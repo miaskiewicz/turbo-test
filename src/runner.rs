@@ -58,6 +58,12 @@ thread_local! {
     static REUSE_ISO: RefCell<Option<v8::OwnedIsolate>> = RefCell::new(None);
     static REUSE_CTX: RefCell<Option<v8::Global<v8::Context>>> = RefCell::new(None);
     static DOM_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set while resolve+drain of pending vi.mock factories is in progress. An async factory's
+    /// `await import('<self>')` re-enters load_cjs(drain_mocks=true) for the real module; without
+    /// this guard that nested call would drain (and clear) the very queue we're mid-resolving,
+    /// registering the still-pending factory promise as an empty mock. While set, load_cjs leaves
+    /// the pending-mock queue untouched so the outer drain registers the resolved exports.
+    static RESOLVING_MOCKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Mock targets registered by setup files (run once per worker) — kept across files in the
     /// reuse path so e.g. the analytics mock survives, while per-file test mocks are evicted.
     static SETUP_MOCKS: RefCell<std::collections::HashSet<PathBuf>> = RefCell::new(std::collections::HashSet::new());
@@ -912,6 +918,12 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
         // Module-runner: run the mock factories IN THE CURRENT realm (CJS transform + wrapper)
         // so their require('react')/jsx-runtime resolve to the SAME shared react the test uses
         // — React-component mocks then render correctly (no dual-react). Runs before the entry.
+        // Guard the whole prepass: an async factory's `await import('<self>')` resolves during the
+        // microtask checkpoint below, re-entering load_cjs for the real module. Its nested drain
+        // would clear the pending-mock queue and register the still-pending factory promise as an
+        // empty mock (so the real module wins and named imports never rebind to the spies). The
+        // flag makes load_cjs leave the queue alone until the outer drain runs here.
+        let prev_resolving = RESOLVING_MOCKS.with(|f| f.replace(true));
         if let Some(raw) = esbuild_transform_cjs(&p) {
             let wrapped = format!(
                 "(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})"
@@ -954,6 +966,7 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
         }
         resolve_pending_mocks(scope);
         drain_pending_mocks(scope, entry.parent().unwrap_or(Path::new(".")), false);
+        RESOLVING_MOCKS.with(|f| f.set(prev_resolving));
         return;
     }
     let bundled = esbuild_bundle(&p, &[]).unwrap_or_else(|| p.clone());
@@ -1770,7 +1783,13 @@ fn resolve_pending_mocks(scope: &mut v8::PinScope) {
         return;
     };
     let recv = v8::undefined(scope).into();
-    let Some(ret) = f.call(scope, recv, &[]) else { return };
+    // Guard the pump: a factory's `await import('<self>')` re-enters load_cjs, whose nested drain
+    // would otherwise clear the queue mid-resolve and register the still-pending promise.
+    let prev = RESOLVING_MOCKS.with(|f| f.replace(true));
+    let Some(ret) = f.call(scope, recv, &[]) else {
+        RESOLVING_MOCKS.with(|f| f.set(prev));
+        return;
+    };
     if let Ok(promise) = v8::Local::<v8::Promise>::try_from(ret) {
         for _ in 0..100000 {
             if promise.state() != v8::PromiseState::Pending {
@@ -1784,6 +1803,7 @@ fn resolve_pending_mocks(scope: &mut v8::PinScope) {
             scope.perform_microtask_checkpoint();
         }
     }
+    RESOLVING_MOCKS.with(|f| f.set(prev));
 }
 
 fn drain_pending_mocks(scope: &mut v8::PinScope, base_dir: &Path, skip_relative: bool) {
@@ -1798,9 +1818,17 @@ fn drain_pending_mocks(scope: &mut v8::PinScope, base_dir: &Path, skip_relative:
     };
     let spec_key = v8::String::new(scope, "spec").unwrap();
     let exp_key = v8::String::new(scope, "exports").unwrap();
+    // Entries whose factory promise is still unresolved must NOT be registered here and must be
+    // kept in the queue for the outer resolve+drain. This guards re-entrancy: an async factory's
+    // `await import('<self>')` loads the real module via load_cjs(drain_mocks=true), which drains
+    // pending mocks WHILE the factory's own promise is still pending. Registering that raw promise
+    // would mark the module mocked with an empty (names=[]) exports, so the real module wins and
+    // the test file's named imports never rebind to the factory's spies (the payroll-app
+    // `vi.mocked(<named import>)` is undefined / points at the real export bug).
+    let mut retained: Vec<v8::Local<v8::Value>> = Vec::new();
     for i in 0..arr.length() {
-        let Some(item) = arr.get_index(scope, i).and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
-        else {
+        let Some(item_val) = arr.get_index(scope, i) else { continue };
+        let Some(item) = v8::Local::<v8::Object>::try_from(item_val).ok() else {
             continue;
         };
         let Some(spec) = item.get(scope, spec_key.into()).map(|v| v.to_rust_string_lossy(scope)) else {
@@ -1808,6 +1836,10 @@ fn drain_pending_mocks(scope: &mut v8::PinScope, base_dir: &Path, skip_relative:
         };
         let _ = skip_relative;
         let exports = item.get(scope, exp_key.into()).unwrap_or_else(|| v8::undefined(scope).into());
+        if exports.is_promise() || is_thenable(scope, exports) {
+            retained.push(item_val); // unresolved factory — defer to the outer drain
+            continue;
+        }
         if exports.is_undefined() {
             continue; // failed/async-rejected factory — fall back to the real module
         }
@@ -1815,9 +1847,20 @@ fn drain_pending_mocks(scope: &mut v8::PinScope, base_dir: &Path, skip_relative:
             register_mock_value(scope, &abs, exports);
         }
     }
-    // clear the queue
-    let empty = v8::Array::new(scope, 0);
-    global.set(scope, key.into(), empty.into());
+    // rebuild the queue with only the still-pending entries (cleared if none remain)
+    let next = v8::Array::new(scope, retained.len() as i32);
+    for (i, item) in retained.into_iter().enumerate() {
+        next.set_index(scope, i as u32, item);
+    }
+    global.set(scope, key.into(), next.into());
+}
+
+/// True if `val` is a non-promise object exposing a callable `then` (a thenable). Promises are
+/// detected separately via `is_promise()`; both kinds must be deferred, not registered as mocks.
+fn is_thenable(scope: &mut v8::PinScope, val: v8::Local<v8::Value>) -> bool {
+    let Ok(obj) = v8::Local::<v8::Object>::try_from(val) else { return false };
+    let Some(k) = v8::String::new(scope, "then") else { return false };
+    obj.get(scope, k.into()).map(|v| v.is_function()).unwrap_or(false)
 }
 
 // ---- CommonJS -------------------------------------------------------------
@@ -1922,7 +1965,10 @@ fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks: bool)
     // pending mocks are THIS file's — drain them, resolved relative to this file, overriding
     // any earlier (global setup) mock of the same module. (Both real imports and per-file
     // mocks are thus supported: a file-local vi.mock wins for that file's subsequent imports.)
-    if drain_mocks {
+    if RESOLVING_MOCKS.with(|f| f.get()) {
+        // Re-entrant load during mock resolution (an async factory's `await import('<self>')`):
+        // leave the pending-mock queue alone — the outer resolve+drain owns it.
+    } else if drain_mocks {
         let dir_for_mocks = abs.parent().unwrap_or(Path::new("."));
         resolve_pending_mocks(scope);
         drain_pending_mocks(scope, dir_for_mocks, false);
