@@ -6,11 +6,26 @@ const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
+// On Linux, glibc vs musl (Alpine) need different binaries but report the same
+// process.platform/arch — detect musl so we pick the right one.
+function isMusl() {
+  if (process.platform !== 'linux') return false;
+  try {
+    return !process.report.getReport().header.glibcVersionRuntime;
+  } catch {
+    return false;
+  }
+}
+
 function binaryPath() {
   const ext = process.platform === 'win32' ? '.exe' : '';
-  const name = `turbo-test-${process.platform}-${process.arch}${ext}`;
-  const p = path.join(__dirname, 'bin', name);
-  if (fs.existsSync(p)) return p;
+  const base = `turbo-test-${process.platform}-${process.arch}`;
+  // Prefer the musl build on musl systems, fall back to the default name.
+  const names = isMusl() ? [`${base}-musl${ext}`, `${base}${ext}`] : [`${base}${ext}`];
+  for (const name of names) {
+    const p = path.join(__dirname, 'bin', name);
+    if (fs.existsSync(p)) return p;
+  }
   // dev fallback: a cargo build in this repo
   const dev = path.join(__dirname, 'target', 'release', `turbo-test${ext}`);
   if (fs.existsSync(dev)) return dev;

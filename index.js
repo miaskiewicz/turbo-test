@@ -5,10 +5,23 @@ const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
+function isMusl() {
+  if (process.platform !== 'linux') return false;
+  try {
+    return !process.report.getReport().header.glibcVersionRuntime;
+  } catch {
+    return false;
+  }
+}
+
 function binaryPath() {
   const ext = process.platform === 'win32' ? '.exe' : '';
-  const local = path.join(__dirname, 'bin', `turbo-test-${process.platform}-${process.arch}${ext}`);
-  if (fs.existsSync(local)) return local;
+  const base = `turbo-test-${process.platform}-${process.arch}`;
+  const names = isMusl() ? [`${base}-musl${ext}`, `${base}${ext}`] : [`${base}${ext}`];
+  for (const name of names) {
+    const local = path.join(__dirname, 'bin', name);
+    if (fs.existsSync(local)) return local;
+  }
   const dev = path.join(__dirname, 'target', 'release', `turbo-test${ext}`);
   if (fs.existsSync(dev)) return dev;
   return null;
