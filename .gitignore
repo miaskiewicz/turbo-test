@@ -1,0 +1,40 @@
+# Rust / Cargo
+/target
+**/*.rs.bk
+*.pdb
+
+# Native addon build output
+*.node
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# Build / dist
+/dist
+/build
+*.tsbuildinfo
+
+# Turbo / test caches
+.turbo/
+turbo-test-cache/
+/coverage
+*.lcov
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+Thumbs.db

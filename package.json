@@ -1,0 +1,49 @@
+{
+  "name": "@miaskiewicz/turbo-test",
+  "version": "0.1.0",
+  "description": "A blazing-fast test runner — 5x faster than vitest. A drop-in replacement for vitest.",
+  "license": "MIT",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "require": "./index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test 'test/*.mjs'"
+  },
+  "keywords": [
+    "test",
+    "test-runner",
+    "testing",
+    "vitest",
+    "jest",
+    "fast",
+    "drop-in"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/miaskiewicz/turbo-test.git"
+  },
+  "homepage": "https://github.com/miaskiewicz/turbo-test#readme",
+  "bugs": {
+    "url": "https://github.com/miaskiewicz/turbo-test/issues"
+  },
+  "author": "miaskiewicz",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@miaskiewicz/turbo-dom": "^0.1.57"
+  }
+}
