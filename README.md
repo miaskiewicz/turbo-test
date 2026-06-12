@@ -105,9 +105,11 @@ terminal summary:
 Branch coverage parses each source file with [oxc](https://oxc.rs) to find decision points
 (`if`/`else`, `?:`, `&&`/`||`/`??`, `switch`) and correlates each arm with V8's block counts mapped
 back through the source map — so it's real per-arm branch data (not block-as-branch). **Statement**
-coverage reuses that same oxc pass (one parse, no extra cost) to locate each executable statement
-and correlate it with V8's covered ranges — c8-style; it tracks lines closely. lcov has no
-statement field, so statements appear in the json-summary / text / html reporters only.
+coverage reuses that same oxc pass (one parse, no extra cost) to locate each **executable**
+statement and correlate it with V8's covered ranges. Following Istanbul, declarations are not
+statements — `import`/`export`, `function`/`class` declarations (those are function coverage), and
+TS type-only decls are excluded; the statements inside them still count. lcov has no statement
+field, so statements appear in the json-summary / text / html reporters only.
 
 node_modules and test/spec files are excluded. Coverage runs the fresh isolation path.
 

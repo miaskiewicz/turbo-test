@@ -1134,3 +1134,33 @@ tfoot td{{font-weight:600;border-top:2px solid #ccc}}\
         cell(total.bpct(), total.brh, total.brf)
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_globs_keeps_brace_commas_intact() {
+        // top-level comma separates globs; commas inside {…} do NOT (the v0.2.7 bug).
+        assert_eq!(split_globs("src/**/*.{ts,tsx}"), vec!["src/**/*.{ts,tsx}"]);
+        assert_eq!(
+            split_globs("src/**/*.ts, test/**/*.tsx"),
+            vec!["src/**/*.ts", "test/**/*.tsx"]
+        );
+        assert_eq!(
+            split_globs("src/**/*.{ts,tsx},lib/**/*.{js,jsx}"),
+            vec!["src/**/*.{ts,tsx}", "lib/**/*.{js,jsx}"]
+        );
+    }
+
+    #[test]
+    fn brace_glob_matches_each_alternative() {
+        assert!(glob_match("src/**/*.{ts,tsx}", "src/a/b.ts"));
+        assert!(glob_match("src/**/*.{ts,tsx}", "src/a/b.tsx"));
+        assert!(!glob_match("src/**/*.{ts,tsx}", "src/a/b.js"));
+        // ** spans separators; * does not
+        assert!(glob_match("src/**", "src/a/b/c.ts"));
+        assert!(glob_match("src/*.ts", "src/x.ts"));
+        assert!(!glob_match("src/*.ts", "src/a/x.ts"));
+    }
+}
