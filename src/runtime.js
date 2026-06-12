@@ -1355,6 +1355,11 @@ globalThis.__ttResetForNextFile = () => {
   // run once per worker, so root.hooks only holds setup hooks; leave them in place.
   root.tests = [];
   root.suites = [];
+  // NOTE: root.hooks is intentionally LEFT in place. Restoring it to a post-global-setup baseline
+  // drops @testing-library's auto-cleanup afterEach for most files (it registers during a test
+  // file's first render, not during global setup) → DOM accumulates → mass failure. The downside
+  // (a test-file-imported setup module's root afterEach leaking, e.g. marketing analytics-test-
+  // setup) is the lesser evil and handled elsewhere.
   current = root;
   globalThis.__tt.hasOnly = false;
   // mock-prepass scratch (turbo-test specific) — must be empty before the next file hoists.
