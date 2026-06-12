@@ -5,7 +5,7 @@
 Written in Rust on V8: per-file transforms via [oxc](https://oxc.rs)/esbuild, a native
 [turbo-dom](https://www.npmjs.com/package/@miaskiewicz/turbo-dom) DOM, work-stealing parallelism,
 and an optional isolate-reuse mode. Runs your existing `*.test.ts(x)` files — same `describe`/`it`/
-`expect`/`vi`, same `@testing-library/react` + jest-dom — typically **2.5–5× faster**.
+`expect`/`vi`, same `@testing-library/react` + jest-dom — typically **~6× faster than vitest+jsdom**.
 
 ```bash
 npm i -D @miaskiewicz/turbo-test
@@ -15,24 +15,37 @@ npx turbo-test src/foo.test.ts --jobs 8 --reporter json
 
 ## Benchmarks
 
-Real app suites, same machine (Apple M-series, 8 workers), identical pass counts:
+Two real production app suites, **same machine, same session, identical pass counts** (Apple
+M-series, 10 workers). To keep it apples-to-apples we measured vitest two ways — with stock
+**jsdom** (the default most projects run) and with **turbo-dom** swapped in as the environment —
+so you can see the DOM's contribution separately from the runner's:
 
-| Suite | Files / tests | vitest | turbo-test | Speedup |
-|---|---|---|---|---|
-| **payroll-app** | 1001 files / 10,006 tests | 99.7s | **39.5s** (fresh) | **2.5×** |
-| **ui-design-components** | 386 files / 6,189 tests | ~130s | **90s** (fresh) | ~1.4× |
-| **ui-design-components** | 386 files / 6,189 tests | ~130s | **33s** (isolate-reuse) | **~4×** |
+| Suite | Tests | vitest + jsdom | vitest + turbo-dom | **turbo-test** | vs jsdom | vs turbo-dom |
+|---|---|---|---|---|---|---|
+| **payroll-app** | 10,006 | 296s | 130s | **51s** | **5.8×** | 2.6× |
+| **ui-design-components** | 6,189 | 428s | 358s | **76s** | **5.6×** | 4.7× |
 
-Both suites pass **100%** under turbo-test (10006/0 and 6189/0). vitest's own breakdown on
-payroll shows where the time goes — `setup 206s + import 433s` cumulative across workers — which
-turbo-test's native transform + dep-bundling collapses.
+All three configs pass 100% (10006/0 and 6189/0). Two takeaways:
+
+- **The DOM matters.** Just swapping jsdom → turbo-dom under plain vitest already cuts wall time
+  ~1.2–2.3× (jsdom's `environment` setup alone was **1228s cumulative** across workers on payroll
+  vs turbo-dom's **96s**). If you can't switch runners yet, switching the environment is free speed.
+- **The runner matters more.** turbo-test's native transform + per-package dep-bundling + V8
+  worker pool collapses vitest's `setup + import` cost (hundreds of seconds cumulative) and lands
+  **~6× faster than the jsdom baseline** — with zero config changes.
+
+> Numbers are from a busy long-uptime workstation, so absolute seconds run high; the **ratios**
+> are what travel. An `isolate: false` reuse mode exists for extra headroom (see below) but on this
+> loaded box it landed even with fresh isolation (~80s on ui-design), so fresh is the headline.
 
 ## Isolate-reuse (extra speed, zero config)
 
 By default turbo-test isolates every file (like vitest's `isolate: true`). If your vitest config
 sets `isolate: false`, turbo-test honors it and **reuses one V8 isolate per worker** — node_modules
-barrels evaluate once instead of per file (~4× on `ui-design-components`). Any file that fails under
-reuse is automatically re-run on a clean isolate, so correctness always matches isolated mode.
+barrels evaluate once instead of per file. Any file that fails under reuse is automatically re-run
+on a clean isolate, so correctness always matches isolated mode (still 6189/0). How much it buys
+depends on how barrel-heavy your imports are and how loaded the machine is — on a quiet box it can
+beat fresh isolation handily; under heavy contention it converges with it.
 
 Force it on/off regardless of config:
 
