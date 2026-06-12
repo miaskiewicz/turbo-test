@@ -170,7 +170,28 @@ function __installFakeDate() {
   FakeDate.parse = Real.parse;
   globalThis.Date = FakeDate;
 }
-function __restoreDate() { globalThis.Date = __loop.RealDate; }
+// Default clock: a Date whose now() is a REAL wall-clock base + the VIRTUAL elapsed (__loop.now,
+// which advances as the loop fires timers). So `const t=Date.now(); await sleep(100); Date.now()-t`
+// reports ~100 even though no real time passed — elapsed-across-setTimeout assertions work, while
+// timestamps stay ~real (base captured at install). Only `now()` and arg-less `new Date()` are
+// virtualized; `new Date(args)` and the prototype stay real (instanceof works).
+let __virtualBase = 0;
+function __installVirtualDate() {
+  const Real = __loop.RealDate;
+  if (!__virtualBase) __virtualBase = __loop.realNow();
+  function VDate(...args) {
+    if (!(this instanceof VDate)) return new Real(__virtualBase + __loop.now).toString();
+    if (args.length === 0) return new Real(__virtualBase + __loop.now);
+    return new Real(...args);
+  }
+  VDate.prototype = Real.prototype;
+  VDate.now = () => __virtualBase + __loop.now;
+  VDate.UTC = Real.UTC;
+  VDate.parse = Real.parse;
+  globalThis.Date = VDate;
+}
+function __restoreDate() { __installVirtualDate(); }
+__installVirtualDate();
 
 // await any async mock-factory results before the native loader drains them; drop rejected
 globalThis.__resolvePendingMocks = async () => {
@@ -661,6 +682,15 @@ if (typeof globalThis.requestAnimationFrame === 'undefined') {
 // ---- node builtin shims (so turbo-dom's loader reaches its native .node) ----
 globalThis.__fileURLToPath = (u) => String(u).replace(/^file:\/\//, '');
 globalThis.__dirnameOf = (p) => { const s = String(p).replace(/\/+$/, ''); const i = s.lastIndexOf('/'); return i <= 0 ? '/' : s.slice(0, i); };
+const __os = {
+  platform: () => 'darwin', arch: () => 'arm64', type: () => 'Darwin', release: () => '23.0.0',
+  version: () => 'Darwin Kernel', EOL: '\n', tmpdir: () => '/tmp', homedir: () => '/', hostname: () => 'localhost',
+  cpus: () => [{ model: 'cpu', speed: 1, times: { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 } }],
+  totalmem: () => 16 * 1024 * 1024 * 1024, freemem: () => 8 * 1024 * 1024 * 1024, uptime: () => 0,
+  loadavg: () => [0, 0, 0], endianness: () => 'LE', networkInterfaces: () => ({}),
+  userInfo: () => ({ username: 'user', uid: -1, gid: -1, shell: null, homedir: '/' }), availableParallelism: () => 4,
+  constants: { signals: {}, errno: {} },
+};
 const __path = {
   sep: '/',
   join: (...a) => a.filter((x) => x != null && x !== '').join('/').replace(/\/+/g, '/'),
@@ -671,7 +701,13 @@ const __path = {
   isAbsolute: (p) => String(p).startsWith('/'),
   relative: (_f, t) => String(t),
   normalize: (p) => String(p).replace(/\/+/g, '/'),
+  parse: (p) => { const s = String(p); const dir = globalThis.__dirnameOf(s); const base = s.split('/').pop() || ''; const m = /\.[^./]+$/.exec(base); const ext = m ? m[0] : ''; return { root: s.startsWith('/') ? '/' : '', dir, base, ext, name: ext ? base.slice(0, -ext.length) : base }; },
+  format: (o) => { o = o || {}; if (o.dir) return (o.dir + '/' + (o.base || ((o.name || '') + (o.ext || '')))).replace(/\/+/g, '/'); return o.base || ((o.name || '') + (o.ext || '')); },
+  delimiter: ':',
 };
+// glob-parent and others reach for path.posix / path.win32; expose both (posix is our default).
+__path.posix = __path;
+__path.win32 = Object.assign({}, __path, { sep: '\\', delimiter: ';' });
 const __fs = {
   existsSync: (p) => globalThis.__fs_existsSync(String(p)),
   readFileSync: (p, enc) => globalThis.__fs_readFileSync(String(p), enc ? String(typeof enc === 'string' ? enc : enc.encoding || 'utf8') : ''),
@@ -737,8 +773,31 @@ class __Readable extends __EventEmitter { pipe(d) { return d; } read() { return 
 class __Writable extends __EventEmitter { write() { return true; } end() { return this; } destroy() { return this; } }
 class __Duplex extends __Readable { write() { return true; } end() { return this; } }
 const __stream = { Readable: __Readable, Writable: __Writable, Duplex: __Duplex, Transform: __Duplex, PassThrough: __Readable, Stream: __EventEmitter, pipeline: (...a) => { const cb = a[a.length - 1]; if (typeof cb === 'function') cb(); }, finished: (_s, cb) => { if (typeof cb === 'function') cb(); } };
+// http/https/net/tls: enough surface that connection-agent libs (agent-base, https-proxy-agent —
+// pulled in transitively by e.g. @playwright/test) load. agent-base does `class X extends
+// http.Agent`, so http.Agent MUST be a real (extendable) class. No real networking happens in
+// unit tests (request contexts are mocked); these just need to construct + be subclassed.
+class __Agent extends __EventEmitter { constructor(opts) { super(); this.options = opts || {}; this.maxSockets = Infinity; this.sockets = {}; this.requests = {}; } destroy() {} getName() { return 'localhost::'; } addRequest() {} createConnection() { return new __EventEmitter(); } }
+class __ClientRequest extends __EventEmitter { setHeader() {} getHeader() {} end() { return this; } write() { return true; } abort() {} destroy() { return this; } setTimeout() { return this; } }
+class __IncomingMessage extends __Readable { constructor() { super(); this.headers = {}; this.statusCode = 200; } }
+const __mkServer = () => { const s = new __EventEmitter(); s.listen = (..._a) => { const cb = _a[_a.length - 1]; if (typeof cb === 'function') cb(); return s; }; s.close = (cb) => { if (typeof cb === 'function') cb(); return s; }; s.address = () => ({ port: 0, address: '127.0.0.1' }); return s; };
+const __http = { Agent: __Agent, globalAgent: new __Agent(), ClientRequest: __ClientRequest, IncomingMessage: __IncomingMessage, ServerResponse: class extends __EventEmitter { setHeader() {} end() { return this; } write() { return true; } writeHead() { return this; } }, Server: class extends __EventEmitter {}, METHODS: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'], STATUS_CODES: {}, createServer: __mkServer, request: () => new __ClientRequest(), get: () => new __ClientRequest() };
+__http.default = __http;
+const __https = Object.assign({}, __http, { Agent: __Agent, globalAgent: new __Agent() }); __https.default = __https;
+const __net = { Socket: class extends __EventEmitter { connect() { return this; } write() { return true; } end() { return this; } destroy() { return this; } setTimeout() { return this; } setNoDelay() { return this; } setKeepAlive() { return this; } ref() { return this; } unref() { return this; } }, Server: class extends __EventEmitter { listen(..._a) { const cb = _a[_a.length - 1]; if (typeof cb === 'function') cb(); return this; } close() { return this; } address() { return { port: 0 }; } }, createConnection: () => new __EventEmitter(), connect: () => new __EventEmitter(), createServer: __mkServer, isIP: () => 0, isIPv4: () => false, isIPv6: () => false }; __net.default = __net;
+const __tls = { TLSSocket: class extends __EventEmitter { connect() { return this; } }, connect: () => new __EventEmitter(), createSecureContext: () => ({}), createServer: __mkServer, checkServerIdentity: () => undefined, rootCertificates: [] }; __tls.default = __tls;
+const __zlib = { createGzip: () => new __Duplex(), createGunzip: () => new __Duplex(), createDeflate: () => new __Duplex(), createInflate: () => new __Duplex(), createBrotliCompress: () => new __Duplex(), createBrotliDecompress: () => new __Duplex(), gzip: (_b, cb) => cb && cb(null, _b), gunzip: (_b, cb) => cb && cb(null, _b), gzipSync: (b) => b, gunzipSync: (b) => b, deflateSync: (b) => b, inflateSync: (b) => b }; __zlib.default = __zlib;
+const __tty = { isatty: () => false, ReadStream: __EventEmitter, WriteStream: __EventEmitter }; __tty.default = __tty;
+const __dns = { lookup: (_h, _o, cb) => { const c = typeof _o === 'function' ? _o : cb; if (c) c(null, '127.0.0.1', 4); }, resolve: (_h, cb) => cb && cb(null, []), promises: { lookup: () => Promise.resolve({ address: '127.0.0.1', family: 4 }), resolve: () => Promise.resolve([]) } }; __dns.default = __dns;
+const __http2 = { connect: () => new __EventEmitter(), createServer: __mkServer, createSecureServer: __mkServer, constants: {}, getDefaultSettings: () => ({}), Http2ServerRequest: __EventEmitter, Http2ServerResponse: __EventEmitter }; __http2.default = __http2;
+const __dgram = { createSocket: () => Object.assign(new __EventEmitter(), { bind() { return this; }, send() {}, close() {}, address: () => ({ port: 0 }) }) }; __dgram.default = __dgram;
+const __readline = { createInterface: () => Object.assign(new __EventEmitter(), { question: (_q, cb) => cb && cb(''), close() {}, prompt() {}, write() {} }), clearLine: () => {}, cursorTo: () => {}, moveCursor: () => {} }; __readline.default = __readline;
+const __v8 = { serialize: (x) => { try { return JSON.stringify(x); } catch (e) { return '{}'; } }, deserialize: () => ({}), getHeapStatistics: () => ({ total_heap_size: 0, used_heap_size: 0 }), setFlagsFromString: () => {} }; __v8.default = __v8;
+const __dc = { channel: () => ({ publish: () => {}, subscribe: () => {}, unsubscribe: () => {}, hasSubscribers: false }), hasSubscribers: () => false, subscribe: () => {}, unsubscribe: () => {} }; __dc.default = __dc;
+class __AsyncLocalStorage { constructor() { this._store = undefined; } run(store, cb, ...a) { const p = this._store; this._store = store; try { return cb(...a); } finally { this._store = p; } } getStore() { return this._store; } enterWith(s) { this._store = s; } disable() {} exit(cb, ...a) { return cb(...a); } }
+const __async_hooks = { AsyncLocalStorage: __AsyncLocalStorage, AsyncResource: class { runInAsyncScope(fn, thisArg, ...a) { return fn.apply(thisArg, a); } emitDestroy() { return this; } bind(fn) { return fn; } }, createHook: () => ({ enable() { return this; }, disable() { return this; } }), executionAsyncId: () => 0, triggerAsyncId: () => 0 }; __async_hooks.default = __async_hooks;
 const __util = {
-  inherits(ctor, superCtor) { if (ctor && superCtor) { ctor.super_ = superCtor; Object.setPrototypeOf(ctor.prototype, superCtor.prototype); } },
+  inherits(ctor, superCtor) { if (ctor && ctor.prototype && superCtor && superCtor.prototype) { ctor.super_ = superCtor; Object.setPrototypeOf(ctor.prototype, superCtor.prototype); } },
   promisify: (f) => (...args) => new Promise((res, rej) => { try { f(...args, (e, v) => e ? rej(e) : res(v)); } catch (e) { rej(e); } }),
   callbackify: (f) => (...args) => { const cb = args.pop(); Promise.resolve(f(...args)).then((v) => cb(null, v), (e) => cb(e)); },
   inspect: (x) => { try { return typeof x === 'string' ? x : JSON.stringify(x); } catch (e) { return String(x); } },
@@ -758,8 +817,8 @@ globalThis.__nodeBuiltins = {
   'node:path': __path,
   module: __module,
   'node:module': __module,
-  os: { platform: () => 'darwin', arch: () => 'arm64', EOL: '\n', tmpdir: () => '/tmp', homedir: () => '/', cpus: () => [{}] },
-  'node:os': { platform: () => 'darwin', EOL: '\n', tmpdir: () => '/tmp' },
+  os: __os,
+  'node:os': __os,
   child_process: { execSync: () => '', exec: () => {}, spawnSync: () => ({ status: 0 }) },
   'node:child_process': { execSync: () => '' },
   url: { fileURLToPath: globalThis.__fileURLToPath, pathToFileURL: (p) => ({ href: 'file://' + p, toString: () => 'file://' + p }), URL: globalThis.URL },
@@ -772,6 +831,34 @@ globalThis.__nodeBuiltins = {
   'node:events': __events,
   stream: __stream,
   'node:stream': __stream,
+  http: __http,
+  'node:http': __http,
+  https: __https,
+  'node:https': __https,
+  net: __net,
+  'node:net': __net,
+  tls: __tls,
+  'node:tls': __tls,
+  zlib: __zlib,
+  'node:zlib': __zlib,
+  tty: __tty,
+  'node:tty': __tty,
+  dns: __dns,
+  'node:dns': __dns,
+  'dns/promises': __dns.promises,
+  'node:dns/promises': __dns.promises,
+  http2: __http2,
+  'node:http2': __http2,
+  dgram: __dgram,
+  'node:dgram': __dgram,
+  readline: __readline,
+  'node:readline': __readline,
+  v8: __v8,
+  'node:v8': __v8,
+  diagnostics_channel: __dc,
+  'node:diagnostics_channel': __dc,
+  async_hooks: __async_hooks,
+  'node:async_hooks': __async_hooks,
   assert: Object.assign((c) => { if (!c) throw new Error('assert'); }, { ok: (c) => { if (!c) throw new Error('assert'); } }),
   perf_hooks: { performance: globalThis.performance || { now: () => 0 } },
 };
@@ -779,7 +866,16 @@ globalThis.__nodeBuiltins = {
 // ---- loader helpers (used by the CJS wrapper) ----
 globalThis.__keys = (o) =>
   o && (typeof o === 'object' || typeof o === 'function') ? Object.keys(o) : [];
-globalThis.__mkRequire = (dir, isEsm, importer) => (spec) => globalThis.__nativeRequire(dir, spec, isEsm, importer);
+globalThis.__mkRequire = (dir, isEsm, importer) => {
+  const req = (spec) => globalThis.__nativeRequire(dir, spec, isEsm, importer);
+  // node libs call require.resolve(); we don't expose a resolver to JS, so echo the spec back
+  // (good enough — callers use it to locate a file, and a missing one stubs gracefully).
+  req.resolve = (spec) => String(spec);
+  req.cache = {};
+  req.extensions = {};
+  req.main = undefined;
+  return req;
+};
 
 // ---- asymmetric matchers (expect.objectContaining et al) ----
 class Asymmetric {

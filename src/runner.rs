@@ -2085,6 +2085,41 @@ fn ensure_lazy_stub<'s>(
     Some(v8::Local::new(scope, &g))
 }
 
+/// Register a generic stub for a node_modules module that FAILED to load in turbo-test's shimmed
+/// env (a heavy Node-only package — e.g. playwright-core's deep deps — that a test imports but
+/// doesn't actually exercise). The stub is a Proxy that is callable, constructable, and returns a
+/// fresh stub for any property, so importers don't crash. If the test really uses the dep, its
+/// assertions fail loudly — but a mere import no longer takes the whole file down.
+fn register_node_stub<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path) -> Option<()> {
+    // NOTE: target is a function (callable + constructable). Do NOT override ownKeys/
+    // getOwnPropertyDescriptor — a function's `prototype` is a non-configurable own prop, so a
+    // [] ownKeys trap violates the Proxy invariant and makes Object.keys(stub) throw.
+    let src = "(function(){var make=function(){return new Proxy(function(){},{\
+get:function(t,k){if(k==='__esModule')return true;if(k==='default')return make();if(typeof k==='symbol')return t[k];return make();},\
+apply:function(){return make();},construct:function(){return make();},has:function(){return true;},\
+set:function(){return true;}});};return make();})()";
+    let code = v8::String::new(scope, src)?;
+    let script = v8::Script::compile(scope, code, None)?;
+    let val = script.run(scope)?;
+    register_mock_value(scope, abs, val)
+}
+
+thread_local! {
+    /// Set per file: true when the entry test file lives under an e2e/ dir. e2e HELPER tests
+    /// import heavy Node-only packages (e.g. @playwright/test) that can't fully load in the
+    /// shimmed env but aren't actually exercised (mocked request contexts). For ONLY those files
+    /// we stub a failed node_modules load instead of throwing. Unit tests under src/ keep strict
+    /// behavior — stubbing there would mask bugs AND turn a transient turbo-dom parser failure
+    /// into a permanent DOM-less stub (mass "document is not defined").
+    static ENTRY_LENIENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether to stub a failed node_modules load for the CURRENT file. e2e entries only;
+/// disableable with TURBO_NO_STUB_FAIL.
+fn stub_failed_deps() -> bool {
+    ENTRY_LENIENT.with(|c| c.get()) && std::env::var("TURBO_NO_STUB_FAIL").is_err()
+}
+
 fn native_require(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -2123,6 +2158,19 @@ fn native_require(
         }
     }
     let Some(abs) = resolve_spec_as(&spec, Path::new(&dir), esm) else {
+        // A node_modules module requiring something unresolvable in this env (a sibling
+        // package.json via "..", an optional dep) — return a stub so it doesn't crash. Keyed by a
+        // synthetic path so repeats hit the cache.
+        if stub_failed_deps() && dir.contains("/node_modules/") {
+            let key = PathBuf::from(format!("<unresolved:{dir}:{spec}>"));
+            if REGISTRY.with(|r| !r.borrow().cjs_exports.contains_key(&key)) {
+                let _ = register_node_stub(scope, &key);
+            }
+            if let Some(g) = REGISTRY.with(|r| r.borrow().cjs_exports.get(&key).cloned()) {
+                rv.set(v8::Local::new(scope, &g));
+                return;
+            }
+        }
         throw(scope, &format!("cannot resolve {spec}"));
         return;
     };
@@ -2165,6 +2213,15 @@ fn native_require(
                     g
                 }
                 Err(e) => {
+                    // A native addon that won't dlopen in this env (e.g. fsevents on a CI box, or
+                    // an arch mismatch) — stub it so an optional require() (chokidar's fsevents)
+                    // doesn't take the file down.
+                    if stub_failed_deps() && register_node_stub(scope, &abs).is_some() {
+                        if let Some(g) = REGISTRY.with(|r| r.borrow().cjs_exports.get(&abs).cloned()) {
+                            rv.set(v8::Local::new(scope, &g));
+                        }
+                        return;
+                    }
                     throw(scope, &format!("native addon {}: {e}", abs.display()));
                     return;
                 }
@@ -2182,13 +2239,29 @@ fn native_require(
     } else if mr_enabled() || detect_kind(&abs) == Kind::Cjs {
         // MR: load everything as CJS (esbuild --format=cjs) so imports are live + mockable.
         if load_cjs(scope, &abs, true).is_none() {
-            throw(scope, &format!("failed to load {spec}"));
-            return;
+            // A node_modules dep that can't load in the shimmed env -> stub it (don't crash the
+            // importer). App modules still hard-fail (a real bug there must surface).
+            if abs.to_string_lossy().contains("/node_modules/") && stub_failed_deps()
+                && register_node_stub(scope, &abs).is_some()
+            {
+                // fall through to return the stub
+            } else {
+                throw(scope, &format!("failed to load {spec}"));
+                return;
+            }
         }
     } else {
         // require() of ESM (Node 22+ behavior): load + instantiate + evaluate, return the
         // module namespace as the require() result. Handles CJS->ESM requires (e.g. tslib).
         let Some(module) = load_graph(scope, &abs) else {
+            if abs.to_string_lossy().contains("/node_modules/") && stub_failed_deps()
+                && register_node_stub(scope, &abs).is_some()
+            {
+                if let Some(g) = REGISTRY.with(|r| r.borrow().cjs_exports.get(&abs).cloned()) {
+                    rv.set(v8::Local::new(scope, &g));
+                }
+                return;
+            }
             throw(scope, &format!("failed to load ESM {spec}"));
             return;
         };
@@ -2754,7 +2827,8 @@ fn is_node_builtin(spec: &str) -> bool {
         "fs" | "fs/promises" | "path" | "module" | "os" | "child_process" | "url" | "util"
             | "events" | "stream" | "assert" | "assert/strict" | "perf_hooks" | "crypto"
             | "buffer" | "querystring" | "string_decoder" | "timers" | "timers/promises"
-            | "http" | "https" | "net" | "tls" | "zlib" | "dns" | "tty" | "constants"
+            | "http" | "http2" | "https" | "net" | "tls" | "zlib" | "dns" | "dns/promises"
+            | "tty" | "constants" | "dgram" | "readline" | "v8" | "diagnostics_channel"
             | "process" | "async_hooks" | "worker_threads" | "vm" | "inspector"
     )
 }
@@ -2809,6 +2883,9 @@ impl TestReport {
 /// Run a single test file end-to-end and return its pass/fail report.
 pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     let entry_abs = std::fs::canonicalize(entry).map_err(|e| format!("{e}"))?;
+    // e2e helper tests may import heavy Node-only deps they don't exercise — allow stubbing a
+    // failed node_modules load for these files only (see stub_failed_deps).
+    ENTRY_LENIENT.with(|c| c.set(entry_abs.components().any(|p| p.as_os_str() == "e2e")));
 
     // Setup-file mock specifiers are kept OUT of the esbuild bundle so the module boundary
     // survives and the (reliably-drained) mock registry intercepts them. Entry-file mocks are
