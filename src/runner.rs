@@ -49,6 +49,10 @@ struct Registry {
 
 thread_local! {
     static REGISTRY: RefCell<Registry> = RefCell::new(Registry::default());
+    /// Force a single file onto the FRESH (per-file isolate) path even when reuse is enabled —
+    /// used by the fresh-retry: a file that failed under reuse is re-run in a clean isolate
+    /// (authoritative) so cross-file leak artifacts don't count as real failures.
+    static FORCE_FRESH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Isolate-reuse (TURBO_REUSE_ISOLATE): one persistent isolate + context per worker thread,
     /// reused across files so node_modules barrels are evaluated once, not per file.
     static REUSE_ISO: RefCell<Option<v8::OwnedIsolate>> = RefCell::new(None);
@@ -2875,7 +2879,8 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     // Zero-config speed path: reuse this worker's isolate+context across files (vitest
     // isolate:false semantics) so node_modules barrels evaluate once, not per file. Enabled by
     // the project's vitest config (`isolate: false`) or TURBO_REUSE_ISOLATE; off with TURBO_NO_REUSE.
-    if reuse_decision(&entry_abs) {
+    // FORCE_FRESH (the fresh-retry) overrides reuse for this one file.
+    if !FORCE_FRESH.with(|f| f.get()) && reuse_decision(&entry_abs) {
         return run_test_file_reused(&entry_abs, &setup_files, &externals, &mock_targets, &load_target);
     }
 
@@ -3256,6 +3261,36 @@ pub fn end_worker_reuse() {
     DOM_INSTALLED.with(|d| d.set(false));
     SETUP_MOCKS.with(|s| s.borrow_mut().clear());
     SETUP_MOCK_SNAPSHOT.with(|s| s.borrow_mut().clear());
+}
+
+/// Whether isolate-reuse was selected for this run (env or vitest config). False until the first
+/// non-forced file resolves the decision.
+pub fn is_reuse_enabled() -> bool {
+    reuse_isolate_enabled()
+}
+
+/// Authoritative fresh-isolate retry: run `entry` on a FRESH per-file isolate even under reuse.
+/// A file that failed under reuse may have hit a cross-file leak artifact; re-running it in a
+/// clean isolate (which is 6189/0 territory) is the source of truth. The worker's reuse REGISTRY
+/// is swapped out for the duration so the fresh isolate's Globals don't clobber the persistent
+/// reuse module cache (the saved registry's Globals stay valid — the persistent isolate lives on).
+pub fn run_test_file_fresh(entry: &Path) -> Result<TestReport, String> {
+    let saved = REGISTRY.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    FORCE_FRESH.with(|f| f.set(true));
+    // Panic-safe: a V8/loader panic must NOT lose the saved reuse registry or strand FORCE_FRESH.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_test_file(entry)));
+    FORCE_FRESH.with(|f| f.set(false));
+    // On success the fresh path already cleared its registry; on panic it may hold handles to the
+    // now-dead fresh isolate. Either way, swap the saved reuse registry back in and FORGET the
+    // fresh one (don't drop — its isolate is gone, dropping would assert).
+    REGISTRY.with(|r| {
+        let fresh_reg = std::mem::replace(&mut *r.borrow_mut(), saved);
+        std::mem::forget(fresh_reg);
+    });
+    match result {
+        Ok(r) => r,
+        Err(_) => Err("panicked (fresh retry)".to_string()),
+    }
 }
 
 fn drive_tests(

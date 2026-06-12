@@ -55,10 +55,11 @@ function __reportUncaught(e) {
   try { globalThis.console.error('uncaught', (e && e.message) || e); } catch {}
 }
 const __loop = {
-  macro: [],       // {id, due, cb, interval}
+  macro: [],       // {id, due, cb, interval, gen}
   nextTicks: [],
   seq: 1,
   now: 0,          // logical clock (ms)
+  gen: 0,          // file generation (isolate-reuse): timers from a prior file are dropped, unrun
   fake: false,
   systemTime: 0,   // wall-clock base used by Date when faking
   RealDate: Date,
@@ -66,8 +67,18 @@ const __loop = {
 };
 function __schedule(cb, delay, interval) {
   const id = __loop.seq++;
-  __loop.macro.push({ id, due: __loop.now + Math.max(0, delay | 0), cb, interval });
+  __loop.macro.push({ id, due: __loop.now + Math.max(0, delay | 0), cb, interval, gen: __loop.gen });
   return id;
+}
+// Isolate-reuse: drop timers left over from a PRIOR file (gen < current) WITHOUT running them.
+// A finished file's leaked setInterval / self-rescheduling setTimeout would otherwise fire in the
+// next file and re-arm itself → the loop never settles → the 2M guard spins (run crawls/hangs).
+// Dropping at fire-time (not at reset) lets the CURRENT file keep its own pending one-shots
+// (clearing those broke ~40 async tests).
+function __dropStaleTimers() {
+  if (__loop.macro.length && __loop.macro.some((t) => t.gen < __loop.gen)) {
+    __loop.macro = __loop.macro.filter((t) => t.gen >= __loop.gen);
+  }
 }
 function __clearTimer(id) { __loop.macro = __loop.macro.filter((t) => t.id !== id); }
 function __dueSorted(upto) {
@@ -83,6 +94,7 @@ __loop.drainNextTicks = function () {
 };
 // Real mode: run the single earliest-due macrotask (Rust drains micro/nextTick around it).
 __loop.stepMacro = function () {
+  __dropStaleTimers();
   if (!__loop.macro.length) return false;
   __loop.macro.sort((a, b) => a.due - b.due || a.id - b.id);
   const t = __loop.macro[0];
@@ -94,6 +106,7 @@ __loop.stepMacro = function () {
 };
 // Fake mode: advance the virtual clock, firing timers in order (synchronous).
 __loop.advance = function (ms) {
+  __dropStaleTimers();
   const target = __loop.now + Math.max(0, ms | 0);
   let guard = 0;
   while (guard++ < 1e6) {
@@ -1366,14 +1379,11 @@ globalThis.__ttResetForNextFile = () => {
   globalThis.__pendingMocks = [];
   globalThis.__hoistedCache = [];
   globalThis.__hoistedIdx = 0;
-  // Drop only leaked INTERVALS between files (turbo-test specific). Our virtual event loop keeps
-  // queued macrotasks; a prior file's setInterval that was never cleared fires forever in the
-  // next file → the loop never settles → the 2M-iteration guard spins (the run crawls/hangs).
-  // One-shot timeouts and microtasks are LEFT intact — clearing them broke ~40 async tests that
-  // legitimately await pending work, and vitest (real timers) doesn't clear them either.
-  if (__loop.macro.some((t) => t.interval != null)) {
-    __loop.macro = __loop.macro.filter((t) => t.interval == null);
-  }
+  // Bump the timer generation: the prior file's leaked timers (now gen < __loop.gen) get dropped,
+  // unrun, the moment the loop next reaches them (see __dropStaleTimers) — without touching this
+  // file's own pending one-shots. Do NOT clear macro/nextTicks or reset the clock here (that
+  // broke ~40 async tests).
+  __loop.gen++;
   try { globalThis.vi && globalThis.vi.resetConfig && globalThis.vi.resetConfig(); } catch (e) {}
   // NOTE: we do NOT call restoreAllMocks() here. A spyOn spy's mockRestore() redefines a
   // (possibly shared, cached) module export back to the `orig` captured at spy time. This
