@@ -102,17 +102,49 @@ fn reporters() -> Vec<String> {
 // include = report everything (current behavior); exclude is always applied.
 static INCLUDE: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static EXCLUDE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Split a comma-joined glob list on TOP-LEVEL commas only — commas inside `{a,b}` brace
+/// alternation are part of a single glob, not separators. Without this, the canonical vitest
+/// include `src/**/*.{ts,tsx}` (forwarded comma-joined) was split into `src/**/*.{ts` + `tsx}`,
+/// two malformed globs that match nothing → silent zero coverage.
+fn split_globs(spec: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    for ch in spec.chars() {
+        match ch {
+            '{' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            '}' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+                cur.push(ch);
+            }
+            ',' if depth == 0 => {
+                let t = cur.trim();
+                if !t.is_empty() {
+                    out.push(t.to_string());
+                }
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    let t = cur.trim();
+    if !t.is_empty() {
+        out.push(t.to_string());
+    }
+    out
+}
 pub fn add_include(spec: &str) {
     let mut g = INCLUDE.lock().unwrap();
-    for p in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        g.push(p.to_string());
-    }
+    g.extend(split_globs(spec));
 }
 pub fn add_exclude(spec: &str) {
     let mut g = EXCLUDE.lock().unwrap();
-    for p in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        g.push(p.to_string());
-    }
+    g.extend(split_globs(spec));
 }
 
 // Files carrying a per-file ignore directive (P5) — excluded from the report + the gate.
@@ -781,15 +813,34 @@ impl Row {
 /// turns a `false` into a non-zero process exit.
 pub fn report() -> bool {
     let g = COV.lock().unwrap();
-    let Some(map) = g.as_ref() else {
-        println!("\ncoverage: no data collected.");
-        return true;
-    };
+    let map = g.as_ref();
+    // Zero instrumented source files is a hard FAILURE, not a vacuous 100% (0/0) green. Almost
+    // always a misconfigured `coverage.include` (e.g. a brace glob that matched nothing) — a
+    // silent pass there hides that the suite covers nothing. Distinguish "no source loaded at
+    // all" from "include globs filtered everything out" so the message points at the cause.
+    let nothing_collected = map.map(|m| m.is_empty()).unwrap_or(true);
     let mut files: Vec<(&PathBuf, &HashMap<u32, u64>)> = map
-        .iter()
-        // honor include/exclude globs + per-file ignore directive
-        .filter(|(f, _)| passes_globs(f) && !is_ignored(f))
-        .collect();
+        .map(|m| {
+            m.iter()
+                // honor include/exclude globs + per-file ignore directive
+                .filter(|(f, _)| passes_globs(f) && !is_ignored(f))
+                .collect()
+        })
+        .unwrap_or_default();
+    if files.is_empty() {
+        eprintln!("\n  coverage ERROR: 0 source files instrumented.");
+        if nothing_collected {
+            eprintln!("    No instrumentable source was loaded under --coverage.");
+        } else {
+            let inc = INCLUDE.lock().unwrap();
+            eprintln!(
+                "    The coverage.include globs matched no loaded source: [{}]",
+                inc.join(", ")
+            );
+        }
+        eprintln!("    Refusing to report a vacuous 0/0 pass — check coverage.include / paths.");
+        return false;
+    }
     files.sort_by(|a, b| a.0.cmp(b.0));
 
     let fn_g = FN_COV.lock().unwrap();

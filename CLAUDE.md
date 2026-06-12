@@ -26,3 +26,8 @@ when not passed explicitly (flags win).
 no extra parse cost) and each executable statement's position is correlated with V8's covered
 ranges, the same as branches. It appears in json-summary / text / html and is gateable; lcov has
 no statement field so it's omitted there. Tracks lines closely (c8-style).
+Include/exclude globs support `{a,b}` brace alternation. The multi-glob separator is a TOP-LEVEL
+comma only — commas inside `{ts,tsx}` are NOT split (v0.2.7 fix; the canonical vitest include
+`src/**/*.{ts,tsx}` is forwarded comma-joined and was being torn into malformed globs).
+Under `--coverage`, 0 instrumented files is a hard FAIL (non-zero exit), never a vacuous 0/0
+green — guards against a misconfigured include silently covering nothing.
