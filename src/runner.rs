@@ -45,6 +45,10 @@ struct Registry {
     /// paths that require()d it. When a file mocks module M, every (transitive) importer of M is
     /// evicted so it re-imports the mock instead of the version it captured under an old mock.
     import_edges: HashMap<PathBuf, std::collections::HashSet<PathBuf>>,
+    /// Generated ESM bundle (cache path) -> the ORIGINAL source dir it was built from. The bundle
+    /// lives in the cache dir (no node_modules beside it), so resolve_callback resolves its
+    /// externalized bare imports relative to this dir instead of the cache file's location.
+    bundle_src_dir: HashMap<PathBuf, PathBuf>,
 }
 
 thread_local! {
@@ -201,9 +205,18 @@ fn base_resolve_options(tsconfig: Option<PathBuf>, esm: bool) -> oxc_resolver::R
     // importers a separate CJS build → dual context. CJS-interop edges (e.g. recharts importing
     // eventemitter3's default) are handled by the __toESM function-default fix, not by switching
     // builds. (`esm` kept for signature compatibility.) (no "types" — .d.ts only.)
+    //
+    // NO "node" condition: turbo-test runs in a browser-like V8 (turbo-dom, esbuild
+    // --platform=browser), and packages' `node` builds target the real Node runtime — they pull
+    // node-only APIs and, worse, TOP-LEVEL AWAIT (e.g. lexical's *.node.mjs does
+    // `const mod = await import(...)`), which esbuild cannot emit as --format=cjs. That bundle
+    // then fails and falls back to a raw-.mjs CJS compile → "Unexpected token 'export'" load
+    // errors. Dropping `node` makes the resolver pick the package's `default`/`browser` build,
+    // which is the right target for this env and CJS-compiles cleanly. ("require" stays as a
+    // last-resort condition so require-only packages still resolve.)
     let _ = esm;
     let (conditions, mains): (&[&str], &[&str]) =
-        (&["import", "module", "browser", "default", "node", "require"], &["module", "browser", "main"]);
+        (&["import", "module", "browser", "default", "require"], &["module", "browser", "main"]);
     oxc_resolver::ResolveOptions {
         extensions: strs(&[".ts", ".tsx", ".mjs", ".js", ".jsx", ".cjs", ".json", ".node"]),
         condition_names: strs(conditions),
@@ -528,8 +541,14 @@ fn esbuild_bundle_full(
         k.hash(&mut h);
         v.hash(&mut h);
     }
-    "esb-v3".hash(&mut h);
+    "esb-v4-react-ext".hash(&mut h);
+    mr_enabled().hash(&mut h);
     let out = cache_dir().join(format!("esb-{:016x}.mjs", h.finish()));
+    // Record the source dir so resolve_callback can resolve this bundle's externalized bare
+    // imports (the cache file has no node_modules of its own).
+    if let Some(src_dir) = file.parent() {
+        REGISTRY.with(|r| r.borrow_mut().bundle_src_dir.insert(out.clone(), src_dir.to_path_buf()));
+    }
     if out.exists() {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
         return Some(out);
@@ -573,6 +592,20 @@ fn esbuild_bundle_full(
     ]);
     for e in externals {
         cmd.arg(format!("--external:{e}"));
+    }
+    // Under the module-runner, this ESM bundle (setup files) must NOT inline node_modules
+    // packages: the entry + its require-graph load every package via the shared CJS dep cache
+    // (esbuild_bundle_dep_cjs uses --packages=external), so any package this bundle inlines
+    // becomes a SECOND, separate instance. For a module-level singleton (react's dispatcher,
+    // an emotion cache, a MUI theme context, a react-query client) that split silently breaks
+    // things — the classic symptom is a setup-bundled component rendering against a second react
+    // ("Invalid hook call / Cannot read properties of null (reading 'useRef')"). Externalize ALL
+    // packages (generic — no library names) so each bare import resolves via resolve_callback ->
+    // native_require to the ONE shared instance, exactly like the CJS dep-bundle path. The bundle
+    // then carries only this file's own (relative) code; resolve_callback resolves the externals
+    // from the bundle's recorded source dir (registered below) and lazy-loads them on demand.
+    if mr_enabled() {
+        cmd.arg("--packages=external");
     }
     if let Some(tc) = &tsconfig {
         cmd.arg(format!("--tsconfig={}", tc.display()));
@@ -1287,7 +1320,15 @@ fn shared_mock_lets(src: &str) -> Vec<String> {
                 let is_array = rest.contains("= []") || rest.contains("= [\n") || rest.trim_end().ends_with("= [");
                 name.len() >= 12 && is_array && contains_word(&factories, &name)
             } else {
-                name.len() >= 6 && assigns_word(&factories, &name)
+                // let/var: share when the factory REFERENCES the binding (reads or writes) and
+                // it's assigned somewhere — either by the factory itself (the capture pattern: the
+                // factory writes, the test reads) or by the test bodies (the inverse: the factory
+                // closes over a mutable `let` that beforeEach/it reassign, e.g.
+                // `let hookValue; vi.mock(..., () => ({ useX: () => hookValue })); it(() => { hookValue = ... })`).
+                // Without sharing, the prepass factory runs in a scope where the let isn't bound →
+                // `hookValue is not defined`. assigns_word(src) covers both directions (src includes
+                // the factory); contains_word(factories) keeps it to bindings the factory actually uses.
+                name.len() >= 6 && contains_word(&factories, &name) && assigns_word(src, &name)
             };
             // Skip if the name is used in object-literal shorthand (`{ name }`) — word-replacing
             // it to `globalThis.__ms.name` there is invalid JS (would break the whole file).
@@ -1463,11 +1504,49 @@ fn replace_word(text: &str, word: &str, repl: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < text.len() {
+        // Skip string-literal interiors: a shared-let name that also appears as a quoted string
+        // (e.g. `searchParams.get(k => k === 'mockRole' ? mockRole : null)`) must NOT have the
+        // STRING rewritten — only the identifier. Copy the whole literal verbatim, honoring `\`
+        // escapes. (Template `${...}` expressions are skipped too — a missed interpolation would
+        // surface as a visible ReferenceError, never the silent corruption of a rewritten string.)
+        let c = b[i];
+        if c == b'"' || c == b'\'' || c == b'`' {
+            out.push(c as char);
+            i += 1;
+            while i < text.len() {
+                let d = b[i];
+                if d == b'\\' && i + 1 < text.len() {
+                    out.push_str(&text[i..i + 2]);
+                    i += 2;
+                    continue;
+                }
+                let ch = text[i..].chars().next().unwrap();
+                out.push_str(&text[i..i + ch.len_utf8()]);
+                i += ch.len_utf8();
+                if d == c {
+                    break;
+                }
+            }
+            continue;
+        }
         if text[i..].starts_with(word) {
             // not preceded by an identifier char, nor a property-access `.` (so `obj.word` stays
             // intact). A spread `...word` (the `.` is part of `...`) IS the variable — rewrite it.
             let prop_dot = i > 0 && b[i - 1] == b'.' && !(i >= 2 && b[i - 2] == b'.');
-            let before_ok = i == 0 || (!ident(b[i - 1]) && !prop_dot);
+            // accessor name (`get word()` / `set word()`): the NAME is a property key, not a
+            // variable read — rewriting it yields `get globalThis.__ms.word()` (a syntax error).
+            // The getter BODY's `return word` is preceded by `return `, so it still rewrites.
+            let accessor_name = {
+                let mut j = i;
+                while j > 0 && (b[j - 1] == b' ' || b[j - 1] == b'\t') {
+                    j -= 1;
+                }
+                j >= 3
+                    && (&b[j - 3..j] == b"get" || &b[j - 3..j] == b"set")
+                    && (j == 3 || !ident(b[j - 4]))
+                    && j < i // there was whitespace between the keyword and the name
+            };
+            let before_ok = i == 0 || (!ident(b[i - 1]) && !prop_dot && !accessor_name);
             let after = i + w.len();
             // skip object-literal keys (`word:`) — replacing them yields `globalThis.__ms.word:`.
             let after_ok = after >= b.len() || (!ident(b[after]) && b[after] != b':');
@@ -2544,7 +2623,12 @@ fn load_graph<'s>(
     });
 
     let requests = module.get_module_requests();
-    let dir = abs.parent().unwrap().to_path_buf();
+    // A generated bundle in the cache dir has no node_modules beside it; resolve its externalized
+    // bare imports relative to the recorded source dir (set by esbuild_bundle_full).
+    let dir = REGISTRY
+        .with(|r| r.borrow().bundle_src_dir.get(abs).cloned())
+        .or_else(|| abs.parent().map(|p| p.to_path_buf()))
+        .unwrap();
     for i in 0..requests.length() {
         let req = v8::Local::<v8::ModuleRequest>::try_from(requests.get(scope, i).unwrap()).unwrap();
         let spec = req.get_specifier().to_rust_string_lossy(scope);
@@ -2650,27 +2734,51 @@ fn resolve_callback<'s>(
     v8::callback_scope!(unsafe scope, context);
     let spec = specifier.to_rust_string_lossy(scope);
     let lookup = if spec == "vitest" {
+        ensure_vitest_builtin(scope);
         Some(vitest_key())
     } else if is_node_builtin(&spec) {
+        ensure_node_builtin(scope, &spec);
         Some(PathBuf::from(format!("<node:{spec}>")))
     } else {
         let ref_hash = referrer.get_identity_hash().get();
         REGISTRY.with(|r| {
             let reg = r.borrow();
             let from = reg.path_by_hash.get(&ref_hash)?;
-            resolve_spec(&spec, from.parent()?)
+            // A generated bundle lives in the cache dir (no node_modules beside it); resolve its
+            // externalized bare imports relative to the recorded source dir instead.
+            let base = reg
+                .bundle_src_dir
+                .get(from)
+                .cloned()
+                .or_else(|| from.parent().map(|p| p.to_path_buf()))?;
+            resolve_spec(&spec, &base)
         })
     };
     let abs = lookup?;
+    // Already loaded?
+    if let Some(g) = REGISTRY.with(|r| {
+        let reg = r.borrow();
+        reg.esm_by_path
+            .get(&abs)
+            .or_else(|| reg.cjs_synth_by_path.get(&abs))
+            .cloned()
+    }) {
+        return Some(v8::Local::new(scope, &g));
+    }
+    // Externalized package not loaded yet (a setup bundle's `import 'react'` etc. under
+    // --packages=external): lazy-load it now via the shared loaders so the bundle binds to the
+    // ONE instance every other importer gets, instead of a copy baked into the bundle.
+    if mr_enabled() && esbuild_transform_cjs(&abs).is_some() {
+        load_cjs(scope, &abs, true);
+    } else {
+        load_dep(scope, &abs);
+    }
     REGISTRY.with(|r| {
         let reg = r.borrow();
-        if let Some(g) = reg.esm_by_path.get(&abs) {
-            return Some(v8::Local::new(scope, g));
-        }
-        if let Some(g) = reg.cjs_synth_by_path.get(&abs) {
-            return Some(v8::Local::new(scope, g));
-        }
-        None
+        reg.esm_by_path
+            .get(&abs)
+            .or_else(|| reg.cjs_synth_by_path.get(&abs))
+            .map(|g| v8::Local::new(scope, g))
     })
 }
 
