@@ -1,130 +1,90 @@
 # turbo-test
 
-A blazing-fast native test runner — a drop-in replacement for Vitest, built on Rust + V8
-(`rusty_v8`) with snapshot isolation, native module loading, and an oxc transform pipeline.
+**A blazing-fast native test runner — a drop-in replacement for [vitest](https://vitest.dev).**
 
-> Thesis (per `turbo-test-spec.md`): go native **only below the user-observable line**
-> (module loader, isolation, event loop, transform, resolution, scheduler) and run the real
-> framework code above it — so **compatibility holds by construction** while the native
-> substrate delivers the speed.
+Written in Rust on V8: per-file transforms via [oxc](https://oxc.rs)/esbuild, a native
+[turbo-dom](https://www.npmjs.com/package/@miaskiewicz/turbo-dom) DOM, work-stealing parallelism,
+and an optional isolate-reuse mode. Runs your existing `*.test.ts(x)` files — same `describe`/`it`/
+`expect`/`vi`, same `@testing-library/react` + jest-dom — typically **2.5–5× faster**.
 
-## Status (milestones)
-
-| milestone | status |
-|---|---|
-| M0 — snapshot-isolation spike | ✅ PASS — 0.38ms/file vs Vitest env 32–465ms (84–1215×), full isolation |
-| M1 — module loader + CJS/ESM interop | ✅ PASS — real corpus bit-exact vs Vitest where loadable |
-| M2 — event loop + fake timers | ✅ PASS — ordering battery 4/4 vs node; fake-timer suite 5/5 vs Vitest |
-| M3 — framework layer in snapshot | ✅ mechanism — bake + per-file context, guardrail 0.58ms (real @vitest bundle pending) |
-| M4 — transform cache / resolver / scheduler | ✅ PASS — utils 145/145, warm cache 100%, parallel no-drops |
-| M5 — watch / affected-test detection | ✅ PASS — verified superset, ms-scale |
-| M6 — compat surface + hardening (ship gate) | 🟡 modifiers/sharding/JSON-reporter done; coverage/source-maps/config remain |
-
-## Real-world results
-
-Run against the actual app suites (unmodified, via the native runner):
-
-- **`ui-design-components/src/utils` (pure logic): 145/145, 0 failed — exact parity with
-  stock Vitest**, at ~0.6ms/file env setup vs Vitest's 32–465ms (**15–26× faster wall-clock**).
-- **Full `ui-design-components` (386 files, React + MUI + emotion + @testing-library):
-  6,186 passing / 6,188 (≈99.97%), 0 load-errors** (turbo-dom 0.1.62 via NAPI). Every file
-  loads and runs. The only 2 remaining are turbo-dom's CSS-cascade limitation (a borderRadius
-  `toHaveStyle`). vitest-style `vi.mock` (global + per-file override), `vi.spyOn`-on-namespace,
-  `vi.isMockFunction`, mock-factory module-`let` capture, jest-dom, fake timers, `expect.not`,
-  3-arg `it(name, opts, fn)`, real `URL` validation, and React's scheduler all working.
-- **Module runner (vite-node-style):** app modules are transformed per-file to CJS (esbuild
-  `--format=cjs`) so `import {x}` is a live `require(...).x` binding — `vi.spyOn(ns, 'x')`
-  intercepts every importer (the bundle approach can't). node_modules bundle per-package with
-  `--packages=external` (generic, no hardcoded libs) so react / any React context (MUI
-  ThemeContext) / any singleton resolve to ONE shared instance via the require cache.
-  Circular `require()` returns the live partial export (Node behavior).
-- Remaining ~1.2% (72 tests) clusters into a few hard, mostly library-specific roots:
-  posthog `usePostHog` returning a load-order-dependent context default (analytics spies),
-  mock-factory writes to a module-`let` read by the test (needs vitest-exact hoisting),
-  and a handful of responsive double-render / accessible-name edges. Not generic runner gaps.
-- **Full `payroll-app` (~988 files, Next.js, ~9.7k tests): 9,704 passing / 9,710 (99.94%),
-  1 load-error, fully deterministic run-to-run** — up from 1,909 passing / 828 load-errors at
-  the start. The wins, in rough order of impact: `@/`-tsconfig-paths resolution; the **flux-ui
-  → recharts → eventemitter3** dep chain (CJS↔ESM interop — `__toESM` function-default fix +
-  `postprocess` on dep bundles cleared ~660 load-errors at once); vitest `vi.mock` **hoisting**
-  — including `vi.mock` placed *after* the test body (requires referenced only inside test
-  callbacks load post-mock; top-level uses like `class X extends React.Component` stay
-  pre-mock); **`vi.hoisted`** shared-instance cache (one object across the mock prepass + the
-  entry); **`vi.importActual`/importOriginal** returning the *real* module via a separate
-  `real_exports` cache (no recursion, no dual react-query); **automock**; partial mocks;
-  `vi.spyOn` preserving call-`this` **and constructor (`new.target`→`Reflect.construct`) for
-  spied classes**; **`vi.resetModules` + `vi.doMock` + dynamic re-import** (clears app-module
-  cache, keeps node_modules singletons); **`vi.unmock`** (removes a registered mock so the next
-  import loads real); **`vi.stubGlobal`/`stubEnv` with real save/restore on
-  `unstubAllGlobals`** (a leaked `FileReader` stub no longer pollutes later files);
-  `expect().resolves`/`.rejects` + `.not` chaining, `toThrow(ErrorClass)`,
-  `toMatchObject` honoring `expect.any(...)` asymmetrics; `Response` plain-object headers +
-  derived `statusText`, multi-value `URLSearchParams`, opaque-scheme `URL.protocol`
-  (`javascript:`/`data:`), `FileReader`/`Blob` reading real bytes (incl `ArrayBuffer`/
-  `TextDecoder`) — with our File APIs re-installed after turbo-dom's DOM bootstrap;
-  `vi.setSystemTime` faking `Date` without `useFakeTimers`; `afterEach`/testing-library cleanup
-  running even when a test fails (no DOM leak → no "Found multiple"). **Concurrency is fixed
-  structurally** (NAPI addon `ADDON_LOCK` serializing the parser callback + a best-of-3
-  scheduler retry that keeps the best attempt for any whole-file init-race), so the run is
-  bit-identical across repeats. The 6 remaining failures: 4 are a turbo-dom computed-style gap
-  (`getComputedStyle().background` not reflecting an emotion-injected gradient — a DOM-engine
-  item, see `turbo-dom/TURBO-TEST-INTEGRATION.md` §4b/6), 1 needs real wall-clock to elapse
-  during `setTimeout` (a measured-latency assertion), 1 is an async `vi.mock` factory that
-  `await import()`s its own package's internals (dynamic-import resolution inside the mock
-  prepass). The 1 load-error is a Playwright e2e helper needing a Node+browser runtime (see
-  `docs/BACKLOG.md`).
-
-### How it loads a real component suite
-oxc transform + esbuild dep-bundle (Vite-style) · turbo-dom DOM via the **Node-API host**
-(`src/napi_host.rs`, loads the native `.node` parser) · node-builtin + Web-global + CSSOM
-shims · **path-keyed `vi.mock`** that survives bundling (externalize + basename-rewrite +
-pending-queue drain + JSX prepass) · `MessageChannel`-driven React scheduler · jest-dom via
-`expect.extend` + setupFiles.
-
-See `docs/` for per-milestone findings and `docs/SPEC-COVERAGE.md` for the requirement matrix.
-
-## Build
-
-```
-cargo build --release
+```bash
+npm i -D @miaskiewicz/turbo-test
+npx turbo-test            # discovers + runs every *.test.* / *.spec.* under cwd
+npx turbo-test src/foo.test.ts --jobs 8 --reporter json
 ```
 
-## Run
+## Benchmarks
 
-```
-# run test files (parallel across cores, snapshot-isolated, oxc-transformed)
-./target/release/turbo-test path/to/*.test.ts
+Real app suites, same machine (Apple M-series, 8 workers), identical pass counts:
 
-# options
-./target/release/turbo-test --jobs 8 --shard 1/3 --reporter json <files...>
+| Suite | Files / tests | vitest | turbo-test | Speedup |
+|---|---|---|---|---|
+| **payroll-app** | 1001 files / 10,006 tests | 99.7s | **39.5s** (fresh) | **2.5×** |
+| **ui-design-components** | 386 files / 6,189 tests | ~130s | **90s** (fresh) | ~1.4× |
+| **ui-design-components** | 386 files / 6,189 tests | ~130s | **33s** (isolate-reuse) | **~4×** |
 
-# affected-test detection (watch core)
-./target/release/m5-affected --changed src/foo.ts <test files...>
+Both suites pass **100%** under turbo-test (10006/0 and 6189/0). vitest's own breakdown on
+payroll shows where the time goes — `setup 206s + import 433s` cumulative across workers — which
+turbo-test's native transform + dep-bundling collapses.
 
-# layer-proof spikes
-./target/release/m0-spike            # snapshot-isolation benchmark
-./target/release/m1-esm  [file]      # ESM loader
-./target/release/m1-cjs  [file]      # CJS + interop
-./target/release/m1-transform [file] # oxc TS transform
-```
+## Isolate-reuse (extra speed, zero config)
 
-## Architecture
+By default turbo-test isolates every file (like vitest's `isolate: true`). If your vitest config
+sets `isolate: false`, turbo-test honors it and **reuses one V8 isolate per worker** — node_modules
+barrels evaluate once instead of per file (~4× on `ui-design-components`). Any file that fails under
+reuse is automatically re-run on a clean isolate, so correctness always matches isolated mode.
 
-```
-Rust binary
-├─ transform (oxc)            src/transform.rs   — TS/JSX → JS, content-addressed cache
-├─ resolver (oxc_resolver)    src/runner.rs      — bare specifiers, exports maps, node type
-├─ module loader (rusty_v8)   src/runner.rs      — ESM (v8::Module) + CJS wrapper + interop
-│                                                  + import.meta + dynamic import() + vi.mock
-├─ event loop + fake timers   src/runtime.js     — macro/micro/nextTick, vi.useFakeTimers
-├─ framework snapshot         src/runner.rs      — bake once, context-from-snapshot per file
-├─ scheduler                  src/bin/turbo_test — N isolates/cores, work-stealing, duration-aware
-└─ dep graph / affected       src/graph.rs       — reverse query for watch mode
+Force it on/off regardless of config:
+
+```bash
+TURBO_REUSE_ISOLATE=1 npx turbo-test   # force reuse on
+TURBO_NO_REUSE=1       npx turbo-test   # force fresh isolation
 ```
 
-The framework layer (`src/runtime.js`) is a minimal stand-in; the real `@vitest/expect`,
-chai, `@vitest/snapshot`, `@vitest/spy`, and `@miaskiewicz/turbo-dom` are baked into the
-snapshot via the same mechanism (M3-content).
+## How it works
+
+- **Transform** — per-module oxc/esbuild → CJS; node_modules bundled once per package (Vite-style),
+  cached on disk (99% hit on warm runs).
+- **DOM** — [turbo-dom](https://www.npmjs.com/package/@miaskiewicz/turbo-dom) via a Node-API host
+  (native html5ever parser + lazy copy-on-write DOM). Per-file env setup ~1–2 ms.
+- **Mocks** — `vi.mock` (sync + async factories), hoisting, `vi.spyOn`, `vi.fn`, `vi.hoisted`,
+  `importActual`, jest-dom matchers — all supported.
+- **Parallelism** — work-stealing across `--jobs` workers; duration-aware slowest-first ordering.
+
+## CLI
+
+```
+turbo-test [files...] [--jobs N] [--shard i/n] [--reporter json]
+```
+
+No file args → discovers `**/*.{test,spec}.{ts,tsx,js,jsx,mts,cts}` (skipping `node_modules`,
+`dist`, `build`, etc.). Flags pass through to the native binary.
+
+## Programmatic
+
+```js
+const { run } = require('@miaskiewicz/turbo-test');
+const { status } = run(['src/a.test.ts'], { jobs: 8, env: { TURBO_REUSE_ISOLATE: '1' } });
+process.exit(status);
+```
+
+## Config
+
+turbo-test reads your project's `vitest.config.ts` for `setupFiles`, `environment`, and `isolate`.
+No separate config needed for most suites.
+
+## Compatibility notes
+
+- A handful of vitest features that depend on a full Node runtime are stubbed/approximated; e2e
+  helper files that import heavy Node-only packages (e.g. `@playwright/test`) get those deps
+  stubbed so the file still runs.
+- `Date.now()` reflects a real base + the virtual event-loop clock, so `setTimeout`-driven elapsed
+  assertions pass deterministically.
+
+## Requirements
+
+`node >= 18`. Prebuilt binaries ship for macOS (arm64/x64), Linux (x64/arm64-gnu), and Windows x64.
+Other platforms: build from source with a Rust toolchain (`npm run build`).
 
 ## License
 

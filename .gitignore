@@ -19,6 +19,13 @@ pnpm-debug.log*
 /build
 *.tsbuildinfo
 
+# Prebuilt CLI binaries (large; produced by `npm run build` / prepublishOnly / CI)
+/bin/turbo-test-*
+
+# npm publish artifacts / personal cheat sheets
+*.tgz
+NPM-PUBLISH-*.md
+
 # Turbo / test caches
 .turbo/
 turbo-test-cache/
