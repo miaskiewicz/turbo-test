@@ -1,13 +1,26 @@
-# Coverage backlog — function + branch coverage (research spike)
+# Coverage backlog — function + branch coverage
 
-v0.2.1 ships **line coverage** via V8 precise coverage (`src/coverage.rs`, Inspector
-`Profiler.takePreciseCoverage`, byte-ranges remapped to original `.ts` lines through the esbuild
-inline source map). Function and branch metrics are not emitted yet. Captured here for a future
-spike.
+v0.2.1 shipped **line coverage**; **v0.2.2 adds function + branch coverage** (`src/coverage.rs` +
+`src/coverage_branch.rs`). Both are DONE. Remaining: a per-worker speed optimization (below).
 
-## Task list
+## Status
 
-- [ ] **Function coverage (EASY — ~1h).** The `takePreciseCoverage` result already gives, per
+- [x] **Function coverage** (v0.2.2) — from each V8 function's outer range + count → lcov
+      `FN`/`FNDA`/`FNF`/`FNH`.
+- [x] **Branch coverage** (v0.2.2) — oxc AST decision points (if/else, ?:, &&/||/??, switch)
+      correlated with V8 block ranges mapped back through the source map → lcov
+      `BRDA`/`BRF`/`BRH`. Implicit-else taken = block − then. Verified exact on a fixture.
+- [ ] **Per-worker collection (speed).** Coverage currently attaches the inspector + calls
+      `takePreciseCoverage` per file under fresh isolation (~2–3× a plain run). Collecting once per
+      worker (start coverage at isolate creation, take at worker teardown) would cut the per-file
+      inspector-attach + serialize cost. Needs reuse mode (persistent isolate per worker), which is
+      only test-correct on `isolate: false` projects — so safe to auto-enable only there. For
+      fresh-isolation suites it stays per-file.
+
+## Original spike notes (kept for reference)
+
+### Function coverage
+- [x] **Function coverage (EASY — ~1h).** The `takePreciseCoverage` result already gives, per
       script, `functions: [{ functionName, ranges: [...], isBlockCoverage }]`. The FIRST range of
       each function entry is the function body with its invocation `count`. So:
       - function is "hit" when its outer-range count > 0.

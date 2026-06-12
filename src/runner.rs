@@ -685,7 +685,14 @@ fn vitest_isolate_false(entry: &Path) -> bool {
             "vitest.config.dev.ts", "vitest.config.ci.ts", "vite.config.ts",
         ] {
             if let Ok(s) = std::fs::read_to_string(d.join(cfg)) {
-                let flat: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+                // strip `//` line comments first — a doc comment mentioning "isolate: false"
+                // must not be mistaken for the real setting.
+                let code: String = s
+                    .lines()
+                    .map(|l| l.split("//").next().unwrap_or(""))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let flat: String = code.chars().filter(|c| !c.is_whitespace()).collect();
                 if flat.contains("isolate:false") {
                     return true;
                 }
@@ -715,13 +722,35 @@ fn reuse_decision(entry: &Path) -> bool {
 
 /// Find the project's vitest setupFiles (registers jest-dom matchers etc.) by parsing the
 /// nearest vitest/vite config. Returns resolved absolute paths.
+/// Find a config object key (e.g. `setupFiles`) — the occurrence actually used as a key
+/// (`key:`), skipping mentions inside `//` comments or prose (e.g. a doc comment that names
+/// `setupFiles`). Returns the byte offset of the key name.
+fn find_config_key(s: &str, key: &str) -> Option<usize> {
+    let mut search = 0;
+    while let Some(i) = s[search..].find(key) {
+        let at = search + i;
+        search = at + key.len();
+        // must be immediately followed (after optional whitespace) by ':'
+        if !s[at + key.len()..].trim_start().starts_with(':') {
+            continue;
+        }
+        // skip if this line is a `//` comment
+        let line_start = s[..at].rfind('\n').map(|n| n + 1).unwrap_or(0);
+        if s[line_start..at].trim_start().starts_with("//") {
+            continue;
+        }
+        return Some(at);
+    }
+    None
+}
+
 fn vitest_setup_files(entry: &Path) -> Vec<PathBuf> {
     let mut dir = entry.parent();
     while let Some(d) = dir {
         for cfg in ["vitest.config.ts", "vitest.config.mts", "vite.config.ts", "vitest.config.js"] {
             let p = d.join(cfg);
             if let Ok(s) = std::fs::read_to_string(&p) {
-                if let Some(start) = s.find("setupFiles") {
+                if let Some(start) = find_config_key(&s, "setupFiles") {
                     // grab the [...] (or single quoted) right after setupFiles
                     let tail = &s[start..];
                     if let Some(lb) = tail.find('[') {
@@ -2940,7 +2969,8 @@ fn coverage_accumulate(json: &str) {
                 let wrapped = format!(
                     "(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})"
                 );
-                crate::coverage::register_meta(abs, &wrapped);
+                let orig = std::fs::read_to_string(abs).unwrap_or_default();
+                crate::coverage::register_meta(abs, &wrapped, &orig);
             } else {
                 continue;
             }
@@ -2977,6 +3007,7 @@ fn coverage_accumulate(json: &str) {
             continue;
         }
         crate::coverage::map_script(abs, &ranges, &funcs);
+        crate::coverage::map_branches(abs, &ranges);
     }
 }
 
