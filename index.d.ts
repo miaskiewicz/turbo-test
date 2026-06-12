@@ -5,6 +5,10 @@ export interface RunOptions {
   reporter?: string;
   /** Shard, e.g. "1/4". */
   shard?: string;
+  /** Collect line coverage (V8 precise coverage) → writes lcov.info + prints a summary. */
+  coverage?: boolean;
+  /** Coverage output directory (implies coverage). Default: <cwd>/coverage. */
+  coverageDir?: string;
   /** Extra env vars (e.g. { TURBO_REUSE_ISOLATE: "1" }). */
   env?: Record<string, string>;
 }

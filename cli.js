@@ -47,6 +47,75 @@ function walk(dir, out) {
   return out;
 }
 
+// ---- vitest include/exclude honoring -------------------------------------
+// Compile a glob (supporting **, *, ?, {a,b}) to an anchored RegExp matched
+// against a project-root-relative POSIX path.
+function globToRe(glob) {
+  let re = '^';
+  for (let i = 0; i < glob.length;) {
+    const c = glob[i];
+    if (c === '*') {
+      if (glob[i + 1] === '*') {
+        if (glob[i + 2] === '/') { re += '(?:.*/)?'; i += 3; } // **/  → zero+ dirs
+        else { re += '.*'; i += 2; }
+      } else { re += '[^/]*'; i++; }
+    } else if (c === '?') { re += '[^/]'; i++; }
+    else if (c === '{') { re += '(?:'; i++; }
+    else if (c === '}') { re += ')'; i++; }
+    else if (c === ',') { re += '|'; i++; }
+    else if ('.+^$()|[]\\'.includes(c)) { re += '\\' + c; i++; }
+    else { re += c; i++; }
+  }
+  return new RegExp(re + '$');
+}
+
+// Find the nearest vitest/vite config and pull its test-level include/exclude
+// globs (the FIRST arrays in the file — test.* precedes any coverage.* block).
+// Returns { root, include:[RegExp], exclude:[RegExp] } or null if none/unparseable.
+function vitestPatterns(startDir) {
+  const names = ['vitest.config.ts', 'vitest.config.mts', 'vitest.config.js', 'vitest.config.mjs',
+                 'vite.config.ts', 'vite.config.mts', 'vite.config.js', 'vite.config.mjs'];
+  let dir = startDir;
+  for (;;) {
+    for (const n of names) {
+      const p = path.join(dir, n);
+      if (!fs.existsSync(p)) continue;
+      let text;
+      try { text = fs.readFileSync(p, 'utf8'); } catch { return null; }
+      const arr = (key) => {
+        const m = text.match(new RegExp(key + '\\s*:\\s*\\[([^\\]]*)\\]'));
+        if (!m) return null;
+        const items = m[1].match(/['"`]([^'"`]+)['"`]/g);
+        return items ? items.map((s) => s.slice(1, -1)) : [];
+      };
+      const inc = arr('include');
+      const exc = arr('exclude');
+      if (!inc) return null; // no test.include → fall back to default discovery
+      return {
+        root: dir,
+        include: inc.map(globToRe),
+        exclude: (exc || []).map(globToRe),
+      };
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+function discover(cwd) {
+  const all = walk(cwd, []);
+  const pats = vitestPatterns(cwd);
+  if (!pats) return all.sort();
+  // vitest matches globs against the project-root-relative POSIX path.
+  const rel = (f) => path.relative(pats.root, f).split(path.sep).join('/');
+  const kept = all.filter((f) => {
+    const r = rel(f);
+    return pats.include.some((re) => re.test(r)) && !pats.exclude.some((re) => re.test(r));
+  });
+  return kept.sort();
+}
+
 function main() {
   const bin = binaryPath();
   if (!bin) {
@@ -65,7 +134,7 @@ function main() {
     if (a.startsWith('-')) {
       flags.push(a);
       // flags that take a value: --jobs N, --shard i/n, --reporter X
-      if (/^(-j|--jobs|--shard|--reporter)$/.test(a) && i + 1 < argv.length && !argv[i + 1].startsWith('-')) {
+      if (/^(-j|--jobs|--shard|--reporter|--coverage-dir)$/.test(a) && i + 1 < argv.length && !argv[i + 1].startsWith('-')) {
         flags.push(argv[++i]);
       }
     } else {
@@ -74,7 +143,7 @@ function main() {
   }
   let testFiles = files;
   if (testFiles.length === 0) {
-    testFiles = walk(process.cwd(), []).sort();
+    testFiles = discover(process.cwd());
     if (testFiles.length === 0) {
       console.error('turbo-test: no test files found (looked for *.test.* / *.spec.*).');
       process.exit(1);

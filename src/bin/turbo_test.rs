@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use turbo_test::coverage;
 use turbo_test::runner::{forget_registry, init_v8, run_test_file, transform_cache_stats};
 
 struct FileResult {
@@ -69,6 +70,14 @@ fn main() {
                 }
             }
             "--reporter" => json = args.next().as_deref() == Some("json"),
+            "--coverage" => coverage::enable(),
+            // `--coverage-dir <path>` sets the lcov output dir (and implies --coverage).
+            "--coverage-dir" => {
+                coverage::enable();
+                if let Some(d) = args.next() {
+                    coverage::set_out_dir(&d);
+                }
+            }
             _ => files.push(PathBuf::from(a)),
         }
     }
@@ -268,5 +277,8 @@ fn main() {
         "\n{} files | {} passed | {} failed | {} load-errors | {} jobs | wall {:.0} ms | env setup {:.2} ms/file | cache {:.0}% hit",
         files.len(), tp, tf, errs, jobs, wall_ms, avg_setup / 1000.0, hit_rate
     );
+    if coverage::enabled() {
+        coverage::report();
+    }
     std::process::exit(if tf == 0 && errs == 0 { 0 } else { 1 });
 }

@@ -72,14 +72,53 @@ TURBO_NO_REUSE=1       npx turbo-test   # force fresh isolation
   `importActual`, jest-dom matchers — all supported.
 - **Parallelism** — work-stealing across `--jobs` workers; duration-aware slowest-first ordering.
 
+## Coverage
+
+```bash
+npx turbo-test --coverage                       # line coverage → coverage/lcov.info + a summary
+npx turbo-test --coverage-dir build/cov         # custom output dir (implies --coverage)
+```
+
+Coverage uses **V8's native precise coverage** (the engine's own per-function/block counters via
+the Inspector `Profiler` domain — the same source c8 uses) — not Istanbul-style source
+instrumentation. Byte ranges are mapped back to your original `.ts`/`.tsx` lines through esbuild
+source maps, emitted only under `--coverage`. Reports **line + function** coverage as standard
+**lcov** (`coverage/lcov.info` — `DA`/`LF`/`LH` + `FN`/`FNDA`/`FNF`/`FNH`; consumable by Codecov,
+`genhtml`, VS Code Coverage Gutters, etc.) plus a terminal summary:
+
+```
+ Coverage — 11 files (lines | funcs)
+  100.00% lines  100.00% fns   src/analytics/useAnalytics.ts
+   97.31% lines   85.00% fns   src/theme/components.ts
+  ------
+   99.13% lines (796/803)   82.93% fns (34/41)   → .../coverage/lcov.info
+```
+
+node_modules and test/spec files are excluded. Coverage runs the fresh isolation path.
+
+**Speed.** Collection is opt-in and runs ~2–3× slower than a plain run (V8 block coverage keeps
+code un-optimized to count blocks) — in line with vitest's own coverage. Normal runs are completely
+unaffected (no `--coverage` → no inspector, no source maps, identical transform cache). Branch
+coverage and a per-worker speedup for `isolate: false` projects are tracked in
+[`docs/COVERAGE-FUNC-BRANCH-BACKLOG.md`](docs/COVERAGE-FUNC-BRANCH-BACKLOG.md).
+
+**Precision vs Istanbul.** This is V8 coverage, so execution *counts* are exact and collection is
+near-free — but it measures compiled bytecode mapped back through source maps, where Istanbul
+instruments the source AST directly. At the **line** level the two are comparable (our esbuild maps
+are clean); for **branch**-level attribution Istanbul is finer. turbo-test currently reports
+**line coverage only** — if you need exhaustive branch metrics, keep an Istanbul/vitest coverage
+job for that gate and use turbo-test's coverage for fast everyday line feedback.
+
 ## CLI
 
 ```
-turbo-test [files...] [--jobs N] [--shard i/n] [--reporter json]
+turbo-test [files...] [--jobs N] [--shard i/n] [--reporter json] [--coverage] [--coverage-dir DIR]
 ```
 
-No file args → discovers `**/*.{test,spec}.{ts,tsx,js,jsx,mts,cts}` (skipping `node_modules`,
-`dist`, `build`, etc.). Flags pass through to the native binary.
+No file args → discovers test files. If a `vitest.config.*` is found, turbo-test honors its
+**`test.include` / `test.exclude`** globs (so e.g. Playwright `*.spec.ts` under `e2e/` are skipped
+exactly like vitest); otherwise it falls back to `**/*.{test,spec}.{ts,tsx,js,jsx,mts,cts}`
+(skipping `node_modules`, `dist`, `build`, etc.). Flags pass through to the native binary.
 
 ## Programmatic
 
@@ -91,8 +130,8 @@ process.exit(status);
 
 ## Config
 
-turbo-test reads your project's `vitest.config.ts` for `setupFiles`, `environment`, and `isolate`.
-No separate config needed for most suites.
+turbo-test reads your project's `vitest.config.ts` for `setupFiles`, `environment`, `isolate`, and
+`test.include` / `test.exclude`. No separate config needed for most suites.
 
 ## Compatibility notes
 

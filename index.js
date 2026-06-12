@@ -30,7 +30,7 @@ function binaryPath() {
 /**
  * Run turbo-test over the given files.
  * @param {string[]} files  test file paths
- * @param {{ jobs?: number, reporter?: string, shard?: string, env?: object }} [opts]
+ * @param {{ jobs?: number, reporter?: string, shard?: string, coverage?: boolean, coverageDir?: string, env?: object }} [opts]
  * @returns {{ status: number }}
  */
 function run(files, opts = {}) {
@@ -40,6 +40,8 @@ function run(files, opts = {}) {
   if (opts.jobs) args.push('--jobs', String(opts.jobs));
   if (opts.reporter) args.push('--reporter', String(opts.reporter));
   if (opts.shard) args.push('--shard', String(opts.shard));
+  if (opts.coverageDir) args.push('--coverage-dir', String(opts.coverageDir));
+  else if (opts.coverage) args.push('--coverage');
   args.push(...files);
   const res = spawnSync(bin, args, { stdio: 'inherit', env: { ...process.env, ...(opts.env || {}) } });
   return { status: res.status == null ? 1 : res.status };

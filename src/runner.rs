@@ -987,6 +987,13 @@ fn esbuild_transform_cjs(file: &Path) -> Option<String> {
     raw.hash(&mut h);
     file.extension().and_then(|e| e.to_str()).unwrap_or("").hash(&mut h);
     "mr-cjs-v1".hash(&mut h);
+    // Coverage emits an inline source map (needed to remap V8 byte ranges → original lines), so
+    // the output differs — key it separately. Only perturb the key when coverage is ON, so the
+    // normal (no-map) cache keys are byte-identical to before → zero cache churn on default runs.
+    let cov = crate::coverage::enabled();
+    if cov {
+        "cov-inline-map".hash(&mut h);
+    }
     let cache = cache_dir().join(format!("mr-{:016x}.cjs", h.finish()));
     if let Ok(c) = std::fs::read_to_string(&cache) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
@@ -1012,6 +1019,12 @@ fn esbuild_transform_cjs(file: &Path) -> Option<String> {
         "--define:process.env.NODE_ENV=globalThis.process.env.NODE_ENV",
         "--supported:dynamic-import=false",
     ]);
+    // Under --coverage: emit an inline source map so coverage.rs can map V8 byte ranges back to
+    // the original .ts line. (No --sourcefile: that's stdin-only; with a file arg esbuild names
+    // the source itself, which is fine — we attribute to the known file path directly.)
+    if cov {
+        cmd.args(["--sourcemap=inline", "--sources-content=false"]);
+    }
     if let Some(tc) = &tsconfig {
         cmd.arg(format!("--tsconfig={}", tc.display()));
     }
@@ -1791,10 +1804,23 @@ fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks: bool)
     let wrapped =
         format!("(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})");
     let code = v8::String::new(scope, &wrapped)?;
+    // Under --coverage, give the script an origin named after the file so V8's precise-coverage
+    // report carries a URL we can map back to source. Off by default (origin None) — zero change.
     let script = {
         let tc = std::pin::pin!(v8::TryCatch::new(scope));
         let tc = &mut tc.init();
-        match v8::Script::compile(tc, code, None) {
+        let origin = if crate::coverage::enabled() {
+            v8::String::new(tc, &abs.to_string_lossy()).map(|name| {
+                v8::ScriptOrigin::new(tc, name.into(), 0, 0, false, 123, None, false, false, false, None)
+            })
+        } else {
+            None
+        };
+        let compiled = match &origin {
+            Some(o) => v8::Script::compile(tc, code, Some(o)),
+            None => v8::Script::compile(tc, code, None),
+        };
+        match compiled {
             Some(s) => Some(v8::Global::new(tc, s)),
             None => {
                 eprintln!(
@@ -2880,6 +2906,80 @@ impl TestReport {
     }
 }
 
+/// Parse a `Profiler.takePreciseCoverage` result and attribute V8's per-range hit counts to
+/// original source lines. Only project source files are reported — node_modules and test/spec
+/// files are skipped (test files get hoist-reordered so their maps are unreliable, and they don't
+/// belong in a coverage report anyway).
+fn coverage_accumulate(json: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return };
+    let Some(scripts) =
+        v.get("result").and_then(|r| r.get("result")).and_then(|x| x.as_array())
+    else {
+        return;
+    };
+    for s in scripts {
+        let Some(url) = s.get("url").and_then(|u| u.as_str()) else { continue };
+        if url.is_empty() {
+            continue;
+        }
+        let abs = Path::new(url);
+        if !abs.is_absolute() || !abs.exists() {
+            continue;
+        }
+        if abs.components().any(|c| c.as_os_str() == "node_modules") {
+            continue;
+        }
+        let name = abs.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.contains(".test.") || name.contains(".spec.") {
+            continue;
+        }
+        // Static map data (line table + source map) is built ONCE per file and reused across every
+        // test file that covers it — rebuild the exact wrapper V8 compiled only on first encounter.
+        if !crate::coverage::has_meta(abs) {
+            if let Some(raw) = read_transformed(abs, true) {
+                let wrapped = format!(
+                    "(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})"
+                );
+                crate::coverage::register_meta(abs, &wrapped);
+            } else {
+                continue;
+            }
+        }
+        let mut ranges: Vec<(usize, usize, i64)> = Vec::new();
+        // (name, outer-range start offset, call count) — the FIRST range of each function is its
+        // body span; its count is the invocation count → function coverage.
+        let mut funcs: Vec<(String, usize, i64)> = Vec::new();
+        if let Some(fns) = s.get("functions").and_then(|f| f.as_array()) {
+            for f in fns {
+                let name = f.get("functionName").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                let rs = f.get("ranges").and_then(|r| r.as_array());
+                if let Some(rs) = rs {
+                    for (i, r) in rs.iter().enumerate() {
+                        if let (Some(s0), Some(e0), Some(c0)) = (
+                            r.get("startOffset").and_then(|x| x.as_u64()),
+                            r.get("endOffset").and_then(|x| x.as_u64()),
+                            r.get("count").and_then(|x| x.as_i64()),
+                        ) {
+                            if i == 0 {
+                                // a top-level wrapper-ish function with no name + huge span is the
+                                // module body itself — skip from function metrics, keep its ranges.
+                                if !name.is_empty() {
+                                    funcs.push((name.clone(), s0 as usize, c0));
+                                }
+                            }
+                            ranges.push((s0 as usize, e0 as usize, c0));
+                        }
+                    }
+                }
+            }
+        }
+        if ranges.is_empty() {
+            continue;
+        }
+        crate::coverage::map_script(abs, &ranges, &funcs);
+    }
+}
+
 /// Run a single test file end-to-end and return its pass/fail report.
 pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     let entry_abs = std::fs::canonicalize(entry).map_err(|e| format!("{e}"))?;
@@ -2956,8 +3056,10 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     // Zero-config speed path: reuse this worker's isolate+context across files (vitest
     // isolate:false semantics) so node_modules barrels evaluate once, not per file. Enabled by
     // the project's vitest config (`isolate: false`) or TURBO_REUSE_ISOLATE; off with TURBO_NO_REUSE.
-    // FORCE_FRESH (the fresh-retry) overrides reuse for this one file.
-    if !FORCE_FRESH.with(|f| f.get()) && reuse_decision(&entry_abs) {
+    // FORCE_FRESH (the fresh-retry) overrides reuse for this one file. Coverage always runs the
+    // fresh path (one isolate per file) — that's where the inspector collector is wired, and it
+    // keeps the byte-offset → source mapping unambiguous.
+    if !FORCE_FRESH.with(|f| f.get()) && reuse_decision(&entry_abs) && !crate::coverage::enabled() {
         return run_test_file_reused(&entry_abs, &setup_files, &externals, &mock_targets, &load_target);
     }
 
@@ -2975,12 +3077,19 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         let isolate = &mut v8::Isolate::new(params);
         isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
         isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
+        // Coverage: attach an inspector to this isolate BEFORE entering scopes (needs &mut isolate).
+        let mut collector =
+            crate::coverage::enabled().then(|| crate::coverage::Collector::new(isolate));
 
         v8::scope!(let scope, isolate);
         let context = v8::Context::new(scope, Default::default());
         let scope = &mut v8::ContextScope::new(scope, context);
         let global = context.global(scope);
         install_natives(scope, global);
+        // Begin precise coverage now — captures module-load + test-execution counts.
+        if let Some(c) = collector.as_mut() {
+            c.start(context);
+        }
         // process.cwd(): the test's project root (nearest package.json outside node_modules) —
         // some tests build absolute paths via `path.join(process.cwd(), 'node_modules/...')`.
         {
@@ -3118,6 +3227,16 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
             // 3. drive the collected tests: __tt.run() -> Promise<summary>
             drive_tests(scope, global)
         };
+
+        // Coverage: read out V8's precise counts for everything this file executed, then map the
+        // byte ranges back to original source lines. Done before teardown (isolate still alive).
+        if let Some(c) = collector.as_mut() {
+            if let Some(json) = c.take() {
+                coverage_accumulate(&json);
+            }
+            c.stop(context);
+        }
+        collector = None; // drop the inspector while the isolate + scope are still alive
 
         // drop all Globals while the isolate is still alive
         clear_registry();
