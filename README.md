@@ -25,7 +25,15 @@ so you can see the DOM's contribution separately from the runner's:
 | **payroll-app** | 10,006 | 296s | 130s | **51s** | **5.8×** | 2.6× |
 | **ui-design-components** | 6,189 | 428s | 358s | **76s** | **5.6×** | 4.7× |
 
-All three configs pass 100% (10006/0 and 6189/0). Two takeaways:
+`ui-design-components` also runs under turbo-test's optional **isolate-reuse** mode (see below).
+On a less-loaded box it lands **46.8s — 9.1× vs vitest+jsdom**, ~1.6× over fresh isolation, still
+6189/0:
+
+| ui-design-components | jsdom | turbo-dom | turbo-test fresh | **turbo-test reuse** |
+|---|---|---|---|---|
+| 6,189 tests | 428s | 358s | 76s | **46.8s (9.1× vs jsdom)** |
+
+All configs pass 100% (10006/0 and 6189/0). Two takeaways:
 
 - **The DOM matters.** Just swapping jsdom → turbo-dom under plain vitest already cuts wall time
   ~1.2–2.3× (jsdom's `environment` setup alone was **1228s cumulative** across workers on payroll
@@ -35,8 +43,8 @@ All three configs pass 100% (10006/0 and 6189/0). Two takeaways:
   **~6× faster than the jsdom baseline** — with zero config changes.
 
 > Numbers are from a busy long-uptime workstation, so absolute seconds run high; the **ratios**
-> are what travel. An `isolate: false` reuse mode exists for extra headroom (see below) but on this
-> loaded box it landed even with fresh isolation (~80s on ui-design), so fresh is the headline.
+> are what travel. Reuse mode's win over fresh scales with how loaded the machine is — under heavy
+> contention the two converge (~80s); on a quieter box reuse pulls ahead (46.8s above).
 
 ## Isolate-reuse (extra speed, zero config)
 
