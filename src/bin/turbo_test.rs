@@ -78,6 +78,38 @@ fn main() {
                     coverage::set_out_dir(&d);
                 }
             }
+            // `--coverage-thresholds lines=90,functions=80,branches=80` — gate (implies --coverage).
+            "--coverage-thresholds" | "--coverage-threshold" => {
+                coverage::enable();
+                if let Some(v) = args.next() {
+                    coverage::set_thresholds(&v);
+                }
+            }
+            // apply thresholds to EACH reported file, not just the total.
+            "--coverage-per-file" => {
+                coverage::enable();
+                coverage::set_per_file(true);
+            }
+            // `--coverage-reporter lcov,json-summary,text,html` (repeatable / comma-list).
+            "--coverage-reporter" | "--coverage-reporters" => {
+                coverage::enable();
+                if let Some(v) = args.next() {
+                    coverage::set_reporters(&v);
+                }
+            }
+            // include/exclude globs (cwd-relative) — usually injected from vitest config by cli.js.
+            "--coverage-include" => {
+                coverage::enable();
+                if let Some(v) = args.next() {
+                    coverage::add_include(&v);
+                }
+            }
+            "--coverage-exclude" => {
+                coverage::enable();
+                if let Some(v) = args.next() {
+                    coverage::add_exclude(&v);
+                }
+            }
             _ => files.push(PathBuf::from(a)),
         }
     }
@@ -277,8 +309,6 @@ fn main() {
         "\n{} files | {} passed | {} failed | {} load-errors | {} jobs | wall {:.0} ms | env setup {:.2} ms/file | cache {:.0}% hit",
         files.len(), tp, tf, errs, jobs, wall_ms, avg_setup / 1000.0, hit_rate
     );
-    if coverage::enabled() {
-        coverage::report();
-    }
-    std::process::exit(if tf == 0 && errs == 0 { 0 } else { 1 });
+    let cov_ok = if coverage::enabled() { coverage::report() } else { true };
+    std::process::exit(if tf == 0 && errs == 0 && cov_ok { 0 } else { 1 });
 }

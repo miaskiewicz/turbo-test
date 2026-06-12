@@ -75,8 +75,15 @@ TURBO_NO_REUSE=1       npx turbo-test   # force fresh isolation
 ## Coverage
 
 ```bash
-npx turbo-test --coverage                       # line coverage → coverage/lcov.info + a summary
+npx turbo-test --coverage                       # line+func+branch → coverage/lcov.info, coverage-summary.json + a summary
 npx turbo-test --coverage-dir build/cov         # custom output dir (implies --coverage)
+
+# gate CI on thresholds (non-zero exit when unmet); --coverage-per-file applies them to each file
+npx turbo-test --coverage --coverage-per-file \
+  --coverage-thresholds lines=90,functions=80,branches=80
+
+# pick reporters (default: lcov,json-summary,text). html is opt-in.
+npx turbo-test --coverage --coverage-reporter lcov,json-summary,text,html
 ```
 
 Coverage uses **V8's native precise coverage** (the engine's own per-function/block counters via
@@ -101,6 +108,23 @@ back through the source map — so it's real per-arm branch data (not block-as-b
 
 node_modules and test/spec files are excluded. Coverage runs the fresh isolation path.
 
+**Thresholds & gating.** `--coverage-thresholds lines=90,functions=80,branches=80` fails the run
+(non-zero exit) when any metric is unmet; add `--coverage-per-file` to enforce them on *every*
+reported file (offending files + the failing metric are printed). When a `vitest.config.*` defines
+`test.coverage.thresholds`, those numbers are honored automatically — flags are optional and win
+when both are present. There is **no `statements` metric**: V8 has no statement counter (that's
+Istanbul), so thresholds are **lines / functions / branches** only, by design.
+
+**Reporters.** `--coverage-reporter` takes a comma list — `lcov`, `json-summary`, `text`, `html`
+(default `lcov,json-summary,text`). `json-summary` writes a vitest/c8-shaped
+`coverage-summary.json` (`total` + per-absolute-path `{lines,functions,branches}` with
+`{total,covered,pct}`); `html` writes a browsable `coverage/index.html`.
+
+**Scoping the report.** `test.coverage.include` / `test.coverage.exclude` globs from the vitest
+config are applied to the report set automatically (or pass `--coverage-include` /
+`--coverage-exclude` directly). To exempt a single file, add a
+`/* turbo-test-coverage-ignore-file */` comment near its top.
+
 **Speed.** Collection is opt-in and runs ~2–3× slower than a plain run (V8 block coverage keeps
 code un-optimized to count blocks) — in line with vitest's own coverage. Normal runs are completely
 unaffected (no `--coverage` → no inspector, no source maps, identical transform cache). Branch
@@ -110,14 +134,19 @@ coverage and a per-worker speedup for `isolate: false` projects are tracked in
 **Precision vs Istanbul.** This is V8 coverage, so execution *counts* are exact and collection is
 near-free — but it measures compiled bytecode mapped back through source maps, where Istanbul
 instruments the source AST directly. At the **line** level the two are comparable (our esbuild maps
-are clean); for **branch**-level attribution Istanbul is finer. turbo-test currently reports
-**line coverage only** — if you need exhaustive branch metrics, keep an Istanbul/vitest coverage
-job for that gate and use turbo-test's coverage for fast everyday line feedback.
+are clean). For **branches**, turbo-test pairs oxc decision points with V8 block counts for real
+per-arm data — including braceless early-return `if (c) return x;` (the implicit-else arm is
+derived from the block/continuation counts, not stuck at 0). Istanbul still resolves a few exotic
+shapes more finely; if you need that exhaustive gate, keep an Istanbul/vitest job alongside.
 
 ## CLI
 
 ```
-turbo-test [files...] [--jobs N] [--shard i/n] [--reporter json] [--coverage] [--coverage-dir DIR]
+turbo-test [files...] [--jobs N] [--shard i/n] [--reporter json]
+           [--coverage] [--coverage-dir DIR]
+           [--coverage-thresholds lines=,functions=,branches=] [--coverage-per-file]
+           [--coverage-reporter lcov,json-summary,text,html]
+           [--coverage-include GLOB] [--coverage-exclude GLOB]
 ```
 
 No file args → discovers test files. If a `vitest.config.*` is found, turbo-test honors its

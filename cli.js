@@ -103,6 +103,62 @@ function vitestPatterns(startDir) {
   }
 }
 
+// Locate the nearest vitest/vite config and return { dir, text } or null.
+function findConfig(startDir) {
+  const names = ['vitest.config.ts', 'vitest.config.mts', 'vitest.config.js', 'vitest.config.mjs',
+                 'vite.config.ts', 'vite.config.mts', 'vite.config.js', 'vite.config.mjs'];
+  let dir = startDir;
+  for (;;) {
+    for (const n of names) {
+      const p = path.join(dir, n);
+      if (!fs.existsSync(p)) continue;
+      try { return { dir, text: fs.readFileSync(p, 'utf8') }; } catch { return null; }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+// Pull the vitest `coverage` block's include/exclude globs + thresholds so the gate, lcov report
+// set, and JSON summary can be driven from config (no flags needed). Config-reading parity with
+// how we already read test.include/exclude — string-scan, no TS evaluation.
+function vitestCoverage(startDir) {
+  const cfg = findConfig(startDir);
+  if (!cfg) return null;
+  const text = cfg.text;
+  // slice from the `coverage:` key so include/exclude/thresholds resolve to the coverage block,
+  // not the test-level ones (test.* precedes coverage.* in the config object).
+  const ci = text.search(/coverage\s*:\s*\{/);
+  if (ci < 0) return { include: [], exclude: [], thresholds: null };
+  const slice = text.slice(ci);
+  const arr = (key) => {
+    const m = slice.match(new RegExp(key + '\\s*:\\s*\\[([^\\]]*)\\]'));
+    if (!m) return [];
+    const items = m[1].match(/['"`]([^'"`]+)['"`]/g);
+    return items ? items.map((s) => s.slice(1, -1)) : [];
+  };
+  // thresholds can be `coverage.thresholds: { lines: 90, ... }` or the flat legacy form.
+  const thrText = (() => {
+    const m = slice.match(/thresholds\s*:\s*\{([^}]*)\}/);
+    return m ? m[1] : slice;
+  })();
+  const num = (key) => {
+    const m = thrText.match(new RegExp('(?:^|[^.\\w])' + key + '\\s*:\\s*(\\d+(?:\\.\\d+)?)'));
+    return m ? m[1] : null;
+  };
+  const parts = [];
+  for (const k of ['lines', 'functions', 'branches']) {
+    const v = num(k);
+    if (v != null) parts.push(`${k}=${v}`);
+  }
+  return {
+    include: arr('include'),
+    exclude: arr('exclude'),
+    thresholds: parts.length ? parts.join(',') : null,
+  };
+}
+
 function discover(cwd) {
   const all = walk(cwd, []);
   const pats = vitestPatterns(cwd);
@@ -134,19 +190,50 @@ function main() {
     if (a.startsWith('-')) {
       flags.push(a);
       // flags that take a value: --jobs N, --shard i/n, --reporter X
-      if (/^(-j|--jobs|--shard|--reporter|--coverage-dir)$/.test(a) && i + 1 < argv.length && !argv[i + 1].startsWith('-')) {
+      if (/^(-j|--jobs|--shard|--reporter|--coverage-dir|--coverage-thresholds|--coverage-threshold|--coverage-reporter|--coverage-reporters|--coverage-include|--coverage-exclude)$/.test(a) && i + 1 < argv.length && !argv[i + 1].startsWith('-')) {
         flags.push(argv[++i]);
       }
     } else {
       files.push(a);
     }
   }
+  // When coverage is on, fill thresholds/include/exclude from vitest config unless the user
+  // passed them explicitly — flags win over config (P1/P2).
+  if (flags.some((f) => f.startsWith('--coverage'))) {
+    const cov = vitestCoverage(process.cwd());
+    if (cov) {
+      if (cov.thresholds && !flags.includes('--coverage-thresholds') && !flags.includes('--coverage-threshold')) {
+        flags.push('--coverage-thresholds', cov.thresholds);
+      }
+      if (cov.include.length && !flags.includes('--coverage-include')) {
+        flags.push('--coverage-include', cov.include.join(','));
+      }
+      if (cov.exclude.length && !flags.includes('--coverage-exclude')) {
+        flags.push('--coverage-exclude', cov.exclude.join(','));
+      }
+    }
+  }
+
   let testFiles = files;
   if (testFiles.length === 0) {
     testFiles = discover(process.cwd());
     if (testFiles.length === 0) {
       console.error('turbo-test: no test files found (looked for *.test.* / *.spec.*).');
       process.exit(1);
+    }
+  }
+  // Drop file args that no longer exist (deleted/renamed since a caller built its list — e.g.
+  // a `git diff`/staged-files wrapper). A stale path would otherwise reach the runner as a
+  // hard load-error and flip the exit code, breaking `set -e` wrappers. Warn, don't fail.
+  {
+    const missing = testFiles.filter((f) => !fs.existsSync(f));
+    if (missing.length) {
+      console.error(`turbo-test: skipping ${missing.length} missing file(s): ${missing.join(', ')}`);
+      testFiles = testFiles.filter((f) => fs.existsSync(f));
+    }
+    if (testFiles.length === 0) {
+      console.error('turbo-test: no existing test files to run.');
+      process.exit(0); // nothing to run is not a failure
     }
   }
   const res = spawnSync(bin, [...flags, ...testFiles], { stdio: 'inherit' });

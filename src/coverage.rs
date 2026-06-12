@@ -8,7 +8,7 @@
 //! lines through the esbuild source map we emit (under coverage only).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +34,215 @@ fn out_dir() -> PathBuf {
         return d;
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("coverage")
+}
+
+// ---- report config: thresholds, reporters, include/exclude (M6 coverage gating) -------------
+//
+// V8 coverage has NO statement metric (that's Istanbul). Thresholds are lines / functions /
+// branches only — there is intentionally no synthetic `statements`. Consumers migrating off
+// vitest should not expect one.
+
+// Per-metric minimum percentages (0..=100). None = not gated on that metric.
+#[derive(Clone, Copy, Default)]
+pub struct Thresholds {
+    pub lines: Option<f64>,
+    pub functions: Option<f64>,
+    pub branches: Option<f64>,
+}
+static THRESHOLDS: Mutex<Option<Thresholds>> = Mutex::new(None);
+static PER_FILE: AtomicBool = AtomicBool::new(false);
+
+/// Parse `lines=90,functions=80,branches=80` (any subset, any order). Unknown keys ignored.
+pub fn set_thresholds(spec: &str) {
+    let mut t = THRESHOLDS.lock().unwrap().unwrap_or_default();
+    for part in spec.split(',') {
+        let Some((k, v)) = part.split_once('=') else { continue };
+        let Ok(n) = v.trim().parse::<f64>() else { continue };
+        match k.trim() {
+            "lines" => t.lines = Some(n),
+            "functions" | "funcs" => t.functions = Some(n),
+            "branches" => t.branches = Some(n),
+            // `statements` is intentionally unsupported (V8 has no statement metric).
+            _ => {}
+        }
+    }
+    *THRESHOLDS.lock().unwrap() = Some(t);
+}
+pub fn set_per_file(on: bool) {
+    PER_FILE.store(on, Ordering::Relaxed);
+}
+
+// Reporters to emit. Default lcov + text (the historical behavior) when none specified.
+static REPORTERS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+pub fn set_reporters(spec: &str) {
+    let list: Vec<String> = spec
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !list.is_empty() {
+        *REPORTERS.lock().unwrap() = Some(list);
+    }
+}
+fn reporters() -> Vec<String> {
+    // Default set: lcov + json-summary + text. HTML is opt-in only (`--coverage-reporter html`)
+    // since it writes a browsable site most CI runs don't need.
+    REPORTERS
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| vec!["lcov".to_string(), "json-summary".to_string(), "text".to_string()])
+}
+
+// include/exclude globs (cwd-relative, vitest `coverage.include`/`coverage.exclude`). Empty
+// include = report everything (current behavior); exclude is always applied.
+static INCLUDE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static EXCLUDE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+pub fn add_include(spec: &str) {
+    let mut g = INCLUDE.lock().unwrap();
+    for p in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        g.push(p.to_string());
+    }
+}
+pub fn add_exclude(spec: &str) {
+    let mut g = EXCLUDE.lock().unwrap();
+    for p in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        g.push(p.to_string());
+    }
+}
+
+// Files carrying a per-file ignore directive (P5) — excluded from the report + the gate.
+static IGNORED: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
+fn mark_ignored(file: &Path) {
+    IGNORED.lock().unwrap().get_or_insert_with(HashSet::new).insert(file.to_path_buf());
+}
+fn is_ignored(file: &Path) -> bool {
+    IGNORED.lock().unwrap().as_ref().map(|s| s.contains(file)).unwrap_or(false)
+}
+
+/// Honor a magic comment in a source file's leading lines that exempts it from coverage
+/// reporting + gating. Recognized (anywhere in the first ~10 lines):
+///   `turbo-test-coverage-ignore-file`, `coverage-ignore-file`,
+///   or the consumer's legacy `disable-test-coverage-check`.
+fn scan_ignore_directive(file: &Path, src: &str) {
+    const MARKERS: [&str; 3] = [
+        "turbo-test-coverage-ignore-file",
+        "coverage-ignore-file",
+        "disable-test-coverage-check",
+    ];
+    for line in src.lines().take(10) {
+        if MARKERS.iter().any(|m| line.contains(m)) {
+            mark_ignored(file);
+            return;
+        }
+    }
+}
+
+// ---- glob matching (vitest-style: **, *, ?, {a,b}) against a cwd-relative POSIX path ---------
+
+/// Expand single-level `{a,b,c}` alternations into concrete patterns (no nesting), then test each
+/// expansion. Sufficient for the globs vitest configs use (`src/**/*.{ts,tsx}`).
+fn glob_match(pat: &str, path: &str) -> bool {
+    expand_braces(pat).iter().any(|p| simple_match(p.as_bytes(), path.as_bytes()))
+}
+
+fn expand_braces(pat: &str) -> Vec<String> {
+    let Some(open) = pat.find('{') else { return vec![pat.to_string()] };
+    let Some(rel_close) = pat[open..].find('}') else { return vec![pat.to_string()] };
+    let close = open + rel_close;
+    let (pre, inner, post) = (&pat[..open], &pat[open + 1..close], &pat[close + 1..]);
+    let mut out = Vec::new();
+    for alt in inner.split(',') {
+        // recurse to expand any further braces in the tail
+        for tail in expand_braces(&format!("{alt}{post}")) {
+            out.push(format!("{pre}{tail}"));
+        }
+    }
+    out
+}
+
+/// Match a brace-free glob (`**` spans path separators, `*`/`?` do not) against a path.
+fn simple_match(pat: &[u8], path: &[u8]) -> bool {
+    let (mut pi, mut si) = (0usize, 0usize);
+    // backtrack state for the most recent `*` (single-segment star)
+    let (mut star, mut star_si): (Option<usize>, usize) = (None, 0);
+    while si < path.len() {
+        if pi < pat.len() {
+            match pat[pi] {
+                b'*' => {
+                    if pi + 1 < pat.len() && pat[pi + 1] == b'*' {
+                        // `**` — matches across separators. Greedy with backtracking via outer loop:
+                        // try to consume the rest after `**` (skip an optional trailing '/').
+                        let mut rest = pi + 2;
+                        if rest < pat.len() && pat[rest] == b'/' {
+                            rest += 1;
+                        }
+                        if rest >= pat.len() {
+                            return true; // trailing `**` matches anything
+                        }
+                        // attempt to match the remainder at each position to end of path
+                        for k in si..=path.len() {
+                            if simple_match(&pat[rest..], &path[k..]) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                    // single `*` — matches zero+ non-separator chars
+                    star = Some(pi);
+                    star_si = si;
+                    pi += 1;
+                    continue;
+                }
+                b'?' => {
+                    if path[si] != b'/' {
+                        pi += 1;
+                        si += 1;
+                        continue;
+                    }
+                }
+                c => {
+                    if c == path[si] {
+                        pi += 1;
+                        si += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        // mismatch — backtrack into the last single `*` if any (but never across '/')
+        if let Some(sp) = star {
+            if path[star_si] != b'/' {
+                pi = sp + 1;
+                star_si += 1;
+                si = star_si;
+                continue;
+            }
+        }
+        return false;
+    }
+    // consume trailing `*` / `**` in the pattern
+    while pi < pat.len() && pat[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pat.len()
+}
+
+/// Whether a file passes the configured include/exclude globs. Matched against the file's
+/// cwd-relative POSIX path (how vitest interprets `coverage.include`).
+fn passes_globs(file: &Path) -> bool {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let rel = file.strip_prefix(&cwd).unwrap_or(file);
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    let inc = INCLUDE.lock().unwrap();
+    let exc = EXCLUDE.lock().unwrap();
+    if !inc.is_empty() && !inc.iter().any(|g| glob_match(g, &rel)) {
+        return false;
+    }
+    if exc.iter().any(|g| glob_match(g, &rel)) {
+        return false;
+    }
+    true
 }
 
 // file -> (origLine -> max hit count). Presence of a line = it's executable; value > 0 = covered.
@@ -103,6 +312,7 @@ pub fn has_meta(file: &Path) -> bool {
 /// Build + cache the static map data for a source file from its wrapped compiled source + the
 /// original source (for branch AST). Stores `None` if the source map can't be parsed.
 pub fn register_meta(file: &Path, wrapped: &str, orig_source: &str) {
+    scan_ignore_directive(file, orig_source);
     let meta = decode_inline_map(wrapped).map(|(genmap, segments)| {
         let u16s: Vec<u16> = wrapped.encode_utf16().collect();
         let mut line_start = vec![0usize];
@@ -417,15 +627,57 @@ pub fn map_branches(file: &Path, ranges: &[(usize, usize, i64)]) {
         }
         best.map(|(_, c)| c)
     };
+    // The innermost covered range CONTAINING `p` (start, end, count) — gives the enclosing block.
+    let block_of = |p: (u32, u32)| -> Option<((u32, u32), (u32, u32), i64)> {
+        let mut best: Option<((u32, u32), (u32, u32), i64)> = None;
+        for &(s, e, c) in &oranges {
+            if s <= p && p < e && best.map(|(bs, _, _)| s >= bs).unwrap_or(true) {
+                best = Some((s, e, c));
+            }
+        }
+        best
+    };
+    // The covered range with the SMALLEST start within `[lo, hi)` — used to find a consequent's
+    // own block, which V8 may start a column or two past the AST keyword position (so plain
+    // point-containment at the keyword misses it and falls through to the parent count).
+    let first_range_in = |lo: (u32, u32), hi: (u32, u32)| -> Option<i64> {
+        oranges
+            .iter()
+            .filter(|(s, _, _)| *s >= lo && *s < hi)
+            .min_by_key(|(s, _, _)| *s)
+            .map(|(_, _, c)| *c)
+    };
     for (block, br) in meta.branches.iter().enumerate() {
         let block_id = block as u32;
         let line = br.decision.0 + 1; // 1-based source line of the decision
         let block_count = count_at(br.decision).unwrap_or(0).max(0) as u64;
         let reached = block_count > 0;
         if br.implicit_else && br.arms.len() == 2 {
-            // `if` with no `else`: then sampled at the consequent; else = block − then.
-            let then_taken = count_at(br.arms[0]).unwrap_or(0).max(0) as u64;
-            let else_taken = block_count.saturating_sub(then_taken);
+            // `if` with no `else`. arms[0] = consequent start, arms[1] = if-statement end (the
+            // implicit-else position). Derive then/else from V8's sub-ranges rather than a single
+            // point sample — robust to the braceless `if (c) return X;` shape where V8 starts the
+            // consequent's range a column past the `return`/`throw` keyword.
+            let (then_taken, else_taken) =
+                if let Some(c) = first_range_in(br.arms[0], br.arms[1]) {
+                    // consequent has its own block (then taken sometimes-but-not-always): that
+                    // range's count IS the then-count; else = block − then.
+                    let t = c.max(0) as u64;
+                    (t, block_count.saturating_sub(t))
+                } else {
+                    // No distinct consequent range. Two cases, told apart by the continuation:
+                    //  - then ALWAYS taken → code after the `if` is unreachable → V8 emits a
+                    //    lower-count continuation range → else = that count (0), then = block.
+                    //  - then NEVER taken → continuation count == block (no distinct range) →
+                    //    then = 0, else = block.
+                    let block_end = block_of(br.decision).map(|(_, e, _)| e).unwrap_or((u32::MAX, 0));
+                    match first_range_in(br.arms[1], block_end) {
+                        Some(c) => {
+                            let e = c.max(0) as u64;
+                            (block_count.saturating_sub(e), e)
+                        }
+                        None => (0, block_count),
+                    }
+                };
             record_branch(file, block_id, 0, line, reached, then_taken);
             record_branch(file, block_id, 1, line, reached, else_taken);
         } else {
@@ -439,15 +691,42 @@ pub fn map_branches(file: &Path, ranges: &[(usize, usize, i64)]) {
 
 // ---- report emission ------------------------------------------------------------------------
 
-/// Write `coverage/lcov.info` and print a per-file + total line-coverage summary. Returns the
-/// (covered, total) line counts for the run.
-pub fn report() -> (u64, u64) {
+/// Per-file coverage row used by every reporter + the gate.
+struct Row {
+    path: PathBuf,
+    lh: u64,
+    lf: u64,
+    fnh: u64,
+    fnf: u64,
+    brh: u64,
+    brf: u64,
+}
+impl Row {
+    fn lpct(&self) -> f64 {
+        if self.lf > 0 { 100.0 * self.lh as f64 / self.lf as f64 } else { 100.0 }
+    }
+    fn fpct(&self) -> f64 {
+        if self.fnf > 0 { 100.0 * self.fnh as f64 / self.fnf as f64 } else { 100.0 }
+    }
+    fn bpct(&self) -> f64 {
+        if self.brf > 0 { 100.0 * self.brh as f64 / self.brf as f64 } else { 100.0 }
+    }
+}
+
+/// Emit the configured coverage reporters and apply threshold gating. Returns `true` if the gate
+/// passed (or no thresholds were configured), `false` if any threshold was unmet — the caller
+/// turns a `false` into a non-zero process exit.
+pub fn report() -> bool {
     let g = COV.lock().unwrap();
     let Some(map) = g.as_ref() else {
         println!("\ncoverage: no data collected.");
-        return (0, 0);
+        return true;
     };
-    let mut files: Vec<(&PathBuf, &HashMap<u32, u64>)> = map.iter().collect();
+    let mut files: Vec<(&PathBuf, &HashMap<u32, u64>)> = map
+        .iter()
+        // honor include/exclude globs + per-file ignore directive
+        .filter(|(f, _)| passes_globs(f) && !is_ignored(f))
+        .collect();
     files.sort_by(|a, b| a.0.cmp(b.0));
 
     let fn_g = FN_COV.lock().unwrap();
@@ -458,8 +737,7 @@ pub fn report() -> (u64, u64) {
     let mut lcov = String::new();
     let (mut tot_lf, mut tot_lh, mut tot_fnf, mut tot_fnh, mut tot_brf, mut tot_brh) =
         (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
-    // row: (path, lh, lf, fnh, fnf, brh, brf)
-    let mut rows: Vec<(String, u64, u64, u64, u64, u64, u64)> = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
     for (file, lines) in &files {
         lcov.push_str(&format!("SF:{}\n", file.display()));
 
@@ -509,31 +787,213 @@ pub fn report() -> (u64, u64) {
             lcov.push_str(&format!("DA:{},{}\n", l, c));
         }
         lcov.push_str(&format!("LF:{lf}\nLH:{lh}\nend_of_record\n"));
-        rows.push((file.to_string_lossy().into_owned(), lh, lf, fnh, fnf, brh, brf));
+        rows.push(Row { path: (*file).clone(), lh, lf, fnh, fnf, brh, brf });
     }
+
+    let total = Row {
+        path: PathBuf::new(),
+        lh: tot_lh,
+        lf: tot_lf,
+        fnh: tot_fnh,
+        fnf: tot_fnf,
+        brh: tot_brh,
+        brf: tot_brf,
+    };
 
     let out_dir = out_dir();
     let _ = std::fs::create_dir_all(&out_dir);
-    let lcov_path = out_dir.join("lcov.info");
-    let _ = std::fs::write(&lcov_path, &lcov);
-
-    // shorten paths against cwd for the summary
+    let reporters = reporters();
+    let has = |r: &str| reporters.iter().any(|x| x == r);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    println!("\n Coverage — {} files (lines | funcs | branches)", rows.len());
-    for (f, lh, lf, fnh, fnf, brh, brf) in &rows {
-        let lpct = if *lf > 0 { 100.0 * *lh as f64 / *lf as f64 } else { 100.0 };
-        let fpct = if *fnf > 0 { 100.0 * *fnh as f64 / *fnf as f64 } else { 100.0 };
-        let bpct = if *brf > 0 { 100.0 * *brh as f64 / *brf as f64 } else { 100.0 };
-        let short = Path::new(f).strip_prefix(&cwd).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| f.clone());
-        println!("  {:>6.2}% ln  {:>6.2}% fn  {:>6.2}% br   {}", lpct, fpct, bpct, short);
+
+    // ---- lcov ----
+    let lcov_path = out_dir.join("lcov.info");
+    if has("lcov") {
+        let _ = std::fs::write(&lcov_path, &lcov);
     }
-    let ltot = if tot_lf > 0 { 100.0 * tot_lh as f64 / tot_lf as f64 } else { 100.0 };
-    let ftot = if tot_fnf > 0 { 100.0 * tot_fnh as f64 / tot_fnf as f64 } else { 100.0 };
-    let btot = if tot_brf > 0 { 100.0 * tot_brh as f64 / tot_brf as f64 } else { 100.0 };
-    println!("  ------");
-    println!(
-        "  {:>6.2}% lines ({}/{})   {:>6.2}% fns ({}/{})   {:>6.2}% branches ({}/{})\n  → {}",
-        ltot, tot_lh, tot_lf, ftot, tot_fnh, tot_fnf, btot, tot_brh, tot_brf, lcov_path.display()
-    );
-    (tot_lh, tot_lf)
+    // ---- json-summary (vitest/c8 shape; no `statements` — V8 has no statement metric) ----
+    if has("json-summary") || has("json") {
+        let json_path = out_dir.join("coverage-summary.json");
+        let _ = std::fs::write(&json_path, json_summary(&total, &rows));
+    }
+    // ---- html (browsable overview table) ----
+    if has("html") {
+        let html_path = out_dir.join("index.html");
+        let _ = std::fs::write(&html_path, html_summary(&total, &rows, &cwd));
+    }
+
+    // ---- text (terminal summary) — on by default, suppress only if reporters set without it ----
+    if has("text") {
+        println!("\n Coverage — {} files (lines | funcs | branches)", rows.len());
+        for r in &rows {
+            let short = r
+                .path
+                .strip_prefix(&cwd)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| r.path.to_string_lossy().into_owned());
+            println!(
+                "  {:>6.2}% ln  {:>6.2}% fn  {:>6.2}% br   {}",
+                r.lpct(),
+                r.fpct(),
+                r.bpct(),
+                short
+            );
+        }
+        println!("  ------");
+        println!(
+            "  {:>6.2}% lines ({}/{})   {:>6.2}% fns ({}/{})   {:>6.2}% branches ({}/{})",
+            total.lpct(),
+            total.lh,
+            total.lf,
+            total.fpct(),
+            total.fnh,
+            total.fnf,
+            total.bpct(),
+            total.brh,
+            total.brf
+        );
+        let mut outs: Vec<String> = Vec::new();
+        if has("lcov") {
+            outs.push(lcov_path.display().to_string());
+        }
+        if has("json-summary") || has("json") {
+            outs.push(out_dir.join("coverage-summary.json").display().to_string());
+        }
+        if has("html") {
+            outs.push(out_dir.join("index.html").display().to_string());
+        }
+        if !outs.is_empty() {
+            println!("  → {}", outs.join("  "));
+        }
+    }
+
+    // ---- threshold gate ----
+    gate(&total, &rows, &cwd)
+}
+
+/// Check global (and, under `--coverage-per-file`, per-file) thresholds. Prints each unmet metric
+/// and returns `false` if any failed. No thresholds configured → always `true`.
+fn gate(total: &Row, rows: &[Row], cwd: &Path) -> bool {
+    let Some(t) = *THRESHOLDS.lock().unwrap() else { return true };
+    let mut failures: Vec<String> = Vec::new();
+
+    let check = |label: &str, fails: &mut Vec<String>, row: &Row| {
+        let metrics: [(Option<f64>, &str, f64); 3] = [
+            (t.lines, "lines", row.lpct()),
+            (t.functions, "functions", row.fpct()),
+            (t.branches, "branches", row.bpct()),
+        ];
+        for (thr, name, pct) in metrics {
+            if let Some(min) = thr {
+                if pct + 1e-9 < min {
+                    fails.push(format!("{label}: {name} {pct:.2}% < {min}%"));
+                }
+            }
+        }
+    };
+
+    check("total", &mut failures, total);
+    if PER_FILE.load(Ordering::Relaxed) {
+        for r in rows {
+            let short = r
+                .path
+                .strip_prefix(cwd)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| r.path.to_string_lossy().into_owned());
+            check(&short, &mut failures, r);
+        }
+    }
+
+    if failures.is_empty() {
+        println!("  coverage thresholds met ✓");
+        return true;
+    }
+    println!("\n  coverage threshold FAILURES ({}):", failures.len());
+    for f in &failures {
+        println!("    ✗ {f}");
+    }
+    false
+}
+
+/// vitest/c8 `coverage-summary.json`: a `total` block + one block per absolute file path. Each
+/// block has `lines`/`functions`/`branches` with `{total,covered,skipped,pct}`. No `statements`.
+fn json_summary(total: &Row, rows: &[Row]) -> String {
+    fn metric(covered: u64, tot: u64, pct: f64) -> String {
+        let pct = (pct * 100.0).round() / 100.0;
+        format!(
+            "{{\"total\":{},\"covered\":{},\"skipped\":0,\"pct\":{}}}",
+            tot, covered, pct
+        )
+    }
+    fn block(r: &Row) -> String {
+        format!(
+            "{{\"lines\":{},\"functions\":{},\"branches\":{}}}",
+            metric(r.lh, r.lf, r.lpct()),
+            metric(r.fnh, r.fnf, r.fpct()),
+            metric(r.brh, r.brf, r.bpct())
+        )
+    }
+    let mut s = String::from("{\n");
+    s.push_str(&format!("  \"total\": {},\n", block(total)));
+    for (i, r) in rows.iter().enumerate() {
+        let key = r.path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+        let comma = if i + 1 < rows.len() { "," } else { "" };
+        s.push_str(&format!("  \"{}\": {}{}\n", key, block(r), comma));
+    }
+    s.push_str("}\n");
+    s
+}
+
+/// Self-contained HTML overview table (c8/istanbul-style) — browsable `coverage/index.html`.
+fn html_summary(total: &Row, rows: &[Row], cwd: &Path) -> String {
+    fn cls(pct: f64) -> &'static str {
+        if pct >= 90.0 { "high" } else if pct >= 75.0 { "med" } else { "low" }
+    }
+    fn esc(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+    let mut body = String::new();
+    let cell = |pct: f64, h: u64, f: u64| {
+        format!(
+            "<td class=\"{}\">{:.2}% <span class=\"frac\">({}/{})</span></td>",
+            cls(pct),
+            pct,
+            h,
+            f
+        )
+    };
+    for r in rows {
+        let short = r
+            .path
+            .strip_prefix(cwd)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| r.path.to_string_lossy().into_owned());
+        body.push_str(&format!(
+            "<tr><td class=\"file\">{}</td>{}{}{}</tr>\n",
+            esc(&short),
+            cell(r.lpct(), r.lh, r.lf),
+            cell(r.fpct(), r.fnh, r.fnf),
+            cell(r.bpct(), r.brh, r.brf)
+        ));
+    }
+    format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<title>turbo-test coverage</title><style>\
+body{{font:14px/1.5 system-ui,sans-serif;margin:2rem;color:#222}}\
+h1{{font-size:1.2rem}}table{{border-collapse:collapse;width:100%}}\
+th,td{{padding:.35rem .6rem;border-bottom:1px solid #eee;text-align:right}}\
+th:first-child,td.file{{text-align:left}}\
+.frac{{color:#888;font-size:.85em}}\
+.high{{color:#0a7d28}}.med{{color:#b8860b}}.low{{color:#c0392b}}\
+tfoot td{{font-weight:600;border-top:2px solid #ccc}}\
+</style></head><body><h1>Coverage — {} files</h1>\
+<table><thead><tr><th>File</th><th>Lines</th><th>Functions</th><th>Branches</th></tr></thead>\
+<tbody>\n{}</tbody><tfoot><tr><td class=\"file\">total</td>{}{}{}</tr></tfoot></table>\
+</body></html>\n",
+        rows.len(),
+        body,
+        cell(total.lpct(), total.lh, total.lf),
+        cell(total.fpct(), total.fnh, total.fnf),
+        cell(total.bpct(), total.brh, total.brf)
+    )
 }
