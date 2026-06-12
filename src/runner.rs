@@ -2940,7 +2940,8 @@ fn coverage_accumulate(json: &str) {
                 let wrapped = format!(
                     "(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})"
                 );
-                crate::coverage::register_meta(abs, &wrapped);
+                let orig = std::fs::read_to_string(abs).unwrap_or_default();
+                crate::coverage::register_meta(abs, &wrapped, &orig);
             } else {
                 continue;
             }
@@ -2977,6 +2978,7 @@ fn coverage_accumulate(json: &str) {
             continue;
         }
         crate::coverage::map_script(abs, &ranges, &funcs);
+        crate::coverage::map_branches(abs, &ranges);
     }
 }
 

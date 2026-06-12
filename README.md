@@ -82,17 +82,22 @@ npx turbo-test --coverage-dir build/cov         # custom output dir (implies --c
 Coverage uses **V8's native precise coverage** (the engine's own per-function/block counters via
 the Inspector `Profiler` domain — the same source c8 uses) — not Istanbul-style source
 instrumentation. Byte ranges are mapped back to your original `.ts`/`.tsx` lines through esbuild
-source maps, emitted only under `--coverage`. Reports **line + function** coverage as standard
-**lcov** (`coverage/lcov.info` — `DA`/`LF`/`LH` + `FN`/`FNDA`/`FNF`/`FNH`; consumable by Codecov,
-`genhtml`, VS Code Coverage Gutters, etc.) plus a terminal summary:
+source maps, emitted only under `--coverage`. Reports **line + function + branch** coverage as
+standard **lcov** (`coverage/lcov.info` — `DA`/`LF`/`LH`, `FN`/`FNDA`/`FNF`/`FNH`,
+`BRDA`/`BRF`/`BRH`; consumable by Codecov, `genhtml`, VS Code Coverage Gutters, etc.) plus a
+terminal summary:
 
 ```
- Coverage — 11 files (lines | funcs)
-  100.00% lines  100.00% fns   src/analytics/useAnalytics.ts
-   97.31% lines   85.00% fns   src/theme/components.ts
+ Coverage — 11 files (lines | funcs | branches)
+  100.00% ln  100.00% fn  100.00% br   src/analytics/useAnalytics.ts
+   97.31% ln   85.00% fn   78.00% br   src/theme/components.ts
   ------
-   99.13% lines (796/803)   82.93% fns (34/41)   → .../coverage/lcov.info
+   99.13% lines (796/803)   82.93% fns (34/41)   80.00% branches (...)   → .../coverage/lcov.info
 ```
+
+Branch coverage parses each source file with [oxc](https://oxc.rs) to find decision points
+(`if`/`else`, `?:`, `&&`/`||`/`??`, `switch`) and correlates each arm with V8's block counts mapped
+back through the source map — so it's real per-arm branch data (not block-as-branch).
 
 node_modules and test/spec files are excluded. Coverage runs the fresh isolation path.
 

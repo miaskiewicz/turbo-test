@@ -4,6 +4,7 @@
 //! ModuleRunner. Public surface is deliberately small: plumbing, not framework.
 
 pub mod coverage;
+pub mod coverage_branch;
 pub mod graph;
 pub mod napi_host;
 pub mod runner;

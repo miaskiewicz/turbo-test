@@ -1615,6 +1615,8 @@ dependencies = [
  "base64",
  "libloading 0.9.0",
  "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
  "oxc_codegen",
  "oxc_parser",
  "oxc_resolver",

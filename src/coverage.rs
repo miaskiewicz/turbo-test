@@ -40,6 +40,23 @@ fn out_dir() -> PathBuf {
 static COV: Mutex<Option<HashMap<PathBuf, HashMap<u32, u64>>>> = Mutex::new(None);
 // file -> ((origLine, fnName) -> max call count). Function coverage.
 static FN_COV: Mutex<Option<HashMap<PathBuf, HashMap<(u32, String), u64>>>> = Mutex::new(None);
+// file -> ((block, branch) -> (line, reached, max taken)). Branch coverage.
+static BR_COV: Mutex<Option<HashMap<PathBuf, HashMap<(u32, u32), (u32, bool, u64)>>>> =
+    Mutex::new(None);
+
+/// Record one branch arm's outcome. Merges across the many test files that exercise the same
+/// source: a branch is reached/taken if any run reached/took it (max counts).
+pub fn record_branch(file: &Path, block: u32, branch: u32, line: u32, reached: bool, taken: u64) {
+    let mut g = BR_COV.lock().unwrap();
+    let m = g.get_or_insert_with(HashMap::new);
+    let f = m.entry(file.to_path_buf()).or_default();
+    let e = f.entry((block, branch)).or_insert((line, false, 0));
+    e.0 = line;
+    e.1 |= reached;
+    if taken > e.2 {
+        e.2 = taken;
+    }
+}
 
 pub fn record(file: &Path, line: u32, count: u64) {
     let mut g = COV.lock().unwrap();
@@ -64,9 +81,18 @@ pub fn record_fn(file: &Path, line: u32, name: &str, count: u64) {
 // Per-source-file static map data (line-start table + gen→src line map). Built ONCE per file and
 // reused across every test file that covers it — the source map is the same each time (the
 // transform is cache-backed), so re-decoding it per occurrence is pure waste.
+// a branch decision in original (line, col) coordinates.
+struct BranchCC {
+    decision: (u32, u32),
+    arms: Vec<(u32, u32)>,
+    implicit_else: bool,
+}
+
 struct ScriptMeta {
-    line_start: Vec<usize>,
-    genmap: HashMap<u32, u32>,
+    line_start: Vec<usize>,        // UTF-16 line starts of the WRAPPED compiled source
+    genmap: HashMap<u32, u32>,     // gen line -> src line (first segment) — line coverage
+    segments: Vec<Vec<(u32, u32, u32)>>, // per gen line: (gen_col, src_line, src_col) — gen→orig
+    branches: Vec<BranchCC>,       // decision points in original (line, col)
 }
 static META: Mutex<Option<HashMap<PathBuf, Option<Arc<ScriptMeta>>>>> = Mutex::new(None);
 
@@ -74,10 +100,10 @@ pub fn has_meta(file: &Path) -> bool {
     META.lock().unwrap().as_ref().map(|m| m.contains_key(file)).unwrap_or(false)
 }
 
-/// Build + cache the static map data for a source file from its wrapped compiled source. Stores
-/// `None` for files whose source map can't be parsed (so we don't retry them).
-pub fn register_meta(file: &Path, wrapped: &str) {
-    let meta = inline_map_genline_to_srcline(wrapped).map(|genmap| {
+/// Build + cache the static map data for a source file from its wrapped compiled source + the
+/// original source (for branch AST). Stores `None` if the source map can't be parsed.
+pub fn register_meta(file: &Path, wrapped: &str, orig_source: &str) {
+    let meta = decode_inline_map(wrapped).map(|(genmap, segments)| {
         let u16s: Vec<u16> = wrapped.encode_utf16().collect();
         let mut line_start = vec![0usize];
         for (i, &c) in u16s.iter().enumerate() {
@@ -85,7 +111,16 @@ pub fn register_meta(file: &Path, wrapped: &str) {
                 line_start.push(i + 1);
             }
         }
-        Arc::new(ScriptMeta { line_start, genmap })
+        // parse branch decision points from the original source, in (line, col).
+        let branches = crate::coverage_branch::extract(file, orig_source)
+            .into_iter()
+            .map(|b| BranchCC {
+                decision: byte_to_linecol(orig_source, b.decision),
+                arms: b.arms.iter().map(|&o| byte_to_linecol(orig_source, o)).collect(),
+                implicit_else: b.implicit_else,
+            })
+            .collect();
+        Arc::new(ScriptMeta { line_start, genmap, segments, branches })
     });
     let mut g = META.lock().unwrap();
     g.get_or_insert_with(HashMap::new).insert(file.to_path_buf(), meta);
@@ -93,6 +128,24 @@ pub fn register_meta(file: &Path, wrapped: &str) {
 
 fn meta_for(file: &Path) -> Option<Arc<ScriptMeta>> {
     META.lock().unwrap().as_ref().and_then(|m| m.get(file).cloned()).flatten()
+}
+
+/// Original-source byte offset → (line, UTF-16 column), both 0-based.
+fn byte_to_linecol(src: &str, off: u32) -> (u32, u32) {
+    let (mut line, mut col, mut b) = (0u32, 0u32, 0u32);
+    for ch in src.chars() {
+        if b >= off {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += ch.len_utf16() as u32;
+        }
+        b += ch.len_utf8() as u32;
+    }
+    (line, col)
 }
 
 // ---- inspector session (one per worker isolate, while coverage is on) -----------------------
@@ -178,44 +231,58 @@ fn dispatch(session: &v8::inspector::V8InspectorSession, msg: &[u8]) {
 
 /// Extract the esbuild inline source map's `mappings` and build a `genLine -> srcLine` table
 /// (the original line of each generated line's first mapped segment). 0-based line numbers.
-fn inline_map_genline_to_srcline(transformed: &str) -> Option<HashMap<u32, u32>> {
+type GenMap = HashMap<u32, u32>;
+type Segments = Vec<Vec<(u32, u32, u32)>>;
+
+/// Extract the esbuild inline source map and decode it into (gen line → src line) for line
+/// coverage and per-gen-line segments (gen_col, src_line, src_col) for gen→orig position mapping.
+fn decode_inline_map(transformed: &str) -> Option<(GenMap, Segments)> {
     let marker = "//# sourceMappingURL=data:application/json;base64,";
     let pos = transformed.rfind(marker)?;
     let b64 = transformed[pos + marker.len()..].lines().next()?.trim();
     let json = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&json).ok()?;
     let mappings = v.get("mappings")?.as_str()?;
-    Some(parse_mappings(mappings))
+    Some(parse_mappings_full(mappings))
 }
 
-fn parse_mappings(mappings: &str) -> HashMap<u32, u32> {
-    let mut out = HashMap::new();
+fn parse_mappings_full(mappings: &str) -> (GenMap, Segments) {
+    let mut genmap = HashMap::new();
+    let mut segs: Segments = Vec::new();
     // src_line/col/idx are cumulative across the WHOLE mappings string; gen_col resets per line.
     let (mut src_idx, mut src_line, mut src_col) = (0i64, 0i64, 0i64);
     for (gen_line, line) in mappings.split(';').enumerate() {
+        let mut gen_col = 0i64;
+        let mut row: Vec<(u32, u32, u32)> = Vec::new();
         let mut first: Option<i64> = None;
         for seg in line.split(',') {
             if seg.is_empty() {
                 continue;
             }
             let vals = vlq_decode(seg);
+            if vals.is_empty() {
+                continue;
+            }
+            gen_col += vals[0];
             if vals.len() >= 4 {
                 src_idx += vals[1];
                 src_line += vals[2];
                 src_col += vals[3];
-                let _ = (src_idx, src_col);
-                if first.is_none() {
+                let _ = src_idx;
+                if src_line >= 0 && src_col >= 0 && gen_col >= 0 {
+                    row.push((gen_col as u32, src_line as u32, src_col as u32));
+                }
+                if first.is_none() && src_line >= 0 {
                     first = Some(src_line);
                 }
             }
         }
         if let Some(sl) = first {
-            if sl >= 0 {
-                out.insert(gen_line as u32, sl as u32);
-            }
+            genmap.insert(gen_line as u32, sl as u32);
         }
+        segs.push(row);
     }
-    out
+    (genmap, segs)
 }
 
 fn vlq_decode(seg: &str) -> Vec<i64> {
@@ -296,6 +363,80 @@ pub fn map_script(file: &Path, ranges: &[(usize, usize, i64)], funcs: &[(String,
     }
 }
 
+/// A WRAPPED generated byte offset → original (src_line, src_col), both 0-based, via the source map
+/// segments. Within a segment the offset delta is applied 1:1 (esbuild segments are identity runs).
+fn gen_to_orig(meta: &ScriptMeta, off: usize) -> Option<(u32, u32)> {
+    let idx = meta.line_start.partition_point(|&s| s <= off);
+    if idx == 0 {
+        return None;
+    }
+    let li = idx - 1; // 0-based wrapped line
+    if li == 0 {
+        return None; // wrapper line
+    }
+    let gen_col = (off - meta.line_start[li]) as u32;
+    let segs = meta.segments.get(li - 1)?; // wrapped line li → esbuild gen line li-1
+    if segs.is_empty() {
+        return None;
+    }
+    // largest segment whose gen_col <= ours (segments are sorted by gen_col within a line)
+    let mut chosen: Option<&(u32, u32, u32)> = None;
+    for s in segs {
+        if s.0 <= gen_col {
+            chosen = Some(s);
+        } else {
+            break;
+        }
+    }
+    let s = chosen?;
+    Some((s.1, s.2 + (gen_col - s.0)))
+}
+
+/// Branch coverage: map V8's generated block ranges into original (line, col) ranges, then look up
+/// each AST decision arm's count to emit lcov BRDA/BRF/BRH.
+pub fn map_branches(file: &Path, ranges: &[(usize, usize, i64)]) {
+    let Some(meta) = meta_for(file) else { return };
+    if meta.branches.is_empty() {
+        return;
+    }
+    // original-coordinate covered ranges
+    let mut oranges: Vec<((u32, u32), (u32, u32), i64)> = Vec::new();
+    for &(gs, ge, c) in ranges {
+        if let (Some(s), Some(e)) = (gen_to_orig(&meta, gs), gen_to_orig(&meta, ge)) {
+            if s < e {
+                oranges.push((s, e, c));
+            }
+        }
+    }
+    let count_at = |p: (u32, u32)| -> Option<i64> {
+        let mut best: Option<((u32, u32), i64)> = None;
+        for &(s, e, c) in &oranges {
+            if s <= p && p < e && best.map(|(bs, _)| s >= bs).unwrap_or(true) {
+                best = Some((s, c));
+            }
+        }
+        best.map(|(_, c)| c)
+    };
+    for (block, br) in meta.branches.iter().enumerate() {
+        let block_id = block as u32;
+        let line = br.decision.0 + 1; // 1-based source line of the decision
+        let block_count = count_at(br.decision).unwrap_or(0).max(0) as u64;
+        let reached = block_count > 0;
+        if br.implicit_else && br.arms.len() == 2 {
+            // `if` with no `else`: then sampled at the consequent; else = block − then.
+            let then_taken = count_at(br.arms[0]).unwrap_or(0).max(0) as u64;
+            let else_taken = block_count.saturating_sub(then_taken);
+            record_branch(file, block_id, 0, line, reached, then_taken);
+            record_branch(file, block_id, 1, line, reached, else_taken);
+        } else {
+            for (i, &arm) in br.arms.iter().enumerate() {
+                let taken = count_at(arm).unwrap_or(0).max(0) as u64;
+                record_branch(file, block_id, i as u32, line, reached, taken);
+            }
+        }
+    }
+}
+
 // ---- report emission ------------------------------------------------------------------------
 
 /// Write `coverage/lcov.info` and print a per-file + total line-coverage summary. Returns the
@@ -311,11 +452,14 @@ pub fn report() -> (u64, u64) {
 
     let fn_g = FN_COV.lock().unwrap();
     let fn_map = fn_g.as_ref();
+    let br_g = BR_COV.lock().unwrap();
+    let br_map = br_g.as_ref();
 
     let mut lcov = String::new();
-    let (mut tot_lf, mut tot_lh, mut tot_fnf, mut tot_fnh) = (0u64, 0u64, 0u64, 0u64);
-    // row: (path, lh, lf, fnh, fnf)
-    let mut rows: Vec<(String, u64, u64, u64, u64)> = Vec::new();
+    let (mut tot_lf, mut tot_lh, mut tot_fnf, mut tot_fnh, mut tot_brf, mut tot_brh) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    // row: (path, lh, lf, fnh, fnf, brh, brf)
+    let mut rows: Vec<(String, u64, u64, u64, u64, u64, u64)> = Vec::new();
     for (file, lines) in &files {
         lcov.push_str(&format!("SF:{}\n", file.display()));
 
@@ -337,6 +481,23 @@ pub fn report() -> (u64, u64) {
         tot_fnf += fnf;
         tot_fnh += fnh;
 
+        // branches (BRDA), sorted by (block, branch)
+        let (mut brf, mut brh) = (0u64, 0u64);
+        if let Some(brs) = br_map.and_then(|m| m.get(*file)) {
+            let mut bv: Vec<(&(u32, u32), &(u32, bool, u64))> = brs.iter().collect();
+            bv.sort_by(|a, b| a.0.cmp(b.0));
+            for ((block, branch), (line, reached, taken)) in &bv {
+                // lcov: taken is "-" when the containing block never executed.
+                let t = if *reached { taken.to_string() } else { "-".to_string() };
+                lcov.push_str(&format!("BRDA:{},{},{},{}\n", line, block, branch, t));
+            }
+            brf = bv.len() as u64;
+            brh = bv.iter().filter(|(_, (_, reached, taken))| *reached && *taken > 0).count() as u64;
+            lcov.push_str(&format!("BRF:{brf}\nBRH:{brh}\n"));
+        }
+        tot_brf += brf;
+        tot_brh += brh;
+
         // lines (DA)
         let mut nums: Vec<(&u32, &u64)> = lines.iter().collect();
         nums.sort_by_key(|(l, _)| **l);
@@ -348,7 +509,7 @@ pub fn report() -> (u64, u64) {
             lcov.push_str(&format!("DA:{},{}\n", l, c));
         }
         lcov.push_str(&format!("LF:{lf}\nLH:{lh}\nend_of_record\n"));
-        rows.push((file.to_string_lossy().into_owned(), lh, lf, fnh, fnf));
+        rows.push((file.to_string_lossy().into_owned(), lh, lf, fnh, fnf, brh, brf));
     }
 
     let out_dir = out_dir();
@@ -358,19 +519,21 @@ pub fn report() -> (u64, u64) {
 
     // shorten paths against cwd for the summary
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    println!("\n Coverage — {} files (lines | funcs)", rows.len());
-    for (f, lh, lf, fnh, fnf) in &rows {
+    println!("\n Coverage — {} files (lines | funcs | branches)", rows.len());
+    for (f, lh, lf, fnh, fnf, brh, brf) in &rows {
         let lpct = if *lf > 0 { 100.0 * *lh as f64 / *lf as f64 } else { 100.0 };
         let fpct = if *fnf > 0 { 100.0 * *fnh as f64 / *fnf as f64 } else { 100.0 };
+        let bpct = if *brf > 0 { 100.0 * *brh as f64 / *brf as f64 } else { 100.0 };
         let short = Path::new(f).strip_prefix(&cwd).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| f.clone());
-        println!("  {:>6.2}% lines  {:>6.2}% fns   {}", lpct, fpct, short);
+        println!("  {:>6.2}% ln  {:>6.2}% fn  {:>6.2}% br   {}", lpct, fpct, bpct, short);
     }
     let ltot = if tot_lf > 0 { 100.0 * tot_lh as f64 / tot_lf as f64 } else { 100.0 };
     let ftot = if tot_fnf > 0 { 100.0 * tot_fnh as f64 / tot_fnf as f64 } else { 100.0 };
+    let btot = if tot_brf > 0 { 100.0 * tot_brh as f64 / tot_brf as f64 } else { 100.0 };
     println!("  ------");
     println!(
-        "  {:>6.2}% lines ({}/{})   {:>6.2}% fns ({}/{})   → {}",
-        ltot, tot_lh, tot_lf, ftot, tot_fnh, tot_fnf, lcov_path.display()
+        "  {:>6.2}% lines ({}/{})   {:>6.2}% fns ({}/{})   {:>6.2}% branches ({}/{})\n  → {}",
+        ltot, tot_lh, tot_lf, ftot, tot_fnh, tot_fnf, btot, tot_brh, tot_brf, lcov_path.display()
     );
     (tot_lh, tot_lf)
 }
