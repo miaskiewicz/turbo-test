@@ -75,12 +75,12 @@ TURBO_NO_REUSE=1       npx turbo-test   # force fresh isolation
 ## Coverage
 
 ```bash
-npx turbo-test --coverage                       # line+func+branch → coverage/lcov.info, coverage-summary.json + a summary
+npx turbo-test --coverage                       # line+func+branch+stmt → coverage/lcov.info, coverage-summary.json + a summary
 npx turbo-test --coverage-dir build/cov         # custom output dir (implies --coverage)
 
 # gate CI on thresholds (non-zero exit when unmet); --coverage-per-file applies them to each file
 npx turbo-test --coverage --coverage-per-file \
-  --coverage-thresholds lines=90,functions=80,branches=80
+  --coverage-thresholds lines=90,functions=80,branches=80,statements=90
 
 # pick reporters (default: lcov,json-summary,text). html is opt-in.
 npx turbo-test --coverage --coverage-reporter lcov,json-summary,text,html
@@ -89,22 +89,25 @@ npx turbo-test --coverage --coverage-reporter lcov,json-summary,text,html
 Coverage uses **V8's native precise coverage** (the engine's own per-function/block counters via
 the Inspector `Profiler` domain — the same source c8 uses) — not Istanbul-style source
 instrumentation. Byte ranges are mapped back to your original `.ts`/`.tsx` lines through esbuild
-source maps, emitted only under `--coverage`. Reports **line + function + branch** coverage as
-standard **lcov** (`coverage/lcov.info` — `DA`/`LF`/`LH`, `FN`/`FNDA`/`FNF`/`FNH`,
+source maps, emitted only under `--coverage`. Reports **line + function + branch + statement**
+coverage as standard **lcov** (`coverage/lcov.info` — `DA`/`LF`/`LH`, `FN`/`FNDA`/`FNF`/`FNH`,
 `BRDA`/`BRF`/`BRH`; consumable by Codecov, `genhtml`, VS Code Coverage Gutters, etc.) plus a
 terminal summary:
 
 ```
- Coverage — 11 files (lines | funcs | branches)
-  100.00% ln  100.00% fn  100.00% br   src/analytics/useAnalytics.ts
-   97.31% ln   85.00% fn   78.00% br   src/theme/components.ts
+ Coverage — 11 files (lines | funcs | branches | stmts)
+  100.00% ln  100.00% fn  100.00% br  100.00% st   src/analytics/useAnalytics.ts
+   97.31% ln   85.00% fn   78.00% br   96.40% st   src/theme/components.ts
   ------
-   99.13% lines (796/803)   82.93% fns (34/41)   80.00% branches (...)   → .../coverage/lcov.info
+   99.13% lines (796/803)   82.93% fns (34/41)   80.00% branches (...)   98.7% stmts (...)   → .../coverage/lcov.info
 ```
 
 Branch coverage parses each source file with [oxc](https://oxc.rs) to find decision points
 (`if`/`else`, `?:`, `&&`/`||`/`??`, `switch`) and correlates each arm with V8's block counts mapped
-back through the source map — so it's real per-arm branch data (not block-as-branch).
+back through the source map — so it's real per-arm branch data (not block-as-branch). **Statement**
+coverage reuses that same oxc pass (one parse, no extra cost) to locate each executable statement
+and correlate it with V8's covered ranges — c8-style; it tracks lines closely. lcov has no
+statement field, so statements appear in the json-summary / text / html reporters only.
 
 node_modules and test/spec files are excluded. Coverage runs the fresh isolation path.
 
@@ -112,17 +115,19 @@ node_modules and test/spec files are excluded. Coverage runs the fresh isolation
 (non-zero exit) when any metric is unmet; add `--coverage-per-file` to enforce them on *every*
 reported file (offending files + the failing metric are printed). When a `vitest.config.*` defines
 `test.coverage.thresholds`, those numbers are honored automatically — flags are optional and win
-when both are present. There is **no `statements` metric**: V8 has no statement counter (that's
-Istanbul), so thresholds are **lines / functions / branches** only, by design.
+when both are present. Gateable metrics are **lines / functions / branches / statements**.
+Under `--coverage`, **0 instrumented files is a hard failure** (non-zero exit), never a vacuous
+`0/0` pass — so a misconfigured `include` that covers nothing can't show up as green.
 
 **Reporters.** `--coverage-reporter` takes a comma list — `lcov`, `json-summary`, `text`, `html`
 (default `lcov,json-summary,text`). `json-summary` writes a vitest/c8-shaped
-`coverage-summary.json` (`total` + per-absolute-path `{lines,functions,branches}` with
+`coverage-summary.json` (`total` + per-absolute-path `{lines,statements,functions,branches}` with
 `{total,covered,pct}`); `html` writes a browsable `coverage/index.html`.
 
 **Scoping the report.** `test.coverage.include` / `test.coverage.exclude` globs from the vitest
 config are applied to the report set automatically (or pass `--coverage-include` /
-`--coverage-exclude` directly). To exempt a single file, add a
+`--coverage-exclude` directly). Globs support `**`, `*`, `?`, and `{a,b}` brace alternation
+(`src/**/*.{ts,tsx}`). To exempt a single file, add a
 `/* turbo-test-coverage-ignore-file */` comment near its top.
 
 **Speed.** Collection is opt-in and runs ~2–3× slower than a plain run (V8 block coverage keeps
