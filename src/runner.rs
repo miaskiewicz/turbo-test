@@ -2758,6 +2758,33 @@ fn framework_snapshot() -> &'static Vec<u8> {
             v8::scope!(let scope, &mut creator);
             let context = v8::Context::new(scope, Default::default());
             let scope = &mut v8::ContextScope::new(scope, context);
+            // Bake the REAL host platform/arch (compile-time target) into the snapshot so
+            // turbo-dom's index.js loader requires the matching prebuilt .node. Without this
+            // the runtime reported 'darwin'/'arm64' everywhere and non-mac hosts loaded the
+            // macOS .node -> dlopen fails -> "document is not defined".
+            let node_platform = match std::env::consts::OS {
+                "macos" => "darwin",
+                "windows" => "win32",
+                other => other, // "linux", "freebsd", ...
+            };
+            let node_arch = match std::env::consts::ARCH {
+                "x86_64" => "x64",
+                "aarch64" => "arm64",
+                other => other,
+            };
+            let os_type = match std::env::consts::OS {
+                "macos" => "Darwin",
+                "windows" => "Windows_NT",
+                "linux" => "Linux",
+                other => other,
+            };
+            // isMusl() reads glibcVersionRuntime: truthy => gnu, falsy => musl.
+            let glibc_runtime: &str = if cfg!(target_env = "musl") { "" } else { "2.39" };
+            let prelude = format!(
+                "globalThis.__ttPlatform={node_platform:?};globalThis.__ttArch={node_arch:?};globalThis.__ttOsType={os_type:?};globalThis.__ttGlibc={glibc_runtime:?};"
+            );
+            let pcode = v8::String::new(scope, &prelude).unwrap();
+            v8::Script::compile(scope, pcode, None).unwrap().run(scope).unwrap();
             let code = v8::String::new(scope, RUNTIME_JS).unwrap();
             let s = v8::Script::compile(scope, code, None).unwrap();
             s.run(scope).unwrap();

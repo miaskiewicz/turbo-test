@@ -23,10 +23,18 @@ globalThis.console = {
 };
 
 // ---- process shim (no Node in our embedding) ----
+// platform/arch come from the host binary (Rust injects __ttPlatform/__ttArch/__ttGlibc
+// from its compile-time target). They MUST be the real host values: turbo-dom's index.js
+// loader switches on process.platform/arch to require the matching prebuilt .node, and
+// its isMusl() reads process.report().header.glibcVersionRuntime to pick gnu vs musl.
+// Hardcoding 'darwin'/'arm64' made every non-mac host load the macOS .node -> dlopen fails.
 globalThis.process = {
   env: { NODE_ENV: 'test', VITEST: 'true', TZ: 'UTC', TURBO_DOM_PARSER: 'native' },
-  platform: 'darwin',
-  arch: 'arm64',
+  platform: globalThis.__ttPlatform || 'darwin',
+  arch: globalThis.__ttArch || 'arm64',
+  // glibcVersionRuntime truthy => glibc (gnu); falsy => musl. __ttGlibc is the glibc
+  // version for a gnu build, '' for a musl build.
+  report: { getReport: () => ({ header: { glibcVersionRuntime: globalThis.__ttGlibc || undefined } }) },
   version: 'v24.0.0',
   versions: { node: '24.0.0', v8: '12.0.0', modules: '127' },
   argv: ['node', 'turbo-test'],
@@ -683,7 +691,7 @@ if (typeof globalThis.requestAnimationFrame === 'undefined') {
 globalThis.__fileURLToPath = (u) => String(u).replace(/^file:\/\//, '');
 globalThis.__dirnameOf = (p) => { const s = String(p).replace(/\/+$/, ''); const i = s.lastIndexOf('/'); return i <= 0 ? '/' : s.slice(0, i); };
 const __os = {
-  platform: () => 'darwin', arch: () => 'arm64', type: () => 'Darwin', release: () => '23.0.0',
+  platform: () => globalThis.__ttPlatform || 'darwin', arch: () => globalThis.__ttArch || 'arm64', type: () => globalThis.__ttOsType || 'Darwin', release: () => '23.0.0',
   version: () => 'Darwin Kernel', EOL: '\n', tmpdir: () => '/tmp', homedir: () => '/', hostname: () => 'localhost',
   cpus: () => [{ model: 'cpu', speed: 1, times: { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 } }],
   totalmem: () => 16 * 1024 * 1024 * 1024, freemem: () => 8 * 1024 * 1024 * 1024, uptime: () => 0,
