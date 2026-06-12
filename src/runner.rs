@@ -3035,6 +3035,7 @@ fn coverage_accumulate(json: &str) {
         }
         crate::coverage::map_script(abs, &ranges, &funcs);
         crate::coverage::map_branches(abs, &ranges);
+        crate::coverage::map_statements(abs, &ranges);
     }
 }
 

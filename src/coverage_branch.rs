@@ -22,9 +22,18 @@ pub struct RawBranch {
 
 struct Collector {
     out: Vec<RawBranch>,
+    stmts: Vec<u32>, // executable statement starts (Istanbul/c8 "statements")
 }
 
 impl<'a> Visit<'a> for Collector {
+    fn visit_statement(&mut self, s: &Statement<'a>) {
+        // Skip the BlockStatement container (no count of its own) and EmptyStatement (`;`).
+        if !matches!(s, Statement::BlockStatement(_) | Statement::EmptyStatement(_)) {
+            self.stmts.push(s.span().start);
+        }
+        walk::walk_statement(self, s);
+    }
+
     fn visit_if_statement(&mut self, s: &IfStatement<'a>) {
         let mut arms = vec![s.consequent.span().start];
         let implicit_else = s.alternate.is_none();
@@ -64,13 +73,15 @@ impl<'a> Visit<'a> for Collector {
     }
 }
 
-/// Parse `source` (its TS/JSX flavour inferred from `file`'s extension) and return its branch
-/// decision points. On a parse error, returns whatever was collected (best-effort).
-pub fn extract(file: &Path, source: &str) -> Vec<RawBranch> {
+/// Parse `source` (its TS/JSX flavour inferred from `file`'s extension) ONCE and return both its
+/// branch decision points and the byte offsets of its executable statements. One parse + one walk
+/// feeds both metrics — keeping coverage's per-file AST cost flat as metrics are added. On a parse
+/// error, returns whatever was collected (best-effort).
+pub fn extract_all(file: &Path, source: &str) -> (Vec<RawBranch>, Vec<u32>) {
     let st = SourceType::from_path(file).unwrap_or_default();
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, st).parse();
-    let mut c = Collector { out: Vec::new() };
+    let mut c = Collector { out: Vec::new(), stmts: Vec::new() };
     c.visit_program(&ret.program);
-    c.out
+    (c.out, c.stmts)
 }

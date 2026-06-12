@@ -38,9 +38,11 @@ fn out_dir() -> PathBuf {
 
 // ---- report config: thresholds, reporters, include/exclude (M6 coverage gating) -------------
 //
-// V8 coverage has NO statement metric (that's Istanbul). Thresholds are lines / functions /
-// branches only — there is intentionally no synthetic `statements`. Consumers migrating off
-// vitest should not expect one.
+// `statements` is derived (V8 has no native statement counter): the original source is parsed
+// with oxc, and each executable statement's position is correlated with V8's covered byte ranges
+// — the same machinery as branches. This mirrors how c8 reports statements, so vitest/c8 users
+// get the metric they expect. (lcov has no statement field, so it appears in json-summary / text
+// / html only.)
 
 // Per-metric minimum percentages (0..=100). None = not gated on that metric.
 #[derive(Clone, Copy, Default)]
@@ -48,11 +50,13 @@ pub struct Thresholds {
     pub lines: Option<f64>,
     pub functions: Option<f64>,
     pub branches: Option<f64>,
+    pub statements: Option<f64>,
 }
 static THRESHOLDS: Mutex<Option<Thresholds>> = Mutex::new(None);
 static PER_FILE: AtomicBool = AtomicBool::new(false);
 
-/// Parse `lines=90,functions=80,branches=80` (any subset, any order). Unknown keys ignored.
+/// Parse `lines=90,functions=80,branches=80,statements=90` (any subset, any order). Unknown
+/// keys ignored.
 pub fn set_thresholds(spec: &str) {
     let mut t = THRESHOLDS.lock().unwrap().unwrap_or_default();
     for part in spec.split(',') {
@@ -62,7 +66,7 @@ pub fn set_thresholds(spec: &str) {
             "lines" => t.lines = Some(n),
             "functions" | "funcs" => t.functions = Some(n),
             "branches" => t.branches = Some(n),
-            // `statements` is intentionally unsupported (V8 has no statement metric).
+            "statements" | "stmts" => t.statements = Some(n),
             _ => {}
         }
     }
@@ -252,6 +256,21 @@ static FN_COV: Mutex<Option<HashMap<PathBuf, HashMap<(u32, String), u64>>>> = Mu
 // file -> ((block, branch) -> (line, reached, max taken)). Branch coverage.
 static BR_COV: Mutex<Option<HashMap<PathBuf, HashMap<(u32, u32), (u32, bool, u64)>>>> =
     Mutex::new(None);
+// file -> (statement index -> (line, max hit count)). Statement coverage.
+static ST_COV: Mutex<Option<HashMap<PathBuf, HashMap<u32, (u32, u64)>>>> = Mutex::new(None);
+
+/// Record one statement's hit count. Merges across the many test files exercising the same source
+/// (a statement is covered if any run hit it — max count).
+pub fn record_stmt(file: &Path, idx: u32, line: u32, count: u64) {
+    let mut g = ST_COV.lock().unwrap();
+    let m = g.get_or_insert_with(HashMap::new);
+    let f = m.entry(file.to_path_buf()).or_default();
+    let e = f.entry(idx).or_insert((line, 0));
+    e.0 = line;
+    if count > e.1 {
+        e.1 = count;
+    }
+}
 
 /// Record one branch arm's outcome. Merges across the many test files that exercise the same
 /// source: a branch is reached/taken if any run reached/took it (max counts).
@@ -302,6 +321,7 @@ struct ScriptMeta {
     genmap: HashMap<u32, u32>,     // gen line -> src line (first segment) — line coverage
     segments: Vec<Vec<(u32, u32, u32)>>, // per gen line: (gen_col, src_line, src_col) — gen→orig
     branches: Vec<BranchCC>,       // decision points in original (line, col)
+    statements: Vec<(u32, u32)>,   // executable statement starts in original (line, col)
 }
 static META: Mutex<Option<HashMap<PathBuf, Option<Arc<ScriptMeta>>>>> = Mutex::new(None);
 
@@ -321,8 +341,9 @@ pub fn register_meta(file: &Path, wrapped: &str, orig_source: &str) {
                 line_start.push(i + 1);
             }
         }
-        // parse branch decision points from the original source, in (line, col).
-        let branches = crate::coverage_branch::extract(file, orig_source)
+        // parse the original source ONCE → branch decision points + statement starts, in (line, col).
+        let (raw_branches, raw_stmts) = crate::coverage_branch::extract_all(file, orig_source);
+        let branches = raw_branches
             .into_iter()
             .map(|b| BranchCC {
                 decision: byte_to_linecol(orig_source, b.decision),
@@ -330,7 +351,11 @@ pub fn register_meta(file: &Path, wrapped: &str, orig_source: &str) {
                 implicit_else: b.implicit_else,
             })
             .collect();
-        Arc::new(ScriptMeta { line_start, genmap, segments, branches })
+        let statements = raw_stmts
+            .into_iter()
+            .map(|o| byte_to_linecol(orig_source, o))
+            .collect();
+        Arc::new(ScriptMeta { line_start, genmap, segments, branches, statements })
     });
     let mut g = META.lock().unwrap();
     g.get_or_insert_with(HashMap::new).insert(file.to_path_buf(), meta);
@@ -689,6 +714,39 @@ pub fn map_branches(file: &Path, ranges: &[(usize, usize, i64)]) {
     }
 }
 
+/// Correlate each executable statement's original position with V8's covered byte ranges (mapped
+/// gen→orig) to attribute a hit count, then record it. Mirrors `map_branches`; called alongside it.
+pub fn map_statements(file: &Path, ranges: &[(usize, usize, i64)]) {
+    let Some(meta) = meta_for(file) else { return };
+    if meta.statements.is_empty() {
+        return;
+    }
+    // original-coordinate covered ranges (same construction as map_branches)
+    let mut oranges: Vec<((u32, u32), (u32, u32), i64)> = Vec::new();
+    for &(gs, ge, c) in ranges {
+        if let (Some(s), Some(e)) = (gen_to_orig(&meta, gs), gen_to_orig(&meta, ge)) {
+            if s < e {
+                oranges.push((s, e, c));
+            }
+        }
+    }
+    // innermost (smallest-start) range containing `p` gives that statement's hit count.
+    let count_at = |p: (u32, u32)| -> Option<i64> {
+        let mut best: Option<((u32, u32), i64)> = None;
+        for &(s, e, c) in &oranges {
+            if s <= p && p < e && best.map(|(bs, _)| s >= bs).unwrap_or(true) {
+                best = Some((s, c));
+            }
+        }
+        best.map(|(_, c)| c)
+    };
+    for (idx, &pos) in meta.statements.iter().enumerate() {
+        let line = pos.0 + 1; // 1-based source line of the statement
+        let count = count_at(pos).unwrap_or(0).max(0) as u64;
+        record_stmt(file, idx as u32, line, count);
+    }
+}
+
 // ---- report emission ------------------------------------------------------------------------
 
 /// Per-file coverage row used by every reporter + the gate.
@@ -700,6 +758,8 @@ struct Row {
     fnf: u64,
     brh: u64,
     brf: u64,
+    sh: u64,
+    sf: u64,
 }
 impl Row {
     fn lpct(&self) -> f64 {
@@ -710,6 +770,9 @@ impl Row {
     }
     fn bpct(&self) -> f64 {
         if self.brf > 0 { 100.0 * self.brh as f64 / self.brf as f64 } else { 100.0 }
+    }
+    fn spct(&self) -> f64 {
+        if self.sf > 0 { 100.0 * self.sh as f64 / self.sf as f64 } else { 100.0 }
     }
 }
 
@@ -733,10 +796,13 @@ pub fn report() -> bool {
     let fn_map = fn_g.as_ref();
     let br_g = BR_COV.lock().unwrap();
     let br_map = br_g.as_ref();
+    let st_g = ST_COV.lock().unwrap();
+    let st_map = st_g.as_ref();
 
     let mut lcov = String::new();
     let (mut tot_lf, mut tot_lh, mut tot_fnf, mut tot_fnh, mut tot_brf, mut tot_brh) =
         (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut tot_sf, mut tot_sh) = (0u64, 0u64);
     let mut rows: Vec<Row> = Vec::new();
     for (file, lines) in &files {
         lcov.push_str(&format!("SF:{}\n", file.display()));
@@ -787,7 +853,17 @@ pub fn report() -> bool {
             lcov.push_str(&format!("DA:{},{}\n", l, c));
         }
         lcov.push_str(&format!("LF:{lf}\nLH:{lh}\nend_of_record\n"));
-        rows.push(Row { path: (*file).clone(), lh, lf, fnh, fnf, brh, brf });
+
+        // statements (no lcov field — counted for json-summary/text/html + the gate)
+        let (mut sf, mut sh) = (0u64, 0u64);
+        if let Some(sts) = st_map.and_then(|m| m.get(*file)) {
+            sf = sts.len() as u64;
+            sh = sts.values().filter(|(_, c)| *c > 0).count() as u64;
+        }
+        tot_sf += sf;
+        tot_sh += sh;
+
+        rows.push(Row { path: (*file).clone(), lh, lf, fnh, fnf, brh, brf, sh, sf });
     }
 
     let total = Row {
@@ -798,6 +874,8 @@ pub fn report() -> bool {
         fnf: tot_fnf,
         brh: tot_brh,
         brf: tot_brf,
+        sh: tot_sh,
+        sf: tot_sf,
     };
 
     let out_dir = out_dir();
@@ -824,7 +902,7 @@ pub fn report() -> bool {
 
     // ---- text (terminal summary) — on by default, suppress only if reporters set without it ----
     if has("text") {
-        println!("\n Coverage — {} files (lines | funcs | branches)", rows.len());
+        println!("\n Coverage — {} files (lines | funcs | branches | stmts)", rows.len());
         for r in &rows {
             let short = r
                 .path
@@ -832,16 +910,17 @@ pub fn report() -> bool {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| r.path.to_string_lossy().into_owned());
             println!(
-                "  {:>6.2}% ln  {:>6.2}% fn  {:>6.2}% br   {}",
+                "  {:>6.2}% ln  {:>6.2}% fn  {:>6.2}% br  {:>6.2}% st   {}",
                 r.lpct(),
                 r.fpct(),
                 r.bpct(),
+                r.spct(),
                 short
             );
         }
         println!("  ------");
         println!(
-            "  {:>6.2}% lines ({}/{})   {:>6.2}% fns ({}/{})   {:>6.2}% branches ({}/{})",
+            "  {:>6.2}% lines ({}/{})   {:>6.2}% fns ({}/{})   {:>6.2}% branches ({}/{})   {:>6.2}% stmts ({}/{})",
             total.lpct(),
             total.lh,
             total.lf,
@@ -850,7 +929,10 @@ pub fn report() -> bool {
             total.fnf,
             total.bpct(),
             total.brh,
-            total.brf
+            total.brf,
+            total.spct(),
+            total.sh,
+            total.sf
         );
         let mut outs: Vec<String> = Vec::new();
         if has("lcov") {
@@ -878,10 +960,11 @@ fn gate(total: &Row, rows: &[Row], cwd: &Path) -> bool {
     let mut failures: Vec<String> = Vec::new();
 
     let check = |label: &str, fails: &mut Vec<String>, row: &Row| {
-        let metrics: [(Option<f64>, &str, f64); 3] = [
+        let metrics: [(Option<f64>, &str, f64); 4] = [
             (t.lines, "lines", row.lpct()),
             (t.functions, "functions", row.fpct()),
             (t.branches, "branches", row.bpct()),
+            (t.statements, "statements", row.spct()),
         ];
         for (thr, name, pct) in metrics {
             if let Some(min) = thr {
@@ -916,7 +999,7 @@ fn gate(total: &Row, rows: &[Row], cwd: &Path) -> bool {
 }
 
 /// vitest/c8 `coverage-summary.json`: a `total` block + one block per absolute file path. Each
-/// block has `lines`/`functions`/`branches` with `{total,covered,skipped,pct}`. No `statements`.
+/// block has `lines`/`statements`/`functions`/`branches` with `{total,covered,skipped,pct}`.
 fn json_summary(total: &Row, rows: &[Row]) -> String {
     fn metric(covered: u64, tot: u64, pct: f64) -> String {
         let pct = (pct * 100.0).round() / 100.0;
@@ -927,8 +1010,9 @@ fn json_summary(total: &Row, rows: &[Row]) -> String {
     }
     fn block(r: &Row) -> String {
         format!(
-            "{{\"lines\":{},\"functions\":{},\"branches\":{}}}",
+            "{{\"lines\":{},\"statements\":{},\"functions\":{},\"branches\":{}}}",
             metric(r.lh, r.lf, r.lpct()),
+            metric(r.sh, r.sf, r.spct()),
             metric(r.fnh, r.fnf, r.fpct()),
             metric(r.brh, r.brf, r.bpct())
         )
@@ -969,9 +1053,10 @@ fn html_summary(total: &Row, rows: &[Row], cwd: &Path) -> String {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| r.path.to_string_lossy().into_owned());
         body.push_str(&format!(
-            "<tr><td class=\"file\">{}</td>{}{}{}</tr>\n",
+            "<tr><td class=\"file\">{}</td>{}{}{}{}</tr>\n",
             esc(&short),
             cell(r.lpct(), r.lh, r.lf),
+            cell(r.spct(), r.sh, r.sf),
             cell(r.fpct(), r.fnh, r.fnf),
             cell(r.bpct(), r.brh, r.brf)
         ));
@@ -987,12 +1072,13 @@ th:first-child,td.file{{text-align:left}}\
 .high{{color:#0a7d28}}.med{{color:#b8860b}}.low{{color:#c0392b}}\
 tfoot td{{font-weight:600;border-top:2px solid #ccc}}\
 </style></head><body><h1>Coverage — {} files</h1>\
-<table><thead><tr><th>File</th><th>Lines</th><th>Functions</th><th>Branches</th></tr></thead>\
-<tbody>\n{}</tbody><tfoot><tr><td class=\"file\">total</td>{}{}{}</tr></tfoot></table>\
+<table><thead><tr><th>File</th><th>Lines</th><th>Statements</th><th>Functions</th><th>Branches</th></tr></thead>\
+<tbody>\n{}</tbody><tfoot><tr><td class=\"file\">total</td>{}{}{}{}</tr></tfoot></table>\
 </body></html>\n",
         rows.len(),
         body,
         cell(total.lpct(), total.lh, total.lf),
+        cell(total.spct(), total.sh, total.sf),
         cell(total.fpct(), total.fnh, total.fnf),
         cell(total.bpct(), total.brh, total.brf)
     )

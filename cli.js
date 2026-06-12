@@ -148,7 +148,7 @@ function vitestCoverage(startDir) {
     return m ? m[1] : null;
   };
   const parts = [];
-  for (const k of ['lines', 'functions', 'branches']) {
+  for (const k of ['lines', 'functions', 'branches', 'statements']) {
     const v = num(k);
     if (v != null) parts.push(`${k}=${v}`);
   }

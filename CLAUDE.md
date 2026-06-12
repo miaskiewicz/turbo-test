@@ -17,8 +17,12 @@ A release where these disagree is a bug. Bump both in the same commit.
   silently collects no coverage.
 
 ## Coverage CLI (v0.2.3+)
-`--coverage` `--coverage-dir DIR` `--coverage-thresholds lines=,functions=,branches=`
+`--coverage` `--coverage-dir DIR` `--coverage-thresholds lines=,functions=,branches=,statements=`
 `--coverage-per-file` `--coverage-reporter lcov,json-summary,text,html`
 `--coverage-include GLOB` `--coverage-exclude GLOB`.
 Thresholds/include/exclude are auto-read from the vitest config `coverage` block by `cli.js`
-when not passed explicitly (flags win). No `statements` metric — V8 has none (intentional).
+when not passed explicitly (flags win).
+`statements` (v0.2.6+) is DERIVED: oxc parses each source once (shared with the branch pass —
+no extra parse cost) and each executable statement's position is correlated with V8's covered
+ranges, the same as branches. It appears in json-summary / text / html and is gateable; lcov has
+no statement field so it's omitted there. Tracks lines closely (c8-style).
