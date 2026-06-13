@@ -758,6 +758,28 @@ const __crypto = {
   randomInt: (min, max) => { if (max === undefined) { max = min; min = 0; } return min + (__pseudoRandomBytes(4).reduce((a, x) => a * 256 + x, 0) % (max - min)); },
   createHash: () => { let data = ''; const h = { update: (d) => { data += String(d); return h; }, digest: (enc) => { let n = 0; for (let i = 0; i < data.length; i++) { n = (n * 31 + data.charCodeAt(i)) & 0x7fffffff; } const hex = n.toString(16).padStart(8, '0'); return enc === 'hex' || !enc ? hex.repeat(8).slice(0, 64) : hex; } }; return h; },
   createHmac: () => { let data = ''; const h = { update: (d) => { data += String(d); return h; }, digest: () => 'hmac' }; return h; },
+  // Node crypto constants — many packages (e.g. @propelauth/node) read these at module load to
+  // pick a padding/algorithm. turbo-test runs in bare V8 (no real OpenSSL), so the values just
+  // need to EXIST so modules load; tests that exercise actual crypto mock it or are out of scope.
+  constants: {
+    RSA_PKCS1_PADDING: 1, RSA_NO_PADDING: 3, RSA_PKCS1_OAEP_PADDING: 4, RSA_X931_PADDING: 5,
+    RSA_PKCS1_PSS_PADDING: 6, RSA_PSS_SALTLEN_DIGEST: -1, RSA_PSS_SALTLEN_MAX_SIGN: -2,
+    RSA_PSS_SALTLEN_AUTO: -2, RSA_SSLV23_PADDING: 2,
+    SSL_OP_ALL: 0x80000bff, ENGINE_METHOD_ALL: 0xffff,
+    DH_CHECK_P_NOT_SAFE_PRIME: 2, DH_NOT_SUITABLE_GENERATOR: 8,
+    POINT_CONVERSION_COMPRESSED: 2, POINT_CONVERSION_UNCOMPRESSED: 4, POINT_CONVERSION_HYBRID: 6,
+    defaultCoreCipherList: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256',
+  },
+  // Cipher/sign stubs: bare V8 has no OpenSSL, so these can't do real AES/RSA. They exist so a
+  // module that merely references them at load doesn't crash; actually invoking them throws a
+  // clear, catchable error rather than producing wrong ciphertext.
+  createCipheriv: () => { throw new Error('turbo-test: crypto.createCipheriv is not available in the V8 runtime (no OpenSSL) — mock it in the test'); },
+  createDecipheriv: () => { throw new Error('turbo-test: crypto.createDecipheriv is not available in the V8 runtime (no OpenSSL) — mock it in the test'); },
+  createSign: () => { throw new Error('turbo-test: crypto.createSign is not available in the V8 runtime'); },
+  createVerify: () => { throw new Error('turbo-test: crypto.createVerify is not available in the V8 runtime'); },
+  pbkdf2Sync: () => { throw new Error('turbo-test: crypto.pbkdf2Sync is not available in the V8 runtime'); },
+  scryptSync: () => { throw new Error('turbo-test: crypto.scryptSync is not available in the V8 runtime'); },
+  timingSafeEqual: (a, b) => { if (a.length !== b.length) return false; let r = 0; for (let i = 0; i < a.length; i++) r |= a[i] ^ b[i]; return r === 0; },
 };
 if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.randomUUID) {
   globalThis.crypto = Object.assign(globalThis.crypto || {}, { randomUUID: __crypto.randomUUID, getRandomValues: __crypto.getRandomValues });
@@ -1326,6 +1348,85 @@ globalThis.vi = {
     if (!m.has(k)) m.set(k, { had: k in globalThis.process.env, val: globalThis.process.env[k] });
     globalThis.process.env[k] = v;
   },
+};
+
+// ---- legacy decorator + emitDecoratorMetadata helpers ----
+// The oxc decorator-metadata transform emits `babelHelpers.decorate / decorateParam /
+// decorateMetadata(...)` (External helper mode). Provide them with standard tslib semantics so
+// NestJS/Mongoose decorators (`@Injectable`, `@Prop`, `@Controller`) run. No Reflect.metadata
+// polyfill: such projects depend on the real `reflect-metadata`, which their import graph
+// (`@nestjs/common`) loads before any decorator runs. A partial polyfill would trip
+// reflect-metadata's "already installed" guard, leaving it missing methods (getOwnMetadataKeys
+// etc.). `decorateMetadata` no-ops cleanly when Reflect.metadata is absent (non-Nest projects).
+globalThis.babelHelpers = globalThis.babelHelpers || {};
+globalThis.babelHelpers.decorate = function (decorators, target, key, desc) {
+  var c = arguments.length,
+    r = c < 3 ? target : desc === null ? (desc = Object.getOwnPropertyDescriptor(target, key)) : desc,
+    d;
+  if (typeof Reflect === 'object' && typeof Reflect.decorate === 'function') {
+    r = Reflect.decorate(decorators, target, key, desc);
+  } else {
+    for (var i = decorators.length - 1; i >= 0; i--) {
+      if ((d = decorators[i])) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    }
+  }
+  return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+globalThis.babelHelpers.decorateParam = function (paramIndex, decorator) {
+  return function (target, key) { decorator(target, key, paramIndex); };
+};
+globalThis.babelHelpers.decorateMetadata = function (metadataKey, metadataValue) {
+  if (typeof Reflect === 'object' && typeof Reflect.metadata === 'function') {
+    return Reflect.metadata(metadataKey, metadataValue);
+  }
+};
+
+// ---- jest compatibility shim ----
+// Jest's `jest` global maps onto the same machinery as `vi` (drop-in for jest projects, e.g.
+// NestJS backends using ts-jest). Most methods are identical; the jest-only ones (sync
+// requireActual/requireMock, isolateModules, setTimeout) are bridged here. Type-only members
+// (jest.Mock, jest.Mocked, jest.SpyInstance, ...) are erased by the transform — no runtime needed.
+// Defined unconditionally: it doesn't touch vitest behavior (vitest suites never reference `jest`).
+globalThis.jest = {
+  fn: (impl) => globalThis.vi.fn(impl),
+  spyOn: (obj, key) => globalThis.vi.spyOn(obj, key),
+  mock: (spec, factory) => globalThis.vi.mock(spec, factory),
+  unmock: (spec) => globalThis.vi.unmock(spec),
+  doMock: (spec, factory) => globalThis.vi.doMock(spec, factory),
+  dontMock: (spec) => globalThis.vi.unmock(spec),
+  mocked: (item) => globalThis.vi.mocked(item),
+  clearAllMocks: () => globalThis.vi.clearAllMocks(),
+  resetAllMocks: () => globalThis.vi.resetAllMocks(),
+  restoreAllMocks: () => globalThis.vi.restoreAllMocks(),
+  isMockFunction: (f) => globalThis.vi.isMockFunction(f),
+  // jest.requireActual / requireMock are SYNCHRONOUS (return the module, not a Promise) —
+  // unlike vi.importActual. Bridge to the native sync loader directly.
+  requireActual: (p) => { try { return globalThis.__ttImportActual(globalThis.__ttDir, String(p)); } catch (e) { return {}; } },
+  requireMock: (p) => { try { return globalThis.__nativeRequire(globalThis.__ttDir, String(p)); } catch (e) { return {}; } },
+  // jest.isolateModules(fn): run `fn` with a fresh module registry. Approximate with a
+  // resetModules around the (sync) callback — enough for the common "re-require with new env".
+  isolateModules: (fn) => { globalThis.vi.resetModules(); try { fn(); } finally { globalThis.vi.resetModules(); } },
+  isolateModulesAsync: async (fn) => { globalThis.vi.resetModules(); try { await fn(); } finally { globalThis.vi.resetModules(); } },
+  resetModules: () => { globalThis.vi.resetModules(); return globalThis.jest; },
+  // timers
+  useFakeTimers: (cfg) => { globalThis.vi.useFakeTimers(cfg); return globalThis.jest; },
+  useRealTimers: () => { globalThis.vi.useRealTimers(); return globalThis.jest; },
+  setSystemTime: (t) => { globalThis.vi.setSystemTime(t); return globalThis.jest; },
+  getRealSystemTime: () => __loop.realNow(),
+  now: () => (globalThis.vi.isFakeTimers() ? globalThis.vi.getMockedSystemTime().getTime() : __loop.realNow()),
+  advanceTimersByTime: (ms) => { globalThis.vi.advanceTimersByTime(ms); return globalThis.jest; },
+  advanceTimersByTimeAsync: async (ms) => { await globalThis.vi.advanceTimersByTimeAsync(ms); return globalThis.jest; },
+  advanceTimersToNextTimer: () => { globalThis.vi.advanceTimersToNextTimer(); return globalThis.jest; },
+  runAllTimers: () => { globalThis.vi.runAllTimers(); return globalThis.jest; },
+  runAllTimersAsync: async () => { await globalThis.vi.runAllTimersAsync(); return globalThis.jest; },
+  runOnlyPendingTimers: () => { globalThis.vi.runOnlyPendingTimers(); return globalThis.jest; },
+  clearAllTimers: () => { globalThis.vi.clearAllTimers(); return globalThis.jest; },
+  getTimerCount: () => globalThis.vi.getTimerCount(),
+  // per-test config knobs — no-ops (turbo-test has no per-file timeout/retry gate yet)
+  setTimeout: () => globalThis.jest,
+  retryTimes: () => globalThis.jest,
+  // env stubbing parity (rarely used via jest, but harmless)
+  replaceProperty: (obj, key, val) => { const orig = obj[key]; obj[key] = val; return { restore: () => { obj[key] = orig; } }; },
 };
 
 // ---- collector: describe / it / hooks ----

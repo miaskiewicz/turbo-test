@@ -6,6 +6,8 @@ Written in Rust on V8: per-file transforms via [oxc](https://oxc.rs)/esbuild, a 
 [turbo-dom](https://www.npmjs.com/package/@miaskiewicz/turbo-dom) DOM, work-stealing parallelism,
 and an optional isolate-reuse mode. Runs your existing `*.test.ts(x)` files — same `describe`/`it`/
 `expect`/`vi`, same `@testing-library/react` + jest-dom — typically **~6× faster than vitest+jsdom**.
+Also runs **jest** suites (`jest` global + jest config + `emitDecoratorMetadata`) — see
+[Jest compatibility](#jest-compatibility-experimental) (experimental).
 
 ```bash
 npm i -D @miaskiewicz/turbo-test
@@ -61,6 +63,38 @@ Force it on/off regardless of config:
 TURBO_REUSE_ISOLATE=1 npx turbo-test   # force reuse on
 TURBO_NO_REUSE=1       npx turbo-test   # force fresh isolation
 ```
+
+## Jest compatibility (experimental)
+
+turbo-test also runs **jest** suites — no rewrite to `vi`. A `jest` global maps onto the same
+machinery as `vi` (`jest.fn`, `jest.mock`/`doMock`, `jest.spyOn`, `jest.mocked`,
+`clearAllMocks`/`resetAllMocks`/`restoreAllMocks`, fake timers, `jest.requireActual`,
+`jest.isolateModules`, …); the type-only members (`jest.Mock`, `jest.Mocked`, `jest.SpyInstance`)
+are erased by the transform. When there's **no vitest config**, the nearest **jest config**
+(`jest.config.{js,cjs,mjs,ts,json}` or a `package.json` `"jest"` block) is read for `setupFiles` /
+`setupFilesAfterEnv` (with `<rootDir>` resolved), so your existing setup runs unchanged.
+
+**`emitDecoratorMetadata`.** esbuild can't emit decorator metadata, which NestJS / Mongoose /
+Sequelize need at runtime (`@Injectable` constructor injection, `@Prop`/`@Column` reading
+`design:type`). turbo-test handles it with **retry-on-load**: files transform on fast esbuild by
+default, and only a decorator file that actually *throws* at load (a missing-metadata error) is
+re-transformed through the project's own TypeScript (`ts.transpileModule`, exact ts-jest parity —
+local type aliases like `type Percentage = number` resolve to `Number`, not `Object`), falling back
+to oxc's metadata transform when the project ships no `typescript`. The common path never pays the
+cost and never regresses.
+
+```bash
+npx turbo-test            # discovers *.spec.* too; reads jest config when no vitest config exists
+```
+
+> **Status — experimental.** Validated against a NestJS + ts-jest backend (~7,150 tests). On that
+> suite turbo-test runs in **~60s vs jest's ~117s (~1.9×)** on a clean box. Pass coverage is
+> partial today (**~4,500 / 7,147 green, ~63%**): the jest *shim*, jest-config reading, decorator
+> metadata, and CommonJS-first resolution (sequelize-typescript, tslib, …) all work. The rest leans
+> on node-native modules that bare V8 can't run yet — the `mongodb` driver, real OpenSSL crypto
+> (`createCipheriv`/RSA), full ICU `Intl` time zones — which need a Node-compat native layer.
+> React/vitest suites (payroll-app 10006/0, ui-design 6189/0) are **unaffected** — CommonJS-first
+> resolution is scoped to jest projects with a node test environment.
 
 ## How it works
 

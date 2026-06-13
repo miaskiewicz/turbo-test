@@ -62,6 +62,12 @@ thread_local! {
     static REUSE_ISO: RefCell<Option<v8::OwnedIsolate>> = RefCell::new(None);
     static REUSE_CTX: RefCell<Option<v8::Global<v8::Context>>> = RefCell::new(None);
     static DOM_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// CommonJS-first module resolution (jest/node backend projects). Set once per run from the
+    /// entry's project: a jest config with a node test environment resolves the `require` export
+    /// condition (the build Node uses), so sequelize/tslib/lexical/etc. get their working CJS
+    /// build instead of an ESM build that breaks once bundled to CJS. Off (ESM-first) for
+    /// vitest/React projects so shared singletons (react/emotion/MUI) stay one instance.
+    static CJS_FIRST_RESOLUTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Set while resolve+drain of pending vi.mock factories is in progress. An async factory's
     /// `await import('<self>')` re-enters load_cjs(drain_mocks=true) for the real module; without
     /// this guard that nested call would drain (and clear) the very queue we're mid-resolving,
@@ -215,8 +221,21 @@ fn base_resolve_options(tsconfig: Option<PathBuf>, esm: bool) -> oxc_resolver::R
     // which is the right target for this env and CJS-compiles cleanly. ("require" stays as a
     // last-resort condition so require-only packages still resolve.)
     let _ = esm;
-    let (conditions, mains): (&[&str], &[&str]) =
-        (&["import", "module", "browser", "default", "require"], &["module", "browser", "main"]);
+    // A jest/node backend (NestJS, sequelize, ts-jest) is a CommonJS world: packages are
+    // `require()`d, so their `require`/`node`/`default` export condition is the build that works
+    // (sequelize's `lib/index.mjs` ESM build, picked by the `import` condition, loses
+    // `DataTypes.ENUM` once bundled to CJS; `lib/index.js` is correct). Resolve CJS-first for such
+    // projects. React/vitest projects keep ESM-first (one shared ESM instance of react/emotion/MUI
+    // — switching them would risk dual-context). `node`/`default` cover packages that only ship
+    // ESM, and a CJS-first bundle of an ESM file still works (esbuild ESM->CJS).
+    // Condition matching is by the package's own key order against this SET — so to make `require`
+    // win we must OMIT `import`/`module`/`browser`, not merely reorder. `node`/`default` still
+    // cover packages without a `require` condition.
+    let (conditions, mains): (&[&str], &[&str]) = if CJS_FIRST_RESOLUTION.with(|c| c.get()) {
+        (&["require", "node", "default"], &["main", "module", "browser"])
+    } else {
+        (&["import", "module", "browser", "default", "require"], &["module", "browser", "main"])
+    };
     oxc_resolver::ResolveOptions {
         extensions: strs(&[".ts", ".tsx", ".mjs", ".js", ".jsx", ".cjs", ".json", ".node"]),
         condition_names: strs(conditions),
@@ -273,10 +292,11 @@ fn is_esm_module(abs: &Path) -> bool {
 /// (ESM vs CJS conditions), cached per (tsconfig, esm).
 fn resolver_for(from_dir: &Path, esm: bool) -> std::rc::Rc<oxc_resolver::Resolver> {
     thread_local! {
-        static RESOLVERS: RefCell<HashMap<(Option<PathBuf>, bool), std::rc::Rc<oxc_resolver::Resolver>>> =
+        static RESOLVERS: RefCell<HashMap<(Option<PathBuf>, bool, bool), std::rc::Rc<oxc_resolver::Resolver>>> =
             RefCell::new(HashMap::new());
     }
-    let key = (nearest_tsconfig(from_dir), esm);
+    // CJS-first mode is part of the key so a flip rebuilds the resolver (it changes conditions).
+    let key = (nearest_tsconfig(from_dir), esm, CJS_FIRST_RESOLUTION.with(|c| c.get()));
     RESOLVERS.with(|m| {
         if let Some(r) = m.borrow().get(&key) {
             return r.clone();
@@ -285,6 +305,33 @@ fn resolver_for(from_dir: &Path, esm: bool) -> std::rc::Rc<oxc_resolver::Resolve
         m.borrow_mut().insert(key, r.clone());
         r
     })
+}
+
+/// Decide CJS-first resolution for a project: true when the nearest config is a jest config with a
+/// node (non-DOM) test environment and there's no vitest config — i.e. a CommonJS backend. Walks
+/// up from `entry`; a vitest config short-circuits to ESM-first.
+fn cjs_first_project(entry: &Path) -> bool {
+    let mut dir = entry.parent();
+    while let Some(d) = dir {
+        for v in ["vitest.config.ts", "vitest.config.mts", "vitest.config.js", "vitest.config.mjs", "vite.config.ts", "vite.config.js"] {
+            if d.join(v).is_file() {
+                return false; // vitest project → ESM-first
+            }
+        }
+        let jest_cfg = ["jest.config.js", "jest.config.cjs", "jest.config.mjs", "jest.config.ts", "jest.config.json"]
+            .iter()
+            .map(|n| d.join(n))
+            .find(|p| p.is_file());
+        let pkg_jest = std::fs::read_to_string(d.join("package.json")).ok()
+            .filter(|s| find_config_key(s, "jest").is_some());
+        if let Some(text) = jest_cfg.and_then(|p| std::fs::read_to_string(p).ok()).or(pkg_jest) {
+            // node test env (jest's default) unless it explicitly asks for a DOM env.
+            let env = config_string_value(&text, "testEnvironment");
+            return !matches!(env.as_deref(), Some("jsdom") | Some("happy-dom") | Some("jest-environment-jsdom"));
+        }
+        dir = d.parent();
+    }
+    false
 }
 
 /// Kind by extension only (unambiguous extensions).
@@ -470,7 +517,7 @@ fn mock_specifiers(file: &Path) -> Vec<String> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for kw in ["vi.mock(", "vi.doMock("] {
+    for kw in ["vi.mock(", "vi.doMock(", "jest.mock(", "jest.doMock("] {
         let mut i = 0;
         while let Some(p) = src[i..].find(kw) {
             let start = i + p + kw.len();
@@ -814,9 +861,106 @@ fn vitest_setup_files(entry: &Path) -> Vec<PathBuf> {
                 return Vec::new(); // config found, no setupFiles
             }
         }
+        // No vitest config in this dir — try a jest config (drop-in for jest projects).
+        if let Some(found) = jest_setup_files(d) {
+            return found;
+        }
         dir = d.parent();
     }
     Vec::new()
+}
+
+/// Jest config parity: read `setupFiles` + `setupFilesAfterEnv` from a jest config in `dir`
+/// (`jest.config.{js,cjs,mjs,ts,json}` or a `"jest"` block in package.json), resolving Jest's
+/// `<rootDir>` token (rootDir defaults to the config dir). Returns None if no jest config here
+/// (so the caller keeps walking up); Some(possibly-empty) once a jest config is found.
+fn jest_setup_files(dir: &Path) -> Option<Vec<PathBuf>> {
+    let names = [
+        "jest.config.js", "jest.config.cjs", "jest.config.mjs",
+        "jest.config.ts", "jest.config.json",
+    ];
+    let mut text: Option<String> = None;
+    for n in &names {
+        if let Ok(s) = std::fs::read_to_string(dir.join(n)) {
+            text = Some(s);
+            break;
+        }
+    }
+    // package.json "jest" block (only if no standalone config file)
+    if text.is_none() {
+        if let Ok(pkg) = std::fs::read_to_string(dir.join("package.json")) {
+            if let Some(start) = find_config_key(&pkg, "jest") {
+                if pkg[start..].trim_start().starts_with("jest")
+                    || pkg[start..].contains('{')
+                {
+                    text = Some(pkg);
+                }
+            }
+        }
+    }
+    let s = text?;
+    // rootDir (default = config dir). Jest paths in setupFiles use `<rootDir>`.
+    let root_dir = config_string_value(&s, "rootDir")
+        .map(|r| normalize_path(&dir.join(&r)))
+        .unwrap_or_else(|| dir.to_path_buf());
+    let mut out = Vec::new();
+    for key in ["setupFiles", "setupFilesAfterEnv"] {
+        if let Some(start) = find_config_key(&s, key) {
+            let tail = &s[start..];
+            if let Some(lb) = tail.find('[') {
+                if let Some(rb) = tail[lb..].find(']') {
+                    for part in tail[lb + 1..lb + rb].split(',') {
+                        let q = part.trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
+                        if q.is_empty() {
+                            continue;
+                        }
+                        // substitute <rootDir>, then resolve relative to root_dir (or config dir)
+                        let replaced = q.replace("<rootDir>", &root_dir.to_string_lossy());
+                        let candidate = if Path::new(&replaced).is_absolute() {
+                            normalize_path(Path::new(&replaced))
+                        } else {
+                            normalize_path(&dir.join(&replaced))
+                        };
+                        if candidate.is_file() {
+                            out.push(candidate);
+                        } else if let Some(abs) = resolve_spec(q, dir) {
+                            out.push(abs);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+/// First string value for a config key (`key: 'value'` / `"value"`). Used for jest `rootDir`.
+fn config_string_value(s: &str, key: &str) -> Option<String> {
+    let start = find_config_key(s, key)?;
+    let tail = s[start..].trim_start();
+    // skip the key name + colon
+    let after_colon = tail.find(':').map(|c| &tail[c + 1..])?.trim_start();
+    let q = after_colon.chars().next()?;
+    if q == '\'' || q == '"' || q == '`' {
+        let rest = &after_colon[1..];
+        let end = rest.find(q)?;
+        Some(rest[..end].to_string())
+    } else {
+        None
+    }
+}
+
+/// Normalize a path lexically (resolve `..`/`.`) without touching the filesystem.
+fn normalize_path(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            std::path::Component::ParentDir => { out.pop(); }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Run a setup module (bundled, with mock specifiers externalized) in the current context,
@@ -957,7 +1101,7 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
         // empty mock (so the real module wins and named imports never rebind to the spies). The
         // flag makes load_cjs leave the queue alone until the outer drain runs here.
         let prev_resolving = RESOLVING_MOCKS.with(|f| f.replace(true));
-        if let Some(raw) = esbuild_transform_cjs(&p) {
+        if let Some(raw) = esbuild_transform_cjs(&p, false) {
             let wrapped = format!(
                 "(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})"
             );
@@ -1050,10 +1194,125 @@ fn setup_dom(scope: &mut v8::PinScope, entry: &Path) {
     }
 }
 
+/// Transform a TS file to **ESM** JS using the PROJECT'S OWN TypeScript (`ts.transpileModule`),
+/// lowering decorators + `emitDecoratorMetadata` with exact ts-jest parity. Unlike esbuild (no
+/// metadata) and oxc 0.134 (emits `Object` for type-alias / nullable types), tsc resolves local
+/// type aliases (`type Percentage = number` -> `Number`) so NestJS/Mongoose decorators get the
+/// right `design:type`. Module syntax is kept as ESM so the caller's esbuild ESM->CJS pass gives
+/// the same `var import_X = require(...)` shape the rest of the pipeline (vi.mock hoisting) needs.
+/// Returns None if the project ships no `typescript` (caller falls back to oxc).
+fn tsc_transform_esm(file: &Path, root: &Path) -> Option<String> {
+    let ts_dir = root.join("node_modules/typescript");
+    if !ts_dir.join("package.json").is_file() {
+        return None;
+    }
+    // Small node program: transpile with the project's TS (no checker — same isolatedModules
+    // semantics ts-jest uses), keeping ESM module syntax + inlined helpers + decorator metadata.
+    const SCRIPT: &str = r#"
+const ts = require(process.argv[1]);
+const fs = require('fs');
+const file = process.argv[2];
+const src = fs.readFileSync(file, 'utf8');
+const isTsx = file.endsWith('.tsx');
+const out = ts.transpileModule(src, {
+  fileName: file,
+  compilerOptions: {
+    module: ts.ModuleKind.ESNext,
+    target: ts.ScriptTarget.ES2021,
+    experimentalDecorators: true,
+    emitDecoratorMetadata: true,
+    esModuleInterop: true,
+    importHelpers: false,
+    isolatedModules: true,
+    jsx: isTsx ? ts.JsxEmit.ReactJSX : undefined,
+    useDefineForClassFields: false,
+  },
+});
+process.stdout.write(out.outputText);
+"#;
+    let out = std::process::Command::new("node")
+        .current_dir(root)
+        .args(["-e", SCRIPT, &ts_dir.to_string_lossy(), &file.to_string_lossy()])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let code = String::from_utf8(out.stdout).ok()?;
+    if code.trim().is_empty() {
+        return None;
+    }
+    Some(code)
+}
+
+/// Convert JS module syntax ESM->CJS with esbuild (stdin), no bundling/resolution — imports stay
+/// as `require(...)` and exports become `module.exports`/`exports.x`. Used as the second pass for
+/// the oxc decorator-metadata output (which oxc leaves as ESM). The input is already plain JS
+/// (TS/decorators lowered), so this is a pure format conversion.
+fn esbuild_format_cjs(root: &Path, js: &str) -> Option<String> {
+    use std::io::Write;
+    let esbuild = root.join("node_modules/.bin/esbuild");
+    let mut child = std::process::Command::new(&esbuild)
+        .current_dir(root)
+        .args([
+            "--format=cjs",
+            "--platform=node",
+            "--loader=js",
+            "--log-level=silent",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(js.as_bytes()).ok()?;
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(postprocess_mr_cjs(String::from_utf8(out.stdout).ok()?))
+}
+
+/// Does the nearest tsconfig enable `emitDecoratorMetadata`? Cached per tsconfig path (the file
+/// is read once per project). Used to decide whether decorator files need the oxc metadata path.
+fn decorator_metadata_enabled(file: &Path) -> bool {
+    thread_local! {
+        static CACHE: RefCell<HashMap<PathBuf, bool>> = RefCell::new(HashMap::new());
+    }
+    let Some(tc) = nearest_tsconfig(file.parent().unwrap_or(Path::new("."))) else { return false };
+    if let Some(v) = CACHE.with(|c| c.borrow().get(&tc).copied()) {
+        return v;
+    }
+    // Strip `//` line comments before scanning so a commented mention doesn't false-positive.
+    let on = std::fs::read_to_string(&tc)
+        .map(|s| {
+            let stripped: String = s.lines().map(|l| l.split("//").next().unwrap_or("")).collect::<Vec<_>>().join("\n");
+            let norm = stripped.replace(char::is_whitespace, "");
+            norm.contains("\"emitDecoratorMetadata\":true")
+        })
+        .unwrap_or(false);
+    CACHE.with(|c| c.borrow_mut().insert(tc, on));
+    on
+}
+
+/// Cheap syntactic check: does the source use a decorator? A decorator appears either at the
+/// start of a line (`@Injectable()`, `  @Prop()`) or inline as a parameter decorator (`(@Inject()`).
+fn file_has_decorator(src: &str) -> bool {
+    if src.contains("(@") {
+        return true;
+    }
+    src.lines().any(|l| {
+        let t = l.trim_start();
+        let mut ch = t.chars();
+        ch.next() == Some('@') && ch.next().map(|c| c.is_ascii_alphabetic() || c == '_' || c == '$').unwrap_or(false)
+    })
+}
+
 /// Module-runner mode: transform a single APP module to CJS (no bundle) so imports become
 /// live `require(...).name` property access (mutable → spyOn/vi.mock work), and post-process
 /// esbuild's export getters to be CONFIGURABLE (so spyOn can redefine them). Cached.
-fn esbuild_transform_cjs(file: &Path) -> Option<String> {
+fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     let root = project_root(file)?;
     let esbuild = root.join("node_modules/.bin/esbuild");
     use std::hash::{Hash, Hasher};
@@ -1062,6 +1321,14 @@ fn esbuild_transform_cjs(file: &Path) -> Option<String> {
     raw.hash(&mut h);
     file.extension().and_then(|e| e.to_str()).unwrap_or("").hash(&mut h);
     "mr-cjs-v1".hash(&mut h);
+    // esbuild can't emit decorator metadata. By default we DON'T pay that cost — only when a
+    // decorator file actually threw at load (Mongoose @Prop / Sequelize @Column read design:type
+    // at class-definition) does the loader retry with `prefer_metadata`, routing it through the
+    // project's TypeScript (ts.transpileModule, exact ts-jest parity) so the metadata is emitted.
+    // Retry-on-failure keeps the common case on fast esbuild and never regresses files that load
+    // fine without metadata. Keyed separately so the two transforms never collide in cache.
+    let use_meta = prefer_metadata && decorator_metadata_enabled(file) && file_has_decorator(&raw);
+    use_meta.hash(&mut h);
     // Coverage emits an inline source map (needed to remap V8 byte ranges → original lines), so
     // the output differs — key it separately. Only perturb the key when coverage is ON, so the
     // normal (no-map) cache keys are byte-identical to before → zero cache churn on default runs.
@@ -1075,6 +1342,33 @@ fn esbuild_transform_cjs(file: &Path) -> Option<String> {
         return Some(c);
     }
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+    if use_meta {
+        // Primary: the project's own TypeScript (ts.transpileModule) → exact ts-jest parity for
+        // emitDecoratorMetadata (resolves local type aliases, nullable types, etc.). Fallback:
+        // oxc lowers decorators+metadata (ESM) then esbuild converts ESM->CJS — used when the
+        // project ships no `typescript`. oxc can panic on some inputs, so it's caught; either way
+        // we fall through to the plain esbuild transform (metadata-less but loads) on failure.
+        // Get ESM-with-metadata from tsc (preferred) or oxc (fallback), then a single esbuild
+        // ESM->CJS pass so every path yields the same esbuild-shaped CJS the loader/hoisting want.
+        let meta_esm = tsc_transform_esm(file, &root).or_else(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::transform::transform_decorators_with_metadata(file, &raw)
+            }))
+            .ok()
+            .and_then(|r| r.ok())
+        });
+        if let Some(cjs) = meta_esm.and_then(|esm| esbuild_format_cjs(&root, &esm)) {
+            let mut code = postprocess_mr_cjs(cjs);
+            code = hoist_mock_setup(&code);
+            let shared = shared_mock_lets(&raw);
+            if !shared.is_empty() {
+                code = rewrite_shared_lets(&code, &shared);
+            }
+            write_atomic(&cache, &code);
+            return Some(code);
+        }
+        // fall through to the plain esbuild transform below (metadata-less, but loads)
+    }
     let mut tsconfig = None;
     let mut d = file.parent();
     while let Some(dir) = d {
@@ -1653,7 +1947,7 @@ fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     Some(code)
 }
 
-fn read_transformed(abs: &Path, as_cjs: bool) -> Option<String> {
+fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<String> {
     // Module-runner: per-module CJS transform (app) / per-package CJS bundle (node_modules)
     // so imports are live + mockable and react is shared. Only on the CJS load path (the test
     // entry + its require-graph); the legacy ESM path (DOM boot, setup files) stays oxc.
@@ -1666,7 +1960,7 @@ fn read_transformed(abs: &Path, as_cjs: bool) -> Option<String> {
             if let Some(code) = esbuild_bundle_dep_cjs(abs) {
                 return Some(code);
             }
-        } else if let Some(code) = esbuild_transform_cjs(abs) {
+        } else if let Some(code) = esbuild_transform_cjs(abs, prefer_metadata) {
             return Some(code);
         }
     }
@@ -1697,8 +1991,18 @@ fn extract_mocks(src: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let bytes = src.as_bytes();
     let mut i = 0;
-    while let Some(pos) = src.get(i..).and_then(|s| s.find("vi.mock(")) {
-        let start = i + pos + "vi.mock(".len();
+    // Match both `vi.mock(` (vitest) and `jest.mock(` (jest) — same hoisting semantics.
+    while let Some((rel, needle_len)) = src.get(i..).and_then(|s| {
+        let a = s.find("vi.mock(").map(|p| (p, "vi.mock(".len()));
+        let b = s.find("jest.mock(").map(|p| (p, "jest.mock(".len()));
+        match (a, b) {
+            (Some(x), Some(y)) => Some(if x.0 <= y.0 { x } else { y }),
+            (Some(x), None) => Some(x),
+            (None, Some(y)) => Some(y),
+            (None, None) => None,
+        }
+    }) {
+        let start = i + rel + needle_len;
         // parse first arg: a string literal
         let rest = src.get(start..).unwrap_or("");
         let q = rest.trim_start();
@@ -1945,10 +2249,14 @@ fn is_thenable(scope: &mut v8::PinScope, val: v8::Local<v8::Value>) -> bool {
 // ---- CommonJS -------------------------------------------------------------
 
 fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks: bool) -> Option<()> {
+    load_cjs_inner(scope, abs, drain_mocks, false)
+}
+
+fn load_cjs_inner<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks: bool, prefer_metadata: bool) -> Option<()> {
     if REGISTRY.with(|r| r.borrow().cjs_synth_by_path.contains_key(abs)) {
         return Some(());
     }
-    let Some(raw) = read_transformed(abs, true) else {
+    let Some(raw) = read_transformed(abs, true, prefer_metadata) else {
         eprintln!("  cjs read/transform failed: {}", abs.display());
         return None;
     };
@@ -2037,7 +2345,22 @@ fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks: bool)
     if let (Some(k), Some(prev)) = (v8::String::new(scope, "__ttDir"), prev_dir) {
         global.set(scope, k.into(), prev);
     }
-    call_res?;
+    if call_res.is_none() {
+        // The module body threw. If it's a decorator file in an emitDecoratorMetadata project and
+        // we haven't already retried, the throw is often a missing-`design:type` error (Mongoose
+        // @Prop / Sequelize @Column read metadata at class-definition). Re-transform THIS file via
+        // the metadata path (ts.transpileModule) and re-run once. Scoped to this file only — its
+        // require()d deps still load on the default esbuild path, so files that load fine without
+        // metadata never change (no regression).
+        if !prefer_metadata
+            && !abs.components().any(|c| c.as_os_str() == "node_modules")
+            && decorator_metadata_enabled(abs)
+            && std::fs::read_to_string(abs).map(|s| file_has_decorator(&s)).unwrap_or(false)
+        {
+            return load_cjs_inner(scope, abs, drain_mocks, true);
+        }
+        return None;
+    }
 
     // Apply any vi.mock() this module declared (e.g. a per-test `*.test.setup` helper that
     // mocks/overrides a module). esbuild hoists requires above the body, so by here the only
@@ -2607,7 +2930,7 @@ fn load_graph<'s>(
     if let Some(g) = REGISTRY.with(|r| r.borrow().esm_by_path.get(abs).cloned()) {
         return Some(v8::Local::new(scope, &g));
     }
-    let raw = read_transformed(abs, false)?;
+    let raw = read_transformed(abs, false, false)?;
     let code = v8::String::new(scope, &raw)?;
     let name = v8::String::new(scope, &abs.to_string_lossy())?;
     let origin = module_origin(scope, name);
@@ -2768,7 +3091,7 @@ fn resolve_callback<'s>(
     // Externalized package not loaded yet (a setup bundle's `import 'react'` etc. under
     // --packages=external): lazy-load it now via the shared loaders so the bundle binds to the
     // ONE instance every other importer gets, instead of a copy baked into the bundle.
-    if mr_enabled() && esbuild_transform_cjs(&abs).is_some() {
+    if mr_enabled() && esbuild_transform_cjs(&abs, false).is_some() {
         load_cjs(scope, &abs, true);
     } else {
         load_dep(scope, &abs);
@@ -2844,7 +3167,7 @@ fn dynamic_import_callback<'s>(
         if !is_builtin {
             // Module-runner: load app modules via the CJS transform path (live bindings, mocks,
             // re-runs after vi.resetModules). Falls back to the ESM graph loader otherwise.
-            if mr_enabled() && esbuild_transform_cjs(&abs).is_some() {
+            if mr_enabled() && esbuild_transform_cjs(&abs, false).is_some() {
                 load_cjs(scope, &abs, true)?;
             } else {
                 load_dep(scope, &abs)?;
@@ -3146,7 +3469,7 @@ fn coverage_accumulate(json: &str) {
         // Static map data (line table + source map) is built ONCE per file and reused across every
         // test file that covers it — rebuild the exact wrapper V8 compiled only on first encounter.
         if !crate::coverage::has_meta(abs) {
-            if let Some(raw) = read_transformed(abs, true) {
+            if let Some(raw) = read_transformed(abs, true, false) {
                 let wrapped = format!(
                     "(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})"
                 );
@@ -3199,6 +3522,9 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     // e2e helper tests may import heavy Node-only deps they don't exercise — allow stubbing a
     // failed node_modules load for these files only (see stub_failed_deps).
     ENTRY_LENIENT.with(|c| c.set(entry_abs.components().any(|p| p.as_os_str() == "e2e")));
+    // CommonJS-first resolution for jest/node backends (sequelize/tslib/lexical get their working
+    // require-condition build). Decided once per file from the project; vitest/React → ESM-first.
+    CJS_FIRST_RESOLUTION.with(|c| c.set(cjs_first_project(&entry_abs)));
 
     // Setup-file mock specifiers are kept OUT of the esbuild bundle so the module boundary
     // survives and the (reliably-drained) mock registry intercepts them. Entry-file mocks are
@@ -3361,7 +3687,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
             // require-graph loaded per-module (live bindings, shared react). No ESM bundle.
             // Only when the entry can actually be CJS-transformed (esbuild project present);
             // standalone ESM fixtures (no esbuild) fall through to the legacy ESM graph loader.
-            if mr_enabled() && esbuild_transform_cjs(&entry_abs).is_some() {
+            if mr_enabled() && esbuild_transform_cjs(&entry_abs, false).is_some() {
                 let err = {
                     let tc = std::pin::pin!(v8::TryCatch::new(scope));
                     let tc = &mut tc.init();
@@ -3577,7 +3903,7 @@ fn run_test_file_reused(
                     g.set(scope, k.into(), zero.into());
                 }
             }
-            if mr_enabled() && esbuild_transform_cjs(entry_abs).is_some() {
+            if mr_enabled() && esbuild_transform_cjs(entry_abs, false).is_some() {
                 let err = {
                     let tc = std::pin::pin!(v8::TryCatch::new(scope));
                     let tc = &mut tc.init();
