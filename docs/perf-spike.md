@@ -66,6 +66,22 @@ fresh-isolate-per-file is THE hot path.
 | payroll-app | 4042 ms | 406 / 0 |
 | ui-design-components | 4859 ms | 687 / 0 |
 
+NEW BASELINE = 0.2.12 (code-cache ON). Full-suite reference pass/fail: payroll 10580/1
+(the 1 failure is PRE-EXISTING, present with cache off too — flaky), ui 7006/0. Future A/B
+controls run with code-cache ON (default).
+
+## Cumulative gain tracker (target: 50%; ship gate: repeatable >=1%)
+- v0.2.12: E2 code-cache ~1.5-1.8%  (SHIPPED). Running total ≈ 1.8%.
+- E4 worker-count: KILLED. The 40-file WARM microbench said jobs=6 was -14% vs jobs=8 (clean,
+  consistent across 8v6/6v4/etc.). But the FULL 431-file ui suite, paired A/B, showed jobs=6
+  +75% / +40% SLOWER. Opposite result. Why: a small warm subset finishes fast and is pure CPU,
+  so the GC/compile helper threads visibly contend → fewer workers win. The full cold suite has
+  enough work in flight that all cores stay productively busy and the helpers are mostly idle, so
+  cutting workers just leaves cores empty. ===> LESSON (added to harness README): parallelism /
+  scheduling / thread-count changes MUST be measured on the FULL suite, never a stride subset.
+  The microbench is fine for per-file work (transform/compile/alloc) but lies about concurrency.
+  Reverted to ncpu default. TURBO_JOBS env hook kept for sweeps.
+
 Microbench harness: `scripts/bench.sh <proj> 3 --sub 40`. Full-suite validation before any
 publish. NEVER kill runs (poisons bundle cache — see docs/TODO-cache-poisoning.md).
 

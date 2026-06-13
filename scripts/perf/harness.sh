@@ -55,7 +55,10 @@ while [ $# -gt 0 ]; do
     *) POS+=("$1"); shift;;
   esac
 done
-JOBFLAG=(); [ -n "$JOBS" ] && JOBFLAG=(--jobs "$JOBS")
+# --jobs env  => omit the --jobs flag so each A/B side's TURBO_JOBS env (or the host default)
+# decides the worker count. Otherwise pass --jobs J (an explicit flag wins over TURBO_JOBS).
+JOBFLAG=()
+if [ -n "$JOBS" ] && [ "$JOBS" != "env" ]; then JOBFLAG=(--jobs "$JOBS"); fi
 
 # ---- file selection: even-stride sample across src/ (representative, no e2e) ----
 cd "$PROJ" || exit 1
@@ -83,10 +86,10 @@ case "$CMD" in
 micro)
   SELECT_FILES
   echo "## micro $PROJ  files=${#FILES[@]}/$TOTAL  jobs=$JOBS runs=$RUNS args='${EXTRA[*]:-}'"
-  L="$(node "$CLI" "${JOBFLAG[@]}" ${EXTRA[@]+"${EXTRA[@]}"} "${FILES[@]}" 2>/dev/null | SUMMARY)"; echo "WARMUP: $L"
+  L="$(node "$CLI" ${JOBFLAG[@]+"${JOBFLAG[@]}"} ${EXTRA[@]+"${EXTRA[@]}"} "${FILES[@]}" 2>/dev/null | SUMMARY)"; echo "WARMUP: $L"
   BPF="$(echo "$L" | PF)"; WS=()
   for r in $(seq 1 "$RUNS"); do
-    L="$(node "$CLI" "${JOBFLAG[@]}" ${EXTRA[@]+"${EXTRA[@]}"} "${FILES[@]}" 2>/dev/null | SUMMARY)"
+    L="$(node "$CLI" ${JOBFLAG[@]+"${JOBFLAG[@]}"} ${EXTRA[@]+"${EXTRA[@]}"} "${FILES[@]}" 2>/dev/null | SUMMARY)"
     P="$(echo "$L" | PF)"; W="$(echo "$L" | WALL)"; F=""
     [ "$P" != "$BPF" ] && F="  <<< PF DRIFT (was $BPF)"
     echo "run$r: wall=${W}ms | $P$F"; WS+=("$W")
@@ -97,7 +100,7 @@ ab)
   [ "${#POS[@]}" -lt 2 ] && die "ab needs ENVA ENVB"
   ENVA="${POS[0]}"; ENVB="${POS[1]}"; LA="${POS[2]:-A}"; LB="${POS[3]:-B}"
   SELECT_FILES
-  run(){ env $1 node "$CLI" "${JOBFLAG[@]}" "${FILES[@]}" 2>/dev/null | SUMMARY; }
+  run(){ env $1 node "$CLI" ${JOBFLAG[@]+"${JOBFLAG[@]}"} "${FILES[@]}" 2>/dev/null | SUMMARY; }
   echo "## ab $PROJ  files=${#FILES[@]}/$TOTAL  jobs=$JOBS pairs=$PAIRS trim=$TRIM"
   echo "## A=$LA [$ENVA]  vs  B=$LB [$ENVB]   (negative dB% => B faster)"
   run "$ENVA" >/dev/null; run "$ENVB" >/dev/null   # warm
@@ -123,10 +126,10 @@ ab)
   ;;
 full)
   echo "## full $PROJ  jobs=$JOBS runs=$RUNS args='${EXTRA[*]:-}'"
-  L="$(node "$CLI" "${JOBFLAG[@]}" ${EXTRA[@]+"${EXTRA[@]}"} 2>/dev/null | SUMMARY)"; echo "WARMUP: $L"
+  L="$(node "$CLI" ${JOBFLAG[@]+"${JOBFLAG[@]}"} ${EXTRA[@]+"${EXTRA[@]}"} 2>/dev/null | SUMMARY)"; echo "WARMUP: $L"
   BPF="$(echo "$L"|PF)"; WS=()
   for r in $(seq 1 "$RUNS"); do
-    L="$(node "$CLI" "${JOBFLAG[@]}" ${EXTRA[@]+"${EXTRA[@]}"} 2>/dev/null | SUMMARY)"
+    L="$(node "$CLI" ${JOBFLAG[@]+"${JOBFLAG[@]}"} ${EXTRA[@]+"${EXTRA[@]}"} 2>/dev/null | SUMMARY)"
     P="$(echo "$L"|PF)"; W="$(echo "$L"|WALL)"; F=""; [ "$P" != "$BPF" ] && F="  <<< PF DRIFT (was $BPF)"
     echo "run$r: wall=${W}ms | $P$F"; WS+=("$W")
   done
@@ -135,8 +138,8 @@ full)
 profile)
   SELECT_FILES
   BIN="$REPO/bin/turbo-test-darwin-arm64"; [ -x "$BIN" ] || BIN="$REPO/target/release/turbo-test"
-  "$BIN" "${JOBFLAG[@]}" "${FILES[@]}" >/dev/null 2>&1   # warm
-  "$BIN" "${JOBFLAG[@]}" "${FILES[@]}" >/dev/null 2>&1 &
+  "$BIN" ${JOBFLAG[@]+"${JOBFLAG[@]}"} "${FILES[@]}" >/dev/null 2>&1   # warm
+  "$BIN" ${JOBFLAG[@]+"${JOBFLAG[@]}"} "${FILES[@]}" >/dev/null 2>&1 &
   PID=$!; OUT="/tmp/tt_sample_$$.txt"
   sample "$PID" 10 -file "$OUT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
   SEC="$(sed -n '/Sort by top of stack/,/Binary Images/p' "$OUT")"

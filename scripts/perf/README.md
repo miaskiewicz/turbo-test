@@ -21,6 +21,14 @@ scripts/perf/harness.sh full ../payroll-app --runs 2
 ```
 
 ## The golden rules (learned the hard way)
+0. **Parallelism/scheduling changes MUST be measured on the FULL suite (`--sub 0`),
+   never a stride subset.** A warm 40-file microbench said cutting workers from 8→6
+   was -14%; the full 431-file suite was +40–75% SLOWER. A small warm subset is pure
+   CPU and finishes fast, so GC/compile helper threads visibly contend → fewer workers
+   look better. The full cold suite keeps all cores busy with real work, so cutting
+   workers just idles cores. The microbench is reliable for PER-FILE work (transform,
+   compile, allocation) but LIES about anything touching concurrency, thread pools,
+   scheduling, or memory pressure. For those: `harness.sh ab <proj> --sub 0 --jobs env`.
 1. **NEVER kill a run mid-flight.** A killed esbuild leaves a truncated bundle in
    the shared cache (`$TMPDIR/turbo-test-cache`) and poisons EVERY later run with
    phantom `Illegal return statement` / render failures. See

@@ -53,8 +53,12 @@ fn save_durations(m: &std::collections::HashMap<String, f64>) {
 
 fn main() {
     let mut files: Vec<PathBuf> = Vec::new();
-    // Default worker count = host parallelism, overridable by TURBO_JOBS (env) for rebuild-free
-    // A/B sweeps of the job count; an explicit --jobs flag still wins (handled below).
+    // Default worker count = host logical cores. (Reducing this to leave headroom for V8's GC
+    // helper threads looked like a big win on a warm 40-file microbench but REGRESSED the full
+    // suite badly: +75% on a 431-file run — with the whole cold suite in flight, all cores stay
+    // productively busy and the GC helpers are mostly idle, so fewer workers just leaves cores
+    // empty. Lesson: measure parallelism changes on the FULL suite, never a subset.) Overridable
+    // by TURBO_JOBS (env, kept for A/B sweeps); an explicit --jobs flag still wins (below).
     let mut jobs = std::env::var("TURBO_JOBS").ok().and_then(|v| v.parse().ok())
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
     let mut shard: Option<(usize, usize)> = None;
