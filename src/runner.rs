@@ -3329,8 +3329,18 @@ fn framework_snapshot() -> &'static Vec<u8> {
             s.run(scope).unwrap();
             scope.set_default_context(context);
         }
+        // E5: bake the framework's compiled bytecode into the snapshot (Keep) instead of dropping
+        // it (Clear). Every per-file fresh isolate deserializes this snapshot; with Keep it gets
+        // RUNTIME_JS already compiled (no per-isolate reparse/recompile of the framework layer).
+        // Costs a larger blob (one-time, shared). env-gated for A/B. Microbench-valid (per-file
+        // compile work, not concurrency).
+        let handling = if std::env::var("TURBO_SNAP_KEEP").is_ok() {
+            v8::FunctionCodeHandling::Keep
+        } else {
+            v8::FunctionCodeHandling::Clear
+        };
         creator
-            .create_blob(v8::FunctionCodeHandling::Clear)
+            .create_blob(handling)
             .expect("framework snapshot")
             .to_vec()
     })

@@ -47,6 +47,15 @@ fresh-isolate-per-file is THE hot path.
   strings out of a HashMap each require beats the OS-page-cached file read, and the growing map
   adds GC pressure). KILL — code removed.
 
+- E5 snapshot bytecode bake (FunctionCodeHandling::Keep vs Clear, gated TURBO_SNAP_KEEP):
+  bake the framework's compiled bytecode into the snapshot so each per-file isolate skips
+  recompiling RUNTIME_JS. Paired A/B: ui -3.6% (faster), payroll +4.8% trimmed / -0.5% median
+  (neutral-to-slower — the bigger Keep blob costs more per-isolate deserialization, offsetting
+  the recompile savings, and the balance flips by suite). Correctness clean (ui keep 7006/0).
+  NOT a clean win on both → NOT shipped as default; gate kept opt-in (default Clear = unchanged).
+- REUSE SPIKE: see docs/reuse-spike.md. Verdict NO (breaks payroll accuracy — per-file vi.mock of
+  node_modules is fundamentally incompatible with caching node_modules across files). Stays opt-in.
+
 ## Experiment backlog (ranked by profile, generic-only)
 - E1: V8 bytecode code-cache for compiled CJS modules (biggest expected)
 - E2: in-memory per-worker transform cache (kill repeated disk read + hash)
