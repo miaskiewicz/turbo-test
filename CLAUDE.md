@@ -7,6 +7,13 @@
 
 A release where these disagree is a bug. Bump both in the same commit.
 
+**Every tagged release MUST add a `CHANGELOG.md` entry — this is mandatory, no exceptions.**
+- Add a `## [x.y.z] — <short title>` section (newest first, above the previous release and below
+  `## [Unreleased]`) in the SAME commit as the version bump.
+- Use Keep-a-Changelog headings (`### Added` / `### Fixed` / `### Performance` / `### Tests`, etc.).
+- Record the *why*, not just the *what* — a future reader should understand the motivation.
+- A tag without a matching `CHANGELOG.md` entry is an incomplete release. Do not tag without it.
+
 ## Build / test loop
 - Native binary: `cargo build --release` → produces `target/release/turbo-test`.
 - `cli.js` prefers the prebuilt `bin/turbo-test-<platform>-<arch>` over `target/release`.

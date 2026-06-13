@@ -938,15 +938,31 @@ class Asymmetric {
 }
 
 // ---- deep equality (asymmetric-aware) ----
-function deepEqual(a, b) {
+// `strict` mirrors jest/vitest: toEqual/toHaveBeenCalledWith (strict=false) treat an own
+// property whose value is `undefined` as ABSENT ({a:1,b:undefined} equals {a:1}); toStrictEqual
+// (strict=true) keeps undefined-valued keys significant. Array indices are NEVER stripped in
+// either mode — a hole/undefined element changes length, so [1,undefined] != [1].
+function deepEqual(a, b, strict = false) {
   if (b instanceof Asymmetric) return b.matches(a);
   if (a instanceof Asymmetric) return a.matches(b);
   if (Object.is(a, b)) return true;
   if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
   if (Array.isArray(a) !== Array.isArray(b)) return false;
-  const ka = Object.keys(a), kb = Object.keys(b);
+  if (Array.isArray(a)) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!deepEqual(a[i], b[i], strict)) return false;
+    return true;
+  }
+  if (strict) {
+    const ka = Object.keys(a), kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    return ka.every((k) => (k in b) && deepEqual(a[k], b[k], true));
+  }
+  // non-strict: drop own keys whose value is `undefined` on both sides before comparing.
+  const ka = Object.keys(a).filter((k) => a[k] !== undefined);
+  const kb = Object.keys(b).filter((k) => b[k] !== undefined);
   if (ka.length !== kb.length) return false;
-  return ka.every((k) => deepEqual(a[k], b[k]));
+  return ka.every((k) => deepEqual(a[k], b[k], false));
 }
 
 function fmt(v) {
@@ -991,7 +1007,7 @@ function makeExpect(actual, negated = false) {
     },
     toBe(e) { ok(Object.is(actual, e), `expected ${fmt(actual)} ${negated ? 'not ' : ''}to be ${fmt(e)}`); },
     toEqual(e) { ok(deepEqual(actual, e), `expected ${fmt(actual)} ${negated ? 'not ' : ''}to equal ${fmt(e)}`); },
-    toStrictEqual(e) { ok(deepEqual(actual, e), `expected ${fmt(actual)} ${negated ? 'not ' : ''}to strictly equal ${fmt(e)}`); },
+    toStrictEqual(e) { ok(deepEqual(actual, e, true), `expected ${fmt(actual)} ${negated ? 'not ' : ''}to strictly equal ${fmt(e)}`); },
     toBeTruthy() { ok(!!actual, `expected ${fmt(actual)} ${negated ? 'not ' : ''}to be truthy`); },
     toBeFalsy() { ok(!actual, `expected ${fmt(actual)} ${negated ? 'not ' : ''}to be falsy`); },
     toBeNull() { ok(actual === null, `expected ${fmt(actual)} ${negated ? 'not ' : ''}to be null`); },

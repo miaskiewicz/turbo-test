@@ -25,6 +25,26 @@ Perf-spike work (no runtime default changes — all opt-in env gates, behavior i
 - Snapshot bytecode bake (`Keep`): mixed (ui −3.6%, payroll neutral/slower); kept opt-in.
 - V8 GC/heap flags, in-memory dep-bundle memo: rejected (slower).
 
+## [0.2.13] — `toEqual` undefined-own-property stripping
+### Fixed
+- `toEqual` / `toHaveBeenCalledWith` / `toStrictEqual`'s negation and all the matchers backed by
+  the deep-equality path now follow jest/vitest semantics: an own property whose value is
+  `undefined` is treated as **absent**, so `{ a: 1, b: undefined }` deep-equals `{ a: 1 }`.
+  Previously `deepEqual` compared raw `Object.keys().length`, so any received object carrying an
+  explicit-`undefined` key failed against an expectation that omitted it — and because the
+  `undefined` value isn't rendered, the printed `expected` and `received` were byte-identical,
+  making the failure look impossible. (`BUG-equality-state-leak-across-shard-files.md`.)
+- The bug was reported as a shard/worker **state leak** (intermittent, order-dependent). It is not:
+  the gap is deterministic and fires whenever the received object has an explicit-`undefined` own
+  property. It only *looked* shard-dependent because whether the asserted object carried such a key
+  depended on which code path the consumer's earlier files exercised.
+- `toStrictEqual` keeps `undefined`-valued keys significant (now via an explicit `strict` flag),
+  matching jest/vitest. Array elements are never stripped in either mode — `[1, undefined]` still
+  differs from `[1]` because the length differs.
+### Tests
+- `fixtures/tests/equality-undefined-strip.test.mjs` — regression covering the reported
+  `toHaveBeenCalledWith({...})` shape, nested objects, `toStrictEqual`, and array non-stripping.
+
 ## [0.2.12] — V8 bytecode code-cache
 ### Added
 - Persistent V8 code (bytecode) cache for compiled CJS module wrappers, keyed by the exact wrapped
