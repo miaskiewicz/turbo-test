@@ -53,7 +53,10 @@ fn save_durations(m: &std::collections::HashMap<String, f64>) {
 
 fn main() {
     let mut files: Vec<PathBuf> = Vec::new();
-    let mut jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    // Default worker count = host parallelism, overridable by TURBO_JOBS (env) for rebuild-free
+    // A/B sweeps of the job count; an explicit --jobs flag still wins (handled below).
+    let mut jobs = std::env::var("TURBO_JOBS").ok().and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
     let mut shard: Option<(usize, usize)> = None;
     let mut json = false;
     let mut args = std::env::args().skip(1);

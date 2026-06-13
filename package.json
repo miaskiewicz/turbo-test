@@ -1,6 +1,6 @@
 {
   "name": "@miaskiewicz/turbo-test",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "description": "A blazing-fast native test runner — a drop-in replacement for vitest, ~5-6x faster vs jsdom. Rust + V8, oxc transform, turbo-dom DOM, native V8 coverage.",
   "license": "MIT",
   "main": "index.js",
