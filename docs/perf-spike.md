@@ -121,6 +121,44 @@ cost) + irreducible V8 per-file isolate deserialize. The only remaining big leve
 (warm ICs + interned strings across files) — closed by payroll accuracy. Cumulative banked ≈ E2
 1.8% + E12 ~7–14%, at the handoff's realistic 10–20% ceiling.
 
+## Execution-bucket round (String/GC/IC) — reuse family (2026-06-14)
+- **R1 hybrid reuse** (TURBO_HYBRID_REUSE: reuse isolate, route files with a BARE vi.mock specifier
+  to the fresh path): KILL. ui accuracy IDENTICAL (431/431) but payroll still 10359/221 — the SAME
+  failures as plain reuse. Instrumented: routing fires (739/1072 payroll files have a bare vi.mock
+  → routed fresh), but routed-fresh files STILL fail. Root cause = `run_test_file_fresh` on a live
+  reuse worker is NOT equivalent to a clean fresh run (shared isolate + thread-local setup state
+  leak); this is the reuse-spike's "fresh-retry doesn't rescue" wall, confirmed. Also 69% of payroll
+  mocks node_modules ⇒ reuse would apply to only ~31% there even if it worked. First (panic) attempt
+  also showed naive top-level routing causes a cross-isolate Handle panic; routing via the
+  panic-safe run_test_file_fresh wrapper fixed the panic but not the accuracy. Reverted.
+  ⇒ The reuse family is blocked by the same fundamental issue every time: making fresh-under-reuse
+  (or per-file mock reset, R2) truly clean. That's the only path to the String/GC/IC win and it's
+  hard + uncertain (reuse-spike verdict stands).
+- **H8 DOM reuse-without-module-reuse**: INFEASIBLE. setup_dom installs turbo-dom (a native .node
+  addon) into the isolate per DOM-file. The DOM is per-isolate JS+native state — can't persist
+  across fresh isolates, and the native binding can't be snapshotted (same wall as install_natives).
+  Reusing the document requires reusing the isolate ⇒ collapses back into reuse (R1, broken).
+- **H5 read-only snapshot strings**: INFEASIBLE without shared isolate groups. Each per-file isolate
+  deserializes its OWN snapshot heap copy; sharing framework strings across isolates needs a shared
+  isolate group / shared string table — which is exactly what `--shared-string-table` needed (it
+  HUNG, G2). Big architecture change, not a flag.
+- **H4 code-cache the dep bundle**: MOOT. In module-runner mode (default) there is no monolithic
+  bundle — every node_modules module loads individually via compile_cjs_cached (E2 code-cache).
+  Already covered. (A bundle exists only under TURBO_NO_MR, not the default path.)
+- **R2 / D1**: R2 (mock-aware full reuse) hits the same fresh-cleanliness + 69%-mock wall as R1 —
+  not built. D1 (production lib builds / NODE_ENV=production) is high accuracy-risk (tests assert
+  dev warnings; React prod drops act() warnings) for an execution bucket that's user code — deferred.
+
+## DEFINITIVE CEILING (2026-06-14)
+String/RegExp 26% + GC 23% + ICs 20% are USER test execution (React/MUI render alloc, dev-mode
+regex, emotion Maps) + cold-by-design fresh-isolate cost. The ONLY mechanism that warms them is
+persisting state across files — and every form is blocked: full reuse breaks per-file node_modules
+mocks (and 69% of payroll uses them); DOM/native state can't cross isolates or snapshot; shared
+string/IC state needs shared isolate groups (hangs / big rearchitecture). turbo-test is at its
+architectural performance ceiling for safe-generic wins. Banked: E2 ~1.8% + E12 ~7–14%. Further
+gains require either the shared-isolate-group rearchitecture (large, risky) or are user-code-side
+(out of the runner's control).
+
 ## Experiment backlog (ranked by profile, generic-only)
 - E1: V8 bytecode code-cache for compiled CJS modules (biggest expected)
 - E2: in-memory per-worker transform cache (kill repeated disk read + hash)
