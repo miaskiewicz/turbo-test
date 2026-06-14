@@ -73,6 +73,27 @@ fresh-isolate-per-file is THE hot path.
   cold suite, ncpu workers + ncpu helpers is the throughput optimum; cutting either idles capacity.
 - REUSE SPIKE: see docs/reuse-spike.md. Verdict NO (breaks payroll accuracy — per-file vi.mock of
   node_modules is fundamentally incompatible with caching node_modules across files). Stays opt-in.
+- E12 SHIPPED v0.2.14 (see CHANGELOG). Memoize nearest_tsconfig + resolve_spec_as per worker.
+  ui full −7.4%, payroll full −13.9%, identical pass/fail. Default ON (TURBO_NO_E12 to disable).
+
+## Post-E12 micro-opt experiments (N1–N5, 2026-06-14) — ALL KILLED
+After E12 banked the resolution-cache win, profiled the remaining per-file hot spots and tried 5
+micro-opts (gated TURBO_N1..N5, jobs=8 --alt validated protocol). Accuracy IDENTICAL both suites
+(ui 431, payroll 1072). All NEUTRAL — none clears the ≥1% both-suites ship gate:
+| exp | what | ui micro | payroll micro |
+|---|---|---|---|
+| N1 | fxhash (FxHasher) for transform cache keys instead of SipHash DefaultHasher | +1.7% | −0.2% |
+| N2 | memoize is_esm_module per path (package.json "type" walk) | +0.9% | −0.3% |
+| N3 | memoize project_root per path (node_modules/.bin/esbuild walk) | +1.3% | −0.4% |
+| N4 | memoize cache_dir (skip create_dir_all syscall per transform) | −0.7% | +0.6% |
+| N5 | skip source read+hash on warm transform (mtime-keyed cache-path memo) | +0.3% | +0.0% |
+| ALL | all five together | +0.8% | −1.0% |
+Reverted (binary stays clean v0.2.14). WHY neutral: E12 already cached the expensive resolution;
+the leftover FS/hash spots are individually tiny and OS-page-cached on a warm run, and the source
+hash isn't the bottleneck. The dominant buckets (String+RegExp 26%, GC 23%, megamorphic ICs 20%)
+are TEST EXECUTION, not per-file plumbing — unreachable by resolution/transform micro-opts. Future
+per-file wins look played out; the remaining levers are execution-side (IC warming, reuse) and are
+either closed (reuse breaks accuracy) or app-specific/hard.
 
 ## Experiment backlog (ranked by profile, generic-only)
 - E1: V8 bytecode code-cache for compiled CJS modules (biggest expected)
