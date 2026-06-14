@@ -39,6 +39,11 @@ fresh-isolate-per-file is THE hot path.
   ~3.5% at jobs=8 block-median but NOISE (paired -3.5% with ±37% pairs, weak 6/10). KILL the nocc
   flags; semi-space inconclusive — revisit with the validated paired protocol if revisited.
   Default reverted to no flags (gate kept).
+  RE-BENCHMARK 2026-06-14 (quiet machine, noise floor verified -0.2% / ±0.4%): semi-space=64
+  is a CLEAN KILL, not noise — paired jobs=1 micro (ui, 120 files, 16 pairs, trim 3) = +10.2%
+  trimmed / +5.2% median SLOWER, B faster only 6/16. Bigger young-gen ⇒ larger per-scavenge cost
+  dominates the fewer-scavenge savings (consistent with the GC bucket being scavenge-heavy). The
+  earlier "promising ~3.5%" read was external-load artifact. E1 = dead. Do not revisit semi-space.
 - E2 V8 bytecode code-cache: consume/produce per-module compiled bytecode on disk, keyed by the
   exact wrapped source; safe fallback on reject/miss. Paired A/B (jobs=8,40f,20pairs,trim4) vs
   ±0.4% noise floor: ui -1.3% / payroll -1.8% trimmed (median -2.1% / -2.6%), pass/fail identical.
@@ -53,6 +58,19 @@ fresh-isolate-per-file is THE hot path.
   (neutral-to-slower — the bigger Keep blob costs more per-isolate deserialization, offsetting
   the recompile savings, and the balance flips by suite). Correctness clean (ui keep 7006/0).
   NOT a clean win on both → NOT shipped as default; gate kept opt-in (default Clear = unchanged).
+- E10 V8 platform helper-pool size (gate TURBO_V8_POOL=N, default 0 = ncpu, 2026-06-14):
+  hypothesis was that new_default_platform(0,…) spawns ~ncpu (~7 on 8-core) GC/compile helper
+  threads on TOP of the N job-threads ⇒ ~2× cores oversubscription, so capping the pool would
+  cut GC-helper contention WITHOUT idling job cores (the surgical lever E4 wasn't). DISPROVEN.
+  Full-suite paired A/B (ui, --sub 0, --jobs env), quiet machine: pool 0 vs 2 = +11.3% trimmed
+  SLOWER (0/5); pool 0 vs 4 = +5.3% trimmed (1/8; the 6 genuine-low-load pairs ALL slower
+  +0.4–16%). Monotonic with E4: fewer helper threads = slower full suite. The helpers earn their
+  keep — concurrent scavenge/marking parallelism during GC bursts outweighs the oversubscription,
+  because the full cold suite keeps job cores busy with real work so the "extra" helpers aren't
+  actually stealing CPU from useful work; they only fire during GC, where more of them = faster GC.
+  KILL. Gate kept opt-in (default 0 = unchanged) for future sweeps, same as TURBO_JOBS.
+  ===> Both concurrency levers (E4 worker-count, E10 helper-pool) are now closed: on the full
+  cold suite, ncpu workers + ncpu helpers is the throughput optimum; cutting either idles capacity.
 - REUSE SPIKE: see docs/reuse-spike.md. Verdict NO (breaks payroll accuracy — per-file vi.mock of
   node_modules is fundamentally incompatible with caching node_modules across files). Stays opt-in.
 
@@ -90,6 +108,12 @@ controls run with code-cache ON (default).
   scheduling / thread-count changes MUST be measured on the FULL suite, never a stride subset.
   The microbench is fine for per-file work (transform/compile/alloc) but lies about concurrency.
   Reverted to ncpu default. TURBO_JOBS env hook kept for sweeps.
+  RE-BENCHMARK 2026-06-14 (quiet machine): full-suite paired A/B (ui, --sub 0, --jobs env,
+  5 pairs, trim 1) reconfirms the KILL — jobs=8 vs 7 = +15.9% trimmed (7 faster 2/5);
+  jobs=8 vs 6 = +59.8% trimmed SLOWER (6 faster 0/5, every pair +49–90%). Monotonic: ncpu(8)
+  is best, fewer workers strictly worse. The earlier "jobs=6 promising" read was the warm-micro
+  lie + external load. E4 = dead. The surgical concurrency lever is E10 (shrink the V8 platform
+  helper pool via new_default_platform(N,…)), NOT worker count — must also be full-suite measured.
 
 Microbench harness: `scripts/bench.sh <proj> 3 --sub 40`. Full-suite validation before any
 publish. NEVER kill runs (poisons bundle cache — see docs/TODO-cache-poisoning.md).

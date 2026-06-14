@@ -41,7 +41,7 @@ CMD="$1"; shift
 PROJ_IN="$1"; shift
 PROJ="$(cd "$PROJ_IN" 2>/dev/null && pwd)" || die "no such project: $PROJ_IN"
 
-SUB=40; JOBS=1; RUNS=3; PAIRS=12; TRIM=2
+SUB=40; JOBS=1; RUNS=3; PAIRS=12; TRIM=2; ALT=0
 EXTRA=(); ENVA=""; ENVB=""; LA="A"; LB="B"
 POS=()
 while [ $# -gt 0 ]; do
@@ -51,6 +51,8 @@ while [ $# -gt 0 ]; do
     --runs) RUNS="$2"; shift 2;;
     --pairs) PAIRS="$2"; shift 2;;
     --trim) TRIM="$2"; shift 2;;
+    --alt) ALT=1; shift;;   # alternate A/B run order per pair: cancels the deterministic
+                            # within-pair "second run is throttled" thermal bias seen at jobs=1
     --) shift; EXTRA=("$@"); break;;
     *) POS+=("$1"); shift;;
   esac
@@ -106,7 +108,11 @@ ab)
   run "$ENVA" >/dev/null; run "$ENVB" >/dev/null   # warm
   DS=(); BWIN=0; SA=0; SB=0; DRIFT=0
   for ((i=1;i<=PAIRS;i++)); do
-    RA="$(run "$ENVA")"; RB="$(run "$ENVB")"
+    if [ "$ALT" = 1 ] && [ $((i%2)) -eq 0 ]; then
+      RB="$(run "$ENVB")"; RA="$(run "$ENVA")"   # B-first on even pairs: penalize A this time
+    else
+      RA="$(run "$ENVA")"; RB="$(run "$ENVB")"
+    fi
     WA="$(echo "$RA"|WALL)"; WB="$(echo "$RB"|WALL)"; PA="$(echo "$RA"|PF)"; PB="$(echo "$RB"|PF)"
     G=""; [ "$PA" != "$PB" ] && { G="  <<< PF DRIFT A=$PA B=$PB"; DRIFT=1; }
     D=$((WB-WA)); PCT="$(awk -v a="$WA" -v d="$D" 'BEGIN{printf "%+.1f",(d*100.0)/a}')"

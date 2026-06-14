@@ -1,6 +1,6 @@
 [package]
 name = "turbo-test"
-version = "0.2.13"
+version = "0.2.14"
 edition = "2021"
 license = "MIT"
 description = "A blazing-fast native test runner — drop-in replacement for Vitest"

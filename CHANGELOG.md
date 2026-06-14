@@ -5,25 +5,49 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
-Perf-spike work (no runtime default changes — all opt-in env gates, behavior identical to 0.2.12):
+## [0.2.14] — E12: memoize module resolution (tsconfig + specifier resolve)
+
+### Performance
+- **Memoize `nearest_tsconfig` and `resolve_spec_as` per worker** (thread-local). `native_require`
+  was the second-hottest path in the profile and re-walked the directory tree (`is_file` syscalls)
+  for the nearest `tsconfig.json` on *every* resolve, and re-ran the full oxc resolve + canonicalize
+  for the same `(specifier, importer-dir)` across every file that imports it. Both are deterministic
+  for a run, so caching them turns repeats into a hashmap hit and cuts the FS-syscall + resolution
+  cost. **Default ON** (disable with `TURBO_NO_E12`).
+  - Paired A/B vs the validated noise floor, identical pass/fail on both suites (accuracy-diff:
+    ui 431/431 and payroll 1072/1072 files byte-identical pass/fail):
+    micro ui −13.8% / payroll −14.1% (20/20); **full-suite ui −7.4% (7/8) / payroll −13.9% (4/4)**.
 
 ### Added
-- `scripts/perf/` ultra harness: `harness.sh` (micro / paired-A/B / full / profile modes),
-  `accuracy-diff.sh` (per-file pass/fail diff between two runner configs), and a README. Validated
-  paired-A/B noise floor of ±0.4%.
-- Env gates for rebuild-free A/B sweeps: `TURBO_V8_FLAGS` (V8 flag string), `TURBO_JOBS` (worker
-  count), `TURBO_SNAP_KEEP` (bake framework bytecode into the snapshot), `TURBO_NO_CODE_CACHE`.
-- `docs/`: `perf-spike.md` (experiment log), `reuse-spike.md` (isolate-reuse verdict),
-  `TODO-cache-poisoning.md` (interrupted-bundle-write cache poisoning bug + fix plan).
+- `scripts/perf/harness.sh --alt`: alternate A/B run order per pair. Cancels a deterministic
+  *within-pair* thermal bias (at `--jobs 1` the second run of each pair was ~46% slower as the
+  pinned P-core throttled — a control-vs-control run showed +46%/0-of-12, pure artifact). The
+  earlier "validated ±0.4% noise floor" was a **jobs=8** measurement; jobs=8 has only random
+  variance (cancels over pairs), jobs=1 has this deterministic bias (does not). Use jobs=8 or
+  `--alt` for per-file micro A/B.
 
 ### Investigated (not shipped)
-- Isolate-reuse as default: **rejected** — accurate + faster on some suites (ui 7006/0) but breaks
-  others (payroll: per-file `vi.mock` of node_modules is fundamentally incompatible with caching
-  node_modules across files). Stays opt-in (`TURBO_REUSE_ISOLATE` / vitest `isolate: false`).
-- Worker count `ncpu→0.75·ncpu`: **rejected** — looked like −14% on a warm microbench but +40–75%
-  SLOWER on the full suite. Default stays `ncpu`. (Lesson: measure concurrency changes full-suite.)
+- **E1 V8 `--max-semi-space-size=64`**: re-benchmarked on a quiet machine — neutral-to-slightly
+  slower (+2.7% at jobs=8). The earlier "−10% promising" was jobs=1 thermal-bias inflation. Killed.
+- **E4 worker count** (`ncpu→7/6`): full-suite +15.9% / +59.8% slower. Killed (reconfirmed).
+- **E10 V8 platform helper-pool size**: capping `new_default_platform(N,…)` to 2/4 was +11.3% /
+  +5.3% slower full-suite — fewer GC helpers idles concurrent-GC parallelism. Killed. (Both
+  concurrency levers — worker count and helper pool — are closed: ncpu workers + ncpu helpers is
+  the full-cold-suite optimum.)
+- **E6 transform-existence memo**: neutral (+0.0%). **E11 drain-loop fn-lookup hoist**: +3.9%
+  (the per-iteration `v8::String::new` churn is negligible vs total). Neither shipped.
+
+### Added (earlier perf-spike, behavior identical to 0.2.12)
+- `scripts/perf/` harness (`harness.sh` micro/ab/full/profile, `accuracy-diff.sh`) + README.
+- Sweep env gates: `TURBO_V8_FLAGS`, `TURBO_JOBS`, `TURBO_SNAP_KEEP`, `TURBO_NO_CODE_CACHE`.
+- `docs/`: `perf-spike.md`, `reuse-spike.md`, `TODO-cache-poisoning.md`.
+
+### Investigated earlier (not shipped)
+- Isolate-reuse as default: **rejected** — faster on some suites (ui 7006/0) but breaks payroll
+  (per-file `vi.mock` of node_modules is incompatible with caching node_modules across files).
+  Stays opt-in (`TURBO_REUSE_ISOLATE` / vitest `isolate: false`).
 - Snapshot bytecode bake (`Keep`): mixed (ui −3.6%, payroll neutral/slower); kept opt-in.
-- V8 GC/heap flags, in-memory dep-bundle memo: rejected (slower).
+- In-memory dep-bundle memo: rejected (slower — clone beats OS-page-cached read).
 
 ## [0.2.13] — `toEqual` undefined-own-property stripping
 ### Fixed

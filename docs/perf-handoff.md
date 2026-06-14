@@ -8,11 +8,19 @@ Status snapshot for picking up the perf work elsewhere. NOT a committed doc (yet
 ## TL;DR
 - Shipped **v0.2.12** = V8 bytecode code-cache (E2), ~1.5–1.8%, identical pass/fail. Live on npm.
 - E1 (V8 flags), E3 (mem-cache), E4 (worker-count) = KILLED. E5 (snapshot-keep) = no-ship (opt-in).
+- **2026-06-14 re-benchmark on a QUIET machine (load problem below RESOLVED): E1 + E4 both
+  reconfirmed KILL — the earlier "promising" reads were external-load artifacts.** E1 semi-space=64
+  = +10.2% trimmed SLOWER (jobs=1 micro; noise floor verified -0.2% / ±0.4%). E4 jobs=8 vs 7 =
+  +15.9%, 8 vs 6 = +59.8% SLOWER (full-suite, monotonic — ncpu is best). Neither ships.
 - Isolate-reuse spike = **NO** (breaks accuracy; fundamental). The big lever is closed by the
   100%-accuracy constraint.
 - Realistic ceiling for safe generic per-file wins ≈ **10–20% cumulative**, not 50%. ~1.8% banked.
-- Work paused because THIS machine had persistent external load (30–46 on 8 cores) making
-  full-suite A/B unreliable. Resume on a quiet machine.
+- **E10 (shrink V8 platform helper pool, gate `TURBO_V8_POOL=N`) = KILL (2026-06-14).** pool 0 vs 2
+  = +11.3% slower, 0 vs 4 = +5.3% slower (full-suite, quiet). The "surgical lever" hypothesis is
+  disproven — same as E4: fewer helper threads idles GC parallelism. Both concurrency levers closed.
+  Gate kept opt-in (default 0 = unchanged). Next untried = **E6/E11/E12** (per-file, microbench-valid).
+- ~~Work paused because THIS machine had persistent external load~~ — RESOLVED 2026-06-14, the
+  quiet-machine re-benchmark above is done; E1/E4 closed for good.
 
 ## Repo state (git, branch main)
 Latest commits (newest first), all pushed to origin/main:

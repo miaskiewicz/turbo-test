@@ -255,6 +255,24 @@ fn base_resolve_options(tsconfig: Option<PathBuf>, esm: bool) -> oxc_resolver::R
 
 /// Nearest tsconfig.json walking up from `dir` (so `paths` aliases resolve per project).
 fn nearest_tsconfig(dir: &Path) -> Option<PathBuf> {
+    // E12: memoize per-dir. Pure function of the filesystem layout, stable for a whole run, but
+    // called on EVERY resolve (resolver_for) and re-walks the tree with is_file() syscalls each
+    // time. A thread-local cache turns repeat lookups for the same dir into a hashmap hit.
+    if e12_enabled() {
+        thread_local! {
+            static TSC_MEMO: RefCell<HashMap<PathBuf, Option<PathBuf>>> = RefCell::new(HashMap::new());
+        }
+        if let Some(v) = TSC_MEMO.with(|m| m.borrow().get(dir).cloned()) {
+            return v;
+        }
+        let v = nearest_tsconfig_uncached(dir);
+        TSC_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v.clone()));
+        return v;
+    }
+    nearest_tsconfig_uncached(dir)
+}
+
+fn nearest_tsconfig_uncached(dir: &Path) -> Option<PathBuf> {
     let mut d = Some(dir);
     while let Some(cur) = d {
         let tc = cur.join("tsconfig.json");
@@ -399,6 +417,28 @@ pub fn resolve_spec(spec: &str, from_dir: &Path) -> Option<PathBuf> {
 
 /// Resolve with the importer's module kind (`esm`) selecting ESM vs CJS export conditions.
 pub fn resolve_spec_as(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
+    // E12: memoize per (spec, from_dir, esm, cjs-first). native_require repeats the same
+    // specifier from the same importer dir across every module/file that imports it; the oxc
+    // resolve + canonicalize is deterministic for a run. cjs-first is in the key because it
+    // flips the resolver conditions (mirrors resolver_for's own cache key).
+    if e12_enabled() {
+        thread_local! {
+            static RES_MEMO: RefCell<HashMap<(String, PathBuf, bool, bool), Option<PathBuf>>> =
+                RefCell::new(HashMap::new());
+        }
+        let cjs = CJS_FIRST_RESOLUTION.with(|c| c.get());
+        let key = (spec.to_string(), from_dir.to_path_buf(), esm, cjs);
+        if let Some(v) = RES_MEMO.with(|m| m.borrow().get(&key).cloned()) {
+            return v;
+        }
+        let v = resolve_spec_as_uncached(spec, from_dir, esm);
+        RES_MEMO.with(|m| m.borrow_mut().insert(key, v.clone()));
+        return v;
+    }
+    resolve_spec_as_uncached(spec, from_dir, esm)
+}
+
+fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
     // A `node_modules/<pkg>/...` import (some tests `await import('node_modules/x/dist/y')`)
     // is really a bare specifier — strip the prefix so oxc resolves it from node_modules.
     let spec = spec.strip_prefix("node_modules/").unwrap_or(spec);
@@ -1893,6 +1933,12 @@ fn postprocess_mr_cjs(mut code: String) -> String {
 fn mr_enabled() -> bool {
     std::env::var("TURBO_NO_MR").is_err()
 }
+
+// E12 (shipped v0.2.14): memoize nearest_tsconfig + resolve_spec_as. Default ON — a clean win on
+// both suites (ui full −7.4%, payroll full −13.9%, identical pass/fail). Escape hatch TURBO_NO_E12
+// mirrors TURBO_NO_CODE_CACHE. (E6 transform-existence memo = neutral, E11 drain-loop hoist =
+// slightly slower — both measured no-help at the validated jobs=8 protocol and not shipped.)
+fn e12_enabled() -> bool { std::env::var("TURBO_NO_E12").is_err() }
 
 /// react family — bundled standalone (one instance) and externalized from every other
 /// node_modules bundle so all code shares the SAME react (fixes dual-react in mocks).
