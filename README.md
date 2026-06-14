@@ -5,7 +5,7 @@
 Written in Rust on V8: per-file transforms via [oxc](https://oxc.rs)/esbuild, a native
 [turbo-dom](https://www.npmjs.com/package/@miaskiewicz/turbo-dom) DOM, work-stealing parallelism,
 and an optional isolate-reuse mode. Runs your existing `*.test.ts(x)` files — same `describe`/`it`/
-`expect`/`vi`, same `@testing-library/react` + jest-dom — typically **~6× faster than vitest+jsdom**.
+`expect`/`vi`, same `@testing-library/react` + jest-dom — typically **~7–9× faster than vitest+jsdom**.
 Also runs **jest** suites (`jest` global + jest config + `emitDecoratorMetadata`) — see
 [Jest compatibility](#jest-compatibility-experimental) (experimental).
 
@@ -18,35 +18,34 @@ npx turbo-test src/foo.test.ts --jobs 8 --reporter json
 ## Benchmarks
 
 Two real production app suites, **same machine, same session, identical pass counts** (Apple
-M-series, 10 workers). To keep it apples-to-apples we measured vitest two ways — with stock
-**jsdom** (the default most projects run) and with **turbo-dom** swapped in as the environment —
-so you can see the DOM's contribution separately from the runner's:
+M-series, 10 workers), measured **A-B-B-A interleaved** so machine drift cancels. To keep it
+apples-to-apples we measured vitest two ways — with stock **jsdom** (the default most projects run)
+and with **turbo-dom** swapped in as the environment — so you can see the DOM's contribution
+separately from the runner's:
 
 | Suite | Tests | vitest + jsdom | vitest + turbo-dom | **turbo-test** | vs jsdom | vs turbo-dom |
 |---|---|---|---|---|---|---|
-| **payroll-app** | 10,006 | 296s | 130s | **51s** | **5.8×** | 2.6× |
-| **ui-design-components** | 6,189 | 428s | 358s | **76s** | **5.6×** | 4.7× |
+| **payroll-app** | 10,580 | 184s | 69s | **~26s** | **7.1×** | 2.7× |
+| **ui-design-components** | 7,006 | 114s | 53s | **~12s** | **9.5×** | 4.5× |
 
 `ui-design-components` also runs under turbo-test's optional **isolate-reuse** mode (see below).
-On a less-loaded box it lands **46.8s — 9.1× vs vitest+jsdom**, ~1.6× over fresh isolation, still
-6189/0:
+On a quieter box an earlier measurement landed it at **~1.5–1.6× over fresh isolation** vs the same
+jsdom baseline — reuse stays opt-in because it changes per-file `vi.mock` semantics for projects
+that mock node_modules (see [Isolate-reuse](#isolate-reuse-extra-speed-zero-config)).
 
-| ui-design-components | jsdom | turbo-dom | turbo-test fresh | **turbo-test reuse** |
-|---|---|---|---|---|
-| 6,189 tests | 428s | 358s | 76s | **46.8s (9.1× vs jsdom)** |
-
-All configs pass 100% (10006/0 and 6189/0). Two takeaways:
+All configs pass 100% (**10,580/0** and **7,006/0**). Two takeaways:
 
 - **The DOM matters.** Just swapping jsdom → turbo-dom under plain vitest already cuts wall time
-  ~1.2–2.3× (jsdom's `environment` setup alone was **1228s cumulative** across workers on payroll
-  vs turbo-dom's **96s**). If you can't switch runners yet, switching the environment is free speed.
+  ~2.1–2.7× (jsdom's `environment` setup alone was **718s cumulative** across workers on payroll
+  vs turbo-dom's **33s**). If you can't switch runners yet, switching the environment is free speed.
 - **The runner matters more.** turbo-test's native transform + per-package dep-bundling + V8
   worker pool collapses vitest's `setup + import` cost (hundreds of seconds cumulative) and lands
-  **~6× faster than the jsdom baseline** — with zero config changes.
+  **~7–9× faster than the jsdom baseline** — with zero config changes.
 
-> Numbers are from a busy long-uptime workstation, so absolute seconds run high; the **ratios**
-> are what travel. Reuse mode's win over fresh scales with how loaded the machine is — under heavy
-> contention the two converge (~80s); on a quieter box reuse pulls ahead (46.8s above).
+> Numbers are from a busy long-uptime workstation, so absolute seconds run high (and load was
+> heavier during the payroll runs, compressing its ratio); the **ratios** are what travel. Measured
+> with v0.2.14 (E12 module-resolution memoization); the **turbo-test** column is the mean of the
+> interleaved A runs.
 
 ## Isolate-reuse (extra speed, zero config)
 
