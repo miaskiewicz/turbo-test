@@ -95,6 +95,32 @@ are TEST EXECUTION, not per-file plumbing — unreachable by resolution/transfor
 per-file wins look played out; the remaining levers are execution-side (IC warming, reuse) and are
 either closed (reuse breaks accuracy) or app-specific/hard.
 
+## GC/IC + setup-cost rounds (2026-06-14) — vein exhausted
+Attribution profile (ui vs payroll, --interpreted-frames-native-stack): GC 30% on render-heavy ui
+vs 4% on payroll ⇒ GC is React/MUI render allocation (user); Map ops = emotion/MUI (user); String
+= user formatting. macOS `sample` can't symbolize JIT JS (anonymous addresses) — attribution is
+structural. busy is a small slice of wall at jobs=1 (main thread waits on workers).
+- **G1** suppress old-gen GC (heap sizing `--max-old-space-size` / `--initial-old-space-size`):
+  KILL. Full-suite ui within the floor's own −2.5% noise. GC is concurrent (overlaps useful work)
+  so suppressing major GC doesn't cut wall. Accuracy identical.
+- **G2** shared string table (`--shared-string-table`): KILL — HANGS the runner (needs a shared
+  isolate group we don't create). Snapshot string-baking deferred (speculative, ~5% ceiling).
+- **I1** force tier-up (`--always-sparkplug`): KILL. +7.6% ui / +13.4% payroll slower — eager
+  baseline-JIT compile not amortized by short per-file runs.
+- **I3** stabilize our Map/object shapes: KILL unbuilt — attribution says the Map churn is
+  emotion/MUI (user), our runtime Maps are narrow polyfills.
+- **Setup-cost round (P1/P2/P3/P5/P6/P10)**: recon found these ALREADY DONE/optimal — RUNTIME_JS
+  (incl. all polyfills) fully baked into the snapshot; DOM gated by `needs_dom`; native binds are
+  few + required (V8 can't serialize Rust fn-pointers); scheduling is already duration-aware
+  (slowest-first) + work-stealing. Remaining ideas (P4 result-batch, P7 isolate-prewarm, P8 mmap
+  cache, P9 dep-granularity) are marginal — workers already overlap isolate creation; cached reads
+  are OS-page-cached (N5 neutral); results are in-process. Not built.
+CONCLUSION: safe-generic per-file optimization is exhausted post-E12. Wall is now user test
+EXECUTION (String/RegExp 26% + GC 23% + ICs 20% are all user/render or cold-by-design fresh-isolate
+cost) + irreducible V8 per-file isolate deserialize. The only remaining big lever is isolate reuse
+(warm ICs + interned strings across files) — closed by payroll accuracy. Cumulative banked ≈ E2
+1.8% + E12 ~7–14%, at the handoff's realistic 10–20% ceiling.
+
 ## Experiment backlog (ranked by profile, generic-only)
 - E1: V8 bytecode code-cache for compiled CJS modules (biggest expected)
 - E2: in-memory per-worker transform cache (kill repeated disk read + hash)
