@@ -186,12 +186,20 @@ install JS) remain baked in as in-isolate harness source — by design.
   C (vendor static esbuild — stopgap only).
 - **runtime.js → stays JS** (baked in, not a Node dep; native-callback port via rusty-v8 possible
   but not worth it).
+- **Distribution → npm thin-wrapper.** Keep `@miaskiewicz/turbo-test` on npm shipping prebuilt
+  per-platform binaries (familiar `npx turbo-test` / devDependency install), `bin` pointing at the
+  Rust binary. The Node *launch* requirement still goes away (cli.js logic moves into the binary —
+  Coupling 1); npm is just the delivery channel, not a runtime dep. `cargo-dist` releases can be
+  added alongside later for non-npm users.
+- **oxc upstream CJS transform → NOT available (checked Jun 2026).** Issue
+  [oxc#4050](https://github.com/oxc-project/oxc/issues/4050) (babel-plugin-transform-modules-commonjs)
+  open since Jul 2024, no implementation progress / assignee / target version. Local 0.134 only
+  wires `Module::CommonJS` to TS-only `import x = require()` (`typescript/module.rs`) — no general
+  ESM→CJS pass exists. **Option A step 1 stays full-scope: we hand-roll the emit.** Bumping oxc
+  won't change this. (Aside: oxc wants the transform itself "for Rolldown app mode" — so rolldown's
+  own module execution is blocked on the same gap; reinforces that B wouldn't have dodged it.)
 
 ## Open questions (for the user)
 
-- **Keep an npm package?** Distribute via npm thin-wrapper (familiar `npx turbo-test`) vs pure
-  cargo/`cargo-dist` release only?
 - **turbo-dom crate API** — what's the planned Rust surface, and is the in-isolate `installGlobals`
   JS staying or being replaced by direct V8 binding?
-- **Check oxc upstream CJS transform** before hand-rolling the emitter — if a real CommonJS
-  transform has landed since 0.134, Option A step 1 shrinks dramatically.
