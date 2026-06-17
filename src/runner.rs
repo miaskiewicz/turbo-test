@@ -3420,6 +3420,16 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
             }
         }
     }
+    // `-u/--update` → write/overwrite obsolete-or-missing snapshots instead of failing the
+    // comparison (vitest's --update semantics). Plumbed via TURBO_UPDATE_SNAPSHOTS env (set by
+    // the CLI) → globalThis.__TT_UPDATE_SNAPSHOTS, read by toMatchSnapshot in the runtime.
+    if std::env::var("TURBO_UPDATE_SNAPSHOTS").is_ok() {
+        if let Some(code) = v8::String::new(scope, "globalThis.__TT_UPDATE_SNAPSHOTS=true") {
+            if let Some(s) = v8::Script::compile(scope, code, None) {
+                s.run(scope);
+            }
+        }
+    }
     // `-t/--testNamePattern` → expose the regex source to the runtime, which compiles it once and
     // skips non-matching tests. JSON-encode so any regex metacharacter survives the JS literal.
     if let Ok(pat) = std::env::var("TURBO_TEST_NAME_PATTERN") {
@@ -3861,7 +3871,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
                         if let Some(s) = v8::Script::compile(scope, code, None) { s.run(scope); }
                     }
                 }
-                break 'work drive_tests(scope, global);
+                break 'work drive_tests(scope, global, &entry_abs);
             }
             let Some(module) = load_graph(scope, &load_target) else {
                 break 'work Err("graph load failed".to_string());
@@ -3911,7 +3921,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
             }
 
             // 3. drive the collected tests: __tt.run() -> Promise<summary>
-            drive_tests(scope, global)
+            drive_tests(scope, global, &entry_abs)
         };
 
         // Coverage: read out V8's precise counts for everything this file executed, then map the
@@ -4076,7 +4086,7 @@ fn run_test_file_reused(
                         }
                     }
                 }
-                break 'work drive_tests(scope, global);
+                break 'work drive_tests(scope, global, entry_abs);
             }
             let Some(module) = load_graph(scope, load_target) else {
                 break 'work Err("graph load failed".to_string());
@@ -4114,7 +4124,7 @@ fn run_test_file_reused(
             if let Some(e) = ev_err {
                 break 'work Err(e);
             }
-            drive_tests(scope, global)
+            drive_tests(scope, global, entry_abs)
         };
 
         // NOTE: no clear_registry() here — node_modules Globals stay alive for the next file;
@@ -4178,7 +4188,18 @@ pub fn run_test_file_fresh(entry: &Path) -> Result<TestReport, String> {
 fn drive_tests(
     scope: &mut v8::PinScope,
     global: v8::Local<v8::Object>,
+    entry_abs: &Path,
 ) -> Result<TestReport, String> {
+    // Expose the test file's absolute path to the runtime so toMatchSnapshot() can locate the
+    // `__snapshots__/<basename>.snap` sibling (mirrors vitest's per-file snapshot resolution).
+    {
+        let js = format!("globalThis.__ttFile = {:?};", entry_abs.to_string_lossy());
+        if let Some(code) = v8::String::new(scope, &js) {
+            if let Some(s) = v8::Script::compile(scope, code, None) {
+                s.run(scope);
+            }
+        }
+    }
     let tt_key = v8::String::new(scope, "__tt").unwrap();
     let tt = v8::Local::<v8::Object>::try_from(
         global.get(scope, tt_key.into()).ok_or("no __tt")?,

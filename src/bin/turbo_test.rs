@@ -85,6 +85,9 @@ fn main() {
                     std::env::set_var("TURBO_TEST_NAME_PATTERN", v);
                 }
             }
+            // `-u` / `--update` — write missing/changed snapshots instead of failing (vitest
+            // `--update`). Plumbed to the runtime via env → globalThis.__TT_UPDATE_SNAPSHOTS.
+            "-u" | "--update" => std::env::set_var("TURBO_UPDATE_SNAPSHOTS", "1"),
             "--coverage" => coverage::enable(),
             // `--coverage-dir <path>` sets the lcov output dir (and implies --coverage).
             "--coverage-dir" => {

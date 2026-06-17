@@ -1,0 +1,31 @@
+// turbo-test snapshot v1
+
+exports[`snapshots > matches a primitive snapshot 1`] = `
+42
+`;
+
+exports[`snapshots > matches a thrown error snapshot 1`] = `
+"boom"
+`;
+
+exports[`snapshots > matches an object snapshot 1`] = `
+{
+  "a": 1,
+  "b": 2,
+  "nested": {
+    "z": [
+      1,
+      2,
+      3,
+    ],
+  },
+}
+`;
+
+exports[`snapshots > matches multiple snapshots in one test 1`] = `
+"first"
+`;
+
+exports[`snapshots > matches multiple snapshots in one test 2`] = `
+"second"
+`;

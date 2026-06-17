@@ -70,7 +70,7 @@ subcommand layer** — `argv[0]` that isn't a flag is treated as a test-file pat
 | `--pool <threads\|forks\|vmThreads>` | ⏸ | — | turbo-test has its own native worker model; flag is meaningless but should be accepted-and-ignored. |
 | `--maxWorkers` / `--minWorkers` | 🟡 | P2 | Map `--maxWorkers` → `--jobs`. No min. |
 | `--maxConcurrency <n>` | ❌ | P3 | Within-file concurrency; turbo-test runs a file's tests sequentially anyway. |
-| `-u, --update` | ❌ | P1 | Snapshot update. Blocked on snapshot support (see §4). |
+| `-u, --update` | ✅ | **P1 — DONE** | Snapshot update. `turbo_test.rs` → `TURBO_UPDATE_SNAPSHOTS` env → `globalThis.__TT_UPDATE_SNAPSHOTS`; `toMatchSnapshot` writes missing/changed keys instead of failing. Forwarded as a boolean flag by `cli.js`. Inline-snapshot auto-write is **not** supported (see §4). |
 | `--retry <n>` | ❌ | P2 | Global retry. Per-test `{ retry }` option **is** honored; no CLI/global form. |
 | `--silent` | ❌ | P2 | Suppress test `console.*` output. |
 | `--changed [since]` | ❌ | P2 | Run only tests affected by git changes. Logic exists in `m5-affected`, unwired. |
@@ -118,25 +118,27 @@ Mostly strong. Notable gaps:
 | API | status | Notes |
 |---|---|---|
 | `describe` / `.skip` / `.only` / `.each` | ✅ | `.each` template-name function form supported. |
-| `describe.todo` / `.skipIf` / `.runIf` / `.concurrent` | 🟡 | `it.*` has these; `describe.*` is missing `todo/skipIf/runIf/concurrent`. |
+| `describe.todo` / `.skipIf` / `.runIf` / `.concurrent` | ✅ | All four added (`runtime.js`). `todo` registers nothing; `skipIf`/`runIf` register the whole block only when the condition allows; `concurrent` is an accepted alias (tests still run **sequentially** within a file). |
 | `it`/`test`, `.skip`/`.only`/`.todo`/`.each`/`.skipIf`/`.runIf` | ✅ | |
 | `it.concurrent` | 🟡 | Accepted as alias; tests still run **sequentially** within a file. |
-| `it.fails` | ❌ | "expected to fail" inversion not implemented. |
-| `it.extend` (fixtures) | ❌ | Test-context fixtures unsupported. |
+| `it.fails` | ✅ | Outcome inverted in `runSuite` (a throwing body passes; a clean body fails). Honors per-test `{ retry }`. |
+| `it.extend` (fixtures) | 🟡 | Best-effort. Fixtures (plain values + `async ({deps}, use) => use(v)` functions) are resolved and passed as the test fn's first-arg context. `.skip/.only/.each/.extend` chain off the returned test. No per-fixture teardown after `use()`, no `{ auto }`/scoped fixtures, no `TestContext` extras (`task`, `expect`, `onTestFinished`, `annotate`). |
 | `{ timeout }` per-test / `--testTimeout` | ❌ | **Parsed but NOT enforced** (`runtime.js:1441` "no per-file timeout gate yet"). A hung test hangs the worker. P1. |
 | `{ retry }` per-test | ✅ | Honored in `runSuite`. |
 | hooks `beforeAll/afterAll/beforeEach/afterEach` | ✅ | Throwing hooks recorded as failures, run settles. |
 | `expect` + core matchers | ✅ | Large matcher set, `expect.extend`, `.soft`, asymmetric matchers, `expect.not`. |
-| `expect.assertions(n)` / `expect.hasAssertions()` | 🟡 | **No-ops** (`runtime.js:1128-1129`) — never enforce the assertion count. P2. |
-| `expect(...).toMatchSnapshot()` / `toMatchInlineSnapshot()` | ❌ | **No snapshot support** at all → blocks `-u/--update`. P1. |
-| `expect(...).toThrowErrorMatchingSnapshot()` | ❌ | Same. |
+| `expect.assertions(n)` / `expect.hasAssertions()` | ✅ | Enforced in `runSuite` after the test body. A per-test counter increments on each `expect(...)` / `expect.soft(...)` call (the `.assertions`/`.hasAssertions` calls themselves don't count); a mismatch / zero fails the test. Reset per test (and per retry attempt). |
+| `expect(...).toMatchSnapshot()` | ✅ | File snapshots under `__snapshots__/<testfile>.snap`, keyed `<full describe>it name> <counter>`. Missing key or update-mode writes + passes; else compares with a readable diff. Pretty-format-ish serializer (primitives / arrays / objects (sorted keys) / Map / Set / Date / RegExp / Error / functions). Driven by `-u`/`--update` → `TURBO_UPDATE_SNAPSHOTS` env → `globalThis.__TT_UPDATE_SNAPSHOTS`. The test file path reaches the runtime as `globalThis.__ttFile` (set in `drive_tests`). |
+| `expect(...).toMatchInlineSnapshot()` | 🟡 | **Compare path only**: comparing against the passed string (whitespace-normalized) works; with no arg it's a no-op pass. **AUTO-WRITING the inline snapshot back into the source on first run / `-u` is UNSUPPORTED** (no test-source rewriting) — pass the expected string explicitly. |
+| `expect(...).toThrowErrorMatchingSnapshot()` / `toThrowErrorMatchingInlineSnapshot()` | ✅ / 🟡 | The thrown error's `message` is snapshotted via the same file path (✅) / inline compare path (🟡, no auto-write). |
 | `vi.fn/spyOn/mock/unmock/doMock/mocked` | ✅ | |
 | `vi.useFakeTimers` + advance/run/clear family, `setSystemTime` | ✅ | Full fake-timer set incl. async variants. |
 | `vi.stubGlobal/stubEnv` + `unstubAllGlobals/unstubAllEnvs` | ✅ | |
 | `vi.hoisted` | ✅ | Shared between mock-prepass & module. |
 | `vi.waitFor/waitUntil` | ✅ | |
 | `jest.*` alias | ✅ | Compatibility shim object. |
-| `bench()` / `expect().toMatchObject` etc. | — | bench ❌; verify individual matchers ad-hoc. |
+| `toMatchObject` / `toContainEqual` / `toSatisfy` / `toHaveBeenCalledOnce` / `toHaveBeenNthCalledWith` | ✅ | Present (verified by `test/compat-api.test.mjs`). |
+| `bench()` | ❌ | No benchmark API. |
 
 ---
 
@@ -176,5 +178,14 @@ All four are locked by `test/cli-compat.test.mjs` (`npm test`).
   unknown-flag ignore, `--passWithNoTests`. Added `test/cli-compat.test.mjs` (the previously-missing
   `test/` dir that `npm test` expects). Next up: P1 (`--bail`, test `{ timeout }` enforcement,
   `--reporter junit` + `--outputFile`, `-c/--config`, snapshots).
+- 2026-06-17 — **test/expect API compat batch shipped** (§4): file snapshots (`toMatchSnapshot`,
+  `toThrowErrorMatchingSnapshot`) + `-u/--update`; `toMatchInlineSnapshot`/`…InlineSnapshot`
+  compare-only (no source auto-write); `expect.assertions(n)`/`hasAssertions()` enforcement;
+  `it.fails`; `describe.todo/.skipIf/.runIf/.concurrent`; `it.extend` fixtures (best-effort,
+  no teardown/scoped fixtures). Common matchers (`toMatchObject`, `toContainEqual`, `toSatisfy`,
+  `toHaveBeenCalledOnce`, `toHaveBeenNthCalledWith`) confirmed present. Added
+  `test/compat-api.test.mjs` + `fixtures/compat/*`. Snapshot file path plumbed via
+  `globalThis.__ttFile` (set in `drive_tests`). Remaining P1: `--bail`, `{ timeout }` enforcement,
+  `--reporter junit` + `--outputFile`, `-c/--config`.
 </content>
 </invoke>
