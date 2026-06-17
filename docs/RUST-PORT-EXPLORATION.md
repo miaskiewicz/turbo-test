@@ -7,22 +7,31 @@
 | P1 — cli.js → Rust | ✅ DONE | `src/launcher.rs`; cli.js is a thin shim; compat suites green |
 | P2a — app-file ESM→CJS emitter | ✅ DONE, default ON | `src/esm_cjs.rs`; payroll 1057 files/10471 tests full parity |
 | Conformity harness | ✅ DONE | `scripts/conformity.mjs` (parity + coverage modes) |
-| P2b — node_modules native | 🟡 EXPERIMENTAL (off) | `native_dep_cjs` behind `TURBO_NATIVE_DEPS`; naive per-file proven insufficient |
-| P2c — delete esbuild (mock AST, cov maps) | ⬜ TODO | blocked on P2b |
+| P2b — node_modules native bundler | ✅ DONE, default ON | `src/bundler.rs`; payroll full parity with native app **+ deps** |
+| P2c — delete esbuild | 🟡 PARTIAL | coverage maps built but density-gap; metadata + fallback still esbuild |
 | P3 — turbo-dom Rust crate | ⬜ TODO (other agent) | retire `napi_host.rs` |
 
-**esbuild is NOT yet removed.** P2a moved the *app-file* transform to oxc (default on). esbuild is
-still required for node_modules bundling, coverage source maps, decorator-metadata, and as the
-automatic app-file fallback.
+**Normal test runs are now 100% native** (app + node_modules), validated at full parity on the
+payroll oracle (1057 files / 10471 tests). esbuild is still invoked only for: **coverage runs**,
+**decorator-metadata** files, and as the **automatic fallback** for any unhandled form.
 
-**P2b finding (harness-validated):** a naive per-file native transform of node_modules is
-**incorrect** — it broke 2/300 payroll component files (MUI/emotion). All 850 emitted deps were
-syntactically valid, but 124 use `__reExport` (barrel `export *`) whose props are copied at load
-time; under circular/ordering deps the source module isn't initialized yet → missing exports.
-esbuild solves this by *bundling* each package with lazy `__esm`/`__commonJS` init wrappers (+
-asset loaders, `--loader:.css=empty`). A correct native deps path must replicate those wrapper
-semantics — substantial. The per-file path is kept behind `TURBO_NATIVE_DEPS` for that future work;
-**deleting esbuild (P2c) is blocked on it.**
+**P2b (done):** `src/bundler.rs` bundles a package's relative graph, wrapping each module in a lazy
+`__commonJS((exports,module)=>{…})` init closure (circular-safe — `module.exports` is assigned
+early with live getters), reusing the per-file emit verbatim inside; bare imports stay external
+(shared via require cache); assets stubbed. The naive per-file attempt's failure (barrel `export *`
+under circular deps) is fixed by the bundle + a key correctness fix: `__reExport` must pass
+`module.exports` as its 3rd arg (else `__toCommonJS`'s snapshot misses names re-exported afterward —
+this broke `@testing-library/react`'s `render`).
+
+**P2c (partial):** `emit` is now single-pass (TS-strip + ESM→CJS on one AST) and, under coverage,
+appends an inline oxc source map (correct — maps to the right source lines). But oxc's codegen map
+is **less dense** than esbuild's per-token map, so `coverage.rs` under-attributes inner
+functions/lines → not parity. Coverage therefore stays on esbuild (gated) until the map density is
+closed or `coverage.rs` is adapted. **Fully deleting esbuild needs:** (1) coverage-map density
+parity, (2) native decorator-metadata (oxc can already lower metadata — wire it to native ESM→CJS),
+(3) confidence to drop the fallback. The mock-hoist/shared-let passes need NO change — native emits
+esbuild-shape `var import_ = require(…)` lines, so the existing string passes work (payroll mock
+parity proves it).
 
 Conformity worktrees live at `/Users/grzegorzmiaskiewicz/github-flux/.tt-conformity/{payroll-app,flux-apis}`
 (detached on `origin/staging`, node_modules symlinked from the main checkouts). flux-apis only runs

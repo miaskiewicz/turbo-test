@@ -27,12 +27,18 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   safety mechanism gating the cutover; it already caught a real dynamic-`import()` bug, now fixed.
   Validated on the payroll-app `staging` worktree: **1057 files / 10471 tests, 100% native
   handling, full parity.**
-- **P2b: experimental native node_modules path (`TURBO_NATIVE_DEPS`, default OFF).** The harness
-  proved a naive per-file native transform of deps is incorrect — barrel `export *` re-exports under
-  circular/ordering deps lose exports (esbuild bundles each package with lazy init wrappers + asset
-  loaders to avoid this). Kept behind the flag for the future bundle-init implementation; esbuild
-  stays the default for node_modules. Deleting esbuild (coverage maps, mock-pass AST-ification) is
-  blocked on a correct P2b.
+- **P2b: native package bundler (`src/bundler.rs`), default ON.** Replaces esbuild for node_modules:
+  bundles a package's relative graph with lazy `__commonJS` init wrappers (circular-safe), bare
+  imports stay external (shared via require cache), assets stubbed. Opt out with `TURBO_NATIVE_DEPS=0`.
+  Validated: payroll 1057 files / 10471 tests full parity with native app **+ deps** — so **normal
+  test runs no longer use esbuild at all** (esbuild remains only for coverage, decorator-metadata,
+  and as the fallback). Key fix: `__reExport` passes `module.exports` as its 3rd arg so names
+  re-exported after `__toCommonJS` (e.g. `@testing-library/react`'s `render`) aren't lost.
+- **P2c (partial): single-pass emit + native coverage source maps (gated).** `emit` now does TS-strip
+  + ESM→CJS on one AST and, under coverage, appends a correct inline oxc source map. Coverage still
+  runs on esbuild for now: oxc's codegen map is less dense than esbuild's, so `coverage.rs`
+  under-attributes inner functions/lines. Fully removing esbuild additionally needs native
+  decorator-metadata + dropping the fallback.
 
 ## [0.2.16] — vitest CLI/API compatibility sweep + turbo-dom 0.2.5
 
