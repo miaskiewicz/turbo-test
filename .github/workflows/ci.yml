@@ -127,11 +127,63 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: x86_64-unknown-linux-musl
-      - name: Build (native musl target, gnu V8 archive + gnu bindings)
+      - name: musl libc-compat shim for the gnu-built V8 static lib
+        # The gnu prebuilt V8 references glibc-only symbols musl lacks: the LFS `*64` aliases
+        # (open64/mmap64/fopen64/fseeko64/ftello64/fstat64/…) and the _FORTIFY `__*_chk` family.
+        # musl is natively 64-bit-off_t and has no fortify, so provide thin wrappers and link them
+        # into the final binary (object files are always pulled, so they satisfy the undefined refs).
+        run: |
+          cat > /tmp/musl_compat.c <<'EOF'
+          #define _GNU_SOURCE
+          #define _LARGEFILE64_SOURCE
+          #include <fcntl.h>
+          #include <sys/stat.h>
+          #include <sys/mman.h>
+          #include <sys/types.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <stdarg.h>
+          #include <unistd.h>
+          int open64(const char*p,int fl,...){mode_t m=0;if(fl&O_CREAT){va_list a;va_start(a,fl);m=(mode_t)va_arg(a,int);va_end(a);}return open(p,fl,m);}
+          int openat64(int d,const char*p,int fl,...){mode_t m=0;if(fl&O_CREAT){va_list a;va_start(a,fl);m=(mode_t)va_arg(a,int);va_end(a);}return openat(d,p,fl,m);}
+          int creat64(const char*p,mode_t m){return creat(p,m);}
+          off_t lseek64(int f,off_t o,int w){return lseek(f,o,w);}
+          FILE*fopen64(const char*p,const char*m){return fopen(p,m);}
+          FILE*freopen64(const char*p,const char*m,FILE*s){return freopen(p,m,s);}
+          FILE*tmpfile64(void){return tmpfile();}
+          int fseeko64(FILE*s,off_t o,int w){return fseeko(s,o,w);}
+          off_t ftello64(FILE*s){return ftello(s);}
+          int stat64(const char*p,struct stat*b){return stat(p,b);}
+          int lstat64(const char*p,struct stat*b){return lstat(p,b);}
+          int fstat64(int f,struct stat*b){return fstat(f,b);}
+          int fstatat64(int d,const char*p,struct stat*b,int fl){return fstatat(d,p,b,fl);}
+          void*mmap64(void*a,size_t l,int pr,int fl,int f,off_t o){return mmap(a,l,pr,fl,f,o);}
+          ssize_t pread64(int f,void*b,size_t n,off_t o){return pread(f,b,n,o);}
+          ssize_t pwrite64(int f,const void*b,size_t n,off_t o){return pwrite(f,b,n,o);}
+          int ftruncate64(int f,off_t l){return ftruncate(f,l);}
+          int truncate64(const char*p,off_t l){return truncate(p,l);}
+          void*__memcpy_chk(void*d,const void*s,size_t n,size_t dn){(void)dn;return memcpy(d,s,n);}
+          void*__memmove_chk(void*d,const void*s,size_t n,size_t dn){(void)dn;return memmove(d,s,n);}
+          void*__memset_chk(void*d,int c,size_t n,size_t dn){(void)dn;return memset(d,c,n);}
+          char*__strcpy_chk(char*d,const char*s,size_t dn){(void)dn;return strcpy(d,s);}
+          char*__strncpy_chk(char*d,const char*s,size_t n,size_t dn){(void)dn;return strncpy(d,s,n);}
+          char*__strcat_chk(char*d,const char*s,size_t dn){(void)dn;return strcat(d,s);}
+          char*__strncat_chk(char*d,const char*s,size_t n,size_t dn){(void)dn;return strncat(d,s,n);}
+          int __snprintf_chk(char*s,size_t n,int fl,size_t sn,const char*f,...){(void)fl;(void)sn;va_list a;va_start(a,f);int r=vsnprintf(s,n,f,a);va_end(a);return r;}
+          int __vsnprintf_chk(char*s,size_t n,int fl,size_t sn,const char*f,va_list a){(void)fl;(void)sn;return vsnprintf(s,n,f,a);}
+          int __sprintf_chk(char*s,int fl,size_t sn,const char*f,...){(void)fl;(void)sn;va_list a;va_start(a,f);int r=vsprintf(s,f,a);va_end(a);return r;}
+          int __vsprintf_chk(char*s,int fl,size_t sn,const char*f,va_list a){(void)fl;(void)sn;return vsprintf(s,f,a);}
+          int __printf_chk(int fl,const char*f,...){(void)fl;va_list a;va_start(a,f);int r=vprintf(f,a);va_end(a);return r;}
+          int __fprintf_chk(FILE*st,int fl,const char*f,...){(void)fl;va_list a;va_start(a,f);int r=vfprintf(st,f,a);va_end(a);return r;}
+          EOF
+          cc -O2 -fPIC -c /tmp/musl_compat.c -o /tmp/musl_compat.o
+      - name: Build (native musl target, gnu V8 archive + gnu bindings + compat shim)
         # The v8 crate ships generated FFI bindings per target in gen/, but only for gnu/darwin —
         # there's no src_binding_release_x86_64-unknown-linux-musl.rs. The bindings are pure
         # x86_64 System-V ABI layout (identical for gnu and musl), so reuse the gnu file under the
         # musl name. cargo fetch (then a throwaway build if needed) extracts the crate source first.
+        env:
+          RUSTFLAGS: "-Clink-arg=/tmp/musl_compat.o"
         run: |
           set -e
           export CARGO_HOME="${CARGO_HOME:-/github/home/.cargo}"
