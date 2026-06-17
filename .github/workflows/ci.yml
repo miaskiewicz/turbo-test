@@ -127,8 +127,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: x86_64-unknown-linux-musl
-      - name: Build (native musl target)
-        run: cargo build --release --bin turbo-test
+      - name: Build (native musl target, gnu V8 archive + gnu bindings)
+        # The v8 crate ships generated FFI bindings per target in gen/, but only for gnu/darwin —
+        # there's no src_binding_release_x86_64-unknown-linux-musl.rs. The bindings are pure
+        # x86_64 System-V ABI layout (identical for gnu and musl), so reuse the gnu file under the
+        # musl name. cargo fetch (then a throwaway build if needed) extracts the crate source first.
+        run: |
+          set -e
+          export CARGO_HOME="${CARGO_HOME:-/github/home/.cargo}"
+          cargo fetch
+          find_src() { find "$CARGO_HOME/registry/src" -maxdepth 2 -type d -name 'v8-149.3.0' | head -1; }
+          SRC="$(find_src)"
+          if [ -z "$SRC" ] || [ ! -d "$SRC/gen" ]; then
+            cargo build --release --bin turbo-test >/dev/null 2>&1 || true   # force source extraction
+            SRC="$(find_src)"
+          fi
+          echo "v8 crate src: $SRC"
+          gnu="$SRC/gen/src_binding_release_x86_64-unknown-linux-gnu.rs"
+          test -f "$gnu" || { echo "gnu binding missing at $gnu"; ls "$SRC/gen" || true; exit 1; }
+          cp "$gnu" "$SRC/gen/src_binding_release_x86_64-unknown-linux-musl.rs"
+          cargo build --release --bin turbo-test
       - name: Stage binary
         run: |
           mkdir -p bin
