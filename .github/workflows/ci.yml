@@ -25,7 +25,6 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,   binname: turbo-test-linux-x64 }
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-musl,  binname: turbo-test-linux-x64-musl, optional: true }
           - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu,  binname: turbo-test-linux-arm64 }
           - { os: macos-latest,   target: aarch64-apple-darwin,       binname: turbo-test-darwin-arm64 }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,     binname: turbo-test-win32-x64.exe }
@@ -90,13 +89,68 @@ jobs:
           path: bin/turbo-test-*
           if-no-files-found: error
 
+  # ---- Build the musl (Alpine) binary in a REAL musl container ----
+  # The glibc matrix above CANNOT produce a musl binary: rusty_v8 (`v8` crate) ships ONLY
+  # gnu/darwin prebuilt static libs — there is no `librusty_v8_*_x86_64-unknown-linux-musl.a`,
+  # so cross-compiling `--target …-musl` makes build.rs 404 trying to download one (this is what
+  # broke the v0.2.16 musl leg). Fix: build natively inside napi-rs's Alpine image (default target
+  # IS x86_64-unknown-linux-musl) and point rusty_v8 at the GNU prebuilt via RUSTY_V8_ARCHIVE so it
+  # skips the (nonexistent) musl download and links the gnu static V8 instead. The smoke gate runs
+  # the binary under musl Node — a binary that won't link or crashes at startup never ships.
+  # Best-effort (continue-on-error): if the gnu-V8-under-musl link/run ever fails, the release still
+  # publishes the other platforms; Alpine users fall back to cli.js's build-from-source path.
+  build-musl:
+    name: build x86_64-unknown-linux-musl
+    runs-on: ubuntu-latest
+    container: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
+    continue-on-error: true
+    env:
+      V8_VERSION: v149.3.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trust the workspace (container runs as root)
+        run: git config --global --add safe.directory '*'
+      - name: Alpine build deps (g++/libstdc++ for the V8 static lib, curl)
+        run: apk add --no-cache g++ libstdc++ curl
+      - name: Fetch the gnu rusty_v8 prebuilt and pin RUSTY_V8_ARCHIVE
+        # rusty_v8 has no musl prebuilt; the gnu static lib links + runs under musl here
+        # (libstdc++ present). RUSTY_V8_ARCHIVE makes build.rs use this file instead of downloading.
+        run: |
+          url="https://github.com/denoland/rusty_v8/releases/download/${V8_VERSION}/librusty_v8_release_x86_64-unknown-linux-gnu.a"
+          curl -fsSL "$url" -o /tmp/librusty_v8.a
+          echo "RUSTY_V8_ARCHIVE=/tmp/librusty_v8.a" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-musl
+      - name: Build (native musl target)
+        run: cargo build --release --bin turbo-test
+      - name: Stage binary
+        run: |
+          mkdir -p bin
+          cp target/release/turbo-test bin/turbo-test-linux-x64-musl
+      - name: Smoke gate — musl binary must run (no link/startup crash)
+        run: |
+          set +e
+          bin/turbo-test-linux-x64-musl </dev/null
+          rc=$?
+          echo "exit code = $rc"
+          # 0/1 = clean run with no test files; >=128 = died by signal (e.g. 139 SIGSEGV) → fail.
+          if [ "$rc" -ge 128 ]; then
+            echo "::error::musl binary crashed at startup (exit $rc)"; exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-x86_64-unknown-linux-musl
+          path: bin/turbo-test-*
+          if-no-files-found: error
+
   # ---- Publish to npm on a version tag ----
   # One package containing every platform binary; cli.js picks the matching one at runtime
   # (linux x64 also detects musl vs glibc). Requires repo secret NPM_TOKEN (a Classic
   # Automation token allowed to publish the package).
   publish:
     name: publish
-    needs: [build]
+    needs: [build, build-musl]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
