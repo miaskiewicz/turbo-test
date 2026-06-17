@@ -15,28 +15,17 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    # `optional` legs never block the publish — assembly just ships without that
-    # binary. musl is optional because turbo-test statically links V8 (rusty_v8),
-    # whose prebuilts are glibc-only, so a musl link may fail. turbo-dom can build
-    # musl as a hard leg (pure Rust, no V8); we can't guarantee it, so best-effort.
-    #
-    # NOTE (investigated 2026-06-17): a musl prebuilt is NOT currently feasible.
-    # rusty_v8 v149.3.0 ships only gnu/darwin static libs (no *-musl.a). Building in
-    # a real Alpine container and linking the GNU V8 archive (RUSTY_V8_ARCHIVE) +
-    # a libc-compat shim (LFS *64 + __*_chk wrappers) gets PAST most of the link, but
-    # the gnu V8 is deeply glibc-coupled: it pulls __libc_stack_end (glibc-private,
-    # no musl equivalent — used for the main-thread stack bound) and reads glibc
-    # struct stat / dirent64 layouts, so even a forced link is ABI-UNSOUND at runtime.
-    # A correct musl binary needs V8 built FROM SOURCE for musl (V8_FROM_SOURCE=1 +
-    # depot_tools/gn/ninja) — a large CI investment, deferred. Until then Alpine users
-    # fall back to cli.js's build-from-source path (which prints clear instructions).
-    continue-on-error: ${{ matrix.optional == true }}
+    # musl (Alpine) is intentionally NOT built. turbo-test statically links V8 (rusty_v8),
+    # which ships only gnu/darwin prebuilt libs (no *-musl.a). The gnu V8 is deeply
+    # glibc-coupled (__libc_stack_end, glibc struct stat/dirent64 layouts), so linking it
+    # into a musl binary is ABI-unsound at runtime — investigated 2026-06-17. A correct
+    # musl build needs V8 from source (V8_FROM_SOURCE=1 + depot_tools/gn/ninja), deferred.
+    # Alpine users fall back to cli.js's build-from-source path (it prints instructions).
     strategy:
       fail-fast: false
       matrix:
         include:
           - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,   binname: turbo-test-linux-x64 }
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-musl,  binname: turbo-test-linux-x64-musl, optional: true }
           - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu,  binname: turbo-test-linux-arm64 }
           - { os: macos-latest,   target: aarch64-apple-darwin,       binname: turbo-test-darwin-arm64 }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,     binname: turbo-test-win32-x64.exe }
@@ -51,10 +40,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Linux musl deps
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Linux aarch64 cross toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -79,8 +64,8 @@ jobs:
 
       # Execute the freshly-built binary on natively-runnable legs so a binary that
       # crashes at startup never ships again (v0.2.3 linux-x64 segfaulted in ld.so:
-      # a macOS-only `-export_dynamic` linker flag zeroed e_entry). Cross-compiled
-      # legs (aarch64-linux, musl) can't run on the x64 host, so they're skipped.
+      # a macOS-only `-export_dynamic` linker flag zeroed e_entry). The cross-compiled
+      # aarch64-linux leg can't run on the x64 host, so it's skipped.
       - name: Smoke test (guard against startup crash)
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
         shell: bash
