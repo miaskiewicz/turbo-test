@@ -96,10 +96,36 @@ fn main() {
     let mut shard: Option<(usize, usize)> = None;
     let mut reporter = Reporter::Default;
     let mut output_file: Option<String> = None;
+    // `--bail N`: stop pulling new files once cumulative failed tests >= N (0 = disabled).
+    let mut bail: usize = 0;
+    // `--no-allowOnly`: error if any `.only` test is collected (vitest CI default).
+    let mut allow_only = true;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--jobs" | "-j" => jobs = args.next().and_then(|v| v.parse().ok()).unwrap_or(jobs),
+            // `--maxWorkers N` is vitest's name for the worker count → maps to --jobs.
+            "--jobs" | "-j" | "--maxWorkers" => jobs = args.next().and_then(|v| v.parse().ok()).unwrap_or(jobs),
+            // turbo-test has no minimum-worker concept; accept-and-ignore the value (documented).
+            "--minWorkers" => { let _ = args.next(); }
+            // `--testTimeout N` → default per-test timeout (ms); runtime reads __TT_DEFAULT_TIMEOUT.
+            "--testTimeout" => {
+                if let Some(v) = args.next() {
+                    if v.parse::<u64>().is_ok() { std::env::set_var("TURBO_TEST_TIMEOUT", v); }
+                }
+            }
+            // `--retry N` → global default retry count; runtime reads __TT_DEFAULT_RETRY.
+            "--retry" => {
+                if let Some(v) = args.next() {
+                    if v.parse::<u64>().is_ok() { std::env::set_var("TURBO_TEST_RETRY", v); }
+                }
+            }
+            // `--bail N` → stop the run after N failed tests total (cross-worker, file-granular).
+            "--bail" => { bail = args.next().and_then(|v| v.parse().ok()).unwrap_or(0); }
+            // `--silent` → suppress test console.* output; runtime reads __TT_SILENT.
+            "--silent" => { std::env::set_var("TURBO_TEST_SILENT", "1"); }
+            // `--allowOnly` / `--no-allowOnly` → permit (default) or forbid stray `.only` tests.
+            "--allowOnly" => { allow_only = true; }
+            "--no-allowOnly" => { allow_only = false; }
             "--shard" => {
                 if let Some(v) = args.next() {
                     if let Some((i, n)) = v.split_once('/') {
@@ -190,6 +216,10 @@ fn main() {
         eprintln!("usage: turbo-test [--jobs N] [--shard i/n] [--reporter json] <file.test.ts> [more...]");
         std::process::exit(2);
     }
+    // --no-allowOnly: plumb to the runtime (which fails any file that collected a `.only`).
+    if !allow_only {
+        std::env::set_var("TURBO_TEST_FORBID_ONLY", "1");
+    }
     // sharding: deterministic partition by index (spec §M6)
     if let Some((i, n)) = shard {
         if n >= 1 && i >= 1 && i <= n {
@@ -213,6 +243,9 @@ fn main() {
     let order = Arc::new(order);
     let cursor = Arc::new(AtomicUsize::new(0));
     let results = Arc::new(Mutex::new(Vec::<FileResult>::new()));
+    // --bail N: cumulative failed-test count across all workers. Once it reaches N, workers stop
+    // pulling NEW files (a worker mid-file finishes that file — file-granular, see vitest.compat.md).
+    let failed_total = Arc::new(AtomicUsize::new(0));
 
     let wall = Instant::now();
     let handles: Vec<_> = (0..jobs)
@@ -221,8 +254,12 @@ fn main() {
             let order = Arc::clone(&order);
             let cursor = Arc::clone(&cursor);
             let results = Arc::clone(&results);
+            let failed_total = Arc::clone(&failed_total);
             std::thread::spawn(move || {
               loop {
+                if bail > 0 && failed_total.load(Ordering::Relaxed) >= bail {
+                    break;
+                }
                 let i = cursor.fetch_add(1, Ordering::Relaxed);
                 if i >= order.len() {
                     break;
@@ -318,6 +355,9 @@ fn main() {
                         dur_ms,
                     },
                 };
+                if bail > 0 {
+                    failed_total.fetch_add(fr.failed as usize, Ordering::Relaxed);
+                }
                 results.lock().unwrap().push(fr);
               }
               // reuse path: tear down this worker's persistent isolate cleanly (no-op otherwise)

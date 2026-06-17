@@ -4,12 +4,15 @@
 // non-timer/non-DOM logic subset of the gauntlet end-to-end and report pass/fail.
 
 // ---- console shim (V8 contexts have none; Node/browser provide it) ----
+// `--silent` (host → globalThis.__TT_SILENT): suppress test console output entirely. Checked at
+// call time, not eval time — the host injects __TT_SILENT AFTER this module is snapshot-evaluated.
 const __noop = () => {};
+const __emit = (tag) => (...a) => { if (!globalThis.__TT_SILENT) globalThis.log(tag, ...a.map(String)); };
 globalThis.console = {
-  log: (...a) => globalThis.log('[log]', ...a.map(String)),
-  info: (...a) => globalThis.log('[info]', ...a.map(String)),
-  warn: (...a) => globalThis.log('[warn]', ...a.map(String)),
-  error: (...a) => globalThis.log('[error]', ...a.map(String)),
+  log: __emit('[log]'),
+  info: __emit('[info]'),
+  warn: __emit('[warn]'),
+  error: __emit('[error]'),
   debug: __noop,
   trace: __noop,
   group: __noop,
@@ -64,6 +67,11 @@ function __reportUncaught(e) {
 }
 const __loop = {
   macro: [],       // {id, due, cb, interval, gen}
+  // Internal one-shot timers (test-timeout enforcement). Kept SEPARATE from `macro` so they are
+  // invisible to the fake-timer API (getTimerCount / runAllTimers / advance / clearAllTimers) —
+  // otherwise a test's `vi.runAllTimers()` would fire the timeout reject. Driven only by the
+  // real-mode drive loop (stepMacro) so a genuinely hung async test still times out.
+  internal: [],    // {id, due, cb, gen}
   nextTicks: [],
   seq: 1,
   now: 0,          // logical clock (ms)
@@ -87,8 +95,18 @@ function __dropStaleTimers() {
   if (__loop.macro.length && __loop.macro.some((t) => t.gen < __loop.gen)) {
     __loop.macro = __loop.macro.filter((t) => t.gen >= __loop.gen);
   }
+  if (__loop.internal.length && __loop.internal.some((t) => t.gen < __loop.gen)) {
+    __loop.internal = __loop.internal.filter((t) => t.gen >= __loop.gen);
+  }
 }
 function __clearTimer(id) { __loop.macro = __loop.macro.filter((t) => t.id !== id); }
+// Internal one-shot timer (test-timeout). Separate queue → invisible to the fake-timer API.
+function __scheduleInternal(cb, delay) {
+  const id = __loop.seq++;
+  __loop.internal.push({ id, due: __loop.now + Math.max(0, delay | 0), cb, gen: __loop.gen });
+  return id;
+}
+function __clearInternal(id) { __loop.internal = __loop.internal.filter((t) => t.id !== id); }
 function __dueSorted(upto) {
   return __loop.macro.filter((t) => t.due <= upto).sort((a, b) => a.due - b.due || a.id - b.id);
 }
@@ -101,15 +119,27 @@ __loop.drainNextTicks = function () {
   return ran;
 };
 // Real mode: run the single earliest-due macrotask (Rust drains micro/nextTick around it).
+// Considers BOTH the user macro queue and the internal test-timeout queue, firing whichever is
+// due first — so a hung test (no user timers) still advances to its timeout and rejects.
 __loop.stepMacro = function () {
   __dropStaleTimers();
-  if (!__loop.macro.length) return false;
   __loop.macro.sort((a, b) => a.due - b.due || a.id - b.id);
-  const t = __loop.macro[0];
-  __loop.now = Math.max(__loop.now, t.due);
-  if (t.interval == null) __clearTimer(t.id);
-  else t.due = __loop.now + t.interval;
-  try { t.cb(); } catch (e) { __reportUncaught(e); }
+  __loop.internal.sort((a, b) => a.due - b.due || a.id - b.id);
+  const m = __loop.macro[0];
+  const it = __loop.internal[0];
+  if (!m && !it) return false;
+  // earliest-due wins; ties favor the user timer (matches scheduling order intent).
+  const useInternal = it && (!m || it.due < m.due);
+  if (useInternal) {
+    __loop.now = Math.max(__loop.now, it.due);
+    __clearInternal(it.id);
+    try { it.cb(); } catch (e) { __reportUncaught(e); }
+    return true;
+  }
+  __loop.now = Math.max(__loop.now, m.due);
+  if (m.interval == null) __clearTimer(m.id);
+  else m.due = __loop.now + m.interval;
+  try { m.cb(); } catch (e) { __reportUncaught(e); }
   return true;
 };
 // Fake mode: advance the virtual clock, firing timers in order (synchronous).
@@ -1603,13 +1633,19 @@ function __normTest(a, b) {
   else { fn = (typeof b === 'function' ? b : () => {}); o = {}; }
   return { fn, o };
 }
+// Default per-test timeout (ms): `--testTimeout` (host → globalThis.__TT_DEFAULT_TIMEOUT) else
+// vitest's 5000ms default. A test's own `{ timeout }` overrides this in runSuite.
+function __defaultTimeout() {
+  const n = Number(globalThis.__TT_DEFAULT_TIMEOUT);
+  return Number.isFinite(n) && n > 0 ? n : 5000;
+}
 function it(name, a, b) {
   const { fn, o } = __normTest(a, b);
-  current.tests.push({ name, fn, skip: false, only: false, retry: o.retry || 0 });
+  current.tests.push({ name, fn, skip: false, only: false, retry: o.retry || 0, timeout: o.timeout });
 }
 it.skip = (name, a, b) => current.tests.push({ name, fn: __normTest(a, b).fn, skip: true });
 it.todo = (name) => current.tests.push({ name, fn: () => {}, skip: true });
-it.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); current.tests.push({ name, fn, skip: false, only: true, retry: o.retry || 0 }); };
+it.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); current.tests.push({ name, fn, skip: false, only: true, retry: o.retry || 0, timeout: o.timeout }); };
 it.concurrent = it; // accepted; this runner executes a file's tests sequentially
 it.each = (rows) => (name, fn) => {
   rows.forEach((row, i) => {
@@ -1675,7 +1711,13 @@ async function runSuite(suite, ancestors, summary) {
     // (vitest: unanchored, case-sensitive, tested against the joined name).
     if (__tt.namePattern && !__tt.namePattern.test(label)) { summary.skipped++; continue; }
     if (t.skip || (__tt.hasOnly && !t.only)) { summary.skipped++; summary.tests.push({ name: label, status: 'skipped', duration_ms: 0 }); continue; }
-    const attempts = (t.retry || 0) + 1;
+    // retry: per-test `{ retry }` wins; else the global default (--retry → __TT_DEFAULT_RETRY).
+    const retry = (t.retry != null && t.retry > 0)
+      ? t.retry
+      : (Number(globalThis.__TT_DEFAULT_RETRY) > 0 ? Number(globalThis.__TT_DEFAULT_RETRY) : 0);
+    const attempts = retry + 1;
+    // timeout (ms): per-test `{ timeout }` wins; else the --testTimeout/5000 default.
+    const timeoutMs = (typeof t.timeout === 'number' && t.timeout > 0) ? t.timeout : __defaultTimeout();
     let lastErr;
     let ok = false;
     // Real wall time for the per-test duration reported by junit/tap/verbose. NOT performance.now()
@@ -1691,7 +1733,19 @@ async function runSuite(suite, ancestors, summary) {
       __snap.hasAssertions = false;
       try {
         for (const s of chain) for (const h of s.hooks.be) await h();
-        await t.fn();
+        // Race t.fn() against a timeout. The timeout is an INTERNAL one-shot timer (separate
+        // from the user/fake-timer queue), so the Rust drive loop advances the virtual clock to
+        // it and rejects even a test that never resolves (e.g. `await new Promise(() => {})`) —
+        // otherwise that hangs the whole worker — while staying invisible to vi.runAllTimers etc.
+        let timer;
+        const timed = new Promise((_, rej) => {
+          timer = __scheduleInternal(() => rej(new Error(`test timed out in ${timeoutMs}ms`)), timeoutMs);
+        });
+        try {
+          await Promise.race([Promise.resolve().then(() => t.fn()), timed]);
+        } finally {
+          __clearInternal(timer);
+        }
         // expect.assertions(n) / hasAssertions() enforcement (vitest: checked after the test body).
         if (__snap.expectedAssertions != null && __snap.assertCount !== __snap.expectedAssertions) {
           throw new Error(`expected ${__snap.expectedAssertions} assertion(s) but got ${__snap.assertCount}`);
@@ -1751,6 +1805,12 @@ globalThis.__tt = {
   },
   async run() {
     const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [] };
+    // --no-allowOnly (host → __TT_FORBID_ONLY): a stray `.only` must fail the run (vitest CI
+    // default). Record it as a failure so it surfaces in the report and flips the exit code.
+    if (globalThis.__TT_FORBID_ONLY && this.hasOnly) {
+      summary.failed++;
+      summary.failures.push('found `.only` test(s) but --allowOnly is disabled (--no-allowOnly)');
+    }
     await runSuite(root, [], summary);
     return summary;
   },
