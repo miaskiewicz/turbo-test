@@ -22,14 +22,25 @@ Three things still keep Node/npm in the loop:
 
 `index.js` (50 LOC programmatic API) is a Node-consumer convenience, orthogonal to the binary.
 
-### What CANNOT (and should not) become Rust
+### `src/runtime.js` — stays JS by CHOICE, not necessity
 
 `src/runtime.js` (1875 LOC) is the in-isolate test harness — `describe`/`it`/`expect`, the
-event-loop + timers, console/process shims, `vi.*`. **V8 executes JS, not Rust.** It is already
-baked into the binary via `include_str!` (`runner.rs:3364`) and ships inside it — it is not a Node
-dependency. "Entirely in Rust" means *the toolchain and distribution* are pure Rust; the harness
-glue that runs *inside the isolate* stays JS (the only alternative is Wasm, not worth it). Be
-honest about this in any "100% Rust" claim.
+event-loop + timers, console/process shims, `vi.*`. It is already baked into the binary via
+`include_str!` (`runner.rs:3364`) and ships inside it — **it is not a Node dependency.**
+
+Could it become Rust? The `v8 = "149.3.0"` crate IS **rusty_v8** (Deno's bindings; crate renamed
+`rusty_v8` → `v8`) — already our embedder. But rusty-v8 is the Rust↔V8 *FFI*; it lets Rust drive
+V8 and bind native functions, it does **not** make V8 run Rust (V8 executes JS/Wasm). So one
+*could* reimplement the harness as native `v8::FunctionTemplate` callbacks on `globalThis` (the
+binary already does this for `log`, microtask draining). Not worth it:
+
+- ergonomics collapse — matcher chaining (`expect(x).toBe(y)`), async test bodies interleaving with
+  user JS, `vi.fn()` proxies are all far cleaner as JS than as cross-FFI native callbacks;
+- **zero distribution payoff** — it's `include_str!`'d into the binary, removing nothing from the
+  "all Rust" target.
+
+So "entirely in Rust" means *the toolchain and distribution* are pure Rust; the in-isolate harness
+glue stays JS by choice. Don't claim "no JS at all" — claim "no Node runtime, no npm deps."
 
 ---
 
@@ -60,38 +71,78 @@ drop npm entirely and distribute via `cargo-dist` / GitHub releases.
 (and the `vitest.compat.md` quirks) or some projects' discovery silently changes. Port with the
 `test/cli-compat.test.mjs` + `compat-config-env.test.mjs` suites as the oracle.
 
-## Coupling 2 — `esbuild` subprocess → native bundler (HIGH lift)
+## Coupling 2 — `esbuild` subprocess → **DECIDED: Option A** (oxc-native ESM→CJS emitter)
 
-This is the real work. Two transform strategies coexist today:
+Decision (with user): **Option A — extend the in-tree oxc pipeline, no new bundler crate.** Not
+rolldown/swc_bundler (option B), not vendoring a static esbuild (option C). Reuses what's linked,
+removes the subprocess AND the npm `esbuild` dep, keeps resolution consistent with the module-runner
+and affected graph (all oxc_resolver). The cost is writing the ESM→CJS emit ourselves.
 
-1. **Module-runner path** — per-module: oxc_resolver resolves each specifier, oxc transforms
-   TS/JSX, V8 loads it as a module. Already pure Rust.
-2. **esbuild bundle path** (`esbuild_bundle_full`) — spawns esbuild `--bundle --format=esm
-   --platform=browser` to flatten a test file + **all its node_modules deps** into one file,
-   with mock externalization rewrites, CSS/asset loaders, and tsconfig `paths`. Cached by content
-   hash under `cache_dir()`.
+### Why it's not a flag-flip — the core blocker
 
-esbuild exists because the module-runner historically didn't cover the messy node_modules world
-(CJS/ESM interop, `__toESM` default-interop, deep dep trees, singleton preservation for
-react/@mui/@emotion — see the long `base_resolve_options` comment). Removing esbuild means one of:
+`transform.rs:67`: **`// oxc 0.134's CommonJS module transform is a no-op`.** esbuild is doing the
+ESM→CJS conversion that oxc can't yet. Even in module-runner mode (`mr_enabled()`, default ON),
+`read_transformed` still routes the CJS load path through esbuild:
 
-- **A. Extend the module-runner to cover node_modules too.** oxc_resolver already resolves bare
-  specifiers (it's used for the affected graph). The gaps to close: CJS↔ESM interop
-  (`__toESM`/`__commonJS` shims oxc_transformer can emit), `paths` aliases (already wired),
-  asset/CSS loaders (map to empty/text/dataurl in the loader, easy), and the singleton concern
-  (one resolved build per package — the resolver conditions already enforce this). This reuses the
-  most code and removes the subprocess + the npm `esbuild` dep entirely. **Preferred.**
-- **B. Embed a Rust bundler** — `rolldown` (oxc-family, Rust, designed as the esbuild/rollup
-  replacement) as a library, or `swc_bundler`. Adds a heavy dep but is closest to drop-in for the
-  bundle semantics we already rely on.
-- **C. Keep esbuild but vendor a static binary** — sidesteps "all Rust" (still a non-Rust
-  subprocess) but kills the npm/node_modules dependency. Cheap fallback if A/B slip.
+- **`esbuild_transform_cjs`** (`runner.rs:1387`) — per **app file**: TS/JSX → CJS.
+  oxc already does TS/JSX strip + decorator/metadata lowering (`transform.rs::transform`,
+  `transform_decorators_with_metadata`). Missing piece = module-syntax → CJS emit.
+- **`esbuild_bundle_dep_cjs`** (`runner.rs:1986`) — per **node_modules package entry**:
+  `--bundle --format=cjs --packages=external`. Flattens a package's OWN relative files into one
+  CJS module, **externalizes every bare import** so react/@mui/@emotion stay single-instance via
+  the require cache. = a mini intra-package bundler (oxc_resolver walks the relative graph; deps
+  are externalized, so it's bounded — not a general bundler).
 
-**Decision needed** (A vs B vs C) — see open questions. A is the cleanest "all Rust" answer and
-leans on machinery we already have; B is lower-risk for bundle parity; C is a stopgap.
+### What Option A must build
 
-**Oracle:** the `payroll 10006/0` + `ui 6189/0` real-world suites in memory. Any bundler swap must
-hold those green and the ~5.6–5.8× benchmark. Bundle cache (`esb-*.mjs`) keying logic carries over.
+1. **An oxc-based ESM→CJS emitter** matching esbuild's output **contract**, because that shape is
+   load-bearing downstream:
+   - `postprocess_mr_cjs` (`runner.rs:1952`) patches export getters → configurable, and overrides
+     `__toESM` to an identity (so `import styled from '@emotion/styled'` yields the function, not
+     the namespace);
+   - `hoist_mock_setup` (`runner.rs:1497`) **string-matches `var import_… = require(…)` lines** to
+     reorder requires below `vi.mock` setup;
+   - `shared_mock_lets` / `rewrite_shared_lets` route mock-closed-over `let`s through a global;
+   - react-family externalization keys off the same `var import_` / `require` shape.
+   So we either emit byte-compatible `var import_X = require("…")` + `__toESM`/`__commonJS` +
+   export-getter output, OR rewrite these consumers against an AST instead of strings (cleaner,
+   bigger diff). **Leaning AST-based** for the hoist/share passes — string-matching esbuild's exact
+   formatting is brittle.
+2. **The per-package bundle mode** — walk a package's relative import closure with oxc_resolver,
+   concatenate + CJS-wrap, externalize all bare specifiers. Reuse the `mrdep-*.cjs` content-cache.
+3. **Coverage source maps** — esbuild emits `--sourcemap=inline` so `coverage.rs` remaps V8 byte
+   ranges → original lines. oxc Codegen can emit a source map; wire it into the inline-map path
+   (`coverage.rs:499` decodes it). Must stay byte-faithful enough for the existing decoder.
+4. **Decorator-metadata path** — already oxc-capable (`transform_decorators_with_metadata`), but it
+   currently hands ESM to a *second* esbuild `--format=cjs` pass (`esbuild_format_cjs`). Same
+   emitter reused → drops that pass too. (tsc-parity path `tsc_transform_esm` is separate, opt-in
+   on decorator-load-failure; can stay.)
+
+### Sequencing within Option A
+
+a. Emitter for **app files** first (`esbuild_transform_cjs` replacement) — smaller, no graph walk.
+   Validate pass/fail + benchmark on one suite before touching node_modules.
+b. Then **per-package bundle** (`esbuild_bundle_dep_cjs`) — the harder half (graph + externalize +
+   singleton correctness).
+c. Convert `hoist_mock_setup`/`shared_mock_lets` to AST passes over our own output.
+d. Wire oxc source maps for coverage. Delete esbuild call sites + the npm dep + the
+   `esbuild_bundle_full` ESM path (setup/DOM-boot — also still esbuild).
+
+### Risks
+
+- **CJS/ESM interop is the whole reason esbuild is here** — `__toESM`/`__commonJS` default-interop,
+  `.default` semantics, live-binding mockability. Getting these subtly wrong = green→red on real
+  suites in non-obvious ways (the `base_resolve_options` + `postprocess_mr_cjs` comments are a map
+  of the landmines already hit).
+- **oxc upstream** may ship a real CJS transform — worth checking current oxc before hand-rolling
+  the emit; if it lands, step 1 shrinks to configuring `TransformOptions` + matching the shape.
+- The legacy non-MR ESM path (`esbuild_bundle_full`, setup files / DOM boot) is *also* esbuild —
+  Option A must cover it too for a clean kill, or keep MR-only and document that `TURBO_NO_MR` is
+  gone.
+
+**Oracle:** `payroll 10006/0` + `ui 6189/0` real-world suites (memory) + the ~5.6–5.8× benchmark.
+Every step gated on holding those green. Content-cache keying (`mr-*.cjs`, `mrdep-*.cjs`,
+`esb-*.mjs`) carries over with a new version tag to bust stale esbuild-shaped entries.
 
 ## Coupling 3 — `turbo-dom` `.node` → Rust crate (MEDIUM, gated on turbo-dom)
 
@@ -117,8 +168,9 @@ This coupling can stay as-is while 1 and 2 land; it's independently shippable.
 
 1. **Port `cli.js` into the Rust binary** (Coupling 1). Self-contained, immediately removes the
    Node *launch* requirement, validated by the existing compat suites. Ship first.
-2. **Native bundler spike** (Coupling 2, decide A/B/C). Biggest lift, biggest payoff — kills the
-   last runtime subprocess and the npm dep tree. Gate on the payroll/ui suites + benchmark.
+2. **oxc-native ESM→CJS emitter** (Coupling 2, Option A — decided). Biggest lift, biggest payoff —
+   kills the last runtime subprocess and the npm dep tree. Sub-sequenced a→d above. Gate every step
+   on the payroll/ui suites + benchmark.
 3. **turbo-dom Rust crate** (Coupling 3). Lands when the turbo-dom port is ready; retire
    `napi_host.rs`.
 4. **Distribution** — `cargo-dist` static binaries per platform; npm package becomes an optional
@@ -127,11 +179,19 @@ This coupling can stay as-is while 1 and 2 land; it's independently shippable.
 After 1–4: no `node` on `PATH`, no `node_modules`, one Rust binary. `runtime.js` (+ optional DOM
 install JS) remain baked in as in-isolate harness source — by design.
 
+## Decisions made
+
+- **Bundler strategy → Option A** (oxc-native ESM→CJS emitter). Rejected B (rolldown — would be the
+  pick if we embedded a bundler, since it's oxc-family vs swc_bundler's dead/duplicate-AST path) and
+  C (vendor static esbuild — stopgap only).
+- **runtime.js → stays JS** (baked in, not a Node dep; native-callback port via rusty-v8 possible
+  but not worth it).
+
 ## Open questions (for the user)
 
-- **Bundler strategy** — A (extend module-runner), B (embed rolldown/swc_bundler), or C (vendor
-  static esbuild as a stopgap)?
 - **Keep an npm package?** Distribute via npm thin-wrapper (familiar `npx turbo-test`) vs pure
   cargo/`cargo-dist` release only?
 - **turbo-dom crate API** — what's the planned Rust surface, and is the in-isolate `installGlobals`
   JS staying or being replaced by direct V8 binding?
+- **Check oxc upstream CJS transform** before hand-rolling the emitter — if a real CommonJS
+  transform has landed since 0.134, Option A step 1 shrinks dramatically.
