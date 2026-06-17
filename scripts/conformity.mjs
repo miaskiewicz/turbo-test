@@ -113,10 +113,10 @@ function main() {
     process.exit(unhandled === 0 ? 0 : 1);
   }
 
-  // parity mode
-  console.error(`conformity[parity]: ${dir}  (esbuild baseline vs native+fallback)`);
-  const base = runMode(dir, { TURBO_NATIVE_CJS: '0', TURBO_NATIVE_CJS_STRICT: '' }, opt.files, opt.jobs);
-  const ntv = runMode(dir, { TURBO_NATIVE_CJS: '1', TURBO_NATIVE_CJS_STRICT: '' }, opt.files, opt.jobs);
+  // parity mode — candidate enables native app transform AND native node_modules bundling.
+  console.error(`conformity[parity]: ${dir}  (esbuild baseline vs native app+deps)`);
+  const base = runMode(dir, { TURBO_NATIVE_CJS: '0', TURBO_NATIVE_DEPS: '0', TURBO_NATIVE_CJS_STRICT: '' }, opt.files, opt.jobs);
+  const ntv = runMode(dir, { TURBO_NATIVE_CJS: '1', TURBO_NATIVE_DEPS: '1', TURBO_NATIVE_CJS_STRICT: '' }, opt.files, opt.jobs);
   if (!base || !ntv) process.exit(2);
 
   const diverged = [];

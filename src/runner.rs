@@ -1423,14 +1423,16 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
     file.extension().and_then(|e| e.to_str()).unwrap_or("").hash(&mut h);
-    "native-dep-v1".hash(&mut h);
+    "native-dep-v3-bundle".hash(&mut h);
     let cache = cache_dir().join(format!("ntvdep-{:016x}.cjs", h.finish()));
     if let Ok(c) = std::fs::read_to_string(&cache) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
         return Some(c);
     }
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-    let code = crate::esm_cjs::emit(file, &raw)?;
+    // Bundle the package's relative graph with lazy __commonJS init wrappers (circular-safe),
+    // bare imports left external (shared via require cache). None → caller falls back to esbuild.
+    let code = crate::bundler::bundle(file)?;
     write_atomic(&cache, &code);
     Some(code)
 }

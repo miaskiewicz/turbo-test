@@ -53,16 +53,17 @@ pub fn strict() -> bool {
     std::env::var("TURBO_NATIVE_CJS_STRICT").map(|v| !v.is_empty()).unwrap_or(false)
 }
 
-/// Whether to use the native emitter for **node_modules** files (P2b). **Default OFF**, opt-in via
-/// `TURBO_NATIVE_DEPS=1`. The naive per-file approach is INCORRECT for real dep graphs: esbuild
-/// bundles a package (`--bundle --packages=external`), which (a) neutralizes non-JS asset imports
-/// via `--loader:.css=empty` etc. and (b) gives circular relative imports bundle-time init
-/// ordering. Per-file `require` does neither, so MUI/emotion-style deps fail to load (the
-/// conformity harness caught 2/300 payroll component files). A correct native deps path needs
-/// esbuild's `__esm`/`__commonJS` lazy-init wrappers + asset stubbing — substantial, deferred.
-/// Until then node_modules stays on the esbuild bundle.
+/// Whether to use the native bundler for **node_modules** packages (P2b). **Default ON** (opt out
+/// via `TURBO_NATIVE_DEPS=0`). Uses `crate::bundler` to bundle a package's relative graph with lazy
+/// `__commonJS` init wrappers (circular-safe) + asset stubbing — esbuild's bundle semantics. The
+/// conformity harness validated full parity on the payroll oracle (1057 files / 10471 tests) with
+/// native app + native deps, and esbuild remains the automatic fallback for any package the bundler
+/// can't handle, so this is zero-regression.
 pub fn deps_enabled() -> bool {
-    std::env::var("TURBO_NATIVE_DEPS").map(|v| v != "0" && !v.is_empty()).unwrap_or(false)
+    match std::env::var("TURBO_NATIVE_DEPS") {
+        Ok(v) => v != "0" && !v.is_empty(),
+        Err(_) => true,
+    }
 }
 
 /// How a reference to an imported local must be rewritten so bindings stay live.
@@ -91,18 +92,63 @@ fn import_var(source: &str, seq: usize) -> String {
 }
 
 /// Collected export registration entry: `exported_name: () => <value_js>`.
-struct ExportEntry {
+pub(crate) struct ExportEntry {
     name: String,
     value_js: String,
 }
 
-struct EmitState<'a> {
+/// How a module specifier should be referenced. App mode = everything `External` (runtime
+/// `require`). Bundler mode (P2b) resolves a package's own RELATIVE files to bundled modules
+/// referenced through their lazy init / `__commonJS` wrappers, while bare imports stay `External`.
+pub(crate) enum SourceRef {
+    /// runtime `require("spec")` (bare import, or app mode where everything is external)
+    External,
+    /// a bundled ESM module: `init_<id>()` then read `<id>_exports`
+    BundledEsm { id: String },
+    /// a bundled CJS module: `require_<id>()` returns its `module.exports`
+    BundledCjs { id: String },
+}
+
+/// Strategy controlling how source-bearing statements (import / export-from / `export *`) and the
+/// module's own exports object are lowered. App mode and bundler mode differ only here.
+pub(crate) struct LowerCtx<'r> {
+    /// the exports-registry object name (`__tt_exports` app; `<id>_exports` per bundled module)
+    pub exports_obj: String,
+    /// resolve a specifier → `SourceRef`. `None` = app mode (always `External`).
+    pub resolve: Option<&'r dyn Fn(&str) -> SourceRef>,
+}
+
+impl LowerCtx<'_> {
+    fn source_ref(&self, spec: &str) -> SourceRef {
+        match &self.resolve {
+            Some(f) => f(spec),
+            None => SourceRef::External,
+        }
+    }
+}
+
+/// The transformed pieces of one module, before final assembly. App mode wraps these into a
+/// self-contained CJS module; bundler mode wraps each into an `__esm`/`__commonJS` init closure.
+pub(crate) struct ModuleParts {
+    pub requires: Vec<String>,
+    pub re_exports: Vec<String>,
+    pub exports: Vec<ExportEntry>,
+    pub body_code: String,
+    pub default_needs_rewrite: bool,
+    /// true if the module used any static ESM import/export (else it's CJS / a plain script).
+    pub has_module_syntax: bool,
+}
+
+struct EmitState<'a, 'r> {
     ast: AstBuilder<'a>,
     imports: HashMap<SymbolId, Access>,
     scoping: Scoping,
+    /// bundler mode: resolve a `require("./rel")` specifier to a bundled module to rewrite the call.
+    /// `None` in app mode → require() calls are left untouched (runtime resolution).
+    resolve: Option<&'r dyn Fn(&str) -> SourceRef>,
 }
 
-impl<'a> EmitState<'a> {
+impl<'a> EmitState<'a, '_> {
     fn access_for_ref(&self, id: &IdentifierReference) -> Option<&Access> {
         let rid = id.reference_id.get()?;
         let sym = self.scoping.get_reference(rid).symbol_id()?;
@@ -146,14 +192,54 @@ impl<'a> EmitState<'a> {
         let toesm = self.call_global("__toESM", require_call);
         self.call_member("Promise", "resolve", toesm)
     }
+
+    /// `init_<id>(), <id>_exports` as a parenthesized sequence — the namespace of a bundled ESM
+    /// module after ensuring it's initialized.
+    fn build_init_exports(&self, id: &str) -> Expression<'a> {
+        let init = self.ast.expression_identifier(SPAN, self.ast.ident(&format!("init_{id}")));
+        let init_call = self.ast.expression_call(SPAN, init, NONE, self.ast.vec(), false);
+        let exports = self.ast.expression_identifier(SPAN, self.ast.ident(&format!("{id}_exports")));
+        self.ast.expression_sequence(SPAN, self.ast.vec_from_iter([init_call, exports]))
+    }
+
+    /// `require_<id>()` — the module.exports of a bundled CJS module.
+    fn build_require_id(&self, id: &str) -> Expression<'a> {
+        let callee = self.ast.expression_identifier(SPAN, self.ast.ident(&format!("require_{id}")));
+        self.ast.expression_call(SPAN, callee, NONE, self.ast.vec(), false)
+    }
+
+    /// If `call` is a static `require("literal")`, return the specifier string.
+    fn require_spec(call: &CallExpression) -> Option<String> {
+        if call.arguments.len() != 1 {
+            return None;
+        }
+        let Expression::Identifier(callee) = &call.callee else { return None };
+        if callee.name != "require" {
+            return None;
+        }
+        match call.arguments.first() {
+            Some(Argument::StringLiteral(s)) => Some(s.value.to_string()),
+            _ => None,
+        }
+    }
 }
 
-impl<'a> VisitMut<'a> for EmitState<'a> {
+impl<'a> VisitMut<'a> for EmitState<'a, '_> {
     fn visit_expression(&mut self, expr: &mut Expression<'a>) {
         if let Expression::Identifier(id) = expr {
             if let Some(access) = self.access_for_ref(id).cloned() {
                 *expr = self.build_member(&access);
                 return;
+            }
+        }
+        // bundler mode: rewrite `require("./rel")` for a bundled module to its init/require chain.
+        if let (Some(resolve), Expression::CallExpression(call)) = (self.resolve, &*expr) {
+            if let Some(spec) = Self::require_spec(call) {
+                match resolve(&spec) {
+                    SourceRef::BundledEsm { id } => { *expr = self.build_init_exports(&id); return; }
+                    SourceRef::BundledCjs { id } => { *expr = self.build_require_id(&id); return; }
+                    SourceRef::External => {}
+                }
             }
         }
         if matches!(expr, Expression::ImportExpression(_)) {
@@ -190,11 +276,26 @@ pub fn emit(path: &Path, src: &str) -> Option<String> {
     } else {
         src.to_string()
     };
+    // 2-5. Transform to parts in APP mode (everything external / runtime require).
+    let ctx = LowerCtx { exports_obj: "__tt_exports".to_string(), resolve: None };
+    let parts = transform_to_parts(&js, &ctx)?;
+    // 6. No ESM module syntax → a CommonJS module or a plain script: return the transformed body
+    //    WITHOUT CJS-wrapping it (wrapping would clobber the file's own module.exports/exports.x).
+    //    import() was still lowered.
+    if !parts.has_module_syntax {
+        return Some(parts.body_code);
+    }
+    Some(assemble(&parts.requires, &parts.re_exports, &parts.exports, &parts.body_code))
+}
 
-    // 2. Re-parse + semantic.
+/// Parse `js` (already TS/JSX-stripped, plain JS), classify imports/exports under `ctx`, rewrite
+/// references to imported locals + lower dynamic `import()`, and codegen the body. Returns the
+/// `ModuleParts` for the caller to assemble (app CJS module, or a bundled init closure). `None` on
+/// parse/semantic failure or an unhandled form.
+pub(crate) fn transform_to_parts(js: &str, ctx: &LowerCtx) -> Option<ModuleParts> {
     let alloc = Allocator::default();
     let stype = SourceType::mjs();
-    let parsed = Parser::new(&alloc, &js, stype).parse();
+    let parsed = Parser::new(&alloc, js, stype).parse();
     if !parsed.errors.is_empty() {
         return None;
     }
@@ -206,36 +307,24 @@ pub fn emit(path: &Path, src: &str) -> Option<String> {
     let scoping = sem.semantic.into_scoping();
     let ast = AstBuilder::new(&alloc);
 
-    // 3. Plan: classify imports/exports, build require prelude + export registry + body.
     let Plan { imports, requires, re_exports, exports, body_stmts, default_needs_rewrite } =
-        plan(&ast, &scoping, &mut program)?;
+        plan(&ast, &scoping, ctx, &mut program)?;
 
-    // 4. Rewrite references to imported locals (live bindings) + lower dynamic import() across the
-    //    body. Runs even with no static module syntax (a file may use only `import()`).
-    let mut state = EmitState { ast, imports, scoping };
+    let mut state = EmitState { ast, imports, scoping, resolve: ctx.resolve };
     let mut body = body_stmts;
     for stmt in body.iter_mut() {
         state.visit_statement(stmt);
     }
 
-    // 5. Codegen the rewritten body, fix up `export default`.
     let prog2 = ast.program(SPAN, stype, "", ast.vec(), None, ast.vec(), ast.vec_from_iter(body));
     let mut body_code = Codegen::new().build(&prog2).code;
     if default_needs_rewrite {
-        // the kept `export default <expr>` statement is invalid in a CJS script; turn it into the
-        // synthetic default var the getter reads. (First occurrence only; it appears once.)
         body_code = body_code.replacen("export default ", "var __tt_default = ", 1);
     }
 
-    // 6. No ESM module syntax (static import/export) → a CommonJS module or a plain script: return
-    //    the transformed body WITHOUT CJS-wrapping it. Wrapping (prepending
-    //    `module.exports = __toCommonJS(...)`) would clobber the file's own `module.exports` /
-    //    `exports.x` and detach the live `exports` binding. import() was still lowered above.
-    if requires.is_empty() && re_exports.is_empty() && exports.is_empty() && !default_needs_rewrite {
-        return Some(body_code);
-    }
-
-    Some(assemble(&requires, &re_exports, &exports, &body_code))
+    let has_module_syntax =
+        !(requires.is_empty() && re_exports.is_empty() && exports.is_empty() && !default_needs_rewrite);
+    Some(ModuleParts { requires, re_exports, exports, body_code, default_needs_rewrite, has_module_syntax })
 }
 
 struct Plan<'a> {
@@ -247,7 +336,7 @@ struct Plan<'a> {
     default_needs_rewrite: bool,
 }
 
-fn plan<'a>(ast: &AstBuilder<'a>, scoping: &Scoping, program: &mut Program<'a>) -> Option<Plan<'a>> {
+fn plan<'a>(ast: &AstBuilder<'a>, scoping: &Scoping, ctx: &LowerCtx, program: &mut Program<'a>) -> Option<Plan<'a>> {
     let mut imports: HashMap<SymbolId, Access> = HashMap::new();
     let mut requires: Vec<String> = Vec::new();
     let mut re_exports: Vec<String> = Vec::new();
@@ -265,13 +354,13 @@ fn plan<'a>(ast: &AstBuilder<'a>, scoping: &Scoping, program: &mut Program<'a>) 
         match stmt {
             Statement::ImportDeclaration(decl) => {
                 seq += 1;
-                if !collect_import(&decl, seq, &mut imports, &mut requires) {
+                if !collect_import(&decl, seq, ctx, &mut imports, &mut requires) {
                     return None;
                 }
             }
             Statement::ExportNamedDeclaration(decl) => {
                 seq += 1;
-                if !collect_export_named(scoping, decl.unbox(), seq, &mut requires, &mut exports, &mut deferred_named, &mut body_stmts) {
+                if !collect_export_named(scoping, decl.unbox(), seq, ctx, &mut requires, &mut exports, &mut deferred_named, &mut body_stmts) {
                     return None;
                 }
             }
@@ -284,13 +373,24 @@ fn plan<'a>(ast: &AstBuilder<'a>, scoping: &Scoping, program: &mut Program<'a>) 
                 seq += 1;
                 let src = decl.source.value.as_str();
                 match &decl.exported {
+                    // `export * as ns from "s"` → named export of the namespace object.
                     Some(name) => {
+                        let (prelude, expr) = module_namespace_expr(ctx, src, seq, true);
                         let var = import_var(src, seq);
-                        requires.push(format!("var {var} = __toESM(require(\"{src}\"));"));
+                        requires.extend(prelude);
+                        requires.push(format!("var {var} = {expr};"));
                         exports.push(ExportEntry { name: module_export_name(name), value_js: var });
                     }
+                    // `export * from "s"` → live merge into this module's exports object AND its
+                    // module.exports. The 3rd arg is REQUIRED: `module.exports = __toCommonJS(obj)`
+                    // (emitted earlier) snapshots `obj`'s getters into a NEW object, so re-exported
+                    // names added to `obj` afterward must ALSO be copied onto module.exports. Inside
+                    // a bundled module's `__commonJS` closure, `module.exports` is the closure param.
                     None => {
-                        re_exports.push(format!("__reExport(__tt_exports, require(\"{src}\"), module.exports);"));
+                        let (prelude, expr) = module_namespace_expr(ctx, src, seq, false);
+                        re_exports.extend(prelude);
+                        let obj = &ctx.exports_obj;
+                        re_exports.push(format!("__reExport({obj}, {expr}, module.exports);"));
                     }
                 }
             }
@@ -309,18 +409,70 @@ fn plan<'a>(ast: &AstBuilder<'a>, scoping: &Scoping, program: &mut Program<'a>) 
     Some(Plan { imports, requires, re_exports, exports, body_stmts, default_needs_rewrite })
 }
 
-/// Render one ImportDeclaration into require line(s) + import-map entries. Returns false on an
-/// unhandled form.
+/// An expression evaluating to a module's namespace object, plus any prelude lines needed first.
+/// `toesm` wraps external/CJS results with `__toESM` (default-interop); a bundled ESM module's
+/// exports object already has the right getters so it's used directly.
+fn module_namespace_expr(ctx: &LowerCtx, src: &str, _seq: usize, toesm: bool) -> (Vec<String>, String) {
+    match ctx.source_ref(src) {
+        SourceRef::External => {
+            let r = format!("require(\"{src}\")");
+            (vec![], if toesm { format!("__toESM({r})") } else { r })
+        }
+        // `(init_<id>(), <id>_exports)` — ensure the bundled ESM module is initialized, then read it.
+        SourceRef::BundledEsm { id } => (vec![], format!("(init_{id}(), {id}_exports)")),
+        SourceRef::BundledCjs { id } => {
+            let r = format!("require_{id}()");
+            (vec![], if toesm { format!("__toESM({r})") } else { r })
+        }
+    }
+}
+
+/// Map var-based import specifiers (default/named) to `<var>.<prop>` accesses. Namespace specifiers
+/// bind `var` directly (handled by the caller), so they get no entry.
+fn map_var_specs(
+    specifiers: &[ImportDeclarationSpecifier],
+    var: &str,
+    imports: &mut HashMap<SymbolId, Access>,
+) {
+    for spec in specifiers {
+        match spec {
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(d) => {
+                if let Some(sym) = d.local.symbol_id.get() {
+                    imports.insert(sym, Access { var: var.to_string(), prop: "default".into() });
+                }
+            }
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+            ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                if let Some(sym) = s.local.symbol_id.get() {
+                    imports.insert(sym, Access { var: var.to_string(), prop: module_export_name(&s.imported) });
+                }
+            }
+        }
+    }
+}
+
+/// Render one ImportDeclaration into require/init line(s) + import-map entries, under `ctx`.
+/// Returns false on an unhandled form.
 fn collect_import(
     decl: &ImportDeclaration,
     seq: usize,
+    ctx: &LowerCtx,
     imports: &mut HashMap<SymbolId, Access>,
     requires: &mut Vec<String>,
 ) -> bool {
     let src = decl.source.value.as_str();
+    let sref = ctx.source_ref(src);
+
     let Some(specifiers) = &decl.specifiers else {
-        let var = import_var(src, seq);
-        requires.push(format!("var {var} = require(\"{src}\");"));
+        // side-effect import: `import "s"`
+        match &sref {
+            SourceRef::External => {
+                let var = import_var(src, seq);
+                requires.push(format!("var {var} = require(\"{src}\");"));
+            }
+            SourceRef::BundledEsm { id } => requires.push(format!("init_{id}();")),
+            SourceRef::BundledCjs { id } => requires.push(format!("require_{id}();")),
+        }
         return true;
     };
 
@@ -331,28 +483,45 @@ fn collect_import(
         ImportDeclarationSpecifier::ImportNamespaceSpecifier(n) => Some(n.local.name.to_string()),
         _ => None,
     });
-    let var = ns_local.unwrap_or_else(|| import_var(src, seq));
 
-    let require_expr = if has_default_or_ns {
-        format!("__toESM(require(\"{src}\"))")
-    } else {
-        format!("require(\"{src}\")")
-    };
-    requires.push(format!("var {var} = {require_expr};"));
-
-    for spec in specifiers {
-        match spec {
-            ImportDeclarationSpecifier::ImportDefaultSpecifier(d) => {
-                if let Some(sym) = d.local.symbol_id.get() {
-                    imports.insert(sym, Access { var: var.clone(), prop: "default".into() });
+    match &sref {
+        // bundled ESM: refs go to `<id>_exports.<name>`; ensure init; bind a namespace local to it.
+        SourceRef::BundledEsm { id } => {
+            let exports_obj = format!("{id}_exports");
+            if let Some(local) = &ns_local {
+                requires.push(format!("var {local} = (init_{id}(), {exports_obj});"));
+            } else {
+                requires.push(format!("init_{id}();"));
+            }
+            for spec in specifiers {
+                match spec {
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(d) => {
+                        if let Some(sym) = d.local.symbol_id.get() {
+                            imports.insert(sym, Access { var: exports_obj.clone(), prop: "default".into() });
+                        }
+                    }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+                    ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                        if let Some(sym) = s.local.symbol_id.get() {
+                            imports.insert(sym, Access { var: exports_obj.clone(), prop: module_export_name(&s.imported) });
+                        }
+                    }
                 }
             }
-            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
-            ImportDeclarationSpecifier::ImportSpecifier(s) => {
-                if let Some(sym) = s.local.symbol_id.get() {
-                    imports.insert(sym, Access { var: var.clone(), prop: module_export_name(&s.imported) });
-                }
-            }
+        }
+        // bundled CJS: `var v = require_<id>()` (or __toESM for default/ns), refs `v.name`.
+        SourceRef::BundledCjs { id } => {
+            let var = ns_local.unwrap_or_else(|| import_var(src, seq));
+            let expr = if has_default_or_ns { format!("__toESM(require_{id}())") } else { format!("require_{id}()") };
+            requires.push(format!("var {var} = {expr};"));
+            map_var_specs(specifiers, &var, imports);
+        }
+        // external (bare, or app mode): runtime `require("spec")`.
+        SourceRef::External => {
+            let var = ns_local.unwrap_or_else(|| import_var(src, seq));
+            let expr = if has_default_or_ns { format!("__toESM(require(\"{src}\"))") } else { format!("require(\"{src}\")") };
+            requires.push(format!("var {var} = {expr};"));
+            map_var_specs(specifiers, &var, imports);
         }
     }
     true
@@ -363,6 +532,7 @@ fn collect_export_named<'a>(
     scoping: &Scoping,
     decl: ExportNamedDeclaration<'a>,
     seq: usize,
+    ctx: &LowerCtx,
     requires: &mut Vec<String>,
     exports: &mut Vec<ExportEntry>,
     deferred_named: &mut Vec<(String, String, Option<SymbolId>)>,
@@ -382,10 +552,13 @@ fn collect_export_named<'a>(
         return true;
     }
     if let Some(source) = &decl.source {
-        // `export { a, b as c } from "s"` — require the module, getters read from it.
+        // `export { a, b as c } from "s"` — reference the module, getters read from it.
         let src = source.value.as_str();
+        // bind the module's namespace to a local var, then getters read `var.local`.
         let var = import_var(src, seq + 1_000_000);
-        requires.push(format!("var {var} = require(\"{src}\");"));
+        let (prelude, expr) = module_namespace_expr(ctx, src, seq, false);
+        requires.extend(prelude);
+        requires.push(format!("var {var} = {expr};"));
         for spec in &decl.specifiers {
             let exported = module_export_name(&spec.exported);
             let local = module_export_name(&spec.local);
@@ -491,7 +664,11 @@ fn module_export_name(n: &ModuleExportName) -> String {
     }
 }
 
-const PREAMBLE: &str = r#"var __defProp = Object.defineProperty;
+/// Runtime helper preamble (shared by app emit + the bundler — emitted ONCE per output). `__esm`
+/// and `__commonJS` are the lazy module-init wrappers the bundler uses so circular dependencies +
+/// init ordering work (each module's body runs once, on first require, with its exports object
+/// already live).
+pub(crate) const PREAMBLE: &str = r#"var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
@@ -500,13 +677,16 @@ var __copyProps = (to, from, except, desc) => { if (from && typeof from === "obj
 var __reExport = (target, mod, secondTarget) => (__copyProps(target, mod, "default"), secondTarget && __copyProps(secondTarget, mod, "default"));
 var __toESM = (mod) => (mod && mod.__esModule ? mod : (mod && (typeof mod === "object" || typeof mod === "function") && !("default" in mod) && Object.defineProperty(mod, "default", { value: mod, configurable: true }), mod));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+var __commonJS = (cb) => { var mod; return () => (mod || (mod = { exports: {} }, cb(mod.exports, mod)), mod.exports); };
+var __esm = (fn) => { var done, res; return () => (done || (done = 1, res = fn()), res); };
 "#;
 
-/// Assemble the full CJS module text (order mirrors esbuild so the loader + `hoist_mock_setup`
-/// see the expected shape).
-fn assemble(requires: &[String], re_exports: &[String], exports: &[ExportEntry], body: &str) -> String {
-    let mut out = String::with_capacity(PREAMBLE.len() + body.len() + 512);
-    out.push_str(PREAMBLE);
+/// Assemble one module's CJS text from its parts — NO preamble (the caller emits that once).
+/// `module.exports = __toCommonJS(__tt_exports)` is written EARLY (before requires + body) so that
+/// under circular requires a re-entrant `require_<id>()` sees the live exports object. Order mirrors
+/// esbuild so the loader + `hoist_mock_setup` see the expected shape.
+pub(crate) fn assemble_module(requires: &[String], re_exports: &[String], exports: &[ExportEntry], body: &str) -> String {
+    let mut out = String::with_capacity(body.len() + 512);
     out.push_str("var __tt_exports = {};\n");
     if !exports.is_empty() {
         out.push_str("__export(__tt_exports, {\n");
@@ -528,7 +708,15 @@ fn assemble(requires: &[String], re_exports: &[String], exports: &[ExportEntry],
     out
 }
 
-fn quote_key(name: &str) -> String {
+/// App-mode full module: preamble + the assembled CJS module.
+fn assemble(requires: &[String], re_exports: &[String], exports: &[ExportEntry], body: &str) -> String {
+    let mut out = String::with_capacity(PREAMBLE.len() + body.len() + 512);
+    out.push_str(PREAMBLE);
+    out.push_str(&assemble_module(requires, re_exports, exports, body));
+    out
+}
+
+pub(crate) fn quote_key(name: &str) -> String {
     let ok = !name.is_empty()
         && name.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_' || c == '$').unwrap_or(false)
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
