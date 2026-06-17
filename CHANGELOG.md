@@ -16,14 +16,36 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   - `--passWithNoTests` — exit 0 (not 1) when discovery finds no test files.
   - Unknown `-`/`--` flags are now warned-and-ignored instead of being treated as test-file paths
     (which previously reached the runner as a hard load-error and flipped the exit code).
+- **vitest CLI compatibility — P1/P2 batches** (developed in parallel worktrees, merged together):
+  - **Execution control:** `--testTimeout <ms>` + per-test `{ timeout }` now ENFORCED (internal
+    one-shot timer raced against the body, invisible to `vi.runAllTimers`/`getTimerCount`; a hung
+    `await new Promise(()=>{})` test now fails cleanly instead of hanging the worker); `--retry <n>`
+    global default; `--bail <n>` (shared cross-worker failure counter, file-granular); `--maxWorkers`
+    alias of `--jobs`, `--minWorkers` accepted (no-op); `--silent` (test `console.*` no-op);
+    `--allowOnly`/`--no-allowOnly` (per-file `.only` gate that flips the exit code).
+  - **Reporters/output:** `--reporter junit` (per-testcase XML), `tap` (TAP v13), `verbose`, `dot`,
+    `default`; `--outputFile <path>` for json/junit/tap. Unknown reporter values fall back to text
+    (never error). Required retaining a per-test result list (`TestReport.tests`) through
+    `runtime.js` → `runner.rs` → `turbo_test.rs`.
+  - **Config/discovery/environment:** `-c/--config <path>` (force exact config), `--root`/`--dir`
+    (discovery-root override), `--environment <node|jsdom|happy-dom>` + `// @vitest-environment`
+    pragma (`node` skips turbo-dom DOM-global install via `TURBO_ENV`), `--isolate`/`--no-isolate`
+    (→ `TURBO_NO_REUSE`/`TURBO_REUSE_ISOLATE`), `--changed [since]` (git changed-file filter),
+    `--globals`/`--no-globals` (accepted; `--no-globals` a documented no-op).
+  - **Test/`expect` API:** file snapshots (`toMatchSnapshot`, `toThrowErrorMatchingSnapshot`) +
+    `-u/--update`; `toMatchInlineSnapshot` compare-only (no source auto-write); `expect.assertions(n)`/
+    `hasAssertions()` enforcement; `it.fails`; `describe.todo/.skipIf/.runIf/.concurrent`; `it.extend`
+    fixtures (best-effort).
+  - Documented compatibility gaps for every partial item are tracked in `vitest.compat.md`.
 
 ### Tests
 - Added `test/cli-compat.test.mjs` (the `test/` dir `npm test`/`node --test` already expected but
-  which did not exist) locking the four behaviors above, plus `fixtures/compat/`.
+  which did not exist) + `test/compat-{runflags,reporters,config-env,api}.test.mjs` — **47 cases**
+  total locking the behaviors above, plus `fixtures/compat/`.
 
 ### Docs
 - Added `vitest.compat.md` — a living CLI/command + `vi`/`expect` API compatibility matrix and
-  prioritized backlog.
+  prioritized backlog, updated as each batch landed.
 
 ## [0.2.15] — bump turbo-dom to 0.2.2
 
