@@ -5,6 +5,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.2.16] — vitest CLI/API compatibility sweep + turbo-dom 0.2.5
+
+### Changed
+- **Bump `@miaskiewicz/turbo-dom` `^0.2.2` → `^0.2.5`.** Pulls in the latest published DOM runtime.
+
 ### Added
 - **vitest CLI compatibility — P0 batch.** Closes the highest-value gaps for being a drop-in
   `vitest run` in CI (see `vitest.compat.md` for the full audit + tracker):
