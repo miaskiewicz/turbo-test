@@ -1506,6 +1506,9 @@ async function runSuite(suite, ancestors, summary) {
   const chain = [...ancestors, suite];
   for (const t of suite.tests) {
     const label = chain.map((s) => s.name).filter(Boolean).concat(t.name).join(' > ');
+    // -t/--testNamePattern: skip tests whose full `describe > it` name does not match the regex
+    // (vitest: unanchored, case-sensitive, tested against the joined name).
+    if (__tt.namePattern && !__tt.namePattern.test(label)) { summary.skipped++; continue; }
     if (t.skip || (__tt.hasOnly && !t.only)) { summary.skipped++; continue; }
     const attempts = (t.retry || 0) + 1;
     let lastErr;
@@ -1550,6 +1553,13 @@ async function runSuite(suite, ancestors, summary) {
 
 globalThis.__tt = {
   hasOnly: false,
+  // Compiled lazily from globalThis.__TT_NAME_PATTERN (set by the host from -t/--testNamePattern).
+  get namePattern() {
+    if (this._np !== undefined) return this._np;
+    const src = globalThis.__TT_NAME_PATTERN;
+    this._np = src ? (() => { try { return new RegExp(src); } catch { return null; } })() : null;
+    return this._np;
+  },
   async run() {
     const summary = { passed: 0, failed: 0, skipped: 0, failures: [] };
     await runSuite(root, [], summary);

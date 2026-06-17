@@ -3420,6 +3420,35 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
             }
         }
     }
+    // `-t/--testNamePattern` → expose the regex source to the runtime, which compiles it once and
+    // skips non-matching tests. JSON-encode so any regex metacharacter survives the JS literal.
+    if let Ok(pat) = std::env::var("TURBO_TEST_NAME_PATTERN") {
+        let js = format!("globalThis.__TT_NAME_PATTERN={};", json_string(&pat));
+        if let Some(code) = v8::String::new(scope, &js) {
+            if let Some(s) = v8::Script::compile(scope, code, None) {
+                s.run(scope);
+            }
+        }
+    }
+}
+
+/// Minimal JSON string encoder for embedding a Rust string as a JS string literal.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// native fs.existsSync(path) -> bool

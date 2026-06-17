@@ -77,6 +77,14 @@ fn main() {
                 }
             }
             "--reporter" => json = args.next().as_deref() == Some("json"),
+            // `-t <re>` / `--testNamePattern <re>` — run only tests whose full `describe > it`
+            // name matches the regex (vitest semantics: unanchored, case-sensitive). Plumbed to
+            // the runtime via env → `globalThis.__TT_NAME_PATTERN` (see runner bootstrap).
+            "-t" | "--testNamePattern" => {
+                if let Some(v) = args.next() {
+                    std::env::set_var("TURBO_TEST_NAME_PATTERN", v);
+                }
+            }
             "--coverage" => coverage::enable(),
             // `--coverage-dir <path>` sets the lcov output dir (and implies --coverage).
             "--coverage-dir" => {
@@ -116,6 +124,13 @@ fn main() {
                 if let Some(v) = args.next() {
                     coverage::add_exclude(&v);
                 }
+            }
+            // Unknown `-`/`--` token: a vitest flag turbo-test does not model (e.g. --silent,
+            // --pool=forks, --logHeapUsage). Warn + ignore — NEVER treat it as a test-file path
+            // (that reached the runner as a hard load-error and flipped the exit code). Test
+            // files and globs never start with `-`.
+            other if other.starts_with('-') => {
+                eprintln!("turbo-test: ignoring unsupported flag '{other}'");
             }
             _ => files.push(PathBuf::from(a)),
         }

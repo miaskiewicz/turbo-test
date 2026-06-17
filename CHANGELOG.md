@@ -5,6 +5,26 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Added
+- **vitest CLI compatibility — P0 batch.** Closes the highest-value gaps for being a drop-in
+  `vitest run` in CI (see `vitest.compat.md` for the full audit + tracker):
+  - `-t, --testNamePattern <re>` — run only tests whose full `describe > it` name matches the regex
+    (unanchored, case-sensitive, matching vitest). Plumbed `cli.js` → `TURBO_TEST_NAME_PATTERN` env
+    → `__TT_NAME_PATTERN` global → `runtime.js` `runSuite` filter.
+  - Leading `run`/`watch`/`dev` subcommand token is accepted and stripped (turbo-test is always a
+    single run), so the canonical `vitest run …` invocation works unchanged.
+  - `--passWithNoTests` — exit 0 (not 1) when discovery finds no test files.
+  - Unknown `-`/`--` flags are now warned-and-ignored instead of being treated as test-file paths
+    (which previously reached the runner as a hard load-error and flipped the exit code).
+
+### Tests
+- Added `test/cli-compat.test.mjs` (the `test/` dir `npm test`/`node --test` already expected but
+  which did not exist) locking the four behaviors above, plus `fixtures/compat/`.
+
+### Docs
+- Added `vitest.compat.md` — a living CLI/command + `vi`/`expect` API compatibility matrix and
+  prioritized backlog.
+
 ## [0.2.15] — bump turbo-dom to 0.2.2
 
 ### Changed

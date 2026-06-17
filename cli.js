@@ -181,7 +181,15 @@ function main() {
     );
     process.exit(1);
   }
-  const argv = process.argv.slice(2);
+  let argv = process.argv.slice(2);
+  // vitest dispatches on a leading subcommand (`vitest run …`, `vitest watch …`). turbo-test is
+  // always a single run, so accept-and-strip a leading `run`/`watch`/`dev` token rather than
+  // letting it reach the runner as a phantom test-file path.
+  if (argv.length && /^(run|watch|dev)$/.test(argv[0])) argv = argv.slice(1);
+  // `--passWithNoTests`: vitest exits 0 (not 1) when no test files match. Handled here in the
+  // launcher (the discover-empty branch below); not forwarded to the native binary.
+  const passWithNoTests = argv.includes('--passWithNoTests');
+  argv = argv.filter((a) => a !== '--passWithNoTests');
   // split flags (start with -) from file/glob args
   const flags = [];
   const files = [];
@@ -189,8 +197,8 @@ function main() {
     const a = argv[i];
     if (a.startsWith('-')) {
       flags.push(a);
-      // flags that take a value: --jobs N, --shard i/n, --reporter X
-      if (/^(-j|--jobs|--shard|--reporter|--coverage-dir|--coverage-thresholds|--coverage-threshold|--coverage-reporter|--coverage-reporters|--coverage-include|--coverage-exclude)$/.test(a) && i + 1 < argv.length && !argv[i + 1].startsWith('-')) {
+      // flags that take a value: --jobs N, --shard i/n, --reporter X, -t <pattern>
+      if (/^(-j|--jobs|--shard|--reporter|-t|--testNamePattern|--coverage-dir|--coverage-thresholds|--coverage-threshold|--coverage-reporter|--coverage-reporters|--coverage-include|--coverage-exclude)$/.test(a) && i + 1 < argv.length && !argv[i + 1].startsWith('-')) {
         flags.push(argv[++i]);
       }
     } else {
@@ -218,6 +226,10 @@ function main() {
   if (testFiles.length === 0) {
     testFiles = discover(process.cwd());
     if (testFiles.length === 0) {
+      if (passWithNoTests) {
+        console.error('turbo-test: no test files found — exiting 0 (--passWithNoTests).');
+        process.exit(0);
+      }
       console.error('turbo-test: no test files found (looked for *.test.* / *.spec.*).');
       process.exit(1);
     }
