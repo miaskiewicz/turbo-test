@@ -59,7 +59,7 @@ subcommand layer** — `argv[0]` that isn't a flag is treated as a test-file pat
 | `-t, --testNamePattern <re>` | ✅ | **P0 — DONE** | Filter tests by name (regex, unanchored, case-sensitive). `turbo_test.rs` → `TURBO_TEST_NAME_PATTERN` env → `__TT_NAME_PATTERN` global → `runtime.js` `runSuite` filter. `cli.js` forwards the value. |
 | `--run` | ✅ | **P0 — DONE** | `run`/`watch`/`dev` leading subcommand token stripped in `cli.js`; `--run` (and other unknown flags) accepted-and-ignored. |
 | `--passWithNoTests` | ✅ | **P0 — DONE** | `cli.js`: exit 0 instead of 1 when discovery finds no files. |
-| `--bail <n>` | ❌ | P1 | Stop the run after N failures. Needs cross-worker abort. |
+| `--bail <n>` | 🟡 | **P1 — DONE** | Stop after N **failed tests** total. `turbo_test.rs`: shared `Arc<AtomicUsize>` failure counter incremented after each file; workers stop pulling new files once it reaches N. **File-granular**: a worker already mid-file finishes that file, so the final failed count can exceed N (esp. with multiple workers); partial results are still reported. `cli.js` forwards the value. |
 | `--reporter junit` / `--outputFile` | ❌ | P1 | JUnit XML is the standard CI artifact. No file output of any reporter today. |
 | `--reporter` (verbose/dot/tap/tap-flat/html/default) | ❌ | P2 | Only `json` recognized. |
 | `-c, --config <path>` | ❌ | P1 | Config path is auto-discovered (nearest `vitest/vite.config.*`); cannot override. |
@@ -68,13 +68,13 @@ subcommand layer** — `argv[0]` that isn't a flag is treated as a test-file pat
 | `--globals` / `--no-globals` | 🟡 | P2 | Globals are **always on**; cannot disable. `import { describe } from 'vitest'` interop relies on this. |
 | `--isolate` / `--no-isolate` | 🟡 | P1 | Controlled by `TURBO_REUSE_ISOLATE`/`TURBO_NO_REUSE` env + config `isolate:false` autodetect — **no CLI flag**. |
 | `--pool <threads\|forks\|vmThreads>` | ⏸ | — | turbo-test has its own native worker model; flag is meaningless but should be accepted-and-ignored. |
-| `--maxWorkers` / `--minWorkers` | 🟡 | P2 | Map `--maxWorkers` → `--jobs`. No min. |
+| `--maxWorkers` / `--minWorkers` | ✅ | **P2 — DONE** | `--maxWorkers N` aliases `--jobs` (`turbo_test.rs`). `--minWorkers` is accepted-and-ignored — turbo-test has no minimum-worker concept (work-stealing scales down naturally). `cli.js` forwards both values. |
 | `--maxConcurrency <n>` | ❌ | P3 | Within-file concurrency; turbo-test runs a file's tests sequentially anyway. |
 | `-u, --update` | ❌ | P1 | Snapshot update. Blocked on snapshot support (see §4). |
-| `--retry <n>` | ❌ | P2 | Global retry. Per-test `{ retry }` option **is** honored; no CLI/global form. |
-| `--silent` | ❌ | P2 | Suppress test `console.*` output. |
+| `--retry <n>` | ✅ | **P2 — DONE** | Global default retry. `turbo_test.rs` → `TURBO_TEST_RETRY` env → `__TT_DEFAULT_RETRY` global → `runtime.js` `runSuite` (per-test `{ retry }` still wins). `cli.js` forwards the value. |
+| `--silent` | ✅ | **P2 — DONE** | `turbo_test.rs` → `TURBO_TEST_SILENT` → `__TT_SILENT` global; `runtime.js` console.log/info/warn/error become no-ops (checked at call time, since the global is injected after the runtime module is snapshot-evaluated). |
 | `--changed [since]` | ❌ | P2 | Run only tests affected by git changes. Logic exists in `m5-affected`, unwired. |
-| `--allowOnly` / `--no-allowOnly` | 🟡 | P3 | `.only` always allowed; vitest CI default forbids it. No flag to error on stray `.only`. |
+| `--allowOnly` / `--no-allowOnly` | 🟡 | **P3 — DONE** | Both flags accepted (`turbo_test.rs`). Default allows `.only`. `--no-allowOnly` → `TURBO_TEST_FORBID_ONLY` → `__TT_FORBID_ONLY`; `runtime.js` `__tt.run()` records a failure (flipping the exit code) for any **file** that collected a `.only`. **Partial**: per-file granularity — the failure is attributed to the file, and the file's `.only` tests still execute (vitest collect-time errors before running); the run exits non-zero with a clear message, which is the CI-relevant behavior. |
 | `--watch` / `-w` | ❌ | ⏸ | No watcher. |
 | `--ui` | ❌ | ⏸ | No browser UI. |
 | `--browser` | ❌ | ⏸ | No browser-mode. |
@@ -123,7 +123,7 @@ Mostly strong. Notable gaps:
 | `it.concurrent` | 🟡 | Accepted as alias; tests still run **sequentially** within a file. |
 | `it.fails` | ❌ | "expected to fail" inversion not implemented. |
 | `it.extend` (fixtures) | ❌ | Test-context fixtures unsupported. |
-| `{ timeout }` per-test / `--testTimeout` | ❌ | **Parsed but NOT enforced** (`runtime.js:1441` "no per-file timeout gate yet"). A hung test hangs the worker. P1. |
+| `{ timeout }` per-test / `--testTimeout` | ✅ | **ENFORCED.** `runtime.js` `runSuite` races `t.fn()` against an INTERNAL one-shot timer (separate from the user/fake-timer queue → invisible to `vi.runAllTimers`/`getTimerCount`) that rejects with `test timed out in <ms>ms`. Per-test `{ timeout }` (and the numeric 3rd-arg form) wins; else `--testTimeout` (`TURBO_TEST_TIMEOUT` → `__TT_DEFAULT_TIMEOUT`); else vitest's 5000ms. A genuinely hung async test (`await new Promise(()=>{})`) now fails cleanly instead of hanging the worker — the drive loop advances the virtual clock to the internal timeout. |
 | `{ retry }` per-test | ✅ | Honored in `runSuite`. |
 | hooks `beforeAll/afterAll/beforeEach/afterEach` | ✅ | Throwing hooks recorded as failures, run settles. |
 | `expect` + core matchers | ✅ | Large matcher set, `expect.extend`, `.soft`, asymmetric matchers, `expect.not`. |
@@ -162,9 +162,11 @@ Mostly strong. Notable gaps:
 
 All four are locked by `test/cli-compat.test.mjs` (`npm test`).
 
-**P1 (next):**
-- `--bail <n>`; test `{ timeout }` enforcement + `--testTimeout`; `--reporter junit` + `--outputFile`;
-  `-c/--config`; `--environment` selection; snapshots (`toMatchSnapshot` + `-u`); `--maxWorkers` alias.
+**P1 — ✅ execution-control batch SHIPPED 2026-06-17:**
+- ✅ test `{ timeout }` enforcement + `--testTimeout`; ✅ `--bail <n>`; ✅ `--maxWorkers`/`--minWorkers`;
+  ✅ `--retry`; ✅ `--silent`; ✅ `--allowOnly`/`--no-allowOnly` (partial, see §2).
+- Still open: `--reporter junit` + `--outputFile`; `-c/--config`; `--environment` selection;
+  snapshots (`toMatchSnapshot` + `-u`).
 
 **P2/P3:** see per-row priorities in §2/§4.
 
@@ -176,5 +178,11 @@ All four are locked by `test/cli-compat.test.mjs` (`npm test`).
   unknown-flag ignore, `--passWithNoTests`. Added `test/cli-compat.test.mjs` (the previously-missing
   `test/` dir that `npm test` expects). Next up: P1 (`--bail`, test `{ timeout }` enforcement,
   `--reporter junit` + `--outputFile`, `-c/--config`, snapshots).
+- 2026-06-17 — **Execution-control batch shipped**: `--testTimeout` + per-test `{ timeout }`
+  ENFORCEMENT (internal-timer race, invisible to fake timers; hung tests fail cleanly), `--retry`
+  global default, `--bail <n>` (file-granular cross-worker abort), `--maxWorkers` alias + `--minWorkers`
+  no-op, `--silent` (call-time console no-op), `--allowOnly`/`--no-allowOnly` (per-file `.only` gate).
+  Added `test/compat-runflags.test.mjs` (10 tests) + `fixtures/compat/{timeout,per-test-timeout,retry}.test.ts`
+  and `fixtures/compat/{bail,silent,only}/`. cli.js value-flag regex extended for the new value flags.
 </content>
 </invoke>
