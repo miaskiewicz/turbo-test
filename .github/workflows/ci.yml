@@ -19,12 +19,24 @@ jobs:
     # binary. musl is optional because turbo-test statically links V8 (rusty_v8),
     # whose prebuilts are glibc-only, so a musl link may fail. turbo-dom can build
     # musl as a hard leg (pure Rust, no V8); we can't guarantee it, so best-effort.
+    #
+    # NOTE (investigated 2026-06-17): a musl prebuilt is NOT currently feasible.
+    # rusty_v8 v149.3.0 ships only gnu/darwin static libs (no *-musl.a). Building in
+    # a real Alpine container and linking the GNU V8 archive (RUSTY_V8_ARCHIVE) +
+    # a libc-compat shim (LFS *64 + __*_chk wrappers) gets PAST most of the link, but
+    # the gnu V8 is deeply glibc-coupled: it pulls __libc_stack_end (glibc-private,
+    # no musl equivalent — used for the main-thread stack bound) and reads glibc
+    # struct stat / dirent64 layouts, so even a forced link is ABI-UNSOUND at runtime.
+    # A correct musl binary needs V8 built FROM SOURCE for musl (V8_FROM_SOURCE=1 +
+    # depot_tools/gn/ninja) — a large CI investment, deferred. Until then Alpine users
+    # fall back to cli.js's build-from-source path (which prints clear instructions).
     continue-on-error: ${{ matrix.optional == true }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,   binname: turbo-test-linux-x64 }
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-musl,  binname: turbo-test-linux-x64-musl, optional: true }
           - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu,  binname: turbo-test-linux-arm64 }
           - { os: macos-latest,   target: aarch64-apple-darwin,       binname: turbo-test-darwin-arm64 }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,     binname: turbo-test-win32-x64.exe }
@@ -89,158 +101,13 @@ jobs:
           path: bin/turbo-test-*
           if-no-files-found: error
 
-  # ---- Build the musl (Alpine) binary in a REAL musl container ----
-  # The glibc matrix above CANNOT produce a musl binary: rusty_v8 (`v8` crate) ships ONLY
-  # gnu/darwin prebuilt static libs — there is no `librusty_v8_*_x86_64-unknown-linux-musl.a`,
-  # so cross-compiling `--target …-musl` makes build.rs 404 trying to download one (this is what
-  # broke the v0.2.16 musl leg). Fix: build natively inside napi-rs's Alpine image (default target
-  # IS x86_64-unknown-linux-musl) and point rusty_v8 at the GNU prebuilt via RUSTY_V8_ARCHIVE so it
-  # skips the (nonexistent) musl download and links the gnu static V8 instead. The smoke gate runs
-  # the binary under musl Node — a binary that won't link or crashes at startup never ships.
-  # Best-effort (continue-on-error): if the gnu-V8-under-musl link/run ever fails, the release still
-  # publishes the other platforms; Alpine users fall back to cli.js's build-from-source path.
-  build-musl:
-    name: build x86_64-unknown-linux-musl
-    runs-on: ubuntu-latest
-    container: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
-    continue-on-error: true
-    env:
-      V8_VERSION: v149.3.0
-    steps:
-      - uses: actions/checkout@v4
-      - name: Trust the workspace (container runs as root)
-        run: git config --global --add safe.directory '*'
-      - name: Alpine build deps (g++/libstdc++ for the V8 static lib, curl)
-        run: apk add --no-cache g++ libstdc++ curl
-      - name: Ensure a default Rust toolchain (image ships rustup w/o a default)
-        run: rustup default stable || (rustup toolchain install stable && rustup default stable)
-      - name: Fetch the gnu rusty_v8 prebuilt and pin RUSTY_V8_ARCHIVE
-        # rusty_v8 has no musl prebuilt; the gnu static lib links + runs under musl here
-        # (libstdc++ present). RUSTY_V8_ARCHIVE makes build.rs use this file instead of downloading.
-        run: |
-          # rusty_v8 ships the static libs GZIPPED (…-gnu.a.gz); the plain .a is a 404.
-          url="https://github.com/denoland/rusty_v8/releases/download/${V8_VERSION}/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz"
-          curl -fsSL "$url" -o /tmp/librusty_v8.a.gz
-          gunzip -f /tmp/librusty_v8.a.gz   # → /tmp/librusty_v8.a
-          test -f /tmp/librusty_v8.a
-          echo "RUSTY_V8_ARCHIVE=/tmp/librusty_v8.a" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: x86_64-unknown-linux-musl
-      - name: musl libc-compat shim for the gnu-built V8 static lib
-        # The gnu prebuilt V8 references glibc-only symbols musl lacks: the LFS `*64` aliases
-        # (open64/mmap64/fopen64/fseeko64/ftello64/fstat64/…) and the _FORTIFY `__*_chk` family.
-        # musl is natively 64-bit-off_t and has no fortify, so provide thin wrappers and link them
-        # into the final binary (object files are always pulled, so they satisfy the undefined refs).
-        run: |
-          # Declare the base libc fns ourselves and do NOT include fcntl.h/stdio.h/unistd.h — those
-          # headers #define open64→open etc on musl, which would rewrite our definitions into
-          # redefinitions of the base symbols (multiple-definition link errors). sys/types gives the
-          # types without the LFS macros. -fno-stack-protector avoids an __stack_chk_fail dep.
-          cat > /tmp/musl_compat.c <<'EOF'
-          #include <sys/types.h>
-          #include <stddef.h>
-          #include <stdarg.h>
-          extern int open(const char*,int,...);
-          extern int openat(int,const char*,int,...);
-          extern int creat(const char*,mode_t);
-          extern off_t lseek(int,off_t,int);
-          extern void* fopen(const char*,const char*);
-          extern void* freopen(const char*,const char*,void*);
-          extern void* tmpfile(void);
-          extern int fseeko(void*,off_t,int);
-          extern off_t ftello(void*);
-          extern int stat(const char*,void*);
-          extern int lstat(const char*,void*);
-          extern int fstat(int,void*);
-          extern int fstatat(int,const char*,void*,int);
-          extern void* mmap(void*,size_t,int,int,int,off_t);
-          extern ssize_t pread(int,void*,size_t,off_t);
-          extern ssize_t pwrite(int,const void*,size_t,off_t);
-          extern int ftruncate(int,off_t);
-          extern int truncate(const char*,off_t);
-          extern void* memcpy(void*,const void*,size_t);
-          extern void* memmove(void*,const void*,size_t);
-          extern void* memset(void*,int,size_t);
-          int open64(const char*p,int fl,...){va_list a;va_start(a,fl);int m=va_arg(a,int);va_end(a);return open(p,fl,m);}
-          int openat64(int d,const char*p,int fl,...){va_list a;va_start(a,fl);int m=va_arg(a,int);va_end(a);return openat(d,p,fl,m);}
-          int creat64(const char*p,mode_t m){return creat(p,m);}
-          off_t lseek64(int f,off_t o,int w){return lseek(f,o,w);}
-          void* fopen64(const char*p,const char*m){return fopen(p,m);}
-          void* freopen64(const char*p,const char*m,void*s){return freopen(p,m,s);}
-          void* tmpfile64(void){return tmpfile();}
-          int fseeko64(void*s,off_t o,int w){return fseeko(s,o,w);}
-          off_t ftello64(void*s){return ftello(s);}
-          int stat64(const char*p,void*b){return stat(p,b);}
-          int lstat64(const char*p,void*b){return lstat(p,b);}
-          int fstat64(int f,void*b){return fstat(f,b);}
-          int fstatat64(int d,const char*p,void*b,int fl){return fstatat(d,p,b,fl);}
-          void* mmap64(void*a,size_t l,int pr,int fl,int f,off_t o){return mmap(a,l,pr,fl,f,o);}
-          ssize_t pread64(int f,void*b,size_t n,off_t o){return pread(f,b,n,o);}
-          ssize_t pwrite64(int f,const void*b,size_t n,off_t o){return pwrite(f,b,n,o);}
-          int ftruncate64(int f,off_t l){return ftruncate(f,l);}
-          int truncate64(const char*p,off_t l){return truncate(p,l);}
-          void* __memcpy_chk(void*d,const void*s,size_t n,size_t dn){(void)dn;return memcpy(d,s,n);}
-          void* __memmove_chk(void*d,const void*s,size_t n,size_t dn){(void)dn;return memmove(d,s,n);}
-          void* __memset_chk(void*d,int c,size_t n,size_t dn){(void)dn;return memset(d,c,n);}
-          EOF
-          cc -O2 -fPIC -fno-stack-protector -c /tmp/musl_compat.c -o /tmp/musl_compat.o
-      - name: Build (native musl target, gnu V8 archive + gnu bindings + compat shim)
-        # The v8 crate ships generated FFI bindings per target in gen/, but only for gnu/darwin —
-        # there's no src_binding_release_x86_64-unknown-linux-musl.rs. The bindings are pure
-        # x86_64 System-V ABI layout (identical for gnu and musl), so reuse the gnu file under the
-        # musl name. cargo fetch (then a throwaway build if needed) extracts the crate source first.
-        # The trailing -lc re-scans libc after the shim so the shim's base-fn calls resolve
-        # (static-link order: the shim object is appended after libc).
-        env:
-          RUSTFLAGS: "-Clink-arg=/tmp/musl_compat.o -Clink-arg=-lc"
-        run: |
-          set -e
-          export CARGO_HOME="${CARGO_HOME:-/github/home/.cargo}"
-          cargo fetch
-          find_src() { find "$CARGO_HOME/registry/src" -maxdepth 2 -type d -name 'v8-149.3.0' | head -1; }
-          SRC="$(find_src)"
-          if [ -z "$SRC" ] || [ ! -d "$SRC/gen" ]; then
-            cargo build --release --bin turbo-test >/dev/null 2>&1 || true   # force source extraction
-            SRC="$(find_src)"
-          fi
-          echo "v8 crate src: $SRC"
-          gnu="$SRC/gen/src_binding_release_x86_64-unknown-linux-gnu.rs"
-          test -f "$gnu" || { echo "gnu binding missing at $gnu"; ls "$SRC/gen" || true; exit 1; }
-          cp "$gnu" "$SRC/gen/src_binding_release_x86_64-unknown-linux-musl.rs"
-          cargo build --release --bin turbo-test
-      - name: Stage binary
-        run: |
-          mkdir -p bin
-          cp target/release/turbo-test bin/turbo-test-linux-x64-musl
-      - name: Smoke gate — musl binary must actually RUN a test (exercises V8)
-        # `binary </dev/null` exits before init_v8(), so it can't prove the gnu-V8-on-musl
-        # Frankenbinary works. Run a real fixture: this boots V8, builds the snapshot, transforms
-        # + executes TS, and asserts. A glibc/musl ABI mismatch (e.g. struct stat layout) surfaces
-        # here as a crash/failure → the (continue-on-error) job fails and musl simply doesn't ship,
-        # rather than publishing a binary that segfaults for Alpine users.
-        run: |
-          set +e
-          out=$(bin/turbo-test-linux-x64-musl fixtures/tests/logic.test.ts 2>&1)
-          rc=$?
-          echo "$out"; echo "exit code = $rc"
-          if [ "$rc" -ne 0 ]; then
-            echo "::error::musl binary failed to run a real test (exit $rc) — not shipping musl"; exit 1
-          fi
-          echo "$out" | grep -q "7 passed" || { echo "::error::unexpected musl test output"; exit 1; }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bin-x86_64-unknown-linux-musl
-          path: bin/turbo-test-*
-          if-no-files-found: error
-
   # ---- Publish to npm on a version tag ----
   # One package containing every platform binary; cli.js picks the matching one at runtime
   # (linux x64 also detects musl vs glibc). Requires repo secret NPM_TOKEN (a Classic
   # Automation token allowed to publish the package).
   publish:
     name: publish
-    needs: [build, build-musl]
+    needs: [build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
