@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use turbo_test::coverage;
-use turbo_test::runner::{forget_registry, init_v8, run_test_file, transform_cache_stats};
+use turbo_test::runner::{forget_registry, init_v8, run_test_file, transform_cache_stats, TestCase};
 
 struct FileResult {
     idx: usize,
@@ -20,8 +20,40 @@ struct FileResult {
     passed: u32,
     failed: u32,
     load_error: bool,
+    /// Load-error message (for the synthetic JUnit/TAP failing case); empty otherwise.
+    error_msg: String,
+    /// Per-test cases (name/status/duration/message) for the per-testcase reporters.
+    tests: Vec<TestCase>,
     setup_us: f64,
     dur_ms: f64,
+}
+
+/// Which reporter to emit. Anything turbo-test does not implement is accepted-and-ignored and
+/// falls back to `Default` (the text reporter) — never an error (vitest-compat requirement).
+#[derive(Clone, Copy, PartialEq)]
+enum Reporter {
+    Default,
+    Dot,
+    Json,
+    Junit,
+    Tap,
+    Verbose,
+}
+
+/// XML-escape a string for JUnit attribute/text content.
+fn xml_esc(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => o.push_str("&amp;"),
+            '<' => o.push_str("&lt;"),
+            '>' => o.push_str("&gt;"),
+            '"' => o.push_str("&quot;"),
+            '\'' => o.push_str("&apos;"),
+            _ => o.push(c),
+        }
+    }
+    o
 }
 
 fn durations_path() -> PathBuf {
@@ -62,7 +94,8 @@ fn main() {
     let mut jobs = std::env::var("TURBO_JOBS").ok().and_then(|v| v.parse().ok())
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
     let mut shard: Option<(usize, usize)> = None;
-    let mut json = false;
+    let mut reporter = Reporter::Default;
+    let mut output_file: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -76,7 +109,22 @@ fn main() {
                     }
                 }
             }
-            "--reporter" => json = args.next().as_deref() == Some("json"),
+            // `--reporter <r>`: select an output reporter. Implemented: default, dot, json,
+            // junit, tap, verbose. Any other value (html, tap-flat, hanging-process, …) is
+            // accepted-and-ignored → falls back to the text reporter (never an error).
+            "--reporter" | "--reporters" => {
+                reporter = match args.next().as_deref() {
+                    Some("json") => Reporter::Json,
+                    Some("junit") => Reporter::Junit,
+                    Some("tap") => Reporter::Tap,
+                    Some("verbose") => Reporter::Verbose,
+                    Some("dot") => Reporter::Dot,
+                    _ => Reporter::Default,
+                };
+            }
+            // `--outputFile <path>`: write the active reporter's output to a file (vitest writes
+            // the reporter artifact here — JUnit XML, TAP, JSON). Text/dot/verbose still print.
+            "--outputFile" | "--output-file" => output_file = args.next(),
             // `-t <re>` / `--testNamePattern <re>` — run only tests whose full `describe > it`
             // name matches the regex (vitest semantics: unanchored, case-sensitive). Plumbed to
             // the runtime via env → `globalThis.__TT_NAME_PATTERN` (see runner bootstrap).
@@ -253,7 +301,7 @@ fn main() {
                         for f in &rep.failures {
                             line.push_str(&format!("\n        ✗ {f}"));
                         }
-                        FileResult { idx, line, passed: rep.passed, failed: rep.failed, load_error: false, setup_us: rep.setup_us, dur_ms }
+                        FileResult { idx, line, passed: rep.passed, failed: rep.failed, load_error: false, error_msg: String::new(), tests: rep.tests, setup_us: rep.setup_us, dur_ms }
                     }
                     Err(e) => FileResult {
                         idx,
@@ -261,6 +309,8 @@ fn main() {
                         passed: 0,
                         failed: 0,
                         load_error: true,
+                        error_msg: e,
+                        tests: Vec::new(),
                         setup_us: 0.0,
                         dur_ms,
                     },
@@ -282,8 +332,27 @@ fn main() {
 
     let (mut tp, mut tf, mut errs, mut setup_sum, mut setup_n) = (0u32, 0u32, 0u32, 0.0f64, 0u32);
     let mut new_hist = hist.clone();
+    // `json/junit/tap` are machine artifacts — keep stdout clean for them (the artifact is the
+    // only stdout content; the human summary line goes to stderr). `default/dot/verbose` are
+    // human reporters and print to stdout.
+    let artifact_reporter = matches!(reporter, Reporter::Json | Reporter::Junit | Reporter::Tap);
     for r in &res {
-        println!("{}", r.line);
+        match reporter {
+            Reporter::Default => println!("{}", r.line),
+            Reporter::Dot => print!("{}", if r.load_error { "!" } else if r.failed == 0 { "." } else { "x" }),
+            Reporter::Verbose => {
+                println!("{}", r.line);
+                for t in &r.tests {
+                    let mark = match t.status.as_str() {
+                        "passed" => "✓",
+                        "failed" => "✗",
+                        _ => "-",
+                    };
+                    println!("   {mark} {} ({:.0}ms)", t.name, t.duration_ms);
+                }
+            }
+            _ => {}
+        }
         tp += r.passed;
         tf += r.failed;
         if r.load_error {
@@ -294,43 +363,146 @@ fn main() {
         }
         new_hist.insert(files[r.idx].to_string_lossy().to_string(), r.dur_ms);
     }
+    if reporter == Reporter::Dot {
+        println!();
+    }
     save_durations(&new_hist);
 
-    if json {
-        // Vitest-compatible-ish JSON summary (numTotalTests/numPassedTests/...).
-        let total: u32 = res.iter().map(|r| r.passed + r.failed).sum();
-        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-        let mut out = String::from("{");
-        out.push_str(&format!("\"numTotalTestSuites\":{},", files.len()));
-        out.push_str(&format!("\"numTotalTests\":{total},"));
-        out.push_str(&format!("\"numPassedTests\":{tp},"));
-        out.push_str(&format!("\"numFailedTests\":{tf},"));
-        out.push_str(&format!("\"success\":{},", tf == 0 && errs == 0));
-        out.push_str("\"testResults\":[");
-        let items: Vec<String> = res
-            .iter()
-            .map(|r| {
-                format!(
-                    "{{\"name\":\"{}\",\"status\":\"{}\",\"numPassingTests\":{},\"numFailingTests\":{}}}",
-                    esc(&files[r.idx].to_string_lossy()),
-                    if r.load_error { "error" } else if r.failed == 0 { "passed" } else { "failed" },
-                    r.passed,
-                    r.failed
-                )
-            })
-            .collect();
-        out.push_str(&items.join(","));
-        out.push_str("]}");
-        println!("{out}");
+    // Build the active artifact reporter's output (json/junit/tap). Written to --outputFile when
+    // given, else printed to stdout.
+    let artifact: Option<String> = match reporter {
+        Reporter::Json => {
+            // Vitest-compatible-ish JSON summary (numTotalTests/numPassedTests/...).
+            let total: u32 = res.iter().map(|r| r.passed + r.failed).sum();
+            let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+            let mut out = String::from("{");
+            out.push_str(&format!("\"numTotalTestSuites\":{},", files.len()));
+            out.push_str(&format!("\"numTotalTests\":{total},"));
+            out.push_str(&format!("\"numPassedTests\":{tp},"));
+            out.push_str(&format!("\"numFailedTests\":{tf},"));
+            out.push_str(&format!("\"success\":{},", tf == 0 && errs == 0));
+            out.push_str("\"testResults\":[");
+            let items: Vec<String> = res
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{{\"name\":\"{}\",\"status\":\"{}\",\"numPassingTests\":{},\"numFailingTests\":{}}}",
+                        esc(&files[r.idx].to_string_lossy()),
+                        if r.load_error { "error" } else if r.failed == 0 { "passed" } else { "failed" },
+                        r.passed,
+                        r.failed
+                    )
+                })
+                .collect();
+            out.push_str(&items.join(","));
+            out.push_str("]}");
+            Some(out)
+        }
+        Reporter::Junit => {
+            let total: u32 = res.iter().map(|r| r.passed + r.failed).sum();
+            let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+            out.push_str(&format!(
+                "<testsuites name=\"turbo-test\" tests=\"{total}\" failures=\"{tf}\" errors=\"{errs}\">\n"
+            ));
+            for r in &res {
+                let suite = files[r.idx].to_string_lossy().to_string();
+                let secs = r.dur_ms / 1000.0;
+                // A file that failed to LOAD has no per-test list: emit one synthetic failing
+                // <testcase> carrying the load error, so the failure is never silently dropped.
+                if r.load_error {
+                    out.push_str(&format!(
+                        "  <testsuite name=\"{}\" tests=\"1\" failures=\"1\" errors=\"1\" time=\"{:.3}\">\n",
+                        xml_esc(&suite), secs
+                    ));
+                    out.push_str(&format!(
+                        "    <testcase name=\"{}\" classname=\"{}\">\n      <error message=\"{}\"/>\n    </testcase>\n",
+                        xml_esc(&suite), xml_esc(&suite), xml_esc(&r.error_msg)
+                    ));
+                    out.push_str("  </testsuite>\n");
+                    continue;
+                }
+                out.push_str(&format!(
+                    "  <testsuite name=\"{}\" tests=\"{}\" failures=\"{}\" errors=\"0\" time=\"{:.3}\">\n",
+                    xml_esc(&suite), r.passed + r.failed, r.failed, secs
+                ));
+                for t in &r.tests {
+                    if t.status == "skipped" {
+                        continue;
+                    }
+                    out.push_str(&format!(
+                        "    <testcase name=\"{}\" classname=\"{}\" time=\"{:.3}\"",
+                        xml_esc(&t.name), xml_esc(&suite), t.duration_ms / 1000.0
+                    ));
+                    if t.status == "failed" {
+                        out.push_str(&format!(
+                            ">\n      <failure message=\"{}\"/>\n    </testcase>\n",
+                            xml_esc(&t.message)
+                        ));
+                    } else {
+                        out.push_str("/>\n");
+                    }
+                }
+                out.push_str("  </testsuite>\n");
+            }
+            out.push_str("</testsuites>\n");
+            Some(out)
+        }
+        Reporter::Tap => {
+            // TAP v13: a flat numbered plan over every test across all files.
+            let total: usize = res.iter().map(|r| r.tests.len()).sum();
+            let mut out = String::from("TAP version 13\n");
+            out.push_str(&format!("1..{total}\n"));
+            let mut n = 0usize;
+            for r in &res {
+                for t in &r.tests {
+                    n += 1;
+                    let ok = if t.status == "failed" { "not ok" } else { "ok" };
+                    let dir = if t.status == "skipped" { " # SKIP" } else { "" };
+                    out.push_str(&format!("{ok} {n} - {}{dir}\n", t.name));
+                    if t.status == "failed" && !t.message.is_empty() {
+                        out.push_str("  ---\n");
+                        out.push_str(&format!("  message: {}\n", t.message.replace('\n', " ")));
+                        out.push_str("  ...\n");
+                    }
+                }
+            }
+            Some(out)
+        }
+        _ => None,
+    };
+    if let Some(text) = artifact {
+        match &output_file {
+            Some(path) => {
+                if let Some(parent) = std::path::Path::new(path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(e) = std::fs::write(path, &text) {
+                    eprintln!("turbo-test: failed to write --outputFile '{path}': {e}");
+                }
+            }
+            None => println!("{text}"),
+        }
+    } else if let (Some(path), false) = (&output_file, artifact_reporter) {
+        // Non-artifact reporter + --outputFile: write the plain text PASS/FAIL lines so the flag
+        // is never silently ignored.
+        let text: String = res.iter().map(|r| format!("{}\n", r.line)).collect();
+        let _ = std::fs::write(path, text);
     }
 
     let avg_setup = if setup_n > 0 { setup_sum / setup_n as f64 } else { 0.0 };
     let (hits, misses) = transform_cache_stats();
     let hit_rate = if hits + misses > 0 { 100.0 * hits as f64 / (hits + misses) as f64 } else { 0.0 };
-    println!(
+    let summary = format!(
         "\n{} files | {} passed | {} failed | {} load-errors | {} jobs | wall {:.0} ms | env setup {:.2} ms/file | cache {:.0}% hit",
         files.len(), tp, tf, errs, jobs, wall_ms, avg_setup / 1000.0, hit_rate
     );
+    // Keep stdout clean for machine artifacts (json/junit/tap) printed to stdout — send the human
+    // summary to stderr so it doesn't corrupt the parsed output.
+    if artifact_reporter && output_file.is_none() {
+        eprintln!("{summary}");
+    } else {
+        println!("{summary}");
+    }
     let cov_ok = if coverage::enabled() { coverage::report() } else { true };
     std::process::exit(if tf == 0 && errs == 0 && cov_ok { 0 } else { 1 });
 }

@@ -3576,8 +3576,21 @@ pub struct TestReport {
     pub passed: u32,
     pub failed: u32,
     pub failures: Vec<String>,
+    /// Per-test list (full `describe > it` name, status, duration ms) — drives the
+    /// per-testcase reporters (junit/tap/verbose). Empty only if the file failed to load.
+    pub tests: Vec<TestCase>,
     /// Per-file environment setup time (isolate+context-from-snapshot+natives), µs.
     pub setup_us: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TestCase {
+    pub name: String,
+    /// "passed" | "failed" | "skipped".
+    pub status: String,
+    pub duration_ms: f64,
+    /// Failure message (empty unless status == "failed").
+    pub message: String,
 }
 
 impl TestReport {
@@ -4247,7 +4260,39 @@ fn drive_tests(
             }
         }
     }
-    Ok(TestReport { passed, failed, failures, setup_us: 0.0 })
+    // Per-test list (name/status/duration_ms/message) for the per-testcase reporters.
+    let mut tests = Vec::new();
+    let tkey = v8::String::new(scope, "tests").unwrap();
+    if let Some(arr) = summary
+        .get(scope, tkey.into())
+        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())
+    {
+        let get_str = |scope: &mut v8::PinScope, o: v8::Local<v8::Object>, key: &str| -> String {
+            let k = v8::String::new(scope, key).unwrap();
+            o.get(scope, k.into())
+                .filter(|v| !v.is_undefined() && !v.is_null())
+                .map(|v| v.to_rust_string_lossy(scope))
+                .unwrap_or_default()
+        };
+        let get_f64 = |scope: &mut v8::PinScope, o: v8::Local<v8::Object>, key: &str| -> f64 {
+            let k = v8::String::new(scope, key).unwrap();
+            o.get(scope, k.into()).and_then(|v| v.number_value(scope)).unwrap_or(0.0)
+        };
+        for i in 0..arr.length() {
+            if let Some(o) = arr
+                .get_index(scope, i)
+                .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
+            {
+                tests.push(TestCase {
+                    name: get_str(scope, o, "name"),
+                    status: get_str(scope, o, "status"),
+                    duration_ms: get_f64(scope, o, "duration_ms"),
+                    message: get_str(scope, o, "message"),
+                });
+            }
+        }
+    }
+    Ok(TestReport { passed, failed, failures, tests, setup_us: 0.0 })
 }
 
 /// Call a no-arg global JS function and coerce its result to bool.

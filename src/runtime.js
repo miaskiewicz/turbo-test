@@ -1509,10 +1509,13 @@ async function runSuite(suite, ancestors, summary) {
     // -t/--testNamePattern: skip tests whose full `describe > it` name does not match the regex
     // (vitest: unanchored, case-sensitive, tested against the joined name).
     if (__tt.namePattern && !__tt.namePattern.test(label)) { summary.skipped++; continue; }
-    if (t.skip || (__tt.hasOnly && !t.only)) { summary.skipped++; continue; }
+    if (t.skip || (__tt.hasOnly && !t.only)) { summary.skipped++; summary.tests.push({ name: label, status: 'skipped', duration_ms: 0 }); continue; }
     const attempts = (t.retry || 0) + 1;
     let lastErr;
     let ok = false;
+    // Real wall time for the per-test duration reported by junit/tap/verbose. NOT performance.now()
+    // — that's stubbed to a constant 0 in this runtime (see the perf stub near top of file).
+    const __t0 = Date.now();
     for (let a = 0; a < attempts && !ok; a++) {
       try {
         for (const s of chain) for (const h of s.hooks.be) await h();
@@ -1528,7 +1531,8 @@ async function runSuite(suite, ancestors, summary) {
         try { await h(); } catch (e) {}
       }
     }
-    if (ok) summary.passed++;
+    const __dur = Date.now() - __t0;
+    if (ok) { summary.passed++; summary.tests.push({ name: label, status: 'passed', duration_ms: __dur }); }
     else {
       summary.failed++;
       let msg = lastErr ? (lastErr.message || String(lastErr)) : String(lastErr);
@@ -1543,6 +1547,7 @@ async function runSuite(suite, ancestors, summary) {
         if (e0 && e0.stack) msg += '\n          @ ' + String(e0.stack).split('\n').slice(0, 5).join('\n          @ ');
       }
       summary.failures.push(`${label}: ${msg}`);
+      summary.tests.push({ name: label, status: 'failed', duration_ms: __dur, message: msg });
     }
   }
   for (const child of suite.suites) await runSuite(child, chain, summary);
@@ -1561,7 +1566,7 @@ globalThis.__tt = {
     return this._np;
   },
   async run() {
-    const summary = { passed: 0, failed: 0, skipped: 0, failures: [] };
+    const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [] };
     await runSuite(root, [], summary);
     return summary;
   },

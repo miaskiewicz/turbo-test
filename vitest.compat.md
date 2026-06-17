@@ -60,8 +60,8 @@ subcommand layer** — `argv[0]` that isn't a flag is treated as a test-file pat
 | `--run` | ✅ | **P0 — DONE** | `run`/`watch`/`dev` leading subcommand token stripped in `cli.js`; `--run` (and other unknown flags) accepted-and-ignored. |
 | `--passWithNoTests` | ✅ | **P0 — DONE** | `cli.js`: exit 0 instead of 1 when discovery finds no files. |
 | `--bail <n>` | ❌ | P1 | Stop the run after N failures. Needs cross-worker abort. |
-| `--reporter junit` / `--outputFile` | ❌ | P1 | JUnit XML is the standard CI artifact. No file output of any reporter today. |
-| `--reporter` (verbose/dot/tap/tap-flat/html/default) | ❌ | P2 | Only `json` recognized. |
+| `--reporter junit` / `--outputFile` | ✅ | **P1 — DONE** | JUnit XML (per-testcase) + `--outputFile` for json/junit/tap. See §3. |
+| `--reporter` (verbose/dot/tap/default) | ✅ | **P1/P2 — DONE** | `tap`/`verbose`/`dot`/`default` implemented; unknown values (`html`, `tap-flat`, …) accepted-and-ignored → text fallback. See §3. |
 | `-c, --config <path>` | ❌ | P1 | Config path is auto-discovered (nearest `vitest/vite.config.*`); cannot override. |
 | `--root <path>` / `--dir <path>` | ❌ | P2 | No root override; discovery is `cwd`-rooted. |
 | `--environment <node\|jsdom\|happy-dom>` | 🟡 | P1 | Env is effectively fixed (turbo-dom DOM globals always installed). Not selectable per-run; `// @vitest-environment` pragma not honored. |
@@ -102,11 +102,14 @@ for unmodeled flags. Covered by `test/cli-compat.test.mjs`.
 
 | capability | status | Notes |
 |---|---|---|
-| default text (`PASS/FAIL file (n passed, n failed)` + summary line) | ✅ | turbo-test's own format, not byte-identical to vitest's. |
-| `--reporter json` | 🟡 | Emits `{numTotalTests,numPassedTests,…,testResults[]}` to **stdout** (vitest's JSON is richer + per-assertion). No `--outputFile`. |
-| `--reporter junit` | ❌ | P1 — standard CI artifact. |
-| verbose / dot / tap / tap-flat / html / hanging-process | ❌ | P2/P3. |
-| `--outputFile[.<reporter>] <path>` | ❌ | P1 — needed to write any reporter to disk. |
+| default text (`PASS/FAIL file (n passed, n failed)` + summary line) | ✅ | turbo-test's own format, not byte-identical to vitest's. `--reporter default` selects it. |
+| `--reporter json` | 🟡 | Emits `{numTotalTests,numPassedTests,…,testResults[]}` (file-level, not per-assertion). To **stdout** (summary line moved to stderr to keep stdout clean) or to `--outputFile`. `testResults[]` is per-FILE counts, not per-test `assertionResults[]` like vitest. **Where:** `src/bin/turbo_test.rs` `Reporter::Json`. |
+| `--reporter junit` + `--outputFile` | ✅ | JUnit XML: `<testsuites tests= failures= errors=>` → one `<testsuite>` per file → one `<testcase name="describe > it" classname=file time=>` per test, with `<failure message=…/>` on failures. Names/messages XML-escaped. A file that fails to LOAD emits one synthetic `<testcase>` with `<error>`. Skipped tests omitted from `<testcase>` list. **Where:** `src/bin/turbo_test.rs` `Reporter::Junit`; per-test list from `TestReport.tests` (`runner.rs`) ← `summary.tests[]` (`runtime.js runSuite`). **Gap:** no `<system-out>`/`<properties>`; `time` is wall-clock `Date.now()` (ms-granular, can read `0.000` for sub-ms tests; affected by `vi.setSystemTime`). |
+| `--reporter tap` | ✅ | TAP v13: `TAP version 13`, flat `1..N` plan over all tests, `ok N - name` / `not ok N - name`, `# SKIP` directive, YAML `message:` diagnostic block on failure. **Where:** `Reporter::Tap`. **Gap:** flat (no nested subtests); message newlines flattened to spaces. |
+| `--reporter verbose` | ✅ | Per-file PASS/FAIL line + one `✓/✗/- name (Nms)` line per test. To stdout. **Where:** `Reporter::Verbose`. |
+| `--reporter dot` | ✅ | One char per FILE (`.` pass / `x` fail / `!` load-error), not per-test (vitest is per-test). **Where:** `Reporter::Dot`. Documented divergence. |
+| `--reporter html` / `tap-flat` / `hanging-process` / `basic` / unknown | 🟡 | Accepted-and-ignored → falls back to the default text reporter, never errors. |
+| `--outputFile[.<reporter>] <path>` | 🟡 | `--outputFile <path>` writes the active artifact reporter (json/junit/tap) to disk; for text/dot/verbose it writes the plain PASS/FAIL lines. The vitest per-reporter dotted form `--outputFile.junit=…` (multi-reporter fan-out) is **not** parsed. **Where:** `src/bin/turbo_test.rs` `--outputFile` arm; `cli.js` value-flag regex. |
 | dotted flags (`--coverage.reporter`, `--reporter.0`) | ❌ | turbo-test uses flat `--coverage-*`; vitest's dotted form unrecognized. |
 
 ---
@@ -163,7 +166,7 @@ Mostly strong. Notable gaps:
 All four are locked by `test/cli-compat.test.mjs` (`npm test`).
 
 **P1 (next):**
-- `--bail <n>`; test `{ timeout }` enforcement + `--testTimeout`; `--reporter junit` + `--outputFile`;
+- `--bail <n>`; test `{ timeout }` enforcement + `--testTimeout`; ~~`--reporter junit` + `--outputFile`~~ ✅ DONE;
   `-c/--config`; `--environment` selection; snapshots (`toMatchSnapshot` + `-u`); `--maxWorkers` alias.
 
 **P2/P3:** see per-row priorities in §2/§4.
@@ -176,5 +179,14 @@ All four are locked by `test/cli-compat.test.mjs` (`npm test`).
   unknown-flag ignore, `--passWithNoTests`. Added `test/cli-compat.test.mjs` (the previously-missing
   `test/` dir that `npm test` expects). Next up: P1 (`--bail`, test `{ timeout }` enforcement,
   `--reporter junit` + `--outputFile`, `-c/--config`, snapshots).
+- 2026-06-17 — **Reporters batch shipped**: `--reporter junit` (per-testcase XML), `tap` (TAP v13),
+  `verbose`, `dot`, `default`, `json`-to-file via `--outputFile`. Unknown reporter values fall back
+  to text (never error). Extended `TestReport`/`summary` with a per-test list
+  (`tests[] = {name,status,duration_ms,message}`: `runtime.js runSuite` → `runner.rs` parse →
+  `turbo_test.rs` reporters) — passing test names are now retained. Added
+  `test/compat-reporters.test.mjs` + `fixtures/compat/mixed.test.ts` (pass+fail mix) and the
+  `fixtures/compat/empty/` dir the existing `--passWithNoTests` test needs. `cli.js` value-flag
+  regex now forwards `--outputFile`. **Gaps:** dotted per-reporter `--outputFile.junit=` fan-out
+  unsupported; `dot` is per-file not per-test; durations are `Date.now()` ms-granular.
 </content>
 </invoke>

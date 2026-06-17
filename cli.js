@@ -198,7 +198,7 @@ function main() {
     if (a.startsWith('-')) {
       flags.push(a);
       // flags that take a value: --jobs N, --shard i/n, --reporter X, -t <pattern>
-      if (/^(-j|--jobs|--shard|--reporter|-t|--testNamePattern|--coverage-dir|--coverage-thresholds|--coverage-threshold|--coverage-reporter|--coverage-reporters|--coverage-include|--coverage-exclude)$/.test(a) && i + 1 < argv.length && !argv[i + 1].startsWith('-')) {
+      if (/^(-j|--jobs|--shard|--reporter|--reporters|--outputFile|--output-file|-t|--testNamePattern|--coverage-dir|--coverage-thresholds|--coverage-threshold|--coverage-reporter|--coverage-reporters|--coverage-include|--coverage-exclude)$/.test(a) && i + 1 < argv.length && !argv[i + 1].startsWith('-')) {
         flags.push(argv[++i]);
       }
     } else {
