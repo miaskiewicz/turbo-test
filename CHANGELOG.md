@@ -5,6 +5,13 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.2.15] — bump turbo-dom to 0.2.2
+
+### Changed
+- **Bump `@miaskiewicz/turbo-dom` `^0.2.0` → `^0.2.2`.** Pulls in the latest published DOM
+  runtime so consumers installing fresh resolve the current line rather than the older 0.2.0
+  floor. No turbo-test source changes; patch release to ship the updated dependency range.
+
 ## [0.2.14] — E12: memoize module resolution (tsconfig + specifier resolve)
 
 ### Performance
