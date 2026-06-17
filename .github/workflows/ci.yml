@@ -116,8 +116,11 @@ jobs:
         # rusty_v8 has no musl prebuilt; the gnu static lib links + runs under musl here
         # (libstdc++ present). RUSTY_V8_ARCHIVE makes build.rs use this file instead of downloading.
         run: |
-          url="https://github.com/denoland/rusty_v8/releases/download/${V8_VERSION}/librusty_v8_release_x86_64-unknown-linux-gnu.a"
-          curl -fsSL "$url" -o /tmp/librusty_v8.a
+          # rusty_v8 ships the static libs GZIPPED (…-gnu.a.gz); the plain .a is a 404.
+          url="https://github.com/denoland/rusty_v8/releases/download/${V8_VERSION}/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz"
+          curl -fsSL "$url" -o /tmp/librusty_v8.a.gz
+          gunzip -f /tmp/librusty_v8.a.gz   # → /tmp/librusty_v8.a
+          test -f /tmp/librusty_v8.a
           echo "RUSTY_V8_ARCHIVE=/tmp/librusty_v8.a" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
