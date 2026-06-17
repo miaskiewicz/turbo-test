@@ -1381,6 +1381,35 @@ fn file_has_decorator(src: &str) -> bool {
     })
 }
 
+/// Native (oxc) counterpart of `esbuild_transform_cjs` for app files (P2a). Emits the same
+/// esbuild-shaped, runner-friendly CJS via `esm_cjs::emit` (no esbuild subprocess, no
+/// `postprocess_mr_cjs` — native output already has configurable getters + identity `__toESM`),
+/// then applies the SAME vi.mock hoisting + shared-let rewrite as the esbuild path so mocks behave
+/// identically. Content-cached under a distinct key. Returns `None` on any unhandled form → caller
+/// falls back to esbuild.
+fn native_transform_cjs(file: &Path) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let raw = std::fs::read_to_string(file).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    raw.hash(&mut h);
+    file.extension().and_then(|e| e.to_str()).unwrap_or("").hash(&mut h);
+    "native-cjs-v2".hash(&mut h);
+    let cache = cache_dir().join(format!("ntv-{:016x}.cjs", h.finish()));
+    if let Ok(c) = std::fs::read_to_string(&cache) {
+        CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+        return Some(c);
+    }
+    CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+    let emitted = crate::esm_cjs::emit(file, &raw)?;
+    let mut code = hoist_mock_setup(&emitted);
+    let shared = shared_mock_lets(&raw);
+    if !shared.is_empty() {
+        code = rewrite_shared_lets(&code, &shared);
+    }
+    write_atomic(&cache, &code);
+    Some(code)
+}
+
 /// Module-runner mode: transform a single APP module to CJS (no bundle) so imports become
 /// live `require(...).name` property access (mutable → spyOn/vi.mock work), and post-process
 /// esbuild's export getters to be CONFIGURABLE (so spyOn can redefine them). Cached.
@@ -2038,8 +2067,26 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
             if let Some(code) = esbuild_bundle_dep_cjs(abs) {
                 return Some(code);
             }
-        } else if let Some(code) = esbuild_transform_cjs(abs, prefer_metadata) {
-            return Some(code);
+        } else {
+            // Native oxc ESM→CJS (P2a, gated by TURBO_NATIVE_CJS): try it first for app files, fall
+            // back to esbuild on any unhandled form. Skipped under coverage until oxc source maps
+            // land (P2c) — native output has no inline map yet, so coverage stays on esbuild.
+            if crate::esm_cjs::enabled()
+                && !crate::coverage::enabled()
+                && !prefer_metadata
+            {
+                if let Some(code) = native_transform_cjs(abs) {
+                    return Some(code);
+                }
+                // strict mode (conformity coverage measurement): do NOT fall back to esbuild on an
+                // unhandled form — surface it as a load error so the harness counts it.
+                if crate::esm_cjs::strict() {
+                    return None;
+                }
+            }
+            if let Some(code) = esbuild_transform_cjs(abs, prefer_metadata) {
+                return Some(code);
+            }
         }
     }
     let raw = std::fs::read_to_string(abs).ok()?;

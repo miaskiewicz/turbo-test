@@ -540,7 +540,9 @@ pub fn prepare(mut raw: Vec<String>) -> Vec<String> {
                 forward.push(raw[i + 1].clone());
                 i += 1;
             }
-        } else {
+        } else if !a.is_empty() {
+            // skip empty args (e.g. a stray "" from a shell wrapper) — they'd be treated as a
+            // missing file and abort the whole run.
             files.push(a.clone());
         }
         i += 1;

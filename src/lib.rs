@@ -5,6 +5,7 @@
 
 pub mod coverage;
 pub mod coverage_branch;
+pub mod esm_cjs;
 pub mod graph;
 pub mod launcher;
 pub mod napi_host;
