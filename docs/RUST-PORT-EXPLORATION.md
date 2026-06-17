@@ -1,5 +1,28 @@
 # Rust port — exploration (branch `rust-port`)
 
+## STATUS (live)
+
+| Phase | State | Notes |
+|---|---|---|
+| P1 — cli.js → Rust | ✅ DONE | `src/launcher.rs`; cli.js is a thin shim; compat suites green |
+| P2a — app-file ESM→CJS emitter | ✅ DONE, default ON | `src/esm_cjs.rs`; payroll 1057 files/10471 tests full parity |
+| Conformity harness | ✅ DONE | `scripts/conformity.mjs` (parity + coverage modes) |
+| P2b — node_modules native bundle | ⬜ TODO | `esbuild_bundle_dep_cjs` still esbuild |
+| P2c — delete esbuild (mock AST, cov maps) | ⬜ TODO | esbuild still: node_modules, coverage, decorator-metadata, fallback |
+| P3 — turbo-dom Rust crate | ⬜ TODO (other agent) | retire `napi_host.rs` |
+
+**esbuild is NOT yet removed.** P2a only moved the *app-file* transform to oxc. esbuild is still
+required for node_modules bundling, coverage source maps, decorator-metadata, and as the automatic
+fallback. Removing it needs P2b + P2c.
+
+Conformity worktrees live at `/Users/grzegorzmiaskiewicz/github-flux/.tt-conformity/{payroll-app,flux-apis}`
+(detached on `origin/staging`, node_modules symlinked from the main checkouts). flux-apis only runs
+under turbo-test in pure-logic dirs (its NestJS app-graph doesn't load under the esbuild baseline
+either), so payroll-app is the primary oracle.
+
+---
+
+
 Goal: turbo-test runs as a **single self-contained Rust binary** — no Node.js process, no npm
 runtime dependencies. Pairs with the upcoming **all-Rust turbo-dom build** (the DOM env links as
 a Rust crate instead of a prebuilt `.node` addon).

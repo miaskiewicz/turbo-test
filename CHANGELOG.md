@@ -5,6 +5,29 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Added — Rust port (branch `rust-port`)
+- **P1: launcher ported into the native binary (`src/launcher.rs`).** Default test discovery,
+  vitest config include/exclude + coverage/environment scanning, `--changed [since]` git filter,
+  isolate/environment env wiring, and `--passWithNoTests` now run in Rust — `cli.js` is a thin
+  binary-resolving shim. The binary launches a run with no Node-side logic; npm stays a
+  distribution wrapper. *Why:* removes the Node process from launching, the first step to a
+  self-contained binary. All compat suites green; binary self-discovers standalone.
+- **P2a: native oxc ESM→CJS emitter (`src/esm_cjs.rs`), on by default.** Replaces the per-app-file
+  `esbuild --format=cjs` transform with a hand-written oxc lowering (oxc 0.134 has no CommonJS
+  module transform) that matches esbuild's output contract: live-binding member rewrites for
+  named/default imports (scope-correct via semantic), `__export` getter block + `__toCommonJS`,
+  `export *` via `__reExport`, `export default`, and dynamic `import()` →
+  `Promise.resolve(__toESM(require(x)))`. Opt out with `TURBO_NATIVE_CJS=0`. *Why:* drops the
+  esbuild subprocess for app files — a step toward removing the esbuild/npm dependency. esbuild
+  is still used for node_modules bundling (P2b), coverage source maps, decorator-metadata, and as
+  the automatic fallback for any unhandled form.
+- **Conformity harness (`scripts/conformity.mjs`).** Runs a target project both ways (esbuild
+  baseline vs native) and diffs per-file pass/fail — `parity` mode guarantees behavioral
+  equivalence; `coverage` mode (native-strict) measures the native handling rate. *Why:* the
+  safety mechanism gating the cutover; it already caught a real dynamic-`import()` bug, now fixed.
+  Validated on the payroll-app `staging` worktree: **1057 files / 10471 tests, 100% native
+  handling, full parity.**
+
 ## [0.2.16] — vitest CLI/API compatibility sweep + turbo-dom 0.2.5
 
 ### Changed
