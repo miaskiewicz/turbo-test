@@ -1410,6 +1410,31 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
     Some(code)
 }
 
+/// Native (oxc) counterpart of `esbuild_bundle_dep_cjs` for node_modules files (P2b). Instead of
+/// bundling a package's relative files into one module (esbuild `--bundle --packages=external`),
+/// transform the SINGLE file ESM→CJS via `esm_cjs::emit` and let the loader resolve its relative +
+/// bare `require`s on demand — bare imports stay `require("react")` etc., so singletons resolve to
+/// ONE instance via the require cache exactly like `--packages=external`. CJS/plain files pass
+/// through unchanged (emit's no-module-syntax path). No vi.mock hoisting (deps don't mock). Cached.
+/// Returns `None` on an unhandled form → caller falls back to the esbuild bundle.
+fn native_dep_cjs(file: &Path) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let raw = std::fs::read_to_string(file).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    raw.hash(&mut h);
+    file.extension().and_then(|e| e.to_str()).unwrap_or("").hash(&mut h);
+    "native-dep-v1".hash(&mut h);
+    let cache = cache_dir().join(format!("ntvdep-{:016x}.cjs", h.finish()));
+    if let Ok(c) = std::fs::read_to_string(&cache) {
+        CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+        return Some(c);
+    }
+    CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+    let code = crate::esm_cjs::emit(file, &raw)?;
+    write_atomic(&cache, &code);
+    Some(code)
+}
+
 /// Module-runner mode: transform a single APP module to CJS (no bundle) so imports become
 /// live `require(...).name` property access (mutable → spyOn/vi.mock work), and post-process
 /// esbuild's export getters to be CONFIGURABLE (so spyOn can redefine them). Cached.
@@ -2064,6 +2089,18 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
         // are externalized from every bundle so their shared singletons (ThemeContext, emotion
         // cache, react) resolve to ONE instance via the require cache (no dual-context).
         if abs.components().any(|c| c.as_os_str() == "node_modules") {
+            // Native per-file ESM→CJS for deps (P2b) — EXPERIMENTAL, opt-in (TURBO_NATIVE_DEPS).
+            // Default OFF: per-file is incorrect for real dep graphs (asset imports + circular
+            // init ordering that esbuild's bundle handles); see `esm_cjs::deps_enabled`. esbuild
+            // bundle stays the default + fallback. Skipped under coverage (no source maps, P2c).
+            if crate::esm_cjs::deps_enabled() && !crate::coverage::enabled() {
+                if let Some(code) = native_dep_cjs(abs) {
+                    return Some(code);
+                }
+                if crate::esm_cjs::strict() {
+                    return None;
+                }
+            }
             if let Some(code) = esbuild_bundle_dep_cjs(abs) {
                 return Some(code);
             }

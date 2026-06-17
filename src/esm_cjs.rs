@@ -53,6 +53,18 @@ pub fn strict() -> bool {
     std::env::var("TURBO_NATIVE_CJS_STRICT").map(|v| !v.is_empty()).unwrap_or(false)
 }
 
+/// Whether to use the native emitter for **node_modules** files (P2b). **Default OFF**, opt-in via
+/// `TURBO_NATIVE_DEPS=1`. The naive per-file approach is INCORRECT for real dep graphs: esbuild
+/// bundles a package (`--bundle --packages=external`), which (a) neutralizes non-JS asset imports
+/// via `--loader:.css=empty` etc. and (b) gives circular relative imports bundle-time init
+/// ordering. Per-file `require` does neither, so MUI/emotion-style deps fail to load (the
+/// conformity harness caught 2/300 payroll component files). A correct native deps path needs
+/// esbuild's `__esm`/`__commonJS` lazy-init wrappers + asset stubbing — substantial, deferred.
+/// Until then node_modules stays on the esbuild bundle.
+pub fn deps_enabled() -> bool {
+    std::env::var("TURBO_NATIVE_DEPS").map(|v| v != "0" && !v.is_empty()).unwrap_or(false)
+}
+
 /// How a reference to an imported local must be rewritten so bindings stay live.
 #[derive(Clone)]
 struct Access {
@@ -198,20 +210,29 @@ pub fn emit(path: &Path, src: &str) -> Option<String> {
     let Plan { imports, requires, re_exports, exports, body_stmts, default_needs_rewrite } =
         plan(&ast, &scoping, &mut program)?;
 
-    // 4. Rewrite references to imported locals (live bindings) across the body.
+    // 4. Rewrite references to imported locals (live bindings) + lower dynamic import() across the
+    //    body. Runs even with no static module syntax (a file may use only `import()`).
     let mut state = EmitState { ast, imports, scoping };
     let mut body = body_stmts;
     for stmt in body.iter_mut() {
         state.visit_statement(stmt);
     }
 
-    // 5. Codegen the rewritten body, fix up `export default`, assemble.
+    // 5. Codegen the rewritten body, fix up `export default`.
     let prog2 = ast.program(SPAN, stype, "", ast.vec(), None, ast.vec(), ast.vec_from_iter(body));
     let mut body_code = Codegen::new().build(&prog2).code;
     if default_needs_rewrite {
         // the kept `export default <expr>` statement is invalid in a CJS script; turn it into the
         // synthetic default var the getter reads. (First occurrence only; it appears once.)
         body_code = body_code.replacen("export default ", "var __tt_default = ", 1);
+    }
+
+    // 6. No ESM module syntax (static import/export) → a CommonJS module or a plain script: return
+    //    the transformed body WITHOUT CJS-wrapping it. Wrapping (prepending
+    //    `module.exports = __toCommonJS(...)`) would clobber the file's own `module.exports` /
+    //    `exports.x` and detach the live `exports` binding. import() was still lowered above.
+    if requires.is_empty() && re_exports.is_empty() && exports.is_empty() && !default_needs_rewrite {
+        return Some(body_code);
     }
 
     Some(assemble(&requires, &re_exports, &exports, &body_code))
