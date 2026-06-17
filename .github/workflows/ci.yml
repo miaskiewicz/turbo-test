@@ -112,6 +112,8 @@ jobs:
         run: git config --global --add safe.directory '*'
       - name: Alpine build deps (g++/libstdc++ for the V8 static lib, curl)
         run: apk add --no-cache g++ libstdc++ curl
+      - name: Ensure a default Rust toolchain (image ships rustup w/o a default)
+        run: rustup default stable || (rustup toolchain install stable && rustup default stable)
       - name: Fetch the gnu rusty_v8 prebuilt and pin RUSTY_V8_ARCHIVE
         # rusty_v8 has no musl prebuilt; the gnu static lib links + runs under musl here
         # (libstdc++ present). RUSTY_V8_ARCHIVE makes build.rs use this file instead of downloading.
