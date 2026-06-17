@@ -6,6 +6,7 @@
 pub mod coverage;
 pub mod coverage_branch;
 pub mod graph;
+pub mod launcher;
 pub mod napi_host;
 pub mod runner;
 pub mod transform;

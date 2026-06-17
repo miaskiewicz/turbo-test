@@ -182,6 +182,13 @@ fn glob_match(pat: &str, path: &str) -> bool {
     expand_braces(pat).iter().any(|p| simple_match(p.as_bytes(), path.as_bytes()))
 }
 
+/// Public reuse for the CLI launcher's vitest include/exclude discovery: vitest matches the same
+/// `**`/`*`/`?`/`{a,b}` glob shape against a project-root-relative POSIX path. Same matcher → the
+/// launcher's discovery and coverage's file filtering agree on what a glob means.
+pub fn glob_matches(pat: &str, path: &str) -> bool {
+    glob_match(pat, path)
+}
+
 fn expand_braces(pat: &str) -> Vec<String> {
     let Some(open) = pat.find('{') else { return vec![pat.to_string()] };
     let Some(rel_close) = pat[open..].find('}') else { return vec![pat.to_string()] };
