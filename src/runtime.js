@@ -970,6 +970,89 @@ function fmt(v) {
   catch { return String(v); }
 }
 
+// ---- snapshots ----
+// Per-test state set by runSuite before each test: the full `describe > it` name and a
+// per-(test-name) counter so multiple toMatchSnapshot() calls in one test get distinct keys
+// (`<full name> 1`, `<full name> 2`, …), matching vitest's keying.
+const __snap = {
+  testName: '',
+  counters: Object.create(null), // testName -> next index
+  // assertion enforcement (expect.assertions / hasAssertions); reset per test.
+  assertCount: 0,
+  expectedAssertions: null, // number | null
+  hasAssertions: false,
+};
+function __snapNextKey(name) {
+  const n = (__snap.counters[name] || 0) + 1;
+  __snap.counters[name] = n;
+  return `${name} ${n}`;
+}
+function __snapFile() {
+  const f = globalThis.__ttFile;
+  if (!f) return null;
+  const slash = f.lastIndexOf('/');
+  const dir = slash >= 0 ? f.slice(0, slash) : '.';
+  const base = slash >= 0 ? f.slice(slash + 1) : f;
+  return { dir: `${dir}/__snapshots__`, path: `${dir}/__snapshots__/${base}.snap` };
+}
+// pretty-format-ish serializer (jest-snapshot style): stable, indented, ordered keys.
+function __serialize(v, indent = '') {
+  const ni = indent + '  ';
+  if (v === null) return 'null';
+  if (v === undefined) return 'undefined';
+  const t = typeof v;
+  if (t === 'string') return `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
+  if (t === 'number' || t === 'boolean' || t === 'bigint') return String(v);
+  if (t === 'function') return `[Function ${v.name || 'anonymous'}]`;
+  if (t === 'symbol') return v.toString();
+  if (v instanceof RegExp) return String(v);
+  if (v instanceof Date) return v.toISOString();
+  if (v instanceof Error) return `[Error: ${v.message}]`;
+  if (Array.isArray(v)) {
+    if (v.length === 0) return '[]';
+    const items = v.map((x) => ni + __serialize(x, ni));
+    return `[\n${items.join(',\n')},\n${indent}]`;
+  }
+  if (v instanceof Map) {
+    const items = [...v.entries()].map(([k, val]) => `${ni}${__serialize(k, ni)} => ${__serialize(val, ni)}`);
+    return `Map {\n${items.join(',\n')},\n${indent}}`;
+  }
+  if (v instanceof Set) {
+    const items = [...v.values()].map((x) => ni + __serialize(x, ni));
+    return `Set {\n${items.join(',\n')},\n${indent}}`;
+  }
+  if (t === 'object') {
+    const keys = Object.keys(v).sort();
+    if (keys.length === 0) return '{}';
+    const ctor = v.constructor && v.constructor.name;
+    const prefix = ctor && ctor !== 'Object' ? `${ctor} ` : '';
+    const items = keys.map((k) => `${ni}"${k}": ${__serialize(v[k], ni)}`);
+    return `${prefix}{\n${items.join(',\n')},\n${indent}}`;
+  }
+  return String(v);
+}
+// Parse a .snap file into a map of key -> serialized body. Format mirrors jest/vitest:
+//   exports[`<key>`] = `\n<body>\n`;
+function __parseSnapFile(text) {
+  const out = Object.create(null);
+  const re = /exports\[`((?:[^`\\]|\\.)*)`\]\s*=\s*`((?:[^`\\]|\\.)*)`;/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const key = m[1].replace(/\\`/g, '`').replace(/\\\\/g, '\\');
+    const body = m[2].replace(/\\`/g, '`').replace(/\\\\/g, '\\');
+    out[key] = body;
+  }
+  return out;
+}
+function __serializeSnapFile(map) {
+  const header = "// turbo-test snapshot v1\n\n";
+  const keys = Object.keys(map).sort();
+  const esc = (s) => s.replace(/\\/g, '\\\\').replace(/`/g, '\\`');
+  return header + keys.map((k) => `exports[\`${esc(k)}\`] = \`${esc(map[k])}\`;\n`).join('\n');
+}
+// snapshot body is stored as `\n<serialized>\n` (jest convention); compare on the trimmed form.
+function __snapBody(serialized) { return `\n${serialized}\n`; }
+
 // ---- expect ----
 function makeExpect(actual, negated = false) {
   const ok = (pass, msg) => {
@@ -1029,6 +1112,46 @@ function makeExpect(actual, negated = false) {
       ok(sub(actual, obj), `expected ${fmt(actual)} ${negated ? 'not ' : ''}to match object ${fmt(obj)}`);
     },
     toThrowError(e) { return api.toThrow(e); },
+    // File snapshot: serialize `actual`, key by `<full test name> <counter>` under
+    // `__snapshots__/<testfile>.snap`. Missing key or update-mode (-u) → write + pass; else compare.
+    toMatchSnapshot(_hint) {
+      const sf = __snapFile();
+      if (!sf) throw new Error('toMatchSnapshot: no test file path available');
+      const key = __snapNextKey(__snap.testName);
+      const body = __snapBody(__serialize(actual));
+      const exists = globalThis.__fs_existsSync(sf.path);
+      const map = exists ? __parseSnapFile(globalThis.__fs_readFileSync(sf.path, 'utf8')) : Object.create(null);
+      const update = !!globalThis.__TT_UPDATE_SNAPSHOTS;
+      if (!(key in map) || update) {
+        map[key] = body;
+        globalThis.__fs_mkdirSync(sf.dir);
+        globalThis.__fs_writeFileSync(sf.path, __serializeSnapFile(map));
+        return;
+      }
+      ok(map[key] === body, `snapshot mismatch for "${key}"\n- Snapshot\n+ Received\n- ${map[key].trim()}\n+ ${body.trim()}`);
+    },
+    // Inline snapshot: compares against the provided string arg (whitespace-normalized, matching
+    // vitest's trimming). AUTO-WRITE back into the source on first run / -u is UNSUPPORTED — pass
+    // the expected string explicitly. With no arg and no update, the first run writes nothing and
+    // passes (parity gap documented in vitest.compat.md).
+    toMatchInlineSnapshot(expected) {
+      const body = __serialize(actual);
+      if (expected === undefined) return; // no auto-write; treat as accepted (documented gap)
+      const norm = (s) => String(s).replace(/^\n/, '').replace(/\n\s*$/, '').split('\n').map((l) => l.trim()).join('\n');
+      ok(norm(body) === norm(expected), `inline snapshot mismatch\n- ${norm(expected)}\n+ ${norm(body)}`);
+    },
+    toThrowErrorMatchingSnapshot(_hint) {
+      let msg;
+      if (typeof actual === 'function') { try { actual(); msg = undefined; } catch (e) { msg = (e && e.message) || String(e); } }
+      else if (actual instanceof Error) msg = actual.message;
+      makeExpect(msg).toMatchSnapshot();
+    },
+    toThrowErrorMatchingInlineSnapshot(expected) {
+      let msg;
+      if (typeof actual === 'function') { try { actual(); msg = undefined; } catch (e) { msg = (e && e.message) || String(e); } }
+      else if (actual instanceof Error) msg = actual.message;
+      makeExpect(msg).toMatchInlineSnapshot(expected);
+    },
     toStrictEqual_alias() {},
     toHaveLength(n) { ok(actual != null && actual.length === n, `expected length ${actual && actual.length} ${negated ? 'not ' : ''}to be ${n}`); },
     toHaveProperty(path, value) {
@@ -1123,11 +1246,13 @@ const __matcherUtils = {
   highlightTrailingWhitespace: (s) => s,
 };
 const __customMatchers = {};
-globalThis.expect = (actual) => makeExpect(actual);
+globalThis.expect = (actual) => { __snap.assertCount++; return makeExpect(actual); };
 globalThis.expect.extend = (matchers) => { Object.assign(__customMatchers, matchers || {}); };
-globalThis.expect.assertions = () => {};
-globalThis.expect.hasAssertions = () => {};
-globalThis.expect.soft = (actual) => makeExpect(actual);
+// expect.assertions(n) / expect.hasAssertions(): record the expectation; runSuite verifies the
+// count at test end (see __snap.assertCount, reset per test). These calls do NOT count themselves.
+globalThis.expect.assertions = (n) => { __snap.expectedAssertions = n; };
+globalThis.expect.hasAssertions = () => { __snap.hasAssertions = true; };
+globalThis.expect.soft = (actual) => { __snap.assertCount++; return makeExpect(actual); };
 globalThis.expect.any = (ctor) => new Asymmetric('any', ctor);
 globalThis.expect.anything = () => new Asymmetric('anything');
 globalThis.expect.objectContaining = (s) => new Asymmetric('objectContaining', s);
@@ -1460,6 +1585,12 @@ function describe(name, a, b) {
 }
 describe.skip = (name, _fn) => { /* skipped */ };
 describe.only = (name, fn) => { __tt.hasOnly = true; describe(name, fn); };
+describe.todo = (name) => { /* todo: collected as nothing to run */ };
+// describe.skipIf/runIf: when the condition skips the block, register NO tests (the whole suite
+// is absent) — mirrors it.skipIf/runIf semantics applied at the suite level.
+describe.skipIf = (cond) => (name, a, b) => { if (cond) return; describe(name, a, b); };
+describe.runIf = (cond) => (name, a, b) => { if (!cond) return; describe(name, a, b); };
+describe.concurrent = describe; // accepted; a file's tests still run sequentially
 describe.each = (rows) => (name, fn) => rows.forEach((row, i) => {
   const args = Array.isArray(row) ? row : [row];
   describe(typeof name === 'string' ? name : name(row), () => fn(...args));
@@ -1488,6 +1619,40 @@ it.each = (rows) => (name, fn) => {
 };
 it.skipIf = (cond) => (name, fn) => current.tests.push({ name, fn, skip: !!cond, only: false, retry: 0 });
 it.runIf = (cond) => (name, fn) => current.tests.push({ name, fn, skip: !cond, only: false, retry: 0 });
+// it.fails: the test PASSES iff its body throws (runSuite inverts the outcome via `fails`).
+it.fails = (name, a, b) => { const { fn, o } = __normTest(a, b); current.tests.push({ name, fn, skip: false, only: false, retry: o.retry || 0, fails: true }); };
+// it.extend({...}) — test-context fixtures (best-effort). vitest passes a merged context object as
+// the test fn's first arg; fixtures defined as plain values or `async ({}, use) => use(value)`
+// functions are resolved here and provided. Returns a new test fn with these fixtures baked in.
+it.extend = (fixtures) => {
+  const resolveCtx = async () => {
+    const ctx = {};
+    for (const k of Object.keys(fixtures || {})) {
+      const f = fixtures[k];
+      if (typeof f === 'function') {
+        // vitest fixture fn: ({...deps}, use) => { ... await use(value) }. Capture the used value.
+        let captured;
+        const use = (v) => { captured = v; return Promise.resolve(); };
+        const r = f(ctx, use);
+        if (r && typeof r.then === 'function') await r;
+        ctx[k] = captured;
+      } else {
+        ctx[k] = f;
+      }
+    }
+    return ctx;
+  };
+  const wrap = (userFn) => async () => { const ctx = await resolveCtx(); return userFn(ctx); };
+  const ext = (name, a, b) => { const { fn, o } = __normTest(a, b); current.tests.push({ name, fn: wrap(fn), skip: false, only: false, retry: o.retry || 0 }); };
+  ext.skip = (name, a, b) => current.tests.push({ name, fn: wrap(__normTest(a, b).fn), skip: true });
+  ext.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); current.tests.push({ name, fn: wrap(fn), skip: false, only: true, retry: o.retry || 0 }); };
+  ext.each = (rows) => (name, fn) => rows.forEach((row, i) => {
+    const args = Array.isArray(row) ? row : [row];
+    current.tests.push({ name: `${name} [${i}]`, fn: wrap((ctx) => fn(...args, ctx)), skip: false, only: false, retry: 0 });
+  });
+  ext.extend = (more) => it.extend({ ...fixtures, ...more });
+  return ext;
+};
 globalThis.describe = describe;
 globalThis.it = it;
 globalThis.test = it;
@@ -1517,12 +1682,31 @@ async function runSuite(suite, ancestors, summary) {
     // — that's stubbed to a constant 0 in this runtime (see the perf stub near top of file).
     const __t0 = Date.now();
     for (let a = 0; a < attempts && !ok; a++) {
+      // Reset per-test snapshot + assertion-count state (snapshot counter is keyed by test name,
+      // so distinct multi-snapshot tests don't collide; assertion enforcement resets each attempt).
+      __snap.testName = label;
+      __snap.counters[label] = 0;
+      __snap.assertCount = 0;
+      __snap.expectedAssertions = null;
+      __snap.hasAssertions = false;
       try {
         for (const s of chain) for (const h of s.hooks.be) await h();
         await t.fn();
+        // expect.assertions(n) / hasAssertions() enforcement (vitest: checked after the test body).
+        if (__snap.expectedAssertions != null && __snap.assertCount !== __snap.expectedAssertions) {
+          throw new Error(`expected ${__snap.expectedAssertions} assertion(s) but got ${__snap.assertCount}`);
+        }
+        if (__snap.hasAssertions && __snap.assertCount === 0) {
+          throw new Error('expected at least one assertion but got none');
+        }
         ok = true;
       } catch (e) {
         lastErr = e;
+      }
+      // it.fails: invert the outcome — a thrown error is the success condition, a clean pass fails.
+      if (t.fails) {
+        if (lastErr) { ok = true; lastErr = undefined; }
+        else { ok = false; lastErr = new Error('expected test to fail, but it passed'); }
       }
       // afterEach (incl. @testing-library cleanup) runs even when the test failed — otherwise a
       // failed test's mounted DOM leaks into the next test. Hook errors here don't fail a test
@@ -1604,6 +1788,8 @@ globalThis.__ttResetForNextFile = () => {
   // run once per worker, so root.hooks only holds setup hooks; leave them in place.
   root.tests = [];
   root.suites = [];
+  // Reset snapshot counters between files (keyed by test name; cleared to avoid cross-file drift).
+  __snap.counters = Object.create(null);
   // NOTE: root.hooks is intentionally LEFT in place. Restoring it to a post-global-setup baseline
   // drops @testing-library's auto-cleanup afterEach for most files (it registers during a test
   // file's first render, not during global setup) → DOM accumulates → mass failure. The downside
