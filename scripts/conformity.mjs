@@ -92,7 +92,7 @@ function main() {
   if (opt.mode === 'coverage') {
     // native-strict: unhandled files load-error. Compare to esbuild baseline to attribute failures.
     console.error(`conformity[coverage]: ${dir}`);
-    const base = runMode(dir, { TURBO_NATIVE_CJS: '', TURBO_NATIVE_CJS_STRICT: '' }, opt.files, opt.jobs);
+    const base = runMode(dir, { TURBO_NATIVE_CJS: '0', TURBO_NATIVE_CJS_STRICT: '' }, opt.files, opt.jobs);
     const ntv = runMode(dir, { TURBO_NATIVE_CJS: '1', TURBO_NATIVE_CJS_STRICT: '1' }, opt.files, opt.jobs);
     if (!base || !ntv) process.exit(2);
     let handled = 0, unhandled = 0;
@@ -115,7 +115,7 @@ function main() {
 
   // parity mode
   console.error(`conformity[parity]: ${dir}  (esbuild baseline vs native+fallback)`);
-  const base = runMode(dir, { TURBO_NATIVE_CJS: '', TURBO_NATIVE_CJS_STRICT: '' }, opt.files, opt.jobs);
+  const base = runMode(dir, { TURBO_NATIVE_CJS: '0', TURBO_NATIVE_CJS_STRICT: '' }, opt.files, opt.jobs);
   const ntv = runMode(dir, { TURBO_NATIVE_CJS: '1', TURBO_NATIVE_CJS_STRICT: '' }, opt.files, opt.jobs);
   if (!base || !ntv) process.exit(2);
 

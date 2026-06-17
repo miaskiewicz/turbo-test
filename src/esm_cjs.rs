@@ -33,12 +33,17 @@ use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder, SymbolId};
 use oxc_span::{SourceType, SPAN};
 
-/// Whether the native ESM→CJS emitter is enabled (opt-in until conformity-validated). Default OFF
-/// → esbuild path unchanged. `TURBO_NATIVE_CJS=1` turns it on.
+/// Whether the native ESM→CJS emitter is enabled for app files. **Default ON** (P2a cutover): the
+/// conformity harness validated full parity on the payroll oracle (1057 files / 10471 tests) and
+/// esbuild remains the automatic fallback for any form the emitter doesn't handle, so native-on is
+/// zero-regression. Opt OUT with `TURBO_NATIVE_CJS=0` (or empty) — the harness uses this to run the
+/// esbuild baseline. (esbuild is still used for node_modules bundling, coverage, and
+/// decorator-metadata regardless — see the gate in `read_transformed`.)
 pub fn enabled() -> bool {
-    // non-empty only: an empty value (`TURBO_NATIVE_CJS=`) means OFF, so the conformity harness can
-    // force the esbuild baseline by setting it empty without it counting as enabled.
-    std::env::var("TURBO_NATIVE_CJS").map(|v| !v.is_empty()).unwrap_or(false)
+    match std::env::var("TURBO_NATIVE_CJS") {
+        Ok(v) => v != "0" && !v.is_empty(),
+        Err(_) => true,
+    }
 }
 
 /// Strict mode (conformity coverage measurement): when on, the runner does NOT fall back to esbuild
