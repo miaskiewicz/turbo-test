@@ -7,13 +7,22 @@
 | P1 — cli.js → Rust | ✅ DONE | `src/launcher.rs`; cli.js is a thin shim; compat suites green |
 | P2a — app-file ESM→CJS emitter | ✅ DONE, default ON | `src/esm_cjs.rs`; payroll 1057 files/10471 tests full parity |
 | Conformity harness | ✅ DONE | `scripts/conformity.mjs` (parity + coverage modes) |
-| P2b — node_modules native bundle | ⬜ TODO | `esbuild_bundle_dep_cjs` still esbuild |
-| P2c — delete esbuild (mock AST, cov maps) | ⬜ TODO | esbuild still: node_modules, coverage, decorator-metadata, fallback |
+| P2b — node_modules native | 🟡 EXPERIMENTAL (off) | `native_dep_cjs` behind `TURBO_NATIVE_DEPS`; naive per-file proven insufficient |
+| P2c — delete esbuild (mock AST, cov maps) | ⬜ TODO | blocked on P2b |
 | P3 — turbo-dom Rust crate | ⬜ TODO (other agent) | retire `napi_host.rs` |
 
-**esbuild is NOT yet removed.** P2a only moved the *app-file* transform to oxc. esbuild is still
-required for node_modules bundling, coverage source maps, decorator-metadata, and as the automatic
-fallback. Removing it needs P2b + P2c.
+**esbuild is NOT yet removed.** P2a moved the *app-file* transform to oxc (default on). esbuild is
+still required for node_modules bundling, coverage source maps, decorator-metadata, and as the
+automatic app-file fallback.
+
+**P2b finding (harness-validated):** a naive per-file native transform of node_modules is
+**incorrect** — it broke 2/300 payroll component files (MUI/emotion). All 850 emitted deps were
+syntactically valid, but 124 use `__reExport` (barrel `export *`) whose props are copied at load
+time; under circular/ordering deps the source module isn't initialized yet → missing exports.
+esbuild solves this by *bundling* each package with lazy `__esm`/`__commonJS` init wrappers (+
+asset loaders, `--loader:.css=empty`). A correct native deps path must replicate those wrapper
+semantics — substantial. The per-file path is kept behind `TURBO_NATIVE_DEPS` for that future work;
+**deleting esbuild (P2c) is blocked on it.**
 
 Conformity worktrees live at `/Users/grzegorzmiaskiewicz/github-flux/.tt-conformity/{payroll-app,flux-apis}`
 (detached on `origin/staging`, node_modules symlinked from the main checkouts). flux-apis only runs

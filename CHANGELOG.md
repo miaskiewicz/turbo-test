@@ -27,6 +27,12 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   safety mechanism gating the cutover; it already caught a real dynamic-`import()` bug, now fixed.
   Validated on the payroll-app `staging` worktree: **1057 files / 10471 tests, 100% native
   handling, full parity.**
+- **P2b: experimental native node_modules path (`TURBO_NATIVE_DEPS`, default OFF).** The harness
+  proved a naive per-file native transform of deps is incorrect — barrel `export *` re-exports under
+  circular/ordering deps lose exports (esbuild bundles each package with lazy init wrappers + asset
+  loaders to avoid this). Kept behind the flag for the future bundle-init implementation; esbuild
+  stays the default for node_modules. Deleting esbuild (coverage maps, mock-pass AST-ification) is
+  blocked on a correct P2b.
 
 ## [0.2.16] — vitest CLI/API compatibility sweep + turbo-dom 0.2.5
 
