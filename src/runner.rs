@@ -1393,7 +1393,10 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
     file.extension().and_then(|e| e.to_str()).unwrap_or("").hash(&mut h);
-    "native-cjs-v2".hash(&mut h);
+    "native-cjs-v3".hash(&mut h);
+    // coverage output carries an inline source map → key it separately so the no-map and with-map
+    // forms never collide in the cache.
+    crate::coverage::enabled().hash(&mut h);
     let cache = cache_dir().join(format!("ntv-{:016x}.cjs", h.finish()));
     if let Ok(c) = std::fs::read_to_string(&cache) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
@@ -2091,10 +2094,10 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
         // are externalized from every bundle so their shared singletons (ThemeContext, emotion
         // cache, react) resolve to ONE instance via the require cache (no dual-context).
         if abs.components().any(|c| c.as_os_str() == "node_modules") {
-            // Native per-file ESM→CJS for deps (P2b) — EXPERIMENTAL, opt-in (TURBO_NATIVE_DEPS).
-            // Default OFF: per-file is incorrect for real dep graphs (asset imports + circular
-            // init ordering that esbuild's bundle handles); see `esm_cjs::deps_enabled`. esbuild
-            // bundle stays the default + fallback. Skipped under coverage (no source maps, P2c).
+            // Native package bundler for deps (P2b, default on); esbuild bundle is the fallback.
+            // Under coverage the whole transform path stays on esbuild (see the app branch), so deps
+            // do too — keeps coverage runs on the known-good esbuild path until native maps reach
+            // parity.
             if crate::esm_cjs::deps_enabled() && !crate::coverage::enabled() {
                 if let Some(code) = native_dep_cjs(abs) {
                     return Some(code);
@@ -2107,13 +2110,12 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
                 return Some(code);
             }
         } else {
-            // Native oxc ESM→CJS (P2a, gated by TURBO_NATIVE_CJS): try it first for app files, fall
-            // back to esbuild on any unhandled form. Skipped under coverage until oxc source maps
-            // land (P2c) — native output has no inline map yet, so coverage stays on esbuild.
-            if crate::esm_cjs::enabled()
-                && !crate::coverage::enabled()
-                && !prefer_metadata
-            {
+            // Native oxc ESM→CJS (P2a) for app files; esbuild fallback on any unhandled form.
+            // Coverage stays on esbuild for now: the native single-pass emitter DOES append an inline
+            // source map (see esm_cjs::emit), but oxc's codegen map is less dense than esbuild's
+            // (fewer per-token mappings), so coverage.rs under-attributes inner functions/lines —
+            // not yet parity. Decorator-metadata files also route to esbuild/tsc. (P2c remainder.)
+            if crate::esm_cjs::enabled() && !crate::coverage::enabled() && !prefer_metadata {
                 if let Some(code) = native_transform_cjs(abs) {
                     return Some(code);
                 }

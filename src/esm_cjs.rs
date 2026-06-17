@@ -28,10 +28,11 @@ use oxc_allocator::{Allocator, Box as ABox};
 use oxc_ast::ast::*;
 use oxc_ast::{AstBuilder, NONE};
 use oxc_ast_visit::{walk_mut, VisitMut};
-use oxc_codegen::Codegen;
+use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder, SymbolId};
 use oxc_span::{SourceType, SPAN};
+use oxc_transformer::{TransformOptions, Transformer};
 
 /// Whether the native ESM→CJS emitter is enabled for app files. **Default ON** (P2a cutover): the
 /// conformity harness validated full parity on the payroll oracle (1057 files / 10471 tests) and
@@ -268,30 +269,60 @@ impl<'a> VisitMut<'a> for EmitState<'a, '_> {
 }
 
 /// Emit esbuild-shaped CJS for `path` (TS/JSX allowed). `None` on parse/transform failure or an
-/// unhandled module form (caller falls back to esbuild).
+/// unhandled module form (caller falls back to esbuild). Single-pass: TS/JSX strip + ESM→CJS on ONE
+/// AST so, under coverage, a single codegen source map maps the output back to the ORIGINAL `.ts`
+/// lines (no esbuild). The map is appended inline (`//# sourceMappingURL=…`) for `coverage.rs`.
 pub fn emit(path: &Path, src: &str) -> Option<String> {
-    // 1. TS/JSX strip → plain JS.
-    let js = if crate::transform::needs_transform(path) {
-        crate::transform::transform(path, src).ok()?
-    } else {
-        src.to_string()
-    };
-    // 2-5. Transform to parts in APP mode (everything external / runtime require).
-    let ctx = LowerCtx { exports_obj: "__tt_exports".to_string(), resolve: None };
-    let parts = transform_to_parts(&js, &ctx)?;
-    // 6. No ESM module syntax → a CommonJS module or a plain script: return the transformed body
-    //    WITHOUT CJS-wrapping it (wrapping would clobber the file's own module.exports/exports.x).
-    //    import() was still lowered.
-    if !parts.has_module_syntax {
-        return Some(parts.body_code);
+    let alloc = Allocator::default();
+    let stype = SourceType::from_path(path).ok()?;
+    let parsed = Parser::new(&alloc, src, stype).parse();
+    if !parsed.errors.is_empty() {
+        return None;
     }
-    Some(assemble(&parts.requires, &parts.re_exports, &parts.exports, &parts.body_code))
+    let mut program = parsed.program;
+
+    // TS/JSX strip IN PLACE (original spans preserved → the codegen map points at the .ts source).
+    if crate::transform::needs_transform(path) {
+        let scoping0 = SemanticBuilder::new().build(&program).semantic.into_scoping();
+        let opts = TransformOptions::default();
+        let ret = Transformer::new(&alloc, path, &opts).build_with_scoping(scoping0, &mut program);
+        if !ret.errors.is_empty() {
+            return None;
+        }
+    }
+
+    // Rebuild semantic on the now-plain-JS AST for the ESM→CJS reference rewriting.
+    let sem = SemanticBuilder::new().build(&program);
+    if !sem.errors.is_empty() {
+        return None;
+    }
+    let scoping = sem.semantic.into_scoping();
+    let ast = AstBuilder::new(&alloc);
+
+    let ctx = LowerCtx { exports_obj: "__tt_exports".to_string(), resolve: None };
+    let map_src = if crate::coverage::enabled() { Some((path, src)) } else { None };
+    let (parts, mappings) = lower(ast, scoping, &ctx, &mut program, map_src)?;
+
+    // No ESM module syntax → CJS/script: return the transformed body unwrapped (no preamble).
+    if !parts.has_module_syntax {
+        let mut out = parts.body_code;
+        if let Some(m) = &mappings {
+            append_inline_map(&mut out, path, 0, m);
+        }
+        return Some(out);
+    }
+    let mut out = assemble(&parts.requires, &parts.re_exports, &parts.exports, &parts.body_code);
+    if let Some(m) = &mappings {
+        // lines before body_code in the output = preamble + the assembled-module prefix.
+        let prefix = PREAMBLE.matches('\n').count()
+            + assemble_module(&parts.requires, &parts.re_exports, &parts.exports, "").matches('\n').count();
+        append_inline_map(&mut out, path, prefix, m);
+    }
+    Some(out)
 }
 
-/// Parse `js` (already TS/JSX-stripped, plain JS), classify imports/exports under `ctx`, rewrite
-/// references to imported locals + lower dynamic `import()`, and codegen the body. Returns the
-/// `ModuleParts` for the caller to assemble (app CJS module, or a bundled init closure). `None` on
-/// parse/semantic failure or an unhandled form.
+/// Parse `js` (already TS/JSX-stripped, plain JS) and lower to `ModuleParts` under `ctx`. Used by
+/// the bundler (per module); no source map. `None` on parse/semantic failure or an unhandled form.
 pub(crate) fn transform_to_parts(js: &str, ctx: &LowerCtx) -> Option<ModuleParts> {
     let alloc = Allocator::default();
     let stype = SourceType::mjs();
@@ -306,9 +337,23 @@ pub(crate) fn transform_to_parts(js: &str, ctx: &LowerCtx) -> Option<ModuleParts
     }
     let scoping = sem.semantic.into_scoping();
     let ast = AstBuilder::new(&alloc);
+    let (parts, _) = lower(ast, scoping, ctx, &mut program, None)?;
+    Some(parts)
+}
 
+/// Core: classify imports/exports under `ctx`, rewrite imported-local refs + dynamic `import()` +
+/// (bundler) `require()` calls, codegen the body. `map_src = Some((path, original_src))` enables a
+/// codegen source map (returned as the raw VLQ `mappings` string for the body).
+fn lower<'a>(
+    ast: AstBuilder<'a>,
+    scoping: Scoping,
+    ctx: &LowerCtx,
+    program: &mut Program<'a>,
+    map_src: Option<(&Path, &'a str)>,
+) -> Option<(ModuleParts, Option<String>)> {
+    let stype = SourceType::mjs();
     let Plan { imports, requires, re_exports, exports, body_stmts, default_needs_rewrite } =
-        plan(&ast, &scoping, ctx, &mut program)?;
+        plan(&ast, &scoping, ctx, program)?;
 
     let mut state = EmitState { ast, imports, scoping, resolve: ctx.resolve };
     let mut body = body_stmts;
@@ -316,15 +361,70 @@ pub(crate) fn transform_to_parts(js: &str, ctx: &LowerCtx) -> Option<ModuleParts
         state.visit_statement(stmt);
     }
 
-    let prog2 = ast.program(SPAN, stype, "", ast.vec(), None, ast.vec(), ast.vec_from_iter(body));
-    let mut body_code = Codegen::new().build(&prog2).code;
+    // codegen resolves sourcemap spans against `program.source_text` (NOT with_source_text), so the
+    // synthetic program must carry the ORIGINAL source text for the map to point at the .ts lines.
+    let prog_src = map_src.map(|(_, s)| s).unwrap_or("");
+    let prog2 = ast.program(SPAN, stype, prog_src, ast.vec(), None, ast.vec(), ast.vec_from_iter(body));
+    let (mut body_code, mappings) = match map_src {
+        Some((path, _)) => {
+            let ret = Codegen::new()
+                .with_options(CodegenOptions {
+                    source_map_path: Some(path.to_path_buf()),
+                    ..Default::default()
+                })
+                .build(&prog2);
+            (ret.code, ret.map.map(|m| m.to_json().mappings))
+        }
+        None => (Codegen::new().build(&prog2).code, None),
+    };
     if default_needs_rewrite {
+        // same-line replacement → does not shift line numbers, map stays valid.
         body_code = body_code.replacen("export default ", "var __tt_default = ", 1);
     }
 
     let has_module_syntax =
         !(requires.is_empty() && re_exports.is_empty() && exports.is_empty() && !default_needs_rewrite);
-    Some(ModuleParts { requires, re_exports, exports, body_code, default_needs_rewrite, has_module_syntax })
+    Some((
+        ModuleParts { requires, re_exports, exports, body_code, default_needs_rewrite, has_module_syntax },
+        mappings,
+    ))
+}
+
+/// Append an inline source map (`//# sourceMappingURL=data:…base64`) whose generated lines align
+/// with the FINAL output: `prefix_lines` empty groups are prepended so the body's mappings start at
+/// the right output line. `coverage.rs::decode_inline_map` reads this exactly like esbuild's.
+fn append_inline_map(out: &mut String, path: &Path, prefix_lines: usize, body_mappings: &str) {
+    use base64::Engine;
+    let mappings = format!("{}{}", ";".repeat(prefix_lines), body_mappings);
+    let src_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let json = format!(
+        "{{\"version\":3,\"sources\":[{}],\"sourcesContent\":[null],\"mappings\":{}}}",
+        json_string(&src_name),
+        json_string(&mappings),
+    );
+    let b64 = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+    out.push_str("\n//# sourceMappingURL=data:application/json;base64,");
+    out.push_str(&b64);
+    out.push('\n');
+}
+
+/// Minimal JSON string encoder (quotes + escapes) for the inline-map fields.
+fn json_string(s: &str) -> String {
+    let mut o = String::with_capacity(s.len() + 2);
+    o.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
 }
 
 struct Plan<'a> {
