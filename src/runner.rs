@@ -780,13 +780,45 @@ fn dom_bootstrap(root: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
+/// Parse a per-file `// @vitest-environment <env>` pragma (vitest honors a docblock comment at
+/// the top of a test file). Returns the lowercased environment name if present. We scan the
+/// whole file (cheap) rather than only the leading docblock — a stray mention is unlikely and
+/// matching vitest's exact docblock placement isn't worth the parse.
+fn file_env_pragma(s: &str) -> Option<String> {
+    let i = s.find("@vitest-environment")?;
+    let rest = &s[i + "@vitest-environment".len()..];
+    let name: String = rest
+        .trim_start_matches([' ', ':', '\t'])
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    if name.is_empty() { None } else { Some(name.to_ascii_lowercase()) }
+}
+
+/// Resolve the effective environment for a file: a per-file `@vitest-environment` pragma wins,
+/// then the run-level `TURBO_ENV` (set by cli.js from `--environment` / config `test.environment`),
+/// else `None` (auto — fall back to the content heuristic). Recognized: node | jsdom | happy-dom.
+fn forced_env(s: &str) -> Option<String> {
+    file_env_pragma(s).or_else(|| std::env::var("TURBO_ENV").ok().map(|v| v.to_ascii_lowercase()))
+}
+
 /// Whether a file needs a DOM environment (so we don't impose one on pure-logic tests,
 /// which keeps their clean globals — mirrors vitest's per-file environment).
+///
+/// An explicit environment (per-file pragma or `TURBO_ENV`) is authoritative: `node` SKIPS the
+/// DOM install even for a `.tsx` file; `jsdom`/`happy-dom` FORCE it on. With no explicit env we
+/// fall back to the content heuristic (extension + DOM-API mentions).
 fn needs_dom(file: &Path) -> bool {
+    let s = std::fs::read_to_string(file).unwrap_or_default();
+    match forced_env(&s).as_deref() {
+        Some("node") => return false,
+        // turbo-dom is our single DOM impl; jsdom/happy-dom both map onto it.
+        Some("jsdom") | Some("happy-dom") | Some("happydom") => return true,
+        _ => {}
+    }
     if matches!(file.extension().and_then(|e| e.to_str()), Some("tsx" | "jsx")) {
         return true;
     }
-    let s = std::fs::read_to_string(file).unwrap_or_default();
     s.contains("@testing-library")
         || s.contains("react-dom")
         || s.contains("ReactDOM")
@@ -4425,4 +4457,30 @@ pub fn init_v8() {
         // so per-file setup timing reflects steady state, not the one-time build.
         let _ = framework_snapshot();
     });
+}
+
+#[cfg(test)]
+mod env_pragma_tests {
+    use super::file_env_pragma;
+
+    #[test]
+    fn parses_node_pragma() {
+        assert_eq!(file_env_pragma("// @vitest-environment node\nimport x;").as_deref(), Some("node"));
+    }
+
+    #[test]
+    fn parses_colon_and_jsdom() {
+        assert_eq!(file_env_pragma("/* @vitest-environment: jsdom */").as_deref(), Some("jsdom"));
+        assert_eq!(file_env_pragma("// @vitest-environment   happy-dom").as_deref(), Some("happy-dom"));
+    }
+
+    #[test]
+    fn case_insensitive_value() {
+        assert_eq!(file_env_pragma("// @vitest-environment Node").as_deref(), Some("node"));
+    }
+
+    #[test]
+    fn none_when_absent() {
+        assert_eq!(file_env_pragma("import { it } from 'vitest';"), None);
+    }
 }

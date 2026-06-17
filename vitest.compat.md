@@ -62,18 +62,18 @@ subcommand layer** — `argv[0]` that isn't a flag is treated as a test-file pat
 | `--bail <n>` | 🟡 | **P1 — DONE** | Stop after N **failed tests** total. `turbo_test.rs`: shared `Arc<AtomicUsize>` failure counter incremented after each file; workers stop pulling new files once it reaches N. **File-granular**: a worker already mid-file finishes that file, so the final failed count can exceed N (esp. with multiple workers); partial results are still reported. `cli.js` forwards the value. |
 | `--reporter junit` / `--outputFile` | ✅ | **P1 — DONE** | JUnit XML (per-testcase) + `--outputFile` for json/junit/tap. See §3. |
 | `--reporter` (verbose/dot/tap/default) | ✅ | **P1/P2 — DONE** | `tap`/`verbose`/`dot`/`default` implemented; unknown values (`html`, `tap-flat`, …) accepted-and-ignored → text fallback. See §3. |
-| `-c, --config <path>` | ❌ | P1 | Config path is auto-discovered (nearest `vitest/vite.config.*`); cannot override. |
-| `--root <path>` / `--dir <path>` | ❌ | P2 | No root override; discovery is `cwd`-rooted. |
-| `--environment <node\|jsdom\|happy-dom>` | 🟡 | P1 | Env is effectively fixed (turbo-dom DOM globals always installed). Not selectable per-run; `// @vitest-environment` pragma not honored. |
-| `--globals` / `--no-globals` | 🟡 | P2 | Globals are **always on**; cannot disable. `import { describe } from 'vitest'` interop relies on this. |
-| `--isolate` / `--no-isolate` | 🟡 | P1 | Controlled by `TURBO_REUSE_ISOLATE`/`TURBO_NO_REUSE` env + config `isolate:false` autodetect — **no CLI flag**. |
+| `-c, --config <path>` | ✅ | **P1 — DONE** | Forces that exact config file for include/exclude/coverage/`environment` reading instead of the walk-up search. `cli.js` `findConfig`/`vitestPatterns`/`vitestCoverage` take a `forced` arg; the file's dir becomes the discovery root for relative globs. Still a string-scan (no TS eval — same limits as auto-discovery). |
+| `--root <path>` / `--dir <path>` | ✅ | **P2 — DONE** | Override the directory `discover()` walks (default `cwd`). turbo-test scans the project root for files, so `--root` and `--dir` are equivalent (last wins); vitest's finer root-vs-dir distinction is not modeled. |
+| `--environment <node\|jsdom\|happy-dom>` | 🟡 | **P1 — mostly DONE** | `cli.js` maps the flag (and config `test.environment`) → `TURBO_ENV`, read in `runner.rs` `needs_dom`/`forced_env`. `node` SKIPS the turbo-dom DOM-global install; `jsdom`/`happy-dom` both FORCE it on (turbo-dom is the single DOM impl — jsdom vs happy-dom are NOT distinguished). Per-file `// @vitest-environment <env>` pragma is honored and OVERRIDES the run-level env. |
+| `--globals` / `--no-globals` | 🟡 | **P2 — accepted, gap documented** | Both spellings accepted (`cli.js`). Globals (`describe`/`it`/`expect`) are **always on** and injected unconditionally; `--no-globals` is a **no-op** — it CANNOT be honored because there is no `vitest` module-export shim to `import { describe } from 'vitest'` from. Honoring it would require shipping such a shim. |
+| `--isolate` / `--no-isolate` | ✅ | **P1 — DONE** | CLI flag added: `cli.js` sets `--no-isolate` → `TURBO_REUSE_ISOLATE=1` (reuse one isolate per worker), `--isolate` → `TURBO_NO_REUSE=1` (force fresh) in the env before spawning the binary (which inherits it). Config `isolate:false` autodetect still applies when neither flag is passed. |
 | `--pool <threads\|forks\|vmThreads>` | ⏸ | — | turbo-test has its own native worker model; flag is meaningless but should be accepted-and-ignored. |
 | `--maxWorkers` / `--minWorkers` | ✅ | **P2 — DONE** | `--maxWorkers N` aliases `--jobs` (`turbo_test.rs`). `--minWorkers` is accepted-and-ignored — turbo-test has no minimum-worker concept (work-stealing scales down naturally). `cli.js` forwards both values. |
 | `--maxConcurrency <n>` | ❌ | P3 | Within-file concurrency; turbo-test runs a file's tests sequentially anyway. |
 | `-u, --update` | ✅ | **P1 — DONE** | Snapshot update. `turbo_test.rs` → `TURBO_UPDATE_SNAPSHOTS` env → `globalThis.__TT_UPDATE_SNAPSHOTS`; `toMatchSnapshot` writes missing/changed keys instead of failing. Forwarded as a boolean flag by `cli.js`. Inline-snapshot auto-write is **not** supported (see §4). |
 | `--retry <n>` | ✅ | **P2 — DONE** | Global default retry. `turbo_test.rs` → `TURBO_TEST_RETRY` env → `__TT_DEFAULT_RETRY` global → `runtime.js` `runSuite` (per-test `{ retry }` still wins). `cli.js` forwards the value. |
 | `--silent` | ✅ | **P2 — DONE** | `turbo_test.rs` → `TURBO_TEST_SILENT` → `__TT_SILENT` global; `runtime.js` console.log/info/warn/error become no-ops (checked at call time, since the global is injected after the runtime module is snapshot-evaluated). |
-| `--changed [since]` | ❌ | P2 | Run only tests affected by git changes. Logic exists in `m5-affected`, unwired. |
+| `--changed [since]` | 🟡 | **P2 — DONE (direct filter)** | `cli.js` `gitChanged()`: `git diff --name-only [since]` + `--cached` + untracked (`ls-files --others`), intersected with discovered test files (absolute paths). `since` arg is optional (working-tree vs HEAD/index by default). When nothing changed → exit 0 (running nothing is not a failure). When git is unavailable / not a repo → runs all. **Gap:** this is a direct changed-*file* filter, NOT an affected-graph — a test that imports a changed *source* file but is itself unchanged is NOT re-run (no import graph built; the `m5-affected` graph idea is still unwired). |
 | `--allowOnly` / `--no-allowOnly` | 🟡 | **P3 — DONE** | Both flags accepted (`turbo_test.rs`). Default allows `.only`. `--no-allowOnly` → `TURBO_TEST_FORBID_ONLY` → `__TT_FORBID_ONLY`; `runtime.js` `__tt.run()` records a failure (flipping the exit code) for any **file** that collected a `.only`. **Partial**: per-file granularity — the failure is attributed to the file, and the file's `.only` tests still execute (vitest collect-time errors before running); the run exits non-zero with a clear message, which is the CI-relevant behavior. |
 | `--watch` / `-w` | ❌ | ⏸ | No watcher. |
 | `--ui` | ❌ | ⏸ | No browser UI. |
@@ -149,11 +149,12 @@ Mostly strong. Notable gaps:
 
 | capability | status | Notes |
 |---|---|---|
-| auto-discover nearest `vitest.config.*` / `vite.config.*` | ✅ | walks up from cwd. |
+| auto-discover nearest `vitest.config.*` / `vite.config.*` | ✅ | walks up from cwd. `-c/--config <path>` forces an exact file (skips the walk-up; its dir becomes the discovery root). |
 | `test.include` / `test.exclude` globs | ✅ | string-scan (no TS eval); drives discovery. |
 | `coverage.include/exclude/thresholds` | ✅ | string-scan; flags win over config. |
+| `test.environment` | ✅ | string-scan; sets the run default env when `--environment` is absent → `TURBO_ENV`. Per-file pragma still wins. |
 | anything requiring evaluating the config (functions, `defineConfig` logic, env interpolation, plugins, `setupFiles` array beyond first, aliases) | 🟡/❌ | Pure regex scan — dynamic config is invisible. |
-| `test.environment`, `test.globals`, `test.testTimeout`, `test.retry`, `test.bail`, `test.pool`, `test.setupFiles`, `test.reporters` | ❌ | Not read from config (only include/exclude/coverage are). |
+| `test.globals`, `test.testTimeout`, `test.retry`, `test.bail`, `test.pool`, `test.setupFiles`, `test.reporters` | ❌ | Not read from config. (`test.isolate:false` IS autodetected separately in `runner.rs`.) |
 
 ---
 
@@ -203,12 +204,17 @@ All four are locked by `test/cli-compat.test.mjs` (`npm test`).
   `toHaveBeenCalledOnce`, `toHaveBeenNthCalledWith`) confirmed present. Added
   `test/compat-api.test.mjs` + `fixtures/compat/*`. Snapshot file path plumbed via
   `globalThis.__ttFile` (set in `drive_tests`).
-- 2026-06-17 — **config/environment batch shipped** (§2/§5): `-c/--config`, `--root`/`--dir`,
-  `--isolate`/`--no-isolate` (→ `TURBO_NO_REUSE`/`TURBO_REUSE_ISOLATE`), `--changed [since]`
-  (git diff ∩ discovered files), `--environment` + `// @vitest-environment` pragma (`node` skips
-  DOM-global install via `TURBO_ENV`; jsdom/happy-dom not distinguished), `--globals` accepted
-  (`--no-globals` no-op — globals always injected). Added `test/compat-config-env.test.mjs` +
-  Rust pragma unit tests.
+- 2026-06-17 — **config / discovery / environment batch shipped**: `-c/--config` (force exact
+  config), `--root`/`--dir` (discovery root override), `--environment <node|jsdom|happy-dom>` +
+  per-file `// @vitest-environment` pragma (→ `TURBO_ENV`, gates turbo-dom DOM install in
+  `runner.rs`), `--isolate`/`--no-isolate` (→ `TURBO_NO_REUSE`/`TURBO_REUSE_ISOLATE` env),
+  `--changed [since]` (direct git changed-file filter, no import graph), `--globals`/`--no-globals`
+  (accepted; `--no-globals` is a documented no-op). `test.environment` now read from config as the
+  env default. `cli.js` value-flag handling extended (incl. optional-arg `--changed` and `--k=v`
+  inline form). Tests: `test/compat-config-env.test.mjs` (13 cases) + 4 Rust unit tests for the
+  pragma parser (`runner::env_pragma_tests`). Gaps: jsdom/happy-dom not distinguished (both →
+  turbo-dom); `--no-globals` can't be honored (no `vitest` export shim); `--changed` is a file
+  filter, not an affected-graph.
 - 2026-06-17 — **Execution-control batch shipped**: `--testTimeout` + per-test `{ timeout }`
   ENFORCEMENT (internal-timer race, invisible to fake timers; hung tests fail cleanly), `--retry`
   global default, `--bail <n>` (file-granular cross-worker abort), `--maxWorkers` alias + `--minWorkers`

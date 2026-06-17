@@ -72,9 +72,18 @@ function globToRe(glob) {
 // Find the nearest vitest/vite config and pull its test-level include/exclude
 // globs (the FIRST arrays in the file — test.* precedes any coverage.* block).
 // Returns { root, include:[RegExp], exclude:[RegExp] } or null if none/unparseable.
-function vitestPatterns(startDir) {
+// When `forced` (a `-c/--config` path) is given, that exact file is used (its dir is the
+// root) instead of the walk-up search.
+function vitestPatterns(startDir, forced) {
   const names = ['vitest.config.ts', 'vitest.config.mts', 'vitest.config.js', 'vitest.config.mjs',
                  'vite.config.ts', 'vite.config.mts', 'vite.config.js', 'vite.config.mjs'];
+  if (forced) {
+    const p = path.resolve(forced);
+    if (!fs.existsSync(p)) return null;
+    let text;
+    try { text = fs.readFileSync(p, 'utf8'); } catch { return null; }
+    return patternsFromText(text, path.dirname(p));
+  }
   let dir = startDir;
   for (;;) {
     for (const n of names) {
@@ -82,20 +91,9 @@ function vitestPatterns(startDir) {
       if (!fs.existsSync(p)) continue;
       let text;
       try { text = fs.readFileSync(p, 'utf8'); } catch { return null; }
-      const arr = (key) => {
-        const m = text.match(new RegExp(key + '\\s*:\\s*\\[([^\\]]*)\\]'));
-        if (!m) return null;
-        const items = m[1].match(/['"`]([^'"`]+)['"`]/g);
-        return items ? items.map((s) => s.slice(1, -1)) : [];
-      };
-      const inc = arr('include');
-      const exc = arr('exclude');
-      if (!inc) return null; // no test.include → fall back to default discovery
-      return {
-        root: dir,
-        include: inc.map(globToRe),
-        exclude: (exc || []).map(globToRe),
-      };
+      const r = patternsFromText(text, dir);
+      if (r === undefined) continue; // (kept for symmetry; patternsFromText never returns undefined)
+      return r;
     }
     const parent = path.dirname(dir);
     if (parent === dir) return null;
@@ -103,8 +101,33 @@ function vitestPatterns(startDir) {
   }
 }
 
-// Locate the nearest vitest/vite config and return { dir, text } or null.
-function findConfig(startDir) {
+// Extract { root, include, exclude } from config text + its dir. null if no test.include
+// (→ caller falls back to default discovery).
+function patternsFromText(text, dir) {
+  const arr = (key) => {
+    const m = text.match(new RegExp(key + '\\s*:\\s*\\[([^\\]]*)\\]'));
+    if (!m) return null;
+    const items = m[1].match(/['"`]([^'"`]+)['"`]/g);
+    return items ? items.map((s) => s.slice(1, -1)) : [];
+  };
+  const inc = arr('include');
+  const exc = arr('exclude');
+  if (!inc) return null; // no test.include → fall back to default discovery
+  return {
+    root: dir,
+    include: inc.map(globToRe),
+    exclude: (exc || []).map(globToRe),
+  };
+}
+
+// Locate a vitest/vite config and return { dir, text } or null. With `forced` (a `-c/--config`
+// path) that exact file is used; otherwise walk up from `startDir`.
+function findConfig(startDir, forced) {
+  if (forced) {
+    const p = path.resolve(forced);
+    if (!fs.existsSync(p)) return null;
+    try { return { dir: path.dirname(p), text: fs.readFileSync(p, 'utf8') }; } catch { return null; }
+  }
   const names = ['vitest.config.ts', 'vitest.config.mts', 'vitest.config.js', 'vitest.config.mjs',
                  'vite.config.ts', 'vite.config.mts', 'vite.config.js', 'vite.config.mjs'];
   let dir = startDir;
@@ -120,11 +143,19 @@ function findConfig(startDir) {
   }
 }
 
+// Read `test.environment` (node|jsdom|happy-dom) from a config — used to set the run default
+// when `--environment` isn't passed. String-scan, like the other config readers.
+function configEnvironment(text) {
+  if (!text) return null;
+  const m = text.match(/environment\s*:\s*['"`]([a-z-]+)['"`]/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
 // Pull the vitest `coverage` block's include/exclude globs + thresholds so the gate, lcov report
 // set, and JSON summary can be driven from config (no flags needed). Config-reading parity with
 // how we already read test.include/exclude — string-scan, no TS evaluation.
-function vitestCoverage(startDir) {
-  const cfg = findConfig(startDir);
+function vitestCoverage(startDir, forced) {
+  const cfg = findConfig(startDir, forced);
   if (!cfg) return null;
   const text = cfg.text;
   // slice from the `coverage:` key so include/exclude/thresholds resolve to the coverage block,
@@ -159,9 +190,9 @@ function vitestCoverage(startDir) {
   };
 }
 
-function discover(cwd) {
+function discover(cwd, forcedConfig) {
   const all = walk(cwd, []);
-  const pats = vitestPatterns(cwd);
+  const pats = vitestPatterns(cwd, forcedConfig);
   if (!pats) return all.sort();
   // vitest matches globs against the project-root-relative POSIX path.
   const rel = (f) => path.relative(pats.root, f).split(path.sep).join('/');
@@ -170,6 +201,35 @@ function discover(cwd) {
     return pats.include.some((re) => re.test(r)) && !pats.exclude.some((re) => re.test(r));
   });
   return kept.sort();
+}
+
+// `--changed [since]`: the set of files git reports as changed vs `since` (default working tree
+// vs HEAD), as ABSOLUTE paths. Includes staged + unstaged + untracked. Returns a Set, or null if
+// git isn't available / not a repo (caller then falls back to running everything). NOTE: this is a
+// direct changed-FILE filter — we do NOT build an import graph, so a test that imports a changed
+// source file but is itself unchanged is NOT picked up (transitive "affected" is unsupported).
+function gitChanged(since, cwd) {
+  const run = (args) => {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+    if (r.status !== 0 || r.error) return null;
+    return r.stdout.split('\n').filter(Boolean);
+  };
+  const root = run(['rev-parse', '--show-toplevel']);
+  if (!root) return null;
+  const repoRoot = root[0];
+  const out = new Set();
+  // `git diff --name-only <since>` covers working-tree vs the ref; with no `since` it's
+  // working-tree vs index. Add `--cached` for staged, and `--others` for untracked.
+  const diffRef = since && since !== 'true' ? [since] : [];
+  for (const args of [
+    ['diff', '--name-only', ...diffRef],
+    ['diff', '--name-only', '--cached', ...diffRef],
+    ['ls-files', '--others', '--exclude-standard'],
+  ]) {
+    const lines = run(args);
+    if (lines) for (const f of lines) out.add(path.resolve(repoRoot, f));
+  }
+  return out;
 }
 
 function main() {
@@ -190,11 +250,40 @@ function main() {
   // launcher (the discover-empty branch below); not forwarded to the native binary.
   const passWithNoTests = argv.includes('--passWithNoTests');
   argv = argv.filter((a) => a !== '--passWithNoTests');
+  // Config / discovery / environment flags consumed by the LAUNCHER (not forwarded to the
+  // native binary — they drive config reading, file discovery, and env-var injection here).
+  const opts = { config: null, root: null, environment: null, changed: undefined, isolate: undefined };
   // split flags (start with -) from file/glob args
   const flags = [];
   const files = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    // Allow `--key=value` for the launcher-consumed value flags.
+    const eq = a.indexOf('=');
+    const key = a.startsWith('--') && eq > 0 ? a.slice(0, eq) : a;
+    const inlineVal = a.startsWith('--') && eq > 0 ? a.slice(eq + 1) : null;
+    const takeVal = () => {
+      if (inlineVal != null) return inlineVal;
+      if (i + 1 < argv.length && !argv[i + 1].startsWith('-')) return argv[++i];
+      return null;
+    };
+    switch (key) {
+      case '-c': case '--config': opts.config = takeVal(); continue;
+      // vitest distinguishes --root (project root) from --dir (test scan dir); turbo-test scans
+      // the project root for files, so both override the discovery directory (last one wins).
+      case '--root': case '--dir': opts.root = takeVal(); continue;
+      case '--environment': opts.environment = takeVal(); continue;
+      // `--changed`'s arg is OPTIONAL: a following non-flag token is the `since` ref; otherwise
+      // it's working-tree vs HEAD/index.
+      case '--changed': opts.changed = takeVal() || 'true'; continue;
+      case '--isolate': opts.isolate = true; continue;
+      case '--no-isolate': opts.isolate = false; continue;
+      // Globals are ALWAYS on in turbo-test (describe/it/expect are injected unconditionally).
+      // Accept both spellings as no-ops; --no-globals CANNOT be honored (no `vitest` module-export
+      // shim to import from) — see vitest.compat.md §2.
+      case '--globals': case '--no-globals': continue;
+      default: break;
+    }
     if (a.startsWith('-')) {
       flags.push(a);
       // flags that take a value: --jobs N, --shard i/n, --reporter X, -t <pattern>, --outputFile,
@@ -206,10 +295,30 @@ function main() {
       files.push(a);
     }
   }
+
+  // Discovery root: --root/--dir override cwd.
+  const cwd = opts.root ? path.resolve(opts.root) : process.cwd();
+
+  // `--isolate` / `--no-isolate` → the runner's reuse env switches (it inherits our env).
+  // `--no-isolate` reuses one isolate per worker (vitest isolate:false); `--isolate` forces fresh.
+  if (opts.isolate === false) process.env.TURBO_REUSE_ISOLATE = '1';
+  else if (opts.isolate === true) process.env.TURBO_NO_REUSE = '1';
+
+  // `--environment <node|jsdom|happy-dom>` → TURBO_ENV (read in runner.rs needs_dom/forced_env).
+  // Falls back to config `test.environment` when the flag is absent. `node` skips DOM-global
+  // install; jsdom/happy-dom both map onto turbo-dom. A per-file `// @vitest-environment` pragma
+  // overrides this at runtime (see runner.rs).
+  let environment = opts.environment;
+  if (!environment) {
+    const cfg = findConfig(cwd, opts.config);
+    environment = cfg ? configEnvironment(cfg.text) : null;
+  }
+  if (environment) process.env.TURBO_ENV = environment;
+
   // When coverage is on, fill thresholds/include/exclude from vitest config unless the user
   // passed them explicitly — flags win over config (P1/P2).
   if (flags.some((f) => f.startsWith('--coverage'))) {
-    const cov = vitestCoverage(process.cwd());
+    const cov = vitestCoverage(cwd, opts.config);
     if (cov) {
       if (cov.thresholds && !flags.includes('--coverage-thresholds') && !flags.includes('--coverage-threshold')) {
         flags.push('--coverage-thresholds', cov.thresholds);
@@ -225,7 +334,7 @@ function main() {
 
   let testFiles = files;
   if (testFiles.length === 0) {
-    testFiles = discover(process.cwd());
+    testFiles = discover(cwd, opts.config);
     if (testFiles.length === 0) {
       if (passWithNoTests) {
         console.error('turbo-test: no test files found — exiting 0 (--passWithNoTests).');
@@ -233,6 +342,23 @@ function main() {
       }
       console.error('turbo-test: no test files found (looked for *.test.* / *.spec.*).');
       process.exit(1);
+    }
+  }
+  // `--changed [since]`: keep only discovered test files that git reports as changed. This is a
+  // direct changed-file filter (no import graph) — a test unaffected in itself but importing a
+  // changed source is NOT re-run. When nothing changed, running zero tests is expected, not a
+  // failure → exit 0.
+  if (opts.changed !== undefined) {
+    const changed = gitChanged(opts.changed, cwd);
+    if (changed == null) {
+      console.error('turbo-test: --changed: git unavailable / not a repo — running all discovered tests.');
+    } else {
+      const before = testFiles.length;
+      testFiles = testFiles.filter((f) => changed.has(path.resolve(f)));
+      if (testFiles.length === 0) {
+        console.error(`turbo-test: --changed: no changed test files (of ${before}) — exiting 0.`);
+        process.exit(0);
+      }
     }
   }
   // Drop file args that no longer exist (deleted/renamed since a caller built its list — e.g.
