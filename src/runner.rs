@@ -3841,6 +3841,19 @@ fn coverage_accumulate(json: &str) {
 
 /// Run a single test file end-to-end and return its pass/fail report.
 pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
+    // Per-file native-DOM lifecycle: reset the thread-local DOM (fresh document per file) and, when
+    // debugging (TURBO_RUST_DOM_LOG), dump the missing-member access log — on ANY exit incl. a load
+    // failure (the surface React/testing-library touched is recorded during the failed load).
+    struct DomGuard;
+    impl Drop for DomGuard {
+        fn drop(&mut self) {
+            if crate::rust_dom::enabled() {
+                crate::rust_dom::reset();
+            }
+        }
+    }
+    let _dom_guard = DomGuard;
+
     let entry_abs = std::fs::canonicalize(entry).map_err(|e| format!("{e}"))?;
     // e2e helper tests may import heavy Node-only deps they don't exercise — allow stubbing a
     // failed node_modules load for these files only (see stub_failed_deps).

@@ -22,6 +22,64 @@ pub fn enabled() -> bool {
     std::env::var("TURBO_RUST_DOM").map(|v| !v.is_empty() && v != "0").unwrap_or(false)
 }
 
+/// Whether to RECORD missing-member accesses (debug surface map). The interceptor itself is always
+/// installed (for graceful degradation — an unimplemented member returns undefined instead of
+/// crashing the file); recording is the only extra cost and is gated here so production pays nothing
+/// but a cached bool check + a small fall-through. Cached once (no per-access getenv).
+pub fn log_enabled() -> bool {
+    use std::sync::OnceLock;
+    static LOG: OnceLock<bool> = OnceLock::new();
+    *LOG.get_or_init(|| std::env::var("TURBO_RUST_DOM_LOG").map(|v| !v.is_empty() && v != "0").unwrap_or(false))
+}
+
+/// Names the native DOM binds (template methods/accessors + document own methods) + JS internals —
+/// the interceptor falls through for these and only records the REST as "missing".
+const KNOWN: &[&str] = &[
+    // element methods + accessors
+    "appendChild", "removeChild", "insertBefore", "setAttribute", "getAttribute", "hasAttribute",
+    "removeAttribute", "querySelector", "querySelectorAll", "tagName", "parentNode", "firstChild",
+    "nextSibling", "textContent", "id", "className",
+    // document own methods/props
+    "createElement", "createTextNode", "getElementById", "body", "documentElement",
+    // JS internals V8 / libs probe constantly — never DOM
+    "then", "catch", "finally", "constructor", "prototype", "toString", "valueOf", "toJSON",
+    "length", "name", "call", "apply", "bind", "hasOwnProperty", "nodeName",
+];
+
+thread_local! {
+    /// debug logger: unknown property name → access count.
+    static MISSING: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+}
+
+/// Interceptor getter (debug only): fall through for known/symbol names; record + return undefined
+/// for anything unimplemented.
+fn missing_getter(scope: &mut v8::PinScope, name: v8::Local<v8::Name>, _args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) -> v8::Intercepted {
+    let key = name.to_rust_string_lossy(scope);
+    // symbols (Symbol.toPrimitive, Symbol.iterator, …) + known names → fall through.
+    if key.starts_with("Symbol(") || KNOWN.contains(&key.as_str()) {
+        return v8::Intercepted::kNo;
+    }
+    if log_enabled() {
+        MISSING.with(|m| *m.borrow_mut().entry(key).or_insert(0) += 1);
+    }
+    // graceful degradation: an unimplemented member reads as undefined (no crash).
+    rv.set(v8::undefined(scope).into());
+    v8::Intercepted::kYes
+}
+
+/// Print + clear the accumulated missing-access log (call between files when debugging).
+pub fn dump_missing() {
+    let mut items: Vec<(String, u64)> = MISSING.with(|m| m.borrow_mut().drain().collect());
+    if items.is_empty() {
+        return;
+    }
+    items.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    eprintln!("[rust-dom] {} missing DOM members (name×accesses):", items.len());
+    for (name, n) in &items {
+        eprintln!("[rust-dom]   {name} ×{n}");
+    }
+}
+
 struct DomState {
     tree: Tree,
     /// handle → JS node object, for identity (`el === el`).
@@ -261,7 +319,7 @@ fn doc_query_selector(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgume
 
 fn doc_query_selector_all(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let sel = arg_str(scope, &args, 0);
-    let handles = with_tree(|t| t.query_selector_all(&sel)).unwrap_or_default();
+    let handles: Vec<Handle> = with_tree(|t| t.query_selector_all(&sel).to_vec()).unwrap_or_default();
     let arr = v8::Array::new(scope, handles.len() as i32);
     for (i, hh) in handles.into_iter().enumerate() {
         let node = wrap(scope, hh);
@@ -320,6 +378,13 @@ fn build_el_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::
     tmpl_accessor(scope, tmpl, "id", get_id, set_id);
     tmpl_accessor(scope, tmpl, "className", get_class_name, set_class_name);
 
+    // Always-on graceful-degradation interceptor: unimplemented members read as undefined (no
+    // crash); recording the access list is gated by log_enabled() (TURBO_RUST_DOM_LOG).
+    let handler = v8::NamedPropertyHandlerConfiguration::new()
+        .getter(missing_getter)
+        .flags(v8::PropertyHandlerFlags::NON_MASKING | v8::PropertyHandlerFlags::ONLY_INTERCEPT_STRINGS);
+    tmpl.set_named_property_handler(handler);
+
     tmpl
 }
 
@@ -366,6 +431,9 @@ pub fn install(scope: &mut v8::PinScope) {
 
 /// Reset the per-thread DOM (call between test files when reusing an isolate).
 pub fn reset() {
+    if log_enabled() {
+        dump_missing();
+    }
     DOM.with(|d| *d.borrow_mut() = None);
 }
 
