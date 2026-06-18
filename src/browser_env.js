@@ -212,9 +212,9 @@
   if (!d.head) { try { d.head = d.createElement('head'); if (d.documentElement) d.documentElement.appendChild(d.head); } catch(e){} }
   d.createElementNS = function(ns, tag){ return d.createElement(tag); };
   d.createDocumentFragment = function(){ return d.createElement('#document-fragment'); };
-  d.addEventListener = function(){};
-  d.removeEventListener = function(){};
-  d.dispatchEvent = function(){ return true; };
+  // NOTE: document.addEventListener/removeEventListener/dispatchEvent use the native binding (the
+  // document is a wrapped node) so document-level listeners — click-outside handlers, global
+  // keydown — register and fire via the bubble path. (Previously stubbed to no-ops.)
   // CSSOM shim (<style>.sheet) + form-control value/checked. value/checked are defined BOTH as an
   // OWN accessor on each control element (testing-library's setNativeValue reads
   // getOwnPropertyDescriptor(element)) AND on the interface .prototype (React's value-tracker reads
