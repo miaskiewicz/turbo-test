@@ -20,6 +20,9 @@
   if (typeof g.cancelAnimationFrame === 'undefined') g.cancelAnimationFrame = function(id){ clearTimeout(id); };
   if (typeof g.matchMedia === 'undefined') g.matchMedia = function(q){ return { matches:false, media:q, addListener:function(){}, removeListener:function(){}, addEventListener:function(){}, removeEventListener:function(){}, dispatchEvent:function(){return false;} }; };
   if (typeof g.scrollTo === 'undefined') g.scrollTo = function(){};
+  if (typeof g.location === 'undefined' || g.location == null) {
+    g.location = { href: 'http://localhost/', origin: 'http://localhost', protocol: 'http:', host: 'localhost', hostname: 'localhost', port: '', pathname: '/', search: '', hash: '', assign: function(){}, replace: function(){}, reload: function(){}, toString: function(){ return this.href; } };
+  }
   // DOM interface constructors (for `instanceof` / global presence). Stubs; identity not enforced.
   // Real Event base class (dispatch in browser_env.rs reads type/bubbles/defaultPrevented/__stop*).
   if (!g.__ttEvent) {
@@ -100,6 +103,27 @@
     var selEndDesc = { configurable: true, get: function(){ return this.__selEnd == null ? String(this.value||'').length : this.__selEnd; }, set: function(v){ this.__selEnd = v; } };
     var selDirDesc = { configurable: true, get: function(){ return this.__selDir || 'none'; }, set: function(v){ this.__selDir = v; } };
     var baseProto = Object.getPrototypeOf(orig('span'));
+    // classList on the shared element prototype (every element inherits it), backed by className.
+    if (baseProto && !Object.getOwnPropertyDescriptor(baseProto, 'classList')) {
+      try { Object.defineProperty(baseProto, 'classList', { configurable: true, get: function(){
+        var el = this;
+        var parse = function(){ return String(el.className || '').split(/\s+/).filter(Boolean); };
+        var write = function(a){ el.className = a.join(' '); };
+        var dt = {
+          add: function(){ var a = parse(); for (var i=0;i<arguments.length;i++) if (a.indexOf(arguments[i])<0) a.push(arguments[i]); write(a); },
+          remove: function(){ var a = parse(); for (var i=0;i<arguments.length;i++){ var x=a.indexOf(arguments[i]); if (x>=0) a.splice(x,1); } write(a); },
+          toggle: function(c, force){ var a = parse(); var has = a.indexOf(c)>=0; var on = force === undefined ? !has : !!force; if (on && !has) a.push(c); else if (!on && has) a.splice(a.indexOf(c),1); write(a); return on; },
+          contains: function(c){ return parse().indexOf(c)>=0; },
+          replace: function(o,n){ var a = parse(); var x = a.indexOf(o); if (x<0) return false; a[x]=n; write(a); return true; },
+          item: function(i){ return parse()[i] || null; },
+          forEach: function(cb, thisArg){ parse().forEach(cb, thisArg); },
+          toString: function(){ return String(el.className || ''); }
+        };
+        Object.defineProperty(dt, 'length', { get: function(){ return parse().length; } });
+        Object.defineProperty(dt, 'value', { get: function(){ return String(el.className || ''); } });
+        return dt;
+      } }); } catch(e){}
+    }
     var protoFor = {};
     var defType = { HTMLInputElement:'text', HTMLButtonElement:'submit' };
     ['HTMLInputElement','HTMLTextAreaElement','HTMLSelectElement','HTMLOptionElement','HTMLButtonElement','HTMLLabelElement'].forEach(function(n){ if (typeof g[n] !== 'function') g[n] = function(){}; var p = Object.create(baseProto); try {
