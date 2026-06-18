@@ -1082,7 +1082,14 @@ fn get_style(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::Pro
 fn style_proxy_set(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let target = match v8::Local::<v8::Object>::try_from(args.get(0)) { Ok(o) => o, Err(_) => { rv.set_bool(false); return; } };
     let key = args.get(1);
-    let value = args.get(2);
+    let mut value = args.get(2);
+    // Normalize hex colors to rgb()/rgba() form (jsdom does this on assignment); keeps el.style.X
+    // reads consistent with getComputedStyle's normalized cascade values for jest-dom toHaveStyle.
+    if value.is_string() {
+        if let Some(n) = normalize_css_color(&value.to_rust_string_lossy(scope)) {
+            if let Some(s) = v8::String::new(scope, &n) { value = s.into(); }
+        }
+    }
     target.set(scope, key, value);
     // element handle stashed as __h
     let h = v8::String::new(scope, "__h")
@@ -1094,6 +1101,24 @@ fn style_proxy_set(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments
         with_tree_mut(|t| { if css.is_empty() { t.remove_attribute(h, "style"); } else { t.set_attribute(h, "style", &css); } });
     }
     rv.set_bool(true);
+}
+
+/// Normalize a `#rgb`/`#rrggbb`/`#rrggbbaa` hex color to `rgb(r, g, b)` / `rgba(r, g, b, a)` (the form
+/// a browser's CSS parser stores), so a hex from one source matches a hex from another. Returns None
+/// for non-hex values (left untouched).
+fn normalize_css_color(v: &str) -> Option<String> {
+    let s = v.trim();
+    let hex = s.strip_prefix('#')?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+    let h = |a: u8, b: u8| -> Option<u8> { u8::from_str_radix(&format!("{}{}", a as char, b as char), 16).ok() };
+    let b = hex.as_bytes();
+    match hex.len() {
+        3 => { let (r, g, bl) = (h(b[0], b[0])?, h(b[1], b[1])?, h(b[2], b[2])?); Some(format!("rgb({}, {}, {})", r, g, bl)) }
+        6 => { let (r, g, bl) = (h(b[0], b[1])?, h(b[2], b[3])?, h(b[4], b[5])?); Some(format!("rgb({}, {}, {})", r, g, bl)) }
+        8 => { let (r, g, bl, a) = (h(b[0], b[1])?, h(b[2], b[3])?, h(b[4], b[5])?, h(b[6], b[7])?);
+               let af = (a as f64 / 255.0 * 100.0).round() / 100.0; Some(format!("rgba({}, {}, {}, {})", r, g, bl, af)) }
+        _ => None,
+    }
 }
 
 /// Serialize a style declaration object's own string properties to `prop: value;` cssText (camelCase

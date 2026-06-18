@@ -14,7 +14,15 @@
     // Normalize comma-spacing ("a,b" -> "a, b"): minified emotion rules drop the space, but jest-dom
     // toHaveStyle's expected value is normalized by the browser's CSS parser (which inserts ", "),
     // so font-family / shorthand lists must match that form.
-    var setProp = function(name, val){ name = String(name).trim(); if (!name) return; if (typeof val === 'string' && val.indexOf(',') >= 0) val = val.replace(/\s*,\s*/g, ', '); decl[name] = val; decl[camel(name)] = val; };
+    // Normalize hex colors to rgb()/rgba() (jsdom's CSS parser does this), matching the form stored
+    // by the style proxy, so jest-dom toHaveStyle color assertions compare equal.
+    var normColor = function(v){
+      var m = /^#([0-9a-fA-F]{3})$/.exec(v); if (m){ var x=m[1]; return 'rgb('+parseInt(x[0]+x[0],16)+', '+parseInt(x[1]+x[1],16)+', '+parseInt(x[2]+x[2],16)+')'; }
+      m = /^#([0-9a-fA-F]{6})$/.exec(v); if (m){ var h=m[1]; return 'rgb('+parseInt(h.slice(0,2),16)+', '+parseInt(h.slice(2,4),16)+', '+parseInt(h.slice(4,6),16)+')'; }
+      m = /^#([0-9a-fA-F]{8})$/.exec(v); if (m){ var h2=m[1]; return 'rgba('+parseInt(h2.slice(0,2),16)+', '+parseInt(h2.slice(2,4),16)+', '+parseInt(h2.slice(4,6),16)+', '+(Math.round(parseInt(h2.slice(6,8),16)/255*100)/100)+')'; }
+      return v;
+    };
+    var setProp = function(name, val){ name = String(name).trim(); if (!name) return; if (typeof val === 'string'){ var t = val.trim(); if (t.charAt(0) === '#') val = normColor(t); else if (val.indexOf(',') >= 0) val = val.replace(/\s*,\s*/g, ', '); } decl[name] = val; decl[camel(name)] = val; };
     try {
       var sheets = el && el.ownerDocument ? (el.ownerDocument.styleSheets || []) : [];
       for (var si=0; si<sheets.length; si++) {
