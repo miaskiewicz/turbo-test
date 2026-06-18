@@ -285,6 +285,7 @@ fn get_children(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::
         let node = wrap(scope, k);
         arr.set_index(scope, i as u32, node.into());
     }
+    bind_method(scope, arr.into(), "item", nodelist_item);
     rv.set(arr.into());
 }
 
@@ -594,6 +595,7 @@ fn el_query_selector_all(scope: &mut v8::PinScope, args: v8::FunctionCallbackArg
         let node = wrap(scope, hh);
         arr.set_index(scope, i as u32, node.into());
     }
+    bind_method(scope, arr.into(), "item", nodelist_item);
     rv.set(arr.into());
 }
 
@@ -941,7 +943,20 @@ fn get_child_nodes(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v
         let node = wrap(scope, k);
         arr.set_index(scope, i as u32, node.into());
     }
+    bind_method(scope, arr.into(), "item", nodelist_item);
     rv.set(arr.into());
+}
+
+/// `NodeList.item(i)` → the i-th node, or null when out of range. Bound on every node-collection
+/// array we hand back (childNodes / querySelectorAll / getElementsBy*), so libs calling `.item(i)`
+/// instead of `[i]` (e.g. React-DOM's child reconciliation) don't crash.
+fn nodelist_item(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let i = args.get(0).number_value(scope).unwrap_or(f64::NAN);
+    if i.is_nan() || i < 0.0 { rv.set_null(); return; }
+    match args.this().get_index(scope, i as u32) {
+        Some(v) if !v.is_undefined() => rv.set(v),
+        _ => rv.set_null(),
+    }
 }
 
 fn get_owner_document(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, _args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
@@ -1039,6 +1054,7 @@ fn doc_query_selector_all(scope: &mut v8::PinScope, args: v8::FunctionCallbackAr
         let node = wrap(scope, hh);
         arr.set_index(scope, i as u32, node.into());
     }
+    bind_method(scope, arr.into(), "item", nodelist_item);
     rv.set(arr.into());
 }
 

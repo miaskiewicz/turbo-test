@@ -112,6 +112,31 @@
         p.setRangeText = function(){};
       }
     } catch(e){} g[n].prototype = p; protoFor[n] = p; });
+    // <option>: `value` falls back to text content (HTML spec), `selected`/`defaultSelected` track
+    // the live + attribute state. React-DOM's updateOptions reads option.value and writes
+    // option.selected for every option of a controlled <select>.
+    (function(){
+      var op = protoFor.HTMLOptionElement;
+      Object.defineProperty(op, 'value', { configurable: true, get: function(){ var v = this.getAttribute('value'); return v == null ? (this.textContent || '') : v; }, set: function(v){ this.setAttribute('value', v == null ? '' : String(v)); } });
+      Object.defineProperty(op, 'selected', { configurable: true, get: function(){ return this.__selected === undefined ? this.hasAttribute('selected') : !!this.__selected; }, set: function(v){ this.__selected = !!v; } });
+      Object.defineProperty(op, 'defaultSelected', { configurable: true, get: function(){ return this.hasAttribute('selected'); }, set: function(v){ if (v) this.setAttribute('selected',''); else this.removeAttribute('selected'); } });
+      Object.defineProperty(op, 'disabled', { configurable: true, get: function(){ return this.hasAttribute('disabled'); }, set: function(v){ if (v) this.setAttribute('disabled',''); else this.removeAttribute('disabled'); } });
+      Object.defineProperty(op, 'text', { configurable: true, get: function(){ return this.textContent || ''; }, set: function(v){ this.textContent = v; } });
+    })();
+    // <select>: `options` (HTMLOptionsCollection — the crash: React-DOM reads node.options.length),
+    // plus `value`/`selectedIndex` derived from the options' selected state.
+    (function(){
+      var sp = protoFor.HTMLSelectElement;
+      var opts = function(sel){ var list = sel.querySelectorAll('option'); var a = []; for (var i=0;i<list.length;i++) a.push(list[i]); a.item = function(i){ return this[i] || null; }; return a; };
+      Object.defineProperty(sp, 'options', { configurable: true, get: function(){ return opts(this); } });
+      Object.defineProperty(sp, 'selectedOptions', { configurable: true, get: function(){ return opts(this).filter(function(o){ return o.selected; }); } });
+      Object.defineProperty(sp, 'selectedIndex', { configurable: true,
+        get: function(){ var o = opts(this); for (var i=0;i<o.length;i++) if (o[i].selected) return i; return o.length ? -1 : -1; },
+        set: function(idx){ var o = opts(this); for (var i=0;i<o.length;i++) o[i].selected = (i === idx); } });
+      Object.defineProperty(sp, 'value', { configurable: true,
+        get: function(){ var o = opts(this); for (var i=0;i<o.length;i++) if (o[i].selected) return o[i].value; return o.length ? o[0].value : ''; },
+        set: function(v){ var o = opts(this); var s = String(v); var hit = false; for (var i=0;i<o.length;i++){ var m = (o[i].value === s); o[i].selected = m; if (m) hit = true; } if (!hit) for (var j=0;j<o.length;j++) o[j].selected = false; } });
+    })();
     var CTRL = { input:'HTMLInputElement', textarea:'HTMLTextAreaElement', select:'HTMLSelectElement', option:'HTMLOptionElement', button:'HTMLButtonElement' };
     d.createElement = function(tag){
       var el = orig(tag); var t = String(tag).toLowerCase();
