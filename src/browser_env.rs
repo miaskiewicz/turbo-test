@@ -50,6 +50,7 @@ const KNOWN: &[&str] = &[
     "getRootNode", "getSelection",
     "closest",
     "data", "nodeValue", "constructor",
+    "documentMode",
     "getAttributeNode", "TEXT_NODE", "ELEMENT_NODE", "COMMENT_NODE", "DOCUMENT_NODE", "DOCUMENT_FRAGMENT_NODE",
     // document own methods/props
     "createElement", "createTextNode", "getElementById", "body", "documentElement",

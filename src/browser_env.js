@@ -52,7 +52,10 @@
   // document extras (pure-JS shims over the native tree).
   var d = g.document;
   d.defaultView = g;
-  d.documentMode = undefined;
+  // React's isEventSupported('input') checks `'oninput' in document`; make it true (+ keep
+  // documentMode ABSENT) so React uses the modern input/change path, not the IE change polyfill —
+  // otherwise fireEvent.change never fires onChange.
+  d.oninput = null; d.onchange = null; d.onclick = null; d.onkeydown = null; d.onkeyup = null;
   if (!d.head) { try { d.head = d.createElement('head'); if (d.documentElement) d.documentElement.appendChild(d.head); } catch(e){} }
   d.createElementNS = function(ns, tag){ return d.createElement(tag); };
   d.createDocumentFragment = function(){ return d.createElement('#document-fragment'); };
@@ -74,9 +77,12 @@
     // so getPrototypeOf(el) === el.constructor.prototype has the descriptor (React + testing-library).
     var valDesc = { configurable: true, get: function(){ var v = this.getAttribute('value'); return v == null ? '' : v; }, set: function(v){ this.setAttribute('value', v == null ? '' : String(v)); } };
     var checkedDesc = { configurable: true, get: function(){ return this.__checked === undefined ? this.hasAttribute('checked') : !!this.__checked; }, set: function(v){ this.__checked = !!v; } };
+    // `type` defaults to 'text' for <input> — React's isTextInputElement keys on it to pick the
+    // input/change handling path; undefined would route changes to the select/checkbox path.
+    var typeDesc = { configurable: true, get: function(){ return (this.getAttribute('type') || 'text').toLowerCase(); }, set: function(v){ this.setAttribute('type', v); } };
     var baseProto = Object.getPrototypeOf(orig('span'));
     var protoFor = {};
-    ['HTMLInputElement','HTMLTextAreaElement','HTMLSelectElement','HTMLOptionElement'].forEach(function(n){ if (typeof g[n] !== 'function') g[n] = function(){}; var p = Object.create(baseProto); try { Object.defineProperty(p, 'value', valDesc); Object.defineProperty(p, 'checked', checkedDesc); } catch(e){} g[n].prototype = p; protoFor[n] = p; });
+    ['HTMLInputElement','HTMLTextAreaElement','HTMLSelectElement','HTMLOptionElement'].forEach(function(n){ if (typeof g[n] !== 'function') g[n] = function(){}; var p = Object.create(baseProto); try { Object.defineProperty(p, 'value', valDesc); Object.defineProperty(p, 'checked', checkedDesc); if (n === 'HTMLInputElement') Object.defineProperty(p, 'type', typeDesc); } catch(e){} g[n].prototype = p; protoFor[n] = p; });
     var CTRL = { input:'HTMLInputElement', textarea:'HTMLTextAreaElement', select:'HTMLSelectElement', option:'HTMLOptionElement' };
     d.createElement = function(tag){
       var el = orig(tag); var t = String(tag).toLowerCase();
