@@ -1,7 +1,21 @@
 (function(){
   var g = globalThis;
   if (typeof g.navigator === 'undefined') g.navigator = { userAgent: 'turbo-test', platform: 'rust', language: 'en-US', languages: ['en-US'], clipboard: {}, maxTouchPoints: 0 };
-  if (typeof g.getComputedStyle === 'undefined') g.getComputedStyle = function(){ return { getPropertyValue: function(){ return ''; } }; };
+  // getComputedStyle reflects the element's inline style object (React writes el.style.X), so
+  // jest-dom toHaveStyle (computedStyle[prop] / getPropertyValue(prop)) and toBeVisible (display/
+  // visibility/opacity) read real values. No cascade — inline styles only, which covers these tests.
+  if (typeof g.getComputedStyle === 'undefined') g.getComputedStyle = function(el){
+    var st = el && el.style;
+    if (st) {
+      var camel = function(p){ return p.replace(/-([a-z])/g, function(_,c){ return c.toUpperCase(); }); };
+      return {
+        getPropertyValue: function(p){ var v = st.getPropertyValue ? st.getPropertyValue(p) : st[p]; if (v) return v; var c = st[camel(p)]; return c == null ? '' : String(c); },
+        get display(){ return st.display || ''; }, get visibility(){ return st.visibility || ''; }, get opacity(){ return st.opacity || ''; },
+        length: 0
+      };
+    }
+    return { getPropertyValue: function(){ return ''; }, display:'', visibility:'', opacity:'', length:0 };
+  };
   if (typeof g.requestAnimationFrame === 'undefined') g.requestAnimationFrame = function(cb){ return setTimeout(function(){ cb(Date.now()); }, 0); };
   if (typeof g.cancelAnimationFrame === 'undefined') g.cancelAnimationFrame = function(id){ clearTimeout(id); };
   if (typeof g.matchMedia === 'undefined') g.matchMedia = function(q){ return { matches:false, media:q, addListener:function(){}, removeListener:function(){}, addEventListener:function(){}, removeEventListener:function(){}, dispatchEvent:function(){return false;} }; };
@@ -59,7 +73,6 @@
   if (!d.head) { try { d.head = d.createElement('head'); if (d.documentElement) d.documentElement.appendChild(d.head); } catch(e){} }
   d.createElementNS = function(ns, tag){ return d.createElement(tag); };
   d.createDocumentFragment = function(){ return d.createElement('#document-fragment'); };
-  d.createComment = function(data){ return d.createTextNode(data); };
   d.addEventListener = function(){};
   d.removeEventListener = function(){};
   d.dispatchEvent = function(){ return true; };

@@ -324,15 +324,28 @@ thread_local! {
     /// the focused element handle (document.activeElement). userEvent.type targets it.
     static ACTIVE: RefCell<Option<Handle>> = const { RefCell::new(None) };
 }
+/// Native `HTMLElement.focus()` — like a real browser / jsdom: blur the previously-focused element
+/// (blur + bubbling focusout), make this the activeElement, then fire focus + bubbling focusin. The
+/// bubbling focusout/focusin reach React's delegated onBlur/onFocus at the root container. userEvent
+/// drives blur-on-tab purely through native focus(), so this must dispatch the events itself.
 fn el_focus(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
-    if let Some(h) = handle_of(scope, args.this()) {
-        ACTIVE.with(|a| *a.borrow_mut() = Some(h));
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let prev = ACTIVE.with(|a| *a.borrow());
+    if prev == Some(h) { return; }
+    ACTIVE.with(|a| *a.borrow_mut() = Some(h));
+    if let Some(p) = prev {
+        dispatch_synthetic(scope, p, "blur", false, false);
+        dispatch_synthetic(scope, p, "focusout", true, false);
     }
+    dispatch_synthetic(scope, h, "focus", false, false);
+    dispatch_synthetic(scope, h, "focusin", true, false);
 }
 fn el_blur(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
-    if let Some(h) = handle_of(scope, args.this()) {
-        ACTIVE.with(|a| { if *a.borrow() == Some(h) { *a.borrow_mut() = None; } });
-    }
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    if ACTIVE.with(|a| *a.borrow()) != Some(h) { return; }
+    ACTIVE.with(|a| *a.borrow_mut() = None);
+    dispatch_synthetic(scope, h, "blur", false, false);
+    dispatch_synthetic(scope, h, "focusout", true, false);
 }
 /// `document.activeElement` → the focused element, or `<body>`.
 fn get_active_element(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, _args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
@@ -343,7 +356,12 @@ fn get_active_element(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, _arg
         rv.set(node.into());
     }
 }
-fn el_click(_scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {}
+/// Native `HTMLElement.click()` — dispatch a bubbling, cancelable click event so React's delegated
+/// onClick at the root container fires. Tests call `el.click()` directly (no userEvent).
+fn el_click(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    dispatch_synthetic(scope, h, "click", true, true);
+}
 fn el_scroll_into_view(_scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {}
 fn el_get_bounding_client_rect(scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let o = v8::Object::new(scope);
