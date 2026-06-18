@@ -336,6 +336,14 @@
         p.select = function(){ this.__selStart = 0; this.__selEnd = String(this.value||'').length; };
         p.setRangeText = function(){};
       }
+      // click() on the interface prototype (input/textarea/button) so tests can spy on
+      // HTMLInputElement.prototype.click (e.g. opening a file picker via inputRef.click()); the own
+      // native click is dropped in createElement. NOT for select/option (their own click is
+      // load-bearing for native dropdown behavior). Dispatches a bubbling click (checkbox/radio
+      // activation + React onClick still run via el_dispatch_event).
+      if (n === 'HTMLInputElement' || n === 'HTMLTextAreaElement' || n === 'HTMLButtonElement') {
+        p.click = function(){ try { var C = g.MouseEvent || g.PointerEvent || g.Event; this.dispatchEvent(new C('click', { bubbles: true, cancelable: true })); } catch(e){} };
+      }
     } catch(e){} g[n].prototype = p; protoFor[n] = p; });
     // Descendant <option>s. Prefer querySelectorAll (document order); fall back to a `children` walk
     // when it returns empty — that happens on a DETACHED subtree (qsa matches only connected nodes),
@@ -429,6 +437,9 @@
           // value uses a spec internal dirty-value slot (valDesc, distinct from the content attribute);
           // attach the DOM value-change tracker so framework change-detection works (per-char + dedup).
           if (t === 'input' || t === 'textarea') { attachValueTracker(el, 'value', valDesc); Object.defineProperty(el, 'checked', checkedDesc); }
+          // drop the own native click on input/textarea/button so it resolves to the patchable proto
+          // click (tests spy on HTMLInputElement.prototype.click for file pickers etc.).
+          if ((t === 'input' || t === 'textarea' || t === 'button') && Object.prototype.hasOwnProperty.call(el, 'click')) delete el.click;
         } else if (t === 'a') {
           Object.setPrototypeOf(el, anchorProto);
           if (Object.prototype.hasOwnProperty.call(el, 'click')) delete el.click; // resolve to the patchable proto click
