@@ -34,6 +34,16 @@
           else if (STYLES[tok]) setProp(pre+'-style', tok);
         });
       }
+      // Expand the `margin`/`padding` box shorthand into the four sides (1/2/3/4-value forms), since
+      // tests read marginTop/paddingLeft longhands.
+      if ((name === 'margin' || name === 'padding') && typeof val === 'string'){
+        var p = val.trim().split(/\s+/);
+        var sides = p.length===1 ? [p[0],p[0],p[0],p[0]]
+          : p.length===2 ? [p[0],p[1],p[0],p[1]]
+          : p.length===3 ? [p[0],p[1],p[2],p[1]]
+          : [p[0],p[1],p[2],p[3]];
+        ['top','right','bottom','left'].forEach(function(s,i){ if (sides[i]) setProp(name+'-'+s, sides[i]); });
+      }
     };
     try {
       var sheets = el && el.ownerDocument ? (el.ownerDocument.styleSheets || []) : [];
