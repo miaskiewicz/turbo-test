@@ -1086,7 +1086,7 @@ fn style_proxy_set(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments
     // CSSOM values are always strings (jest-dom assigns numbers like `style.fontWeight = 600`; a
     // browser stores "600"). Coerce to string, then normalize hex colors to rgb()/rgba() so
     // el.style.X reads match getComputedStyle's normalized cascade values for jest-dom toHaveStyle.
-    if !key.is_symbol() && !value.is_string() && !value.is_undefined() && !value.is_null() {
+    if value.is_number() || value.is_boolean() {
         if let Some(s) = value.to_string(scope) { value = s.into(); }
     }
     if value.is_string() {
