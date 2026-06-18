@@ -151,12 +151,26 @@ profile)
   SEC="$(sed -n '/Sort by top of stack/,/Binary Images/p' "$OUT")"
   bucket(){ echo "$SEC" | grep -iE "$1" | grep -oE '[0-9]+$' | paste -sd+ - | bc; }
   tot="$(echo "$SEC"|grep -oE '[0-9]+$'|paste -sd+ -|bc)"
-  wait_s="$(bucket 'psynch_cvwait|ulock_wait|kevent|__wait4|mach_msg')"
-  echo "## profile $PROJ files=${#FILES[@]} jobs=$JOBS  (busy=$((tot-wait_s)) of $tot samples)"
-  echo "  GC:        $(bucket 'Scaveng|Marking|Sweeper|RecordWrite|FreeList|Evacuate|IteratePointers|Heap::')"
-  echo "  IC/props:  $(bucket 'LoadIC|StoreIC|KeyedLoad|KeyedStore|HashMap|MapPrototypeSet|Megamorphic')"
-  echo "  String/RX: $(bucket 'String|RegExp|Scanner|murmur|cityhash|Hash')"
-  echo "  FS sys:    $(bucket 'getattrlist|\bread\b|\bstat\b|__open|getdirentries|fstat')"
+  wait_s="$(bucket 'psynch_cvwait|ulock_wait|kevent|__wait4|mach_msg|__workq')"
+  busy=$((tot-wait_s)); [ "$busy" -lt 1 ] && busy=1
+  pct(){ awk -v n="${1:-0}" -v b="$busy" 'BEGIN{printf "%4.1f%%", n*100.0/b}'; }
+  # Buckets tuned for the all-Rust-DOM era (TURBO_RUST_DOM=1). The dominant cost on a warm suite is
+  # V8 parse/compile: each fresh per-file isolate deserializes the shared bytecode cache AND
+  # lazy-compiles inner functions (React/MUI closures) on first call. Then JS execution (baseline/
+  # builtins), GC, malloc, native DOM (rtdom), IC. Each line shows samples + % of BUSY (non-wait).
+  PC="$(bucket 'Scanner|Parser|AstValue|AstRawString|Scope::Lookup|BytecodeGenerator|BytecodeArray|PerfectKeyword|ParseLogical|ParseStatement|::Compile|CompileLazy|Utf8Decod|Utf16')"
+  GC="$(bucket 'Scaveng|Marking|Sweeper|RecordWrite|FreeList|Evacuate|IteratePointers|Heap::|ConcurrentMarking')"
+  IC="$(bucket 'LoadIC|StoreIC|KeyedLoad|KeyedStore|Megamorphic|MapPrototypeSet|MigrateToMap|LookupIterator|CreateDataProperty')"
+  EX="$(bucket 'Builtins_|Interpreter|InterpreterEntry|StrictEqual|JSEntry|CallApi')"
+  DOM="$(bucket 'rtdom|turbo_dom|browser_env|parse_complex|parse_compound|tokenize')"
+  MEM="$(bucket 'xzm|_malloc|_free|memmove|memset|nanov2')"
+  echo "## profile $PROJ files=${#FILES[@]} jobs=$JOBS  (busy=$busy of $tot samples, $((100*wait_s/tot))% wait)"
+  echo "  V8 parse/compile: ${PC:-0}  ($(pct ${PC:-0}))   <- per-file isolate deserialize + lazy inner-compile (top hotspot)"
+  echo "  JS execution:     ${EX:-0}  ($(pct ${EX:-0}))"
+  echo "  GC:               ${GC:-0}  ($(pct ${GC:-0}))"
+  echo "  malloc/free:      ${MEM:-0}  ($(pct ${MEM:-0}))"
+  echo "  IC/props:         ${IC:-0}  ($(pct ${IC:-0}))"
+  echo "  native DOM(rtdom):${DOM:-0}  ($(pct ${DOM:-0}))"
   echo "  full sample: $OUT"
   ;;
 *) die "unknown cmd '$CMD'";;
