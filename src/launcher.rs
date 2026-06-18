@@ -591,6 +591,19 @@ pub fn prepare(mut raw: Vec<String>) -> Vec<String> {
         }
     }
 
+    // Per-test timeout: honor the vitest config `test.testTimeout` unless the user passed
+    // `--testTimeout` explicitly. Without this the binary falls back to vitest's 5000ms default,
+    // so a project that raises testTimeout (e.g. 10000 for slow editor/auto-hide flows) spuriously
+    // times out under turbo-test.
+    if !has_flag(&forward, "--testTimeout") {
+        if let Some(cfg) = find_config(&cwd, opts.config.as_deref()) {
+            if let Some(tt) = scan_number(&cfg.text, "testTimeout") {
+                forward.push("--testTimeout".to_string());
+                forward.push(tt);
+            }
+        }
+    }
+
     // Resolve the test file set.
     let mut test_files: Vec<PathBuf> = if files.is_empty() {
         let discovered = discover(&cwd, opts.config.as_deref());
