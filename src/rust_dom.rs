@@ -48,6 +48,9 @@ const KNOWN: &[&str] = &[
     "getBoundingClientRect", "createElementNS", "createDocumentFragment", "createComment",
     "cloneNode", "isConnected", "attributes", "dataset", "createRange",
     "getRootNode", "getSelection",
+    "closest",
+    "data", "nodeValue", "constructor",
+    "getAttributeNode", "TEXT_NODE", "ELEMENT_NODE", "COMMENT_NODE", "DOCUMENT_NODE", "DOCUMENT_FRAGMENT_NODE",
     // document own methods/props
     "createElement", "createTextNode", "getElementById", "body", "documentElement",
     // JS internals V8 / libs probe constantly — never DOM
@@ -196,6 +199,27 @@ fn el_get_attribute(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgument
     let val = with_tree(|t| t.get_attribute(h, &name).map(|s| s.to_string())).flatten();
     match val {
         Some(s) => rv.set(v8::String::new(scope, &s).unwrap().into()),
+        None => rv.set(v8::null(scope).into()),
+    }
+}
+
+fn el_get_attribute_node(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let name = arg_str(scope, &args, 0);
+    let val = with_tree(|t| t.get_attribute(h, &name).map(|s| s.to_string())).flatten();
+    match val {
+        Some(v) => {
+            let o = v8::Object::new(scope);
+            for (pk, pv) in [("name", name.as_str()), ("nodeName", name.as_str()), ("localName", name.as_str()), ("value", v.as_str()), ("nodeValue", v.as_str())] {
+                let key = v8::String::new(scope, pk).unwrap();
+                let s = v8::String::new(scope, pv).unwrap();
+                o.set(scope, key.into(), s.into());
+            }
+            let sk = v8::String::new(scope, "specified").unwrap();
+            let st = v8::Boolean::new(scope, true);
+            o.set(scope, sk.into(), st.into());
+            rv.set(o.into());
+        }
         None => rv.set(v8::null(scope).into()),
     }
 }
@@ -466,6 +490,24 @@ fn get_dataset(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::P
     rv.set(o.into());
 }
 
+/// `closest(selector)` → nearest ancestor (incl. self) that matches, or null.
+fn el_closest(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let sel = arg_str(scope, &args, 0);
+    let found = with_tree(|t| {
+        let mut cur = Some(h);
+        while let Some(c) = cur {
+            if t.node_type(c) == 1 && t.matches(c, &sel) {
+                return Some(c);
+            }
+            cur = NodeRef::new(t, c).parent().map(|p| p.handle());
+        }
+        None
+    }).flatten();
+    let v = wrap_opt(scope, found);
+    rv.set(v);
+}
+
 fn el_matches(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let Some(h) = handle_of(scope, args.this()) else { return };
     let sel = arg_str(scope, &args, 0);
@@ -670,10 +712,51 @@ fn set_prop(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, name: &str, va
     }
 }
 
+/// `constructor` → the named global DOM constructor for this node's type, so libraries keying on
+/// `node.constructor.name` (pretty-format's DOMElementFilter regex `/^((HTML|SVG)\w*)?Element$/`)
+/// treat it as a DOM node, not a plain Object they'd recurse into and crash on.
+fn get_constructor(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
+    let Some(h) = handle_of(scope, args.holder()) else { return };
+    let nt = with_tree(|t| t.node_type(h)).unwrap_or(1);
+    let cname = match nt {
+        3 => "Text",
+        8 => "Comment",
+        9 => "HTMLDocument",
+        11 => "DocumentFragment",
+        _ => "HTMLElement",
+    };
+    let global = scope.get_current_context().global(scope);
+    if let Some(key) = v8::String::new(scope, cname) {
+        if let Some(ctor) = global.get(scope, key.into()) {
+            if !ctor.is_undefined() {
+                rv.set(ctor);
+            }
+        }
+    }
+}
+
 fn get_node_type(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
     let Some(h) = handle_of(scope, args.holder()) else { return };
     let nt = with_tree(|t| t.node_type(h)).unwrap_or(1);
     rv.set(v8::Integer::new(scope, nt as i32).into());
+}
+
+/// `data` / `nodeValue` → text of a text/comment node (null for elements). Serializers call
+/// `.replace` on these, so they must be strings (not undefined) for text nodes.
+fn get_node_data(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
+    let Some(h) = handle_of(scope, args.holder()) else { return };
+    let nt = with_tree(|t| t.node_type(h)).unwrap_or(1);
+    if nt == 3 || nt == 8 {
+        let data = with_tree(|t| t.node_value(h)).flatten().unwrap_or_default();
+        rv.set(v8::String::new(scope, &data).unwrap().into());
+    } else {
+        rv.set(v8::null(scope).into());
+    }
+}
+fn set_node_data(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, value: v8::Local<v8::Value>, args: v8::PropertyCallbackArguments, _rv: v8::ReturnValue<()>) {
+    let Some(h) = handle_of(scope, args.holder()) else { return };
+    let data = value.to_rust_string_lossy(scope);
+    with_tree_mut(|t| t.set_text_content(h, &data));
 }
 
 fn get_node_name(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
@@ -834,6 +917,7 @@ fn build_el_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::
     tmpl_method(scope, tmpl, "insertBefore", el_insert_before);
     tmpl_method(scope, tmpl, "setAttribute", el_set_attribute);
     tmpl_method(scope, tmpl, "getAttribute", el_get_attribute);
+    tmpl_method(scope, tmpl, "getAttributeNode", el_get_attribute_node);
     tmpl_method(scope, tmpl, "hasAttribute", el_has_attribute);
     tmpl_method(scope, tmpl, "removeAttribute", el_remove_attribute);
     tmpl_method(scope, tmpl, "querySelector", el_query_selector);
@@ -842,6 +926,7 @@ fn build_el_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::
     tmpl_method(scope, tmpl, "removeEventListener", el_remove_event_listener);
     tmpl_method(scope, tmpl, "dispatchEvent", el_dispatch_event);
     tmpl_method(scope, tmpl, "matches", el_matches);
+    tmpl_method(scope, tmpl, "closest", el_closest);
     tmpl_method(scope, tmpl, "contains", el_contains);
     tmpl_method(scope, tmpl, "cloneNode", el_clone_node);
     tmpl_method(scope, tmpl, "getRootNode", el_get_root_node);
@@ -860,7 +945,10 @@ fn build_el_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::
     tmpl_getter(scope, tmpl, "firstChild", get_first_child);
     tmpl_getter(scope, tmpl, "nextSibling", get_next_sibling);
     tmpl_getter(scope, tmpl, "style", get_style);
+    tmpl_getter(scope, tmpl, "constructor", get_constructor);
     tmpl_getter(scope, tmpl, "nodeType", get_node_type);
+    tmpl_accessor(scope, tmpl, "data", get_node_data, set_node_data);
+    tmpl_accessor(scope, tmpl, "nodeValue", get_node_data, set_node_data);
     tmpl_getter(scope, tmpl, "nodeName", get_node_name);
     tmpl_getter(scope, tmpl, "childNodes", get_child_nodes);
     tmpl_getter(scope, tmpl, "ownerDocument", get_owner_document);
@@ -878,6 +966,19 @@ fn build_el_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::
     tmpl_accessor(scope, tmpl, "textContent", get_text_content, set_text_content);
     tmpl_accessor(scope, tmpl, "id", get_id, set_id);
     tmpl_accessor(scope, tmpl, "className", get_class_name, set_class_name);
+
+    // Node-type constants on every node (`node.TEXT_NODE === 3`, …). dom-accessibility-api compares
+    // `node.nodeType === node.TEXT_NODE`, so without these the accessible-name walk skips all text
+    // nodes → empty names → getByRole({name}) finds nothing.
+    for (name, val) in [
+        ("ELEMENT_NODE", 1), ("ATTRIBUTE_NODE", 2), ("TEXT_NODE", 3), ("CDATA_SECTION_NODE", 4),
+        ("PROCESSING_INSTRUCTION_NODE", 7), ("COMMENT_NODE", 8), ("DOCUMENT_NODE", 9),
+        ("DOCUMENT_TYPE_NODE", 10), ("DOCUMENT_FRAGMENT_NODE", 11),
+    ] {
+        let key = v8::String::new(scope, name).unwrap();
+        let v = v8::Integer::new(scope, val);
+        tmpl.set(key.into(), v.into());
+    }
 
     // Always-on graceful-degradation interceptor: unimplemented members read as undefined (no
     // crash); recording the access list is gated by log_enabled() (TURBO_RUST_DOM_LOG).
@@ -987,7 +1088,7 @@ const BOOTSTRAP: &str = r#"(function(){
   }
   var ctors = ['Node','Element','HTMLElement','HTMLDivElement','HTMLInputElement','HTMLButtonElement','HTMLAnchorElement','HTMLSelectElement','HTMLTextAreaElement','HTMLFormElement','HTMLImageElement','HTMLLabelElement','HTMLOptionElement','HTMLUListElement','HTMLLIElement','HTMLSpanElement','HTMLParagraphElement','HTMLHeadingElement','HTMLTableElement','HTMLIFrameElement','HTMLCanvasElement','HTMLStyleElement','HTMLScriptElement','HTMLDocument','Document','DocumentFragment','ShadowRoot','Text','Comment','SVGElement','SVGSVGElement','DOMParser','EventTarget','AbortController','AbortSignal','DOMException',
     'UIEvent','MouseEvent','KeyboardEvent','FocusEvent','InputEvent','TouchEvent','PointerEvent','WheelEvent','DragEvent','ClipboardEvent','AnimationEvent','TransitionEvent','MessageEvent','ProgressEvent','CompositionEvent','PopStateEvent','HashChangeEvent','StorageEvent','ErrorEvent','CloseEvent'];
-  ctors.forEach(function(n){ if (typeof g[n] === 'undefined') { var f = function(){}; f.prototype = {}; g[n] = f; } });
+  ctors.forEach(function(n){ if (typeof g[n] === "undefined") { var f = function(){}; f.prototype = {}; try { Object.defineProperty(f, "name", { value: n, configurable: true }); } catch(e){} g[n] = f; } });
   // make `node instanceof HTMLElement/Element/Node/...` work for native DOM nodes (jest-dom's
   // checkHtmlElement + many libs rely on it) via Symbol.hasInstance keyed on nodeType.
   function iface(name, pred){ var f = g[name] || function(){}; try { Object.defineProperty(f, Symbol.hasInstance, { configurable: true, value: pred }); } catch(e){} g[name] = f; }
