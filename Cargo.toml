@@ -47,7 +47,8 @@ base64 = "0.22"
 # P3: all-Rust DOM, from the published crate (crates.io `turbo-dom`). It's a standalone crate that
 # exports `rtdom` (Dom/Tree/NodeRef) unconditionally — no features needed. Kept under the
 # `turbo_dom_parser` import name via `package` so the existing `use turbo_dom_parser::rtdom::…` stands.
-turbo-dom-parser = { package = "turbo-dom", version = "0.3.2" }
+# 0.3.4 adds native CharacterData mutation + ChildNode/ParentNode manip + insertAdjacent + toggleAttribute + getAttributeNS over rtdom.
+turbo-dom-parser = { package = "turbo-dom", version = "0.3.4" }
 
 [profile.release]
 opt-level = 3
