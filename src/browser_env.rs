@@ -1083,8 +1083,12 @@ fn style_proxy_set(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments
     let target = match v8::Local::<v8::Object>::try_from(args.get(0)) { Ok(o) => o, Err(_) => { rv.set_bool(false); return; } };
     let key = args.get(1);
     let mut value = args.get(2);
-    // Normalize hex colors to rgb()/rgba() form (jsdom does this on assignment); keeps el.style.X
-    // reads consistent with getComputedStyle's normalized cascade values for jest-dom toHaveStyle.
+    // CSSOM values are always strings (jest-dom assigns numbers like `style.fontWeight = 600`; a
+    // browser stores "600"). Coerce to string, then normalize hex colors to rgb()/rgba() so
+    // el.style.X reads match getComputedStyle's normalized cascade values for jest-dom toHaveStyle.
+    if !key.is_symbol() && !value.is_string() && !value.is_undefined() && !value.is_null() {
+        if let Some(s) = value.to_string(scope) { value = s.into(); }
+    }
     if value.is_string() {
         if let Some(n) = normalize_css_color(&value.to_rust_string_lossy(scope)) {
             if let Some(s) = v8::String::new(scope, &n) { value = s.into(); }
