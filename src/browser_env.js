@@ -110,7 +110,19 @@
     // value/checked live ONLY on the interface .prototype (NOT own — React's value-tracker bails on
     // node.hasOwnProperty('value')). Each control's actual proto is set to that interface prototype
     // so getPrototypeOf(el) === el.constructor.prototype has the descriptor (React + testing-library).
-    var valDesc = { configurable: true, get: function(){ var v = this.getAttribute('value'); return v == null ? '' : v; }, set: function(v){ this.setAttribute('value', v == null ? '' : String(v)); } };
+    // A `date`/`time` <input> only retains a value the browser can parse — an invalid/partial string
+    // sets value to ''. userEvent.type relies on this (isValidDateOrTimeValue clones, assigns, and
+    // checks the value stuck) to commit the typed value + fire onChange only once a full valid date
+    // is entered. Without it, partials commit and the controlled reset mangles the result.
+    var validForType = function(el, v){
+      var t = (el.getAttribute('type') || 'text').toLowerCase();
+      if (t === 'date') return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : '';
+      if (t === 'time') return /^\d{2}:\d{2}(:\d{2})?$/.test(v) ? v : '';
+      if (t === 'month') return /^\d{4}-\d{2}$/.test(v) ? v : '';
+      if (t === 'datetime-local') return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v) ? v : '';
+      return v;
+    };
+    var valDesc = { configurable: true, get: function(){ var v = this.getAttribute('value'); return v == null ? '' : v; }, set: function(v){ this.setAttribute('value', validForType(this, v == null ? '' : String(v))); } };
     // Reflect the live `checked` property to the `checked` content attribute so rtdom's `:checked`
     // pseudo (which matches on the attribute) finds controlled checkboxes/radios React toggles.
     var checkedDesc = { configurable: true, get: function(){ return this.__checked === undefined ? this.hasAttribute('checked') : !!this.__checked; }, set: function(v){ v = !!v; this.__checked = v; try { if (v) this.setAttribute('checked', ''); else this.removeAttribute('checked'); } catch(e){} } };
@@ -214,10 +226,12 @@
       } });
     })();
     var CTRL = { input:'HTMLInputElement', textarea:'HTMLTextAreaElement', select:'HTMLSelectElement', option:'HTMLOptionElement', button:'HTMLButtonElement', label:'HTMLLabelElement' };
-    d.createElement = function(tag){
-      var el = orig(tag); var t = String(tag).toLowerCase();
+    // Apply the control interface prototype + own value/checked to an element by its tag. Used by
+    // createElement AND cloneNode (clones must keep type/value/checked/selected accessors — e.g.
+    // userEvent's isValidDateOrTimeValue clones a date input, assigns, and checks the value stuck).
+    var applyControlProto = function(el){
       try {
-        if (t === 'style' && !el.sheet) { var s = mkSheet(el); Object.defineProperty(el, 'sheet', { configurable: true, get: function(){ return s; } }); sheets.push(s); }
+        var t = String(el.tagName || '').toLowerCase();
         if (CTRL[t]) {
           Object.setPrototypeOf(el, protoFor[CTRL[t]]);
           // define value/checked as OWN props too: React's value-tracker bails when
@@ -227,8 +241,19 @@
           if (t === 'input' || t === 'textarea') { Object.defineProperty(el, 'value', valDesc); Object.defineProperty(el, 'checked', checkedDesc); }
         }
       } catch(e){}
+    };
+    d.createElement = function(tag){
+      var el = orig(tag); var t = String(tag).toLowerCase();
+      try {
+        if (t === 'style' && !el.sheet) { var s = mkSheet(el); Object.defineProperty(el, 'sheet', { configurable: true, get: function(){ return s; } }); sheets.push(s); }
+      } catch(e){}
+      applyControlProto(el);
       return el;
     };
+    // NOTE: cloneNode re-applies the control prototype natively (el_clone_node copies the source's
+    // prototype to the clone), so a cloned <input>/<select> keeps its type/value/checked accessors
+    // (userEvent's isValidDateOrTimeValue clones a date input, assigns, and checks the value stuck).
+    void applyControlProto;
     if (!d.styleSheets) { try { Object.defineProperty(d, 'styleSheets', { configurable: true, get: function(){ return sheets; } }); } catch(e){} }
   })();
   d.createRange = function(){ return { setStart:function(){}, setEnd:function(){}, selectNodeContents:function(){}, collapse:function(){}, getClientRects:function(){return [];}, getBoundingClientRect:function(){return {x:0,y:0,top:0,left:0,right:0,bottom:0,width:0,height:0};}, createContextualFragment:function(html){ var f=d.createDocumentFragment(); var t=d.createElement("div"); t.innerHTML=html; while(t.firstChild) f.appendChild(t.firstChild); return f; }, cloneRange:function(){return d.createRange();}, detach:function(){}, commonAncestorContainer: d.body }; };

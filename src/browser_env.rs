@@ -459,6 +459,14 @@ fn el_clone_node(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, 
     let deep = args.get(0).boolean_value(scope);
     if let Some(new_h) = with_tree_mut(|t| clone_subtree(t, h, deep)) {
         let node = wrap(scope, new_h);
+        // Carry over the source's JS prototype so a cloned control element keeps its interface
+        // accessors (type/value/checked/selected). createElement applies these protos, but cloneNode
+        // bypasses it; without this a cloned <input type=date> loses date-value validation, which
+        // userEvent's isValidDateOrTimeValue (clone, assign, check it stuck) relies on.
+        let src_proto = args.this().get_prototype(scope);
+        if let Some(p) = src_proto {
+            node.set_prototype(scope, p);
+        }
         rv.set(node.into());
     }
 }
