@@ -103,6 +103,27 @@
   // document extras (pure-JS shims over the native tree).
   var d = g.document;
   d.defaultView = g;
+  // document.cookie jar. Defined on the document PROTOTYPE (not the instance) — code reads
+  // `Object.getOwnPropertyDescriptor(Object.getPrototypeOf(document), 'cookie')` to wrap it. Setter
+  // parses "k=v; attrs"; max-age<=0 deletes. Getter serializes the live pairs.
+  (function(){
+    var proto = Object.getPrototypeOf(d) || d;
+    if (!Object.getOwnPropertyDescriptor(proto, 'cookie')) {
+      var jar = {};
+      try { Object.defineProperty(proto, 'cookie', {
+        configurable: true,
+        get: function(){ var out = []; for (var k in jar) out.push(k + '=' + jar[k]); return out.join('; '); },
+        set: function(str){
+          str = String(str == null ? '' : str);
+          var parts = str.split(';'); var first = parts[0] || ''; var eq = first.indexOf('=');
+          if (eq < 0) return; var name = first.slice(0, eq).trim(); var val = first.slice(eq + 1).trim();
+          var del = false;
+          for (var i = 1; i < parts.length; i++){ var p = parts[i].trim(); var m = /^max-age\s*=\s*(-?\d+)/i.exec(p); if (m && parseInt(m[1], 10) <= 0) del = true; if (/^expires\s*=/i.test(p) && /1970/.test(p)) del = true; }
+          if (del) { delete jar[name]; } else { jar[name] = val; }
+        }
+      }); } catch(e){}
+    }
+  })();
   // React's isEventSupported('input') checks `'oninput' in document`; make it true (+ keep
   // documentMode ABSENT) so React uses the modern input/change path, not the IE change polyfill —
   // otherwise fireEvent.change never fires onChange.
