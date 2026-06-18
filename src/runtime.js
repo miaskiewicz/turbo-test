@@ -314,9 +314,12 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
     constructor(init) {
       this._ = []; // list of [key, value] pairs — supports multiple values per key (append)
       if (typeof init === 'string') {
+        // application/x-www-form-urlencoded: '+' decodes to a space (decodeURIComponent alone leaves
+        // it). Matches Node/jsdom so `new URLSearchParams('a=John+Doe').get('a') === 'John Doe'`.
+        const dec = (s) => { try { return decodeURIComponent(s.replace(/\+/g, ' ')); } catch { return s; } };
         init.replace(/^\?/, '').split('&').filter(Boolean).forEach((p) => {
           const i = p.indexOf('='); const k = i < 0 ? p : p.slice(0, i); const v = i < 0 ? '' : p.slice(i + 1);
-          this._.push([decodeURIComponent(k), decodeURIComponent(v)]);
+          this._.push([dec(k), dec(v)]);
         });
       } else if (Array.isArray(init)) {
         init.forEach(([k, v]) => this._.push([String(k), String(v)]));
@@ -337,7 +340,9 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
     values() { return this._.map((p) => p[1])[Symbol.iterator](); }
     entries() { return this._.map((p) => [p[0], p[1]])[Symbol.iterator](); }
     sort() { this._.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); }
-    toString() { return this._.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&'); }
+    // form-urlencoded serialization: encode, then render space as '+' (Node/jsdom do; turbo-test
+    // previously emitted %20, diverging on `name=John+Doe`).
+    toString() { const enc = (s) => encodeURIComponent(s).replace(/%20/g, '+'); return this._.map(([k, v]) => `${enc(k)}=${enc(v)}`).join('&'); }
     [Symbol.iterator]() { return this.entries(); }
   };
 }
@@ -353,28 +358,48 @@ if (typeof globalThis.URL === 'undefined') {
       if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) {
         throw new TypeError('Invalid URL: ' + url);
       }
-      this.href = url;
       // protocol is the scheme up to the first ':' (works for opaque schemes like
       // javascript:/data:/mailto: that have no '//' authority).
       const scheme = /^([a-z][a-z0-9+.-]*:)/i.exec(url);
       this.protocol = scheme ? scheme[1] : 'http:';
       const m = /^([a-z][a-z0-9+.-]*:)\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/i.exec(url);
+      let searchStr;
       if (m) {
+        this._hierarchical = true;
         this.host = m[2] || '';
         this.hostname = (m[2] || '').split(':')[0];
         this.port = (m[2] || '').split(':')[1] || '';
         this.pathname = m[3] || '/';
-        this.search = m[4] || '';
+        searchStr = m[4] || '';
         this.hash = m[5] || '';
         this.origin = this.protocol + '//' + this.host;
       } else {
-        // opaque URL (no authority): everything after the scheme is the path.
+        // opaque URL (no authority): everything after the scheme is the path (sans query/hash).
+        this._hierarchical = false;
         this.host = ''; this.hostname = ''; this.port = '';
-        this.pathname = url.slice(this.protocol.length);
-        this.search = ''; this.hash = ''; this.origin = 'null';
+        const rest = url.slice(this.protocol.length);
+        const qi = rest.indexOf('?'); const hi = rest.indexOf('#');
+        let cut = rest.length;
+        if (qi >= 0) cut = Math.min(cut, qi);
+        if (hi >= 0) cut = Math.min(cut, hi);
+        this.pathname = rest.slice(0, cut);
+        const after = rest.slice(cut);
+        const am = /^(\?[^#]*)?(#.*)?$/.exec(after) || [];
+        searchStr = am[1] || ''; this.hash = am[2] || ''; this.origin = 'null';
       }
-      this.searchParams = new globalThis.URLSearchParams(this.search);
+      // searchParams is the SOURCE OF TRUTH for the query; `search`/`href`/`toString` derive from it
+      // so post-construction `searchParams.set()/append()` mutations are reflected (real URL semantics
+      // — previously href was frozen at construction and dropped them).
+      this._sp = new globalThis.URLSearchParams(searchStr);
     }
+    get searchParams() { return this._sp; }
+    get search() { const s = this._sp.toString(); return s ? '?' + s : ''; }
+    set search(v) { this._sp = new globalThis.URLSearchParams(String(v).replace(/^\?/, '')); }
+    get href() {
+      const auth = this._hierarchical ? this.protocol + '//' + this.host : this.protocol;
+      return auth + this.pathname + this.search + (this.hash || '');
+    }
+    set href(v) { const u = new globalThis.URL(v); this.protocol = u.protocol; this.host = u.host; this.hostname = u.hostname; this.port = u.port; this.pathname = u.pathname; this.hash = u.hash; this.origin = u.origin; this._hierarchical = u._hierarchical; this._sp = u._sp; }
     toString() { return this.href; }
     static createObjectURL() { return 'blob:mock'; }
     static revokeObjectURL() {}
@@ -708,6 +733,14 @@ if (typeof globalThis.Event === 'undefined') {
     preventDefault() { this.defaultPrevented = true; }
     stopPropagation() {}
     stopImmediatePropagation() {}
+  };
+}
+// MessageEvent — postMessage-style events (Calendly/Stripe embeds, BroadcastChannel, web workers).
+// jsdom provides it; turbo-test didn't, so `new MessageEvent('message', { data })` / a component's
+// window 'message' listener threw "MessageEvent is not defined".
+if (typeof globalThis.MessageEvent === 'undefined') {
+  globalThis.MessageEvent = class MessageEvent extends globalThis.Event {
+    constructor(type, init) { super(type, init); init = init || {}; this.data = init.data == null ? null : init.data; this.origin = init.origin || ''; this.lastEventId = init.lastEventId || ''; this.source = init.source || null; this.ports = init.ports || []; }
   };
 }
 if (typeof globalThis.MutationObserver === 'undefined') {

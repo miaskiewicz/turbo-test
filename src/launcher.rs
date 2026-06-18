@@ -208,8 +208,17 @@ struct Patterns {
 
 fn vitest_patterns(start_dir: &Path, forced: Option<&str>) -> Option<Patterns> {
     let cfg = find_config(start_dir, forced)?;
-    let include = scan_string_array(&cfg.text, "include")?; // no test.include → default discovery
-    let exclude = scan_string_array(&cfg.text, "exclude").unwrap_or_default();
+    // Scan include/exclude in the TEST config only — truncate before the coverage block. Otherwise
+    // a project with no `test.exclude` but a `coverage.exclude` whose first entry is the test glob
+    // (e.g. `**/*.test.{ts,tsx}`, common in vitest coverage configs) has that picked up as the test
+    // exclude → every test file is excluded → "no test files found". test.* precedes coverage.* in
+    // the config object, so the prefix before `coverage:` holds the real test patterns.
+    let scan_text = match find_coverage_block(&cfg.text) {
+        Some(ci) => &cfg.text[..ci],
+        None => cfg.text.as_str(),
+    };
+    let include = scan_string_array(scan_text, "include")?; // no test.include → default discovery
+    let exclude = scan_string_array(scan_text, "exclude").unwrap_or_default();
     Some(Patterns { root: cfg.dir, include, exclude })
 }
 
