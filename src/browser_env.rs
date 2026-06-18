@@ -410,8 +410,13 @@ fn el_remove_self(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments,
 
 // document native methods (reliable — no JS-bootstrap dependency).
 fn doc_create_element_ns(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let ns = arg_str(scope, &args, 0).to_ascii_lowercase();
     let tag = arg_str(scope, &args, 1);
-    if let Some(h) = with_tree_mut(|t| t.create_element(&tag)) {
+    // Map the namespace URI to rtdom's ns id (svg=1, math=2, html=0) so SVG/MathML elements keep
+    // their namespace + case-preserved attributes (e.g. `viewBox`), unlike HTML which lowercases.
+    let ns_id: u8 = if ns.contains("svg") { 1 } else if ns.contains("mathml") || ns.contains("math") { 2 } else { 0 };
+    let made = with_tree_mut(|t| if ns_id == 0 { t.create_element(&tag) } else { t.create_element_ns(&tag, ns_id) });
+    if let Some(h) = made {
         let node = wrap(scope, h);
         rv.set(node.into());
     }

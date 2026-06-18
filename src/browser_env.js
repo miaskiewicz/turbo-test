@@ -210,7 +210,8 @@
   // otherwise fireEvent.change never fires onChange.
   d.oninput = null; d.onchange = null; d.onclick = null; d.onkeydown = null; d.onkeyup = null;
   if (!d.head) { try { d.head = d.createElement('head'); if (d.documentElement) d.documentElement.appendChild(d.head); } catch(e){} }
-  d.createElementNS = function(ns, tag){ return d.createElement(tag); };
+  // NOTE: document.createElementNS uses the native binding (namespace-aware: SVG/MathML elements keep
+  // their namespace + case-preserved attributes like viewBox). Previously aliased to createElement.
   d.createDocumentFragment = function(){ return d.createElement('#document-fragment'); };
   // NOTE: document.addEventListener/removeEventListener/dispatchEvent use the native binding (the
   // document is a wrapped node) so document-level listeners — click-outside handlers, global
