@@ -733,6 +733,18 @@ fn el_dispatch_event(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgumen
     let target_node = wrap(scope, target);
     set_prop(scope, event_obj, "target", target_node.into());
 
+    // PRE-CLICK ACTIVATION: a checkbox/radio toggles `checked` BEFORE the click listeners run (per
+    // the activation-behavior spec), so React's ChangeEventPlugin — which detects checkbox change on
+    // the `click` event by reading node.checked — sees the new value. Reverted below if the click is
+    // canceled. `change`/`input` DOM events fire afterward (also below).
+    let click_check = if ty == "click" { checkable_kind(target) } else { None };
+    let check_was = click_check.map(|_| get_bool_prop(scope, target_node, "checked"));
+    if let (Some(kind), Some(was)) = (click_check, check_was) {
+        let next = if kind == CheckKind::Radio { true } else { !was };
+        let b = v8::Boolean::new(scope, next);
+        set_prop(scope, target_node, "checked", b.into());
+    }
+
     // propagation path: ancestors (root … parent), then the target. Bubbling reverses it.
     let mut ancestors = Vec::new();
     let mut cur = with_tree(|t| NodeRef::new(t, target).parent().map(|p| p.handle())).flatten();
@@ -794,7 +806,38 @@ fn el_dispatch_event(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgumen
         }
     }
 
+    // Finish the checkbox/radio activation: a canceled click reverts the pre-toggle; otherwise fire
+    // the DOM `input` + `change` events (jsdom does this; some libs listen for them directly).
+    if let (Some(_kind), Some(was)) = (click_check, check_was) {
+        if not_prevented {
+            dispatch_synthetic(scope, target, "input", true, false);
+            dispatch_synthetic(scope, target, "change", true, false);
+        } else {
+            let el = wrap(scope, target);
+            let b = v8::Boolean::new(scope, was);
+            set_prop(scope, el, "checked", b.into());
+        }
+    }
+
     rv.set(v8::Boolean::new(scope, not_prevented).into());
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum CheckKind { Checkbox, Radio }
+
+/// `<input type=checkbox|radio>` → its kind, else None (drives the click toggle default action).
+fn checkable_kind(h: Handle) -> Option<CheckKind> {
+    with_tree(|t| {
+        if t.node_type(h) != 1 || t.tag_name(h).unwrap_or_default().to_ascii_uppercase() != "INPUT" {
+            return None;
+        }
+        match t.get_attribute(h, "type").map(|s| s.to_ascii_lowercase()).as_deref() {
+            Some("checkbox") => Some(CheckKind::Checkbox),
+            Some("radio") => Some(CheckKind::Radio),
+            _ => None,
+        }
+    })
+    .flatten()
 }
 
 /// A `<button>` (type submit or unset — submit is the default) or `<input type=submit>`.
