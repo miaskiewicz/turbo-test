@@ -735,50 +735,6 @@ fn esbuild_bundle_full(
     Some(out)
 }
 
-/// Nearest dir containing node_modules/@miaskiewicz/turbo-dom (the DOM environment).
-fn turbodom_root(file: &Path) -> Option<PathBuf> {
-    let mut d = file.parent();
-    while let Some(dir) = d {
-        if dir.join("node_modules/@miaskiewicz/turbo-dom/src/environment/install.mjs").is_file() {
-            return Some(dir.to_path_buf());
-        }
-        d = dir.parent();
-    }
-    None
-}
-
-/// A tiny ESM bootstrap that installs turbo-dom's window/document onto globalThis. Lives in
-/// the cache dir and imports install.mjs by absolute path (so node_modules resolution + our
-/// node-builtin shims + the napi-loaded .node parser all kick in via the native loader).
-fn dom_bootstrap(root: &Path) -> Option<PathBuf> {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    root.hash(&mut h);
-    let out = cache_dir().join(format!("dom-boot-{:016x}.mjs", h.finish()));
-    // After installGlobals, shim CSSOM that emotion/MUI need but turbo-dom doesn't expose:
-    // a working `.sheet` (insertRule/cssRules) on <style> elements, and document.styleSheets.
-    // emotion's sheetForTag reads tag.sheet.cssRules.length → crashes without this.
-    let src = format!(
-        "import {{ installGlobals }} from '{root}/node_modules/@miaskiewicz/turbo-dom/src/environment/install.mjs';\n\
-         globalThis.__turboDomEnv = installGlobals(globalThis, {{}});\n\
-         (function () {{\n\
-           const sheets = [];\n\
-           const mkSheet = (el) => {{ const rules = []; return {{ ownerNode: el, cssRules: rules, get rules() {{ return rules; }},\n\
-             insertRule(rule, index) {{ const i = index == null ? rules.length : index; rules.splice(i, 0, {{ cssText: String(rule), selectorText: '' }}); return i; }},\n\
-             deleteRule(i) {{ rules.splice(i, 1); }}, replaceSync() {{}}, replace() {{ return Promise.resolve(); }} }}; }};\n\
-           if (typeof document !== 'undefined' && document.createElement) {{\n\
-             const orig = document.createElement.bind(document);\n\
-             document.createElement = function (tag) {{ const el = orig(tag); try {{ if (String(tag).toLowerCase() === 'style' && !el.sheet) {{ const s = mkSheet(el); Object.defineProperty(el, 'sheet', {{ configurable: true, get: () => s }}); sheets.push(s); }} }} catch (e) {{}} return el; }};\n\
-             if (!document.styleSheets) {{ try {{ Object.defineProperty(document, 'styleSheets', {{ configurable: true, get: () => sheets }}); }} catch (e) {{}} }}\n\
-           }}\n\
-         }})();\n",
-        root = root.display()
-    );
-    if std::fs::read_to_string(&out).ok().as_deref() != Some(src.as_str()) {
-        std::fs::write(&out, &src).ok()?;
-    }
-    Some(out)
-}
 
 /// Parse a per-file `// @vitest-environment <env>` pragma (vitest honors a docblock comment at
 /// the top of a test file). Returns the lowercased environment name if present. We scan the
@@ -1231,44 +1187,11 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
     drain_pending_mocks(scope, entry.parent().unwrap_or(Path::new(".")), false);
 }
 
-/// Set up the DOM environment in the current context (best-effort): load + run the turbo-dom
-/// bootstrap so document/window exist before the test evaluates.
-fn setup_dom(scope: &mut v8::PinScope, entry: &Path) {
-    // P3: all-Rust DOM (gated TURBO_RUST_DOM) — bind rtdom natively, no JS installGlobals / .node.
-    if crate::browser_env::enabled() {
-        crate::browser_env::install(scope);
-        return;
-    }
-    let Some(root) = turbodom_root(entry) else { return };
-    let Some(boot) = dom_bootstrap(&root) else { return };
-    let Some(module) = load_graph(scope, &boot) else {
-        eprintln!("dom bootstrap load failed");
-        return;
-    };
-    let tc = std::pin::pin!(v8::TryCatch::new(scope));
-    let tc = &mut tc.init();
-    let inst = module.instantiate_module(tc, resolve_callback);
-    if inst != Some(true) {
-        eprintln!("dom bootstrap instantiate failed: {:?}", inst);
-        if tc.has_caught() {
-            eprintln!("  exc: {}", tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_default());
-        }
-        return;
-    }
-    let _ = module.evaluate(tc);
-    tc.perform_microtask_checkpoint();
-    // turbo-dom's installGlobals clobbered Blob/File/FileReader with SoA-backed versions that
-    // read zero bytes — restore ours so file reads return real content.
-    if let Some(code) = v8::String::new(tc, "if (globalThis.__ttRestoreFileApis) globalThis.__ttRestoreFileApis();") {
-        if let Some(s) = v8::Script::compile(tc, code, None) { s.run(tc); }
-    }
-    if tc.has_caught() {
-        eprintln!("dom bootstrap threw: {}", tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_default());
-    } else if module.get_status() == v8::ModuleStatus::Errored {
-        eprintln!("dom bootstrap errored: {}", module.get_exception().to_rust_string_lossy(tc));
-    } else {
-        eprintln!("dom bootstrap OK, status={:?}", module.get_status());
-    }
+/// Set up the DOM environment in the current context: bind the all-Rust DOM (rtdom) natively so
+/// document/window exist before the test evaluates. (The legacy JS turbo-dom bootstrap —
+/// installGlobals + the `.node` parser — was removed in v0.3.0; rtdom is the only DOM now.)
+fn setup_dom(scope: &mut v8::PinScope, _entry: &Path) {
+    crate::browser_env::install(scope);
 }
 
 /// Transform a TS file to **ESM** JS using the PROJECT'S OWN TypeScript (`ts.transpileModule`),

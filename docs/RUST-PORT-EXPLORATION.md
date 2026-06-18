@@ -9,11 +9,19 @@
 | Conformity harness | ✅ DONE | `scripts/conformity.mjs` (parity + coverage modes) |
 | P2b — node_modules native bundler | ✅ DONE, default ON | `src/bundler.rs`; payroll full parity with native app **+ deps** |
 | P2c — delete esbuild | 🟡 PARTIAL | coverage maps built but density-gap; metadata + fallback still esbuild |
-| P3 — turbo-dom Rust crate | ⬜ TODO (other agent) | retire `napi_host.rs` |
+| P3 — all-Rust DOM (rtdom) | ✅ DONE, default ON (v0.3.0) | `src/browser_env.rs` binds turbo-dom's `rtdom` crate to V8; JS `installGlobals` + `.node` + the `@miaskiewicz/turbo-dom` npm dep **removed**. `napi_host.rs` kept (lexical/fsevents addons) |
 
-**Normal test runs are now 100% native** (app + node_modules), validated at full parity on the
-payroll oracle (1057 files / 10471 tests). esbuild is still invoked only for: **coverage runs**,
-**decorator-metadata** files, and as the **automatic fallback** for any unhandled form.
+**Normal test runs are now 100% native** (app + node_modules + DOM), validated with **zero env
+flags** on three oracles: payroll (1057 files / 10,471), ui-design-components (7,062), website-global
+(1,003) — all green. esbuild is still invoked only for: **coverage runs**, **decorator-metadata**
+files, and as the **automatic fallback** for any unhandled form.
+
+**P3 (done, v0.3.0):** the DOM env is turbo-dom's pure-Rust `rtdom`, bound directly to V8 in
+`src/browser_env.rs` (handle-based nodes, native event dispatch, cascade, Selection/Range,
+CharacterData, form-control reflection). `setup_dom` calls `browser_env::install` for any
+DOM-environment file — there is no JS DOM path anymore. DOM-tree spec methods live in the published
+`turbo-dom` crate (0.3.4); the V8↔rtdom binding + browser-env shims (getComputedStyle, CSSOM,
+Selection, IDL reflections) live here in `browser_env.{rs,js}`.
 
 **P2b (done):** `src/bundler.rs` bundles a package's relative graph, wrapping each module in a lazy
 `__commonJS((exports,module)=>{…})` init closure (circular-safe — `module.exports` is assigned

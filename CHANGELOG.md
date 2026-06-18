@@ -5,6 +5,43 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.0] — all-Rust DOM is the default (JS turbo-dom removed)
+
+The DOM environment is now turbo-dom's pure-Rust **rtdom**, bound natively to V8. The legacy JS
+`installGlobals` bootstrap + the `.node` parser + the `@miaskiewicz/turbo-dom` npm dependency are
+**gone**; `TURBO_RUST_DOM` is no longer consulted (rtdom is unconditional). All three production
+oracles run 100% green with **zero env flags** (payroll 10,471/0, ui-design 7,062/0,
+website-global 1,003/0).
+
+### Changed
+- **Flip:** `browser_env::enabled()` is always true; `setup_dom` binds rtdom directly. Removed
+  `dom_bootstrap`/`turbodom_root` (imported `install.mjs` + shimmed CSSOM) and dropped the
+  `@miaskiewicz/turbo-dom` runtime dep. esbuild stays (coverage / decorator-metadata / fallback).
+
+### Added — all-Rust DOM coverage (rtdom + browser_env binding)
+- DOM event-dispatch fix: the V8 NON_MASKING name interceptor defers to a real own property before
+  returning undefined — V8's inline cache could otherwise mask React's `__reactFiber$`/`__reactProps$`
+  expandos (added after a cached miss), breaking delegated onClick/onChange on portal'd content
+  (MUI Autocomplete × userEvent). Cleared the whole cluster + the `--jobs 8` flakiness.
+- Real Selection/Range (live caret, `getRangeAt`, `setBaseAndExtent`, `selectionchange`) + native
+  CharacterData (`insertData`/`splitText`/…) so contenteditable editors (Lexical) + userEvent typing
+  work; `contentEditable`/`isContentEditable`; visibility resolved via rtdom's inheritance-aware
+  native cascade; `input.valueAsNumber`.
+- Form-control reflection; doc state (`readyState`/`visibilityState`/`elementFromPoint`/
+  `getClientRects`); native ChildNode/ParentNode (`before`/`after`/`replaceWith`/`replaceChildren`);
+  `insertAdjacentHTML`/`Element`; `toggleAttribute`; `getAttributeNS`; `setAttributeNode`/
+  `removeAttributeNode`; anchor URL decomposition; `link.rel`/`media`/`as`/`type`; `localName`.
+  (rtdom DOM methods land in the published `turbo-dom` crate 0.3.4.)
+- `testTimeout` honored from the vitest config (was a fixed 5000ms default).
+
+### Fixed — runtime
+- `URL`: `search`/`href`/`toString` derive live from `searchParams`, so post-construction
+  `searchParams.set()` serializes (was frozen at construction). `URLSearchParams` form-urlencoded
+  space ⇄ `+`. `MessageEvent` global added.
+- Config scan: read test `include`/`exclude` only from the text before the `coverage` block — a
+  `coverage.exclude` whose first glob is `**/*.test.{ts,tsx}` was wrongly taken as the test exclude
+  → "no test files found".
+
 ### Added — Rust port (branch `rust-port`)
 - **P1: launcher ported into the native binary (`src/launcher.rs`).** Default test discovery,
   vitest config include/exclude + coverage/environment scanning, `--changed [since]` git filter,

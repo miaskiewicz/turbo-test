@@ -2,18 +2,41 @@
 
 **A blazing-fast native test runner — a drop-in replacement for [vitest](https://vitest.dev).**
 
-Written in Rust on V8: per-file transforms via [oxc](https://oxc.rs)/esbuild, a native
-[turbo-dom](https://www.npmjs.com/package/@miaskiewicz/turbo-dom) DOM, work-stealing parallelism,
-and an optional isolate-reuse mode. Runs your existing `*.test.ts(x)` files — same `describe`/`it`/
-`expect`/`vi`, same `@testing-library/react` + jest-dom — typically **~5–12× faster than vitest+jsdom**.
-Also runs **jest** suites (`jest` global + jest config + `emitDecoratorMetadata`) — see
-[Jest compatibility](#jest-compatibility-experimental) (experimental).
+Written in Rust on V8: per-file transforms via [oxc](https://oxc.rs)/esbuild, an **all-Rust DOM**
+([turbo-dom](https://crates.io/crates/turbo-dom)'s `rtdom`, bound natively to V8 — no jsdom, no
+Node), work-stealing parallelism, and an optional isolate-reuse mode. Runs your existing
+`*.test.ts(x)` files — same `describe`/`it`/`expect`/`vi`, same `@testing-library/react` + jest-dom —
+typically **~5–12× faster than vitest+jsdom**. Also runs **jest** suites (`jest` global + jest config
++ `emitDecoratorMetadata`) — see [Jest compatibility](#jest-compatibility-experimental) (experimental).
+
+## Running it (drop-in for vitest)
+
+No config changes — turbo-test reads your existing `vitest.config.*` (include/exclude, environment,
+coverage thresholds) and runs the same test files:
 
 ```bash
 npm i -D @miaskiewicz/turbo-test
-npx turbo-test            # discovers + runs every *.test.* / *.spec.* under cwd
-npx turbo-test src/foo.test.ts --jobs 8 --reporter json
+npx turbo-test                       # discover + run every *.test.* / *.spec.* under cwd
+npx turbo-test src/foo.test.ts       # run specific files
+npx turbo-test --changed             # only files affected by your git diff
+npx turbo-test --jobs 8              # parallelism (default = cores)
+npx turbo-test --coverage            # native V8 coverage (honors the config's thresholds)
+npx turbo-test --reporter json       # json | tap | default
 ```
+
+Swap it into CI/scripts by replacing `vitest run` with `turbo-test`:
+
+```jsonc
+// package.json
+"scripts": {
+  "test": "turbo-test",              // was: "vitest run"
+  "test:cov": "turbo-test --coverage"
+}
+```
+
+The DOM is on by default for `jsdom`/`happy-dom`/`turbo-dom` environments (and any file with a
+`// @vitest-environment jsdom` pragma); `environment: 'node'` files get clean globals, just like
+vitest. There is **no environment to install or configure** — the Rust DOM ships inside the binary.
 
 ## Benchmarks
 
