@@ -40,6 +40,17 @@
   if (typeof g.cancelAnimationFrame === 'undefined') g.cancelAnimationFrame = function(id){ clearTimeout(id); };
   if (typeof g.matchMedia === 'undefined') g.matchMedia = function(q){ return { matches:false, media:q, addListener:function(){}, removeListener:function(){}, addEventListener:function(){}, removeEventListener:function(){}, dispatchEvent:function(){return false;} }; };
   if (typeof g.scrollTo === 'undefined') g.scrollTo = function(){};
+  // `new Image(w,h)` -> an <img> element (HTMLImageElement). Setting `.src` resolves `onload`
+  // asynchronously (no real network/decoding) so avatar/image-load effects fire.
+  if (typeof g.Image === 'undefined') {
+    g.Image = function(w, h){
+      var img = g.document.createElement('img');
+      if (w != null) img.width = w; if (h != null) img.height = h;
+      var _src = '';
+      try { Object.defineProperty(img, 'src', { configurable: true, get: function(){ return _src; }, set: function(v){ _src = v == null ? '' : String(v); this.setAttribute('src', _src); var self = this; if (_src) setTimeout(function(){ if (typeof self.onload === 'function') self.onload({ type: 'load', target: self }); }, 0); } }); } catch(e){}
+      return img;
+    };
+  }
   if (typeof g.location === 'undefined' || g.location == null) {
     g.location = { href: 'http://localhost/', origin: 'http://localhost', protocol: 'http:', host: 'localhost', hostname: 'localhost', port: '', pathname: '/', search: '', hash: '', assign: function(){}, replace: function(){}, reload: function(){}, toString: function(){ return this.href; } };
   }
@@ -242,10 +253,38 @@
         }
       } catch(e){}
     };
+    // <canvas>.getContext('2d') — a no-op 2D context stub (no rasterization). Covers components that
+    // probe a context (signature pads, charts) without a real GPU/layout backend.
+    var mkCanvasCtx = function(canvas){
+      var noop = function(){};
+      return {
+        canvas: canvas,
+        fillRect: noop, clearRect: noop, strokeRect: noop, beginPath: noop, closePath: noop,
+        moveTo: noop, lineTo: noop, bezierCurveTo: noop, quadraticCurveTo: noop, arc: noop, arcTo: noop,
+        rect: noop, ellipse: noop, fill: noop, stroke: noop, clip: noop, save: noop, restore: noop,
+        scale: noop, rotate: noop, translate: noop, transform: noop, setTransform: noop, resetTransform: noop,
+        drawImage: noop, putImageData: noop, setLineDash: noop, getLineDash: function(){ return []; },
+        createLinearGradient: function(){ return { addColorStop: noop }; },
+        createRadialGradient: function(){ return { addColorStop: noop }; },
+        createPattern: function(){ return {}; },
+        getImageData: function(x,y,w,h){ return { data: new Uint8ClampedArray(Math.max(0,(w||0)*(h||0)*4)), width: w||0, height: h||0 }; },
+        createImageData: function(w,h){ return { data: new Uint8ClampedArray(Math.max(0,(w||0)*(h||0)*4)), width: w||0, height: h||0 }; },
+        measureText: function(s){ return { width: (String(s||'').length)*6, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 }; },
+        fillText: noop, strokeText: noop, isPointInPath: function(){ return false; },
+        fillStyle: '#000', strokeStyle: '#000', lineWidth: 1, lineCap: 'butt', lineJoin: 'miter',
+        font: '10px sans-serif', textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1, globalCompositeOperation: 'source-over'
+      };
+    };
     d.createElement = function(tag){
       var el = orig(tag); var t = String(tag).toLowerCase();
       try {
         if (t === 'style' && !el.sheet) { var s = mkSheet(el); Object.defineProperty(el, 'sheet', { configurable: true, get: function(){ return s; } }); sheets.push(s); }
+        if (t === 'canvas' && typeof el.getContext !== 'function') {
+          var ctx2d = null;
+          el.getContext = function(kind){ if (kind === '2d') { if (!ctx2d) ctx2d = mkCanvasCtx(el); return ctx2d; } return null; };
+          if (typeof el.toDataURL !== 'function') el.toDataURL = function(){ return 'data:image/png;base64,'; };
+          if (typeof el.toBlob !== 'function') el.toBlob = function(cb){ if (cb) cb(null); };
+        }
       } catch(e){}
       applyControlProto(el);
       return el;
