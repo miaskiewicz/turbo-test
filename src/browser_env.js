@@ -79,11 +79,14 @@
     var checkedDesc = { configurable: true, get: function(){ return this.__checked === undefined ? this.hasAttribute('checked') : !!this.__checked; }, set: function(v){ this.__checked = !!v; } };
     // `type` defaults to 'text' for <input> — React's isTextInputElement keys on it to pick the
     // input/change handling path; undefined would route changes to the select/checkbox path.
-    var typeDesc = { configurable: true, get: function(){ return (this.getAttribute('type') || 'text').toLowerCase(); }, set: function(v){ this.setAttribute('type', v); } };
+    var mkTypeDesc = function(def){ return { configurable: true, get: function(){ return (this.getAttribute('type') || def).toLowerCase(); }, set: function(v){ this.setAttribute('type', v); } }; };
+    // `form` → the nearest ancestor <form> (userEvent fires submit on a submit-button's form).
+    var formDesc = { configurable: true, get: function(){ return this.closest ? this.closest('form') : null; } };
     var baseProto = Object.getPrototypeOf(orig('span'));
     var protoFor = {};
-    ['HTMLInputElement','HTMLTextAreaElement','HTMLSelectElement','HTMLOptionElement'].forEach(function(n){ if (typeof g[n] !== 'function') g[n] = function(){}; var p = Object.create(baseProto); try { Object.defineProperty(p, 'value', valDesc); Object.defineProperty(p, 'checked', checkedDesc); if (n === 'HTMLInputElement') Object.defineProperty(p, 'type', typeDesc); } catch(e){} g[n].prototype = p; protoFor[n] = p; });
-    var CTRL = { input:'HTMLInputElement', textarea:'HTMLTextAreaElement', select:'HTMLSelectElement', option:'HTMLOptionElement' };
+    var defType = { HTMLInputElement:'text', HTMLButtonElement:'submit' };
+    ['HTMLInputElement','HTMLTextAreaElement','HTMLSelectElement','HTMLOptionElement','HTMLButtonElement'].forEach(function(n){ if (typeof g[n] !== 'function') g[n] = function(){}; var p = Object.create(baseProto); try { Object.defineProperty(p, 'value', valDesc); Object.defineProperty(p, 'checked', checkedDesc); Object.defineProperty(p, 'form', formDesc); if (defType[n]) Object.defineProperty(p, 'type', mkTypeDesc(defType[n])); } catch(e){} g[n].prototype = p; protoFor[n] = p; });
+    var CTRL = { input:'HTMLInputElement', textarea:'HTMLTextAreaElement', select:'HTMLSelectElement', option:'HTMLOptionElement', button:'HTMLButtonElement' };
     d.createElement = function(tag){
       var el = orig(tag); var t = String(tag).toLowerCase();
       try {

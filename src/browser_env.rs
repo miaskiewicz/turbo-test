@@ -737,7 +737,75 @@ fn el_dispatch_event(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgumen
         if !fire(scope, node_h, false, false) { break; }
     }
     let not_prevented = !get_bool_prop(scope, event_obj, "defaultPrevented");
+
+    // DEFAULT ACTION: a non-prevented click on a submit control fires the form's `submit` event
+    // (jsdom does this natively; userEvent/fireEvent.click rely on it for form submission).
+    if not_prevented && ty == "click" && is_submit_control(target) {
+        if let Some(form) = closest_form(target) {
+            dispatch_synthetic(scope, form, "submit", true, true);
+        }
+    }
+
     rv.set(v8::Boolean::new(scope, not_prevented).into());
+}
+
+/// A `<button>` (type submit or unset — submit is the default) or `<input type=submit>`.
+fn is_submit_control(h: Handle) -> bool {
+    with_tree(|t| {
+        if t.node_type(h) != 1 {
+            return false;
+        }
+        let tag = t.tag_name(h).unwrap_or_default().to_ascii_uppercase();
+        let ty = t.get_attribute(h, "type").map(|s| s.to_ascii_lowercase());
+        match tag.as_str() {
+            "BUTTON" => ty.as_deref().map(|t| t == "submit").unwrap_or(true),
+            "INPUT" => ty.as_deref() == Some("submit"),
+            _ => false,
+        }
+    })
+    .unwrap_or(false)
+}
+
+/// nearest ancestor `<form>` (incl. self).
+fn closest_form(h: Handle) -> Option<Handle> {
+    with_tree(|t| {
+        let mut cur = Some(h);
+        while let Some(c) = cur {
+            if t.tag_name(c).map(|s| s.eq_ignore_ascii_case("form")).unwrap_or(false) {
+                return Some(c);
+            }
+            cur = NodeRef::new(t, c).parent().map(|p| p.handle());
+        }
+        None
+    })
+    .flatten()
+}
+
+/// Construct `new Event(type, {bubbles, cancelable})` and dispatch it on `target` via its native
+/// dispatchEvent (re-enters the event system → fires listeners).
+fn dispatch_synthetic(scope: &mut v8::PinScope, target: Handle, ty: &str, bubbles: bool, cancelable: bool) {
+    let global = scope.get_current_context().global(scope);
+    let Some(ctor) = v8::String::new(scope, "Event")
+        .and_then(|k| global.get(scope, k.into()))
+        .and_then(|v| v8::Local::<v8::Function>::try_from(v).ok())
+    else { return };
+    let init = v8::Object::new(scope);
+    for (k, val) in [("bubbles", bubbles), ("cancelable", cancelable)] {
+        if let Some(key) = v8::String::new(scope, k) {
+            let b = v8::Boolean::new(scope, val);
+            init.set(scope, key.into(), b.into());
+        }
+    }
+    let ty_str = v8::String::new(scope, ty).unwrap();
+    let Some(ev) = ctor.new_instance(scope, &[ty_str.into(), init.into()]) else { return };
+    let node = wrap(scope, target);
+    if let Some(de) = v8::String::new(scope, "dispatchEvent")
+        .and_then(|k| node.get(scope, k.into()))
+        .and_then(|v| v8::Local::<v8::Function>::try_from(v).ok())
+    {
+        let recv: v8::Local<v8::Value> = node.into();
+        de.call(scope, recv, &[ev.into()]);
+    }
 }
 
 // small prop helpers
