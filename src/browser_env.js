@@ -1,6 +1,57 @@
 (function(){
   var g = globalThis;
   if (typeof g.navigator === 'undefined') g.navigator = { userAgent: 'turbo-test', platform: 'rust', language: 'en-US', languages: ['en-US'], clipboard: {}, maxTouchPoints: 0 };
+  // ---- CSS shorthand expansion ----------------------------------------------------------------
+  // getComputedStyle in jsdom derives longhands from shorthands; tests read e.g. marginTop,
+  // borderWidth, backgroundColor, rowGap, flexBasis. Expand the common shorthands into longhands so
+  // those reads resolve. `emit(prop, value)` writes a single longhand.
+  var LINE_STYLES = { none:1,hidden:1,dotted:1,dashed:1,solid:1,double:1,groove:1,ridge:1,inset:1,outset:1 };
+  var isLen = function(t){ return /^[\d.]+(px|em|rem|%|pt|vh|vw|vmin|vmax|ch|ex|fr|cm|mm|in)$/.test(t) || t === '0' || /^calc\(/.test(t); };
+  var isColor = function(t){ return /^#[0-9a-fA-F]{3,8}$/.test(t) || /^(rgb|rgba|hsl|hsla)\(/i.test(t) || t === 'transparent' || t === 'currentColor' || /^[a-z]+$/i.test(t) && !LINE_STYLES[t] && !isLen(t); };
+  // split on top-level whitespace, keeping parenthesized groups (rgb(...), calc(...), url(...)) intact
+  var splitTop = function(v){ var out=[], depth=0, cur=''; for (var i=0;i<v.length;i++){ var c=v[i]; if (c==='(') depth++; else if (c===')') depth--; if (/\s/.test(c) && depth===0){ if (cur){ out.push(cur); cur=''; } } else cur+=c; } if (cur) out.push(cur); return out; };
+  var box4 = function(p){ return p.length===1 ? [p[0],p[0],p[0],p[0]] : p.length===2 ? [p[0],p[1],p[0],p[1]] : p.length===3 ? [p[0],p[1],p[2],p[1]] : [p[0],p[1],p[2],p[3]]; };
+  var expandShorthand = function(name, val, emit){
+    var p = splitTop(val.trim());
+    // 4-side box shorthands
+    if (/^(margin|padding|inset|scroll-margin|scroll-padding)$/.test(name)){
+      if (name === 'inset'){ var s4=box4(p); ['top','right','bottom','left'].forEach(function(s,i){ if(s4[i]) emit(s,s4[i]); }); return; }
+      var s=box4(p); ['top','right','bottom','left'].forEach(function(side,i){ if(s[i]) emit(name+'-'+side, s[i]); }); return;
+    }
+    // border-width / -style / -color: also 4-side
+    if (/^border-(width|style|color)$/.test(name)){ var which=name.split('-')[1]; var b=box4(p); ['top','right','bottom','left'].forEach(function(side,i){ if(b[i]) emit('border-'+side+'-'+which, b[i]); }); return; }
+    // border[-side] / outline: width | style | color (any order)
+    if (/^(border(-(top|right|bottom|left))?|outline)$/.test(name)){
+      var pre = name;
+      p.forEach(function(tok){ if (isLen(tok)||tok==='thin'||tok==='medium'||tok==='thick') emit(pre+'-width', tok); else if (LINE_STYLES[tok]) emit(pre+'-style', tok); else if (isColor(tok)) emit(pre+'-color', tok); });
+      return;
+    }
+    // border-radius: up to 4 corners (ignore the "/" vertical-radii form)
+    if (name === 'border-radius'){ var r=val.split('/')[0].trim().split(/\s+/); var c=box4(r); emit('border-top-left-radius',c[0]); emit('border-top-right-radius',c[1]); emit('border-bottom-right-radius',c[2]); emit('border-bottom-left-radius',c[3]); return; }
+    // two-axis shorthands
+    if (name === 'gap'){ emit('row-gap', p[0]); emit('column-gap', p[1]||p[0]); return; }
+    if (name === 'overflow'){ emit('overflow-x', p[0]); emit('overflow-y', p[1]||p[0]); return; }
+    if (name === 'place-items' || name === 'place-content' || name === 'place-self'){ var base=name.split('-')[1]; emit('align-'+base, p[0]); emit('justify-'+base, p[1]||p[0]); return; }
+    // flex: grow [shrink] [basis]
+    if (name === 'flex'){
+      if (p.length===1 && p[0]==='none'){ emit('flex-grow','0'); emit('flex-shrink','0'); emit('flex-basis','auto'); return; }
+      if (p[0]!=null) emit('flex-grow', p[0]); if (p[1]!=null && /^[\d.]+$/.test(p[1])) emit('flex-shrink', p[1]); var basis = p.filter(function(t){ return isLen(t)||t==='auto'||t==='content'; }); if (basis.length) emit('flex-basis', basis[basis.length-1]); return;
+    }
+    // font: [style] [variant] [weight] size[/line-height] family...
+    if (name === 'font'){
+      var fi=0; var weights={normal:1,bold:1,bolder:1,lighter:1,100:1,200:1,300:1,400:1,500:1,600:1,700:1,800:1,900:1};
+      while (fi<p.length){ var t=p[fi]; if (t==='italic'||t==='oblique') emit('font-style',t); else if (t==='small-caps') emit('font-variant',t); else if (weights[t]&&!isLen(t)) emit('font-weight',t); else break; fi++; }
+      if (fi<p.length){ var sz=p[fi]; var slash=sz.split('/'); emit('font-size', slash[0]); if (slash[1]) emit('line-height', slash[1]); fi++; }
+      if (fi<p.length) emit('font-family', p.slice(fi).join(' ')); return;
+    }
+    // text-decoration: line | style | color
+    if (name === 'text-decoration'){
+      var lines={none:1,underline:1,overline:1,'line-through':1,blink:1}; var styles={solid:1,double:1,dotted:1,dashed:1,wavy:1};
+      p.forEach(function(tok){ if (lines[tok]) emit('text-decoration-line', tok); else if (styles[tok]) emit('text-decoration-style', tok); else if (isColor(tok)) emit('text-decoration-color', tok); }); return;
+    }
+    // background: extract the color token -> background-color (position/size/repeat are layout-y)
+    if (name === 'background'){ for (var bi=0; bi<p.length; bi++){ if (/^#[0-9a-fA-F]{3,8}$/.test(p[bi]) || /^(rgb|rgba|hsl|hsla)\(/i.test(p[bi]) || p[bi]==='transparent'){ emit('background-color', p[bi]); break; } } return; }
+  };
   // getComputedStyle reflects the element's inline style object (React writes el.style.X), so
   // jest-dom toHaveStyle (computedStyle[prop] / getPropertyValue(prop)) and toBeVisible (display/
   // visibility/opacity) read real values. No cascade — inline styles only, which covers these tests.
@@ -23,27 +74,7 @@
       return v;
     };
     var setProp = function(name, val){ name = String(name).trim(); if (!name) return; if (typeof val === 'string'){ var t = val.trim(); if (t.charAt(0) === '#') val = normColor(t); else if (val.indexOf(',') >= 0) val = val.replace(/\s*,\s*/g, ', '); } decl[name] = val; decl[camel(name)] = val;
-      // Expand the `border[-side]` shorthand into width/style/color longhands (browsers derive them;
-      // tests read borderWidth/borderStyle). width = length|thin|medium|thick, style = a line-style.
-      if (/^border(-(top|right|bottom|left))?$/.test(name) && typeof val === 'string'){
-        var pre = name === 'border' ? 'border' : name; // e.g. border-top
-        var toks = val.trim().split(/\s+/);
-        var STYLES = {none:1,hidden:1,dotted:1,dashed:1,solid:1,double:1,groove:1,ridge:1,inset:1,outset:1};
-        toks.forEach(function(tok){
-          if (/^[\d.]+(px|em|rem|%|pt|vh|vw)$/.test(tok) || tok==='thin' || tok==='medium' || tok==='thick') setProp(pre+'-width', tok);
-          else if (STYLES[tok]) setProp(pre+'-style', tok);
-        });
-      }
-      // Expand the `margin`/`padding` box shorthand into the four sides (1/2/3/4-value forms), since
-      // tests read marginTop/paddingLeft longhands.
-      if ((name === 'margin' || name === 'padding') && typeof val === 'string'){
-        var p = val.trim().split(/\s+/);
-        var sides = p.length===1 ? [p[0],p[0],p[0],p[0]]
-          : p.length===2 ? [p[0],p[1],p[0],p[1]]
-          : p.length===3 ? [p[0],p[1],p[2],p[1]]
-          : [p[0],p[1],p[2],p[3]];
-        ['top','right','bottom','left'].forEach(function(s,i){ if (sides[i]) setProp(name+'-'+s, sides[i]); });
-      }
+      if (typeof val === 'string') expandShorthand(name, val, setProp);
     };
     try {
       var sheets = el && el.ownerDocument ? (el.ownerDocument.styleSheets || []) : [];
