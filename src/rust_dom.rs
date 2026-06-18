@@ -46,6 +46,8 @@ const KNOWN: &[&str] = &[
     "innerHTML", "outerHTML", "children", "parentElement", "firstElementChild", "namespaceURI",
     "value", "append", "prepend", "remove", "focus", "blur", "click", "scrollIntoView",
     "getBoundingClientRect", "createElementNS", "createDocumentFragment", "createComment",
+    "cloneNode", "isConnected", "attributes", "dataset", "createRange",
+    "getRootNode", "getSelection",
     // document own methods/props
     "createElement", "createTextNode", "getElementById", "body", "documentElement",
     // JS internals V8 / libs probe constantly — never DOM
@@ -337,6 +339,133 @@ fn doc_create_comment(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgume
     }
 }
 
+/// recursively clone a subtree, returning the new root handle.
+fn clone_subtree(t: &mut Tree, h: Handle, deep: bool) -> Handle {
+    let nt = t.node_type(h);
+    let new_h = match nt {
+        3 => t.create_text_node(&t.node_value(h).unwrap_or_default()),
+        8 => t.create_comment(&t.node_value(h).unwrap_or_default()),
+        _ => {
+            let tag = t.tag_name(h).unwrap_or_else(|| "div".into());
+            let e = t.create_element(&tag);
+            for (k, v) in t.attributes(h) {
+                t.set_attribute(e, &k, &v);
+            }
+            e
+        }
+    };
+    if deep && nt != 3 && nt != 8 {
+        for c in t.children(h) {
+            let cc = clone_subtree(t, c, true);
+            t.append_child(new_h, cc);
+        }
+    }
+    new_h
+}
+
+/// `getRootNode()` → the topmost ancestor (the document root if connected). jest-dom's
+/// `toBeInTheDocument` compares `ownerDocument === getRootNode()`.
+fn el_get_root_node(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let root = with_tree(|t| {
+        let mut cur = h;
+        while let Some(p) = NodeRef::new(t, cur).parent() {
+            cur = p.handle();
+        }
+        cur
+    });
+    if let Some(r) = root {
+        let node = wrap(scope, r);
+        rv.set(node.into());
+    }
+}
+
+fn el_clone_node(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let deep = args.get(0).boolean_value(scope);
+    if let Some(new_h) = with_tree_mut(|t| clone_subtree(t, h, deep)) {
+        let node = wrap(scope, new_h);
+        rv.set(node.into());
+    }
+}
+
+/// whether `h`'s root (walking parents) is the document root → attached to the document.
+fn is_connected(t: &Tree, h: Handle) -> bool {
+    let root = t.root();
+    let mut cur = Some(h);
+    while let Some(c) = cur {
+        if c == root {
+            return true;
+        }
+        cur = NodeRef::new(t, c).parent().map(|p| p.handle());
+    }
+    false
+}
+
+fn get_is_connected(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
+    let Some(h) = handle_of(scope, args.holder()) else { return };
+    let c = with_tree(|t| is_connected(t, h)).unwrap_or(false);
+    rv.set(v8::Boolean::new(scope, c).into());
+}
+
+/// `parent.contains(node)` — true if node === parent or a descendant.
+fn el_contains_node(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(p) = handle_of(scope, args.this()) else { return };
+    let other = args.get(0).to_object(scope).and_then(|o| handle_of(scope, o));
+    let yes = match other {
+        Some(o) => with_tree(|t| {
+            let mut cur = Some(o);
+            while let Some(c) = cur {
+                if c == p { return true; }
+                cur = NodeRef::new(t, c).parent().map(|x| x.handle());
+            }
+            false
+        }).unwrap_or(false),
+        None => false,
+    };
+    rv.set(v8::Boolean::new(scope, yes).into());
+}
+
+/// `attributes` → array of `{ name, value, nodeName, nodeValue }` (NamedNodeMap-lite, indexable).
+fn get_attributes(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
+    let Some(h) = handle_of(scope, args.holder()) else { return };
+    let attrs = with_tree(|t| t.attributes(h)).unwrap_or_default();
+    let arr = v8::Array::new(scope, attrs.len() as i32);
+    for (i, (k, v)) in attrs.into_iter().enumerate() {
+        let o = v8::Object::new(scope);
+        for (pk, pv) in [("name", k.as_str()), ("nodeName", k.as_str()), ("value", v.as_str()), ("nodeValue", v.as_str())] {
+            let key = v8::String::new(scope, pk).unwrap();
+            let val = v8::String::new(scope, pv).unwrap();
+            o.set(scope, key.into(), val.into());
+        }
+        arr.set_index(scope, i as u32, o.into());
+    }
+    rv.set(arr.into());
+}
+
+/// `dataset` → `{ camelCaseKey: value }` for each `data-*` attribute.
+fn get_dataset(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
+    let Some(h) = handle_of(scope, args.holder()) else { return };
+    let attrs = with_tree(|t| t.attributes(h)).unwrap_or_default();
+    let o = v8::Object::new(scope);
+    for (k, v) in attrs {
+        if let Some(rest) = k.strip_prefix("data-") {
+            // kebab → camelCase
+            let mut camel = String::new();
+            let mut up = false;
+            for ch in rest.chars() {
+                if ch == '-' { up = true; }
+                else if up { camel.extend(ch.to_uppercase()); up = false; }
+                else { camel.push(ch); }
+            }
+            let key = v8::String::new(scope, &camel).unwrap();
+            let val = v8::String::new(scope, &v).unwrap();
+            o.set(scope, key.into(), val.into());
+        }
+    }
+    rv.set(o.into());
+}
+
 fn el_matches(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let Some(h) = handle_of(scope, args.this()) else { return };
     let sel = arg_str(scope, &args, 0);
@@ -444,11 +573,101 @@ fn get_next_sibling(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: 
     rv.set(v);
 }
 
-// Event methods — no-op stubs for now (unblock render; real rtdom event dispatch is the next step).
-fn el_add_event_listener(_scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {}
-fn el_remove_event_listener(_scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {}
-fn el_dispatch_event(scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
-    rv.set(v8::Boolean::new(scope, true).into());
+// ---- events: real dispatch (addEventListener/removeEventListener/dispatchEvent) --------------
+// React attaches one delegated listener at the root container and relies on bubbling; fireEvent /
+// userEvent call `node.dispatchEvent(new Event(type, {bubbles:true}))`. So we store JS listeners
+// per (handle, type) and walk target→ancestors firing them, with target/currentTarget set on the
+// event object (the `Event` class lives in the JS bootstrap).
+
+thread_local! {
+    /// (node handle, event type) → registered JS listeners (in add order).
+    static LISTENERS: RefCell<HashMap<(Handle, String), Vec<v8::Global<v8::Function>>>> = RefCell::new(HashMap::new());
+}
+
+fn el_add_event_listener(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let ty = arg_str(scope, &args, 0);
+    let Some(f) = v8::Local::<v8::Function>::try_from(args.get(1)).ok() else { return };
+    let g = v8::Global::new(scope, f);
+    LISTENERS.with(|m| m.borrow_mut().entry((h, ty)).or_default().push(g));
+}
+
+fn el_remove_event_listener(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let ty = arg_str(scope, &args, 0);
+    let Some(f) = v8::Local::<v8::Function>::try_from(args.get(1)).ok() else { return };
+    LISTENERS.with(|m| {
+        if let Some(v) = m.borrow_mut().get_mut(&(h, ty)) {
+            v.retain(|g| !v8::Local::new(scope, g).eq(&f));
+        }
+    });
+}
+
+fn el_dispatch_event(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(target) = handle_of(scope, args.this()) else {
+        rv.set(v8::Boolean::new(scope, true).into());
+        return;
+    };
+    let event = args.get(0);
+    let Some(event_obj) = event.to_object(scope) else { return };
+    let ty = get_str_prop(scope, event_obj, "type").unwrap_or_default();
+    let bubbles = get_bool_prop(scope, event_obj, "bubbles");
+
+    // event.target = the dispatching node.
+    let target_node = wrap(scope, target);
+    set_prop(scope, event_obj, "target", target_node.into());
+
+    // propagation path: target, then ancestors (bubble). Stop if `bubbles` is false (target only).
+    let mut path = vec![target];
+    if bubbles {
+        let mut cur = with_tree(|t| NodeRef::new(t, target).parent().map(|p| p.handle())).flatten();
+        while let Some(c) = cur {
+            path.push(c);
+            cur = with_tree(|t| NodeRef::new(t, c).parent().map(|p| p.handle())).flatten();
+        }
+    }
+
+    for node_h in path {
+        // re-check the propagation-stopped flag each hop.
+        if get_bool_prop(scope, event_obj, "__stop") {
+            break;
+        }
+        let listeners: Vec<v8::Global<v8::Function>> =
+            LISTENERS.with(|m| m.borrow().get(&(node_h, ty.clone())).cloned().unwrap_or_default());
+        if listeners.is_empty() {
+            continue;
+        }
+        let cur_node = wrap(scope, node_h);
+        set_prop(scope, event_obj, "currentTarget", cur_node.into());
+        for g in listeners {
+            if get_bool_prop(scope, event_obj, "__stopImmediate") {
+                break;
+            }
+            let f = v8::Local::new(scope, &g);
+            let recv: v8::Local<v8::Value> = cur_node.into();
+            f.call(scope, recv, &[event]);
+        }
+    }
+    let not_prevented = !get_bool_prop(scope, event_obj, "defaultPrevented");
+    rv.set(v8::Boolean::new(scope, not_prevented).into());
+}
+
+// small prop helpers
+fn get_str_prop(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, name: &str) -> Option<String> {
+    let key = v8::String::new(scope, name)?;
+    let v = obj.get(scope, key.into())?;
+    if v.is_string() { Some(v.to_rust_string_lossy(scope)) } else { None }
+}
+fn get_bool_prop(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, name: &str) -> bool {
+    v8::String::new(scope, name)
+        .and_then(|k| obj.get(scope, k.into()))
+        .map(|v| v.boolean_value(scope))
+        .unwrap_or(false)
+}
+fn set_prop(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, name: &str, val: v8::Local<v8::Value>) {
+    if let Some(k) = v8::String::new(scope, name) {
+        obj.set(scope, k.into(), val);
+    }
 }
 
 fn get_node_type(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
@@ -624,6 +843,9 @@ fn build_el_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::
     tmpl_method(scope, tmpl, "dispatchEvent", el_dispatch_event);
     tmpl_method(scope, tmpl, "matches", el_matches);
     tmpl_method(scope, tmpl, "contains", el_contains);
+    tmpl_method(scope, tmpl, "cloneNode", el_clone_node);
+    tmpl_method(scope, tmpl, "getRootNode", el_get_root_node);
+    tmpl_method(scope, tmpl, "containsNode", el_contains_node);
     tmpl_method(scope, tmpl, "append", el_append);
     tmpl_method(scope, tmpl, "prepend", el_append);
     tmpl_method(scope, tmpl, "remove", el_remove_self);
@@ -647,6 +869,9 @@ fn build_el_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::
     tmpl_getter(scope, tmpl, "parentElement", get_parent_element);
     tmpl_getter(scope, tmpl, "firstElementChild", get_first_element_child);
     tmpl_getter(scope, tmpl, "namespaceURI", get_namespace_uri);
+    tmpl_getter(scope, tmpl, "isConnected", get_is_connected);
+    tmpl_getter(scope, tmpl, "attributes", get_attributes);
+    tmpl_getter(scope, tmpl, "dataset", get_dataset);
     tmpl_accessor(scope, tmpl, "innerHTML", get_inner_html, set_inner_html);
     tmpl_accessor(scope, tmpl, "value", get_value, set_value);
 
@@ -739,9 +964,44 @@ const BOOTSTRAP: &str = r#"(function(){
   if (typeof g.matchMedia === 'undefined') g.matchMedia = function(q){ return { matches:false, media:q, addListener:function(){}, removeListener:function(){}, addEventListener:function(){}, removeEventListener:function(){}, dispatchEvent:function(){return false;} }; };
   if (typeof g.scrollTo === 'undefined') g.scrollTo = function(){};
   // DOM interface constructors (for `instanceof` / global presence). Stubs; identity not enforced.
+  // Real Event base class (dispatch in rust_dom.rs reads type/bubbles/defaultPrevented/__stop*).
+  if (!g.__ttEvent) {
+    function Event(type, init){ init = init || {}; this.type = type; this.bubbles = !!init.bubbles; this.cancelable = !!init.cancelable; this.composed = !!init.composed; this.defaultPrevented = false; this.target = null; this.currentTarget = null; this.__stop = false; this.__stopImmediate = false; this.eventPhase = 0; this.timeStamp = Date.now(); this.isTrusted = false; this.detail = init.detail; }
+    Event.prototype.preventDefault = function(){ if (this.cancelable) this.defaultPrevented = true; };
+    Event.prototype.stopPropagation = function(){ this.__stop = true; };
+    Event.prototype.stopImmediatePropagation = function(){ this.__stop = true; this.__stopImmediate = true; };
+    Event.prototype.initEvent = function(type, bubbles, cancelable){ this.type = type; this.bubbles = !!bubbles; this.cancelable = !!cancelable; };
+    Event.NONE = 0; Event.CAPTURING_PHASE = 1; Event.AT_TARGET = 2; Event.BUBBLING_PHASE = 3;
+    g.Event = Event;
+    function mkSub(extra){ return function(type, init){ init = init || {}; Event.call(this, type, init); if (extra) extra(this, init); for (var k in init){ if (!(k in this)) this[k] = init[k]; } }; }
+    function sub(name, extra){ var C = mkSub(extra); C.prototype = Object.create(Event.prototype); C.prototype.constructor = C; g[name] = C; }
+    var keyExtra = function(self, init){ self.key = init.key||''; self.code = init.code||''; self.keyCode = init.keyCode||0; self.which = init.which||init.keyCode||0; self.altKey=!!init.altKey; self.ctrlKey=!!init.ctrlKey; self.metaKey=!!init.metaKey; self.shiftKey=!!init.shiftKey; self.repeat=!!init.repeat; };
+    var mouseExtra = function(self, init){ self.button=init.button||0; self.buttons=init.buttons||0; self.clientX=init.clientX||0; self.clientY=init.clientY||0; self.pageX=init.pageX||0; self.pageY=init.pageY||0; self.altKey=!!init.altKey; self.ctrlKey=!!init.ctrlKey; self.metaKey=!!init.metaKey; self.shiftKey=!!init.shiftKey; self.relatedTarget=init.relatedTarget||null; };
+    sub('CustomEvent', function(self, init){ self.detail = init.detail; });
+    sub('UIEvent'); sub('MouseEvent', mouseExtra); sub('PointerEvent', mouseExtra); sub('KeyboardEvent', keyExtra);
+    sub('InputEvent', function(self, init){ self.data = init.data; self.inputType = init.inputType||''; });
+    sub('FocusEvent', function(self, init){ self.relatedTarget = init.relatedTarget||null; });
+    sub('CompositionEvent'); sub('WheelEvent', mouseExtra); sub('DragEvent', mouseExtra); sub('TouchEvent'); sub('ClipboardEvent');
+    g.document.createEvent = function(){ return new Event('', {}); };
+    g.__ttEvent = true;
+  }
   var ctors = ['Node','Element','HTMLElement','HTMLDivElement','HTMLInputElement','HTMLButtonElement','HTMLAnchorElement','HTMLSelectElement','HTMLTextAreaElement','HTMLFormElement','HTMLImageElement','HTMLLabelElement','HTMLOptionElement','HTMLUListElement','HTMLLIElement','HTMLSpanElement','HTMLParagraphElement','HTMLHeadingElement','HTMLTableElement','HTMLIFrameElement','HTMLCanvasElement','HTMLStyleElement','HTMLScriptElement','HTMLDocument','Document','DocumentFragment','ShadowRoot','Text','Comment','SVGElement','SVGSVGElement','DOMParser','EventTarget','AbortController','AbortSignal','DOMException',
     'UIEvent','MouseEvent','KeyboardEvent','FocusEvent','InputEvent','TouchEvent','PointerEvent','WheelEvent','DragEvent','ClipboardEvent','AnimationEvent','TransitionEvent','MessageEvent','ProgressEvent','CompositionEvent','PopStateEvent','HashChangeEvent','StorageEvent','ErrorEvent','CloseEvent'];
   ctors.forEach(function(n){ if (typeof g[n] === 'undefined') { var f = function(){}; f.prototype = {}; g[n] = f; } });
+  // make `node instanceof HTMLElement/Element/Node/...` work for native DOM nodes (jest-dom's
+  // checkHtmlElement + many libs rely on it) via Symbol.hasInstance keyed on nodeType.
+  function iface(name, pred){ var f = g[name] || function(){}; try { Object.defineProperty(f, Symbol.hasInstance, { configurable: true, value: pred }); } catch(e){} g[name] = f; }
+  var isNode = function(o){ return o != null && typeof o === 'object' && typeof o.nodeType === 'number'; };
+  iface('Node', isNode);
+  iface('Element', function(o){ return isNode(o) && o.nodeType === 1; });
+  iface('HTMLElement', function(o){ return isNode(o) && o.nodeType === 1; });
+  iface('SVGElement', function(o){ return isNode(o) && o.nodeType === 1 && String(o.namespaceURI||'').indexOf('svg') >= 0; });
+  iface('Text', function(o){ return isNode(o) && o.nodeType === 3; });
+  iface('Comment', function(o){ return isNode(o) && o.nodeType === 8; });
+  iface('DocumentFragment', function(o){ return isNode(o) && o.nodeType === 11; });
+  iface('HTMLInputElement', function(o){ return isNode(o) && o.nodeType === 1 && String(o.tagName).toUpperCase() === 'INPUT'; });
+  iface('HTMLTextAreaElement', function(o){ return isNode(o) && o.nodeType === 1 && String(o.tagName).toUpperCase() === 'TEXTAREA'; });
+  iface('HTMLSelectElement', function(o){ return isNode(o) && o.nodeType === 1 && String(o.tagName).toUpperCase() === 'SELECT'; });
   // window-level event listeners (no-op until native events land).
   if (typeof g.addEventListener === 'undefined') g.addEventListener = function(){};
   if (typeof g.removeEventListener === 'undefined') g.removeEventListener = function(){};
@@ -758,11 +1018,16 @@ const BOOTSTRAP: &str = r#"(function(){
   d.removeEventListener = function(){};
   d.dispatchEvent = function(){ return true; };
   d.activeElement = d.body;
+  d.createRange = function(){ return { setStart:function(){}, setEnd:function(){}, selectNodeContents:function(){}, collapse:function(){}, getClientRects:function(){return [];}, getBoundingClientRect:function(){return {x:0,y:0,top:0,left:0,right:0,bottom:0,width:0,height:0};}, createContextualFragment:function(html){ var f=d.createDocumentFragment(); var t=d.createElement("div"); t.innerHTML=html; while(t.firstChild) f.appendChild(t.firstChild); return f; }, cloneRange:function(){return d.createRange();}, detach:function(){}, commonAncestorContainer: d.body }; };
+  if (!d.getRootNode) d.getRootNode = function(){ return d; };
+  if (!d.getSelection) d.getSelection = function(){ return { removeAllRanges:function(){}, addRange:function(){}, getRangeAt:function(){return d.createRange();}, rangeCount:0, toString:function(){return "";} }; };
+  if (!g.getSelection) g.getSelection = d.getSelection;
 })();"#;
 
 /// Reset the per-thread DOM (call between test files when reusing an isolate).
 pub fn reset() {
     STYLE.with(|s| s.borrow_mut().clear());
+    LISTENERS.with(|s| s.borrow_mut().clear());
     if log_enabled() {
         dump_missing();
     }
