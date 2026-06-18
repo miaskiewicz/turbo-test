@@ -136,13 +136,28 @@
         p.setRangeText = function(){};
       }
     } catch(e){} g[n].prototype = p; protoFor[n] = p; });
+    // Descendant <option>s. Prefer querySelectorAll (document order); fall back to a `children` walk
+    // when it returns empty — that happens on a DETACHED subtree (qsa matches only connected nodes),
+    // which is exactly when React-DOM's updateOptions reads select.options DURING commit (the subtree
+    // is still detached then). Without the fallback a controlled <select> never marks its option.
+    var optionsOf = function(sel){
+      var a = []; var list = sel.querySelectorAll('option');
+      for (var i=0;i<list.length;i++) a.push(list[i]);
+      if (!a.length) (function walk(n){ var ch = n.children; for (var j=0;j<ch.length;j++){ var c = ch[j]; var tg = String(c.tagName).toUpperCase(); if (tg === 'OPTION') a.push(c); else if (tg === 'OPTGROUP') walk(c); } })(sel);
+      a.item = function(i){ return this[i] || null; }; return a;
+    };
+    var ownerSelect = function(n){ var p = n.parentNode; while (p && p.nodeType === 1){ if (String(p.tagName).toUpperCase() === 'SELECT') return p; p = p.parentNode; } return null; };
     // <option>: `value` falls back to text content (HTML spec), `selected`/`defaultSelected` track
     // the live + attribute state. React-DOM's updateOptions reads option.value and writes
     // option.selected for every option of a controlled <select>.
     (function(){
       var op = protoFor.HTMLOptionElement;
       Object.defineProperty(op, 'value', { configurable: true, get: function(){ var v = this.getAttribute('value'); return v == null ? (this.textContent || '') : v; }, set: function(v){ this.setAttribute('value', v == null ? '' : String(v)); } });
-      Object.defineProperty(op, 'selected', { configurable: true, get: function(){ return this.__selected === undefined ? this.hasAttribute('selected') : !!this.__selected; }, set: function(v){ this.__selected = !!v; } });
+      // Setting selected=true on a single (non-multiple) <select> deselects its siblings — the
+      // browser enforces the single-selection invariant. Without this, an option marked during the
+      // detached commit stays selected after userEvent.selectOptions marks another, and select.value
+      // (first selected) returns the stale one.
+      Object.defineProperty(op, 'selected', { configurable: true, get: function(){ return this.__selected === undefined ? this.hasAttribute('selected') : !!this.__selected; }, set: function(v){ v = !!v; this.__selected = v; if (v){ var s = ownerSelect(this); if (s && !s.multiple){ var os = optionsOf(s); for (var i=0;i<os.length;i++) if (os[i] !== this) os[i].__selected = false; } } } });
       Object.defineProperty(op, 'defaultSelected', { configurable: true, get: function(){ return this.hasAttribute('selected'); }, set: function(v){ if (v) this.setAttribute('selected',''); else this.removeAttribute('selected'); } });
       Object.defineProperty(op, 'disabled', { configurable: true, get: function(){ return this.hasAttribute('disabled'); }, set: function(v){ if (v) this.setAttribute('disabled',''); else this.removeAttribute('disabled'); } });
       Object.defineProperty(op, 'text', { configurable: true, get: function(){ return this.textContent || ''; }, set: function(v){ this.textContent = v; } });
@@ -151,7 +166,7 @@
     // plus `value`/`selectedIndex` derived from the options' selected state.
     (function(){
       var sp = protoFor.HTMLSelectElement;
-      var opts = function(sel){ var list = sel.querySelectorAll('option'); var a = []; for (var i=0;i<list.length;i++) a.push(list[i]); a.item = function(i){ return this[i] || null; }; return a; };
+      var opts = optionsOf;
       Object.defineProperty(sp, 'options', { configurable: true, get: function(){ return opts(this); } });
       Object.defineProperty(sp, 'selectedOptions', { configurable: true, get: function(){ return opts(this).filter(function(o){ return o.selected; }); } });
       Object.defineProperty(sp, 'selectedIndex', { configurable: true,
