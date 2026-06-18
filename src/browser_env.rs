@@ -200,7 +200,12 @@ fn el_set_attribute(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgument
     let Some(h) = handle_of(scope, args.this()) else { return };
     let name = arg_str(scope, &args, 0);
     let value = arg_str(scope, &args, 1);
-    with_tree_mut(|t| t.set_attribute(h, &name, &value));
+    // HTML setAttribute lowercases the qualified name (React calls setAttribute('colSpan', …); jsdom
+    // stores 'colspan'). Lowercase for HTML-namespace elements only (ns 0); SVG (ns 1) keeps camelCase
+    // attrs like viewBox.
+    let is_html = with_tree(|t| t.namespace_id(h) == 0).unwrap_or(true);
+    let key = if is_html { name.to_ascii_lowercase() } else { name.clone() };
+    with_tree_mut(|t| t.set_attribute(h, &key, &value));
 }
 
 /// Attribute lookup with the HTML case-insensitivity rule: try the exact name, then its lowercase
