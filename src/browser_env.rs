@@ -206,6 +206,24 @@ fn el_set_attribute(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgument
     let is_html = with_tree(|t| t.namespace_id(h) == 0).unwrap_or(true);
     let key = if is_html { name.to_ascii_lowercase() } else { name.clone() };
     with_tree_mut(|t| t.set_attribute(h, &key, &value));
+
+    // When an <input> becomes a checkbox/radio (React sets `type` via setAttribute after createElement),
+    // strip the value-change tracker: those inputs track `checked`, not `value`, so a value-tracker
+    // would mis-detect changes and break onChange. Removing the own `value`/`_valueTracker` lets the
+    // framework use its checked path (we keep the own `checked` accessor).
+    if key == "type" {
+        let v = value.to_ascii_lowercase();
+        if v == "checkbox" || v == "radio" {
+            let this = args.this();
+            for k in ["value", "_valueTracker"] {
+                if let Some(key) = v8::String::new(scope, k) {
+                    if this.has_own_property(scope, key.into()).unwrap_or(false) {
+                        this.delete(scope, key.into());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Attribute lookup with the HTML case-insensitivity rule: try the exact name, then its lowercase
