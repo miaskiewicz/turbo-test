@@ -150,6 +150,17 @@ fn arg_str(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments, i: i3
     args.get(i).to_rust_string_lossy(scope)
 }
 
+/// Resolve argument `i` to a node handle, or `None` for null/undefined/non-node. CRITICAL: guards
+/// `to_object()`, which THROWS "Cannot convert undefined or null to object" on null/undefined — and
+/// `insertBefore(node, null)` / `removeChild`-style calls pass that constantly (emotion/react-dom).
+fn arg_handle(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments, i: i32) -> Option<Handle> {
+    let v = args.get(i);
+    if v.is_null_or_undefined() {
+        return None;
+    }
+    v.to_object(scope).and_then(|o| handle_of(scope, o))
+}
+
 // ---- with-tree helpers (borrow the thread-local Tree) ----------------------------------------
 
 fn with_tree<R>(f: impl FnOnce(&Tree) -> R) -> Option<R> {
@@ -163,25 +174,22 @@ fn with_tree_mut<R>(f: impl FnOnce(&mut Tree) -> R) -> Option<R> {
 
 fn el_append_child(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let Some(parent) = handle_of(scope, args.this()) else { return };
-    let Some(child_obj) = args.get(0).to_object(scope) else { return };
-    let Some(child) = handle_of(scope, child_obj) else { return };
+    let Some(child) = arg_handle(scope, &args, 0) else { return };
     with_tree_mut(|t| t.append_child(parent, child));
     rv.set(args.get(0));
 }
 
 fn el_remove_child(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let Some(parent) = handle_of(scope, args.this()) else { return };
-    let Some(child_obj) = args.get(0).to_object(scope) else { return };
-    let Some(child) = handle_of(scope, child_obj) else { return };
+    let Some(child) = arg_handle(scope, &args, 0) else { return };
     with_tree_mut(|t| t.remove_child(parent, child));
     rv.set(args.get(0));
 }
 
 fn el_insert_before(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let Some(parent) = handle_of(scope, args.this()) else { return };
-    let Some(child_obj) = args.get(0).to_object(scope) else { return };
-    let Some(child) = handle_of(scope, child_obj) else { return };
-    let reference = args.get(1).to_object(scope).and_then(|o| handle_of(scope, o));
+    let Some(child) = arg_handle(scope, &args, 0) else { return };
+    let reference = arg_handle(scope, &args, 1);
     with_tree_mut(|t| t.insert_before(parent, child, reference));
     rv.set(args.get(0));
 }
@@ -328,7 +336,7 @@ fn el_get_bounding_client_rect(scope: &mut v8::PinScope, _args: v8::FunctionCall
 fn el_append(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
     let Some(parent) = handle_of(scope, args.this()) else { return };
     for i in 0..args.length() {
-        if let Some(child) = args.get(i).to_object(scope).and_then(|o| handle_of(scope, o)) {
+        if let Some(child) = arg_handle(scope, &args, i) {
             with_tree_mut(|t| t.append_child(parent, child));
         }
     }
@@ -435,7 +443,7 @@ fn get_is_connected(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: 
 /// `parent.contains(node)` — true if node === parent or a descendant.
 fn el_contains_node(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let Some(p) = handle_of(scope, args.this()) else { return };
-    let other = args.get(0).to_object(scope).and_then(|o| handle_of(scope, o));
+    let other = arg_handle(scope, &args, 0);
     let yes = match other {
         Some(o) => with_tree(|t| {
             let mut cur = Some(o);
@@ -517,7 +525,7 @@ fn el_matches(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut
 
 fn el_contains(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let Some(h) = handle_of(scope, args.this()) else { return };
-    let other = args.get(0).to_object(scope).and_then(|o| handle_of(scope, o));
+    let other = arg_handle(scope, &args, 0);
     let contains = match other {
         Some(o) => with_tree(|t| {
             // walk up from `o` to see if `h` is an ancestor (or equal).
@@ -1119,6 +1127,14 @@ const BOOTSTRAP: &str = r#"(function(){
   d.removeEventListener = function(){};
   d.dispatchEvent = function(){ return true; };
   d.activeElement = d.body;
+  // CSSOM shim emotion/MUI need: a working `.sheet` (insertRule/cssRules) on <style> + styleSheets.
+  (function(){
+    var sheets = [];
+    var mkSheet = function(el){ var rules = []; return { ownerNode: el, cssRules: rules, get rules(){ return rules; }, insertRule: function(rule, index){ var i = index == null ? rules.length : index; rules.splice(i, 0, { cssText: String(rule), selectorText: '' }); return i; }, deleteRule: function(i){ rules.splice(i, 1); }, replaceSync: function(){}, replace: function(){ return Promise.resolve(); } }; };
+    var orig = d.createElement.bind(d);
+    d.createElement = function(tag){ var el = orig(tag); try { if (String(tag).toLowerCase() === 'style' && !el.sheet) { var s = mkSheet(el); Object.defineProperty(el, 'sheet', { configurable: true, get: function(){ return s; } }); sheets.push(s); } } catch(e){} return el; };
+    if (!d.styleSheets) { try { Object.defineProperty(d, 'styleSheets', { configurable: true, get: function(){ return sheets; } }); } catch(e){} }
+  })();
   d.createRange = function(){ return { setStart:function(){}, setEnd:function(){}, selectNodeContents:function(){}, collapse:function(){}, getClientRects:function(){return [];}, getBoundingClientRect:function(){return {x:0,y:0,top:0,left:0,right:0,bottom:0,width:0,height:0};}, createContextualFragment:function(html){ var f=d.createDocumentFragment(); var t=d.createElement("div"); t.innerHTML=html; while(t.firstChild) f.appendChild(t.firstChild); return f; }, cloneRange:function(){return d.createRange();}, detach:function(){}, commonAncestorContainer: d.body }; };
   if (!d.getRootNode) d.getRootNode = function(){ return d; };
   if (!d.getSelection) d.getSelection = function(){ return { removeAllRanges:function(){}, addRange:function(){}, getRangeAt:function(){return d.createRange();}, rangeCount:0, toString:function(){return "";} }; };
