@@ -284,6 +284,9 @@
       // Reflected IDL string attributes: a library setting `input.name = 'x'` (e.g. react-number-
       // format, MUI) must show up as the `name` content attribute (toHaveAttribute, [name] selectors).
       ['name','placeholder','accept'].forEach(function(a){ Object.defineProperty(p, a, { configurable: true, get: function(){ return this.getAttribute(a) || ''; }, set: function(v){ this.setAttribute(a, v == null ? '' : String(v)); } }); });
+      // Reflected BOOLEAN IDL attributes (presence): el.disabled = true -> the `disabled` content
+      // attribute; reading returns hasAttribute. Tests read el.disabled / [disabled] / multiple.
+      [['disabled','disabled'],['multiple','multiple'],['required','required'],['readOnly','readonly'],['autoFocus','autofocus']].forEach(function(pair){ Object.defineProperty(p, pair[0], { configurable: true, get: function(){ return this.hasAttribute(pair[1]); }, set: function(v){ if (v) this.setAttribute(pair[1], ''); else this.removeAttribute(pair[1]); } }); });
       if (n === 'HTMLInputElement' || n === 'HTMLTextAreaElement') {
         Object.defineProperty(p, 'selectionStart', selStartDesc); Object.defineProperty(p, 'selectionEnd', selEndDesc); Object.defineProperty(p, 'selectionDirection', selDirDesc);
         p.setSelectionRange = function(s, e, dir){ this.__selStart = s; this.__selEnd = e; this.__selDir = dir || 'none'; };
