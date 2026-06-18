@@ -683,6 +683,11 @@ fn arg_capture(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments) -
     if v.is_boolean() {
         return v.boolean_value(scope);
     }
+    // 2-arg addEventListener leaves arg 2 undefined; to_object() on null/undefined THROWS
+    // ("Cannot convert undefined or null to object"). Guard before converting.
+    if v.is_null_or_undefined() {
+        return false;
+    }
     if let Some(o) = v.to_object(scope) {
         if let Some(k) = v8::String::new(scope, "capture") {
             if let Some(c) = o.get(scope, k.into()) {
@@ -719,6 +724,7 @@ fn el_dispatch_event(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgumen
         return;
     };
     let event = args.get(0);
+    if event.is_null_or_undefined() { return; }
     let Some(event_obj) = event.to_object(scope) else { return };
     let ty = get_str_prop(scope, event_obj, "type").unwrap_or_default();
     let bubbles = get_bool_prop(scope, event_obj, "bubbles");
