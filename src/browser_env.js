@@ -244,6 +244,9 @@
       if (t === 'time') return /^\d{2}:\d{2}(:\d{2})?$/.test(v) ? v : '';
       if (t === 'month') return /^\d{4}-\d{2}$/.test(v) ? v : '';
       if (t === 'datetime-local') return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v) ? v : '';
+      // A number input only retains a valid floating-point number; an invalid/partial value ('.', '-')
+      // becomes '' (HTML value-sanitization), which is what lets components see the empty-string clear.
+      if (t === 'number') return (v === '' || /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(v)) ? v : '';
       return v;
     };
     // The `value` IDL accessor, backed by the `value` content attribute (defaultValue==value here,
