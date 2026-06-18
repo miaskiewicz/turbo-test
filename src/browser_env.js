@@ -73,7 +73,9 @@
       m = /^#([0-9a-fA-F]{8})$/.exec(v); if (m){ var h2=m[1]; return 'rgba('+parseInt(h2.slice(0,2),16)+', '+parseInt(h2.slice(2,4),16)+', '+parseInt(h2.slice(4,6),16)+', '+(Math.round(parseInt(h2.slice(6,8),16)/255*100)/100)+')'; }
       return v;
     };
-    var setProp = function(name, val){ name = String(name).trim(); if (!name) return; if (typeof val === 'string'){ var t = val.trim(); if (t.charAt(0) === '#') val = normColor(t); else if (val.indexOf(',') >= 0) val = val.replace(/\s*,\s*/g, ', '); } decl[name] = val; decl[camel(name)] = val;
+    // length-valued properties where the computed value is in px (jsdom returns "0px" for a bare 0).
+    var LEN_PROP = /(width|height|^top$|^right$|^bottom$|^left$|^inset|margin|padding|gap|^flex-basis$|radius|^font-size$|letter-spacing|word-spacing|text-indent|^outline-offset$|^column-(width|gap)$|size$)/;
+    var setProp = function(name, val){ name = String(name).trim(); if (!name) return; if (typeof val === 'string'){ var t = val.trim(); if (t.charAt(0) === '#') val = normColor(t); else if (t === '0' && LEN_PROP.test(name)) val = '0px'; else if (val.indexOf(',') >= 0) val = val.replace(/\s*,\s*/g, ', '); } decl[name] = val; decl[camel(name)] = val;
       if (typeof val === 'string') expandShorthand(name, val, setProp);
     };
     try {
