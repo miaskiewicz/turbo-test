@@ -190,14 +190,6 @@
     var selEndDesc = { configurable: true, get: function(){ return this.__selEnd == null ? String(this.value||'').length : this.__selEnd; }, set: function(v){ this.__selEnd = v; } };
     var selDirDesc = { configurable: true, get: function(){ return this.__selDir || 'none'; }, set: function(v){ this.__selDir = v; } };
     var baseProto = Object.getPrototypeOf(orig('span'));
-    // `click()` on the shared element prototype (createElement drops the own native click below) so
-    // libraries can spy on HTMLAnchorElement.prototype.click (download flows) and it isn't shadowed
-    // by an own method. Dispatches a bubbling, cancelable click — same effect as the native one.
-    if (baseProto && !Object.getOwnPropertyDescriptor(baseProto, 'click')) {
-      try { Object.defineProperty(baseProto, 'click', { configurable: true, writable: true, value: function(){
-        try { var Ctor = g.MouseEvent || g.PointerEvent || g.Event; this.dispatchEvent(new Ctor('click', { bubbles: true, cancelable: true })); } catch(e){}
-      } }); } catch(e){}
-    }
     // classList on the shared element prototype (every element inherits it), backed by className.
     if (baseProto && !Object.getOwnPropertyDescriptor(baseProto, 'classList')) {
       try { Object.defineProperty(baseProto, 'classList', { configurable: true, get: function(){
@@ -221,7 +213,7 @@
     }
     var protoFor = {};
     var defType = { HTMLInputElement:'text', HTMLButtonElement:'submit' };
-    ['HTMLInputElement','HTMLTextAreaElement','HTMLSelectElement','HTMLOptionElement','HTMLButtonElement','HTMLLabelElement','HTMLAnchorElement'].forEach(function(n){ if (typeof g[n] !== 'function') g[n] = function(){}; var p = Object.create(baseProto); try {
+    ['HTMLInputElement','HTMLTextAreaElement','HTMLSelectElement','HTMLOptionElement','HTMLButtonElement','HTMLLabelElement'].forEach(function(n){ if (typeof g[n] !== 'function') g[n] = function(){}; var p = Object.create(baseProto); try {
       Object.defineProperty(p, 'value', valDesc); Object.defineProperty(p, 'checked', checkedDesc); Object.defineProperty(p, 'form', formDesc);
       if (defType[n]) Object.defineProperty(p, 'type', mkTypeDesc(defType[n]));
       // Reflected IDL string attributes: a library setting `input.name = 'x'` (e.g. react-number-
@@ -289,7 +281,7 @@
         return null;
       } });
     })();
-    var CTRL = { input:'HTMLInputElement', textarea:'HTMLTextAreaElement', select:'HTMLSelectElement', option:'HTMLOptionElement', button:'HTMLButtonElement', label:'HTMLLabelElement', a:'HTMLAnchorElement' };
+    var CTRL = { input:'HTMLInputElement', textarea:'HTMLTextAreaElement', select:'HTMLSelectElement', option:'HTMLOptionElement', button:'HTMLButtonElement', label:'HTMLLabelElement' };
     // Apply the control interface prototype + own value/checked to an element by its tag. Used by
     // createElement AND cloneNode (clones must keep type/value/checked/selected accessors — e.g.
     // userEvent's isValidDateOrTimeValue clones a date input, assigns, and checks the value stuck).
@@ -304,9 +296,6 @@
           // still finds the own setter.
           if (t === 'input' || t === 'textarea') { Object.defineProperty(el, 'value', valDesc); Object.defineProperty(el, 'checked', checkedDesc); }
         }
-        // Drop the own native click so it resolves to the (patchable) prototype click — tests spy on
-        // HTMLAnchorElement.prototype.click for download flows; an own method would shadow the spy.
-        if (Object.prototype.hasOwnProperty.call(el, 'click')) delete el.click;
       } catch(e){}
     };
     // <canvas>.getContext('2d') — a no-op 2D context stub (no rasterization). Covers components that
