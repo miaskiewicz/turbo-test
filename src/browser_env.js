@@ -61,12 +61,31 @@
   d.removeEventListener = function(){};
   d.dispatchEvent = function(){ return true; };
   d.activeElement = d.body;
-  // CSSOM shim emotion/MUI need: a working `.sheet` (insertRule/cssRules) on <style> + styleSheets.
+  // CSSOM shim (<style>.sheet) + form-control value/checked. value/checked are defined BOTH as an
+  // OWN accessor on each control element (testing-library's setNativeValue reads
+  // getOwnPropertyDescriptor(element)) AND on the interface .prototype (React's value-tracker reads
+  // node.constructor.prototype). No setPrototypeOf — avoids touching the native proto chain.
   (function(){
     var sheets = [];
     var mkSheet = function(el){ var rules = []; return { ownerNode: el, cssRules: rules, get rules(){ return rules; }, insertRule: function(rule, index){ var i = index == null ? rules.length : index; rules.splice(i, 0, { cssText: String(rule), selectorText: '' }); return i; }, deleteRule: function(i){ rules.splice(i, 1); }, replaceSync: function(){}, replace: function(){ return Promise.resolve(); } }; };
     var orig = d.createElement.bind(d);
-    d.createElement = function(tag){ var el = orig(tag); try { if (String(tag).toLowerCase() === 'style' && !el.sheet) { var s = mkSheet(el); Object.defineProperty(el, 'sheet', { configurable: true, get: function(){ return s; } }); sheets.push(s); } } catch(e){} return el; };
+    // value/checked live ONLY on the interface .prototype (NOT own — React's value-tracker bails on
+    // node.hasOwnProperty('value')). Each control's actual proto is set to that interface prototype
+    // so getPrototypeOf(el) === el.constructor.prototype has the descriptor (React + testing-library).
+    var valDesc = { configurable: true, get: function(){ var v = this.getAttribute('value'); return v == null ? '' : v; }, set: function(v){ this.setAttribute('value', v == null ? '' : String(v)); } };
+    var checkedDesc = { configurable: true, get: function(){ return this.__checked === undefined ? this.hasAttribute('checked') : !!this.__checked; }, set: function(v){ this.__checked = !!v; } };
+    var baseProto = Object.getPrototypeOf(orig('span'));
+    var protoFor = {};
+    ['HTMLInputElement','HTMLTextAreaElement','HTMLSelectElement','HTMLOptionElement'].forEach(function(n){ if (typeof g[n] !== 'function') g[n] = function(){}; var p = Object.create(baseProto); try { Object.defineProperty(p, 'value', valDesc); Object.defineProperty(p, 'checked', checkedDesc); } catch(e){} g[n].prototype = p; protoFor[n] = p; });
+    var CTRL = { input:'HTMLInputElement', textarea:'HTMLTextAreaElement', select:'HTMLSelectElement', option:'HTMLOptionElement' };
+    d.createElement = function(tag){
+      var el = orig(tag); var t = String(tag).toLowerCase();
+      try {
+        if (t === 'style' && !el.sheet) { var s = mkSheet(el); Object.defineProperty(el, 'sheet', { configurable: true, get: function(){ return s; } }); sheets.push(s); }
+        if (CTRL[t]) Object.setPrototypeOf(el, protoFor[CTRL[t]]);
+      } catch(e){}
+      return el;
+    };
     if (!d.styleSheets) { try { Object.defineProperty(d, 'styleSheets', { configurable: true, get: function(){ return sheets; } }); } catch(e){} }
   })();
   d.createRange = function(){ return { setStart:function(){}, setEnd:function(){}, selectNodeContents:function(){}, collapse:function(){}, getClientRects:function(){return [];}, getBoundingClientRect:function(){return {x:0,y:0,top:0,left:0,right:0,bottom:0,width:0,height:0};}, createContextualFragment:function(html){ var f=d.createDocumentFragment(); var t=d.createElement("div"); t.innerHTML=html; while(t.firstChild) f.appendChild(t.firstChild); return f; }, cloneRange:function(){return d.createRange();}, detach:function(){}, commonAncestorContainer: d.body }; };

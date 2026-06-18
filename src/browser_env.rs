@@ -630,16 +630,33 @@ fn get_next_sibling(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: 
 // event object (the `Event` class lives in the JS bootstrap).
 
 thread_local! {
-    /// (node handle, event type) → registered JS listeners (in add order).
-    static LISTENERS: RefCell<HashMap<(Handle, String), Vec<v8::Global<v8::Function>>>> = RefCell::new(HashMap::new());
+    /// (node handle, event type) → registered JS listeners (function, capture-phase flag).
+    static LISTENERS: RefCell<HashMap<(Handle, String), Vec<(v8::Global<v8::Function>, bool)>>> = RefCell::new(HashMap::new());
+}
+
+/// useCapture from the 3rd addEventListener arg (boolean, or `{capture: true}` options object).
+fn arg_capture(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments) -> bool {
+    let v = args.get(2);
+    if v.is_boolean() {
+        return v.boolean_value(scope);
+    }
+    if let Some(o) = v.to_object(scope) {
+        if let Some(k) = v8::String::new(scope, "capture") {
+            if let Some(c) = o.get(scope, k.into()) {
+                return c.boolean_value(scope);
+            }
+        }
+    }
+    false
 }
 
 fn el_add_event_listener(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
     let Some(h) = handle_of(scope, args.this()) else { return };
     let ty = arg_str(scope, &args, 0);
     let Some(f) = v8::Local::<v8::Function>::try_from(args.get(1)).ok() else { return };
+    let capture = arg_capture(scope, &args);
     let g = v8::Global::new(scope, f);
-    LISTENERS.with(|m| m.borrow_mut().entry((h, ty)).or_default().push(g));
+    LISTENERS.with(|m| m.borrow_mut().entry((h, ty)).or_default().push((g, capture)));
 }
 
 fn el_remove_event_listener(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
@@ -648,7 +665,7 @@ fn el_remove_event_listener(scope: &mut v8::PinScope, args: v8::FunctionCallback
     let Some(f) = v8::Local::<v8::Function>::try_from(args.get(1)).ok() else { return };
     LISTENERS.with(|m| {
         if let Some(v) = m.borrow_mut().get_mut(&(h, ty)) {
-            v.retain(|g| !v8::Local::new(scope, g).eq(&f));
+            v.retain(|(g, _)| !v8::Local::new(scope, g).eq(&f));
         }
     });
 }
@@ -667,29 +684,37 @@ fn el_dispatch_event(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgumen
     let target_node = wrap(scope, target);
     set_prop(scope, event_obj, "target", target_node.into());
 
-    // propagation path: target, then ancestors (bubble). Stop if `bubbles` is false (target only).
-    let mut path = vec![target];
-    if bubbles {
-        let mut cur = with_tree(|t| NodeRef::new(t, target).parent().map(|p| p.handle())).flatten();
-        while let Some(c) = cur {
-            path.push(c);
-            cur = with_tree(|t| NodeRef::new(t, c).parent().map(|p| p.handle())).flatten();
-        }
+    // propagation path: ancestors (root … parent), then the target. Bubbling reverses it.
+    let mut ancestors = Vec::new();
+    let mut cur = with_tree(|t| NodeRef::new(t, target).parent().map(|p| p.handle())).flatten();
+    while let Some(c) = cur {
+        ancestors.push(c);
+        cur = with_tree(|t| NodeRef::new(t, c).parent().map(|p| p.handle())).flatten();
     }
 
-    for node_h in path {
-        // re-check the propagation-stopped flag each hop.
+    // CAPTURE phase: root → target's parent (capture listeners), then TARGET (both), then BUBBLE:
+    // target's parent → root (non-capture listeners). React 18 registers some delegated root
+    // listeners in capture phase, so a bubble-only dispatch would miss them.
+    let mut capture_path: Vec<Handle> = ancestors.iter().rev().copied().collect();
+    let bubble_path: Vec<Handle> = if bubbles { ancestors.clone() } else { Vec::new() };
+    capture_path.push(target); // target fires in both phases (handled by the at_target flag below)
+
+    let fire = |scope: &mut v8::PinScope, node_h: Handle, want_capture: bool, at_target: bool| -> bool {
         if get_bool_prop(scope, event_obj, "__stop") {
-            break;
+            return false;
         }
-        let listeners: Vec<v8::Global<v8::Function>> =
+        let listeners: Vec<(v8::Global<v8::Function>, bool)> =
             LISTENERS.with(|m| m.borrow().get(&(node_h, ty.clone())).cloned().unwrap_or_default());
         if listeners.is_empty() {
-            continue;
+            return true;
         }
         let cur_node = wrap(scope, node_h);
         set_prop(scope, event_obj, "currentTarget", cur_node.into());
-        for g in listeners {
+        for (g, capture) in listeners {
+            // at the target, both capture and bubble listeners fire; elsewhere only the phase's.
+            if !at_target && capture != want_capture {
+                continue;
+            }
             if get_bool_prop(scope, event_obj, "__stopImmediate") {
                 break;
             }
@@ -697,6 +722,18 @@ fn el_dispatch_event(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgumen
             let recv: v8::Local<v8::Value> = cur_node.into();
             f.call(scope, recv, &[event]);
         }
+        true
+    };
+
+    // capture: root → parent
+    for &node_h in capture_path.iter().take(capture_path.len().saturating_sub(1)) {
+        if !fire(scope, node_h, true, false) { break; }
+    }
+    // at target (both phases)
+    fire(scope, target, false, true);
+    // bubble: parent → root
+    for node_h in bubble_path {
+        if !fire(scope, node_h, false, false) { break; }
     }
     let not_prevented = !get_bool_prop(scope, event_obj, "defaultPrevented");
     rv.set(v8::Boolean::new(scope, not_prevented).into());
@@ -725,12 +762,19 @@ fn set_prop(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, name: &str, va
 /// treat it as a DOM node, not a plain Object they'd recurse into and crash on.
 fn get_constructor(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
     let Some(h) = handle_of(scope, args.holder()) else { return };
-    let nt = with_tree(|t| t.node_type(h)).unwrap_or(1);
+    let (nt, tag) = with_tree(|t| (t.node_type(h), t.tag_name(h))).unwrap_or((1, None));
     let cname = match nt {
         3 => "Text",
         8 => "Comment",
         9 => "HTMLDocument",
         11 => "DocumentFragment",
+        1 => match tag.as_deref().map(|s| s.to_ascii_uppercase()).as_deref() {
+            Some("INPUT") => "HTMLInputElement",
+            Some("TEXTAREA") => "HTMLTextAreaElement",
+            Some("SELECT") => "HTMLSelectElement",
+            Some("OPTION") => "HTMLOptionElement",
+            _ => "HTMLElement",
+        },
         _ => "HTMLElement",
     };
     let global = scope.get_current_context().global(scope);
@@ -969,7 +1013,6 @@ fn build_el_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::
     tmpl_getter(scope, tmpl, "attributes", get_attributes);
     tmpl_getter(scope, tmpl, "dataset", get_dataset);
     tmpl_accessor(scope, tmpl, "innerHTML", get_inner_html, set_inner_html);
-    tmpl_accessor(scope, tmpl, "value", get_value, set_value);
 
     tmpl_accessor(scope, tmpl, "textContent", get_text_content, set_text_content);
     tmpl_accessor(scope, tmpl, "id", get_id, set_id);
