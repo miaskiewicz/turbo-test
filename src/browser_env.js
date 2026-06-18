@@ -221,7 +221,14 @@
   // node.constructor.prototype). No setPrototypeOf — avoids touching the native proto chain.
   (function(){
     var sheets = [];
-    var mkSheet = function(el){ var rules = []; return { ownerNode: el, cssRules: rules, get rules(){ return rules; }, insertRule: function(rule, index){ var i = index == null ? rules.length : index; rules.splice(i, 0, { cssText: String(rule), selectorText: '' }); return i; }, deleteRule: function(i){ rules.splice(i, 1); }, replaceSync: function(){}, replace: function(){ return Promise.resolve(); } }; };
+    var mkSheet = function(el){ var rules = []; return { ownerNode: el, cssRules: rules, get rules(){ return rules; },
+      insertRule: function(rule, index){ var i = index == null ? rules.length : index; rules.splice(i, 0, { cssText: String(rule), selectorText: '' });
+        // Also reflect into the <style> element's text so code reading style.textContent (emotion's
+        // non-speedy form, which some tests assume) sees the inserted CSS.
+        try { el.textContent = (el.textContent || '') + String(rule); } catch(e){}
+        return i; },
+      deleteRule: function(i){ rules.splice(i, 1); try { el.textContent = rules.map(function(r){ return r.cssText; }).join(''); } catch(e){} },
+      replaceSync: function(){}, replace: function(){ return Promise.resolve(); } }; };
     var orig = d.createElement.bind(d);
     // value/checked live ONLY on the interface .prototype (NOT own — React's value-tracker bails on
     // node.hasOwnProperty('value')). Each control's actual proto is set to that interface prototype
