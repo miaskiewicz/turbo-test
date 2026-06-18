@@ -5,16 +5,36 @@
   // jest-dom toHaveStyle (computedStyle[prop] / getPropertyValue(prop)) and toBeVisible (display/
   // visibility/opacity) read real values. No cascade — inline styles only, which covers these tests.
   if (typeof g.getComputedStyle === 'undefined') g.getComputedStyle = function(el){
+    var camel = function(p){ return p.replace(/-([a-z])/g, function(_,c){ return c.toUpperCase(); }); };
+    var decl = { getPropertyValue: function(p){ var v = this[p]; if (v == null) v = this[camel(p)]; return v == null ? '' : String(v); }, getPropertyPriority: function(){ return ''; }, length: 0 };
+    // Minimal cascade: merge declarations from every injected stylesheet rule whose selector matches
+    // `el` (emotion's `sx` -> `.css-xxx{...}`), then overlay the element's inline style (highest
+    // priority). jsdom-style getComputedStyle so MUI sx values (gradients, etc.) are observable
+    // without a full layout engine. Properties are exposed both kebab and camelCase.
+    var setProp = function(name, val){ name = String(name).trim(); if (!name) return; decl[name] = val; decl[camel(name)] = val; };
+    try {
+      var sheets = el && el.ownerDocument ? (el.ownerDocument.styleSheets || []) : [];
+      for (var si=0; si<sheets.length; si++) {
+        var rules = sheets[si].cssRules || [];
+        for (var ri=0; ri<rules.length; ri++) {
+          var txt = String(rules[ri].cssText || ''); var br = txt.indexOf('{'); if (br < 0) continue;
+          var sel = txt.slice(0, br).trim(); var body = txt.slice(br+1, txt.lastIndexOf('}'));
+          var matched = false;
+          var parts = sel.split(',');
+          for (var pi=0; pi<parts.length; pi++){ var s = parts[pi].trim(); if (!s) continue; try { if (el.matches && el.matches(s)) { matched = true; break; } } catch(e){} }
+          if (!matched) continue;
+          var ds = body.split(';');
+          for (var di=0; di<ds.length; di++){ var c = ds[di].indexOf(':'); if (c<0) continue; setProp(ds[di].slice(0,c), ds[di].slice(c+1).trim()); }
+        }
+      }
+    } catch(e){}
+    // overlay inline style (own props React/components set: background, height, display, ...)
     var st = el && el.style;
-    if (st) {
-      var camel = function(p){ return p.replace(/-([a-z])/g, function(_,c){ return c.toUpperCase(); }); };
-      return {
-        getPropertyValue: function(p){ var v = st.getPropertyValue ? st.getPropertyValue(p) : st[p]; if (v) return v; var c = st[camel(p)]; return c == null ? '' : String(c); },
-        get display(){ return st.display || ''; }, get visibility(){ return st.visibility || ''; }, get opacity(){ return st.opacity || ''; },
-        length: 0
-      };
-    }
-    return { getPropertyValue: function(){ return ''; }, display:'', visibility:'', opacity:'', length:0 };
+    if (st) { for (var k in st) { if (Object.prototype.hasOwnProperty.call(st, k) && typeof st[k] !== 'function') setProp(k, st[k]); } }
+    if (decl.display == null) decl.display = '';
+    if (decl.visibility == null) decl.visibility = '';
+    if (decl.opacity == null) decl.opacity = '';
+    return decl;
   };
   if (typeof g.requestAnimationFrame === 'undefined') g.requestAnimationFrame = function(cb){ return setTimeout(function(){ cb(Date.now()); }, 0); };
   if (typeof g.cancelAnimationFrame === 'undefined') g.cancelAnimationFrame = function(id){ clearTimeout(id); };
