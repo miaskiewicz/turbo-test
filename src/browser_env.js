@@ -213,12 +213,12 @@
     }
     var protoFor = {};
     var defType = { HTMLInputElement:'text', HTMLButtonElement:'submit' };
-    ['HTMLInputElement','HTMLTextAreaElement','HTMLSelectElement','HTMLOptionElement','HTMLButtonElement','HTMLLabelElement'].forEach(function(n){ if (typeof g[n] !== 'function') g[n] = function(){}; var p = Object.create(baseProto); try {
+    ['HTMLInputElement','HTMLTextAreaElement','HTMLSelectElement','HTMLOptionElement','HTMLButtonElement','HTMLLabelElement','HTMLCanvasElement'].forEach(function(n){ if (typeof g[n] !== 'function') g[n] = function(){}; var p = Object.create(baseProto); try {
       Object.defineProperty(p, 'value', valDesc); Object.defineProperty(p, 'checked', checkedDesc); Object.defineProperty(p, 'form', formDesc);
       if (defType[n]) Object.defineProperty(p, 'type', mkTypeDesc(defType[n]));
       // Reflected IDL string attributes: a library setting `input.name = 'x'` (e.g. react-number-
       // format, MUI) must show up as the `name` content attribute (toHaveAttribute, [name] selectors).
-      ['name','placeholder'].forEach(function(a){ Object.defineProperty(p, a, { configurable: true, get: function(){ return this.getAttribute(a) || ''; }, set: function(v){ this.setAttribute(a, v == null ? '' : String(v)); } }); });
+      ['name','placeholder','accept'].forEach(function(a){ Object.defineProperty(p, a, { configurable: true, get: function(){ return this.getAttribute(a) || ''; }, set: function(v){ this.setAttribute(a, v == null ? '' : String(v)); } }); });
       if (n === 'HTMLInputElement' || n === 'HTMLTextAreaElement') {
         Object.defineProperty(p, 'selectionStart', selStartDesc); Object.defineProperty(p, 'selectionEnd', selEndDesc); Object.defineProperty(p, 'selectionDirection', selDirDesc);
         p.setSelectionRange = function(s, e, dir){ this.__selStart = s; this.__selEnd = e; this.__selDir = dir || 'none'; };
@@ -281,7 +281,7 @@
         return null;
       } });
     })();
-    var CTRL = { input:'HTMLInputElement', textarea:'HTMLTextAreaElement', select:'HTMLSelectElement', option:'HTMLOptionElement', button:'HTMLButtonElement', label:'HTMLLabelElement' };
+    var CTRL = { input:'HTMLInputElement', textarea:'HTMLTextAreaElement', select:'HTMLSelectElement', option:'HTMLOptionElement', button:'HTMLButtonElement', label:'HTMLLabelElement', canvas:'HTMLCanvasElement' };
     // Apply the control interface prototype + own value/checked to an element by its tag. Used by
     // createElement AND cloneNode (clones must keep type/value/checked/selected accessors — e.g.
     // userEvent's isValidDateOrTimeValue clones a date input, assigns, and checks the value stuck).
@@ -320,18 +320,25 @@
         font: '10px sans-serif', textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1, globalCompositeOperation: 'source-over'
       };
     };
+    // <canvas> methods live on HTMLCanvasElement.prototype (not own) so tests can mock
+    // HTMLCanvasElement.prototype.getContext / getBoundingClientRect (signature pads) and the mock
+    // isn't shadowed by an own method.
+    (function(){
+      var cp = protoFor.HTMLCanvasElement;
+      cp.getContext = function(kind){ if (kind === '2d') { if (!this.__ctx2d) this.__ctx2d = mkCanvasCtx(this); return this.__ctx2d; } return null; };
+      cp.toDataURL = function(){ return 'data:image/png;base64,'; };
+      cp.toBlob = function(cb){ if (cb) cb(null); };
+      cp.getBoundingClientRect = function(){ return { x:0, y:0, top:0, left:0, right:0, bottom:0, width:0, height:0, toJSON:function(){ return this; } }; };
+    })();
     d.createElement = function(tag){
       var el = orig(tag); var t = String(tag).toLowerCase();
       try {
         if (t === 'style' && !el.sheet) { var s = mkSheet(el); Object.defineProperty(el, 'sheet', { configurable: true, get: function(){ return s; } }); sheets.push(s); }
-        if (t === 'canvas' && typeof el.getContext !== 'function') {
-          var ctx2d = null;
-          el.getContext = function(kind){ if (kind === '2d') { if (!ctx2d) ctx2d = mkCanvasCtx(el); return ctx2d; } return null; };
-          if (typeof el.toDataURL !== 'function') el.toDataURL = function(){ return 'data:image/png;base64,'; };
-          if (typeof el.toBlob !== 'function') el.toBlob = function(cb){ if (cb) cb(null); };
-        }
       } catch(e){}
       applyControlProto(el);
+      // canvas: drop the own native getBoundingClientRect so it resolves to the (mockable)
+      // HTMLCanvasElement.prototype version; getContext/toDataURL/toBlob are on the proto too.
+      if (t === 'canvas') { try { if (Object.prototype.hasOwnProperty.call(el, 'getBoundingClientRect')) delete el.getBoundingClientRect; } catch(e){} }
       return el;
     };
     // NOTE: cloneNode re-applies the control prototype natively (el_clone_node copies the source's
