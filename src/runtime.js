@@ -1427,9 +1427,17 @@ globalThis.vi = {
     __loop.fake = true;
     if (__loop.systemTime === 0) __loop.systemTime = __loop.realNow();
     __installFakeDate();
+    // Mark the global timer fns so @testing-library's jestFakeTimersAreEnabled() (checks
+    // `setTimeout.clock` / `_isMockFunction`) detects fake timers — otherwise waitFor polls with the
+    // frozen real clock and hangs. testing-library then drives jest.advanceTimersByTime() to advance.
+    try { globalThis.setTimeout.clock = __loop; globalThis.setInterval.clock = __loop; } catch (e) {}
     return globalThis.vi;
   },
-  useRealTimers: () => { __loop.fake = false; __restoreDate(); return globalThis.vi; },
+  useRealTimers: () => {
+    __loop.fake = false; __restoreDate();
+    try { delete globalThis.setTimeout.clock; delete globalThis.setInterval.clock; } catch (e) {}
+    return globalThis.vi;
+  },
   isFakeTimers: () => __loop.fake,
   setSystemTime: (t) => {
     const ms = t instanceof __loop.RealDate ? t.getTime()
