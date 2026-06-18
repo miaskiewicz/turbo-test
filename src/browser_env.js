@@ -96,13 +96,31 @@
   iface('HTMLInputElement', function(o){ return isNode(o) && o.nodeType === 1 && String(o.tagName).toUpperCase() === 'INPUT'; });
   iface('HTMLTextAreaElement', function(o){ return isNode(o) && o.nodeType === 1 && String(o.tagName).toUpperCase() === 'TEXTAREA'; });
   iface('HTMLSelectElement', function(o){ return isNode(o) && o.nodeType === 1 && String(o.tagName).toUpperCase() === 'SELECT'; });
-  // window-level event listeners (no-op until native events land).
-  if (typeof g.addEventListener === 'undefined') g.addEventListener = function(){};
-  if (typeof g.removeEventListener === 'undefined') g.removeEventListener = function(){};
-  if (typeof g.dispatchEvent === 'undefined') g.dispatchEvent = function(){ return true; };
+  // window-level event listeners — a real registry so window.addEventListener('keydown', …) +
+  // window.dispatchEvent(new KeyboardEvent(...)) work (e.g. global keyboard shortcuts).
+  if (!g.__winListeners) {
+    var winL = g.__winListeners = {};
+    g.addEventListener = function(type, fn){ if (typeof fn !== 'function') return; (winL[type] = winL[type] || []).push(fn); };
+    g.removeEventListener = function(type, fn){ var a = winL[type]; if (a){ var i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); } };
+    g.dispatchEvent = function(ev){ if (!ev) return true; if (ev.target == null) { try { ev.target = g; } catch(e){} } var a = winL[ev.type]; if (a) a.slice().forEach(function(fn){ try { fn.call(g, ev); } catch(e){} }); return !ev.defaultPrevented; };
+  }
   // document extras (pure-JS shims over the native tree).
   var d = g.document;
   d.defaultView = g;
+  // document.title reflects the <title> element's text (jsdom semantics). Ensure a <title> exists in
+  // <head> so code that does querySelector('title').textContent = … (usePageMetadata) has a target,
+  // and reading document.title returns it.
+  {
+    var ensureTitle = function(){
+      var el = d.querySelector && d.querySelector('title');
+      if (!el) { el = d.createElement('title'); var head = (d.head) || (d.querySelector && d.querySelector('head')) || d.documentElement || d.body; if (head && head.appendChild) head.appendChild(el); }
+      return el;
+    };
+    try { ensureTitle(); } catch(e){}
+    try { Object.defineProperty(d, 'title', { configurable: true,
+      get: function(){ var el = d.querySelector && d.querySelector('title'); return el ? (el.textContent || '') : ''; },
+      set: function(v){ var el = ensureTitle(); if (el) el.textContent = String(v == null ? '' : v); } }); } catch(e){}
+  }
   // document.cookie jar. Defined on the document PROTOTYPE (not the instance) — code reads
   // `Object.getOwnPropertyDescriptor(Object.getPrototypeOf(document), 'cookie')` to wrap it. Setter
   // parses "k=v; attrs"; max-age<=0 deletes. Getter serializes the live pairs.
