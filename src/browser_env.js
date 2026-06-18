@@ -11,7 +11,10 @@
     // `el` (emotion's `sx` -> `.css-xxx{...}`), then overlay the element's inline style (highest
     // priority). jsdom-style getComputedStyle so MUI sx values (gradients, etc.) are observable
     // without a full layout engine. Properties are exposed both kebab and camelCase.
-    var setProp = function(name, val){ name = String(name).trim(); if (!name) return; decl[name] = val; decl[camel(name)] = val; };
+    // Normalize comma-spacing ("a,b" -> "a, b"): minified emotion rules drop the space, but jest-dom
+    // toHaveStyle's expected value is normalized by the browser's CSS parser (which inserts ", "),
+    // so font-family / shorthand lists must match that form.
+    var setProp = function(name, val){ name = String(name).trim(); if (!name) return; if (typeof val === 'string' && val.indexOf(',') >= 0) val = val.replace(/\s*,\s*/g, ', '); decl[name] = val; decl[camel(name)] = val; };
     try {
       var sheets = el && el.ownerDocument ? (el.ownerDocument.styleSheets || []) : [];
       for (var si=0; si<sheets.length; si++) {
