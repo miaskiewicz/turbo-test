@@ -98,7 +98,18 @@
     var st = el && el.style;
     if (st) { for (var k in st) { if (k.indexOf('__') !== 0 && Object.prototype.hasOwnProperty.call(st, k) && typeof st[k] !== 'function') setProp(k, st[k]); } }
     if (decl.display == null) decl.display = '';
-    if (decl.visibility == null) decl.visibility = '';
+    // `visibility` is an INHERITED property: a child with no explicit visibility takes the parent's
+    // computed value. testing-library / dom-accessibility-api rely on this — they treat an element
+    // as inaccessible when getComputedStyle(el).visibility === 'hidden', expecting a hidden ancestor
+    // to have propagated down (rather than walking ancestors themselves). Without inheritance a
+    // button inside a `visibility: hidden` container stayed query-visible (e.g. getAllByRole counted
+    // a hidden section toggle). display is NOT inherited, so it is left as-is.
+    if (decl.visibility == null || decl.visibility === '') {
+      var pv = '';
+      var par = el && el.parentElement;
+      if (par) { try { pv = g.getComputedStyle(par).visibility || ''; } catch(e){} }
+      decl.visibility = pv;
+    }
     if (decl.opacity == null) decl.opacity = '';
     return decl;
   };
@@ -280,6 +291,10 @@
     if (!baseProto.replaceData) baseProto.replaceData = function(offset, count, data){ var s = this.data || ''; offset = offset|0; this.data = s.slice(0, offset) + String(data) + s.slice(offset + (count|0)); };
     if (!baseProto.substringData) baseProto.substringData = function(offset, count){ var s = this.data || ''; offset = offset|0; return s.slice(offset, offset + (count|0)); };
     if (!baseProto.splitText) baseProto.splitText = function(offset){ var s = this.data || ''; offset = offset|0; var rest = s.slice(offset); this.data = s.slice(0, offset); var n = this.ownerDocument.createTextNode(rest); if (this.parentNode) this.parentNode.insertBefore(n, this.nextSibling); return n; };
+    // input.valueAsNumber — the numeric view of `value`, NaN when non-numeric/empty. MUI Slider's
+    // hidden range input reads event.target.valueAsNumber in its change handler to derive the new
+    // value; without it the value came through as null. (number/range inputs only; others give NaN.)
+    if (!Object.getOwnPropertyDescriptor(baseProto, 'valueAsNumber')) { try { Object.defineProperty(baseProto, 'valueAsNumber', { configurable: true, get: function(){ var v = this.value; if (v == null || v === '') return NaN; var n = Number(v); return isNaN(n) ? NaN : n; }, set: function(n){ this.value = (n == null || isNaN(n)) ? '' : String(n); } }); } catch(e){} }
     // getElementsByTagName / getElementsByClassName / getElementsByName over querySelectorAll. The
     // native binding ships querySelector(All) only; libs (jQuery's load-time support probe does
     // el.getElementsByTagName('input')[0].checked) need these. Add to the shared element prototype
