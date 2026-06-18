@@ -22,7 +22,19 @@
       m = /^#([0-9a-fA-F]{8})$/.exec(v); if (m){ var h2=m[1]; return 'rgba('+parseInt(h2.slice(0,2),16)+', '+parseInt(h2.slice(2,4),16)+', '+parseInt(h2.slice(4,6),16)+', '+(Math.round(parseInt(h2.slice(6,8),16)/255*100)/100)+')'; }
       return v;
     };
-    var setProp = function(name, val){ name = String(name).trim(); if (!name) return; if (typeof val === 'string'){ var t = val.trim(); if (t.charAt(0) === '#') val = normColor(t); else if (val.indexOf(',') >= 0) val = val.replace(/\s*,\s*/g, ', '); } decl[name] = val; decl[camel(name)] = val; };
+    var setProp = function(name, val){ name = String(name).trim(); if (!name) return; if (typeof val === 'string'){ var t = val.trim(); if (t.charAt(0) === '#') val = normColor(t); else if (val.indexOf(',') >= 0) val = val.replace(/\s*,\s*/g, ', '); } decl[name] = val; decl[camel(name)] = val;
+      // Expand the `border[-side]` shorthand into width/style/color longhands (browsers derive them;
+      // tests read borderWidth/borderStyle). width = length|thin|medium|thick, style = a line-style.
+      if (/^border(-(top|right|bottom|left))?$/.test(name) && typeof val === 'string'){
+        var pre = name === 'border' ? 'border' : name; // e.g. border-top
+        var toks = val.trim().split(/\s+/);
+        var STYLES = {none:1,hidden:1,dotted:1,dashed:1,solid:1,double:1,groove:1,ridge:1,inset:1,outset:1};
+        toks.forEach(function(tok){
+          if (/^[\d.]+(px|em|rem|%|pt|vh|vw)$/.test(tok) || tok==='thin' || tok==='medium' || tok==='thick') setProp(pre+'-width', tok);
+          else if (STYLES[tok]) setProp(pre+'-style', tok);
+        });
+      }
+    };
     try {
       var sheets = el && el.ownerDocument ? (el.ownerDocument.styleSheets || []) : [];
       for (var si=0; si<sheets.length; si++) {
