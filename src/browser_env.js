@@ -198,6 +198,9 @@
     ['HTMLInputElement','HTMLTextAreaElement','HTMLSelectElement','HTMLOptionElement','HTMLButtonElement','HTMLLabelElement'].forEach(function(n){ if (typeof g[n] !== 'function') g[n] = function(){}; var p = Object.create(baseProto); try {
       Object.defineProperty(p, 'value', valDesc); Object.defineProperty(p, 'checked', checkedDesc); Object.defineProperty(p, 'form', formDesc);
       if (defType[n]) Object.defineProperty(p, 'type', mkTypeDesc(defType[n]));
+      // Reflected IDL string attributes: a library setting `input.name = 'x'` (e.g. react-number-
+      // format, MUI) must show up as the `name` content attribute (toHaveAttribute, [name] selectors).
+      ['name','placeholder'].forEach(function(a){ Object.defineProperty(p, a, { configurable: true, get: function(){ return this.getAttribute(a) || ''; }, set: function(v){ this.setAttribute(a, v == null ? '' : String(v)); } }); });
       if (n === 'HTMLInputElement' || n === 'HTMLTextAreaElement') {
         Object.defineProperty(p, 'selectionStart', selStartDesc); Object.defineProperty(p, 'selectionEnd', selEndDesc); Object.defineProperty(p, 'selectionDirection', selDirDesc);
         p.setSelectionRange = function(s, e, dir){ this.__selStart = s; this.__selEnd = e; this.__selDir = dir || 'none'; };
