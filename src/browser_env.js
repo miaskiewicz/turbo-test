@@ -346,6 +346,23 @@
     // (userEvent's isValidDateOrTimeValue clones a date input, assigns, and checks the value stuck).
     void applyControlProto;
     if (!d.styleSheets) { try { Object.defineProperty(d, 'styleSheets', { configurable: true, get: function(){ return sheets; } }); } catch(e){} }
+
+    // Alias the shim interface-constructor `.prototype`s onto the REAL element/document prototypes,
+    // so a test patching HTMLElement.prototype.requestFullscreen / Document.prototype.exitFullscreen
+    // (DataTableCore fullscreen) reaches our instances. Only affects methods that aren't own per
+    // instance (own native methods still shadow). Default fullscreen stubs so components work
+    // unmocked; document.fullscreenElement defaults null.
+    try {
+      if (g.HTMLElement) g.HTMLElement.prototype = baseProto;
+      if (g.Element) g.Element.prototype = baseProto;
+      if (g.Node) g.Node.prototype = baseProto;
+      var docProto = Object.getPrototypeOf(d) || baseProto;
+      if (g.Document) g.Document.prototype = docProto;
+      if (g.HTMLDocument) g.HTMLDocument.prototype = docProto;
+      if (typeof baseProto.requestFullscreen !== 'function') baseProto.requestFullscreen = function(){ return Promise.resolve(); };
+      if (typeof docProto.exitFullscreen !== 'function') docProto.exitFullscreen = function(){ return Promise.resolve(); };
+      if (!Object.getOwnPropertyDescriptor(d, 'fullscreenElement')) { try { Object.defineProperty(d, 'fullscreenElement', { configurable: true, writable: true, value: null }); } catch(e){} }
+    } catch(e){}
   })();
   d.createRange = function(){ return { setStart:function(){}, setEnd:function(){}, selectNodeContents:function(){}, collapse:function(){}, getClientRects:function(){return [];}, getBoundingClientRect:function(){return {x:0,y:0,top:0,left:0,right:0,bottom:0,width:0,height:0};}, createContextualFragment:function(html){ var f=d.createDocumentFragment(); var t=d.createElement("div"); t.innerHTML=html; while(t.firstChild) f.appendChild(t.firstChild); return f; }, cloneRange:function(){return d.createRange();}, detach:function(){}, commonAncestorContainer: d.body }; };
   if (!d.getRootNode) d.getRootNode = function(){ return d; };
