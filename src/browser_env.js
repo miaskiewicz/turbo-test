@@ -264,6 +264,23 @@
     // property) must show as the content attribute so attribute selectors like script[src*="maps"]
     // and getAttribute('src') see it. (Image() defines its own src with onload; that shadows this.)
     ['src','href'].forEach(function(a){ if (!Object.getOwnPropertyDescriptor(baseProto, a)) { try { Object.defineProperty(baseProto, a, { configurable: true, get: function(){ return this.getAttribute(a) || ''; }, set: function(v){ this.setAttribute(a, v == null ? '' : String(v)); } }); } catch(e){} } });
+    // getElementsByTagName / getElementsByClassName / getElementsByName over querySelectorAll. The
+    // native binding ships querySelector(All) only; libs (jQuery's load-time support probe does
+    // el.getElementsByTagName('input')[0].checked) need these. Add to the shared element prototype
+    // (guarded so a native impl wins if ever added).
+    // Walk descendants via `children` (works on a DETACHED subtree, unlike querySelectorAll which
+    // matches only connected nodes — same reason select.options walks children).
+    var geWalk = function(node, match){ var out = []; (function visit(n){ var kids = n.children || []; for (var i=0;i<kids.length;i++){ if (match(kids[i])) out.push(kids[i]); visit(kids[i]); } })(node); out.item = function(i){ return out[i] || null; }; return out; };
+    var geByTag = function(t){ var want = String(t).toUpperCase(); return geWalk(this, function(e){ return want === '*' || String(e.tagName).toUpperCase() === want; }); };
+    var geByClass = function(c){ var want = String(c).trim().split(/\s+/).filter(Boolean); return geWalk(this, function(e){ var cls = String(e.className || '').split(/\s+/); return want.every(function(w){ return cls.indexOf(w) >= 0; }); }); };
+    var geByName = function(nm){ var want = String(nm); return geWalk(this, function(e){ return e.getAttribute && e.getAttribute('name') === want; }); };
+    var addGetElems = function(proto){
+      if (typeof proto.getElementsByTagName !== 'function') proto.getElementsByTagName = geByTag;
+      if (typeof proto.getElementsByClassName !== 'function') proto.getElementsByClassName = geByClass;
+      if (typeof proto.getElementsByName !== 'function') proto.getElementsByName = geByName;
+    };
+    addGetElems(baseProto);
+    g.__addGetElems = addGetElems; // reused for document below
     // classList on the shared element prototype (every element inherits it), backed by className.
     if (baseProto && !Object.getOwnPropertyDescriptor(baseProto, 'classList')) {
       try { Object.defineProperty(baseProto, 'classList', { configurable: true, get: function(){
@@ -443,6 +460,7 @@
   })();
   d.createRange = function(){ return { setStart:function(){}, setEnd:function(){}, selectNodeContents:function(){}, collapse:function(){}, getClientRects:function(){return [];}, getBoundingClientRect:function(){return {x:0,y:0,top:0,left:0,right:0,bottom:0,width:0,height:0};}, createContextualFragment:function(html){ var f=d.createDocumentFragment(); var t=d.createElement("div"); t.innerHTML=html; while(t.firstChild) f.appendChild(t.firstChild); return f; }, cloneRange:function(){return d.createRange();}, detach:function(){}, commonAncestorContainer: d.body }; };
   if (!d.getRootNode) d.getRootNode = function(){ return d; };
+  if (g.__addGetElems) { g.__addGetElems(d); try { delete g.__addGetElems; } catch(e){} }
   if (!d.getSelection) d.getSelection = function(){ return { removeAllRanges:function(){}, addRange:function(){}, getRangeAt:function(){return d.createRange();}, rangeCount:0, toString:function(){return "";} }; };
   if (!g.getSelection) g.getSelection = d.getSelection;
 })();
