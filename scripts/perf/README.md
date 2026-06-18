@@ -92,6 +92,31 @@ Findings that shape the next perf push:
 > so jobs=1 walls show ~2× outliers mid-run. Validate any candidate win on a quiet box (golden rule
 > #2) before believing a sub-20% delta.
 
+### The 50% path — two real levers (not yet landed)
+Both attack the same hotspot: per-file deps parse/compile. Pick by appetite.
+
+1. **Isolate-reuse as the sharing mechanism** — compile+instantiate deps **once per worker**, not
+   per file. Already built (`TURBO_REUSE_ISOLATE=1`); correctness held by auto-retry of any failing
+   file on a clean isolate. Profile implies ~30% potential. **Blocker: needs a quiet box to measure
+   honestly** — the warm cc cache makes the win invisible under VM contention (measured ~2% here,
+   not trustworthy). Lowest effort; the semantic caveat (per-file `vi.mock` of node_modules) is
+   already mitigated by the retry path.
+
+2. **V8 startup snapshot** — pre-compile AND pre-instantiate deps into a snapshot; each file forks a
+   context from it → near-zero per-file deps cost. The generic, no-semantic-change answer and the
+   biggest win. **Cost: large + fragile.** V8-snapshot constraints with React/MUI host state:
+   - host/external refs (rtdom nodes, the DOM binding's `FunctionTemplate`s + Rust accessor
+     callbacks, `External` values) aren't serializable — needs an exact, maintained
+     `external_references` table or it crashes on restore;
+   - emotion/MUI touch `document`/`window`/`globalThis` at *import* → snapshot bakes stale bindings;
+   - `vi.mock` per file needs the snapshot bypassed for mocked specifiers;
+   - V8 snapshots choke on `Proxy` / some `WeakMap`/`Map` states — we use a style `Proxy`, emotion
+     leans on Proxies + WeakMaps;
+   - init-time globals (`Date`, `process.env`, seeds) get frozen into the blob.
+
+Smaller combinable wins: GC (~6%, tune V8 heap flags via `TURBO_V8_FLAGS=--max-semi-space-size=…`),
+malloc (~6%, pool the per-node V8 wrapper allocations in `browser_env.rs`).
+
 ## Files
 - `harness.sh` — the tool (canonical).
 - `bench.sh`, `bench-ab.sh` — thin back-compat shims forwarding to `harness.sh`.
