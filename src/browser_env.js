@@ -386,6 +386,14 @@
       } });
     })();
     var CTRL = { input:'HTMLInputElement', textarea:'HTMLTextAreaElement', select:'HTMLSelectElement', option:'HTMLOptionElement', button:'HTMLButtonElement', label:'HTMLLabelElement', canvas:'HTMLCanvasElement' };
+    // <a> interface prototype with a `click` that dispatches (NOT an own per-instance method), so
+    // download flows that spy on HTMLAnchorElement.prototype.click (createObjectURL + a.click) work —
+    // an own native click would shadow the spy. Scoped to anchors only (the global variant regressed
+    // select-like components, whose own native click is load-bearing).
+    if (typeof g.HTMLAnchorElement !== 'function') g.HTMLAnchorElement = function(){};
+    var anchorProto = Object.create(baseProto);
+    anchorProto.click = function(){ try { var C = g.MouseEvent || g.PointerEvent || g.Event; this.dispatchEvent(new C('click', { bubbles: true, cancelable: true })); } catch(e){} };
+    g.HTMLAnchorElement.prototype = anchorProto;
     // Apply the control interface prototype + own value/checked to an element by its tag. Used by
     // createElement AND cloneNode (clones must keep type/value/checked/selected accessors — e.g.
     // userEvent's isValidDateOrTimeValue clones a date input, assigns, and checks the value stuck).
@@ -399,6 +407,9 @@
           // EVERY input event (so userEvent.type per-char onChange works), while testing-library
           // still finds the own setter.
           if (t === 'input' || t === 'textarea') { Object.defineProperty(el, 'value', valDesc); Object.defineProperty(el, 'checked', checkedDesc); }
+        } else if (t === 'a') {
+          Object.setPrototypeOf(el, anchorProto);
+          if (Object.prototype.hasOwnProperty.call(el, 'click')) delete el.click; // resolve to the patchable proto click
         }
       } catch(e){}
     };
