@@ -1234,6 +1234,11 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
 /// Set up the DOM environment in the current context (best-effort): load + run the turbo-dom
 /// bootstrap so document/window exist before the test evaluates.
 fn setup_dom(scope: &mut v8::PinScope, entry: &Path) {
+    // P3: all-Rust DOM (gated TURBO_RUST_DOM) — bind rtdom natively, no JS installGlobals / .node.
+    if crate::rust_dom::enabled() {
+        crate::rust_dom::install(scope);
+        return;
+    }
     let Some(root) = turbodom_root(entry) else { return };
     let Some(boot) = dom_bootstrap(&root) else { return };
     let Some(module) = load_graph(scope, &boot) else {
