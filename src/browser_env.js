@@ -63,7 +63,6 @@
   d.addEventListener = function(){};
   d.removeEventListener = function(){};
   d.dispatchEvent = function(){ return true; };
-  d.activeElement = d.body;
   // CSSOM shim (<style>.sheet) + form-control value/checked. value/checked are defined BOTH as an
   // OWN accessor on each control element (testing-library's setNativeValue reads
   // getOwnPropertyDescriptor(element)) AND on the interface .prototype (React's value-tracker reads
@@ -105,7 +104,14 @@
       var el = orig(tag); var t = String(tag).toLowerCase();
       try {
         if (t === 'style' && !el.sheet) { var s = mkSheet(el); Object.defineProperty(el, 'sheet', { configurable: true, get: function(){ return s; } }); sheets.push(s); }
-        if (CTRL[t]) Object.setPrototypeOf(el, protoFor[CTRL[t]]);
+        if (CTRL[t]) {
+          Object.setPrototypeOf(el, protoFor[CTRL[t]]);
+          // define value/checked as OWN props too: React's value-tracker bails when
+          // node.hasOwnProperty('value') -> getInstIfValueChanged returns true -> onChange fires on
+          // EVERY input event (so userEvent.type per-char onChange works), while testing-library
+          // still finds the own setter.
+          if (t === 'input' || t === 'textarea') { Object.defineProperty(el, 'value', valDesc); Object.defineProperty(el, 'checked', checkedDesc); }
+        }
       } catch(e){}
       return el;
     };

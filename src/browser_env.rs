@@ -51,6 +51,7 @@ const KNOWN: &[&str] = &[
     "closest",
     "data", "nodeValue", "constructor",
     "documentMode",
+    "activeElement", "focus", "blur", "selectionStart", "selectionEnd", "setSelectionRange",
     "getAttributeNode", "TEXT_NODE", "ELEMENT_NODE", "COMMENT_NODE", "DOCUMENT_NODE", "DOCUMENT_FRAGMENT_NODE",
     // document own methods/props
     "createElement", "createTextNode", "getElementById", "body", "documentElement",
@@ -319,8 +320,29 @@ fn set_value(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, value: v8::Lo
 }
 
 // no-op / stub element methods commonly called during render + queries.
-fn el_focus(_scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {}
-fn el_blur(_scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {}
+thread_local! {
+    /// the focused element handle (document.activeElement). userEvent.type targets it.
+    static ACTIVE: RefCell<Option<Handle>> = const { RefCell::new(None) };
+}
+fn el_focus(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    if let Some(h) = handle_of(scope, args.this()) {
+        ACTIVE.with(|a| *a.borrow_mut() = Some(h));
+    }
+}
+fn el_blur(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    if let Some(h) = handle_of(scope, args.this()) {
+        ACTIVE.with(|a| { if *a.borrow() == Some(h) { *a.borrow_mut() = None; } });
+    }
+}
+/// `document.activeElement` → the focused element, or `<body>`.
+fn get_active_element(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, _args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
+    let active = ACTIVE.with(|a| *a.borrow());
+    let h = active.or_else(|| with_tree(|t| t.query_selector("body")).flatten());
+    if let Some(h) = h {
+        let node = wrap(scope, h);
+        rv.set(node.into());
+    }
+}
 fn el_click(_scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {}
 fn el_scroll_into_view(_scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {}
 fn el_get_bounding_client_rect(scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
@@ -1068,6 +1090,7 @@ fn build_el_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::
     tmpl_getter(scope, tmpl, "style", get_style);
     tmpl_getter(scope, tmpl, "constructor", get_constructor);
     tmpl_getter(scope, tmpl, "nodeType", get_node_type);
+    tmpl_getter(scope, tmpl, "activeElement", get_active_element);
     tmpl_accessor(scope, tmpl, "data", get_node_data, set_node_data);
     tmpl_accessor(scope, tmpl, "nodeValue", get_node_data, set_node_data);
     tmpl_getter(scope, tmpl, "nodeName", get_node_name);
@@ -1186,6 +1209,7 @@ const BOOTSTRAP: &str = include_str!("browser_env.js");
 pub fn reset() {
     STYLE.with(|s| s.borrow_mut().clear());
     LISTENERS.with(|s| s.borrow_mut().clear());
+    ACTIVE.with(|a| *a.borrow_mut() = None);
     if log_enabled() {
         dump_missing();
     }
