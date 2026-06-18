@@ -100,7 +100,13 @@ fn main() {
     let mut bail: usize = 0;
     // `--no-allowOnly`: error if any `.only` test is collected (vitest CI default).
     let mut allow_only = true;
-    let mut args = std::env::args().skip(1);
+    // Launcher front-end (formerly cli.js): strip vitest subcommands, consume launcher-only flags
+    // (config/root/environment/changed/isolate/globals/passWithNoTests), set env vars, do default
+    // discovery + vitest config include/exclude, inject coverage config, apply the --changed git
+    // filter, and prune missing files — returning the effective argv (runner flags + resolved
+    // absolute test files) that the loop below parses. May exit for terminal cases.
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let mut args = turbo_test::launcher::prepare(raw).into_iter();
     while let Some(a) = args.next() {
         match a.as_str() {
             // `--maxWorkers N` is vitest's name for the worker count → maps to --jobs.

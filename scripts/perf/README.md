@@ -59,6 +59,64 @@ measurement; omit-as-default uses cores), `--runs R`, `--pairs P`, `--trim T`
 (pairs dropped each end before the trimmed mean). `SUB_ROOT=dir` overrides the
 `src` search root. Args after `--` pass through to the turbo-test CLI.
 
+## Profiling the all-Rust DOM (`TURBO_RUST_DOM=1`)
+Set `TURBO_RUST_DOM=1` in the env before any mode to profile/benchmark the native-DOM path:
+```sh
+TURBO_RUST_DOM=1 scripts/perf/harness.sh profile ../ui-design-components --sub 200 --jobs 1
+```
+`profile` buckets are tuned for this path and print samples + % of BUSY (non-wait):
+`V8 parse/compile`, `JS execution`, `GC`, `malloc/free`, `IC/props`, `native DOM (rtdom)`.
+
+### Hotspot map (warm suite, measured 2026-06)
+| bucket | %busy | note |
+|---|---|---|
+| **V8 parse/compile** | **~36–45%** | the hotspot. Each fresh per-file isolate deserializes the (shared, warm) bytecode cache AND lazy-compiles inner React/MUI closures on first call. |
+| JS execution | ~15% | baseline/builtins running the test |
+| IC / GC / malloc | ~6–7% each | property access, scavenge, node-wrapper allocs |
+| native DOM (rtdom) | ~1% | the Rust DOM itself is cheap |
+
+Findings that shape the next perf push:
+- The on-disk **bytecode cache already shares dep modules across files** (key = source hash; a dep's
+  `cc-<hash>.bin` is reused by every test file — verified: 6 distinct files added 0 new cc entries).
+  So compilation is cached; the residual cost is V8 **re-deserializing + lazy-compiling into each
+  fresh per-file isolate**.
+- **Isolate-reuse** (`TURBO_REUSE_ISOLATE=1`) now buys ~2% (not the old ~1.5×) — the warm cc cache
+  already captures most of what reuse used to save.
+- **Eager code-cache** (`EagerCompile`) only shaved ~36% vs ~45% on the parse/compile bucket while
+  bloating the cache; reverted. Not the lever.
+- The remaining big lever is eliminating per-file deps cost entirely — a **V8 startup snapshot**
+  (deps pre-compiled AND pre-instantiated, each file forks a context from it). Large + V8-snapshot
+  constraints with React/MUI host state; not yet attempted.
+
+> Measurement caveat: this box runs a VM (`com.apple.Virtualization` ~20% CPU) under long uptime,
+> so jobs=1 walls show ~2× outliers mid-run. Validate any candidate win on a quiet box (golden rule
+> #2) before believing a sub-20% delta.
+
+### The 50% path — two real levers (not yet landed)
+Both attack the same hotspot: per-file deps parse/compile. Pick by appetite.
+
+1. **Isolate-reuse as the sharing mechanism** — compile+instantiate deps **once per worker**, not
+   per file. Already built (`TURBO_REUSE_ISOLATE=1`); correctness held by auto-retry of any failing
+   file on a clean isolate. Profile implies ~30% potential. **Blocker: needs a quiet box to measure
+   honestly** — the warm cc cache makes the win invisible under VM contention (measured ~2% here,
+   not trustworthy). Lowest effort; the semantic caveat (per-file `vi.mock` of node_modules) is
+   already mitigated by the retry path.
+
+2. **V8 startup snapshot** — pre-compile AND pre-instantiate deps into a snapshot; each file forks a
+   context from it → near-zero per-file deps cost. The generic, no-semantic-change answer and the
+   biggest win. **Cost: large + fragile.** V8-snapshot constraints with React/MUI host state:
+   - host/external refs (rtdom nodes, the DOM binding's `FunctionTemplate`s + Rust accessor
+     callbacks, `External` values) aren't serializable — needs an exact, maintained
+     `external_references` table or it crashes on restore;
+   - emotion/MUI touch `document`/`window`/`globalThis` at *import* → snapshot bakes stale bindings;
+   - `vi.mock` per file needs the snapshot bypassed for mocked specifiers;
+   - V8 snapshots choke on `Proxy` / some `WeakMap`/`Map` states — we use a style `Proxy`, emotion
+     leans on Proxies + WeakMaps;
+   - init-time globals (`Date`, `process.env`, seeds) get frozen into the blob.
+
+Smaller combinable wins: GC (~6%, tune V8 heap flags via `TURBO_V8_FLAGS=--max-semi-space-size=…`),
+malloc (~6%, pool the per-node V8 wrapper allocations in `browser_env.rs`).
+
 ## Files
 - `harness.sh` — the tool (canonical).
 - `bench.sh`, `bench-ab.sh` — thin back-compat shims forwarding to `harness.sh`.

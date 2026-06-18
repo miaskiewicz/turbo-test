@@ -5,6 +5,78 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.0] — all-Rust DOM is the default (JS turbo-dom removed)
+
+The DOM environment is now turbo-dom's pure-Rust **rtdom**, bound natively to V8. The legacy JS
+`installGlobals` bootstrap + the `.node` parser + the `@miaskiewicz/turbo-dom` npm dependency are
+**gone**; `TURBO_RUST_DOM` is no longer consulted (rtdom is unconditional). All three production
+oracles run 100% green with **zero env flags** (payroll 10,471/0, ui-design 7,062/0,
+website-global 1,003/0).
+
+### Changed
+- **Flip:** `browser_env::enabled()` is always true; `setup_dom` binds rtdom directly. Removed
+  `dom_bootstrap`/`turbodom_root` (imported `install.mjs` + shimmed CSSOM) and dropped the
+  `@miaskiewicz/turbo-dom` runtime dep. esbuild stays (coverage / decorator-metadata / fallback).
+
+### Added — all-Rust DOM coverage (rtdom + browser_env binding)
+- DOM event-dispatch fix: the V8 NON_MASKING name interceptor defers to a real own property before
+  returning undefined — V8's inline cache could otherwise mask React's `__reactFiber$`/`__reactProps$`
+  expandos (added after a cached miss), breaking delegated onClick/onChange on portal'd content
+  (MUI Autocomplete × userEvent). Cleared the whole cluster + the `--jobs 8` flakiness.
+- Real Selection/Range (live caret, `getRangeAt`, `setBaseAndExtent`, `selectionchange`) + native
+  CharacterData (`insertData`/`splitText`/…) so contenteditable editors (Lexical) + userEvent typing
+  work; `contentEditable`/`isContentEditable`; visibility resolved via rtdom's inheritance-aware
+  native cascade; `input.valueAsNumber`.
+- Form-control reflection; doc state (`readyState`/`visibilityState`/`elementFromPoint`/
+  `getClientRects`); native ChildNode/ParentNode (`before`/`after`/`replaceWith`/`replaceChildren`);
+  `insertAdjacentHTML`/`Element`; `toggleAttribute`; `getAttributeNS`; `setAttributeNode`/
+  `removeAttributeNode`; anchor URL decomposition; `link.rel`/`media`/`as`/`type`; `localName`.
+  (rtdom DOM methods land in the published `turbo-dom` crate 0.3.4.)
+- `testTimeout` honored from the vitest config (was a fixed 5000ms default).
+
+### Fixed — runtime
+- `URL`: `search`/`href`/`toString` derive live from `searchParams`, so post-construction
+  `searchParams.set()` serializes (was frozen at construction). `URLSearchParams` form-urlencoded
+  space ⇄ `+`. `MessageEvent` global added.
+- Config scan: read test `include`/`exclude` only from the text before the `coverage` block — a
+  `coverage.exclude` whose first glob is `**/*.test.{ts,tsx}` was wrongly taken as the test exclude
+  → "no test files found".
+
+### Added — Rust port (branch `rust-port`)
+- **P1: launcher ported into the native binary (`src/launcher.rs`).** Default test discovery,
+  vitest config include/exclude + coverage/environment scanning, `--changed [since]` git filter,
+  isolate/environment env wiring, and `--passWithNoTests` now run in Rust — `cli.js` is a thin
+  binary-resolving shim. The binary launches a run with no Node-side logic; npm stays a
+  distribution wrapper. *Why:* removes the Node process from launching, the first step to a
+  self-contained binary. All compat suites green; binary self-discovers standalone.
+- **P2a: native oxc ESM→CJS emitter (`src/esm_cjs.rs`), on by default.** Replaces the per-app-file
+  `esbuild --format=cjs` transform with a hand-written oxc lowering (oxc 0.134 has no CommonJS
+  module transform) that matches esbuild's output contract: live-binding member rewrites for
+  named/default imports (scope-correct via semantic), `__export` getter block + `__toCommonJS`,
+  `export *` via `__reExport`, `export default`, and dynamic `import()` →
+  `Promise.resolve(__toESM(require(x)))`. Opt out with `TURBO_NATIVE_CJS=0`. *Why:* drops the
+  esbuild subprocess for app files — a step toward removing the esbuild/npm dependency. esbuild
+  is still used for node_modules bundling (P2b), coverage source maps, decorator-metadata, and as
+  the automatic fallback for any unhandled form.
+- **Conformity harness (`scripts/conformity.mjs`).** Runs a target project both ways (esbuild
+  baseline vs native) and diffs per-file pass/fail — `parity` mode guarantees behavioral
+  equivalence; `coverage` mode (native-strict) measures the native handling rate. *Why:* the
+  safety mechanism gating the cutover; it already caught a real dynamic-`import()` bug, now fixed.
+  Validated on the payroll-app `staging` worktree: **1057 files / 10471 tests, 100% native
+  handling, full parity.**
+- **P2b: native package bundler (`src/bundler.rs`), default ON.** Replaces esbuild for node_modules:
+  bundles a package's relative graph with lazy `__commonJS` init wrappers (circular-safe), bare
+  imports stay external (shared via require cache), assets stubbed. Opt out with `TURBO_NATIVE_DEPS=0`.
+  Validated: payroll 1057 files / 10471 tests full parity with native app **+ deps** — so **normal
+  test runs no longer use esbuild at all** (esbuild remains only for coverage, decorator-metadata,
+  and as the fallback). Key fix: `__reExport` passes `module.exports` as its 3rd arg so names
+  re-exported after `__toCommonJS` (e.g. `@testing-library/react`'s `render`) aren't lost.
+- **P2c (partial): single-pass emit + native coverage source maps (gated).** `emit` now does TS-strip
+  + ESM→CJS on one AST and, under coverage, appends a correct inline oxc source map. Coverage still
+  runs on esbuild for now: oxc's codegen map is less dense than esbuild's, so `coverage.rs`
+  under-attributes inner functions/lines. Fully removing esbuild additionally needs native
+  decorator-metadata + dropping the fallback.
+
 ## [0.2.16] — vitest CLI/API compatibility sweep + turbo-dom 0.2.5
 
 ### Changed

@@ -2,50 +2,76 @@
 
 **A blazing-fast native test runner — a drop-in replacement for [vitest](https://vitest.dev).**
 
-Written in Rust on V8: per-file transforms via [oxc](https://oxc.rs)/esbuild, a native
-[turbo-dom](https://www.npmjs.com/package/@miaskiewicz/turbo-dom) DOM, work-stealing parallelism,
-and an optional isolate-reuse mode. Runs your existing `*.test.ts(x)` files — same `describe`/`it`/
-`expect`/`vi`, same `@testing-library/react` + jest-dom — typically **~7–9× faster than vitest+jsdom**.
-Also runs **jest** suites (`jest` global + jest config + `emitDecoratorMetadata`) — see
-[Jest compatibility](#jest-compatibility-experimental) (experimental).
+Written in Rust on V8: per-file transforms via [oxc](https://oxc.rs)/esbuild, an **all-Rust DOM**
+([turbo-dom](https://crates.io/crates/turbo-dom)'s `rtdom`, bound natively to V8 — no jsdom, no
+Node), work-stealing parallelism, and an optional isolate-reuse mode. Runs your existing
+`*.test.ts(x)` files — same `describe`/`it`/`expect`/`vi`, same `@testing-library/react` + jest-dom —
+typically **~5–12× faster than vitest+jsdom**. Also runs **jest** suites (`jest` global + jest config
++ `emitDecoratorMetadata`) — see [Jest compatibility](#jest-compatibility-experimental) (experimental).
+
+## Running it (drop-in for vitest)
+
+No config changes — turbo-test reads your existing `vitest.config.*` (include/exclude, environment,
+coverage thresholds) and runs the same test files:
 
 ```bash
 npm i -D @miaskiewicz/turbo-test
-npx turbo-test            # discovers + runs every *.test.* / *.spec.* under cwd
-npx turbo-test src/foo.test.ts --jobs 8 --reporter json
+npx turbo-test                       # discover + run every *.test.* / *.spec.* under cwd
+npx turbo-test src/foo.test.ts       # run specific files
+npx turbo-test --changed             # only files affected by your git diff
+npx turbo-test --jobs 8              # parallelism (default = cores)
+npx turbo-test --coverage            # native V8 coverage (honors the config's thresholds)
+npx turbo-test --reporter json       # json | tap | default
 ```
+
+Swap it into CI/scripts by replacing `vitest run` with `turbo-test`:
+
+```jsonc
+// package.json
+"scripts": {
+  "test": "turbo-test",              // was: "vitest run"
+  "test:cov": "turbo-test --coverage"
+}
+```
+
+The DOM is on by default for `jsdom`/`happy-dom`/`turbo-dom` environments (and any file with a
+`// @vitest-environment jsdom` pragma); `environment: 'node'` files get clean globals, just like
+vitest. There is **no environment to install or configure** — the Rust DOM ships inside the binary.
 
 ## Benchmarks
 
 Two real production app suites, **same machine, same session, identical pass counts** (Apple
-M-series, 10 workers), measured **A-B-B-A interleaved** so machine drift cancels. To keep it
-apples-to-apples we measured vitest two ways — with stock **jsdom** (the default most projects run)
-and with **turbo-dom** swapped in as the environment — so you can see the DOM's contribution
-separately from the runner's:
+M-series, 8 workers), each the **median of repeated full-suite runs**. To keep it apples-to-apples
+we measured vitest two ways — with stock **jsdom** (the default most projects run) and with
+**turbo-dom** swapped in as the environment — so you can see the DOM's contribution separately from
+the runner's; turbo-test ran under its all-Rust DOM (`TURBO_RUST_DOM`):
 
 | Suite | Tests | vitest + jsdom | vitest + turbo-dom | **turbo-test** | vs jsdom | vs turbo-dom |
 |---|---|---|---|---|---|---|
-| **payroll-app** | 10,580 | 184s | 69s | **~26s** | **7.1×** | 2.7× |
-| **ui-design-components** | 7,006 | 114s | 53s | **~12s** | **9.5×** | 4.5× |
+| **payroll-app** | 10,471 | ~252s | ~88s | **~20s** | **~12×** | ~4.4× |
+| **ui-design-components** | 7,062 | ~173s | ~142s | **~36s** | **~4.8×** | ~3.9× |
 
 `ui-design-components` also runs under turbo-test's optional **isolate-reuse** mode (see below).
 On a quieter box an earlier measurement landed it at **~1.5–1.6× over fresh isolation** vs the same
 jsdom baseline — reuse stays opt-in because it changes per-file `vi.mock` semantics for projects
 that mock node_modules (see [Isolate-reuse](#isolate-reuse-extra-speed-zero-config)).
 
-All configs pass 100% (**10,580/0** and **7,006/0**). Two takeaways:
+All configs pass 100% (**10,471/0** and **7,062/0** — both suites run green under turbo-test's
+all-Rust DOM). Two takeaways:
 
 - **The DOM matters.** Just swapping jsdom → turbo-dom under plain vitest already cuts wall time
   ~2.1–2.7× (jsdom's `environment` setup alone was **718s cumulative** across workers on payroll
   vs turbo-dom's **33s**). If you can't switch runners yet, switching the environment is free speed.
 - **The runner matters more.** turbo-test's native transform + per-package dep-bundling + V8
   worker pool collapses vitest's `setup + import` cost (hundreds of seconds cumulative) and lands
-  **~7–9× faster than the jsdom baseline** — with zero config changes.
+  **~5–12× faster than the jsdom baseline** — with zero config changes.
 
-> Numbers are from a busy long-uptime workstation, so absolute seconds run high (and load was
-> heavier during the payroll runs, compressing its ratio); the **ratios** are what travel. Measured
-> with v0.2.14 (E12 module-resolution memoization); the **turbo-test** column is the mean of the
-> interleaved A runs.
+> ⚠️ **Tentative numbers** — re-measured on the all-Rust-DOM build (`TURBO_RUST_DOM`) on a busy
+> long-uptime workstation (a background VM held ~20% CPU), so absolute seconds run high and variance
+> is large (±30%+ per run): the medians here are placeholders pending a clean-box interleaved re-run.
+> The **ratios** are what travel, and even compressed by contention turbo-test lands multiples ahead
+> of both baselines (the ui-design-components jsdom-vs-turbo-dom split is the noisiest cell — it
+> should be wider, as payroll shows). Each column is the median of the suite's runs.
 
 ## Isolate-reuse (extra speed, zero config)
 

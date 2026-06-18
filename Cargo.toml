@@ -1,6 +1,6 @@
 [package]
 name = "turbo-test"
-version = "0.2.16"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "A blazing-fast native test runner — drop-in replacement for Vitest"
@@ -37,12 +37,18 @@ oxc_span = "0.134"
 oxc_ast = "0.134"
 oxc_ast_visit = "0.134"
 oxc_codegen = "0.134"
+oxc_sourcemap = "7"
 oxc_transformer = "0.134"
 oxc_semantic = "0.134"
 oxc_resolver = "11.21.0"
 libloading = "0.9.0"
 serde_json = "1"
 base64 = "0.22"
+# P3: all-Rust DOM, from the published crate (crates.io `turbo-dom`). It's a standalone crate that
+# exports `rtdom` (Dom/Tree/NodeRef) unconditionally — no features needed. Kept under the
+# `turbo_dom_parser` import name via `package` so the existing `use turbo_dom_parser::rtdom::…` stands.
+# 0.3.4 adds native CharacterData mutation + ChildNode/ParentNode manip + insertAdjacent + toggleAttribute + getAttributeNS over rtdom.
+turbo-dom-parser = { package = "turbo-dom", version = "0.3.4" }
 
 [profile.release]
 opt-level = 3

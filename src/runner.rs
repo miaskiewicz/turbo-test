@@ -735,50 +735,6 @@ fn esbuild_bundle_full(
     Some(out)
 }
 
-/// Nearest dir containing node_modules/@miaskiewicz/turbo-dom (the DOM environment).
-fn turbodom_root(file: &Path) -> Option<PathBuf> {
-    let mut d = file.parent();
-    while let Some(dir) = d {
-        if dir.join("node_modules/@miaskiewicz/turbo-dom/src/environment/install.mjs").is_file() {
-            return Some(dir.to_path_buf());
-        }
-        d = dir.parent();
-    }
-    None
-}
-
-/// A tiny ESM bootstrap that installs turbo-dom's window/document onto globalThis. Lives in
-/// the cache dir and imports install.mjs by absolute path (so node_modules resolution + our
-/// node-builtin shims + the napi-loaded .node parser all kick in via the native loader).
-fn dom_bootstrap(root: &Path) -> Option<PathBuf> {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    root.hash(&mut h);
-    let out = cache_dir().join(format!("dom-boot-{:016x}.mjs", h.finish()));
-    // After installGlobals, shim CSSOM that emotion/MUI need but turbo-dom doesn't expose:
-    // a working `.sheet` (insertRule/cssRules) on <style> elements, and document.styleSheets.
-    // emotion's sheetForTag reads tag.sheet.cssRules.length → crashes without this.
-    let src = format!(
-        "import {{ installGlobals }} from '{root}/node_modules/@miaskiewicz/turbo-dom/src/environment/install.mjs';\n\
-         globalThis.__turboDomEnv = installGlobals(globalThis, {{}});\n\
-         (function () {{\n\
-           const sheets = [];\n\
-           const mkSheet = (el) => {{ const rules = []; return {{ ownerNode: el, cssRules: rules, get rules() {{ return rules; }},\n\
-             insertRule(rule, index) {{ const i = index == null ? rules.length : index; rules.splice(i, 0, {{ cssText: String(rule), selectorText: '' }}); return i; }},\n\
-             deleteRule(i) {{ rules.splice(i, 1); }}, replaceSync() {{}}, replace() {{ return Promise.resolve(); }} }}; }};\n\
-           if (typeof document !== 'undefined' && document.createElement) {{\n\
-             const orig = document.createElement.bind(document);\n\
-             document.createElement = function (tag) {{ const el = orig(tag); try {{ if (String(tag).toLowerCase() === 'style' && !el.sheet) {{ const s = mkSheet(el); Object.defineProperty(el, 'sheet', {{ configurable: true, get: () => s }}); sheets.push(s); }} }} catch (e) {{}} return el; }};\n\
-             if (!document.styleSheets) {{ try {{ Object.defineProperty(document, 'styleSheets', {{ configurable: true, get: () => sheets }}); }} catch (e) {{}} }}\n\
-           }}\n\
-         }})();\n",
-        root = root.display()
-    );
-    if std::fs::read_to_string(&out).ok().as_deref() != Some(src.as_str()) {
-        std::fs::write(&out, &src).ok()?;
-    }
-    Some(out)
-}
 
 /// Parse a per-file `// @vitest-environment <env>` pragma (vitest honors a docblock comment at
 /// the top of a test file). Returns the lowercased environment name if present. We scan the
@@ -1231,39 +1187,11 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
     drain_pending_mocks(scope, entry.parent().unwrap_or(Path::new(".")), false);
 }
 
-/// Set up the DOM environment in the current context (best-effort): load + run the turbo-dom
-/// bootstrap so document/window exist before the test evaluates.
-fn setup_dom(scope: &mut v8::PinScope, entry: &Path) {
-    let Some(root) = turbodom_root(entry) else { return };
-    let Some(boot) = dom_bootstrap(&root) else { return };
-    let Some(module) = load_graph(scope, &boot) else {
-        eprintln!("dom bootstrap load failed");
-        return;
-    };
-    let tc = std::pin::pin!(v8::TryCatch::new(scope));
-    let tc = &mut tc.init();
-    let inst = module.instantiate_module(tc, resolve_callback);
-    if inst != Some(true) {
-        eprintln!("dom bootstrap instantiate failed: {:?}", inst);
-        if tc.has_caught() {
-            eprintln!("  exc: {}", tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_default());
-        }
-        return;
-    }
-    let _ = module.evaluate(tc);
-    tc.perform_microtask_checkpoint();
-    // turbo-dom's installGlobals clobbered Blob/File/FileReader with SoA-backed versions that
-    // read zero bytes — restore ours so file reads return real content.
-    if let Some(code) = v8::String::new(tc, "if (globalThis.__ttRestoreFileApis) globalThis.__ttRestoreFileApis();") {
-        if let Some(s) = v8::Script::compile(tc, code, None) { s.run(tc); }
-    }
-    if tc.has_caught() {
-        eprintln!("dom bootstrap threw: {}", tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_default());
-    } else if module.get_status() == v8::ModuleStatus::Errored {
-        eprintln!("dom bootstrap errored: {}", module.get_exception().to_rust_string_lossy(tc));
-    } else {
-        eprintln!("dom bootstrap OK, status={:?}", module.get_status());
-    }
+/// Set up the DOM environment in the current context: bind the all-Rust DOM (rtdom) natively so
+/// document/window exist before the test evaluates. (The legacy JS turbo-dom bootstrap —
+/// installGlobals + the `.node` parser — was removed in v0.3.0; rtdom is the only DOM now.)
+fn setup_dom(scope: &mut v8::PinScope, _entry: &Path) {
+    crate::browser_env::install(scope);
 }
 
 /// Transform a TS file to **ESM** JS using the PROJECT'S OWN TypeScript (`ts.transpileModule`),
@@ -1379,6 +1307,65 @@ fn file_has_decorator(src: &str) -> bool {
         let mut ch = t.chars();
         ch.next() == Some('@') && ch.next().map(|c| c.is_ascii_alphabetic() || c == '_' || c == '$').unwrap_or(false)
     })
+}
+
+/// Native (oxc) counterpart of `esbuild_transform_cjs` for app files (P2a). Emits the same
+/// esbuild-shaped, runner-friendly CJS via `esm_cjs::emit` (no esbuild subprocess, no
+/// `postprocess_mr_cjs` — native output already has configurable getters + identity `__toESM`),
+/// then applies the SAME vi.mock hoisting + shared-let rewrite as the esbuild path so mocks behave
+/// identically. Content-cached under a distinct key. Returns `None` on any unhandled form → caller
+/// falls back to esbuild.
+fn native_transform_cjs(file: &Path) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let raw = std::fs::read_to_string(file).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    raw.hash(&mut h);
+    file.extension().and_then(|e| e.to_str()).unwrap_or("").hash(&mut h);
+    "native-cjs-v3".hash(&mut h);
+    // coverage output carries an inline source map → key it separately so the no-map and with-map
+    // forms never collide in the cache.
+    crate::coverage::enabled().hash(&mut h);
+    let cache = cache_dir().join(format!("ntv-{:016x}.cjs", h.finish()));
+    if let Ok(c) = std::fs::read_to_string(&cache) {
+        CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+        return Some(c);
+    }
+    CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+    let emitted = crate::esm_cjs::emit(file, &raw)?;
+    let mut code = hoist_mock_setup(&emitted);
+    let shared = shared_mock_lets(&raw);
+    if !shared.is_empty() {
+        code = rewrite_shared_lets(&code, &shared);
+    }
+    write_atomic(&cache, &code);
+    Some(code)
+}
+
+/// Native (oxc) counterpart of `esbuild_bundle_dep_cjs` for node_modules files (P2b). Instead of
+/// bundling a package's relative files into one module (esbuild `--bundle --packages=external`),
+/// transform the SINGLE file ESM→CJS via `esm_cjs::emit` and let the loader resolve its relative +
+/// bare `require`s on demand — bare imports stay `require("react")` etc., so singletons resolve to
+/// ONE instance via the require cache exactly like `--packages=external`. CJS/plain files pass
+/// through unchanged (emit's no-module-syntax path). No vi.mock hoisting (deps don't mock). Cached.
+/// Returns `None` on an unhandled form → caller falls back to the esbuild bundle.
+fn native_dep_cjs(file: &Path) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let raw = std::fs::read_to_string(file).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    raw.hash(&mut h);
+    file.extension().and_then(|e| e.to_str()).unwrap_or("").hash(&mut h);
+    "native-dep-v3-bundle".hash(&mut h);
+    let cache = cache_dir().join(format!("ntvdep-{:016x}.cjs", h.finish()));
+    if let Ok(c) = std::fs::read_to_string(&cache) {
+        CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+        return Some(c);
+    }
+    CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+    // Bundle the package's relative graph with lazy __commonJS init wrappers (circular-safe),
+    // bare imports left external (shared via require cache). None → caller falls back to esbuild.
+    let code = crate::bundler::bundle(file)?;
+    write_atomic(&cache, &code);
+    Some(code)
 }
 
 /// Module-runner mode: transform a single APP module to CJS (no bundle) so imports become
@@ -2035,11 +2022,40 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
         // are externalized from every bundle so their shared singletons (ThemeContext, emotion
         // cache, react) resolve to ONE instance via the require cache (no dual-context).
         if abs.components().any(|c| c.as_os_str() == "node_modules") {
+            // Native package bundler for deps (P2b, default on); esbuild bundle is the fallback.
+            // Under coverage the whole transform path stays on esbuild (see the app branch), so deps
+            // do too — keeps coverage runs on the known-good esbuild path until native maps reach
+            // parity.
+            if crate::esm_cjs::deps_enabled() && !crate::coverage::enabled() {
+                if let Some(code) = native_dep_cjs(abs) {
+                    return Some(code);
+                }
+                if crate::esm_cjs::strict() {
+                    return None;
+                }
+            }
             if let Some(code) = esbuild_bundle_dep_cjs(abs) {
                 return Some(code);
             }
-        } else if let Some(code) = esbuild_transform_cjs(abs, prefer_metadata) {
-            return Some(code);
+        } else {
+            // Native oxc ESM→CJS (P2a) for app files; esbuild fallback on any unhandled form.
+            // Coverage stays on esbuild for now: the native single-pass emitter DOES append an inline
+            // source map (see esm_cjs::emit), but oxc's codegen map is less dense than esbuild's
+            // (fewer per-token mappings), so coverage.rs under-attributes inner functions/lines —
+            // not yet parity. Decorator-metadata files also route to esbuild/tsc. (P2c remainder.)
+            if crate::esm_cjs::enabled() && !crate::coverage::enabled() && !prefer_metadata {
+                if let Some(code) = native_transform_cjs(abs) {
+                    return Some(code);
+                }
+                // strict mode (conformity coverage measurement): do NOT fall back to esbuild on an
+                // unhandled form — surface it as a load error so the harness counts it.
+                if crate::esm_cjs::strict() {
+                    return None;
+                }
+            }
+            if let Some(code) = esbuild_transform_cjs(abs, prefer_metadata) {
+                return Some(code);
+            }
         }
     }
     let raw = std::fs::read_to_string(abs).ok()?;
@@ -3748,6 +3764,19 @@ fn coverage_accumulate(json: &str) {
 
 /// Run a single test file end-to-end and return its pass/fail report.
 pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
+    // Per-file native-DOM lifecycle: reset the thread-local DOM (fresh document per file) and, when
+    // debugging (TURBO_RUST_DOM_LOG), dump the missing-member access log — on ANY exit incl. a load
+    // failure (the surface React/testing-library touched is recorded during the failed load).
+    struct DomGuard;
+    impl Drop for DomGuard {
+        fn drop(&mut self) {
+            if crate::browser_env::enabled() {
+                crate::browser_env::reset();
+            }
+        }
+    }
+    let _dom_guard = DomGuard;
+
     let entry_abs = std::fs::canonicalize(entry).map_err(|e| format!("{e}"))?;
     // e2e helper tests may import heavy Node-only deps they don't exercise — allow stubbing a
     // failed node_modules load for these files only (see stub_failed_deps).
