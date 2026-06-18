@@ -203,10 +203,20 @@ fn el_set_attribute(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgument
     with_tree_mut(|t| t.set_attribute(h, &name, &value));
 }
 
+/// Attribute lookup with the HTML case-insensitivity rule: try the exact name, then its lowercase
+/// form (React writes `tabindex`/`maxlength` lowercased; tests read `tabIndex`/`maxLength`). Exact-
+/// first preserves SVG camelCase attributes (`viewBox`).
+fn attr_get(t: &Tree, h: Handle, name: &str) -> Option<String> {
+    if let Some(v) = t.get_attribute(h, name) { return Some(v.to_string()); }
+    let lower = name.to_ascii_lowercase();
+    if lower != name { if let Some(v) = t.get_attribute(h, &lower) { return Some(v.to_string()); } }
+    None
+}
+
 fn el_get_attribute(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let Some(h) = handle_of(scope, args.this()) else { return };
     let name = arg_str(scope, &args, 0);
-    let val = with_tree(|t| t.get_attribute(h, &name).map(|s| s.to_string())).flatten();
+    let val = with_tree(|t| attr_get(t, h, &name)).flatten();
     match val {
         Some(s) => rv.set(v8::String::new(scope, &s).unwrap().into()),
         None => rv.set(v8::null(scope).into()),
@@ -216,7 +226,7 @@ fn el_get_attribute(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgument
 fn el_get_attribute_node(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let Some(h) = handle_of(scope, args.this()) else { return };
     let name = arg_str(scope, &args, 0);
-    let val = with_tree(|t| t.get_attribute(h, &name).map(|s| s.to_string())).flatten();
+    let val = with_tree(|t| attr_get(t, h, &name)).flatten();
     match val {
         Some(v) => {
             let o = v8::Object::new(scope);
@@ -237,14 +247,16 @@ fn el_get_attribute_node(scope: &mut v8::PinScope, args: v8::FunctionCallbackArg
 fn el_has_attribute(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let Some(h) = handle_of(scope, args.this()) else { return };
     let name = arg_str(scope, &args, 0);
-    let has = with_tree(|t| t.has_attribute(h, &name)).unwrap_or(false);
+    let lower = name.to_ascii_lowercase();
+    let has = with_tree(|t| t.has_attribute(h, &name) || (lower != name && t.has_attribute(h, &lower))).unwrap_or(false);
     rv.set(v8::Boolean::new(scope, has).into());
 }
 
 fn el_remove_attribute(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
     let Some(h) = handle_of(scope, args.this()) else { return };
     let name = arg_str(scope, &args, 0);
-    with_tree_mut(|t| t.remove_attribute(h, &name));
+    let lower = name.to_ascii_lowercase();
+    with_tree_mut(|t| { t.remove_attribute(h, &name); if lower != name { t.remove_attribute(h, &lower); } });
 }
 
 /// element-scoped querySelector via NodeRef.
