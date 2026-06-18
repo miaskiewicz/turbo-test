@@ -1056,9 +1056,64 @@ fn get_style(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::Pro
     bind_method(scope, obj, "getPropertyValue", style_get_property);
     bind_method(scope, obj, "getPropertyPriority", style_get_property_priority);
     bind_method(scope, obj, "removeProperty", style_remove_property);
-    let g = v8::Global::new(scope, obj);
+    // stash the element handle so the proxy set-trap can reflect to the `style` content attribute.
+    if let Some(hk) = v8::String::new(scope, "__h") {
+        let hv = v8::Number::new(scope, h as f64);
+        obj.set(scope, hk.into(), hv.into());
+    }
+    // Wrap in a Proxy whose set-trap reflects every style mutation (React writes el.style.x = v) to
+    // the `style` content attribute in the tree, so attribute selectors (`[style]`) and
+    // getAttribute('style') see it. Reads/methods pass through to the target.
+    let handler = v8::Object::new(scope);
+    bind_method(scope, handler, "set", style_proxy_set);
+    let proxy = v8::Proxy::new(scope, obj, handler).map(|p| p.into()).unwrap_or(obj);
+    let g = v8::Global::new(scope, proxy);
     STYLE.with(|s| { s.borrow_mut().insert(h, g); });
-    rv.set(obj.into());
+    rv.set(proxy.into());
+}
+
+/// Proxy `set` trap for `element.style`: set on the target, then serialize the declaration to the
+/// element's `style` content attribute so it's observable via attribute selectors / getAttribute.
+fn style_proxy_set(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let target = match v8::Local::<v8::Object>::try_from(args.get(0)) { Ok(o) => o, Err(_) => { rv.set_bool(false); return; } };
+    let key = args.get(1);
+    let value = args.get(2);
+    target.set(scope, key, value);
+    // element handle stashed as __h
+    let h = v8::String::new(scope, "__h")
+        .and_then(|k| target.get(scope, k.into()))
+        .and_then(|v| v.number_value(scope))
+        .map(|n| n as Handle);
+    if let Some(h) = h {
+        let css = serialize_style(scope, target);
+        with_tree_mut(|t| { if css.is_empty() { t.remove_attribute(h, "style"); } else { t.set_attribute(h, "style", &css); } });
+    }
+    rv.set_bool(true);
+}
+
+/// Serialize a style declaration object's own string properties to `prop: value;` cssText (camelCase
+/// names → kebab-case), skipping internals (`__*`) and methods.
+fn serialize_style(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> String {
+    let mut out = String::new();
+    let Some(names) = obj.get_own_property_names(scope, Default::default()) else { return out };
+    for i in 0..names.length() {
+        let Some(k) = names.get_index(scope, i) else { continue };
+        let kn = k.to_rust_string_lossy(scope);
+        if kn.starts_with("__") { continue; }
+        let Some(v) = obj.get(scope, k) else { continue };
+        if v.is_function() || v.is_undefined() || v.is_null() { continue; }
+        let vs = v.to_rust_string_lossy(scope);
+        if vs.is_empty() { continue; }
+        // camelCase -> kebab-case
+        let mut prop = String::with_capacity(kn.len() + 4);
+        for ch in kn.chars() {
+            if ch.is_ascii_uppercase() { prop.push('-'); prop.push(ch.to_ascii_lowercase()); }
+            else { prop.push(ch); }
+        }
+        if !out.is_empty() { out.push(' '); }
+        out.push_str(&prop); out.push_str(": "); out.push_str(&vs); out.push(';');
+    }
+    out
 }
 
 fn style_set_property(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
