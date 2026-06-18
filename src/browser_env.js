@@ -30,7 +30,7 @@
     } catch(e){}
     // overlay inline style (own props React/components set: background, height, display, ...)
     var st = el && el.style;
-    if (st) { for (var k in st) { if (Object.prototype.hasOwnProperty.call(st, k) && typeof st[k] !== 'function') setProp(k, st[k]); } }
+    if (st) { for (var k in st) { if (k.indexOf('__') !== 0 && Object.prototype.hasOwnProperty.call(st, k) && typeof st[k] !== 'function') setProp(k, st[k]); } }
     if (decl.display == null) decl.display = '';
     if (decl.visibility == null) decl.visibility = '';
     if (decl.opacity == null) decl.opacity = '';

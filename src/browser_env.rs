@@ -1042,6 +1042,7 @@ fn get_style(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::Pro
     // setProperty/getPropertyValue/removeProperty so libs using the CSSOM methods don't crash.
     bind_method(scope, obj, "setProperty", style_set_property);
     bind_method(scope, obj, "getPropertyValue", style_get_property);
+    bind_method(scope, obj, "getPropertyPriority", style_get_property_priority);
     bind_method(scope, obj, "removeProperty", style_remove_property);
     let g = v8::Global::new(scope, obj);
     STYLE.with(|s| { s.borrow_mut().insert(h, g); });
@@ -1054,6 +1055,41 @@ fn style_set_property(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgume
     if let Some(key) = v8::String::new(scope, &name) {
         args.this().set(scope, key.into(), value);
     }
+    // 3rd arg = priority ("important" | ""). Track it in a non-style `__prio` map for
+    // getPropertyPriority (the `__`-prefixed key is skipped by getComputedStyle's inline overlay).
+    let prio = arg_str(scope, &args, 2);
+    if let Some(pmap) = style_prio_map(scope, args.this()) {
+        if let Some(nk) = v8::String::new(scope, &name) {
+            if prio.eq_ignore_ascii_case("important") {
+                let pv = v8::String::new(scope, "important").unwrap();
+                pmap.set(scope, nk.into(), pv.into());
+            } else {
+                pmap.delete(scope, nk.into());
+            }
+        }
+    }
+}
+
+/// the `__prio` object on a style declaration (created on first use) holding per-property priorities.
+fn style_prio_map<'s>(scope: &mut v8::PinScope<'s, '_>, style: v8::Local<v8::Object>) -> Option<v8::Local<'s, v8::Object>> {
+    let key = v8::String::new(scope, "__prio")?;
+    let existing = style.get(scope, key.into())?;
+    if let Ok(o) = v8::Local::<v8::Object>::try_from(existing) {
+        return Some(o);
+    }
+    let o = v8::Object::new(scope);
+    style.set(scope, key.into(), o.into());
+    Some(o)
+}
+
+fn style_get_property_priority(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let name = arg_str(scope, &args, 0);
+    let prio = style_prio_map(scope, args.this())
+        .and_then(|m| v8::String::new(scope, &name).and_then(|k| m.get(scope, k.into())))
+        .filter(|v| v.is_string())
+        .map(|v| v.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+    rv.set(v8::String::new(scope, &prio).unwrap().into());
 }
 
 fn style_get_property(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
