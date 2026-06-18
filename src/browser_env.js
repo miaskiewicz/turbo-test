@@ -245,6 +245,9 @@
       if (t === 'datetime-local') return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v) ? v : '';
       return v;
     };
+    // The `value` IDL accessor, backed by the `value` content attribute (defaultValue==value here,
+    // which suffices for getByDisplayValue/[value]); the value-change tracker (attachValueTracker)
+    // layers the dirty-since-last-seen signal on top for framework change detection.
     var valDesc = { configurable: true, get: function(){ var v = this.getAttribute('value'); return v == null ? '' : v; }, set: function(v){ this.setAttribute('value', validForType(this, v == null ? '' : String(v))); } };
     // Reflect the live `checked` property to the `checked` content attribute so rtdom's `:checked`
     // pseudo (which matches on the attribute) finds controlled checkboxes/radios React toggles.
@@ -397,16 +400,28 @@
     // Apply the control interface prototype + own value/checked to an element by its tag. Used by
     // createElement AND cloneNode (clones must keep type/value/checked/selected accessors — e.g.
     // userEvent's isValidDateOrTimeValue clones a date input, assigns, and checks the value stuck).
+    // The DOM value-change tracker: browsers expose an internal "is the IDL value dirty since the
+    // framework last saw it" signal that React/Preact/etc. read via the conventional `_valueTracker`
+    // slot (a tracker is the standard contract, not React-private). We attach a spec-shaped one whose
+    // `currentValue` advances only when value is set through the OWN accessor (programmatic / a
+    // controlled-component restore) — NOT through the prototype accessor that user-event drives.
+    // So user typing reads as "changed" (per-char onChange) while a controlled restore to the same
+    // value reads as "unchanged" (no spurious trailing onChange — e.g. date inputs commit once).
+    var attachValueTracker = function(el, field, protoDesc){
+      var current = '' + (protoDesc.get ? protoDesc.get.call(el) : '');
+      Object.defineProperty(el, field, { configurable: true, enumerable: false,
+        get: function(){ return protoDesc.get.call(this); },
+        set: function(v){ current = '' + v; protoDesc.set.call(this, v); } });
+      el._valueTracker = { getValue: function(){ return current; }, setValue: function(v){ current = '' + v; }, stopTracking: function(){ el._valueTracker = null; try { Object.defineProperty(el, field, protoDesc); } catch(e){} } };
+    };
     var applyControlProto = function(el){
       try {
         var t = String(el.tagName || '').toLowerCase();
         if (CTRL[t]) {
           Object.setPrototypeOf(el, protoFor[CTRL[t]]);
-          // define value/checked as OWN props too: React's value-tracker bails when
-          // node.hasOwnProperty('value') -> getInstIfValueChanged returns true -> onChange fires on
-          // EVERY input event (so userEvent.type per-char onChange works), while testing-library
-          // still finds the own setter.
-          if (t === 'input' || t === 'textarea') { Object.defineProperty(el, 'value', valDesc); Object.defineProperty(el, 'checked', checkedDesc); }
+          // value uses a spec internal dirty-value slot (valDesc, distinct from the content attribute);
+          // attach the DOM value-change tracker so framework change-detection works (per-char + dedup).
+          if (t === 'input' || t === 'textarea') { attachValueTracker(el, 'value', valDesc); Object.defineProperty(el, 'checked', checkedDesc); }
         } else if (t === 'a') {
           Object.setPrototypeOf(el, anchorProto);
           if (Object.prototype.hasOwnProperty.call(el, 'click')) delete el.click; // resolve to the patchable proto click
