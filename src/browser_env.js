@@ -190,6 +190,10 @@
     var selEndDesc = { configurable: true, get: function(){ return this.__selEnd == null ? String(this.value||'').length : this.__selEnd; }, set: function(v){ this.__selEnd = v; } };
     var selDirDesc = { configurable: true, get: function(){ return this.__selDir || 'none'; }, set: function(v){ this.__selDir = v; } };
     var baseProto = Object.getPrototypeOf(orig('span'));
+    // Reflected IDL attributes on every element: setting el.src / el.href (script/img/link/a — a DOM
+    // property) must show as the content attribute so attribute selectors like script[src*="maps"]
+    // and getAttribute('src') see it. (Image() defines its own src with onload; that shadows this.)
+    ['src','href'].forEach(function(a){ if (!Object.getOwnPropertyDescriptor(baseProto, a)) { try { Object.defineProperty(baseProto, a, { configurable: true, get: function(){ return this.getAttribute(a) || ''; }, set: function(v){ this.setAttribute(a, v == null ? '' : String(v)); } }); } catch(e){} } });
     // classList on the shared element prototype (every element inherits it), backed by className.
     if (baseProto && !Object.getOwnPropertyDescriptor(baseProto, 'classList')) {
       try { Object.defineProperty(baseProto, 'classList', { configurable: true, get: function(){
