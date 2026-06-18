@@ -249,20 +249,21 @@ globalThis.__stepMacro = () => __loop.stepMacro();
 globalThis.__hasNextTicks = () => __loop.nextTicks.length > 0;
 globalThis.__stepMacro = () => __loop.stepMacro();
 
-// ---- minimal Web Storage (real DOM env / turbo-dom provides the full thing at M3) ----
-function __makeStorage() {
-  const m = new Map();
-  return {
-    getItem: (k) => (m.has(String(k)) ? m.get(String(k)) : null),
-    setItem: (k, v) => { m.set(String(k), String(v)); },
-    removeItem: (k) => { m.delete(String(k)); },
-    clear: () => m.clear(),
-    key: (i) => Array.from(m.keys())[i] ?? null,
-    get length() { return m.size; },
-  };
+// ---- minimal Web Storage. A real `Storage` class (not an object literal) so the methods live on
+// `Storage.prototype` — tests do `vi.spyOn(Storage.prototype, 'setItem')`, which only intercepts
+// localStorage/sessionStorage calls when those are genuine Storage instances. ----
+class __Storage {
+  constructor() { this._m = new Map(); }
+  getItem(k) { return this._m.has(String(k)) ? this._m.get(String(k)) : null; }
+  setItem(k, v) { this._m.set(String(k), String(v)); }
+  removeItem(k) { this._m.delete(String(k)); }
+  clear() { this._m.clear(); }
+  key(i) { return Array.from(this._m.keys())[i] ?? null; }
+  get length() { return this._m.size; }
 }
-globalThis.localStorage = __makeStorage();
-globalThis.sessionStorage = __makeStorage();
+globalThis.Storage = __Storage;
+globalThis.localStorage = new __Storage();
+globalThis.sessionStorage = new __Storage();
 
 // ---- TextEncoder/TextDecoder (host globals; bare V8 has none) ----
 if (typeof globalThis.TextEncoder === 'undefined') {
