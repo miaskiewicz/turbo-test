@@ -102,7 +102,7 @@
     var baseProto = Object.getPrototypeOf(orig('span'));
     var protoFor = {};
     var defType = { HTMLInputElement:'text', HTMLButtonElement:'submit' };
-    ['HTMLInputElement','HTMLTextAreaElement','HTMLSelectElement','HTMLOptionElement','HTMLButtonElement'].forEach(function(n){ if (typeof g[n] !== 'function') g[n] = function(){}; var p = Object.create(baseProto); try {
+    ['HTMLInputElement','HTMLTextAreaElement','HTMLSelectElement','HTMLOptionElement','HTMLButtonElement','HTMLLabelElement'].forEach(function(n){ if (typeof g[n] !== 'function') g[n] = function(){}; var p = Object.create(baseProto); try {
       Object.defineProperty(p, 'value', valDesc); Object.defineProperty(p, 'checked', checkedDesc); Object.defineProperty(p, 'form', formDesc);
       if (defType[n]) Object.defineProperty(p, 'type', mkTypeDesc(defType[n]));
       if (n === 'HTMLInputElement' || n === 'HTMLTextAreaElement') {
@@ -137,7 +137,22 @@
         get: function(){ var o = opts(this); for (var i=0;i<o.length;i++) if (o[i].selected) return o[i].value; return o.length ? o[0].value : ''; },
         set: function(v){ var o = opts(this); var s = String(v); var hit = false; for (var i=0;i<o.length;i++){ var m = (o[i].value === s); o[i].selected = m; if (m) hit = true; } if (!hit) for (var j=0;j<o.length;j++) o[j].selected = false; } });
     })();
-    var CTRL = { input:'HTMLInputElement', textarea:'HTMLTextAreaElement', select:'HTMLSelectElement', option:'HTMLOptionElement', button:'HTMLButtonElement' };
+    // <label>: htmlFor + control resolution. testing-library's getByLabelText filters
+    // querySelectorAll('label') by `label.control === element`, so without `control` NO label ever
+    // associates and every form field fails with "no form control was found associated to that label".
+    (function(){
+      var lp = protoFor.HTMLLabelElement;
+      var labelable = function(el){ if (!el || el.nodeType !== 1) return false; var tg = String(el.tagName).toUpperCase(); if (tg === 'INPUT') return (el.getAttribute('type') || 'text').toLowerCase() !== 'hidden'; return tg === 'BUTTON' || tg === 'SELECT' || tg === 'TEXTAREA' || tg === 'METER' || tg === 'OUTPUT' || tg === 'PROGRESS'; };
+      Object.defineProperty(lp, 'htmlFor', { configurable: true, get: function(){ return this.getAttribute('for') || ''; }, set: function(v){ this.setAttribute('for', v == null ? '' : String(v)); } });
+      Object.defineProperty(lp, 'control', { configurable: true, get: function(){
+        var f = this.getAttribute('for');
+        if (f) { var el = this.ownerDocument.getElementById(f); return labelable(el) ? el : null; }
+        var list = this.querySelectorAll('input, button, select, textarea, meter, output, progress');
+        for (var i=0;i<list.length;i++) if (labelable(list[i])) return list[i];
+        return null;
+      } });
+    })();
+    var CTRL = { input:'HTMLInputElement', textarea:'HTMLTextAreaElement', select:'HTMLSelectElement', option:'HTMLOptionElement', button:'HTMLButtonElement', label:'HTMLLabelElement' };
     d.createElement = function(tag){
       var el = orig(tag); var t = String(tag).toLowerCase();
       try {
