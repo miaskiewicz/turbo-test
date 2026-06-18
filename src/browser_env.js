@@ -281,6 +281,16 @@
     };
     addGetElems(baseProto);
     g.__addGetElems = addGetElems; // reused for document below
+    // Traversal accessors the native binding lacks (it ships firstChild/nextSibling/children/
+    // firstElementChild only). jQuery's clone-support probe reads clone.lastChild.checked; Sizzle
+    // walks siblings. Derive from native childNodes/children/parentNode (all detached-safe).
+    var idxIn = function(list, node){ for (var i=0;i<list.length;i++) if (list[i] === node) return i; return -1; };
+    var defTrav = function(name, get){ if (baseProto && !Object.getOwnPropertyDescriptor(baseProto, name)) { try { Object.defineProperty(baseProto, name, { configurable: true, get: get }); } catch(e){} } };
+    defTrav('lastChild', function(){ var c = this.childNodes || []; return c.length ? c[c.length-1] : null; });
+    defTrav('lastElementChild', function(){ var c = this.children || []; return c.length ? c[c.length-1] : null; });
+    defTrav('previousSibling', function(){ var p = this.parentNode; if (!p) return null; var c = p.childNodes || []; var i = idxIn(c, this); return i > 0 ? c[i-1] : null; });
+    defTrav('previousElementSibling', function(){ var p = this.parentNode; if (!p) return null; var c = p.children || []; var i = idxIn(c, this); return i > 0 ? c[i-1] : null; });
+    defTrav('nextElementSibling', function(){ var p = this.parentNode; if (!p) return null; var c = p.children || []; var i = idxIn(c, this); return (i >= 0 && i+1 < c.length) ? c[i+1] : null; });
     // classList on the shared element prototype (every element inherits it), backed by className.
     if (baseProto && !Object.getOwnPropertyDescriptor(baseProto, 'classList')) {
       try { Object.defineProperty(baseProto, 'classList', { configurable: true, get: function(){
