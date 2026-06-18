@@ -1,4 +1,4 @@
-//! All-Rust DOM (P3) — binds turbo-dom's pure-Rust `rtdom` (the `turbo-dom-parser` crate, built with
+//! Browser environment shim (P3) — the V8 BINDING + browser globals over turbo-dom's pure-Rust `rtdom` (the `turbo-dom-parser` crate, built with
 //! `rust-runtime`) to V8 via native rusty-v8 callbacks, so tests get `window`/`document`/Element with
 //! NO JS DOM (no `installGlobals`, no `.node` parser, no node_modules turbo-dom).
 //!
@@ -1073,7 +1073,7 @@ const BOOTSTRAP: &str = r#"(function(){
   if (typeof g.matchMedia === 'undefined') g.matchMedia = function(q){ return { matches:false, media:q, addListener:function(){}, removeListener:function(){}, addEventListener:function(){}, removeEventListener:function(){}, dispatchEvent:function(){return false;} }; };
   if (typeof g.scrollTo === 'undefined') g.scrollTo = function(){};
   // DOM interface constructors (for `instanceof` / global presence). Stubs; identity not enforced.
-  // Real Event base class (dispatch in rust_dom.rs reads type/bubbles/defaultPrevented/__stop*).
+  // Real Event base class (dispatch in browser_env.rs reads type/bubbles/defaultPrevented/__stop*).
   if (!g.__ttEvent) {
     function Event(type, init){ init = init || {}; this.type = type; this.bubbles = !!init.bubbles; this.cancelable = !!init.cancelable; this.composed = !!init.composed; this.defaultPrevented = false; this.target = null; this.currentTarget = null; this.__stop = false; this.__stopImmediate = false; this.eventPhase = 0; this.timeStamp = Date.now(); this.isTrusted = false; this.detail = init.detail; }
     Event.prototype.preventDefault = function(){ if (this.cancelable) this.defaultPrevented = true; };

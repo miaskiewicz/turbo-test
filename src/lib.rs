@@ -11,5 +11,5 @@ pub mod graph;
 pub mod launcher;
 pub mod napi_host;
 pub mod runner;
-pub mod rust_dom;
+pub mod browser_env;
 pub mod transform;

@@ -1235,8 +1235,8 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
 /// bootstrap so document/window exist before the test evaluates.
 fn setup_dom(scope: &mut v8::PinScope, entry: &Path) {
     // P3: all-Rust DOM (gated TURBO_RUST_DOM) — bind rtdom natively, no JS installGlobals / .node.
-    if crate::rust_dom::enabled() {
-        crate::rust_dom::install(scope);
+    if crate::browser_env::enabled() {
+        crate::browser_env::install(scope);
         return;
     }
     let Some(root) = turbodom_root(entry) else { return };
@@ -3847,8 +3847,8 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     struct DomGuard;
     impl Drop for DomGuard {
         fn drop(&mut self) {
-            if crate::rust_dom::enabled() {
-                crate::rust_dom::reset();
+            if crate::browser_env::enabled() {
+                crate::browser_env::reset();
             }
         }
     }
