@@ -99,6 +99,11 @@ are erased by the transform. When there's **no vitest config**, the nearest **je
 (`jest.config.{js,cjs,mjs,ts,json}` or a `package.json` `"jest"` block) is read for `setupFiles` /
 `setupFilesAfterEnv` (with `<rootDir>` resolved), so your existing setup runs unchanged.
 
+Both the injected globals **and** the explicit-import form work — a suite with `injectGlobals: false`
+that does `import { describe, it, expect, jest } from '@jest/globals'` resolves that specifier from
+turbo-test's own runtime (never the real `@jest/globals` package), the same builtin that backs
+`import … from 'vitest'`.
+
 **`emitDecoratorMetadata`.** esbuild can't emit decorator metadata, which NestJS / Mongoose /
 Sequelize need at runtime (`@Injectable` constructor injection, `@Prop`/`@Column` reading
 `design:type`). turbo-test handles it with **retry-on-load**: files transform on fast esbuild by
@@ -227,6 +232,38 @@ const { run } = require('@miaskiewicz/turbo-test');
 const { status } = run(['src/a.test.ts'], { jobs: 8, env: { TURBO_REUSE_ISOLATE: '1' } });
 process.exit(status);
 ```
+
+## TypeScript types (drop the `vitest` devDependency)
+
+turbo-test injects `describe` / `it` / `test` / `expect` / `vi` / `jest` and the hook functions as
+globals at run time, and resolves `import … from 'vitest'` (and `'@jest/globals'`) from its own
+runtime. To make `tsc --noEmit` type-check that surface **without** keeping `vitest` (or
+`@types/jest`) in `devDependencies` purely for types, turbo-test ships its own `.d.ts` bundle:
+
+- **`@miaskiewicz/turbo-test/globals`** — ambient globals; the drop-in for `types: ["vitest/globals"]`.
+- **`types/vitest.d.ts`** — the `vitest` module surface (for `import … from 'vitest'`).
+- **`types/jest-globals.d.ts`** — the `@jest/globals` module surface (for `import … from '@jest/globals'`).
+
+Wire it up in `tsconfig.json` — swap the `types` entry and add `paths` so the bare specifiers
+resolve to the shipped shims instead of `node_modules`:
+
+```jsonc
+{
+  "compilerOptions": {
+    "types": ["@miaskiewicz/turbo-test/globals"],   // was: ["vitest/globals"]
+    "paths": {
+      "vitest": ["./node_modules/@miaskiewicz/turbo-test/types/vitest.d.ts"],
+      "@jest/globals": ["./node_modules/@miaskiewicz/turbo-test/types/jest-globals.d.ts"]
+    }
+  }
+}
+```
+
+> **Subset, by design.** These are a pragmatic vitest/jest-**compatible** subset — matcher and mock
+> signatures widen arguments to `any`, so real test code type-checks and no *false* errors are
+> introduced, at the cost of some of the precise matcher-argument inference upstream `vitest` gives
+> you. If you need the exact upstream types, keep `vitest` as a **types-only** devDependency instead
+> (it never has to be in the runtime path).
 
 ## Config
 
