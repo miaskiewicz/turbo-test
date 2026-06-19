@@ -10,7 +10,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::transform::maybe_transform;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Kind {
@@ -447,10 +446,17 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
     // what makes deep node_modules graphs (@mui internal "./styles" etc.) resolve.
     if let Ok(res) = resolver_for(from_dir, esm).resolve(from_dir, spec) {
         if let Ok(c) = std::fs::canonicalize(res.path()) {
-            return Some(c);
+            // oxc can resolve a bare `require("..")` / `require(".")` (a directory re-export, common
+            // in NestJS package `index.js` → `require("./dist")` chains and `dist/utils/x.js →
+            // require("..")` self-references) to the DIRECTORY path rather than its index file. A
+            // directory isn't loadable as a module → fall through to the manual index probing below
+            // instead of returning the dir (which threw "cannot resolve ..").
+            if c.is_file() {
+                return Some(c);
+            }
         }
     }
-    // fallback: manual probing for local files oxc may skip
+    // fallback: manual probing for local files oxc may skip (incl. bare "." / ".." directory specs)
     if spec.starts_with('.') || spec.starts_with('/') {
         let base = from_dir.join(spec);
         for c in [
@@ -1322,6 +1328,13 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
     raw.hash(&mut h);
     file.extension().and_then(|e| e.to_str()).unwrap_or("").hash(&mut h);
     "native-cjs-v3".hash(&mut h);
+    // Legacy-decorator lowering happens inside esm_cjs::emit when the project enables
+    // experimentalDecorators/emitDecoratorMetadata AND this file uses a decorator. Without it the
+    // native emitter leaves `@Decorator` syntax intact (→ "Unexpected token 'export'") or lowers
+    // it with 2022-standard semantics (→ "Cannot access 'X' before initialization" TDZ). Key the
+    // cache on this decision so a config/file change can't serve stale (mis-lowered) output.
+    let legacy_decorators = decorator_metadata_enabled(file) && file_has_decorator(&raw);
+    legacy_decorators.hash(&mut h);
     // coverage output carries an inline source map → key it separately so the no-map and with-map
     // forms never collide in the cache.
     crate::coverage::enabled().hash(&mut h);
@@ -1331,7 +1344,7 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
         return Some(c);
     }
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-    let emitted = crate::esm_cjs::emit(file, &raw)?;
+    let emitted = crate::esm_cjs::emit_with(file, &raw, legacy_decorators)?;
     let mut code = hoist_mock_setup(&emitted);
     let shared = shared_mock_lets(&raw);
     if !shared.is_empty() {
@@ -2062,14 +2075,29 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
     if !crate::transform::needs_transform(abs) {
         return Some(raw);
     }
-    // content-addressed disk cache, shared across runs and workers
-    let path = cache_dir().join(format!("{:016x}.js", cache_key(abs, &raw)));
+    // App `.ts`/`.tsx` files load through this path as ESM (load_graph → maybe_transform), NOT the
+    // CJS native-emit branch above. So legacy-decorator lowering must also happen HERE, else a
+    // NestJS / Sequelize-typescript / Mongoose class emits `export @Decorator class X {}` (oxc's
+    // default decorator handling) → "Unexpected token 'export'", and circular decorated models trip
+    // "Cannot access 'X' before initialization". Lower legacy decorators when the project enables
+    // experimentalDecorators/emitDecoratorMetadata AND this file uses a decorator. node_modules are
+    // excluded (they ship pre-compiled JS; their tsconfig isn't ours).
+    let legacy_decorators = !abs.components().any(|c| c.as_os_str() == "node_modules")
+        && decorator_metadata_enabled(abs)
+        && file_has_decorator(&raw);
+    // content-addressed disk cache, shared across runs and workers. Key on the legacy-decorator
+    // decision so a config/file change can't serve stale (un-lowered) output.
+    let mut key = cache_key(abs, &raw);
+    if legacy_decorators {
+        key ^= 0x9e37_79b9_7f4a_7c15;
+    }
+    let path = cache_dir().join(format!("{:016x}.js", key));
     if let Ok(cached) = std::fs::read_to_string(&path) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
         return Some(cached);
     }
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-    let out = maybe_transform(abs, raw)
+    let out = crate::transform::transform_with(abs, &raw, legacy_decorators)
         .map_err(|e| eprintln!("transform {}: {e}", abs.display()))
         .ok()?;
     let _ = std::fs::write(&path, &out);

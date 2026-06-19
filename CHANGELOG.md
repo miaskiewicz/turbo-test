@@ -5,6 +5,44 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.6] — node-env jest: gated decorator lowering + `.`/`..` directory re-exports
+
+Unblocks the two largest file-load buckets that stopped a real NestJS + Sequelize/Mongoose backend
+(flux-apis) suite from running under turbo-test. On a 120-spec subset, clean-loading files went
+**30 → 53** and decorator-syntax / TDZ load-errors **83 → 0**.
+
+### Fixed
+- **TypeScript legacy decorators + `emitDecoratorMetadata` are lowered in the native transform —
+  gated, on both load paths.** The oxc TS-strip pass used `TransformOptions::default()`, which
+  doesn't lower *legacy* decorators, so a NestJS/Sequelize/Mongoose decorated class emitted either
+  `export @Decorator class X {}` (→ `Unexpected token 'export'`) or oxc's 2022-standard lowering
+  that re-reads the class binding mid-init (→ `Cannot access 'X' before initialization` TDZ) — and
+  because both fail at *run* time, the esbuild retry-on-load was never taken → hard load-error. New
+  `transform::transform_with` / `esm_cjs::emit_with` lower legacy decorators + metadata (babel
+  helpers are global via `runtime.js`), called from both `read_transformed` (ESM) and
+  `native_transform_cjs` (CJS), **gated** on `experimentalDecorators`/`emitDecoratorMetadata` being
+  enabled AND the file actually using a decorator AND not being in `node_modules`, with the flag
+  folded into the transform cache keys — so non-decorated files pay nothing (no blanket
+  metadata-pass cost). The pre-existing CJS circular machinery (installing `module.exports` before
+  the body runs) was already correct; decorators were the actual cause of the "circular init" TDZ.
+- **`require(".")` / `require("..")` directory re-exports resolve.** NestJS packages
+  (`@nestjs/sequelize`, `config`, `mapped-types`, …) chain `__export(require("./dist"))` and
+  `dist/utils/x.js → require("..")` self-references. `bundler::is_relative` excluded bare `.`/`..`,
+  so they were left as runtime externals resolved against the bundle's package-root dir →
+  "cannot resolve ..". `is_relative` now accepts `.`/`..`; and `resolve_spec_as` falls through to
+  index probing when oxc resolves such a spec to a *directory* instead of its index file.
+
+### Tests
+- `fixtures/compat/circular/` (plain ESM require cycle) and `fixtures/compat/circular-decorators/`
+  (decorated, mutually-referencing models + local tsconfig) — both fail on the pre-fix binary, pass
+  with the fix — wired into `test/compat-api.test.mjs`.
+
+### Known follow-ups (not here)
+- A separate, pre-existing native-bundler bug: it can't resolve `tslib` inside
+  `@aws-crypto/crc32c` (cascading through `@aws-sdk/client-s3`) — the bulk of the remaining
+  flux-apis load-errors, unrelated to decorators/circular init.
+- turbo-test SIGSEGV on a native `.node` addon `require()` (fixed separately in 0.3.7).
+
 ## [0.3.5] — `.d.ts` shim round 4: adopt vitest's canonical types
 
 Stops the `it.each` whack-a-mole by lifting vitest's real type definitions verbatim (read from

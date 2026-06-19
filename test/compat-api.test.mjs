@@ -102,3 +102,18 @@ test('constructable CSSStyleSheet + adoptedStyleSheets (emotion/MUI adopt patter
   assert.equal(j.numPassedTests, 4);
   assert.equal(j.numFailedTests, 0);
 });
+
+test('circular module graph (A <-> B) loads without a TDZ "before initialization" error', () => {
+  const j = parseJson(run(['--reporter', 'json', file('circular/circular.test.ts')]).out);
+  assert.equal(j.numPassedTests, 4, 'all four assertions across the cycle pass');
+  assert.equal(j.numFailedTests, 0);
+});
+
+test('circular decorated models (@Entity/@Field, User <-> Post) load — legacy decorator lowering', () => {
+  // Regression for the Sequelize/NestJS case: without legacy-decorator lowering the native
+  // transform emitted `export @Entity class …` (Unexpected token 'export') or a 2022-standard
+  // class-binding TDZ ("Cannot access 'X' before initialization"). Both must load now.
+  const j = parseJson(run(['--reporter', 'json', file('circular-decorators/circular-decorators.test.ts')]).out);
+  assert.equal(j.numPassedTests, 2);
+  assert.equal(j.numFailedTests, 0);
+});
