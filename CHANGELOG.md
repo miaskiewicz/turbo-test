@@ -5,11 +5,12 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
-## [0.3.6] — node-env jest: gated decorator lowering + `.`/`..` directory re-exports
+## [0.3.6] — node-env jest: gated decorators + `.`/`..` re-exports + native-addon crash guard
 
-Unblocks the two largest file-load buckets that stopped a real NestJS + Sequelize/Mongoose backend
-(flux-apis) suite from running under turbo-test. On a 120-spec subset, clean-loading files went
-**30 → 53** and decorator-syntax / TDZ load-errors **83 → 0**.
+Makes a real NestJS + Sequelize/Mongoose backend (flux-apis) load and run under turbo-test, from
+two background spikes. On a 120-spec subset, clean-loading files went **30 → 53** and
+decorator-syntax / TDZ load-errors **83 → 0**; and a native `.node` addon `require()` no longer
+takes down the whole run.
 
 ### Fixed
 - **TypeScript legacy decorators + `emitDecoratorMetadata` are lowered in the native transform —
@@ -31,17 +32,28 @@ Unblocks the two largest file-load buckets that stopped a real NestJS + Sequeliz
   so they were left as runtime externals resolved against the bundle's package-root dir →
   "cannot resolve ..". `is_relative` now accepts `.`/`..`; and `resolve_spec_as` falls through to
   index probing when oxc resolves such a spec to a *directory* instead of its index file.
+- **A native `.node` N-API addon no longer SIGSEGVs the whole run.** turbo-test's host
+  (`src/napi_host.rs`) exported ~37 napi symbols; a real napi-rs addon (e.g. `turbo-html2pdf`) calls
+  ~14 more, and under macOS flat-namespace `-export_dynamic` those undefined symbols resolve to
+  `0x0`, so the addon's first such call jumps to NULL (exit 139, zero output, every other test in
+  the run killed). Implemented the safe missing symbols (buffers, array/element/property-name
+  access, bool/double/int64 getters); routed genuinely-unsupported entrypoints
+  (`napi_wrap`/`napi_unwrap`/`napi_new_instance`) to a **catchable JS throw**; and wrapped addon
+  module-init + every native callback FFI call in `catch_unwind` — so a broken/unsupported addon
+  fails its own file cleanly and the rest of the run continues.
 
 ### Tests
 - `fixtures/compat/circular/` (plain ESM require cycle) and `fixtures/compat/circular-decorators/`
   (decorated, mutually-referencing models + local tsconfig) — both fail on the pre-fix binary, pass
   with the fix — wired into `test/compat-api.test.mjs`.
+- `fixtures/napi/` (a synthetic misbehaving C addon, built at test time, `.node` gitignored) +
+  `test/compat-napi.test.mjs`: asserts the run does not segfault (`signal !== 'SIGSEGV'`,
+  `code !== 139`) and a sibling spec still executes after the bad-addon file.
 
 ### Known follow-ups (not here)
 - A separate, pre-existing native-bundler bug: it can't resolve `tslib` inside
   `@aws-crypto/crc32c` (cascading through `@aws-sdk/client-s3`) — the bulk of the remaining
   flux-apis load-errors, unrelated to decorators/circular init.
-- turbo-test SIGSEGV on a native `.node` addon `require()` (fixed separately in 0.3.7).
 
 ## [0.3.5] — `.d.ts` shim round 4: adopt vitest's canonical types
 
