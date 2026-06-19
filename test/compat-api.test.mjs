@@ -96,3 +96,9 @@ test('extra HTML*Element constructor globals + tag-keyed instanceof + constructo
   assert.equal(j.numPassedTests, 3);
   assert.equal(j.numFailedTests, 0);
 });
+
+test('constructable CSSStyleSheet + adoptedStyleSheets (emotion/MUI adopt pattern)', () => {
+  const j = parseJson(run(['--reporter', 'json', file('constructable-stylesheet.test.ts')]).out);
+  assert.equal(j.numPassedTests, 4);
+  assert.equal(j.numFailedTests, 0);
+});

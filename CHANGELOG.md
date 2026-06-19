@@ -7,6 +7,15 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [0.3.4] — `.d.ts` shim round 3 (`it.each` `as const` rows) + constructable stylesheets
 
+### Added
+- **Constructable stylesheets** in the DOM bootstrap: `new CSSStyleSheet()` (with
+  `cssRules`/`rules`, `insertRule` returning the index, `deleteRule`, `replace` → `Promise<this>`,
+  `replaceSync`) plus a real, settable `document.adoptedStyleSheets` array. emotion/MUI do
+  `new CSSStyleSheet()` then `document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet]`;
+  there's no layout engine, so the rule list is an inert store that satisfies the API — but a
+  missing `CSSStyleSheet` reference threw mid-chunk during hydration and blanked the tree.
+  (`browser_env.js`.)
+
 ### Fixed
 - **`it.each([...] as const)` regression.** The 0.3.3 tuple overload constrained rows to mutable
   `any[]`, so `[…] as const` (readonly tuples) fell through to the single-value overload and the
