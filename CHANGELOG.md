@@ -41,6 +41,12 @@ takes down the whole run.
   (`napi_wrap`/`napi_unwrap`/`napi_new_instance`) to a **catchable JS throw**; and wrapped addon
   module-init + every native callback FFI call in `catch_unwind` — so a broken/unsupported addon
   fails its own file cleanly and the rest of the run continues.
+- **`__dirname` / `__filename` on the ESM graph load path.** CJS modules get them as wrapper
+  params; a real ES module (the `load_graph` path) had neither in scope, so an app `.ts` that reads
+  `const DIR = __dirname` at top level threw `ReferenceError: __dirname is not defined` and the file
+  failed to load. `inject_dirname_esm` now prepends Node-CJS-equivalent module-local `const`
+  bindings, gated on actual reference + no local declaration, newline-free (line numbers/source maps
+  preserved). (`browser_env` projects are unaffected — only files reaching `__dirname` change.)
 
 ### Tests
 - `fixtures/compat/circular/` (plain ESM require cycle) and `fixtures/compat/circular-decorators/`

@@ -501,6 +501,96 @@ fn module_origin<'s>(
     v8::ScriptOrigin::new(scope, name.into(), 0, 0, false, 123, None, false, false, true, None)
 }
 
+/// CJS modules get `__dirname`/`__filename` as wrapper-function params (see `load_cjs_inner`); a
+/// real ES module (the `load_graph` path) has neither in scope, so an app `.ts` file that reads
+/// `const COUNTRIES_DIR = __dirname` at top level throws `ReferenceError: __dirname is not defined`.
+/// Node's ESM doesn't expose these, but our graph path loads app code authored for the CJS world —
+/// so we inject module-local `const` bindings matching Node's CJS semantics (`__filename` = the
+/// file, `__dirname` = its directory).
+///
+/// Injected only when the (already-transformed) body actually references the identifier and does
+/// not declare it itself — so esbuild bundles that already shim `__dirname`, or files that bind it
+/// locally, are left untouched (avoids a redeclaration `SyntaxError`). The prelude carries no
+/// newline, so existing line numbers (stack traces / source maps) are preserved.
+fn inject_dirname_esm(abs: &Path, body: &str) -> Option<String> {
+    let needs_dir = references_ident(body, "__dirname") && !declares_ident(body, "__dirname");
+    let needs_file = references_ident(body, "__filename") && !declares_ident(body, "__filename");
+    if !needs_dir && !needs_file {
+        return None;
+    }
+    let mut prelude = String::new();
+    if needs_file {
+        let file = js_string_literal(&abs.to_string_lossy());
+        prelude.push_str(&format!("const __filename={file};"));
+    }
+    if needs_dir {
+        let dir = abs.parent().unwrap_or_else(|| Path::new("/"));
+        let dir = js_string_literal(&dir.to_string_lossy());
+        prelude.push_str(&format!("const __dirname={dir};"));
+    }
+    Some(format!("{prelude}{body}"))
+}
+
+/// `ident` appears as a whole-word token (not as a substring of a longer identifier and not in the
+/// `foo.__dirname` member-access position). Cheap heuristic — good enough to gate the injection.
+fn references_ident(src: &str, ident: &str) -> bool {
+    let bytes = src.as_bytes();
+    let id_len = ident.len();
+    let mut i = 0;
+    while let Some(rel) = src.get(i..).and_then(|s| s.find(ident)) {
+        let at = i + rel;
+        let before_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
+        let after = at + id_len;
+        let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
+        // skip `.`-prefixed member access (`x.__dirname`) — that's a property, not the global.
+        let not_member = at == 0 || bytes[at - 1] != b'.';
+        if before_ok && after_ok && not_member {
+            return true;
+        }
+        i = at + id_len;
+    }
+    false
+}
+
+/// The body declares `ident` via `const`/`let`/`var` at any position (so we must not re-inject).
+fn declares_ident(src: &str, ident: &str) -> bool {
+    for kw in ["const ", "let ", "var "] {
+        let needle = format!("{kw}{ident}");
+        let mut i = 0;
+        while let Some(rel) = src.get(i..).and_then(|s| s.find(&needle)) {
+            let at = i + rel + needle.len();
+            // next char must end the identifier (`=`, space, `,`, `;`, etc.) — not extend it.
+            if at >= src.len() || !is_ident_byte(src.as_bytes()[at]) {
+                return true;
+            }
+            i = at;
+        }
+    }
+    false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+/// Build a double-quoted JS string literal for `s` (escapes the metacharacters that appear in
+/// filesystem paths). Used to embed `__dirname`/`__filename` path constants in injected source.
+fn js_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 use std::sync::atomic::{AtomicU64, Ordering};
 static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 static CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
@@ -3145,6 +3235,10 @@ fn load_graph<'s>(
         return Some(v8::Local::new(scope, &g));
     }
     let raw = read_transformed(abs, false, false)?;
+    // CJS gets __dirname/__filename via the wrapper params; a real ES module has neither in scope.
+    // App code authored for the CJS world (NestJS seed runners, country-config loaders) reads them
+    // at top level, so inject Node-CJS-equivalent module-local bindings when referenced.
+    let raw = inject_dirname_esm(abs, &raw).unwrap_or(raw);
     let code = v8::String::new(scope, &raw)?;
     let name = v8::String::new(scope, &abs.to_string_lossy())?;
     let origin = module_origin(scope, name);
