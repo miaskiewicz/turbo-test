@@ -5,6 +5,37 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.1] — turbo-dom 0.3.5 + jest `@jest/globals` imports + shipped TypeScript types
+
+### Fixed
+- Bump the `turbo-dom` crate (rtdom DOM runtime) `0.3.4` → `0.3.5`. The new release stops
+  `rtdom::serialize` from escaping regular spaces to `&nbsp;` (U+00A0) — a quirk inherited from
+  the old JS serializer. That corruption made a re-parse / accessible-name / text query see
+  `"a b"` instead of `"a b"`, so whitespace-normalized matching
+  (`getByRole`/`getByText`/`toHaveText` against a serialized DOM) failed. Spaces now serialize
+  verbatim; only `&`/`<`/`>`/`"` are escaped.
+
+### Added
+- **`import { … } from '@jest/globals'`** now resolves from turbo-test's own runtime, the same
+  builtin that backs `import … from 'vitest'`. jest projects with `injectGlobals: false` (or
+  TS-strict setups that import the API explicitly) previously fell through to node-module
+  resolution and broke. The builtin shim now also exports `jest` (alongside
+  `describe`/`it`/`test`/`expect`/`vi`/hooks/`assert`), so the named `jest` import binds to the
+  runtime controller. (`runner.rs`: `is_test_api_module()` matches both specifiers across the
+  static-ESM, dynamic-`import()`, and CJS-`require` resolution paths.)
+- **Shipped `.d.ts` bundle** so consumers can drop the `vitest` (or `@types/jest`) devDependency
+  that was kept purely for types. `tsconfig.json` `types: ["vitest/globals"]` and `from 'vitest'`
+  imports across a codebase otherwise force `vitest` into devDependencies even when turbo-test is
+  the runtime. New `types/`: `globals.d.ts` (ambient globals → `@miaskiewicz/turbo-test/globals`),
+  `vitest.d.ts` (the `vitest` module), `jest-globals.d.ts` (the `@jest/globals` module), over a
+  shared `turbo-test-api.d.ts`. A pragmatic vitest/jest-compatible **subset** (matcher/mock args
+  widen to `any` — no false type errors, less precise inference). Exposed via `package.json`
+  `exports` (`./globals`, `./types/*`) and added to `files`. README → "TypeScript types".
+
+### Tests
+- `fixtures/jest/src/jest-globals-import.spec.ts` + `test/compat-jest.test.mjs` cover the
+  `@jest/globals` named-import path alongside the existing global-`jest` shim fixture.
+
 ## [0.3.0] — all-Rust DOM is the default (JS turbo-dom removed)
 
 The DOM environment is now turbo-dom's pure-Rust **rtdom**, bound natively to V8. The legacy JS

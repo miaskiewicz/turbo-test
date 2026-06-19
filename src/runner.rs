@@ -2800,8 +2800,9 @@ fn native_require(
         }
         return;
     }
-    // vitest builtin (describe/it/expect/vi from globals) — never load the real package.
-    if spec == "vitest" {
+    // vitest / @jest/globals builtin (describe/it/expect/vi/jest from globals) — never load the
+    // real package.
+    if is_test_api_module(&spec) {
         ensure_vitest_builtin(scope);
         if let Some(g) = REGISTRY.with(|r| r.borrow().cjs_exports.get(&vitest_key()).cloned()) {
             rv.set(v8::Local::new(scope, &g));
@@ -3111,7 +3112,7 @@ fn load_graph<'s>(
     for i in 0..requests.length() {
         let req = v8::Local::<v8::ModuleRequest>::try_from(requests.get(scope, i).unwrap()).unwrap();
         let spec = req.get_specifier().to_rust_string_lossy(scope);
-        if spec == "vitest" {
+        if is_test_api_module(&spec) {
             ensure_vitest_builtin(scope)?;
             continue;
         }
@@ -3128,9 +3129,17 @@ fn load_graph<'s>(
     Some(module)
 }
 
-/// Registry key for the built-in `vitest` module shim (named import surface).
+/// Registry key for the built-in test-API module shim (named import surface).
+/// One shim backs both `vitest` and `@jest/globals` — the exported names are a superset
+/// (describe/it/test/expect/vi/jest/hooks/assert), all sourced from our runtime globals.
 fn vitest_key() -> PathBuf {
     PathBuf::from("<builtin:vitest>")
+}
+
+/// Is `spec` a bare test-framework module we satisfy from globals rather than node_modules?
+/// Covers vitest (`import … from 'vitest'`) and jest (`import { jest } from '@jest/globals'`).
+fn is_test_api_module(spec: &str) -> bool {
+    spec == "vitest" || spec == "@jest/globals"
 }
 
 /// Expose our runtime globals as a `vitest` module so real suites that do
@@ -3144,7 +3153,7 @@ fn ensure_vitest_builtin<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<()> {
     let global = scope.get_current_context().global(scope);
     let obj = v8::Object::new(scope);
     for n in [
-        "describe", "it", "test", "expect", "vi", "beforeEach", "afterEach", "beforeAll",
+        "describe", "it", "test", "expect", "vi", "jest", "beforeEach", "afterEach", "beforeAll",
         "afterAll", "assert",
     ] {
         let k = v8::String::new(scope, n)?;
@@ -3212,7 +3221,7 @@ fn resolve_callback<'s>(
 ) -> Option<v8::Local<'s, v8::Module>> {
     v8::callback_scope!(unsafe scope, context);
     let spec = specifier.to_rust_string_lossy(scope);
-    let lookup = if spec == "vitest" {
+    let lookup = if is_test_api_module(&spec) {
         ensure_vitest_builtin(scope);
         Some(vitest_key())
     } else if is_node_builtin(&spec) {
@@ -3302,7 +3311,7 @@ fn dynamic_import_callback<'s>(
         }
     }
     // dynamic import of builtins (e.g. turbo-dom's `await import('node:module')`) + vitest
-    let (abs, is_builtin) = if spec == "vitest" {
+    let (abs, is_builtin) = if is_test_api_module(&spec) {
         ensure_vitest_builtin(scope);
         (Some(vitest_key()), true)
     } else if is_node_builtin(&spec) {
