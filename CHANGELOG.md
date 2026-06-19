@@ -26,6 +26,22 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   is extended in lockstep so `node.constructor.name` resolves to the specific interface, not a
   generic `HTMLElement`. (`browser_env.js` bootstrap + `browser_env.rs`.)
 
+### Fixed — `.d.ts` shim widened to match real vitest API usage
+The 0.3.1 type subset was too narrow to replace `vitest`'s types in a large suite (payroll-app:
+525 `tsc` errors across ~170 spec files with `vitest` dropped). Widened `types/turbo-test-api.d.ts`:
+- **`vi.mocked()`** now returns a `MockedFunction<T>` for functions (exposing `mockReturnValue`/
+  `mockReturnValueOnce`/`mockResolved|RejectedValue(Once)`/`mockImplementation(Once)`/
+  `mockClear|Reset|Restore` and `.mock.{calls,results,instances}`) and a `MockedObject<T>` for
+  objects/`{deep:true}` — the dominant define-then-configure pattern. (~350 errors)
+- **`vi.hoisted<T>(factory: () => T): T`** added to `ViAPI`. (92 errors)
+- **Hook callbacks** (`beforeEach`/`afterEach`/…) widened to vitest's `() => unknown | Promise<…>`,
+  so `beforeEach(() => vi.useFakeTimers())` (arrow returns the chainable `ViAPI`) type-checks. (81)
+- **`Mock<T>` / `vi.fn<T>()`** adopt the vitest-4 function-signature generic
+  (`Mock<(a: string) => number>`, `vi.fn<(a) => b>()`) instead of the old args-tuple generic. (54)
+- **`it.each<T>()`** gains a single-value-row overload so an explicit non-array union type arg
+  (`it.each<InviteType>(['a','b'])`) resolves; tuple rows still spread into positional args.
+- **`expect.fail(message?)`** added to `ExpectStatic`. (1)
+
 ## [0.3.1] — turbo-dom 0.3.5 + jest `@jest/globals` imports + shipped TypeScript types
 
 ### Fixed
