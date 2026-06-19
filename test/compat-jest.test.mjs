@@ -34,3 +34,17 @@ test("@jest/globals named imports resolve from the runtime (not the real package
   assert.equal(r.numFailedTests, 0, 'imported describe/it/expect/jest behave like the globals');
   assert.equal(r.numPassedTests, 2);
 });
+
+test('emitDecoratorMetadata field typed as an imported interface loads (tsc-path routing)', () => {
+  // A decorated field typed as an imported INTERFACE: oxc would emit
+  // Reflect.metadata("design:type", <Iface>) referencing the type-only import as a value, which the
+  // ESM linker then rejects ("does not provide an export named <Iface>"). Routing emitDecoratorMetadata
+  // files through the project's TypeScript (emits `Object` for non-value types) loads them.
+  const FIX = path.join(ROOT, 'fixtures', 'compat', 'decorator-metadata-type');
+  const res = spawnSync('node', [CLI, '--reporter', 'json', 'decorator-metadata-type.spec.ts'], { cwd: FIX, encoding: 'utf8' });
+  const line = (res.stdout || '').split('\n').find((l) => l.trim().startsWith('{') && l.includes('numTotalTests'));
+  assert.ok(line, `no JSON summary:\n${res.stdout}\n${res.stderr}`);
+  const j = JSON.parse(line);
+  assert.equal(j.numFailedTests, 0);
+  assert.ok(j.numPassedTests >= 1);
+});

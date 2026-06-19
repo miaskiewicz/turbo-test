@@ -2153,11 +2153,31 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
                 return Some(code);
             }
         } else {
+            // emitDecoratorMetadata files MUST take the project's TypeScript (tsc) path on the
+            // FIRST load, not oxc. oxc has no type checker: for a decorated field typed as an
+            // imported INTERFACE (e.g. Sequelize/Mongoose `@Column() declare x: SomeIface`), it
+            // emits `Reflect.metadata("design:type", SomeIface)` — referencing the type-only import
+            // as a value, so it can't be elided. The interface has no runtime export, so V8 fails
+            // ESM instantiation with `does not provide an export named SomeIface`. tsc emits
+            // `Object` for non-value types (ts-jest parity). This fails at LINK time (before eval),
+            // so the eval-throw retry-on-load can't rescue it — hence routing here, up front.
+            // node_modules excluded (ship pre-compiled JS); browser/React projects have no
+            // emitDecoratorMetadata so this branch never fires for them.
+            let needs_meta = !abs.components().any(|c| c.as_os_str() == "node_modules")
+                && decorator_metadata_enabled(abs)
+                && std::fs::read_to_string(abs).map(|s| file_has_decorator(&s)).unwrap_or(false);
+            if needs_meta && !crate::coverage::enabled() {
+                if let Some(code) = esbuild_transform_cjs(abs, true) {
+                    return Some(code);
+                }
+                // tsc/esbuild unavailable (e.g. a fixture without them) → fall through to oxc; it
+                // still loads everything except interface-typed metadata, no worse than before.
+            }
             // Native oxc ESM→CJS (P2a) for app files; esbuild fallback on any unhandled form.
             // Coverage stays on esbuild for now: the native single-pass emitter DOES append an inline
             // source map (see esm_cjs::emit), but oxc's codegen map is less dense than esbuild's
             // (fewer per-token mappings), so coverage.rs under-attributes inner functions/lines —
-            // not yet parity. Decorator-metadata files also route to esbuild/tsc. (P2c remainder.)
+            // not yet parity.
             if crate::esm_cjs::enabled() && !crate::coverage::enabled() && !prefer_metadata {
                 if let Some(code) = native_transform_cjs(abs) {
                     return Some(code);
@@ -2199,6 +2219,22 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
         return Some(cached);
     }
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+    // emitDecoratorMetadata on the ESM path: prefer the project's TypeScript (tsc_transform_esm),
+    // not oxc. oxc has no type checker, so a decorated field typed as an imported INTERFACE
+    // (`@Column() declare x: SomeIface`) makes it emit `Reflect.metadata("design:type", SomeIface)`
+    // — the type-only import then can't be elided, and since the interface has no runtime export
+    // the ESM linker fails: `does not provide an export named SomeIface`. tsc emits `Object` for
+    // non-value types (ts-jest parity). It fails at LINK time, so the eval-throw retry-on-load can't
+    // rescue it — route here, on first load. oxc remains the fallback when the project ships no
+    // typescript (tsc_transform_esm → None).
+    if legacy_decorators {
+        if let Some(root) = project_root(abs) {
+            if let Some(esm) = tsc_transform_esm(abs, &root) {
+                let _ = std::fs::write(&path, &esm);
+                return Some(esm);
+            }
+        }
+    }
     let out = crate::transform::transform_with(abs, &raw, legacy_decorators)
         .map_err(|e| eprintln!("transform {}: {e}", abs.display()))
         .ok()?;
