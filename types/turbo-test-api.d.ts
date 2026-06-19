@@ -24,8 +24,10 @@ export interface TestOptions {
 }
 
 export interface TestEachFunction {
-  // tuple rows → spread into the callback's positional args (`each([[1, 2]])(…, (a, b) => …)`)
-  <T extends any[]>(cases: ReadonlyArray<T>): (
+  // tuple rows → spread into the callback's positional args, preserving per-position types
+  // (`each([['x', true]])(…, (label: string, flag: boolean) => …)`). `readonly [...T]` forces
+  // each row to infer as a tuple instead of widening to an element-union array.
+  <T extends any[]>(cases: ReadonlyArray<readonly [...T]>): (
     name: string,
     fn: (...args: T) => any,
     timeout?: number,
@@ -111,6 +113,10 @@ export type MockedObject<T> = {
 } & T;
 export type Mocked<T> = T extends (...args: any[]) => any ? MockedFunction<T> : MockedObject<T>;
 
+// The `importOriginal` callback handed to a `vi.mock` async factory — returns the real module,
+// typed via the explicit type arg: `await importOriginal<typeof Mod>()`.
+export type ImportOriginal = <T extends Record<string, any> = Record<string, any>>() => Promise<T>;
+
 // ---- expect -----------------------------------------------------------------------------------
 
 export interface Assertion {
@@ -149,8 +155,12 @@ export interface ViAPI {
   fn(): Mock;
   fn<T extends (...args: any[]) => any>(impl?: T): Mock<T>;
   spyOn(obj: any, method: any): Mock;
+  // async factory: `importOriginal<T>()` returns the real module typed as T
+  // (`vi.mock('x', async (importOriginal) => ({ ...await importOriginal<typeof X>() }))`).
+  mock(path: string, factory: (importOriginal: ImportOriginal) => any): void;
   mock(path: string, factory?: (...args: any[]) => any): void;
   unmock(path: string): void;
+  doMock(path: string, factory: (importOriginal: ImportOriginal) => any): void;
   doMock(path: string, factory?: (...args: any[]) => any): void;
   doUnmock(path: string): void;
   // vi.hoisted: run a factory above the module's imports; returns its value (used for shared mock refs).
