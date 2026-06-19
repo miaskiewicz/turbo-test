@@ -5,6 +5,22 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.3] — `.d.ts` shim round 2 (mock `importOriginal` generic + tuple-preserving `it.each`)
+
+### Fixed
+Round-2 type widening: after 0.3.2, payroll-app's `tsc` errors were `525 → 18` (+1 unrelated PNG).
+The remaining 18 trace to two more type-only shim gaps in `types/turbo-test-api.d.ts`:
+- **`importOriginal` is now generic** in the `vi.mock` / `vi.doMock` async-factory overloads — the
+  factory's first arg is typed `<T extends Record<string, any>>() => Promise<T>` (vitest's
+  signature), so `const actual = await importOriginal<typeof Mod>()` resolves and the spread /
+  derived-`Parameters` usage downstream stops cascading off `{}`. (~16 errors: TS2347 ×11, TS2698,
+  TS2339 ×4)
+- **`it.each([...])` preserves per-position tuple types.** The 0.3.2 array overload widened each row
+  to an element-union, so `it.each([['x', true]])(…, (label, isLast) => …)` saw
+  `string | boolean`. The tuple overload now takes `ReadonlyArray<readonly [...T]>`, forcing each
+  row to infer as a tuple → `(label: string, isLast: boolean)`. Ordered before the single-value
+  overload; numeric-tuple spread and the explicit-union single-arg form (gap 5) still resolve. (2)
+
 ## [0.3.2] — extra HTML*Element constructor globals
 
 ### Fixed
