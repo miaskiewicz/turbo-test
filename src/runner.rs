@@ -642,6 +642,20 @@ fn project_root(file: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Nearest ancestor with `node_modules/typescript` — the root `tsc_transform_esm` needs. Unlike
+/// `project_root` this does NOT require esbuild (ts-jest backends often ship typescript but not
+/// esbuild), so the emitDecoratorMetadata→tsc routing fires for them.
+fn tsc_root(file: &Path) -> Option<PathBuf> {
+    let mut d = file.parent();
+    while let Some(dir) = d {
+        if dir.join("node_modules/typescript/package.json").exists() {
+            return Some(dir.to_path_buf());
+        }
+        d = dir.parent();
+    }
+    None
+}
+
 /// Bundle a test file (and ALL its node_modules deps) into one clean ESM file via esbuild
 /// — the Vite approach. This is what makes @mui / @testing-library / react-dom / emotion etc.
 /// load reliably instead of hand-rolling CJS/ESM interop across the whole dep tree. `vitest`
@@ -2228,7 +2242,11 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
     // rescue it — route here, on first load. oxc remains the fallback when the project ships no
     // typescript (tsc_transform_esm → None).
     if legacy_decorators {
-        if let Some(root) = project_root(abs) {
+        // Use a TYPESCRIPT-based root (not project_root, which requires esbuild) — tsc_transform_esm
+        // only needs `node_modules/typescript`, and many backends (ts-jest projects) ship typescript
+        // but NOT esbuild. Without this the routing silently fell back to oxc, which keeps the
+        // interface-typed import for its `design:type` reference → ESM link failure.
+        if let Some(root) = tsc_root(abs) {
             if let Some(esm) = tsc_transform_esm(abs, &root) {
                 let _ = std::fs::write(&path, &esm);
                 return Some(esm);
