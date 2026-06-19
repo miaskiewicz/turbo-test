@@ -38,7 +38,12 @@ const ASSET_EMPTY: [&str; 5] = ["css", "scss", "sass", "less", "styl"];
 const ASSET_STRING: [&str; 6] = ["svg", "png", "jpg", "jpeg", "gif", "webp"];
 
 fn is_relative(spec: &str) -> bool {
-    spec.starts_with("./") || spec.starts_with("../")
+    // bare `.` / `..` (a directory re-export, e.g. NestJS `dist/utils/x.js` doing `require("..")`
+    // to reach its own package's `dist/index.js`) are relative too. Without this they were treated
+    // as bare externals, left as a runtime `require("..")`, and resolved against the bundle's
+    // recorded src dir (the package root) → "cannot resolve ..". Inlining them keeps the per-file
+    // directory context so the relative resolve is correct.
+    spec.starts_with("./") || spec.starts_with("../") || spec == "." || spec == ".."
 }
 
 fn asset_stub(path: &Path) -> Option<&'static str> {

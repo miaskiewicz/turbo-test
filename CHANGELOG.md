@@ -5,6 +5,62 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.6] — node-env jest: gated decorators + `.`/`..` re-exports + native-addon crash guard
+
+Makes a real NestJS + Sequelize/Mongoose backend (flux-apis) load and run under turbo-test, from
+two background spikes. On a 120-spec subset, clean-loading files went **30 → 53** and
+decorator-syntax / TDZ load-errors **83 → 0**; and a native `.node` addon `require()` no longer
+takes down the whole run.
+
+### Fixed
+- **TypeScript legacy decorators + `emitDecoratorMetadata` are lowered in the native transform —
+  gated, on both load paths.** The oxc TS-strip pass used `TransformOptions::default()`, which
+  doesn't lower *legacy* decorators, so a NestJS/Sequelize/Mongoose decorated class emitted either
+  `export @Decorator class X {}` (→ `Unexpected token 'export'`) or oxc's 2022-standard lowering
+  that re-reads the class binding mid-init (→ `Cannot access 'X' before initialization` TDZ) — and
+  because both fail at *run* time, the esbuild retry-on-load was never taken → hard load-error. New
+  `transform::transform_with` / `esm_cjs::emit_with` lower legacy decorators + metadata (babel
+  helpers are global via `runtime.js`), called from both `read_transformed` (ESM) and
+  `native_transform_cjs` (CJS), **gated** on `experimentalDecorators`/`emitDecoratorMetadata` being
+  enabled AND the file actually using a decorator AND not being in `node_modules`, with the flag
+  folded into the transform cache keys — so non-decorated files pay nothing (no blanket
+  metadata-pass cost). The pre-existing CJS circular machinery (installing `module.exports` before
+  the body runs) was already correct; decorators were the actual cause of the "circular init" TDZ.
+- **`require(".")` / `require("..")` directory re-exports resolve.** NestJS packages
+  (`@nestjs/sequelize`, `config`, `mapped-types`, …) chain `__export(require("./dist"))` and
+  `dist/utils/x.js → require("..")` self-references. `bundler::is_relative` excluded bare `.`/`..`,
+  so they were left as runtime externals resolved against the bundle's package-root dir →
+  "cannot resolve ..". `is_relative` now accepts `.`/`..`; and `resolve_spec_as` falls through to
+  index probing when oxc resolves such a spec to a *directory* instead of its index file.
+- **A native `.node` N-API addon no longer SIGSEGVs the whole run.** turbo-test's host
+  (`src/napi_host.rs`) exported ~37 napi symbols; a real napi-rs addon (e.g. `turbo-html2pdf`) calls
+  ~14 more, and under macOS flat-namespace `-export_dynamic` those undefined symbols resolve to
+  `0x0`, so the addon's first such call jumps to NULL (exit 139, zero output, every other test in
+  the run killed). Implemented the safe missing symbols (buffers, array/element/property-name
+  access, bool/double/int64 getters); routed genuinely-unsupported entrypoints
+  (`napi_wrap`/`napi_unwrap`/`napi_new_instance`) to a **catchable JS throw**; and wrapped addon
+  module-init + every native callback FFI call in `catch_unwind` — so a broken/unsupported addon
+  fails its own file cleanly and the rest of the run continues.
+- **`__dirname` / `__filename` on the ESM graph load path.** CJS modules get them as wrapper
+  params; a real ES module (the `load_graph` path) had neither in scope, so an app `.ts` that reads
+  `const DIR = __dirname` at top level threw `ReferenceError: __dirname is not defined` and the file
+  failed to load. `inject_dirname_esm` now prepends Node-CJS-equivalent module-local `const`
+  bindings, gated on actual reference + no local declaration, newline-free (line numbers/source maps
+  preserved). (`browser_env` projects are unaffected — only files reaching `__dirname` change.)
+
+### Tests
+- `fixtures/compat/circular/` (plain ESM require cycle) and `fixtures/compat/circular-decorators/`
+  (decorated, mutually-referencing models + local tsconfig) — both fail on the pre-fix binary, pass
+  with the fix — wired into `test/compat-api.test.mjs`.
+- `fixtures/napi/` (a synthetic misbehaving C addon, built at test time, `.node` gitignored) +
+  `test/compat-napi.test.mjs`: asserts the run does not segfault (`signal !== 'SIGSEGV'`,
+  `code !== 139`) and a sibling spec still executes after the bad-addon file.
+
+### Known follow-ups (not here)
+- A separate, pre-existing native-bundler bug: it can't resolve `tslib` inside
+  `@aws-crypto/crc32c` (cascading through `@aws-sdk/client-s3`) — the bulk of the remaining
+  flux-apis load-errors, unrelated to decorators/circular init.
+
 ## [0.3.5] — `.d.ts` shim round 4: adopt vitest's canonical types
 
 Stops the `it.each` whack-a-mole by lifting vitest's real type definitions verbatim (read from

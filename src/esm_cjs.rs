@@ -32,7 +32,7 @@ use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder, SymbolId};
 use oxc_span::{SourceType, SPAN};
-use oxc_transformer::{TransformOptions, Transformer};
+use oxc_transformer::{HelperLoaderMode, TransformOptions, Transformer};
 
 /// Whether the native ESM→CJS emitter is enabled for app files. **Default ON** (P2a cutover): the
 /// conformity harness validated full parity on the payroll oracle (1057 files / 10471 tests) and
@@ -273,6 +273,20 @@ impl<'a> VisitMut<'a> for EmitState<'a, '_> {
 /// AST so, under coverage, a single codegen source map maps the output back to the ORIGINAL `.ts`
 /// lines (no esbuild). The map is appended inline (`//# sourceMappingURL=…`) for `coverage.rs`.
 pub fn emit(path: &Path, src: &str) -> Option<String> {
+    emit_with(path, src, false)
+}
+
+/// Like `emit`, but `legacy_decorators = true` lowers TypeScript **legacy** decorators +
+/// `emitDecoratorMetadata` in the SAME oxc TS-strip pass (NestJS / Sequelize-typescript /
+/// Mongoose: `@Injectable`, `@Table`, `@Column`, `@Prop`, parameter `@Inject`). The caller passes
+/// `true` only for app files in an `experimentalDecorators` project that actually use a decorator
+/// (see `runner.rs::native_transform_cjs`). Without this, oxc's DEFAULT options leave a decorator
+/// either un-lowered (`export @Table class …` → "Unexpected token 'export'" in the CJS wrapper) or
+/// lowered with 2022-standard semantics (a class-binding self-reference → "Cannot access 'X' before
+/// initialization"). Legacy lowering emits `babelHelpers.decorate/decorateParam/decorateMetadata`
+/// (External helper mode), which `runtime.js` provides globally — so the native path no longer needs
+/// the esbuild/tsc metadata fallback (which is unavailable when the project ships no esbuild binary).
+pub fn emit_with(path: &Path, src: &str, legacy_decorators: bool) -> Option<String> {
     let alloc = Allocator::default();
     let stype = SourceType::from_path(path).ok()?;
     let parsed = Parser::new(&alloc, src, stype).parse();
@@ -284,7 +298,17 @@ pub fn emit(path: &Path, src: &str) -> Option<String> {
     // TS/JSX strip IN PLACE (original spans preserved → the codegen map points at the .ts source).
     if crate::transform::needs_transform(path) {
         let scoping0 = SemanticBuilder::new().build(&program).semantic.into_scoping();
-        let opts = TransformOptions::default();
+        let mut opts = TransformOptions::default();
+        if legacy_decorators {
+            // Mirror `transform::transform_decorators_with_metadata` so output is identical to the
+            // tsc/esbuild metadata path: legacy decorators, metadata, no strict-null elision (so
+            // `x?: T` / `T | null` emit `T`, not `Object` — matches tsc/ts-jest, which Mongoose
+            // `@Prop`/Sequelize `@Column` rely on), helpers as global `babelHelpers.*`.
+            opts.decorator.legacy = true;
+            opts.decorator.emit_decorator_metadata = true;
+            opts.decorator.strict_null_checks = false;
+            opts.helper_loader.mode = HelperLoaderMode::External;
+        }
         let ret = Transformer::new(&alloc, path, &opts).build_with_scoping(scoping0, &mut program);
         if !ret.errors.is_empty() {
             return None;
@@ -933,3 +957,5 @@ mod tests_dynimport {
         assert!(o.contains("require(import_s_1.p)"), "{o}");
     }
 }
+
+

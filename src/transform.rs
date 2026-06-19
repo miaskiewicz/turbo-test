@@ -23,6 +23,20 @@ pub fn needs_transform(path: &Path) -> bool {
 
 /// Transform a TS/JSX source file to plain JS. Returns generated code.
 pub fn transform(path: &Path, src: &str) -> Result<String, String> {
+    transform_with(path, src, false)
+}
+
+/// Like `transform`, but `legacy_decorators = true` lowers TypeScript **legacy** decorators +
+/// `emitDecoratorMetadata` (NestJS / Sequelize-typescript / Mongoose). Without it, oxc's DEFAULT
+/// options leave a decorator on an exported class as `export @Decorator class X {…}` — invalid JS
+/// in any module/script context ("Unexpected token 'export'") — or, where they DO lower, with
+/// 2022-standard semantics that re-read the class binding before initialization ("Cannot access
+/// 'X' before initialization"). Legacy lowering matches tsc/ts-jest and emits the helpers as global
+/// `babelHelpers.decorate/decorateParam/decorateMetadata` (External mode), which `runtime.js`
+/// provides — so app `.ts` files loaded through the ESM graph (`load_graph` →`maybe_transform`) get
+/// valid, runnable output with no esbuild/tsc dependency. The caller decides `legacy_decorators`
+/// (project has `experimentalDecorators` AND the file uses a decorator).
+pub fn transform_with(path: &Path, src: &str, legacy_decorators: bool) -> Result<String, String> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path).map_err(|e| format!("source type: {e:?}"))?;
 
@@ -35,7 +49,15 @@ pub fn transform(path: &Path, src: &str) -> Result<String, String> {
     // semantic pass produces the scoping the transformer needs for correct renaming
     let scoping = SemanticBuilder::new().build(&program).semantic.into_scoping();
 
-    let options = TransformOptions::default();
+    let mut options = TransformOptions::default();
+    if legacy_decorators {
+        // Match `transform_decorators_with_metadata` (and `esm_cjs::emit_with`): legacy decorators,
+        // metadata, no strict-null elision, helpers as global `babelHelpers.*`.
+        options.decorator.legacy = true;
+        options.decorator.emit_decorator_metadata = true;
+        options.decorator.strict_null_checks = false;
+        options.helper_loader.mode = HelperLoaderMode::External;
+    }
     let ret =
         Transformer::new(&allocator, path, &options).build_with_scoping(scoping, &mut program);
     if !ret.errors.is_empty() {

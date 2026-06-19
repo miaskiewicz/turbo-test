@@ -18,6 +18,7 @@ const SUBDIR = path.join(COMPAT, 'subdir');
 const SUBCFG = path.join(SUBDIR, 'vitest.config.ts');
 const NODE_ENV = path.join(COMPAT, 'node-env.test.ts');
 const PRAGMA = path.join(COMPAT, 'pragma-node.test.ts');
+const DIRNAME = path.join(COMPAT, 'node-dirname.test.ts');
 
 function run(args, opts = {}) {
   const res = spawnSync('node', [CLI, ...args], { cwd: ROOT, encoding: 'utf8', ...opts });
@@ -68,6 +69,17 @@ test('// @vitest-environment node pragma forces node env for that file', () => {
   const j = parseJson(out);
   assert.equal(code, 0, out);
   assert.equal(j.numPassedTests, 1);
+  assert.equal(j.numFailedTests, 0);
+});
+
+test('__dirname / __filename resolve in an ESM-graph .ts module (and its import)', () => {
+  // The CJS wrapper passes __dirname/__filename as params; the ESM graph path (load_graph) does
+  // not, so a top-level `const X = __dirname` in a .ts file threw "ReferenceError: __dirname is
+  // not defined". The runner now injects module-local bindings on the ESM path too.
+  const { code, out } = run(['--reporter', 'json', '--environment', 'node', DIRNAME]);
+  const j = parseJson(out);
+  assert.equal(code, 0, out);
+  assert.equal(j.numPassedTests, 2);
   assert.equal(j.numFailedTests, 0);
 });
 

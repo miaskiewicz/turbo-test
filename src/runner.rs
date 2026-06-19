@@ -10,7 +10,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::transform::maybe_transform;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Kind {
@@ -447,10 +446,17 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
     // what makes deep node_modules graphs (@mui internal "./styles" etc.) resolve.
     if let Ok(res) = resolver_for(from_dir, esm).resolve(from_dir, spec) {
         if let Ok(c) = std::fs::canonicalize(res.path()) {
-            return Some(c);
+            // oxc can resolve a bare `require("..")` / `require(".")` (a directory re-export, common
+            // in NestJS package `index.js` → `require("./dist")` chains and `dist/utils/x.js →
+            // require("..")` self-references) to the DIRECTORY path rather than its index file. A
+            // directory isn't loadable as a module → fall through to the manual index probing below
+            // instead of returning the dir (which threw "cannot resolve ..").
+            if c.is_file() {
+                return Some(c);
+            }
         }
     }
-    // fallback: manual probing for local files oxc may skip
+    // fallback: manual probing for local files oxc may skip (incl. bare "." / ".." directory specs)
     if spec.starts_with('.') || spec.starts_with('/') {
         let base = from_dir.join(spec);
         for c in [
@@ -493,6 +499,96 @@ fn module_origin<'s>(
     name: v8::Local<'s, v8::String>,
 ) -> v8::ScriptOrigin<'s> {
     v8::ScriptOrigin::new(scope, name.into(), 0, 0, false, 123, None, false, false, true, None)
+}
+
+/// CJS modules get `__dirname`/`__filename` as wrapper-function params (see `load_cjs_inner`); a
+/// real ES module (the `load_graph` path) has neither in scope, so an app `.ts` file that reads
+/// `const COUNTRIES_DIR = __dirname` at top level throws `ReferenceError: __dirname is not defined`.
+/// Node's ESM doesn't expose these, but our graph path loads app code authored for the CJS world —
+/// so we inject module-local `const` bindings matching Node's CJS semantics (`__filename` = the
+/// file, `__dirname` = its directory).
+///
+/// Injected only when the (already-transformed) body actually references the identifier and does
+/// not declare it itself — so esbuild bundles that already shim `__dirname`, or files that bind it
+/// locally, are left untouched (avoids a redeclaration `SyntaxError`). The prelude carries no
+/// newline, so existing line numbers (stack traces / source maps) are preserved.
+fn inject_dirname_esm(abs: &Path, body: &str) -> Option<String> {
+    let needs_dir = references_ident(body, "__dirname") && !declares_ident(body, "__dirname");
+    let needs_file = references_ident(body, "__filename") && !declares_ident(body, "__filename");
+    if !needs_dir && !needs_file {
+        return None;
+    }
+    let mut prelude = String::new();
+    if needs_file {
+        let file = js_string_literal(&abs.to_string_lossy());
+        prelude.push_str(&format!("const __filename={file};"));
+    }
+    if needs_dir {
+        let dir = abs.parent().unwrap_or_else(|| Path::new("/"));
+        let dir = js_string_literal(&dir.to_string_lossy());
+        prelude.push_str(&format!("const __dirname={dir};"));
+    }
+    Some(format!("{prelude}{body}"))
+}
+
+/// `ident` appears as a whole-word token (not as a substring of a longer identifier and not in the
+/// `foo.__dirname` member-access position). Cheap heuristic — good enough to gate the injection.
+fn references_ident(src: &str, ident: &str) -> bool {
+    let bytes = src.as_bytes();
+    let id_len = ident.len();
+    let mut i = 0;
+    while let Some(rel) = src.get(i..).and_then(|s| s.find(ident)) {
+        let at = i + rel;
+        let before_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
+        let after = at + id_len;
+        let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
+        // skip `.`-prefixed member access (`x.__dirname`) — that's a property, not the global.
+        let not_member = at == 0 || bytes[at - 1] != b'.';
+        if before_ok && after_ok && not_member {
+            return true;
+        }
+        i = at + id_len;
+    }
+    false
+}
+
+/// The body declares `ident` via `const`/`let`/`var` at any position (so we must not re-inject).
+fn declares_ident(src: &str, ident: &str) -> bool {
+    for kw in ["const ", "let ", "var "] {
+        let needle = format!("{kw}{ident}");
+        let mut i = 0;
+        while let Some(rel) = src.get(i..).and_then(|s| s.find(&needle)) {
+            let at = i + rel + needle.len();
+            // next char must end the identifier (`=`, space, `,`, `;`, etc.) — not extend it.
+            if at >= src.len() || !is_ident_byte(src.as_bytes()[at]) {
+                return true;
+            }
+            i = at;
+        }
+    }
+    false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+/// Build a double-quoted JS string literal for `s` (escapes the metacharacters that appear in
+/// filesystem paths). Used to embed `__dirname`/`__filename` path constants in injected source.
+fn js_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1322,6 +1418,13 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
     raw.hash(&mut h);
     file.extension().and_then(|e| e.to_str()).unwrap_or("").hash(&mut h);
     "native-cjs-v3".hash(&mut h);
+    // Legacy-decorator lowering happens inside esm_cjs::emit when the project enables
+    // experimentalDecorators/emitDecoratorMetadata AND this file uses a decorator. Without it the
+    // native emitter leaves `@Decorator` syntax intact (→ "Unexpected token 'export'") or lowers
+    // it with 2022-standard semantics (→ "Cannot access 'X' before initialization" TDZ). Key the
+    // cache on this decision so a config/file change can't serve stale (mis-lowered) output.
+    let legacy_decorators = decorator_metadata_enabled(file) && file_has_decorator(&raw);
+    legacy_decorators.hash(&mut h);
     // coverage output carries an inline source map → key it separately so the no-map and with-map
     // forms never collide in the cache.
     crate::coverage::enabled().hash(&mut h);
@@ -1331,7 +1434,7 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
         return Some(c);
     }
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-    let emitted = crate::esm_cjs::emit(file, &raw)?;
+    let emitted = crate::esm_cjs::emit_with(file, &raw, legacy_decorators)?;
     let mut code = hoist_mock_setup(&emitted);
     let shared = shared_mock_lets(&raw);
     if !shared.is_empty() {
@@ -2012,6 +2115,18 @@ fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     Some(code)
 }
 
+/// The esbuild CJS transform for a single file, bypassing the native (oxc) emitter — used as the
+/// retry when native output fails to compile in V8. App files go through `esbuild_transform_cjs`
+/// (the same call `read_transformed` would make with native disabled); node_modules through the
+/// esbuild package bundle. Returns the ready-to-wrap CJS, or `None` if esbuild can't produce it.
+fn esbuild_cjs_fallback(abs: &Path, prefer_metadata: bool) -> Option<String> {
+    if abs.components().any(|c| c.as_os_str() == "node_modules") {
+        esbuild_bundle_dep_cjs(abs)
+    } else {
+        esbuild_transform_cjs(abs, prefer_metadata)
+    }
+}
+
 fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<String> {
     // Module-runner: per-module CJS transform (app) / per-package CJS bundle (node_modules)
     // so imports are live + mockable and react is shared. Only on the CJS load path (the test
@@ -2062,14 +2177,29 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
     if !crate::transform::needs_transform(abs) {
         return Some(raw);
     }
-    // content-addressed disk cache, shared across runs and workers
-    let path = cache_dir().join(format!("{:016x}.js", cache_key(abs, &raw)));
+    // App `.ts`/`.tsx` files load through this path as ESM (load_graph → maybe_transform), NOT the
+    // CJS native-emit branch above. So legacy-decorator lowering must also happen HERE, else a
+    // NestJS / Sequelize-typescript / Mongoose class emits `export @Decorator class X {}` (oxc's
+    // default decorator handling) → "Unexpected token 'export'", and circular decorated models trip
+    // "Cannot access 'X' before initialization". Lower legacy decorators when the project enables
+    // experimentalDecorators/emitDecoratorMetadata AND this file uses a decorator. node_modules are
+    // excluded (they ship pre-compiled JS; their tsconfig isn't ours).
+    let legacy_decorators = !abs.components().any(|c| c.as_os_str() == "node_modules")
+        && decorator_metadata_enabled(abs)
+        && file_has_decorator(&raw);
+    // content-addressed disk cache, shared across runs and workers. Key on the legacy-decorator
+    // decision so a config/file change can't serve stale (un-lowered) output.
+    let mut key = cache_key(abs, &raw);
+    if legacy_decorators {
+        key ^= 0x9e37_79b9_7f4a_7c15;
+    }
+    let path = cache_dir().join(format!("{:016x}.js", key));
     if let Ok(cached) = std::fs::read_to_string(&path) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
         return Some(cached);
     }
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-    let out = maybe_transform(abs, raw)
+    let out = crate::transform::transform_with(abs, &raw, legacy_decorators)
         .map_err(|e| eprintln!("transform {}: {e}", abs.display()))
         .ok()?;
     let _ = std::fs::write(&path, &out);
@@ -2438,12 +2568,29 @@ fn load_cjs_inner<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks:
         match compiled {
             Some(s) => Some(v8::Global::new(tc, s)),
             None => {
-                eprintln!(
-                    "  cjs compile failed: {} :: {}",
-                    abs.display(),
-                    tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_default()
-                );
-                None
+                // The native (oxc) emitter can occasionally produce JS that V8 rejects at compile —
+                // a transform edge the esbuild path handles cleanly. Because it fails at COMPILE
+                // (not transform) time, the transform-level esbuild fallback in read_transformed was
+                // never taken. Retry this one file through esbuild and recompile rather than
+                // hard-load-erroring. esbuild is the proven fallback (same output read_transformed
+                // uses when native is disabled), so a file that only the native path mangled now
+                // loads; a genuinely-broken source still fails (esbuild can't compile it either).
+                let native_exc =
+                    tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_default();
+                let fb = esbuild_cjs_fallback(abs, prefer_metadata).and_then(|src| {
+                    let wrapped_fb = format!(
+                        "(function (exports, module, require, __filename, __dirname) {{\n{src}\n}})"
+                    );
+                    if wrapped_fb == wrapped {
+                        return None; // native wasn't the source (output identical) — no point retrying
+                    }
+                    let code_fb = v8::String::new(tc, &wrapped_fb)?;
+                    v8::Script::compile(tc, code_fb, None).map(|s| v8::Global::new(tc, s))
+                });
+                if fb.is_none() {
+                    eprintln!("  cjs compile failed: {} :: {native_exc}", abs.display());
+                }
+                fb
             }
         }
     };
@@ -3088,6 +3235,10 @@ fn load_graph<'s>(
         return Some(v8::Local::new(scope, &g));
     }
     let raw = read_transformed(abs, false, false)?;
+    // CJS gets __dirname/__filename via the wrapper params; a real ES module has neither in scope.
+    // App code authored for the CJS world (NestJS seed runners, country-config loaders) reads them
+    // at top level, so inject Node-CJS-equivalent module-local bindings when referenced.
+    let raw = inject_dirname_esm(abs, &raw).unwrap_or(raw);
     let code = v8::String::new(scope, &raw)?;
     let name = v8::String::new(scope, &abs.to_string_lossy())?;
     let origin = module_origin(scope, name);
