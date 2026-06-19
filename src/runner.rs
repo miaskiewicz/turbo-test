@@ -2025,6 +2025,18 @@ fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     Some(code)
 }
 
+/// The esbuild CJS transform for a single file, bypassing the native (oxc) emitter — used as the
+/// retry when native output fails to compile in V8. App files go through `esbuild_transform_cjs`
+/// (the same call `read_transformed` would make with native disabled); node_modules through the
+/// esbuild package bundle. Returns the ready-to-wrap CJS, or `None` if esbuild can't produce it.
+fn esbuild_cjs_fallback(abs: &Path, prefer_metadata: bool) -> Option<String> {
+    if abs.components().any(|c| c.as_os_str() == "node_modules") {
+        esbuild_bundle_dep_cjs(abs)
+    } else {
+        esbuild_transform_cjs(abs, prefer_metadata)
+    }
+}
+
 fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<String> {
     // Module-runner: per-module CJS transform (app) / per-package CJS bundle (node_modules)
     // so imports are live + mockable and react is shared. Only on the CJS load path (the test
@@ -2466,12 +2478,29 @@ fn load_cjs_inner<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks:
         match compiled {
             Some(s) => Some(v8::Global::new(tc, s)),
             None => {
-                eprintln!(
-                    "  cjs compile failed: {} :: {}",
-                    abs.display(),
-                    tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_default()
-                );
-                None
+                // The native (oxc) emitter can occasionally produce JS that V8 rejects at compile —
+                // a transform edge the esbuild path handles cleanly. Because it fails at COMPILE
+                // (not transform) time, the transform-level esbuild fallback in read_transformed was
+                // never taken. Retry this one file through esbuild and recompile rather than
+                // hard-load-erroring. esbuild is the proven fallback (same output read_transformed
+                // uses when native is disabled), so a file that only the native path mangled now
+                // loads; a genuinely-broken source still fails (esbuild can't compile it either).
+                let native_exc =
+                    tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_default();
+                let fb = esbuild_cjs_fallback(abs, prefer_metadata).and_then(|src| {
+                    let wrapped_fb = format!(
+                        "(function (exports, module, require, __filename, __dirname) {{\n{src}\n}})"
+                    );
+                    if wrapped_fb == wrapped {
+                        return None; // native wasn't the source (output identical) — no point retrying
+                    }
+                    let code_fb = v8::String::new(tc, &wrapped_fb)?;
+                    v8::Script::compile(tc, code_fb, None).map(|s| v8::Global::new(tc, s))
+                });
+                if fb.is_none() {
+                    eprintln!("  cjs compile failed: {} :: {native_exc}", abs.display());
+                }
+                fb
             }
         }
     };
