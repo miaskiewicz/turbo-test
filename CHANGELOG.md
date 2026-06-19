@@ -5,6 +5,27 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.2] — extra HTML*Element constructor globals
+
+### Fixed
+- Register the HTML element constructors the DOM bootstrap's base ctor list omitted:
+  `HTMLDialogElement`, `HTMLDataListElement`, `HTMLFieldSetElement`, `HTMLLegendElement`,
+  `HTMLOListElement`/`HTMLDListElement`, `HTMLPreElement`, `HTMLTableRowElement`/`-CellElement`/
+  `-SectionElement`/`-ColElement`/`-CaptionElement`, `HTMLProgressElement`, `HTMLMeterElement`,
+  `HTMLDetailsElement`, `HTMLPictureElement`, `HTMLSourceElement`, `HTMLMediaElement`/
+  `HTMLVideoElement`/`HTMLAudioElement`, `HTMLTemplateElement`, `HTMLSlotElement`,
+  `HTMLBodyElement`/`HTMLHtmlElement`/`HTMLHeadElement`, `HTMLMetaElement`, `HTMLLinkElement`,
+  `HTMLTitleElement`, `HTMLBaseElement`, `HTMLBRElement`, `HTMLHRElement`, `HTMLOptGroupElement`,
+  `HTMLMapElement`, `HTMLAreaElement`, `HTMLObjectElement`, `HTMLEmbedElement`,
+  `HTMLOutputElement`, `HTMLQuoteElement`, `HTMLMenuElement`, `HTMLDataElement`, `HTMLTimeElement`,
+  `HTMLUnknownElement`. App bundles reference these for feature-detect / `instanceof` /
+  subclassing (e.g. MUI's Dialog touches `HTMLDialogElement`); an undefined reference threw mid-
+  chunk during hydration and blanked the rendered tree. Single-tag elements get a tag-keyed
+  `instanceof` (`x instanceof HTMLDialogElement` ⇔ `x.tagName === 'DIALOG'`); abstract/multi-tag
+  interfaces fall back to a generic element check. The native `get_constructor` tagName→name map
+  is extended in lockstep so `node.constructor.name` resolves to the specific interface, not a
+  generic `HTMLElement`. (`browser_env.js` bootstrap + `browser_env.rs`.)
+
 ## [0.3.1] — turbo-dom 0.3.5 + jest `@jest/globals` imports + shipped TypeScript types
 
 ### Fixed
