@@ -47,6 +47,33 @@ it.each<InviteType>(['partner_join_org', 'employee'])('is %s', (t) => {
   void _t;
 });
 
+// ragged, heterogeneous, NON-const rows (cols differ per row) — no clean per-position tuple, so
+// these land on the permissive array-of-arrays fallback with `any` args (vitest's behavior).
+declare function handleAction(s: string): void;
+it.each([
+  ['SET_TAB', 'infonavit', 'currentTab', 'infonavit'],
+  ['SET_EMPLOYEE_DEDUCTIONS', [{ id: 'd' }], 'employeeDeductions', [{ id: 'd' }]],
+  ['SET_EMPLOYEES', [{ id: 'e' }], 'employees', [{ id: 'e' }]],
+])('%s sets %s', (action, _payload, _key, _expected) => {
+  handleAction(action);
+});
+
+// ---- test/hook callbacks receive a context (vitest parity) -----------------------------------
+
+it('no-arg body still ok', () => { expect(1).toBe(1); });
+it('body receives a test context', (ctx) => {
+  ctx.expect(1).toBe(1);
+  ctx.onTestFinished(() => {});
+});
+it('body can destructure the context', ({ expect: e, task }) => {
+  e(task).toBeDefined();
+});
+beforeEach(() => vi.useFakeTimers());          // arrow returns chainable ViAPI — must be accepted
+afterEach(() => vi.useRealTimers());
+beforeEach((ctx) => { ctx.expect(true).toBe(true); });   // hook may take the context
+beforeAll(async () => {});
+afterAll(() => {});
+
 // ---- vi.mocked / vi.hoisted / vi.fn<T> / mock importOriginal (rounds 1–2 guards) -------------
 
 function useThing(): { v: number } { return { v: 1 }; }
@@ -74,3 +101,9 @@ function assertTrue(c: boolean): void {
   if (!c) expect.fail('nope');
 }
 void assertTrue;
+
+// expect forward-compat statics (poll/unreachable/soft/assertType/…) don't error.
+void expect.soft;
+void expect.unreachable;
+void expect.poll;
+void expect.assertType;

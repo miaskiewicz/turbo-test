@@ -5,6 +5,35 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.5] — `.d.ts` shim round 4: adopt vitest's canonical types
+
+Stops the `it.each` whack-a-mole by lifting vitest's real type definitions verbatim (read from
+`@vitest/runner` / `@vitest/spy`) instead of hand-approximating, and audits the rest of the shim
+against the upstream source.
+
+### Fixed
+- **`it.each` typing replaced with vitest's canonical overload set** (`ExtractEachCallbackArgs` +
+  `EachFunctionReturn` + the four `TestEachFunction` overloads, verbatim from `@vitest/runner`).
+  Tuple rows up to 10 columns (const or not) map to precise positional args; ragged / heterogeneous
+  / >10-column rows land on the permissive `T[]` / `fallback` overload with array args — exactly the
+  runner's behavior. Fixes the last residual (payroll-app `it.each` `1 → 0`) and supersedes the
+  hand-rolled `Writable<T>` overloads from 0.3.4.
+- **Test bodies and hooks now receive a context arg.** vitest's `TestFunction` is
+  `(context) => …` and `beforeEach`/`afterEach`/`beforeAll`/`afterAll` callbacks receive
+  `(context, suite)`; the shim typed them as zero-arg, so `it('x', ({ expect }) => …)` /
+  `beforeEach((ctx) => …)` failed to assign (a callback with more params than the target is not
+  assignable). Added a permissive `TestContext` (typed `task`/`signal`/`expect`/`skip`/`annotate`/
+  `onTestFailed`/`onTestFinished` + an index signature) and widened `TestFunction` / `HookFunction`
+  to pass it. No-arg bodies still assign.
+- **`ExpectStatic` gained an index signature** so forward-compat statics (`expect.poll`,
+  `expect.unreachable`, `expect.assertType`, `expect.addSnapshotSerializer`, …) resolve instead of
+  erroring — matching the shim's permissive-subset philosophy.
+
+### Tests
+- `types/typetests/each.test-d.ts` extended: ragged non-const `it.each` rows (fallback path),
+  context-receiving test bodies + destructured context, hooks with/without a context arg, and the
+  forward-compat `expect` statics. Still gated by `test/compat-types.test.mjs` (`tsc --strict`).
+
 ## [0.3.4] — `.d.ts` shim round 3 (`it.each` `as const` rows) + constructable stylesheets
 
 ### Added
