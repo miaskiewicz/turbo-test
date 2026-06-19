@@ -90,3 +90,9 @@ test('common matchers: toMatchObject / toContainEqual / toSatisfy / toHaveBeenCa
   assert.equal(j.numPassedTests, 5);
   assert.equal(j.numFailedTests, 0);
 });
+
+test('extra HTML*Element constructor globals + tag-keyed instanceof + constructor.name', () => {
+  const j = parseJson(run(['--reporter', 'json', file('html-element-ctors.test.ts')]).out);
+  assert.equal(j.numPassedTests, 3);
+  assert.equal(j.numFailedTests, 0);
+});
