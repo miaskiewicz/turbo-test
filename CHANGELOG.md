@@ -5,6 +5,31 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.7] — runner hardening: native `.node` addon load no longer segfaults
+
+> Sequenced after 0.3.6 (native decorator lowering + `.`/`..` dir re-exports). Independent change —
+> touches only the N-API host.
+
+### Fixed
+- **A native `.node` N-API addon that references an N-API symbol turbo-test didn't export no longer
+  SIGSEGVs the whole run.** turbo-test's host (`src/napi_host.rs`) exported ~37 napi symbols; a real
+  napi-rs addon (e.g. `turbo-html2pdf`) calls ~14 more, and under macOS flat-namespace
+  `-export_dynamic` linking those undefined symbols resolve to `0x0`, so the addon's first such call
+  jumps to NULL → `EXC_BAD_ACCESS` / exit 139, zero output, every other test in the run killed.
+  - Implemented the safe missing symbols (buffers, array element / property-name access,
+    bool/double/int64 getters) — addons that only need these now load and run.
+  - Routed the genuinely-unsupported entrypoints (`napi_wrap`/`napi_unwrap`/`napi_new_instance`) to
+    a **catchable JS throw** ("turbo-test: N-API <fn> is not implemented") instead of a crash.
+  - Wrapped the addon module-init and every native callback FFI call in `catch_unwind`, so a panic
+    or addon fault crossing the `extern "C"` boundary surfaces as a thrown `require()` error rather
+    than process-level UB. Result: a broken addon fails its own file cleanly and the rest of the run
+    continues.
+
+### Tests
+- `fixtures/napi/` (a synthetic misbehaving C addon, built at test time, `.node` gitignored) +
+  `test/compat-napi.test.mjs`: asserts the run does **not** segfault (`signal !== 'SIGSEGV'`,
+  `code !== 139`) and that a sibling spec still executes after the bad-addon file.
+
 ## [0.3.5] — `.d.ts` shim round 4: adopt vitest's canonical types
 
 Stops the `it.each` whack-a-mole by lifting vitest's real type definitions verbatim (read from
