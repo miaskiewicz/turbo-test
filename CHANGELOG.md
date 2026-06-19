@@ -5,6 +5,25 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.4] — `.d.ts` shim round 3 (`it.each` `as const` rows) + constructable stylesheets
+
+### Fixed
+- **`it.each([...] as const)` regression.** The 0.3.3 tuple overload constrained rows to mutable
+  `any[]`, so `[…] as const` (readonly tuples) fell through to the single-value overload and the
+  multi-arg callback's params went implicit-`any` (payroll-app: `it.each` errors `2 → 30`). The
+  spread overload now (1) accepts `readonly` rows via `ReadonlyArray<readonly [...T]>` to force
+  per-position tuple inference (non-const heterogeneous rows + 1-tuples included), and (2) adds a
+  second overload matching the union-of-readonly-tuples that `as const` produces, mapping it to
+  mutable positional params with a `Writable<T>` helper so the spread assigns. `it.each` /
+  `test.each` / `describe.each` and their `.only`/`.skip` variants all share `TestEachFunction`,
+  so the fix covers every form.
+
+### Tests
+- `types/typetests/each.test-d.ts` — a compile-only guard exercising the it.each tuple/`as const`/
+  union/scalar rows plus the rounds 1–2 surface (`vi.mocked`/`hoisted`/`fn<T>`, mock
+  `importOriginal<T>`, `expect.fail`). Run by `test/compat-types.test.mjs` via `tsc --noEmit
+  --strict` (new `typescript` devDependency; skips if absent). A shim regression now fails `npm test`.
+
 ## [0.3.3] — `.d.ts` shim round 2 (mock `importOriginal` generic + tuple-preserving `it.each`)
 
 ### Fixed
