@@ -15,7 +15,23 @@
 //   - `types/vitest.d.ts`    → `declare module 'vitest'` / `'@jest/globals'` (for `import` sites)
 //   - `types/globals.d.ts`   → ambient globals (replaces `types: ["vitest/globals"]`)
 
-export type TestFunction = () => void | Promise<void>;
+// The context object vitest passes as the first arg to every test body and hook (`it('x', ({
+// expect, task }) => …)`, `beforeEach((ctx) => …)`). Kept permissive (index signature) so any
+// destructure type-checks; the common members are typed for editor help.
+export interface TestContext {
+  readonly task: any;
+  readonly signal: AbortSignal;
+  readonly expect: ExpectStatic;
+  readonly skip: (note?: string) => void;
+  readonly annotate: (...args: any[]) => any;
+  readonly onTestFailed: (fn: (ctx: TestContext) => any, timeout?: number) => void;
+  readonly onTestFinished: (fn: (ctx: TestContext) => any, timeout?: number) => void;
+  [key: string]: any;
+}
+
+// vitest's `TestFunction` receives the test context (`(context) => Awaitable<any> | void`); a
+// no-arg `() => …` body is still assignable (fewer params).
+export type TestFunction = (context: TestContext) => any;
 
 export interface TestOptions {
   timeout?: number;
@@ -23,38 +39,44 @@ export interface TestOptions {
   repeats?: number;
 }
 
-// Strip `readonly` so a row spread from `[…] as const` (readonly tuple) is assignable to a
-// callback's mutable positional params.
-export type Writable<T> = { -readonly [K in keyof T]: T[K] };
+// `it.each` typing — lifted verbatim from vitest (`@vitest/runner`'s `ExtractEachCallbackArgs` /
+// `EachFunctionReturn` / `TestEachFunction`) so behavior matches the real runner exactly: tuple
+// rows (const or not, up to 10 cols) map to precise positional args; everything else (ragged /
+// heterogeneous / >10 cols) lands on the permissive `fallback`/`T[]` overload with array args.
+export type ExtractEachCallbackArgs<T extends ReadonlyArray<any>> = {
+  1: [T[0]];
+  2: [T[0], T[1]];
+  3: [T[0], T[1], T[2]];
+  4: [T[0], T[1], T[2], T[3]];
+  5: [T[0], T[1], T[2], T[3], T[4]];
+  6: [T[0], T[1], T[2], T[3], T[4], T[5]];
+  7: [T[0], T[1], T[2], T[3], T[4], T[5], T[6]];
+  8: [T[0], T[1], T[2], T[3], T[4], T[5], T[6], T[7]];
+  9: [T[0], T[1], T[2], T[3], T[4], T[5], T[6], T[7], T[8]];
+  10: [T[0], T[1], T[2], T[3], T[4], T[5], T[6], T[7], T[8], T[9]];
+  fallback: Array<T extends ReadonlyArray<infer U> ? U : any>;
+}[T extends Readonly<[any]> ? 1
+  : T extends Readonly<[any, any]> ? 2
+  : T extends Readonly<[any, any, any]> ? 3
+  : T extends Readonly<[any, any, any, any]> ? 4
+  : T extends Readonly<[any, any, any, any, any]> ? 5
+  : T extends Readonly<[any, any, any, any, any, any]> ? 6
+  : T extends Readonly<[any, any, any, any, any, any, any]> ? 7
+  : T extends Readonly<[any, any, any, any, any, any, any, any]> ? 8
+  : T extends Readonly<[any, any, any, any, any, any, any, any, any]> ? 9
+  : T extends Readonly<[any, any, any, any, any, any, any, any, any, any]> ? 10
+  : 'fallback'];
+
+export interface EachFunctionReturn<T extends any[]> {
+  (name: string | Function, fn: (...args: T) => any, options?: number): void;
+  (name: string | Function, options: TestOptions, fn: (...args: T) => any): void;
+}
 
 export interface TestEachFunction {
-  // (1) inline rows — `readonly [...T]` forces each row to infer as a tuple (not a widened
-  //     element-union array), so a non-const heterogeneous row `['x', false]` keeps its
-  //     per-position types and a 1-tuple `['x']` maps to a single positional arg.
-  <T extends readonly any[]>(cases: ReadonlyArray<readonly [...T]>): (
-    name: string,
-    fn: (...args: [...T]) => any,
-    timeout?: number,
-  ) => void;
-  // (2) `[…] as const` rows arrive as a UNION of distinct readonly tuples that (1) can't unify;
-  //     match the union directly and map it to mutable tuples (`Writable`) so the spread assigns.
-  <T extends readonly any[]>(cases: ReadonlyArray<T>): (
-    name: string,
-    fn: (...args: Writable<T>) => any,
-    timeout?: number,
-  ) => void;
-  (strings: TemplateStringsArray, ...values: any[]): (
-    name: string,
-    fn: (arg: any) => any,
-    timeout?: number,
-  ) => void;
-  // (3) single-value rows — incl. an explicit type arg over a non-array union
-  //     (`it.each<InviteType>(['a', 'b'])(…, (t) => …)`). Kept last so tuple rows infer first.
-  <T>(cases: ReadonlyArray<T>): (
-    name: string,
-    fn: (arg: T) => any,
-    timeout?: number,
-  ) => void;
+  <T extends any[] | [any]>(cases: ReadonlyArray<T>): EachFunctionReturn<T>;
+  <T extends ReadonlyArray<any>>(cases: ReadonlyArray<T>): EachFunctionReturn<ExtractEachCallbackArgs<T>>;
+  <T>(cases: ReadonlyArray<T>): EachFunctionReturn<T[]>;
+  (...args: [TemplateStringsArray, ...any]): EachFunctionReturn<any[]>;
 }
 
 export interface TestAPI {
@@ -68,7 +90,7 @@ export interface TestAPI {
 }
 
 export interface SuiteAPI {
-  (name: string, fn: () => void): void;
+  (name: string, fn: () => any): void;
   only: SuiteAPI;
   skip: SuiteAPI;
   todo: (name: string) => void;
@@ -76,11 +98,12 @@ export interface SuiteAPI {
   each: TestEachFunction;
 }
 
-// vitest's hooks accept `() => any` — a callback may return a teardown fn, a chainable like
-// `vi.useFakeTimers()` (returns ViAPI), or a Promise. Widen to match so `beforeEach(() =>
-// vi.useFakeTimers())` type-checks.
+// vitest's hooks pass a context (`beforeEach((ctx, suite) => …)`) and accept any return — a
+// teardown fn, a chainable like `vi.useFakeTimers()` (returns ViAPI), or a Promise. The callback
+// args are optional, so `beforeEach(() => vi.useFakeTimers())` and `afterEach(async () => …)`
+// both type-check.
 export type HookFunction = (
-  fn: () => unknown | Promise<unknown>,
+  fn: (context: TestContext, ...rest: any[]) => any,
   timeout?: number,
 ) => void;
 
@@ -140,6 +163,9 @@ export interface Assertion {
 
 export interface ExpectStatic {
   (actual: any, message?: string): Assertion;
+  // forward-compat: vitest exposes more statics (poll, unreachable, assertType,
+  // addSnapshotSerializer, getState/setState, …). Permit any `expect.X` rather than error.
+  [key: string]: any;
   extend(matchers: Record<string, (...args: any[]) => any>): void;
   assertions(count: number): void;
   hasAssertions(): void;
