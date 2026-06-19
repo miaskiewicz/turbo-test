@@ -2248,6 +2248,11 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
         // interface-typed import for its `design:type` reference → ESM link failure.
         if let Some(root) = tsc_root(abs) {
             if let Some(esm) = tsc_transform_esm(abs, &root) {
+                // Even tsc (transpileModule, single-file → no type checker) keeps an imported
+                // INTERFACE referenced in `design:type`. Neutralize those metadata refs → Object and
+                // drop the now-unused type-only import, so V8 doesn't fail instantiation on a missing
+                // export. Names used as real values are left intact (see strip_type_only_metadata_imports).
+                let esm = crate::transform::strip_type_only_metadata_imports(&esm);
                 let _ = std::fs::write(&path, &esm);
                 return Some(esm);
             }
@@ -2256,6 +2261,13 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
     let out = crate::transform::transform_with(abs, &raw, legacy_decorators)
         .map_err(|e| eprintln!("transform {}: {e}", abs.display()))
         .ok()?;
+    // Same neutralization for the oxc fallback (its metadata uses a runtime-safe
+    // `typeof X === "undefined" ? Object : X` guard, but the import still demands the export).
+    let out = if legacy_decorators {
+        crate::transform::strip_type_only_metadata_imports(&out)
+    } else {
+        out
+    };
     let _ = std::fs::write(&path, &out);
     Some(out)
 }
