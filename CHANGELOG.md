@@ -5,6 +5,27 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.7] — node-env jest: decorator-metadata via tsc + interface design:type partial
+
+### Fixed
+- **`emitDecoratorMetadata` files now route through the project's TypeScript on first load** — on
+  both the CJS and ESM load paths — emitting `Object` for non-value types (ts-jest parity for local
+  type aliases / nullable types) instead of oxc's identifier-based metadata. Fixes a decorated field
+  typed as a **local** type alias and the nullable-metadata cases.
+- **The routing now actually fires on ts-jest backends.** It required `project_root`, which only
+  resolves a dir containing `node_modules/.bin/esbuild`; projects that ship `typescript` but NOT
+  esbuild (the common ts-jest setup) hit `None` and silently fell back to oxc. New `tsc_root` walks
+  up for `node_modules/typescript`, so tsc runs. Net on a real NestJS+Sequelize suite (flux-apis):
+  **+79 passing tests** (decorated files whose metadata tsc lowers correctly now load).
+
+### Known limit
+- A decorated field typed as an **imported interface** (`@Column() declare x: SomeImportedIface`)
+  still fails ESM instantiation (`does not provide an export named SomeImportedIface`). Neither oxc
+  nor `ts.transpileModule` has a cross-file type checker, so both keep the type-only import and
+  reference it in `design:type`; the interface has no runtime export. Fix is app-side
+  `import type { … }` (elided by any transform) or a full TS program (too heavy for a runner).
+  ~73 such cases remain on flux-apis.
+
 ## [0.3.6] — node-env jest: gated decorators + `.`/`..` re-exports + native-addon crash guard
 
 Makes a real NestJS + Sequelize/Mongoose backend (flux-apis) load and run under turbo-test, from
