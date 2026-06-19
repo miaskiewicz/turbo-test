@@ -23,13 +23,24 @@ export interface TestOptions {
   repeats?: number;
 }
 
+// Strip `readonly` so a row spread from `[…] as const` (readonly tuple) is assignable to a
+// callback's mutable positional params.
+export type Writable<T> = { -readonly [K in keyof T]: T[K] };
+
 export interface TestEachFunction {
-  // tuple rows → spread into the callback's positional args, preserving per-position types
-  // (`each([['x', true]])(…, (label: string, flag: boolean) => …)`). `readonly [...T]` forces
-  // each row to infer as a tuple instead of widening to an element-union array.
-  <T extends any[]>(cases: ReadonlyArray<readonly [...T]>): (
+  // (1) inline rows — `readonly [...T]` forces each row to infer as a tuple (not a widened
+  //     element-union array), so a non-const heterogeneous row `['x', false]` keeps its
+  //     per-position types and a 1-tuple `['x']` maps to a single positional arg.
+  <T extends readonly any[]>(cases: ReadonlyArray<readonly [...T]>): (
     name: string,
-    fn: (...args: T) => any,
+    fn: (...args: [...T]) => any,
+    timeout?: number,
+  ) => void;
+  // (2) `[…] as const` rows arrive as a UNION of distinct readonly tuples that (1) can't unify;
+  //     match the union directly and map it to mutable tuples (`Writable`) so the spread assigns.
+  <T extends readonly any[]>(cases: ReadonlyArray<T>): (
+    name: string,
+    fn: (...args: Writable<T>) => any,
     timeout?: number,
   ) => void;
   (strings: TemplateStringsArray, ...values: any[]): (
@@ -37,8 +48,8 @@ export interface TestEachFunction {
     fn: (arg: any) => any,
     timeout?: number,
   ) => void;
-  // single-value rows — incl. an explicit type arg over a non-array union
-  // (`it.each<InviteType>(['a', 'b'])(…, (t) => …)`). Kept last so tuple rows infer first.
+  // (3) single-value rows — incl. an explicit type arg over a non-array union
+  //     (`it.each<InviteType>(['a', 'b'])(…, (t) => …)`). Kept last so tuple rows infer first.
   <T>(cases: ReadonlyArray<T>): (
     name: string,
     fn: (arg: T) => any,
