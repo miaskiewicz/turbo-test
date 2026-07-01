@@ -1,6 +1,6 @@
 [package]
 name = "turbo-test"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2021"
 license = "MIT"
 description = "A blazing-fast native test runner — drop-in replacement for Vitest"
@@ -50,7 +50,7 @@ base64 = "0.22"
 # 0.3.4 adds native CharacterData mutation + ChildNode/ParentNode manip + insertAdjacent + toggleAttribute + getAttributeNS over rtdom.
 # 0.3.5 fixes rtdom::serialize escaping regular spaces to &nbsp; (U+00A0), which broke
 # whitespace-normalized getByRole/getByText/toHaveText matching against a serialized DOM.
-turbo-dom-parser = { package = "turbo-dom", version = "0.3.5" }
+turbo-dom-parser = { package = "turbo-dom", version = "0.4.0" }
 
 [profile.release]
 opt-level = 3
