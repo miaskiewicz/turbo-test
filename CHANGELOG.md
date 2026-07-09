@@ -5,6 +5,20 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.12] — DOM binding: hasChildNodes/namedItem + form-control methods (React hydration)
+
+### Added
+- **`Node.hasChildNodes()`** on the native element binding. It was absent, so the
+  NON_MASKING interceptor returned `undefined` and React's hydration/commit path threw
+  `hasChildNodes is not a function` — aborting the client-render fallback.
+- **`namedItem` on the array-like NodeList/HTMLCollection/NamedNodeMap** returned by
+  `children`/`childNodes`/`querySelectorAll`/`getElementsBy*`/`attributes` (bound next
+  to the existing `.item`). Libs calling `namedItem` no longer hit `not a function`.
+- **Form-control methods** `setCustomValidity`, `setSelectionRange`, `setRangeText`,
+  `select`, `scrollTo`, `scrollBy` (no-ops), plus `checkValidity`/`reportValidity`
+  (always valid). Missing methods threw mid-hydration, making React discard the SSR
+  tree and client-render the whole root (#425), losing server-rendered content.
+
 ## [0.3.7] — node-env jest: decorator-metadata via tsc + interface design:type partial
 
 ### Fixed
