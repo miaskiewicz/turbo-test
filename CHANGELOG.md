@@ -5,6 +5,18 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.13] — EventTarget is now a real subclassable base (React hydration)
+
+### Fixed
+- **`class Foo extends EventTarget` now works.** The ctor shim gave `EventTarget` an
+  empty prototype, so `this.addEventListener(…)` inside any subclass (event buses,
+  state stores, modal managers — Nike's global-nav modal manager is one) threw
+  `addEventListener is not a function`. An uncaught throw mid-hydration makes React
+  discard the SSR tree and client-render the whole root (#425), blanking
+  server-rendered content. `EventTarget.prototype` now carries a working
+  `addEventListener`/`removeEventListener`/`dispatchEvent` listener registry, so
+  subclass instances behave as event targets and hydration completes over the SSR DOM.
+
 ## [0.3.12] — DOM binding: hasChildNodes/namedItem + form-control methods (React hydration)
 
 ### Added
