@@ -113,7 +113,11 @@ jobs:
           chmod +x bin/* || true
           ls -la bin/
       - name: Publish (skips prepublishOnly — binaries already built)
-        run: npm publish --access public --ignore-scripts
+        # Stamp the npm version from the tag so it can't drift from the crates.io
+        # release (a stale version re-publish 403s "cannot publish over X.Y.Z").
+        run: |
+          npm pkg set version="${GITHUB_REF_NAME#v}"
+          npm publish --access public --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -131,6 +135,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Publish turbo-test crate
-        run: cargo publish -p turbo-test
+        # --allow-dirty: a build step touches a tracked file during package/verify,
+        # which otherwise aborts `cargo publish` ("files not yet committed"). The
+        # tree still matches the tagged commit (fresh checkout), so this is safe.
+        run: cargo publish -p turbo-test --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
