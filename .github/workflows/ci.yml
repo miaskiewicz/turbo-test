@@ -113,7 +113,11 @@ jobs:
           chmod +x bin/* || true
           ls -la bin/
       - name: Publish (skips prepublishOnly — binaries already built)
-        run: npm publish --access public --ignore-scripts
+        # Stamp the npm version from the tag so it can't drift from the crates.io
+        # release (a stale version re-publish 403s "cannot publish over X.Y.Z").
+        run: |
+          npm pkg set version="${GITHUB_REF_NAME#v}"
+          npm publish --access public --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
