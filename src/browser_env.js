@@ -390,13 +390,44 @@
     // Element.getClientRects() — no layout engine, so mirror getBoundingClientRect's zero rect as a
     // single-entry DOMRectList-ish (with .item). Libs do getClientRects()[0] / .length; [] would NPE.
     if (!baseProto.getClientRects) baseProto.getClientRects = function(){ var r = this.getBoundingClientRect ? this.getBoundingClientRect() : { x:0,y:0,top:0,left:0,right:0,bottom:0,width:0,height:0 }; var list = [r]; list.item = function(i){ return list[i] || null; }; return list; };
+    // isEqualNode — React 18 hydration calls it on EVERY node to reconcile the server
+    // markup with the client render; without it every comparison throws
+    // "e.isEqualNode is not a function", React reports a hydration mismatch (#418) and
+    // discards the SSR tree → the whole app falls back to a blank client render. Real
+    // spec-shaped deep structural equality (same type/name, same attributes, same
+    // character data, recursively-equal children). Recurses via a helper (not
+    // child.isEqualNode) so it works even on node types that miss the method.
+    if (!baseProto.isEqualNode) {
+      var __nodeEq = function(a, b){
+        if (a === b) return true;
+        if (!a || !b) return false;
+        if (a.nodeType !== b.nodeType || a.nodeName !== b.nodeName) return false;
+        if (a.nodeType === 1) {
+          var aa = a.attributes || [], ba = b.attributes || [];
+          if ((aa.length || 0) !== (ba.length || 0)) return false;
+          for (var i = 0; i < aa.length; i++) {
+            var at = aa[i], nm = at && (at.name != null ? at.name : at.nodeName);
+            if (nm == null) continue;
+            if (!b.getAttribute || b.getAttribute(nm) !== (at.value != null ? at.value : at.nodeValue)) return false;
+          }
+        } else if ((a.nodeValue || '') !== (b.nodeValue || '')) {
+          return false;
+        }
+        var ac = a.childNodes || [], bc = b.childNodes || [];
+        if ((ac.length || 0) !== (bc.length || 0)) return false;
+        for (var j = 0; j < ac.length; j++) { if (!__nodeEq(ac[j], bc[j])) return false; }
+        return true;
+      };
+      baseProto.isEqualNode = function(other){ return __nodeEq(this, other); };
+      if (!baseProto.isSameNode) baseProto.isSameNode = function(other){ return this === other; };
+    }
     // getElementsByTagName / getElementsByClassName / getElementsByName over querySelectorAll. The
     // native binding ships querySelector(All) only; libs (jQuery's load-time support probe does
     // el.getElementsByTagName('input')[0].checked) need these. Add to the shared element prototype
     // (guarded so a native impl wins if ever added).
     // Walk descendants via `children` (works on a DETACHED subtree, unlike querySelectorAll which
     // matches only connected nodes — same reason select.options walks children).
-    var geWalk = function(node, match){ var out = []; (function visit(n){ var kids = n.children || []; for (var i=0;i<kids.length;i++){ if (match(kids[i])) out.push(kids[i]); visit(kids[i]); } })(node); out.item = function(i){ return out[i] || null; }; return out; };
+    var geWalk = function(node, match){ var out = []; (function visit(n){ var kids = n.children || []; for (var i=0;i<kids.length;i++){ if (match(kids[i])) out.push(kids[i]); visit(kids[i]); } })(node); out.item = function(i){ return out[i] || null; }; out.namedItem = function(nm){ for (var i=0;i<out.length;i++){ var e=out[i]; if (e && (e.id === nm || (e.getAttribute && e.getAttribute('name') === nm))) return e; } return null; }; return out; };
     var geByTag = function(t){ var want = String(t).toUpperCase(); return geWalk(this, function(e){ return want === '*' || String(e.tagName).toUpperCase() === want; }); };
     var geByClass = function(c){ var want = String(c).trim().split(/\s+/).filter(Boolean); return geWalk(this, function(e){ var cls = String(e.className || '').split(/\s+/); return want.every(function(w){ return cls.indexOf(w) >= 0; }); }); };
     var geByName = function(nm){ var want = String(nm); return geWalk(this, function(e){ return e.getAttribute && e.getAttribute('name') === want; }); };
