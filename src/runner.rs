@@ -614,7 +614,12 @@ pub fn transform_cache_stats() -> (u64, u64) {
 const TRANSFORM_VERSION: &str = "oxc-0.134-v1";
 
 fn cache_dir() -> PathBuf {
-    let d = std::env::temp_dir().join("turbo-test-cache");
+    // TURBO_CACHE_DIR overrides the shared temp cache — lets a test run against an isolated,
+    // freshly-cleared cache without disturbing other concurrent turbo-test processes that share
+    // the default location.
+    let d = std::env::var_os("TURBO_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("turbo-test-cache"));
     let _ = std::fs::create_dir_all(&d);
     d
 }
@@ -807,22 +812,33 @@ fn esbuild_bundle_full(
     if let Some(tc) = &tsconfig {
         cmd.arg(format!("--tsconfig={}", tc.display()));
     }
-    cmd.arg(format!("--outfile={}", out.display()))
+    // Write to a UNIQUE temp outfile, then atomically rename into the content-addressed cache
+    // path. esbuild's --outfile writes NON-atomically (it truncates+streams to the target), so
+    // pointing it straight at `out` lets a concurrent worker — which only checks `out.exists()`
+    // (above) — read a half-written / empty bundle. An empty setup bundle silently imports
+    // nothing, so `setupFiles`' `expect.extend` never runs and that whole worker loses its custom
+    // matchers for every file (the jest-dom "toBeInTheDocument is not a function" cascade). Every
+    // OTHER esbuild cache path already goes through write_atomic for this exact reason; this one
+    // used --outfile directly. Mirror the temp+rename here.
+    let seq = ATOMIC_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = out.with_extension(format!("tmp{}-{}.mjs", std::process::id(), seq));
+    cmd.arg(format!("--outfile={}", tmp.display()))
         .stdout(std::process::Stdio::null());
     if std::env::var("TURBO_ESBUILD_DEBUG").is_err() {
         cmd.stderr(std::process::Stdio::null());
     }
-    let status = cmd.status().ok()?;
-    if !(status.success() && out.exists()) {
+    let status = cmd.status().ok();
+    if !status.map(|s| s.success()).unwrap_or(false) || !tmp.exists() {
+        let _ = std::fs::remove_file(&tmp);
         return None;
     }
     // Rewrite every externalized mock import to the single absolute mock target for its
     // basename. All depth-variants of a relative mock specifier ("../analytics",
     // "../../../analytics", ...) point at the same module, so they map to one abs path that
     // matches the mock registered under that path — regardless of which nested module wrote
-    // the import (whose depth differs from the entry's).
+    // the import (whose depth differs from the entry's). Done on the temp file, before publish.
     if !externals.is_empty() && !rewrite_map.is_empty() {
-        if let Ok(mut text) = std::fs::read_to_string(&out) {
+        if let Ok(mut text) = std::fs::read_to_string(&tmp) {
             let mut changed = false;
             for spec in externals {
                 if let Some(abs) = rewrite_map.get(&spec_basename(spec)) {
@@ -838,8 +854,18 @@ fn esbuild_bundle_full(
                 }
             }
             if changed {
-                let _ = std::fs::write(&out, &text);
+                let _ = std::fs::write(&tmp, &text);
             }
+        }
+    }
+    // Publish atomically: `out` only ever becomes visible fully-written. A racing worker either
+    // sees no `out` (and builds its own temp) or the complete file — never a partial one.
+    if std::fs::rename(&tmp, &out).is_err() {
+        // Rename can fail if another worker already published an identical `out`; fall back to it
+        // when present, else give up (and clean the temp).
+        let _ = std::fs::remove_file(&tmp);
+        if !out.exists() {
+            return None;
         }
     }
     Some(out)
