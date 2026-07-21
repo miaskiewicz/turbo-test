@@ -5,6 +5,42 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.14] — setupFiles matchers no longer lost for a whole worker under reuse/coverage
+
+### Fixed
+- **`setupFiles`' `expect.extend` matchers (jest-dom's `toBeInTheDocument`, `toHaveTextContent`,
+  `toBeDisabled`, …) intermittently missing for an entire worker's chunk of files under the
+  isolate-reuse path — and under `--coverage` even with `--isolate`.** Symptom in the consuming app
+  (payroll-app CI shards): a random subset of `.tsx` tests failing `expect(...).toBeInTheDocument is
+  not a function`, bursty per-worker (a broken worker cascades its whole file chunk), unreproducible
+  in isolation. `--isolate` masked the reuse trigger but coverage stayed flaky, so there was no CI
+  workaround.
+- **Root cause:** `esbuild_bundle_full` (used to build the setup-file bundle) wrote the output
+  straight to the shared content-addressed cache path via esbuild's `--outfile`, which streams the
+  file **non-atomically**. The cache-hit check is a bare `out.exists()`, so when many workers raced
+  to create the *same* setup bundle at startup, a worker could read a **half-written or empty**
+  bundle. An empty setup bundle imports nothing → `expect.extend` never runs → that worker's single
+  reused `__customMatchers` registry stays empty for **every** file it owns (the whole-worker
+  cascade). `run_setup_file` swallowed the resulting load, so the failure was silent. Every *other*
+  esbuild cache path already wrote through `write_atomic` (temp + rename) for exactly this reason;
+  this one path did not. It now builds to a unique temp file (applying the mock-rewrite pass there)
+  and **atomically renames** into the cache — a racing worker sees either no file or the complete
+  one, never a partial. Fixes both the reuse and coverage triggers (both go through this bundle).
+- The `fresh-isolate retry` was auto-healing most of the reuse failures (re-running setup per file
+  in a clean isolate), which is why the reuse trigger was flaky rather than constant and why it hid
+  under `--isolate` — but it re-ran whole files at a cost, and could not help the coverage path.
+
+### Added
+- `TURBO_CACHE_DIR` env var to override the shared transform/bundle cache location — lets a test run
+  against an isolated, freshly-cleared cache without disturbing other concurrent turbo-test processes
+  (used by the new regression test).
+
+### Tests
+- `fixtures/jestdom-reuse/` — a vendored `jest-dom-ish` package whose top-level side-effect is
+  `expect.extend({...})`, a setupFile that imports it, `isolate: false`, and 30 files that each call
+  the custom matcher. `test/compat-reuse-matchers.test.mjs` runs it under reuse against a clean
+  isolated cache (forcing the concurrent first-build) and asserts all matcher assertions run + pass.
+
 ## [0.3.13] — EventTarget is now a real subclassable base (React hydration)
 
 ### Fixed
