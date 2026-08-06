@@ -17,6 +17,8 @@ import type {
   TestAPI,
   HookFunction,
   ExpectStatic,
+  ExpectTypeOfStatic,
+  AssertType,
   ViAPI,
 } from './turbo-test-api';
 
@@ -26,6 +28,9 @@ export declare const describe: SuiteAPI;
 export declare const it: TestAPI;
 export declare const test: TestAPI;
 export declare const expect: ExpectStatic;
+// Type-level assertions — checked by tsc, erased at run time (see turbo-test-api.d.ts).
+export declare const expectTypeOf: ExpectTypeOfStatic;
+export declare const assertType: AssertType;
 export declare const vi: ViAPI;
 export declare const beforeEach: HookFunction;
 export declare const afterEach: HookFunction;

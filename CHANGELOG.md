@@ -5,6 +5,43 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.3.15] — functional Web Streams + `expectTypeOf` on the vitest surface
+
+### Fixed
+- **`ReadableStream`/`WritableStream`/`TransformStream` were present but non-functional (issue #15).**
+  The globals existed — so libraries that do `class X extends TransformStream` at module load kept
+  loading — but the reader's `read()` unconditionally resolved `{ done: true }`, so any code that
+  actually *consumed* a stream (fetch response-body streaming, SSE parsing) silently saw an empty
+  stream. Replaced the stub with a working implementation: a chunk queue with `pull` backpressure,
+  reader/writer locking, `cancel`/`abort` propagation to the underlying source/sink, `tee()`,
+  async iteration (`for await`), and `pipeTo`/`pipeThrough`. The guard still defers to a host that
+  already provides native streams. Not spec-exhaustive (no BYOB readers, no queuing-strategy
+  `size`), but matches Node's observable behavior for the common consumer patterns.
+
+### Added
+- **`expectTypeOf` and `assertType` on the `vitest` compatibility surface (issue #16).** They were
+  missing from both the runtime module shim (`import { expectTypeOf } from 'vitest'` threw
+  `does not provide an export named 'expectTypeOf'`, and the namespace-member form failed at
+  runtime as `not a function`) and the bundled type shim (so type-level assertions didn't
+  type-check either). Type assertions are erased at compile time and have no runtime behavior in
+  vitest, so the runtime is a chainable no-op (a proxy that answers every member with itself, with
+  `then` excluded so an accidental `await` can't hang). The checking lives in the `.d.ts`:
+  `ExpectTypeOf<Actual, Positive>` implements `toEqualTypeOf`/`toMatchTypeOf`/`toHaveProperty`/
+  `toBe*`/`.not`/navigation (`items`/`returns`/`resolves`/…), where a mismatch surfaces as a
+  compile error. Exported from `types/vitest.d.ts` and declared as globals in `types/globals.d.ts`,
+  alongside `describe`/`it`/`expect`/`vi`.
+
+### Tests
+- `fixtures/compat/streams.test.ts` (15 cases) — the issue-#15 minimal repro plus lazy `pull`,
+  async `start`, async iteration, `error`/`cancel` propagation, `tee`, subclassed
+  `TransformStream`, and `pipeTo`/`pipeThrough`; asserted via the JSON reporter in
+  `test/compat-api.test.mjs`.
+- `fixtures/compat/expecttypeof.test.ts` (5 cases) — `expectTypeOf`/`assertType` resolve and run
+  through named, namespace, and global access.
+- `types/typetests/expecttypeof.test-d.ts` — compile-only guard (run under `tsc --strict` by
+  `test/compat-types.test.mjs`) covering positive assertions and `@ts-expect-error` negative cases
+  so the shim fails in both directions.
+
 ## [0.3.14] — setupFiles matchers no longer lost for a whole worker under reuse/coverage
 
 ### Fixed

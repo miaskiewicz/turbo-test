@@ -15,6 +15,8 @@ import type {
   TestAPI,
   HookFunction,
   ExpectStatic,
+  ExpectTypeOfStatic,
+  AssertType,
   ViAPI,
   JestAPI,
 } from './turbo-test-api';
@@ -26,6 +28,9 @@ declare global {
   const it: TestAPI;
   const test: TestAPI;
   const expect: ExpectStatic;
+  // Type-level assertions — checked by tsc, erased at run time.
+  const expectTypeOf: ExpectTypeOfStatic;
+  const assertType: AssertType;
   const vi: ViAPI;
   // turbo-test also injects the jest controller as a global (jest-project parity).
   const jest: JestAPI;

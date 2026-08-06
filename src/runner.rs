@@ -3384,8 +3384,8 @@ fn ensure_vitest_builtin<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<()> {
     let global = scope.get_current_context().global(scope);
     let obj = v8::Object::new(scope);
     for n in [
-        "describe", "it", "test", "expect", "vi", "jest", "beforeEach", "afterEach", "beforeAll",
-        "afterAll", "assert",
+        "describe", "it", "test", "expect", "expectTypeOf", "assertType", "vi", "jest",
+        "beforeEach", "afterEach", "beforeAll", "afterAll", "assert",
     ] {
         let k = v8::String::new(scope, n)?;
         if let Some(v) = global.get(scope, k.into()) {
