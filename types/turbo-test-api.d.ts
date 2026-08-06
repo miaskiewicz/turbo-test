@@ -186,6 +186,97 @@ export interface ExpectStatic {
   };
 }
 
+// ---- expectTypeOf / assertType ----------------------------------------------------------------
+//
+// Type-level assertions. They are erased at compile time and have NO runtime behavior (turbo-test
+// backs `expectTypeOf` with a chainable no-op, same observable result as vitest) — all the checking
+// happens here, in the types. A failed assertion surfaces as an arity error on the call
+// ("Expected 1 arguments, but got 0") because the mismatch branch demands an extra argument that
+// cannot be produced.
+
+/** Strict type equality — distinguishes `any`/`unknown`/`never` and optional-vs-undefined. */
+export type TypeEqual<X, Y> = (<T>() => T extends X ? 1 : 2) extends <T>() => T extends Y ? 1 : 2
+  ? true
+  : false;
+export type TypeExtends<A, B> = [A] extends [B] ? true : false;
+export type IsAny<T> = 0 extends 1 & T ? true : false;
+export type IsNullable<T> = null extends T ? true : undefined extends T ? true : false;
+type Negate<B extends boolean> = B extends true ? false : true;
+/** The failure payload: an argument the caller has no way to construct. */
+type TypeMismatch = { readonly __turboTestTypeAssertionFailed: unique symbol };
+/** `[]` when the check holds (call takes no extra arg), `[TypeMismatch]` when it doesn't. */
+type TypeArgs<Got extends boolean, Want extends boolean> = Got extends Want ? [] : [TypeMismatch];
+
+export interface ExpectTypeOf<Actual, Positive extends boolean> {
+  /** Inverts every assertion below it: `expectTypeOf<A>().not.toEqualTypeOf<B>()`. */
+  not: ExpectTypeOf<Actual, Negate<Positive>>;
+
+  toEqualTypeOf<Expected>(
+    expected: Expected,
+    ...args: TypeArgs<TypeEqual<Actual, Expected>, Positive>
+  ): void;
+  toEqualTypeOf<Expected>(...args: TypeArgs<TypeEqual<Actual, Expected>, Positive>): void;
+
+  toMatchTypeOf<Expected>(
+    expected: Expected,
+    ...args: TypeArgs<TypeExtends<Actual, Expected>, Positive>
+  ): void;
+  toMatchTypeOf<Expected>(...args: TypeArgs<TypeExtends<Actual, Expected>, Positive>): void;
+
+  /** vitest 3+ spelling of `toMatchTypeOf`. */
+  toExtend<Expected>(expected: Expected, ...args: TypeArgs<TypeExtends<Actual, Expected>, Positive>): void;
+  toExtend<Expected>(...args: TypeArgs<TypeExtends<Actual, Expected>, Positive>): void;
+  toMatchObjectType<Expected>(...args: TypeArgs<TypeExtends<Actual, Expected>, Positive>): void;
+
+  /** Asserts the key exists, and narrows the chain to that property's type. */
+  toHaveProperty<K extends PropertyKey>(
+    key: K,
+    ...args: TypeArgs<K extends keyof Actual ? true : false, Positive>
+  ): ExpectTypeOf<K extends keyof Actual ? Actual[K] : never, true>;
+
+  toBeString(...args: TypeArgs<TypeExtends<Actual, string>, Positive>): void;
+  toBeNumber(...args: TypeArgs<TypeExtends<Actual, number>, Positive>): void;
+  toBeBoolean(...args: TypeArgs<TypeExtends<Actual, boolean>, Positive>): void;
+  toBeBigInt(...args: TypeArgs<TypeExtends<Actual, bigint>, Positive>): void;
+  toBeSymbol(...args: TypeArgs<TypeExtends<Actual, symbol>, Positive>): void;
+  toBeVoid(...args: TypeArgs<TypeExtends<Actual, void>, Positive>): void;
+  toBeNull(...args: TypeArgs<TypeEqual<Actual, null>, Positive>): void;
+  toBeUndefined(...args: TypeArgs<TypeEqual<Actual, undefined>, Positive>): void;
+  toBeNullable(...args: TypeArgs<IsNullable<Actual>, Positive>): void;
+  toBeAny(...args: TypeArgs<IsAny<Actual>, Positive>): void;
+  toBeUnknown(...args: TypeArgs<TypeEqual<Actual, unknown>, Positive>): void;
+  toBeNever(...args: TypeArgs<TypeEqual<Actual, never>, Positive>): void;
+  toBeObject(...args: TypeArgs<TypeExtends<Actual, object>, Positive>): void;
+  toBeArray(...args: TypeArgs<TypeExtends<Actual, readonly any[]>, Positive>): void;
+  toBeFunction(...args: TypeArgs<TypeExtends<Actual, (...a: any[]) => any>, Positive>): void;
+
+  /** Callable/constructible with exactly these arguments (arity + types checked by tsc). */
+  toBeCallableWith: Actual extends (...a: infer P) => any ? (...args: P) => void : never;
+  toBeConstructibleWith: Actual extends new (...a: infer P) => any ? (...args: P) => void : never;
+
+  // navigation — each narrows the chain to a sub-type of `Actual`
+  items: ExpectTypeOf<Actual extends readonly (infer E)[] ? E : never, Positive>;
+  returns: ExpectTypeOf<Actual extends (...a: any[]) => infer R ? R : never, Positive>;
+  parameters: ExpectTypeOf<Actual extends (...a: infer P) => any ? P : never, Positive>;
+  resolves: ExpectTypeOf<Actual extends PromiseLike<infer R> ? R : never, Positive>;
+  instance: ExpectTypeOf<Actual extends new (...a: any[]) => infer I ? I : never, Positive>;
+  constructorParameters: ExpectTypeOf<Actual extends new (...a: infer P) => any ? P : never, Positive>;
+  thisParameter: ExpectTypeOf<Actual extends (this: infer T, ...a: any[]) => any ? T : never, Positive>;
+  guards: ExpectTypeOf<Actual extends (v: any, ...a: any[]) => v is infer G ? G : never, Positive>;
+  asserts: ExpectTypeOf<Actual, Positive>;
+  branded: ExpectTypeOf<Actual, Positive>;
+}
+
+export interface ExpectTypeOfStatic {
+  /** Value form: `expectTypeOf(user).toEqualTypeOf<User>()`. */
+  <Actual>(actual: Actual): ExpectTypeOf<Actual, true>;
+  /** Type-arg form: `expectTypeOf<User>().toHaveProperty('id')`. */
+  <Actual>(): ExpectTypeOf<Actual, true>;
+}
+
+/** Asserts `value` is assignable to `T`; a compile-time no-op otherwise. */
+export type AssertType = <T>(value: T) => void;
+
 // ---- vi / jest controller --------------------------------------------------------------------
 
 export interface ViAPI {

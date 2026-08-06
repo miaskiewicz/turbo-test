@@ -638,11 +638,315 @@ if (typeof globalThis.DOMMatrix === 'undefined') {
   globalThis.WebKitCSSMatrix = DOMMatrix;
   globalThis.SVGMatrix = DOMMatrix;
 }
-// Minimal Web Streams (some libs `class X extends TransformStream` at module load).
+// Web Streams. This used to be a stub whose reader always resolved `{ done: true }` — the globals
+// existed (so `class X extends TransformStream` loaded) but any code that actually CONSUMED a
+// stream (fetch body / SSE parsing) silently saw an empty stream. This is a working implementation:
+// chunk queue + pull backpressure, reader/writer locking, cancel/abort propagation, tee, async
+// iteration, pipeTo/pipeThrough. Not spec-exhaustive (no BYOB readers, no queuing strategy `size`).
+// A host that already provides native streams (napi/Node) still wins via the guard.
 if (typeof globalThis.TransformStream === 'undefined') {
-  globalThis.ReadableStream = class ReadableStream { constructor() {} getReader() { return { read: () => Promise.resolve({ done: true }), releaseLock() {}, cancel() { return Promise.resolve(); } }; } pipeThrough(t) { return t && t.readable; } pipeTo() { return Promise.resolve(); } cancel() { return Promise.resolve(); } };
-  globalThis.WritableStream = class WritableStream { constructor() {} getWriter() { return { write: () => Promise.resolve(), close: () => Promise.resolve(), releaseLock() {}, abort() { return Promise.resolve(); } }; } };
-  globalThis.TransformStream = class TransformStream { constructor() { this.readable = new globalThis.ReadableStream(); this.writable = new globalThis.WritableStream(); } };
+  // `silent` pre-attaches a no-op catch: `reader.closed` / `writer.closed` reject when the stream
+  // errors, and a test that never touches them must not trip an unhandled-rejection report.
+  const __sDefer = (silent) => {
+    let resolve;
+    let reject;
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+    if (silent) promise.catch(() => {});
+    return { promise, resolve, reject };
+  };
+  // Return a promise the caller may ignore without tripping unhandled-rejection reporting, while
+  // still rejecting for a caller that does await it.
+  const __sQuiet = (p) => { p.catch(() => {}); return p; };
+
+  // ---- readable ----
+  // Ask the source for more data. Re-pulls only when the last pull actually enqueued something,
+  // so a source whose pull() never enqueues can't spin forever.
+  const __rsPull = (s) => {
+    if (s._err || s._closed || s._pulling || typeof s._src.pull !== 'function') return;
+    if (s._queue.length >= s._hwm && !s._pending.length) return;
+    s._pulling = true;
+    const before = s._enq;
+    Promise.resolve(s._startP)
+      .then(() => s._src.pull(s._ctrl))
+      .then(
+        () => { s._pulling = false; if (s._enq !== before) __rsPull(s); },
+        (e) => { s._pulling = false; try { s._ctrl.error(e); } catch (_) {} },
+      );
+  };
+  const __rsRead = (s) => {
+    if (s._queue.length) {
+      const value = s._queue.shift();
+      // A close() with chunks still queued stays readable until they drain (spec behavior).
+      if (s._closed && !s._queue.length) s._closedD.resolve(undefined);
+      __rsPull(s);
+      return Promise.resolve({ value, done: false });
+    }
+    if (s._err) return Promise.reject(s._err.e);
+    if (s._closed) return Promise.resolve({ value: undefined, done: true });
+    const d = __sDefer();
+    s._pending.push(d);
+    __rsPull(s);
+    return d.promise;
+  };
+  const __rsCancel = (s, reason) => {
+    if (s._err) return Promise.reject(s._err.e);
+    s._queue.length = 0;
+    if (!s._closed) {
+      s._closed = true;
+      for (const p of s._pending.splice(0)) p.resolve({ value: undefined, done: true });
+      s._closedD.resolve(undefined);
+    }
+    let r;
+    try { r = typeof s._src.cancel === 'function' ? s._src.cancel(reason) : undefined; } catch (e) { return Promise.reject(e); }
+    return Promise.resolve(r).then(() => undefined);
+  };
+
+  class ReadableStreamDefaultController {
+    constructor(stream) { this._s = stream; }
+    get desiredSize() {
+      const s = this._s;
+      if (s._err) return null;
+      if (s._closed) return 0;
+      return s._hwm - s._queue.length;
+    }
+    enqueue(chunk) {
+      const s = this._s;
+      if (s._closed || s._err) throw new TypeError('Cannot enqueue a chunk into a closed or errored readable stream');
+      s._enq++;
+      const p = s._pending.shift();
+      if (p) p.resolve({ value: chunk, done: false });
+      else s._queue.push(chunk);
+    }
+    close() {
+      const s = this._s;
+      if (s._closed || s._err) throw new TypeError('Cannot close a closed or errored readable stream');
+      s._closed = true;
+      for (const p of s._pending.splice(0)) p.resolve({ value: undefined, done: true });
+      if (!s._queue.length) s._closedD.resolve(undefined);
+    }
+    error(e) {
+      const s = this._s;
+      if (s._err) return;
+      s._err = { e };
+      s._queue.length = 0;
+      for (const p of s._pending.splice(0)) p.reject(e);
+      s._closedD.reject(e);
+    }
+  }
+
+  class ReadableStreamDefaultReader {
+    constructor(stream) {
+      if (stream._reader) throw new TypeError('This stream has already been locked for exclusive reading by another reader');
+      this._s = stream;
+      stream._reader = this;
+    }
+    get closed() { return this._s ? this._s._closedD.promise : Promise.resolve(undefined); }
+    read() { return this._s ? __rsRead(this._s) : Promise.reject(new TypeError('Cannot read from a released reader')); }
+    cancel(reason) { return this._s ? __rsCancel(this._s, reason) : Promise.reject(new TypeError('Cannot cancel a released reader')); }
+    releaseLock() { if (this._s) { this._s._reader = null; this._s = null; } }
+  }
+
+  class ReadableStream {
+    constructor(underlyingSource, strategy) {
+      this._src = underlyingSource || {};
+      this._hwm = strategy && typeof strategy.highWaterMark === 'number' ? strategy.highWaterMark : 1;
+      this._queue = [];
+      this._pending = [];
+      this._closed = false;
+      this._err = null;
+      this._enq = 0;          // enqueue counter — drives the re-pull decision in __rsPull
+      this._pulling = false;
+      this._reader = null;
+      this._closedD = __sDefer(true);
+      this._ctrl = new ReadableStreamDefaultController(this);
+      this._startP = undefined;
+      if (typeof this._src.start === 'function') {
+        try { this._startP = this._src.start(this._ctrl); } catch (e) { this._ctrl.error(e); }
+      }
+      if (this._startP && typeof this._startP.then === 'function') {
+        this._startP.then(() => __rsPull(this), (e) => { try { this._ctrl.error(e); } catch (_) {} });
+      } else {
+        __rsPull(this);
+      }
+    }
+    get locked() { return this._reader != null; }
+    getReader(opts) {
+      if (opts && opts.mode === 'byob') throw new TypeError('BYOB readers are not supported in the turbo-test env');
+      return new ReadableStreamDefaultReader(this);
+    }
+    cancel(reason) {
+      if (this._reader) return Promise.reject(new TypeError('Cannot cancel a stream locked by a reader'));
+      return __rsCancel(this, reason);
+    }
+    tee() {
+      const reader = this.getReader();
+      const branches = [];
+      let inflight = null;
+      // One source read feeds both branches; whichever branch pulls first starts it.
+      const pump = () => {
+        if (!inflight) {
+          inflight = reader.read().then(
+            ({ value, done }) => {
+              inflight = null;
+              for (const b of branches) { try { if (done) b._ctrl.close(); else b._ctrl.enqueue(value); } catch (_) {} }
+            },
+            (e) => { inflight = null; for (const b of branches) { try { b._ctrl.error(e); } catch (_) {} } },
+          );
+        }
+        return inflight;
+      };
+      let cancelled = 0;
+      const src = { pull: pump, cancel: () => (++cancelled === 2 ? reader.cancel() : undefined) };
+      branches.push(new ReadableStream(src), new ReadableStream(src));
+      return branches;
+    }
+    pipeTo(dest, opts) {
+      const o = opts || {};
+      const reader = this.getReader();
+      const writer = dest.getWriter();
+      const pump = () => reader.read().then(({ value, done }) => {
+        if (done) return o.preventClose ? undefined : writer.close();
+        return Promise.resolve(writer.write(value)).then(pump);
+      });
+      return __sQuiet(pump().then(
+        () => { reader.releaseLock(); writer.releaseLock(); },
+        (e) => {
+          reader.releaseLock();
+          const p = o.preventAbort ? Promise.resolve() : Promise.resolve(writer.abort(e)).catch(() => {});
+          return p.then(() => { writer.releaseLock(); throw e; });
+        },
+      ));
+    }
+    pipeThrough(pair, opts) {
+      if (!pair || !pair.writable || !pair.readable) throw new TypeError('pipeThrough requires a { readable, writable } pair');
+      this.pipeTo(pair.writable, opts);
+      return pair.readable;
+    }
+    values(opts) { return this[Symbol.asyncIterator](opts); }
+    [Symbol.asyncIterator]() {
+      const reader = this.getReader();
+      return {
+        next: () => reader.read().then((r) => { if (r.done) reader.releaseLock(); return r; }),
+        return: (v) => reader.cancel().then(() => { reader.releaseLock(); return { value: v, done: true }; }),
+        [Symbol.asyncIterator]() { return this; },
+      };
+    }
+  }
+
+  // ---- writable ----
+  const __wsError = (s, e) => {
+    if (s._err || s._closedFlag) return;
+    s._err = { e };
+    s._closedD.reject(e);
+    s._readyD.reject(e);
+  };
+  // Writes are serialized through a single promise chain so the sink sees them in order.
+  const __wsWrite = (s, chunk) => {
+    if (s._err) return Promise.reject(s._err.e);
+    if (s._closedFlag) return Promise.reject(new TypeError('Cannot write to a closed stream'));
+    s._chain = s._chain.then(() => (typeof s._sink.write === 'function' ? s._sink.write(chunk, s._ctrl) : undefined));
+    const p = s._chain;
+    p.catch((e) => __wsError(s, e));
+    return __sQuiet(p.then(() => undefined));
+  };
+  const __wsClose = (s) => {
+    if (s._err) return Promise.reject(s._err.e);
+    if (s._closedFlag) return Promise.reject(new TypeError('Cannot close an already-closed stream'));
+    s._closedFlag = true;
+    const p = s._chain.then(() => (typeof s._sink.close === 'function' ? s._sink.close(s._ctrl) : undefined));
+    s._chain = p;
+    p.then(() => s._closedD.resolve(undefined), (e) => { s._err = { e }; s._closedD.reject(e); });
+    return __sQuiet(p.then(() => undefined));
+  };
+  const __wsAbort = (s, reason) => {
+    if (s._err) return Promise.resolve(undefined);
+    s._ctrl.signal.aborted = true;
+    s._ctrl.signal.reason = reason;
+    __wsError(s, reason instanceof Error ? reason : new Error(reason === undefined ? 'The stream was aborted' : String(reason)));
+    let r;
+    try { r = typeof s._sink.abort === 'function' ? s._sink.abort(reason) : undefined; } catch (e) { return Promise.reject(e); }
+    return Promise.resolve(r).then(() => undefined);
+  };
+
+  class WritableStreamDefaultController {
+    constructor(stream) {
+      this._s = stream;
+      this.signal = { aborted: false, reason: undefined, addEventListener() {}, removeEventListener() {} };
+    }
+    error(e) { __wsError(this._s, e); }
+  }
+
+  class WritableStreamDefaultWriter {
+    constructor(stream) {
+      if (stream._writer) throw new TypeError('This stream has already been locked for exclusive writing by another writer');
+      this._s = stream;
+      stream._writer = this;
+    }
+    get closed() { return this._s ? this._s._closedD.promise : Promise.resolve(undefined); }
+    get ready() { return this._s ? this._s._readyD.promise : Promise.resolve(undefined); }
+    get desiredSize() { const s = this._s; if (!s || s._err) return null; return s._closedFlag ? 0 : s._hwm; }
+    write(chunk) { return this._s ? __wsWrite(this._s, chunk) : Promise.reject(new TypeError('Cannot write with a released writer')); }
+    close() { return this._s ? __wsClose(this._s) : Promise.reject(new TypeError('Cannot close with a released writer')); }
+    abort(reason) { return this._s ? __wsAbort(this._s, reason) : Promise.reject(new TypeError('Cannot abort with a released writer')); }
+    releaseLock() { if (this._s) { this._s._writer = null; this._s = null; } }
+  }
+
+  class WritableStream {
+    constructor(underlyingSink, strategy) {
+      this._sink = underlyingSink || {};
+      this._hwm = strategy && typeof strategy.highWaterMark === 'number' ? strategy.highWaterMark : 1;
+      this._writer = null;
+      this._err = null;
+      this._closedFlag = false;
+      this._closedD = __sDefer(true);
+      this._readyD = __sDefer(true);
+      this._readyD.resolve(undefined);
+      this._ctrl = new WritableStreamDefaultController(this);
+      this._chain = Promise.resolve();
+      if (typeof this._sink.start === 'function') {
+        this._chain = __sQuiet(Promise.resolve().then(() => this._sink.start(this._ctrl)).catch((e) => { __wsError(this, e); throw e; }));
+      }
+    }
+    get locked() { return this._writer != null; }
+    getWriter() { return new WritableStreamDefaultWriter(this); }
+    close() { return this._writer ? Promise.reject(new TypeError('Cannot close a stream locked by a writer')) : __wsClose(this); }
+    abort(reason) { return this._writer ? Promise.reject(new TypeError('Cannot abort a stream locked by a writer')) : __wsAbort(this, reason); }
+  }
+
+  // ---- transform ----
+  class TransformStreamDefaultController {
+    constructor(ts) { this._ts = ts; }
+    get desiredSize() { return this._ts.readable._ctrl.desiredSize; }
+    enqueue(chunk) { this._ts.readable._ctrl.enqueue(chunk); }
+    error(e) { try { this._ts.readable._ctrl.error(e); } catch (_) {} __wsError(this._ts.writable, e); }
+    terminate() { try { this._ts.readable._ctrl.close(); } catch (_) {} }
+  }
+
+  class TransformStream {
+    constructor(transformer, writableStrategy, readableStrategy) {
+      const t = transformer || {};
+      // Push-driven: transform() enqueues straight into the readable side (no readable-side
+      // backpressure onto the writable side, which is the one spec behavior we don't model).
+      this.readable = new ReadableStream({}, readableStrategy);
+      const ctrl = new TransformStreamDefaultController(this);
+      if (typeof t.start === 'function') t.start(ctrl);
+      this.writable = new WritableStream({
+        write: (chunk) => (typeof t.transform === 'function' ? t.transform(chunk, ctrl) : ctrl.enqueue(chunk)),
+        close: () => Promise.resolve(typeof t.flush === 'function' ? t.flush(ctrl) : undefined)
+          .then(() => { try { this.readable._ctrl.close(); } catch (_) {} }),
+        abort: (reason) => { try { this.readable._ctrl.error(reason instanceof Error ? reason : new Error(String(reason))); } catch (_) {} },
+      }, writableStrategy);
+    }
+  }
+
+  globalThis.ReadableStream = ReadableStream;
+  globalThis.ReadableStreamDefaultReader = ReadableStreamDefaultReader;
+  globalThis.ReadableStreamDefaultController = ReadableStreamDefaultController;
+  globalThis.WritableStream = WritableStream;
+  globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
+  globalThis.WritableStreamDefaultController = WritableStreamDefaultController;
+  globalThis.TransformStream = TransformStream;
+  globalThis.TransformStreamDefaultController = TransformStreamDefaultController;
 }
 if (typeof globalThis.DOMPoint === 'undefined') {
   class DOMPoint {
@@ -1329,6 +1633,26 @@ globalThis.expect.not = {
 };
 globalThis.expect.stringContaining = (s) => new Asymmetric('stringContaining', s);
 globalThis.expect.stringMatching = (s) => new Asymmetric('stringMatching', s);
+
+// ---- expectTypeOf / assertType (type-level assertions) ----
+// Type assertions are checked by tsc and erased at compile time — they have no runtime behavior in
+// vitest either. What has to exist at run time is the CHAIN, so `expectTypeOf<T>().toEqualTypeOf<U>()`
+// (and `.not.toHaveProperty(...)`, `.items.toBeString()`, …) loads and runs. A proxy answers every
+// property with itself, so any current or future member of the chain works — with `then` excluded so
+// an accidental `await` can't see the chain as a thenable and hang forever.
+const __typeChain = new Proxy(function () {}, {
+  get(_t, p) {
+    if (p === 'then' || p === 'catch' || p === 'finally') return undefined;
+    if (p === Symbol.toPrimitive) return () => 'expectTypeOf';
+    if (p === Symbol.toStringTag) return 'ExpectTypeOf';
+    if (p === 'toString') return () => 'expectTypeOf';
+    return __typeChain;
+  },
+  apply() { return __typeChain; },
+  construct() { return __typeChain; },
+});
+globalThis.expectTypeOf = () => __typeChain;
+globalThis.assertType = () => undefined;
 
 // ---- vi (mocks/spies) ----
 function makeSpy(impl) {

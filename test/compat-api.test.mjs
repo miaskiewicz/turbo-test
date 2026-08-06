@@ -97,6 +97,22 @@ test('extra HTML*Element constructor globals + tag-keyed instanceof + constructo
   assert.equal(j.numFailedTests, 0);
 });
 
+// issue #15: Web Streams used to be a stub whose reader always resolved { done: true } — the
+// globals existed but any consumer saw an empty stream. Now they actually stream.
+test('Web Streams actually deliver enqueued chunks (ReadableStream/WritableStream/TransformStream/pipe/tee)', () => {
+  const j = parseJson(run(['--reporter', 'json', file('streams.test.ts')]).out);
+  assert.equal(j.numPassedTests, 15);
+  assert.equal(j.numFailedTests, 0);
+});
+
+// issue #16: `expectTypeOf` / `assertType` must resolve from the `vitest` module (named AND
+// namespace import) and be callable — a runtime no-op backing the tsc-checked type assertions.
+test('expectTypeOf / assertType are exported from vitest and callable (named + namespace import)', () => {
+  const j = parseJson(run(['--reporter', 'json', file('expecttypeof.test.ts')]).out);
+  assert.equal(j.numPassedTests, 5);
+  assert.equal(j.numFailedTests, 0);
+});
+
 test('constructable CSSStyleSheet + adoptedStyleSheets (emotion/MUI adopt pattern)', () => {
   const j = parseJson(run(['--reporter', 'json', file('constructable-stylesheet.test.ts')]).out);
   assert.equal(j.numPassedTests, 4);
