@@ -42,7 +42,7 @@ const CONFIG_NAMES: [&str; 8] = [
 
 /// Runner flags that take a following value (so a file arg isn't mistaken for the value, and the
 /// value isn't mistaken for a file). Mirrors the value-flag set cli.js forwarded with their arg.
-const VALUE_FLAGS: [&str; 26] = [
+const VALUE_FLAGS: [&str; 21] = [
     "-j",
     "--jobs",
     "--shard",
@@ -64,13 +64,6 @@ const VALUE_FLAGS: [&str; 26] = [
     "--coverage-reporters",
     "--coverage-include",
     "--coverage-exclude",
-    // Accepted-and-ignored vitest flags that TAKE a value — listed so their argument isn't torn off
-    // as a bogus file path (the space-separated form; the `--flag=value` form never leaks).
-    "--pool",
-    "--exclude",
-    "--project",
-    "--mode",
-    "--maxConcurrency",
 ];
 
 /// `name` is a vitest-style test file: `*.{test,spec}.{ts,tsx,js,jsx,mts,cts}` (cli.js TEST_RE).
@@ -988,6 +981,23 @@ pub fn prepare(mut raw: Vec<String>) -> Vec<String> {
             }
             // Globals are ALWAYS on in turbo-test; accept both spellings as no-ops.
             "--globals" | "--no-globals" => {
+                i += 1;
+                continue;
+            }
+            // vitest VALUE-taking flags with no effect on a native single-run runner. Consume the
+            // flag AND its value HERE (inline `=v` or the next non-flag token) and drop both, so the
+            // runner never sees them — the runner must NOT re-consume a value that may be absent
+            // (a trailing `--pool`) and swallow a real test-file arg instead. `--no-file-parallelism`
+            // is intentionally NOT here: it maps to real behavior (jobs=1) and is forwarded below.
+            "--pool" | "--mode" | "--project" | "--exclude" | "--maxConcurrency" => {
+                let _ = take_val();
+                i += 1;
+                continue;
+            }
+            // Boolean / no-effect vitest flags — dropped (NO value consumed, so a following test
+            // file isn't eaten).
+            "--run" | "--watch" | "-w" | "--no-watch" | "--logHeapUsage" | "--hideSkippedTests"
+            | "--disableConsoleIntercept" | "--dom" | "--segfaultRetry" | "--printConsoleTrace" => {
                 i += 1;
                 continue;
             }
