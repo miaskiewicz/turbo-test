@@ -1436,19 +1436,6 @@ fn setup_dom(scope: &mut v8::PinScope, _entry: &Path) {
     crate::browser_env::install(scope);
 }
 
-/// Re-establish the top-level window self-references (`self`/`parent`/`top`/`frames` === window,
-/// `frameElement` = null) that `browser_env.js` installs once per worker. Called per file under
-/// isolate reuse so a prior file's unrestored `window.parent = …` stub can't leak forward — matching
-/// vitest's per-file isolation. Idempotent; the props stay `configurable` so tests can still stub.
-fn reapply_window_framing(scope: &mut v8::PinScope) {
-    const SNIPPET: &str = "(function(){var g=globalThis;['self','parent','top','frames'].forEach(function(k){if(g[k]!==g){try{Object.defineProperty(g,k,{value:g,writable:true,configurable:true,enumerable:false});}catch(e){try{g[k]=g;}catch(e2){}}}});try{if(g.frameElement!==null)Object.defineProperty(g,'frameElement',{value:null,writable:true,configurable:true,enumerable:false});}catch(e){}})();";
-    if let Some(code) = v8::String::new(scope, SNIPPET) {
-        if let Some(s) = v8::Script::compile(scope, code, None) {
-            s.run(scope);
-        }
-    }
-}
-
 /// Transform a TS file to **ESM** JS using the PROJECT'S OWN TypeScript (`ts.transpileModule`),
 /// lowering decorators + `emitDecoratorMetadata` with exact ts-jest parity. Unlike esbuild (no
 /// metadata) and oxc 0.134 (emits `Object` for type-alias / nullable types), tsc resolves local
@@ -4489,17 +4476,9 @@ fn run_test_file_reused(
 
         let result: Result<TestReport, String> = 'work: {
             // DOM: install once per worker; subsequent files reset it via env.reset() above.
-            if needs_dom(entry_abs) {
-                if !DOM_INSTALLED.with(|d| d.get()) {
-                    setup_dom(scope, entry_abs);
-                    DOM_INSTALLED.with(|d| d.set(true));
-                } else {
-                    // Re-establish the top-level window self-references each file: a prior file may
-                    // have stubbed `window.parent`/`top`/etc and not restored it, and under isolate
-                    // REUSE that mutation would otherwise leak into this file (vitest isolates per
-                    // file). Cheap idempotent redefine; the DOM tree itself is reset via env.reset().
-                    reapply_window_framing(scope);
-                }
+            if needs_dom(entry_abs) && !DOM_INSTALLED.with(|d| d.get()) {
+                setup_dom(scope, entry_abs);
+                DOM_INSTALLED.with(|d| d.set(true));
             }
             // Setup files run ONCE per worker (vitest isolate:false semantics): their hooks,
             // matchers and mocks persist across files. After the first run we snapshot the hook

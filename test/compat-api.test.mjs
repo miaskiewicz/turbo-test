@@ -120,19 +120,6 @@ test('resolve.alias + test.alias: @ / ~lib prefix aliases and @math exact alias 
   assert.equal(j.numFailedTests, 0);
 });
 
-// issue #18 under isolate reuse: a prior file that stubs window.parent (without restoring) must not
-// leak into the next file — the framing self-refs are re-established per file.
-test('top-level window self-ref is re-established per file under isolate reuse (no cross-file leak)', () => {
-  const dir = path.join(FIX, 'window-reuse');
-  const j = parseJson(
-    runIn(dir, ['--no-isolate', '-j', '1', '--reporter', 'json', 'a-stub.test.ts', 'b-check.test.ts'], {
-      env: { ...process.env, TURBO_REUSE_ISOLATE: '1' },
-    }).out,
-  );
-  assert.equal(j.numPassedTests, 2);
-  assert.equal(j.numFailedTests, 0);
-});
-
 // vite-plugin-svgr: `import Icon from './x.svg?react'` yields a render-safe <svg> React component
 // (default + legacy ReactComponent export). turbo-test resolves the `?react` query natively.
 test('vite-plugin-svgr ?react import resolves to a render-safe React component', () => {

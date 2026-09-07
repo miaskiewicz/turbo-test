@@ -468,10 +468,12 @@ fn strip_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     let mut quote: Option<char> = None;
-    // Previous non-whitespace char; a `/` in "expression position" (after an operator / opener /
-    // start) begins a regex literal, otherwise it's division. `last_word` is the identifier just
-    // read, so a keyword-led regex (`return /re/`) is also recognized.
+    // Previous significant (non-whitespace) char — updated for EVERY non-ws char, identifiers and
+    // `)`/`]` included, so a `/` after a value token reads as DIVISION (not a regex). `cur_word` is
+    // the identifier currently being read and `last_word` the one just completed (kept across a
+    // following space) so a keyword-led regex (`return /re/`) is still recognized.
     let mut prev_sig = '\0';
+    let mut cur_word = String::new();
     let mut last_word = String::new();
     while let Some(c) = chars.next() {
         if let Some(q) = quote {
@@ -490,6 +492,7 @@ fn strip_comments(s: &str) -> String {
                 quote = Some(c);
                 out.push(c);
                 prev_sig = c;
+                cur_word.clear();
                 last_word.clear();
             }
             '/' if chars.peek() == Some(&'/') => {
@@ -517,14 +520,28 @@ fn strip_comments(s: &str) -> String {
             // char would flip their string state and swallow the real `alias` block. Blanking keeps
             // the regex out of their way entirely. Character classes `[...]` may hold an unescaped
             // `/`, so track them to find the true closing `/`.
-            '/' if is_regex_context(prev_sig) || REGEX_KEYWORDS.contains(&last_word.as_str()) => {
+            '/' if is_regex_context(prev_sig)
+                || REGEX_KEYWORDS.contains(
+                    &(if cur_word.is_empty() { last_word.as_str() } else { cur_word.as_str() }),
+                ) =>
+            {
                 out.push(' ');
                 let mut in_class = false;
                 while let Some(n) = chars.next() {
                     match n {
+                        // A regex literal cannot contain a raw newline. Hitting one means this `/`
+                        // was actually division misjudged as a regex — stop blanking at the line end
+                        // so a stray `/` can't consume (and drop) the rest of the config.
+                        '\n' => {
+                            out.push('\n');
+                            break;
+                        }
                         '\\' => {
-                            chars.next();
-                            out.push_str("  ");
+                            if chars.next().is_some() {
+                                out.push_str("  ");
+                            } else {
+                                out.push(' ');
+                            }
                         }
                         '[' => {
                             in_class = true;
@@ -542,17 +559,30 @@ fn strip_comments(s: &str) -> String {
                     }
                 }
                 prev_sig = '/';
+                cur_word.clear();
                 last_word.clear();
             }
             _ => {
                 out.push(c);
                 if c.is_alphanumeric() || c == '_' || c == '$' {
-                    last_word.push(c);
-                } else {
-                    if !c.is_whitespace() {
-                        prev_sig = c;
+                    // Identifier/number char: it IS significant (a `/` after it is division), and it
+                    // extends the current word.
+                    cur_word.push(c);
+                    prev_sig = c;
+                } else if c.is_whitespace() {
+                    // Finalize the current word but keep it as `last_word` across the space, so
+                    // `return /re/` still sees the keyword. prev_sig (last non-ws char) is unchanged.
+                    if !cur_word.is_empty() {
+                        last_word = std::mem::take(&mut cur_word);
                     }
-                    last_word.clear();
+                } else {
+                    // Punctuation: significant, and it ends any pending word.
+                    if !cur_word.is_empty() {
+                        last_word = std::mem::take(&mut cur_word);
+                    } else {
+                        last_word.clear();
+                    }
+                    prev_sig = c;
                 }
             }
         }
