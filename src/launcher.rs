@@ -469,8 +469,10 @@ fn strip_comments(s: &str) -> String {
     let mut chars = s.chars().peekable();
     let mut quote: Option<char> = None;
     // Previous non-whitespace char; a `/` in "expression position" (after an operator / opener /
-    // start) begins a regex literal, otherwise it's division.
+    // start) begins a regex literal, otherwise it's division. `last_word` is the identifier just
+    // read, so a keyword-led regex (`return /re/`) is also recognized.
     let mut prev_sig = '\0';
+    let mut last_word = String::new();
     while let Some(c) = chars.next() {
         if let Some(q) = quote {
             out.push(c);
@@ -488,6 +490,7 @@ fn strip_comments(s: &str) -> String {
                 quote = Some(c);
                 out.push(c);
                 prev_sig = c;
+                last_word.clear();
             }
             '/' if chars.peek() == Some(&'/') => {
                 for n in chars.by_ref() {
@@ -508,38 +511,60 @@ fn strip_comments(s: &str) -> String {
                 }
                 out.push(' ');
             }
-            // Regex literal (only in expression position): copy it verbatim so its `/` and escaped
-            // `\/` don't trip the comment scanner. Character classes `[...]` may contain an unescaped
-            // `/`, so track them.
-            '/' if is_regex_context(prev_sig) => {
-                out.push('/');
+            // Regex literal (only in expression position): BLANK it (emit spaces). It must not be
+            // copied verbatim — a regex body can contain `'`/`"`/`` ` `` (e.g. `/"/g`, `/'/g`), and
+            // the downstream block scanners are quote-aware but NOT regex-aware, so a surviving quote
+            // char would flip their string state and swallow the real `alias` block. Blanking keeps
+            // the regex out of their way entirely. Character classes `[...]` may hold an unescaped
+            // `/`, so track them to find the true closing `/`.
+            '/' if is_regex_context(prev_sig) || REGEX_KEYWORDS.contains(&last_word.as_str()) => {
+                out.push(' ');
                 let mut in_class = false;
                 while let Some(n) = chars.next() {
-                    out.push(n);
                     match n {
                         '\\' => {
-                            if let Some(m) = chars.next() {
-                                out.push(m);
-                            }
+                            chars.next();
+                            out.push_str("  ");
                         }
-                        '[' => in_class = true,
-                        ']' => in_class = false,
-                        '/' if !in_class => break,
-                        _ => {}
+                        '[' => {
+                            in_class = true;
+                            out.push(' ');
+                        }
+                        ']' => {
+                            in_class = false;
+                            out.push(' ');
+                        }
+                        '/' if !in_class => {
+                            out.push(' ');
+                            break;
+                        }
+                        _ => out.push(' '),
                     }
                 }
                 prev_sig = '/';
+                last_word.clear();
             }
             _ => {
                 out.push(c);
-                if !c.is_whitespace() {
-                    prev_sig = c;
+                if c.is_alphanumeric() || c == '_' || c == '$' {
+                    last_word.push(c);
+                } else {
+                    if !c.is_whitespace() {
+                        prev_sig = c;
+                    }
+                    last_word.clear();
                 }
             }
         }
     }
     out
 }
+
+/// Keywords after which a `/` opens a regex literal, not division (`return /re/`, `typeof x || /re/`).
+const REGEX_KEYWORDS: [&str; 12] = [
+    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "do", "else", "yield",
+    "await",
+];
 
 /// A `/` following one of these (or the start of input) opens a regex literal, not division.
 fn is_regex_context(prev: char) -> bool {
@@ -787,14 +812,29 @@ fn top_level_colon(entry: &str) -> Option<usize> {
     None
 }
 
-/// The value expression after `key:` within a single entry `e` (up to end / a stray top-level comma
-/// already stripped by the caller). Returns the raw text after the colon.
+/// The value expression after `key:` within a single entry `e`. Scans ALL occurrences of `key` and
+/// accepts the first that is a real object key — a word boundary before it and a `:` (after optional
+/// whitespace) after it — so a `find`/`replacement` VALUE that merely contains the substring `find`/
+/// `replacement` (e.g. `replacement: 'findme'`) doesn't hijack the match.
 fn value_after_key(e: &str, key: &str) -> Option<String> {
-    let at = e.find(key)?;
-    let rest = &e[at + key.len()..];
-    let rest = rest.trim_start();
-    let rest = rest.strip_prefix(':')?;
-    Some(rest.trim().to_string())
+    let b = e.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = e[from..].find(key) {
+        let at = from + rel;
+        let after = at + key.len();
+        let prev_ok = at == 0 || {
+            let p = b[at - 1];
+            p != b'.' && p != b'_' && p != b'$' && !p.is_ascii_alphanumeric()
+        };
+        if prev_ok {
+            let rest = e[after..].trim_start();
+            if let Some(val) = rest.strip_prefix(':') {
+                return Some(val.trim().to_string());
+            }
+        }
+        from = after;
+    }
+    None
 }
 
 /// Default discovery: all test files under `cwd`, filtered by config include/exclude when a config
@@ -997,11 +1037,22 @@ pub fn prepare(mut raw: Vec<String>) -> Vec<String> {
             // Boolean / no-effect vitest flags — dropped (NO value consumed, so a following test
             // file isn't eaten).
             "--run" | "--watch" | "-w" | "--no-watch" | "--logHeapUsage" | "--hideSkippedTests"
-            | "--disableConsoleIntercept" | "--dom" | "--segfaultRetry" | "--printConsoleTrace" => {
+            | "--disableConsoleIntercept" | "--dom" | "--segfaultRetry" | "--printConsoleTrace"
+            | "--color" | "--no-color" | "--inspect" | "--inspect-brk" => {
                 i += 1;
                 continue;
             }
             _ => {}
+        }
+
+        // Dotted vitest flags with a value (`--sequence.seed 123`, `--browser.name chromium`): drop
+        // the flag and, when the next token is its value (a non-flag), that too — otherwise the
+        // orphaned value token would be mistaken for a test-file path and hard-fail the run. Covers
+        // both the `=`-inline and space forms.
+        if key.starts_with("--sequence") || key.starts_with("--browser") || key.starts_with("--inspect") {
+            let _ = take_val();
+            i += 1;
+            continue;
         }
 
         if a.starts_with('-') {

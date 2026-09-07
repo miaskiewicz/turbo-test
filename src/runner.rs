@@ -547,7 +547,17 @@ fn svgr_stub_path(from_dir: &Path) -> Option<PathBuf> {
     // Import react by the exact path this importer resolves (so the stub shares the one instance);
     // fall back to bare `react`. Single-quote + escape for embedding in the generated JS.
     let react_spec = resolve_spec("react", from_dir)
-        .map(|p| format!("'{}'", p.to_string_lossy().replace('\\', "\\\\").replace('\'', "\\'")))
+        .map(|p| {
+            let esc = p
+                .to_string_lossy()
+                .replace('\\', "\\\\")
+                .replace('\'', "\\'")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\u{2028}', "\\u2028")
+                .replace('\u{2029}', "\\u2029");
+            format!("'{esc}'")
+        })
         .unwrap_or_else(|| "'react'".to_string());
     let src = SVGR_STUB_TEMPLATE.replace("__REACT_SPEC__", &react_spec);
     // Name the file by a hash of its CONTENT (which includes the resolved react path) so distinct
@@ -1424,6 +1434,19 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
 /// installGlobals + the `.node` parser — was removed in v0.3.0; rtdom is the only DOM now.)
 fn setup_dom(scope: &mut v8::PinScope, _entry: &Path) {
     crate::browser_env::install(scope);
+}
+
+/// Re-establish the top-level window self-references (`self`/`parent`/`top`/`frames` === window,
+/// `frameElement` = null) that `browser_env.js` installs once per worker. Called per file under
+/// isolate reuse so a prior file's unrestored `window.parent = …` stub can't leak forward — matching
+/// vitest's per-file isolation. Idempotent; the props stay `configurable` so tests can still stub.
+fn reapply_window_framing(scope: &mut v8::PinScope) {
+    const SNIPPET: &str = "(function(){var g=globalThis;['self','parent','top','frames'].forEach(function(k){if(g[k]!==g){try{Object.defineProperty(g,k,{value:g,writable:true,configurable:true,enumerable:false});}catch(e){try{g[k]=g;}catch(e2){}}}});try{if(g.frameElement!==null)Object.defineProperty(g,'frameElement',{value:null,writable:true,configurable:true,enumerable:false});}catch(e){}})();";
+    if let Some(code) = v8::String::new(scope, SNIPPET) {
+        if let Some(s) = v8::Script::compile(scope, code, None) {
+            s.run(scope);
+        }
+    }
 }
 
 /// Transform a TS file to **ESM** JS using the PROJECT'S OWN TypeScript (`ts.transpileModule`),
@@ -4466,9 +4489,17 @@ fn run_test_file_reused(
 
         let result: Result<TestReport, String> = 'work: {
             // DOM: install once per worker; subsequent files reset it via env.reset() above.
-            if needs_dom(entry_abs) && !DOM_INSTALLED.with(|d| d.get()) {
-                setup_dom(scope, entry_abs);
-                DOM_INSTALLED.with(|d| d.set(true));
+            if needs_dom(entry_abs) {
+                if !DOM_INSTALLED.with(|d| d.get()) {
+                    setup_dom(scope, entry_abs);
+                    DOM_INSTALLED.with(|d| d.set(true));
+                } else {
+                    // Re-establish the top-level window self-references each file: a prior file may
+                    // have stubbed `window.parent`/`top`/etc and not restored it, and under isolate
+                    // REUSE that mutation would otherwise leak into this file (vitest isolates per
+                    // file). Cheap idempotent redefine; the DOM tree itself is reset via env.reset().
+                    reapply_window_framing(scope);
+                }
             }
             // Setup files run ONCE per worker (vitest isolate:false semantics): their hooks,
             // matchers and mocks persist across files. After the first run we snapshot the hook

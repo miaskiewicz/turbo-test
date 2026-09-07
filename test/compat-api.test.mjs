@@ -25,8 +25,8 @@ function parseJson(out) {
 const file = (name) => path.join(FIX, name);
 // Some fixtures need their OWN cwd so the launcher discovers their vitest.config.ts (resolve.alias,
 // test.alias) walking up from there — run them with cwd set to the fixture directory.
-function runIn(cwd, args) {
-  const res = spawnSync('node', [CLI, ...args], { cwd, encoding: 'utf8' });
+function runIn(cwd, args, opts = {}) {
+  const res = spawnSync('node', [CLI, ...args], { cwd, encoding: 'utf8', ...opts });
   return { code: res.status, out: res.stdout || '', err: res.stderr || '' };
 }
 
@@ -117,6 +117,19 @@ test('resolve.alias + test.alias: @ / ~lib prefix aliases and @math exact alias 
   const dir = path.join(FIX, 'alias');
   const j = parseJson(runIn(dir, ['--reporter', 'json', 'alias.test.ts']).out);
   assert.equal(j.numPassedTests, 3);
+  assert.equal(j.numFailedTests, 0);
+});
+
+// issue #18 under isolate reuse: a prior file that stubs window.parent (without restoring) must not
+// leak into the next file — the framing self-refs are re-established per file.
+test('top-level window self-ref is re-established per file under isolate reuse (no cross-file leak)', () => {
+  const dir = path.join(FIX, 'window-reuse');
+  const j = parseJson(
+    runIn(dir, ['--no-isolate', '-j', '1', '--reporter', 'json', 'a-stub.test.ts', 'b-check.test.ts'], {
+      env: { ...process.env, TURBO_REUSE_ISOLATE: '1' },
+    }).out,
+  );
+  assert.equal(j.numPassedTests, 2);
   assert.equal(j.numFailedTests, 0);
 });
 
