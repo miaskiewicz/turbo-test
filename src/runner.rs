@@ -322,6 +322,23 @@ fn nearest_tsconfig_uncached(dir: &Path) -> Option<PathBuf> {
 /// Is `abs` an ES module (so its imports resolve with the "import" condition)? .mjs/.ts/.tsx are
 /// ESM; .cjs is CJS; .js follows the nearest package.json "type".
 fn is_esm_module(abs: &Path) -> bool {
+    // E12: memoize per-file. Pure function of the filesystem layout, stable for a whole run, but
+    // called on every module load (native_require) and re-reads package.json up the tree each time.
+    if e12_enabled() {
+        thread_local! {
+            static ESM_MEMO: RefCell<HashMap<PathBuf, bool>> = RefCell::new(HashMap::new());
+        }
+        if let Some(v) = ESM_MEMO.with(|m| m.borrow().get(abs).copied()) {
+            return v;
+        }
+        let v = is_esm_module_uncached(abs);
+        ESM_MEMO.with(|m| m.borrow_mut().insert(abs.to_path_buf(), v));
+        return v;
+    }
+    is_esm_module_uncached(abs)
+}
+
+fn is_esm_module_uncached(abs: &Path) -> bool {
     match abs.extension().and_then(|e| e.to_str()) {
         Some("mjs" | "mts" | "ts" | "tsx" | "jsx") => true,
         Some("cjs" | "cts") => false,
@@ -361,6 +378,26 @@ fn resolver_for(from_dir: &Path, esm: bool) -> std::rc::Rc<oxc_resolver::Resolve
 /// node (non-DOM) test environment and there's no vitest config — i.e. a CommonJS backend. Walks
 /// up from `entry`; a vitest config short-circuits to ESM-first.
 fn cjs_first_project(entry: &Path) -> bool {
+    // E12: memoize keyed by the start dir (entry.parent()). The result is a pure function of the
+    // directory's ancestor chain — NOT the filename — so every test file in a directory shares one
+    // answer, yet each file otherwise re-walks up reading ~11 config names + package.json per dir.
+    if e12_enabled() {
+        if let Some(dir) = entry.parent() {
+            thread_local! {
+                static CJS_MEMO: RefCell<HashMap<PathBuf, bool>> = RefCell::new(HashMap::new());
+            }
+            if let Some(v) = CJS_MEMO.with(|m| m.borrow().get(dir).copied()) {
+                return v;
+            }
+            let v = cjs_first_project_uncached(entry);
+            CJS_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v));
+            return v;
+        }
+    }
+    cjs_first_project_uncached(entry)
+}
+
+fn cjs_first_project_uncached(entry: &Path) -> bool {
     let mut dir = entry.parent();
     while let Some(d) = dir {
         for v in ["vitest.config.ts", "vitest.config.mts", "vitest.config.js", "vitest.config.mjs", "vite.config.ts", "vite.config.js"] {
@@ -394,6 +431,26 @@ fn kind_of(path: &Path) -> Kind {
 
 /// Nearest package.json `"type"` for a file (Node's module-determination rule).
 fn nearest_pkg_type(path: &Path) -> Option<&'static str> {
+    // E12: memoize keyed by the start dir (path.parent()). The nearest package.json "type" is a
+    // pure function of the ancestor chain — NOT the filename — so all files/modules in a directory
+    // share one answer; called on every module load (detect_kind), re-reading package.json up-tree.
+    if e12_enabled() {
+        if let Some(dir) = path.parent() {
+            thread_local! {
+                static PKG_TYPE_MEMO: RefCell<HashMap<PathBuf, Option<&'static str>>> = RefCell::new(HashMap::new());
+            }
+            if let Some(v) = PKG_TYPE_MEMO.with(|m| m.borrow().get(dir).copied()) {
+                return v;
+            }
+            let v = nearest_pkg_type_uncached(path);
+            PKG_TYPE_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v));
+            return v;
+        }
+    }
+    nearest_pkg_type_uncached(path)
+}
+
+fn nearest_pkg_type_uncached(path: &Path) -> Option<&'static str> {
     let mut dir = path.parent();
     while let Some(d) = dir {
         let pj = d.join("package.json");
@@ -726,7 +783,16 @@ fn cache_dir() -> PathBuf {
     let d = std::env::var_os("TURBO_CACHE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("turbo-test-cache"));
-    let _ = std::fs::create_dir_all(&d);
+    // create_dir_all runs on every call (9 call sites per module load) though the dir only needs
+    // creating once. Memoize the (dir -> created) fact in a OnceLock keyed by the resolved path so
+    // the syscall fires exactly once per distinct cache dir for the life of the process.
+    static ENSURED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    let ensured = ENSURED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut set = ensured.lock().unwrap();
+    if set.insert(d.clone()) {
+        let _ = std::fs::create_dir_all(&d);
+    }
     d
 }
 
@@ -743,6 +809,26 @@ fn cache_key(abs: &Path, src: &str) -> u64 {
 
 /// Nearest project root containing esbuild (for dep bundling).
 fn project_root(file: &Path) -> Option<PathBuf> {
+    // E12: memoize keyed by the start dir (file.parent()). The esbuild project root is a pure
+    // function of the ancestor chain — NOT the filename — so all files/modules in a directory share
+    // one answer; called from many load paths, each re-walking with an exists() syscall per dir.
+    if e12_enabled() {
+        if let Some(dir) = file.parent() {
+            thread_local! {
+                static ROOT_MEMO: RefCell<HashMap<PathBuf, Option<PathBuf>>> = RefCell::new(HashMap::new());
+            }
+            if let Some(v) = ROOT_MEMO.with(|m| m.borrow().get(dir).cloned()) {
+                return v;
+            }
+            let v = project_root_uncached(file);
+            ROOT_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v.clone()));
+            return v;
+        }
+    }
+    project_root_uncached(file)
+}
+
+fn project_root_uncached(file: &Path) -> Option<PathBuf> {
     let mut d = file.parent();
     while let Some(dir) = d {
         if dir.join("node_modules/.bin/esbuild").exists() {
@@ -1101,6 +1187,26 @@ fn find_config_key(s: &str, key: &str) -> Option<usize> {
 }
 
 fn vitest_setup_files(entry: &Path) -> Vec<PathBuf> {
+    // E12: memoize keyed by the start dir (entry.parent()). The setup-file list is a pure function
+    // of the ancestor chain — NOT the filename (resolved relative to the config dir, not the entry)
+    // — so every test file in a directory shares one answer; each otherwise re-walks configs up-tree.
+    if e12_enabled() {
+        if let Some(dir) = entry.parent() {
+            thread_local! {
+                static SETUP_MEMO: RefCell<HashMap<PathBuf, Vec<PathBuf>>> = RefCell::new(HashMap::new());
+            }
+            if let Some(v) = SETUP_MEMO.with(|m| m.borrow().get(dir).cloned()) {
+                return v;
+            }
+            let v = vitest_setup_files_uncached(entry);
+            SETUP_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v.clone()));
+            return v;
+        }
+    }
+    vitest_setup_files_uncached(entry)
+}
+
+fn vitest_setup_files_uncached(entry: &Path) -> Vec<PathBuf> {
     let mut dir = entry.parent();
     while let Some(d) = dir {
         for cfg in ["vitest.config.ts", "vitest.config.mts", "vite.config.ts", "vitest.config.js"] {
