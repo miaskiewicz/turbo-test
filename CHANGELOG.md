@@ -5,6 +5,48 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.4.0] — window self-reference + native plugin/alias support
+
+### Fixed
+- **A top-level window did not self-reference (issue #18).** `window.parent`, `window.top`, and
+  `window.self` were all `undefined`, so `window.parent !== window` — the canonical "am I inside an
+  iframe?" check — read `true` for a non-framed window. Real browsers, jsdom, and vitest all return
+  `=== window` for a top-level document, so any component gated on top-level/iframe detection (e.g. a
+  CMS live-preview hook that only mounts inside the preview iframe) behaved as if *always framed*
+  under turbo-test, forcing tests to stub the framing globals by hand. The window object
+  (`window === globalThis`) now defines `self`/`parent`/`top`/`frames` pointing at itself and
+  `frameElement = null`. They're `configurable`, so a test can still stub framing explicitly
+  (`Object.defineProperty(window, 'parent', { value: iframeWin })`) to exercise the framed path.
+
+### Added
+- **`resolve.alias` / `test.alias` from the vitest config are resolved natively.** Both the object
+  form (`{ '@': path.resolve(__dirname, './src') }`) and the array form
+  (`[{ find, replacement }]`) are parsed by the launcher and fed to the module resolver, so a prefix
+  alias like `@` → `src` turns `@/foo` into `src/foo` while leaving `@scope/pkg` node_modules imports
+  alone. The alias target is the last string literal in the value expression (covers `path.resolve`,
+  `fileURLToPath(new URL(…))`, and bare literals); regex `find` keys are skipped. This is the
+  non-tsconfig counterpart to the tsconfig `paths` aliases turbo-test already resolves.
+- **`vite-plugin-svgr` (`?react`).** `import Icon from './x.svg?react'` now resolves to a
+  render-safe React component — a dependency-free function component that returns a real `<svg>`
+  React element with the props forwarded (className / data-testid / aria-* pass through), plus the
+  legacy `ReactComponent` named export. Plain `import url from './x.svg'` still yields the file
+  contents. Other Vite query suffixes (`?url`, `?raw`, …) no longer hard-error — they resolve the
+  base file.
+- **Documented native support** for the most common vitest plugins (`vite-tsconfig-paths`,
+  `@vitejs/plugin-react`(`-swc`), `@vitest/coverage-v8`, `@testing-library/jest-dom`,
+  `vitest-canvas-mock`) in the README — most suites need no plugin setup.
+- **More vitest CLI flags accepted** instead of warned: `--run`, `--watch`/`-w`, `--pool`, `--mode`,
+  `--project`, `--exclude`, `--maxConcurrency`, `--sequence.*`, `--logHeapUsage`,
+  `--hideSkippedTests`, `--disableConsoleIntercept`, `--inspect*`, `--browser*` (accepted-and-ignored
+  on a native single-run runner), and `--no-file-parallelism` (→ runs files serially, `jobs = 1`).
+  Value-taking forms no longer leak their argument as a bogus test-file path.
+
+### Changed
+- **Reporter output gained a vitest-style summary footer** (`Test Files` / `Tests` / `Duration`) for
+  the human reporters (default / dot / verbose), matching vitest's recognizable end-of-run block. The
+  existing per-file `PASS`/`FAIL` lines and the turbo diagnostic line are unchanged; machine
+  reporters (json / junit / tap) keep clean stdout.
+
 ## [0.3.15] — functional Web Streams + `expectTypeOf` on the vitest surface
 
 ### Fixed
