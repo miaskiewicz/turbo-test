@@ -125,7 +125,7 @@ test('resolve.alias + test.alias: @ / ~lib prefix aliases and @math exact alias 
 test('vite-plugin-svgr ?react import resolves to a render-safe React component', () => {
   const dir = path.join(FIX, 'svgr');
   const j = parseJson(runIn(dir, ['--reporter', 'json', 'svgr.test.ts']).out);
-  assert.equal(j.numPassedTests, 4);
+  assert.equal(j.numPassedTests, 5);
   assert.equal(j.numFailedTests, 0);
 });
 

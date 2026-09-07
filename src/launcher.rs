@@ -432,13 +432,6 @@ fn scan_block(text: &str, key: &str) -> Option<(u8, String)> {
     None
 }
 
-/// The LAST quoted string literal in `s` (the alias/define target — e.g. the `'./src'` inside
-/// `path.resolve(__dirname, './src')` or `fileURLToPath(new URL('./src', import.meta.url))`).
-fn last_quoted(s: &str) -> Option<String> {
-    let all = extract_quoted(s);
-    all.into_iter().last()
-}
-
 /// Lexically resolve `target` against `dir`: absolute stays, `.`/`..`-relative joins+normalizes,
 /// a bare specifier (`react`, `@scope/x`) is returned unchanged (module-name alias).
 fn resolve_alias_target(dir: &Path, target: &str) -> String {
@@ -502,17 +495,68 @@ fn split_top_level(inner: &str) -> Vec<String> {
     out
 }
 
+/// Strip `//` line and `/* */` block comments from JS/TS config text WITHOUT touching comment-like
+/// sequences inside string/template literals — so a commented-out `alias` block (or a `}`/`]` inside
+/// a comment) can't corrupt the brace-matching scanners below. Newlines are preserved.
+fn strip_comments(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            out.push(c);
+            if c == '\\' {
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => {
+                quote = Some(c);
+                out.push(c);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = ' ';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Parse `resolve.alias` and `test.alias` into `(find, resolved-target)` pairs. Supports the object
 /// form (`{ '@': path.resolve(__dirname, './src') }`) and the array form
-/// (`[{ find: '@', replacement: '/abs/src' }]`). Values are arbitrary JS, so the heuristic is: the
-/// target is the LAST quoted string in the value expression (covers `path.resolve`/`fileURLToPath`/
-/// `new URL`/bare literals). A regex `find` (leading `/`) is skipped — oxc alias keys are strings.
-/// `test.alias` overrides `resolve.alias` on key collision (vitest merge order).
+/// (`[{ find: '@', replacement: '/abs/src' }]`). Scoped to the `resolve` and `test` blocks so a
+/// stray `alias` word elsewhere in the config can't be mistaken for a block, and so `test.alias`
+/// reliably overrides `resolve.alias` on a key collision (vitest merge order) regardless of which
+/// appears first in the file. Comments are stripped first. Values are arbitrary JS, so the target is
+/// derived heuristically (see `alias_target`). A regex `find` (leading `/`) is skipped.
 fn config_aliases(start_dir: &Path, forced: Option<&str>) -> Vec<(String, String)> {
     let Some(cfg) = find_config(start_dir, forced) else {
         return vec![];
     };
     let dir = &cfg.dir;
+    let text = strip_comments(&cfg.text);
     let mut map: Vec<(String, String)> = Vec::new();
     let mut put = |k: String, v: String| {
         if let Some(e) = map.iter_mut().find(|(ek, _)| *ek == k) {
@@ -521,31 +565,16 @@ fn config_aliases(start_dir: &Path, forced: Option<&str>) -> Vec<(String, String
             map.push((k, v));
         }
     };
-    // resolve.alias first, then test.alias (later wins). We scan the whole config text for each
-    // `alias` block; there can legitimately be two (resolve + test), so collect ALL occurrences.
-    for (_open, inner) in scan_all_blocks(&cfg.text, "alias") {
-        for (k, v) in parse_alias_inner(&inner, dir) {
+    // resolve.alias FIRST (lower precedence), then test.alias (overrides) — independent of source
+    // order. `alias` is looked up only INSIDE each block's inner text.
+    let resolve_alias = scan_block(&text, "resolve").and_then(|(_, inner)| scan_block(&inner, "alias"));
+    let test_alias = scan_block(&text, "test").and_then(|(_, inner)| scan_block(&inner, "alias"));
+    for block in [resolve_alias, test_alias].into_iter().flatten() {
+        for (k, v) in parse_alias_inner(&block.1, dir) {
             put(k, v);
         }
     }
     map
-}
-
-/// Every `key: {..}|[..]` block for `key` in the text (not just the first) — resolve+test both use
-/// the `alias` key, and a config may define both.
-fn scan_all_blocks(text: &str, key: &str) -> Vec<(u8, String)> {
-    let mut out = Vec::new();
-    let mut offset = 0usize;
-    while let Some((open, inner)) = scan_block(&text[offset..], key) {
-        // advance past this block's inner text to find the next occurrence
-        let consumed = text[offset..].find(&inner).map(|p| p + inner.len()).unwrap_or(text.len() - offset);
-        out.push((open, inner));
-        offset += consumed;
-        if offset >= text.len() {
-            break;
-        }
-    }
-    out
 }
 
 fn parse_alias_inner(inner: &str, dir: &Path) -> Vec<(String, String)> {
@@ -558,10 +587,10 @@ fn parse_alias_inner(inner: &str, dir: &Path) -> Vec<(String, String)> {
             let e = e.strip_prefix('{').unwrap_or(e);
             let e = e.strip_suffix('}').unwrap_or(e);
             let find = value_after_key(e, "find").and_then(|v| first_quoted(&v));
-            let repl = value_after_key(e, "replacement").and_then(|v| last_quoted(&v));
+            let repl = value_after_key(e, "replacement").and_then(|v| alias_target(dir, &v));
             if let (Some(f), Some(r)) = (find, repl) {
                 if !f.starts_with('/') {
-                    out.push((f, resolve_alias_target(dir, &r)));
+                    out.push((f, r));
                 }
             }
         }
@@ -580,11 +609,53 @@ fn parse_alias_inner(inner: &str, dir: &Path) -> Vec<(String, String)> {
         } else {
             continue;
         };
-        if let Some(target) = last_quoted(val) {
-            out.push((key, resolve_alias_target(dir, &target)));
+        if let Some(target) = alias_target(dir, val) {
+            out.push((key, target));
         }
     }
     out
+}
+
+/// Derive the alias target path/specifier from a JS value expression. When the value looks like a
+/// filesystem-path expression (`path.resolve`/`path.join`/`fileURLToPath`/`new URL`/`__dirname`/
+/// `import.meta.url`), ALL its quoted segments are joined against the config dir with path.resolve
+/// semantics (so `path.resolve(__dirname, '../..', 'pkg/src')` resolves correctly, not just its last
+/// segment). Otherwise the value is a plain literal (`'/abs'`, `'./rel'`, or a bare module specifier
+/// like `'preact/compat'`) and its last string is resolved by its own prefix. `None` if no literal.
+fn alias_target(dir: &Path, val: &str) -> Option<String> {
+    let quoted = extract_quoted(val);
+    if quoted.is_empty() {
+        return None;
+    }
+    const PATH_MARKERS: [&str; 6] =
+        ["path.resolve", "path.join", "fileURLToPath", "new URL", "__dirname", "import.meta.url"];
+    if PATH_MARKERS.iter().any(|m| val.contains(m)) {
+        Some(resolve_alias_join(dir, &quoted))
+    } else {
+        Some(resolve_alias_target(dir, quoted.last().unwrap()))
+    }
+}
+
+/// Join path segments against `dir` with Node `path.resolve` semantics: an absolute segment resets
+/// the accumulator, a relative one is appended lexically (`.`/`..` collapsed).
+fn resolve_alias_join(dir: &Path, segs: &[String]) -> String {
+    let mut cur = dir.to_path_buf();
+    for seg in segs {
+        if seg.starts_with('/') {
+            cur = PathBuf::from(seg);
+            continue;
+        }
+        for part in seg.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    cur.pop();
+                }
+                p => cur.push(p),
+            }
+        }
+    }
+    cur.to_string_lossy().into_owned()
 }
 
 /// The FIRST quoted string in `s` (used for an alias key / a `find:` value).

@@ -567,8 +567,10 @@ fn main() {
     // of vitest's default reporter. A file counts as failed if any test failed OR it failed to load.
     // Printed for the human reporters (default/dot/verbose) only; machine artifacts (json/junit/tap)
     // keep stdout clean. `count_line` renders "a failed | b passed (total)" or just "b passed (n)".
+    // Count from actual results, not `files.len()` — under `--bail` (or a worker panic) some files
+    // never run, and those must NOT be reported as passed. `total` stays the discovered file count.
     let failed_files = res.iter().filter(|r| r.load_error || r.failed > 0).count();
-    let passed_files = files.len().saturating_sub(failed_files);
+    let passed_files = res.iter().filter(|r| !r.load_error && r.failed == 0).count();
     let count_line = |failed: usize, passed: usize, total: usize| -> String {
         if failed > 0 {
             format!("{failed} failed | {passed} passed ({total})")

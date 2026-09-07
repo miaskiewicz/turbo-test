@@ -477,8 +477,10 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
     // (its content is served by the asset loader / text), so the import never hard-errors.
     if let Some(qpos) = spec.find('?') {
         let (base, query) = (&spec[..qpos], &spec[qpos + 1..]);
-        if base.ends_with(".svg") && query.split(['&', '=']).any(|t| t == "react") {
-            return svgr_stub_path();
+        // svgr: the `react` query flag (`?react`, `?react&foo`) — a bare flag token split on `&`,
+        // NOT a value like `?foo=react`. `.svg` extension required.
+        if base.ends_with(".svg") && query.split('&').any(|t| t == "react") {
+            return svgr_stub_path(from_dir);
         }
         return resolve_spec_as_uncached(base, from_dir, esm);
     }
@@ -526,33 +528,48 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
     None
 }
 
-/// The shared vite-plugin-svgr stub: a `./x.svg?react` import resolves here. A dependency-free React
-/// function component that returns a real React element (`$$typeof: react.element`, `type: 'svg'`) so
-/// it renders an actual `<svg>` with the forwarded props (className/data-testid/aria-*/title children
-/// all pass through) — enough for the near-universal test patterns (render it, query by role/testid,
-/// assert it's defined) without pulling in svgr's real SVG→JSX transform. Written once to the cache
-/// dir as `.mjs` (unambiguous ESM). Both the `default` and legacy `ReactComponent` exports are the
-/// component (svgr provides both). `null`-returning would be simpler but would break role/testid
-/// queries; a hand-built element needs no `react` import (unresolvable from the cache dir).
-fn svgr_stub_path() -> Option<PathBuf> {
-    let path = cache_dir().join("__turbo_svgr_stub.mjs");
-    if !path.exists() {
-        let src = r#"// turbo-test: vite-plugin-svgr `?react` mock — a render-safe <svg> component.
-var REACT_ELEMENT = (typeof Symbol === 'function' && Symbol.for) ? Symbol.for('react.element') : 0xeac7;
-function SvgrMock(props) {
+/// The shared vite-plugin-svgr stub: a `./x.svg?react` import resolves here. A `forwardRef` React
+/// component that renders a real `<svg>` with the caller's props AND ref forwarded — enough for the
+/// near-universal test patterns (render it, query by role/testid, assert a forwarded ref) without
+/// svgr's real SVG→JSX transform. It builds the element with React's OWN `createElement`, so the
+/// element carries the version-correct `$$typeof` (React 18 vs 19 differ) and refs work — a
+/// hand-built element would hard-code one React era's symbol and silently drop refs. `react` is
+/// imported bare; the cache dir has no `node_modules`, so `bundle_src_dir` is pointed at the
+/// importer's dir (`from_dir`) and `resolve_callback` resolves `react` from there to the project's
+/// one instance. Written once as `.mjs` (unambiguous ESM); `default` and legacy `ReactComponent`
+/// are the same component (svgr exports both).
+fn svgr_stub_path(from_dir: &Path) -> Option<PathBuf> {
+    let src = r#"// turbo-test: vite-plugin-svgr `?react` mock — a render-safe <svg> component.
+import { createElement, forwardRef } from 'react';
+const SvgrMock = forwardRef(function SvgrMock(props, ref) {
   var p = {};
   if (props) { for (var k in props) { if (k !== 'ref' && k !== 'key') p[k] = props[k]; } }
   if (p['aria-hidden'] === undefined && p['aria-label'] === undefined && p.title === undefined && p.role === undefined) {
     p['aria-hidden'] = true;
   }
-  return { $$typeof: REACT_ELEMENT, type: 'svg', key: null, ref: (props && props.ref) || null, props: p, _owner: null };
-}
+  if (ref !== undefined && ref !== null) p.ref = ref;
+  return createElement('svg', p);
+});
 export default SvgrMock;
 export { SvgrMock as ReactComponent };
 "#;
+    // Name the file by a hash of its CONTENT so a changed stub (e.g. after upgrading turbo-test)
+    // never collides with a stale one left in the shared temp cache dir from an older version.
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    src.hash(&mut h);
+    let path = cache_dir().join(format!("__turbo_svgr_stub_{:016x}.mjs", h.finish()));
+    if !path.exists() {
         write_atomic(&path, src);
     }
-    std::fs::canonicalize(&path).ok()
+    let canonical = std::fs::canonicalize(&path).ok()?;
+    // Point the stub's bare `react` import at the importer's dir (cache dir has no node_modules).
+    // resolve_callback keys bundle_src_dir by module path; all importers in a project resolve
+    // `react` to the same instance, so last-writer-wins across importers is harmless.
+    REGISTRY.with(|r| {
+        r.borrow_mut().bundle_src_dir.insert(canonical.clone(), from_dir.to_path_buf());
+    });
+    Some(canonical)
 }
 
 /// Non-JS assets that Vite/Vitest stub: importing them must not crash the graph.
