@@ -47,6 +47,8 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   existing per-file `PASS`/`FAIL` lines and the turbo diagnostic line are unchanged; machine
   reporters (json / junit / tap) keep clean stdout.
 
+## [0.3.15] — functional Web Streams + `expectTypeOf` on the vitest surface
+
 ### Fixed
 - **`ReadableStream`/`WritableStream`/`TransformStream` were present but non-functional (issue #15).**
   The globals existed — so libraries that do `class X extends TransformStream` at module load kept

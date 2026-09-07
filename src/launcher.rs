@@ -736,21 +736,69 @@ fn parse_alias_inner(inner: &str, dir: &Path) -> Vec<(String, String)> {
 /// segment). Otherwise the value is a plain literal (`'/abs'`, `'./rel'`, or a bare module specifier
 /// like `'preact/compat'`) and its last string is resolved by its own prefix. `None` if no literal.
 fn alias_target(dir: &Path, val: &str) -> Option<String> {
-    let quoted = extract_quoted(val);
-    if quoted.is_empty() {
-        return None;
-    }
     const PATH_MARKERS: [&str; 6] =
         ["path.resolve", "path.join", "fileURLToPath", "new URL", "__dirname", "import.meta.url"];
-    // Test markers against the value's CODE (string literals blanked out) so a literal that merely
-    // CONTAINS `__dirname`/`path.join`/… as a substring (e.g. `'bar/__dirname__/x'`) isn't treated
-    // as a path expression.
-    let code = blank_quoted(val);
-    if PATH_MARKERS.iter().any(|m| code.contains(m)) {
-        Some(resolve_alias_join(dir, &quoted))
+    // A value can be a string CONCATENATION (`path.resolve(__dirname,'src') + '/sub'`). Split on the
+    // top-level `+`: the FIRST operand is the base (path.resolve-joined when it's a path expression,
+    // else its plain literal), and each later operand is a plain string appended LITERALLY — so
+    // `+ '/sub'` extends the path and a trailing `+ '/'` is a separator, NOT a reset-to-root (which
+    // is what path.resolve semantics on a `'/'` argument would wrongly do).
+    let mut parts = split_top_level_plus(val).into_iter();
+    let first = parts.next()?;
+    // Test markers against CODE (strings blanked) so a literal merely CONTAINING `__dirname` etc.
+    // isn't mistaken for a path expression.
+    let mut base = if PATH_MARKERS.iter().any(|m| blank_quoted(&first).contains(m)) {
+        let quoted = extract_quoted(&first);
+        if quoted.is_empty() {
+            return None;
+        }
+        resolve_alias_join(dir, &quoted)
     } else {
-        Some(resolve_alias_target(dir, quoted.last().unwrap()))
+        resolve_alias_target(dir, extract_quoted(&first).last()?)
+    };
+    for p in parts {
+        for s in extract_quoted(&p) {
+            base.push_str(&s);
+        }
     }
+    Some(base)
+}
+
+/// Split `s` on TOP-LEVEL `+` (string concatenation), not inside quotes/brackets. Operands trimmed.
+fn split_top_level_plus(s: &str) -> Vec<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' | b'"' | b'`' => quote = Some(c),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'+' if depth == 0 => {
+                out.push(s[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out.push(s[start..].trim().to_string());
+    out
 }
 
 /// Replace every quoted-string span in `s` with spaces (keeping length/positions) so a marker/token
@@ -842,10 +890,13 @@ fn top_level_colon(entry: &str) -> Option<usize> {
     None
 }
 
-/// The value expression after `key:` within a single entry `e`. Scans ALL occurrences of `key` and
-/// accepts the first that is a real object key — a word boundary before it and a `:` (after optional
-/// whitespace) after it — so a `find`/`replacement` VALUE that merely contains the substring `find`/
-/// `replacement` (e.g. `replacement: 'findme'`) doesn't hijack the match.
+/// The value expression for `key:` within an object entry `e`, bounded at the entry's NEXT top-level
+/// comma. Scans all occurrences of `key` and accepts the first that is a real object key (word
+/// boundary before, `:` after optional whitespace) — so a VALUE containing the substring
+/// `find`/`replacement` doesn't hijack the match. The comma bound matters for the ARRAY form, where a
+/// whole `{ find: X, replacement: Y }` object is one entry: without it, `value_after_key(e,"find")`
+/// would read across the comma into `replacement` (grabbing its string, or — when `find` is a regex
+/// blanked to spaces — mis-picking `replacement`'s string as the find key).
 fn value_after_key(e: &str, key: &str) -> Option<String> {
     let b = e.as_bytes();
     let mut from = 0usize;
@@ -857,12 +908,45 @@ fn value_after_key(e: &str, key: &str) -> Option<String> {
             p != b'.' && p != b'_' && p != b'$' && !p.is_ascii_alphanumeric()
         };
         if prev_ok {
-            let rest = e[after..].trim_start();
-            if let Some(val) = rest.strip_prefix(':') {
-                return Some(val.trim().to_string());
+            let ws = skip_ws(b, after);
+            if ws < b.len() && b[ws] == b':' {
+                let val_start = ws + 1;
+                let rel_end = top_level_comma(&e[val_start..]).unwrap_or(e.len() - val_start);
+                return Some(e[val_start..val_start + rel_end].trim().to_string());
             }
         }
         from = after;
+    }
+    None
+}
+
+/// Byte offset of the first TOP-LEVEL `,` in `s` (not inside quotes/brackets). `None` if none.
+fn top_level_comma(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' | b'"' | b'`' => quote = Some(c),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 0 => return Some(i),
+            _ => {}
+        }
+        i += 1;
     }
     None
 }
