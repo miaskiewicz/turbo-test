@@ -23,6 +23,12 @@ function parseJson(out) {
   return JSON.parse(line);
 }
 const file = (name) => path.join(FIX, name);
+// Some fixtures need their OWN cwd so the launcher discovers their vitest.config.ts (resolve.alias,
+// test.alias) walking up from there — run them with cwd set to the fixture directory.
+function runIn(cwd, args) {
+  const res = spawnSync('node', [CLI, ...args], { cwd, encoding: 'utf8' });
+  return { code: res.status, out: res.stdout || '', err: res.stderr || '' };
+}
 
 test('toMatchSnapshot: first run writes the snap and passes; second run compares and passes', () => {
   const snapDir = path.join(FIX, '__snapshots__');
@@ -94,6 +100,32 @@ test('common matchers: toMatchObject / toContainEqual / toSatisfy / toHaveBeenCa
 test('extra HTML*Element constructor globals + tag-keyed instanceof + constructor.name', () => {
   const j = parseJson(run(['--reporter', 'json', file('html-element-ctors.test.ts')]).out);
   assert.equal(j.numPassedTests, 3);
+  assert.equal(j.numFailedTests, 0);
+});
+
+// issue #18: a top-level window must self-reference (window.parent/top/self === window), matching
+// browsers/jsdom/vitest — otherwise iframe-detection (window.parent !== window) reads "always framed".
+test('top-level window self-references (window.parent/top/self/frames === window, frameElement null)', () => {
+  const j = parseJson(run(['--reporter', 'json', file('window-framing.test.ts')]).out);
+  assert.equal(j.numPassedTests, 4);
+  assert.equal(j.numFailedTests, 0);
+});
+
+// vite/vitest resolve.alias (object form, path.resolve) + test.alias (array find/replacement) —
+// turbo-test resolves these natively; the same thing vite-tsconfig-paths' non-tsconfig path map does.
+test('resolve.alias + test.alias: @ / ~lib prefix aliases and @math exact alias resolve', () => {
+  const dir = path.join(FIX, 'alias');
+  const j = parseJson(runIn(dir, ['--reporter', 'json', 'alias.test.ts']).out);
+  assert.equal(j.numPassedTests, 3);
+  assert.equal(j.numFailedTests, 0);
+});
+
+// vite-plugin-svgr: `import Icon from './x.svg?react'` yields a render-safe <svg> React component
+// (default + legacy ReactComponent export). turbo-test resolves the `?react` query natively.
+test('vite-plugin-svgr ?react import resolves to a render-safe React component', () => {
+  const dir = path.join(FIX, 'svgr');
+  const j = parseJson(runIn(dir, ['--reporter', 'json', 'svgr.test.ts']).out);
+  assert.equal(j.numPassedTests, 4);
   assert.equal(j.numFailedTests, 0);
 });
 

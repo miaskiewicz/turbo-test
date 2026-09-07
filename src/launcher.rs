@@ -42,7 +42,7 @@ const CONFIG_NAMES: [&str; 8] = [
 
 /// Runner flags that take a following value (so a file arg isn't mistaken for the value, and the
 /// value isn't mistaken for a file). Mirrors the value-flag set cli.js forwarded with their arg.
-const VALUE_FLAGS: [&str; 21] = [
+const VALUE_FLAGS: [&str; 26] = [
     "-j",
     "--jobs",
     "--shard",
@@ -64,6 +64,13 @@ const VALUE_FLAGS: [&str; 21] = [
     "--coverage-reporters",
     "--coverage-include",
     "--coverage-exclude",
+    // Accepted-and-ignored vitest flags that TAKE a value — listed so their argument isn't torn off
+    // as a bogus file path (the space-separated form; the `--flag=value` form never leaks).
+    "--pool",
+    "--exclude",
+    "--project",
+    "--mode",
+    "--maxConcurrency",
 ];
 
 /// `name` is a vitest-style test file: `*.{test,spec}.{ts,tsx,js,jsx,mts,cts}` (cli.js TEST_RE).
@@ -352,6 +359,280 @@ fn scan_number(text: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Return the INNER text of the balanced `{...}`/`[...]` (or `(...)`) that OPENS at byte `open_at`,
+/// respecting nested `{}[]()` and quoted strings (`'` `"` `` ` ``). `None` if unterminated. Used to
+/// grab a whole `alias`/`define` block even when it contains nested objects/arrays (which the flat
+/// `scan_braced` — first `}` wins — cannot).
+fn balanced_block(text: &str, open_at: usize) -> Option<String> {
+    let b = text.as_bytes();
+    let open = b[open_at];
+    let close = match open {
+        b'{' => b'}',
+        b'[' => b']',
+        b'(' => b')',
+        _ => return None,
+    };
+    let mut depth = 0i32;
+    let mut i = open_at;
+    let mut quote: Option<u8> = None;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' | b'"' | b'`' => quote = Some(c),
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => {
+                depth -= 1;
+                if depth == 0 && c == close {
+                    return Some(text[open_at + 1..i].to_string());
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Find `key` followed by `:` then a `{`/`[` and return `(open_char, inner_text)` of that balanced
+/// block. `key` is matched with a leading word-boundary guard so `alias` doesn't hit `noAlias`.
+fn scan_block(text: &str, key: &str) -> Option<(u8, String)> {
+    let b = text.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = text[from..].find(key) {
+        let at = from + rel;
+        let after = at + key.len();
+        let ok_prev = at == 0 || {
+            let p = b[at - 1];
+            p != b'.' && p != b'_' && p != b'$' && !p.is_ascii_alphanumeric()
+        };
+        if ok_prev {
+            let i = skip_ws(b, after);
+            if i < b.len() && b[i] == b':' {
+                let j = skip_ws(b, i + 1);
+                if j < b.len() && (b[j] == b'{' || b[j] == b'[') {
+                    if let Some(inner) = balanced_block(text, j) {
+                        return Some((b[j], inner));
+                    }
+                }
+            }
+        }
+        from = after;
+    }
+    None
+}
+
+/// The LAST quoted string literal in `s` (the alias/define target — e.g. the `'./src'` inside
+/// `path.resolve(__dirname, './src')` or `fileURLToPath(new URL('./src', import.meta.url))`).
+fn last_quoted(s: &str) -> Option<String> {
+    let all = extract_quoted(s);
+    all.into_iter().last()
+}
+
+/// Lexically resolve `target` against `dir`: absolute stays, `.`/`..`-relative joins+normalizes,
+/// a bare specifier (`react`, `@scope/x`) is returned unchanged (module-name alias).
+fn resolve_alias_target(dir: &Path, target: &str) -> String {
+    if target.starts_with('/') {
+        return target.to_string();
+    }
+    if target.starts_with("./") || target.starts_with("../") || target == "." || target == ".." {
+        let mut out = dir.to_path_buf();
+        for seg in target.split('/') {
+            match seg {
+                "" | "." => {}
+                ".." => {
+                    out.pop();
+                }
+                s => out.push(s),
+            }
+        }
+        return out.to_string_lossy().into_owned();
+    }
+    target.to_string()
+}
+
+/// Split a top-level object/array's inner text into entries on TOP-LEVEL commas (respecting nested
+/// brackets and quotes), so `{ a: f(x, y), b: 1 }` yields `a: f(x, y)` and `b: 1`, not four pieces.
+fn split_top_level(inner: &str) -> Vec<String> {
+    let b = inner.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' | b'"' | b'`' => quote = Some(c),
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => depth -= 1,
+            b',' if depth == 0 => {
+                out.push(inner[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let tail = inner[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
+    }
+    out
+}
+
+/// Parse `resolve.alias` and `test.alias` into `(find, resolved-target)` pairs. Supports the object
+/// form (`{ '@': path.resolve(__dirname, './src') }`) and the array form
+/// (`[{ find: '@', replacement: '/abs/src' }]`). Values are arbitrary JS, so the heuristic is: the
+/// target is the LAST quoted string in the value expression (covers `path.resolve`/`fileURLToPath`/
+/// `new URL`/bare literals). A regex `find` (leading `/`) is skipped — oxc alias keys are strings.
+/// `test.alias` overrides `resolve.alias` on key collision (vitest merge order).
+fn config_aliases(start_dir: &Path, forced: Option<&str>) -> Vec<(String, String)> {
+    let Some(cfg) = find_config(start_dir, forced) else {
+        return vec![];
+    };
+    let dir = &cfg.dir;
+    let mut map: Vec<(String, String)> = Vec::new();
+    let mut put = |k: String, v: String| {
+        if let Some(e) = map.iter_mut().find(|(ek, _)| *ek == k) {
+            e.1 = v;
+        } else {
+            map.push((k, v));
+        }
+    };
+    // resolve.alias first, then test.alias (later wins). We scan the whole config text for each
+    // `alias` block; there can legitimately be two (resolve + test), so collect ALL occurrences.
+    for (_open, inner) in scan_all_blocks(&cfg.text, "alias") {
+        for (k, v) in parse_alias_inner(&inner, dir) {
+            put(k, v);
+        }
+    }
+    map
+}
+
+/// Every `key: {..}|[..]` block for `key` in the text (not just the first) — resolve+test both use
+/// the `alias` key, and a config may define both.
+fn scan_all_blocks(text: &str, key: &str) -> Vec<(u8, String)> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while let Some((open, inner)) = scan_block(&text[offset..], key) {
+        // advance past this block's inner text to find the next occurrence
+        let consumed = text[offset..].find(&inner).map(|p| p + inner.len()).unwrap_or(text.len() - offset);
+        out.push((open, inner));
+        offset += consumed;
+        if offset >= text.len() {
+            break;
+        }
+    }
+    out
+}
+
+fn parse_alias_inner(inner: &str, dir: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let trimmed = inner.trim();
+    // Array form: entries are `{ find: .., replacement: .. }` objects.
+    if trimmed.contains("find") && trimmed.contains("replacement") {
+        for entry in split_top_level(inner) {
+            let e = entry.trim();
+            let e = e.strip_prefix('{').unwrap_or(e);
+            let e = e.strip_suffix('}').unwrap_or(e);
+            let find = value_after_key(e, "find").and_then(|v| first_quoted(&v));
+            let repl = value_after_key(e, "replacement").and_then(|v| last_quoted(&v));
+            if let (Some(f), Some(r)) = (find, repl) {
+                if !f.starts_with('/') {
+                    out.push((f, resolve_alias_target(dir, &r)));
+                }
+            }
+        }
+        return out;
+    }
+    // Object form: `key: value` entries.
+    for entry in split_top_level(inner) {
+        let Some(colon) = top_level_colon(&entry) else { continue };
+        let key_raw = entry[..colon].trim();
+        let val = &entry[colon + 1..];
+        // key is either quoted or a bare identifier; a `[computed]` or regex key is skipped.
+        let key = if let Some(q) = first_quoted(key_raw) {
+            q
+        } else if !key_raw.is_empty() && !key_raw.starts_with('[') && !key_raw.starts_with('/') {
+            key_raw.to_string()
+        } else {
+            continue;
+        };
+        if let Some(target) = last_quoted(val) {
+            out.push((key, resolve_alias_target(dir, &target)));
+        }
+    }
+    out
+}
+
+/// The FIRST quoted string in `s` (used for an alias key / a `find:` value).
+fn first_quoted(s: &str) -> Option<String> {
+    extract_quoted(s).into_iter().next()
+}
+
+/// Byte offset of the first TOP-LEVEL `:` in `entry` (not inside quotes/brackets).
+fn top_level_colon(entry: &str) -> Option<usize> {
+    let b = entry.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' | b'"' | b'`' => quote = Some(c),
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => depth -= 1,
+            b':' if depth == 0 => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The value expression after `key:` within a single entry `e` (up to end / a stray top-level comma
+/// already stripped by the caller). Returns the raw text after the colon.
+fn value_after_key(e: &str, key: &str) -> Option<String> {
+    let at = e.find(key)?;
+    let rest = &e[at + key.len()..];
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix(':')?;
+    Some(rest.trim().to_string())
+}
+
 /// Default discovery: all test files under `cwd`, filtered by config include/exclude when a config
 /// with `test.include` is found. Mirrors cli.js `discover`.
 fn discover(cwd: &Path, forced_config: Option<&str>) -> Vec<PathBuf> {
@@ -577,6 +858,19 @@ pub fn prepare(mut raw: Vec<String>) -> Vec<String> {
     });
     if let Some(env) = environment {
         std::env::set_var("TURBO_ENV", env);
+    }
+
+    // `resolve.alias` / `test.alias` (incl. what plugins like vite-tsconfig-paths' non-tsconfig
+    // fallback emit) → TURBO_ALIAS, read by the runner's module resolver. Serialized as
+    // `find\x1ftarget` records joined by `\x1e`. tsconfig `paths` are handled separately (native).
+    let aliases = config_aliases(&cwd, opts.config.as_deref());
+    if !aliases.is_empty() {
+        let ser = aliases
+            .iter()
+            .map(|(k, v)| format!("{k}\u{1f}{v}"))
+            .collect::<Vec<_>>()
+            .join("\u{1e}");
+        std::env::set_var("TURBO_ALIAS", ser);
     }
 
     // Coverage: fill thresholds/include/exclude from vitest config unless passed explicitly.

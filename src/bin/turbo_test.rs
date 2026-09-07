@@ -208,10 +208,31 @@ fn main() {
                     coverage::add_exclude(&v);
                 }
             }
-            // Unknown `-`/`--` token: a vitest flag turbo-test does not model (e.g. --silent,
-            // --pool=forks, --logHeapUsage). Warn + ignore — NEVER treat it as a test-file path
-            // (that reached the runner as a hard load-error and flipped the exit code). Test
-            // files and globs never start with `-`.
+            // `--no-file-parallelism` (vitest: run test files serially) → jobs = 1.
+            "--no-file-parallelism" => jobs = 1,
+            // Value-taking vitest flags with no effect on a native single-run runner. Consume the
+            // following value token (the space form — the launcher forwards flag+value together) so
+            // it isn't mistaken for a test-file path. The `--flag=value` inline form is one token,
+            // absorbed by the `starts_with` catch-all below (nothing to consume).
+            "--pool" | "--mode" | "--project" | "--exclude" | "--maxConcurrency" => {
+                let _ = args.next();
+            }
+            // Boolean / no-effect vitest flags — silently accepted (NOT warned) so scripts and CI
+            // passing them stay quiet.
+            "--run" | "--watch" | "-w" | "--no-watch" | "--logHeapUsage" | "--hideSkippedTests"
+            | "--no-color" | "--color" | "--dom" | "--segfaultRetry" | "--printConsoleTrace"
+            | "--disableConsoleIntercept" => {}
+            _ if a.starts_with("--pool=")
+                || a.starts_with("--mode=")
+                || a.starts_with("--project=")
+                || a.starts_with("--exclude=")
+                || a.starts_with("--maxConcurrency=")
+                || a.starts_with("--sequence")
+                || a.starts_with("--inspect")
+                || a.starts_with("--browser") => {}
+            // Unknown `-`/`--` token: a vitest flag turbo-test does not model. Warn + ignore —
+            // NEVER treat it as a test-file path (that reached the runner as a hard load-error and
+            // flipped the exit code). Test files and globs never start with `-`.
             other if other.starts_with('-') => {
                 eprintln!("turbo-test: ignoring unsupported flag '{other}'");
             }
@@ -541,6 +562,28 @@ fn main() {
     let avg_setup = if setup_n > 0 { setup_sum / setup_n as f64 } else { 0.0 };
     let (hits, misses) = transform_cache_stats();
     let hit_rate = if hits + misses > 0 { 100.0 * hits as f64 / (hits + misses) as f64 } else { 0.0 };
+
+    // Vitest-style summary footer (`Test Files` / `Tests` / `Duration`) — the recognizable signature
+    // of vitest's default reporter. A file counts as failed if any test failed OR it failed to load.
+    // Printed for the human reporters (default/dot/verbose) only; machine artifacts (json/junit/tap)
+    // keep stdout clean. `count_line` renders "a failed | b passed (total)" or just "b passed (n)".
+    let failed_files = res.iter().filter(|r| r.load_error || r.failed > 0).count();
+    let passed_files = files.len().saturating_sub(failed_files);
+    let count_line = |failed: usize, passed: usize, total: usize| -> String {
+        if failed > 0 {
+            format!("{failed} failed | {passed} passed ({total})")
+        } else {
+            format!("{passed} passed ({total})")
+        }
+    };
+    let dur = if wall_ms >= 1000.0 { format!("{:.2}s", wall_ms / 1000.0) } else { format!("{:.0}ms", wall_ms) };
+    let vitest_footer = format!(
+        "\n Test Files  {}\n      Tests  {}\n   Duration  {}",
+        count_line(failed_files, passed_files, files.len()),
+        count_line(tf as usize, tp as usize, (tp + tf) as usize),
+        dur,
+    );
+
     let summary = format!(
         "\n{} files | {} passed | {} failed | {} load-errors | {} jobs | wall {:.0} ms | env setup {:.2} ms/file | cache {:.0}% hit",
         files.len(), tp, tf, errs, jobs, wall_ms, avg_setup / 1000.0, hit_rate
@@ -550,6 +593,8 @@ fn main() {
     if artifact_reporter && output_file.is_none() {
         eprintln!("{summary}");
     } else {
+        // Human reporters get the vitest-style footer; the turbo diagnostic line follows it.
+        println!("{vitest_footer}");
         println!("{summary}");
     }
     let cov_ok = if coverage::enabled() { coverage::report() } else { true };

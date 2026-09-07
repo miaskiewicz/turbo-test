@@ -202,6 +202,35 @@ fn reset_app_registry() {
     });
 }
 
+/// Parsed `resolve.alias`/`test.alias` (from launcher's TURBO_ALIAS), as oxc alias entries. Cached
+/// for the process — the config is fixed for a whole run. Empty when no aliases are configured.
+fn config_alias_list() -> oxc_resolver::Alias {
+    thread_local! {
+        static ALIASES: RefCell<Option<oxc_resolver::Alias>> = const { RefCell::new(None) };
+    }
+    ALIASES.with(|c| {
+        if let Some(a) = c.borrow().as_ref() {
+            return a.clone();
+        }
+        let parsed: oxc_resolver::Alias = std::env::var("TURBO_ALIAS")
+            .ok()
+            .map(|raw| {
+                raw.split('\u{1e}')
+                    .filter_map(|rec| {
+                        let (k, v) = rec.split_once('\u{1f}')?;
+                        if k.is_empty() || v.is_empty() {
+                            return None;
+                        }
+                        Some((k.to_string(), vec![oxc_resolver::AliasValue::Path(v.to_string())]))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        *c.borrow_mut() = Some(parsed.clone());
+        parsed
+    })
+}
+
 /// Cached node-resolution Resolver (oxc_resolver) for bare specifiers / node_modules.
 fn base_resolve_options(tsconfig: Option<PathBuf>, esm: bool) -> oxc_resolver::ResolveOptions {
     let strs = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -239,6 +268,10 @@ fn base_resolve_options(tsconfig: Option<PathBuf>, esm: bool) -> oxc_resolver::R
         extensions: strs(&[".ts", ".tsx", ".mjs", ".js", ".jsx", ".cjs", ".json", ".node"]),
         condition_names: strs(conditions),
         main_fields: strs(mains),
+        // vitest/vite `resolve.alias` + `test.alias` (launcher → TURBO_ALIAS). oxc matches an alias
+        // key exactly or as a `key/`-prefixed path, so `@` -> /abs/src turns `@/foo` into
+        // /abs/src/foo (and leaves `@scope/pkg` alone). tsconfig `paths` stay separate (below).
+        alias: config_alias_list(),
         // tsconfig `paths` aliases (e.g. "@/*" -> "./src/*"): the module-runner keeps
         // `require("@/...")` in transformed output (esbuild transform doesn't apply paths), so
         // the resolver must. Manual with the nearest tsconfig (Auto discovers from cwd, wrong).
@@ -438,6 +471,17 @@ pub fn resolve_spec_as(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf
 }
 
 fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
+    // Vite/plugin query suffixes (`./icon.svg?react`, `./x.svg?url`, `./y?raw`). oxc can't resolve a
+    // spec with a `?query`, so peel it off. `?react` (vite-plugin-svgr) is special: it yields a React
+    // component — resolve to a shared render-safe SVGR stub. Every other query resolves the base file
+    // (its content is served by the asset loader / text), so the import never hard-errors.
+    if let Some(qpos) = spec.find('?') {
+        let (base, query) = (&spec[..qpos], &spec[qpos + 1..]);
+        if base.ends_with(".svg") && query.split(['&', '=']).any(|t| t == "react") {
+            return svgr_stub_path();
+        }
+        return resolve_spec_as_uncached(base, from_dir, esm);
+    }
     // A `node_modules/<pkg>/...` import (some tests `await import('node_modules/x/dist/y')`)
     // is really a bare specifier — strip the prefix so oxc resolves it from node_modules.
     let spec = spec.strip_prefix("node_modules/").unwrap_or(spec);
@@ -480,6 +524,35 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
         }
     }
     None
+}
+
+/// The shared vite-plugin-svgr stub: a `./x.svg?react` import resolves here. A dependency-free React
+/// function component that returns a real React element (`$$typeof: react.element`, `type: 'svg'`) so
+/// it renders an actual `<svg>` with the forwarded props (className/data-testid/aria-*/title children
+/// all pass through) — enough for the near-universal test patterns (render it, query by role/testid,
+/// assert it's defined) without pulling in svgr's real SVG→JSX transform. Written once to the cache
+/// dir as `.mjs` (unambiguous ESM). Both the `default` and legacy `ReactComponent` exports are the
+/// component (svgr provides both). `null`-returning would be simpler but would break role/testid
+/// queries; a hand-built element needs no `react` import (unresolvable from the cache dir).
+fn svgr_stub_path() -> Option<PathBuf> {
+    let path = cache_dir().join("__turbo_svgr_stub.mjs");
+    if !path.exists() {
+        let src = r#"// turbo-test: vite-plugin-svgr `?react` mock — a render-safe <svg> component.
+var REACT_ELEMENT = (typeof Symbol === 'function' && Symbol.for) ? Symbol.for('react.element') : 0xeac7;
+function SvgrMock(props) {
+  var p = {};
+  if (props) { for (var k in props) { if (k !== 'ref' && k !== 'key') p[k] = props[k]; } }
+  if (p['aria-hidden'] === undefined && p['aria-label'] === undefined && p.title === undefined && p.role === undefined) {
+    p['aria-hidden'] = true;
+  }
+  return { $$typeof: REACT_ELEMENT, type: 'svg', key: null, ref: (props && props.ref) || null, props: p, _owner: null };
+}
+export default SvgrMock;
+export { SvgrMock as ReactComponent };
+"#;
+        write_atomic(&path, src);
+    }
+    std::fs::canonicalize(&path).ok()
 }
 
 /// Non-JS assets that Vite/Vitest stub: importing them must not crash the graph.
