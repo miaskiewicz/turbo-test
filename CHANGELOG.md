@@ -5,6 +5,37 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.4.1] — memoize per-file config/project walks
+
+### Performance
+- **Per-file project/config walks are now memoized (thread-local, per start directory).** Five
+  pure-of-the-filesystem functions in the module-load hot path — `cjs_first_project`,
+  `vitest_setup_files`, `project_root`, `nearest_pkg_type`, and `is_esm_module` — each walk up the
+  directory tree re-reading `package.json` and up to ~11 config filenames per ancestor. Their result
+  depends only on the *directory* chain (never the filename — except `is_esm_module`, which also
+  keys on the file extension), yet they were recomputed for every test file and, for the
+  per-module ones, for every module a file imports. Each now caches into a `thread_local` `HashMap`
+  keyed by the start dir, exactly like the existing E12 `nearest_tsconfig` / `resolve_spec_as`
+  memos and gated behind the same `TURBO_NO_E12` flag. Keying by the start directory (rather than
+  the file path) lets sibling test files and co-located modules share one answer, turning repeat
+  walks into hashmap hits. The syscalls saved are the config `is_file()`/`read_to_string` and
+  `node_modules/.bin/esbuild` `exists()` probes that dominate warm-cache runs once transforms are
+  already cached.
+- **`cache_dir()` no longer calls `create_dir_all` on every invocation.** It is hit ~9× per module
+  load; the directory only needs creating once. The creation is now guarded by a process-wide
+  `OnceLock<Mutex<HashSet<PathBuf>>>` so the syscall fires exactly once per distinct cache dir
+  (the set keys on the resolved path so a `TURBO_CACHE_DIR` override is still honored).
+
+  Behavior is unchanged — identical resolution results, identical test outcomes. Measured on real
+  suites (warm cache, ABBA-interleaved medians to cancel thermal/load drift; `cargo build --release`
+  native binary, 12 jobs, Apple Silicon):
+  - **payroll-app** (1583 files / 18418 tests): runner wall ~15.48s → ~15.19s (**~1.9% faster**).
+  - **ui-design-components** (453 files / 7268 tests): ~12.48s → ~12.35s (**~1%**).
+  - **website-global** (101 / 1476) and **standalone-chat-app** (68 / 761): within noise (walks
+    are a tiny fraction of these short runs).
+  - Cold-cache runs are transform-bound (esbuild dominates) and land within noise — never a
+    regression. All four suites reported identical pass counts before and after.
+
 ## [0.4.0] — window self-reference + native plugin/alias support
 
 ### Fixed
