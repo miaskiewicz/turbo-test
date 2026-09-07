@@ -5,7 +5,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
-## [0.3.16] — window self-reference + native plugin/alias support
+## [0.4.0] — window self-reference + native plugin/alias support
 
 ### Fixed
 - **A top-level window did not self-reference (issue #18).** `window.parent`, `window.top`, and
