@@ -359,11 +359,10 @@ fn scan_number(text: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Return the INNER text of the balanced `{...}`/`[...]` (or `(...)`) that OPENS at byte `open_at`,
-/// respecting nested `{}[]()` and quoted strings (`'` `"` `` ` ``). `None` if unterminated. Used to
-/// grab a whole `alias`/`define` block even when it contains nested objects/arrays (which the flat
-/// `scan_braced` — first `}` wins — cannot).
-fn balanced_block(text: &str, open_at: usize) -> Option<String> {
+/// The balanced `{...}`/`[...]` (or `(...)`) that OPENS at byte `open_at` — respecting nested
+/// `{}[]()` and quoted strings — returned as `(inner_text, close_index)`. `None` if unterminated.
+/// The close index lets a caller resume scanning PAST the block (so it can't re-match / loop).
+fn balanced_block_end(text: &str, open_at: usize) -> Option<(String, usize)> {
     let b = text.as_bytes();
     let open = b[open_at];
     let close = match open {
@@ -394,40 +393,12 @@ fn balanced_block(text: &str, open_at: usize) -> Option<String> {
             b'}' | b']' | b')' => {
                 depth -= 1;
                 if depth == 0 && c == close {
-                    return Some(text[open_at + 1..i].to_string());
+                    return Some((text[open_at + 1..i].to_string(), i));
                 }
             }
             _ => {}
         }
         i += 1;
-    }
-    None
-}
-
-/// Find `key` followed by `:` then a `{`/`[` and return `(open_char, inner_text)` of that balanced
-/// block. `key` is matched with a leading word-boundary guard so `alias` doesn't hit `noAlias`.
-fn scan_block(text: &str, key: &str) -> Option<(u8, String)> {
-    let b = text.as_bytes();
-    let mut from = 0usize;
-    while let Some(rel) = text[from..].find(key) {
-        let at = from + rel;
-        let after = at + key.len();
-        let ok_prev = at == 0 || {
-            let p = b[at - 1];
-            p != b'.' && p != b'_' && p != b'$' && !p.is_ascii_alphanumeric()
-        };
-        if ok_prev {
-            let i = skip_ws(b, after);
-            if i < b.len() && b[i] == b':' {
-                let j = skip_ws(b, i + 1);
-                if j < b.len() && (b[j] == b'{' || b[j] == b'[') {
-                    if let Some(inner) = balanced_block(text, j) {
-                        return Some((b[j], inner));
-                    }
-                }
-            }
-        }
-        from = after;
     }
     None
 }
@@ -496,12 +467,17 @@ fn split_top_level(inner: &str) -> Vec<String> {
 }
 
 /// Strip `//` line and `/* */` block comments from JS/TS config text WITHOUT touching comment-like
-/// sequences inside string/template literals — so a commented-out `alias` block (or a `}`/`]` inside
-/// a comment) can't corrupt the brace-matching scanners below. Newlines are preserved.
+/// sequences inside string/template literals OR regex literals — so a commented-out `alias` block (a
+/// `}`/`]` inside a comment) can't corrupt the brace scanners, and a config regex like
+/// `p.replace(/^\/api\//, '/')` isn't mangled (its `\/` `/` must NOT read as a `//` comment).
+/// Newlines are preserved. Regex-vs-division is disambiguated by the previous significant char.
 fn strip_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     let mut quote: Option<char> = None;
+    // Previous non-whitespace char; a `/` in "expression position" (after an operator / opener /
+    // start) begins a regex literal, otherwise it's division.
+    let mut prev_sig = '\0';
     while let Some(c) = chars.next() {
         if let Some(q) = quote {
             out.push(c);
@@ -518,6 +494,7 @@ fn strip_comments(s: &str) -> String {
             '\'' | '"' | '`' => {
                 quote = Some(c);
                 out.push(c);
+                prev_sig = c;
             }
             '/' if chars.peek() == Some(&'/') => {
                 for n in chars.by_ref() {
@@ -538,7 +515,96 @@ fn strip_comments(s: &str) -> String {
                 }
                 out.push(' ');
             }
-            _ => out.push(c),
+            // Regex literal (only in expression position): copy it verbatim so its `/` and escaped
+            // `\/` don't trip the comment scanner. Character classes `[...]` may contain an unescaped
+            // `/`, so track them.
+            '/' if is_regex_context(prev_sig) => {
+                out.push('/');
+                let mut in_class = false;
+                while let Some(n) = chars.next() {
+                    out.push(n);
+                    match n {
+                        '\\' => {
+                            if let Some(m) = chars.next() {
+                                out.push(m);
+                            }
+                        }
+                        '[' => in_class = true,
+                        ']' => in_class = false,
+                        '/' if !in_class => break,
+                        _ => {}
+                    }
+                }
+                prev_sig = '/';
+            }
+            _ => {
+                out.push(c);
+                if !c.is_whitespace() {
+                    prev_sig = c;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A `/` following one of these (or the start of input) opens a regex literal, not division.
+fn is_regex_context(prev: char) -> bool {
+    matches!(
+        prev,
+        '\0' | '(' | '{' | '[' | ',' | ';' | ':' | '=' | '!' | '&' | '|' | '?' | '+' | '-' | '*'
+            | '/' | '%' | '^' | '<' | '>' | '~'
+    )
+}
+
+/// Every `key: {..}|[..]` block in `text`, string-aware (run this on comment-stripped text). Unlike
+/// scoping to a single `resolve`/`test` block, this finds ALL `alias` blocks wherever they appear —
+/// a decoy `resolve: { conditions }` (no alias) before the real `resolve: { alias }` can't suppress
+/// it — and skips `alias`-looking text inside string literals. Advances past each block's close, so
+/// it can't loop (including on an empty `{}` / `[]`). Blocks come back in source order.
+fn find_key_blocks(text: &str, key: &str) -> Vec<String> {
+    let b = text.as_bytes();
+    let kb = key.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    let mut quote: Option<u8> = None;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' | b'"' | b'`' => {
+                quote = Some(c);
+                i += 1;
+            }
+            _ if b[i..].starts_with(kb) => {
+                let prev_ok = i == 0 || {
+                    let p = b[i - 1];
+                    p != b'.' && p != b'_' && p != b'$' && !p.is_ascii_alphanumeric()
+                };
+                let j = skip_ws(b, i + kb.len());
+                if prev_ok && j < b.len() && b[j] == b':' {
+                    let k = skip_ws(b, j + 1);
+                    if k < b.len() && (b[k] == b'{' || b[k] == b'[') {
+                        if let Some((inner, end)) = balanced_block_end(text, k) {
+                            out.push(inner);
+                            i = end + 1;
+                            continue;
+                        }
+                    }
+                }
+                i += 1;
+            }
+            _ => i += 1,
         }
     }
     out
@@ -546,11 +612,12 @@ fn strip_comments(s: &str) -> String {
 
 /// Parse `resolve.alias` and `test.alias` into `(find, resolved-target)` pairs. Supports the object
 /// form (`{ '@': path.resolve(__dirname, './src') }`) and the array form
-/// (`[{ find: '@', replacement: '/abs/src' }]`). Scoped to the `resolve` and `test` blocks so a
-/// stray `alias` word elsewhere in the config can't be mistaken for a block, and so `test.alias`
-/// reliably overrides `resolve.alias` on a key collision (vitest merge order) regardless of which
-/// appears first in the file. Comments are stripped first. Values are arbitrary JS, so the target is
-/// derived heuristically (see `alias_target`). A regex `find` (leading `/`) is skipped.
+/// (`[{ find: '@', replacement: '/abs/src' }]`). Comments are stripped first, then EVERY `alias:`
+/// block is parsed (string-aware, so `alias`-looking text inside a string/comment is ignored, and a
+/// decoy `resolve: { conditions }` before the real `resolve: { alias }` can't suppress it). Blocks
+/// are applied in source order with later-wins, so a `test.alias` placed after `resolve.alias`
+/// (the conventional order) overrides it on a key collision. Values are arbitrary JS, so the target
+/// is derived heuristically (see `alias_target`); a regex `find` (leading `/`) is skipped.
 fn config_aliases(start_dir: &Path, forced: Option<&str>) -> Vec<(String, String)> {
     let Some(cfg) = find_config(start_dir, forced) else {
         return vec![];
@@ -565,12 +632,8 @@ fn config_aliases(start_dir: &Path, forced: Option<&str>) -> Vec<(String, String
             map.push((k, v));
         }
     };
-    // resolve.alias FIRST (lower precedence), then test.alias (overrides) — independent of source
-    // order. `alias` is looked up only INSIDE each block's inner text.
-    let resolve_alias = scan_block(&text, "resolve").and_then(|(_, inner)| scan_block(&inner, "alias"));
-    let test_alias = scan_block(&text, "test").and_then(|(_, inner)| scan_block(&inner, "alias"));
-    for block in [resolve_alias, test_alias].into_iter().flatten() {
-        for (k, v) in parse_alias_inner(&block.1, dir) {
+    for inner in find_key_blocks(&text, "alias") {
+        for (k, v) in parse_alias_inner(&inner, dir) {
             put(k, v);
         }
     }
@@ -580,8 +643,10 @@ fn config_aliases(start_dir: &Path, forced: Option<&str>) -> Vec<(String, String
 fn parse_alias_inner(inner: &str, dir: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let trimmed = inner.trim();
-    // Array form: entries are `{ find: .., replacement: .. }` objects.
-    if trimmed.contains("find") && trimmed.contains("replacement") {
+    // Array form (`alias: [ { find, replacement }, … ]`): the inner text begins with an object `{`.
+    // The object form's inner begins with a quoted/identifier key instead — so the first char
+    // distinguishes them without a fragile substring test.
+    if trimmed.starts_with('{') {
         for entry in split_top_level(inner) {
             let e = entry.trim();
             let e = e.strip_prefix('{').unwrap_or(e);
@@ -629,11 +694,46 @@ fn alias_target(dir: &Path, val: &str) -> Option<String> {
     }
     const PATH_MARKERS: [&str; 6] =
         ["path.resolve", "path.join", "fileURLToPath", "new URL", "__dirname", "import.meta.url"];
-    if PATH_MARKERS.iter().any(|m| val.contains(m)) {
+    // Test markers against the value's CODE (string literals blanked out) so a literal that merely
+    // CONTAINS `__dirname`/`path.join`/… as a substring (e.g. `'bar/__dirname__/x'`) isn't treated
+    // as a path expression.
+    let code = blank_quoted(val);
+    if PATH_MARKERS.iter().any(|m| code.contains(m)) {
         Some(resolve_alias_join(dir, &quoted))
     } else {
         Some(resolve_alias_target(dir, quoted.last().unwrap()))
     }
+}
+
+/// Replace every quoted-string span in `s` with spaces (keeping length/positions) so a marker/token
+/// search sees only the surrounding CODE, never string contents.
+fn blank_quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                out.push(' ');
+                if c == '\\' {
+                    if chars.next().is_some() {
+                        out.push(' ');
+                    }
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if c == '\'' || c == '"' || c == '`' {
+                    quote = Some(c);
+                    out.push(' ');
+                } else {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Join path segments against `dir` with Node `path.resolve` semantics: an absolute segment resets
