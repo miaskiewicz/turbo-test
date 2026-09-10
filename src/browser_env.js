@@ -932,4 +932,191 @@
     d.getSelection = function(){ return sel; };
     if (!g.getSelection) g.getSelection = function(){ return sel; };
   })();
+
+  // ── <iframe> second realm (bridged, same-isolate) ───────────────────────────────
+  // A real cross-origin iframe hosts its OWN window/document realm and talks to the
+  // parent only over postMessage (reCAPTCHA's anchor↔bframe handshake works exactly
+  // this way). A separate V8 context is not available inside this single-isolate
+  // binding, so `iframe.contentWindow` is a BRIDGED child window: a distinct window
+  // object with its own event registry, a lightweight child document (native elements,
+  // detached from the parent tree), its own location/origin, and DIRECTIONAL postMessage:
+  //   parent → child:  iframe.contentWindow.postMessage(d,o)  fires the CHILD's message
+  //                     listeners with { source: <parent view>, origin: <parent origin> }.
+  //   child  → parent:  window.parent.postMessage(d,o)  (or e.source.postMessage inside
+  //                     the child) fires the PARENT's message listeners with
+  //                     { source: iframe.contentWindow, origin: <child origin> }.
+  // The event's `source` is what lets each side reply to the other (the protocol reads
+  // e.source + e.origin and posts back through e.source), so the two directional views
+  // form a coherent two-window message channel.
+  //
+  // Fidelity tradeoff: globals/prototypes are SHARED — no true origin isolation, no
+  // separate realm identity, and the child document is a lightweight facade over native
+  // element construction rather than a second live-rendered tree. A determined script can
+  // still detect the shared object graph. It is faithful enough for the message-channel
+  // semantics a cross-frame handshake relies on, which is what this unblocks.
+  (function(){
+    // A `message` event shaped like the fields cross-frame protocols read.
+    var mkMsgEvent = function(data, origin, source, ports){
+      return { type:'message', data:data, origin: origin||'', lastEventId:'', source: source||null,
+        ports: ports||[], bubbles:false, cancelable:false, composed:false, defaultPrevented:false,
+        target:null, currentTarget:null, eventPhase:0, isTrusted:false, timeStamp: Date.now(),
+        preventDefault:function(){}, stopPropagation:function(){}, stopImmediatePropagation:function(){} };
+    };
+    // Deliver a message event to a window-like target's `message` listeners + onmessage.
+    // Async via setTimeout when present (matches the real message-loop ordering + the
+    // render tier's virtual timer queue); synchronous fallback for a bare isolate.
+    var deliver = function(win, ev){
+      var st = g.setTimeout || function(f){ return f(); };
+      st(function(){
+        ev.target = win; ev.currentTarget = win;
+        try { if (typeof win.onmessage === 'function') win.onmessage(ev); } catch(e){}
+        try { if (typeof win.dispatchEvent === 'function') win.dispatchEvent(ev); } catch(e){}
+      }, 0);
+    };
+    // Minimal child document: real (native) elements forming a subtree DETACHED from the
+    // parent's live tree, so the child realm builds + queries its own DOM without
+    // scribbling into the host page. Element construction delegates to the native binding.
+    var makeChildDocument = function(){
+      var root = d.createElement('html');
+      var head = d.createElement('head');
+      var body = d.createElement('body');
+      try { root.appendChild(head); root.appendChild(body); } catch(e){}
+      var dl = {};
+      // Walk the child's OWN detached subtree (native element-scoped querySelector isn't
+      // reliable on a subtree that never entered the live tree, so recurse childNodes).
+      // Handles the id / tag / .class selectors the child code uses; anything fancier
+      // falls back to the native element querySelector best-effort.
+      var attr = function(n, name){ try { return n.getAttribute ? n.getAttribute(name) : null; } catch(e){ return null; } };
+      var walk = function(node, pred){
+        var kids = node && node.childNodes ? node.childNodes : null;
+        if (!kids) return null;
+        for (var i = 0; i < kids.length; i++){
+          var k = kids[i];
+          if (k && k.nodeType === 1){
+            if (pred(k)) return k;
+            var deep = walk(k, pred); if (deep) return deep;
+          }
+        }
+        return null;
+      };
+      var walkAll = function(node, pred, out){
+        var kids = node && node.childNodes ? node.childNodes : null;
+        if (!kids) return out;
+        for (var i = 0; i < kids.length; i++){
+          var k = kids[i];
+          if (k && k.nodeType === 1){ if (pred(k)) out.push(k); walkAll(k, pred, out); }
+        }
+        return out;
+      };
+      var predFor = function(sel){
+        sel = String(sel || '').trim();
+        if (sel.charAt(0) === '#'){ var id = sel.slice(1); return function(n){ return attr(n,'id') === id || n.id === id; }; }
+        if (sel.charAt(0) === '.'){ var cls = sel.slice(1); return function(n){ var c = attr(n,'class') || n.className || ''; return (' '+c+' ').indexOf(' '+cls+' ') >= 0; }; }
+        var tag = sel.toUpperCase(); return function(n){ return String(n.tagName).toUpperCase() === tag; };
+      };
+      var q1 = function(s){
+        var r = walk(root, predFor(s));
+        if (r == null){ try { r = root.querySelector(s); } catch(e){} }
+        return r;
+      };
+      var cd = {
+        nodeType: 9, __childDoc: true,
+        documentElement: root, head: head, body: body,
+        readyState: 'complete', contentType: 'text/html', characterSet: 'UTF-8',
+        cookie: '', title: '', hidden: false, visibilityState: 'visible',
+        createElement: function(t){ return d.createElement(t); },
+        createElementNS: function(ns,t){ return d.createElementNS ? d.createElementNS(ns,t) : d.createElement(t); },
+        createTextNode: function(t){ return d.createTextNode(t); },
+        createComment: function(t){ return d.createComment ? d.createComment(t) : d.createTextNode(String(t)); },
+        createDocumentFragment: function(){ return d.createDocumentFragment(); },
+        getElementById: function(id){ return walk(root, function(n){ return attr(n,'id') === String(id) || n.id === String(id); }); },
+        querySelector: q1,
+        querySelectorAll: function(s){ return walkAll(root, predFor(s), []); },
+        getElementsByTagName: function(s){ return walkAll(root, predFor(String(s)), []); },
+        addEventListener: function(t,f){ if (typeof f==='function') (dl[t]=dl[t]||[]).push(f); },
+        removeEventListener: function(t,f){ var a=dl[t]; if(a){ var i=a.indexOf(f); if(i>=0) a.splice(i,1); } },
+        dispatchEvent: function(ev){ if(!ev) return true; var a=dl[ev.type]; if(a) a.slice().forEach(function(f){ try{f.call(cd,ev);}catch(e){} }); return !(ev&&ev.defaultPrevented); },
+      };
+      return cd;
+    };
+    // origin (scheme://host[:port]) of a URL string; 'null' when not absolute http(s).
+    var originOf = function(u){ try { var m=/^(https?:\/\/[^\/]+)/i.exec(String(u||'')); return m?m[1]:'null'; } catch(e){ return 'null'; } };
+
+    // Build (once) a bridged child realm for the <iframe> `hostEl`. `parentWin` defaults
+    // to the top window `g`. Returns the child window; also sets hostEl.contentWindow /
+    // contentDocument. Reused by turbo-surf's render tier for the reCAPTCHA bframe.
+    g.__makeFrameRealm = function(hostEl, parentWin){
+      parentWin = parentWin || g;
+      if (hostEl && hostEl.__realm) return hostEl.__realm;
+      var childDoc = makeChildDocument();
+      var srcAttr = hostEl && (hostEl.src || (hostEl.getAttribute && hostEl.getAttribute('src')));
+      var childOrigin = originOf(srcAttr);
+      var parentOrigin = (parentWin.location && parentWin.location.origin) || originOf(parentWin.location && parentWin.location.href) || '';
+      var wl = {}; // the child window's own event listeners
+      var childWin, parentView;
+      childWin = {
+        document: childDoc, closed: false, name: (hostEl && hostEl.name) || '',
+        origin: childOrigin, length: 0, frames: [], devicePixelRatio: 1,
+        innerWidth: 0, innerHeight: 0, outerWidth: 0, outerHeight: 0, screenX: 0, screenY: 0,
+        location: { href: String(srcAttr || 'about:blank'), origin: childOrigin,
+          protocol: (childOrigin.split(':')[0] || 'about') + ':',
+          host: childOrigin.replace(/^https?:\/\//,''),
+          hostname: childOrigin.replace(/^https?:\/\//,'').split(':')[0],
+          port: '', pathname: '/', search: '', hash: '',
+          assign:function(){}, replace:function(){}, reload:function(){}, toString:function(){ return this.href; } },
+        navigator: g.navigator, screen: g.screen, history: g.history,
+        onmessage: null, onerror: null, onload: null,
+        setTimeout: g.setTimeout, clearTimeout: g.clearTimeout,
+        setInterval: g.setInterval, clearInterval: g.clearInterval,
+        requestAnimationFrame: g.requestAnimationFrame, cancelAnimationFrame: g.cancelAnimationFrame,
+        getComputedStyle: g.getComputedStyle, matchMedia: g.matchMedia,
+        atob: g.atob, btoa: g.btoa, crypto: g.crypto, performance: g.performance,
+        addEventListener: function(t,f){ if(typeof f==='function') (wl[t]=wl[t]||[]).push(f); },
+        removeEventListener: function(t,f){ var a=wl[t]; if(a){ var i=a.indexOf(f); if(i>=0) a.splice(i,1); } },
+        dispatchEvent: function(ev){ if(!ev) return true; if(ev.target==null){ try{ev.target=childWin;}catch(e){} } var a=wl[ev.type]; if(a) a.slice().forEach(function(f){ try{f.call(childWin,ev);}catch(e){} }); return !ev.defaultPrevented; },
+        focus:function(){}, blur:function(){}, close:function(){ childWin.closed = true; },
+        // parent → child: fire the CHILD's listeners; source is the parent view.
+        postMessage: function(msg, targetOrigin, transfer){
+          var ports = Array.isArray(transfer)?transfer:(transfer&&transfer.length?Array.prototype.slice.call(transfer):[]);
+          deliver(childWin, mkMsgEvent(msg, parentOrigin, parentView, ports));
+        },
+      };
+      childWin.window = childWin; childWin.self = childWin; childWin.globalThis = childWin;
+      childDoc.defaultView = childWin;
+      // parentView: what the child holds to reach the parent (child.parent / child.top /
+      // the e.source it replies through). child → parent: fire the PARENT's listeners;
+      // source is the iframe's own contentWindow so the parent can match + reply.
+      parentView = {
+        postMessage: function(msg, targetOrigin, transfer){
+          var ports = Array.isArray(transfer)?transfer:(transfer&&transfer.length?Array.prototype.slice.call(transfer):[]);
+          deliver(parentWin, mkMsgEvent(msg, childOrigin, childWin, ports));
+        },
+        location: { origin: parentOrigin, href: (parentWin.location && parentWin.location.href) || '' },
+      };
+      childWin.parent = parentView; childWin.top = parentView; childWin.frameElement = hostEl || null;
+      if (hostEl) { hostEl.__realm = childWin; try { hostEl.contentWindow = childWin; hostEl.contentDocument = childDoc; } catch(e){} }
+      return childWin;
+    };
+
+    // Wire createElement('iframe') to expose a real contentWindow/contentDocument, built
+    // lazily on first access (or when src is set). Kept general so any consumer gets it;
+    // the lazy build means an unused iframe costs nothing.
+    var origCreateEl = d.createElement.bind(d);
+    d.createElement = function(tag){
+      var el = origCreateEl(tag);
+      if (el && String(tag).toLowerCase() === 'iframe' && !el.__iframeWired) {
+        el.__iframeWired = true;
+        try {
+          Object.defineProperty(el, 'contentWindow', { configurable: true,
+            get: function(){ return el.__realm || g.__makeFrameRealm(el, g); } });
+          Object.defineProperty(el, 'contentDocument', { configurable: true,
+            get: function(){ return (el.__realm || g.__makeFrameRealm(el, g)).document; } });
+        } catch(e){
+          // Native element rejected the accessor → fall back to an eager realm.
+          try { g.__makeFrameRealm(el, g); } catch(e2){}
+        }
+      }
+      return el;
+    };
+  })();
 })();
