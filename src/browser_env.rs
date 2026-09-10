@@ -2989,4 +2989,93 @@ mod tests {
         );
         reset();
     }
+
+    // WebGL emulates a coherent headless-Chrome SwiftShader context: the identity strings
+    // (VENDOR/RENDERER + UNMASKED_* via WEBGL_debug_renderer_info), the numeric limits, the
+    // extension list, shader precision, and deterministic content-dependent readPixels — the
+    // surface a GPU fingerprinter reads. No longer null (a null WebGL is a stronger bot tell).
+    #[test]
+    fn webgl_reports_a_coherent_swiftshader_signature() {
+        init_v8();
+        let isolate = &mut v8::Isolate::new(Default::default());
+        v8::scope!(let scope, isolate);
+        let context = v8::Context::new(scope, Default::default());
+        let scope = &mut v8::ContextScope::new(scope, context);
+        install(scope);
+
+        let run = |scope: &mut v8::PinScope, code: &str| -> String {
+            let src = v8::String::new(scope, code).unwrap();
+            let script = v8::Script::compile(scope, src, None).unwrap();
+            let r = script.run(scope).unwrap();
+            r.to_rust_string_lossy(scope)
+        };
+
+        let out = run(
+            scope,
+            r#"
+            const c = document.createElement('canvas'); c.width = 256; c.height = 256;
+            const gl = c.getContext('webgl');
+            const notNull = gl != null;
+            const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+            const unmaskedVendor = gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL);
+            const unmaskedRenderer = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
+            const vendor = gl.getParameter(gl.VENDOR);
+            const renderer = gl.getParameter(gl.RENDERER);
+            const version = gl.getParameter(gl.VERSION);
+            const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+            const exts = gl.getSupportedExtensions();
+            const hasDbg = exts.indexOf('WEBGL_debug_renderer_info') >= 0;
+            const prec = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER || 0x8B30, gl.HIGH_FLOAT);
+
+            // readPixels: deterministic + content-dependent (draw ops change the hash).
+            const rp = () => { const px = new Uint8Array(4*16); gl.readPixels(0,0,4,4,0x1908,0x1401,px); return Array.from(px.slice(0,8)).join(','); };
+            const a1 = rp();
+            gl.clearColor(0.1,0.2,0.3,1.0); gl.clear(0x4000); gl.drawArrays(0x0004,0,3);
+            const a2 = rp();
+            const a3 = rp(); // same op-state, read again → must be identical (deterministic)
+
+            const gl2 = document.createElement('canvas').getContext('webgl2');
+            const version2 = gl2.getParameter(gl2.VERSION);
+
+            JSON.stringify({ notNull, unmaskedVendor, unmaskedRenderer, vendor, renderer, version,
+              version2, maxTex, hasDbg, extCount: exts.length,
+              precOk: prec.rangeMin === 127 && prec.rangeMax === 127 && prec.precision === 23,
+              detStable: a2 === a3, contentDep: a1 !== a2 });
+        "#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["notNull"], true, "webgl context must not be null: {out}");
+        assert_eq!(v["unmaskedVendor"], "Google Inc. (Google)", "{out}");
+        assert_eq!(
+            v["unmaskedRenderer"],
+            "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)",
+            "{out}"
+        );
+        assert_eq!(v["vendor"], "WebKit", "{out}");
+        assert_eq!(v["renderer"], "WebKit WebGL", "{out}");
+        assert_eq!(v["version"], "WebGL 1.0 (OpenGL ES 2.0 Chromium)", "{out}");
+        assert_eq!(v["version2"], "WebGL 2.0 (OpenGL ES 3.0 Chromium)", "{out}");
+        assert_eq!(v["maxTex"], 8192, "{out}");
+        assert_eq!(
+            v["hasDbg"], true,
+            "WEBGL_debug_renderer_info must be advertised: {out}"
+        );
+        assert!(
+            v["extCount"].as_u64().unwrap() > 20,
+            "full extension list: {out}"
+        );
+        assert_eq!(
+            v["precOk"], true,
+            "highp float precision is SwiftShader's 127/127/23: {out}"
+        );
+        assert_eq!(
+            v["detStable"], true,
+            "identical GL draws hash identically: {out}"
+        );
+        assert_eq!(
+            v["contentDep"], true,
+            "different GL draws change readback: {out}"
+        );
+        reset();
+    }
 }
