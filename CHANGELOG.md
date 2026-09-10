@@ -5,7 +5,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
-## [0.3.16] — browser_env: iframe realm, SwiftShader WebGL, content-dependent canvas
+## [0.4.2] — browser_env: iframe realm, SwiftShader WebGL, content-dependent canvas
 
 Fidelity additions to the rtdom↔V8 `browser_env` DOM binding (consumed by turbo-surf's
 browserless render tier for its reCAPTCHA/anti-bot work):
@@ -18,6 +18,78 @@ browserless render tier for its reCAPTCHA/anti-bot work):
   previously `null`.
 - **Content-dependent canvas2d readback** — `toDataURL`/`toBlob`/`getImageData` now
   hash the recorded draw ops (deterministic, non-empty) instead of a constant stub.
+## [0.4.1] — memoize per-file config/project walks
+
+### Performance
+- **Per-file project/config walks are now memoized (thread-local, per start directory).** Five
+  pure-of-the-filesystem functions in the module-load hot path — `cjs_first_project`,
+  `vitest_setup_files`, `project_root`, `nearest_pkg_type`, and `is_esm_module` — each walk up the
+  directory tree re-reading `package.json` and up to ~11 config filenames per ancestor. Their result
+  depends only on the *directory* chain (never the filename — except `is_esm_module`, which also
+  keys on the file extension), yet they were recomputed for every test file and, for the
+  per-module ones, for every module a file imports. Each now caches into a `thread_local` `HashMap`
+  keyed by the start dir, exactly like the existing E12 `nearest_tsconfig` / `resolve_spec_as`
+  memos and gated behind the same `TURBO_NO_E12` flag. Keying by the start directory (rather than
+  the file path) lets sibling test files and co-located modules share one answer, turning repeat
+  walks into hashmap hits. The syscalls saved are the config `is_file()`/`read_to_string` and
+  `node_modules/.bin/esbuild` `exists()` probes that dominate warm-cache runs once transforms are
+  already cached.
+- **`cache_dir()` no longer calls `create_dir_all` on every invocation.** It is hit ~9× per module
+  load; the directory only needs creating once. The creation is now guarded by a process-wide
+  `OnceLock<Mutex<HashSet<PathBuf>>>` so the syscall fires exactly once per distinct cache dir
+  (the set keys on the resolved path so a `TURBO_CACHE_DIR` override is still honored).
+
+  Behavior is unchanged — identical resolution results, identical test outcomes. Measured on real
+  suites (warm cache, ABBA-interleaved medians to cancel thermal/load drift; `cargo build --release`
+  native binary, 12 jobs, Apple Silicon):
+  - **payroll-app** (1583 files / 18418 tests): runner wall ~15.48s → ~15.19s (**~1.9% faster**).
+  - **ui-design-components** (453 files / 7268 tests): ~12.48s → ~12.35s (**~1%**).
+  - **website-global** (101 / 1476) and **standalone-chat-app** (68 / 761): within noise (walks
+    are a tiny fraction of these short runs).
+  - Cold-cache runs are transform-bound (esbuild dominates) and land within noise — never a
+    regression. All four suites reported identical pass counts before and after.
+
+## [0.4.0] — window self-reference + native plugin/alias support
+
+### Fixed
+- **A top-level window did not self-reference (issue #18).** `window.parent`, `window.top`, and
+  `window.self` were all `undefined`, so `window.parent !== window` — the canonical "am I inside an
+  iframe?" check — read `true` for a non-framed window. Real browsers, jsdom, and vitest all return
+  `=== window` for a top-level document, so any component gated on top-level/iframe detection (e.g. a
+  CMS live-preview hook that only mounts inside the preview iframe) behaved as if *always framed*
+  under turbo-test, forcing tests to stub the framing globals by hand. The window object
+  (`window === globalThis`) now defines `self`/`parent`/`top`/`frames` pointing at itself and
+  `frameElement = null`. They're `configurable`, so a test can still stub framing explicitly
+  (`Object.defineProperty(window, 'parent', { value: iframeWin })`) to exercise the framed path.
+
+### Added
+- **`resolve.alias` / `test.alias` from the vitest config are resolved natively.** Both the object
+  form (`{ '@': path.resolve(__dirname, './src') }`) and the array form
+  (`[{ find, replacement }]`) are parsed by the launcher and fed to the module resolver, so a prefix
+  alias like `@` → `src` turns `@/foo` into `src/foo` while leaving `@scope/pkg` node_modules imports
+  alone. The alias target is the last string literal in the value expression (covers `path.resolve`,
+  `fileURLToPath(new URL(…))`, and bare literals); regex `find` keys are skipped. This is the
+  non-tsconfig counterpart to the tsconfig `paths` aliases turbo-test already resolves.
+- **`vite-plugin-svgr` (`?react`).** `import Icon from './x.svg?react'` now resolves to a
+  render-safe React component — a dependency-free function component that returns a real `<svg>`
+  React element with the props forwarded (className / data-testid / aria-* pass through), plus the
+  legacy `ReactComponent` named export. Plain `import url from './x.svg'` still yields the file
+  contents. Other Vite query suffixes (`?url`, `?raw`, …) no longer hard-error — they resolve the
+  base file.
+- **Documented native support** for the most common vitest plugins (`vite-tsconfig-paths`,
+  `@vitejs/plugin-react`(`-swc`), `@vitest/coverage-v8`, `@testing-library/jest-dom`,
+  `vitest-canvas-mock`) in the README — most suites need no plugin setup.
+- **More vitest CLI flags accepted** instead of warned: `--run`, `--watch`/`-w`, `--pool`, `--mode`,
+  `--project`, `--exclude`, `--maxConcurrency`, `--sequence.*`, `--logHeapUsage`,
+  `--hideSkippedTests`, `--disableConsoleIntercept`, `--inspect*`, `--browser*` (accepted-and-ignored
+  on a native single-run runner), and `--no-file-parallelism` (→ runs files serially, `jobs = 1`).
+  Value-taking forms no longer leak their argument as a bogus test-file path.
+
+### Changed
+- **Reporter output gained a vitest-style summary footer** (`Test Files` / `Tests` / `Duration`) for
+  the human reporters (default / dot / verbose), matching vitest's recognizable end-of-run block. The
+  existing per-file `PASS`/`FAIL` lines and the turbo diagnostic line are unchanged; machine
+  reporters (json / junit / tap) keep clean stdout.
 
 ## [0.3.15] — functional Web Streams + `expectTypeOf` on the vitest surface
 

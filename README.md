@@ -270,6 +270,36 @@ resolve to the shipped shims instead of `node_modules`:
 turbo-test reads your project's `vitest.config.ts` for `setupFiles`, `environment`, `isolate`, and
 `test.include` / `test.exclude`. No separate config needed for most suites.
 
+## Plugins & aliases
+
+turbo-test is a native runner — it does **not** execute your Vite/vitest `plugins` array. Instead it
+reproduces what the most common plugins do, natively and out of the box, so most suites need no plugin
+setup at all:
+
+| Plugin | Status | Notes |
+| --- | --- | --- |
+| **`vite-tsconfig-paths`** | ✅ built in | `tsconfig.json` `compilerOptions.paths` aliases (e.g. `@/*` → `src/*`) resolve natively from the nearest tsconfig. No plugin needed. |
+| **`@vitejs/plugin-react` / `-react-swc`** | ✅ built in | JSX/TSX (automatic runtime), TS, and modern JS are transformed natively (oxc). |
+| **`vite-plugin-svgr`** | ✅ built in | `import Icon from './x.svg?react'` resolves to a render-safe `<svg>` React component (default **and** legacy `ReactComponent` export). Plain `import url from './x.svg'` still yields the file contents. |
+| **`@vitest/coverage-v8`** | ✅ built in | V8 coverage with lcov / json-summary / text / html reporters and gateable thresholds — see [Coverage](#coverage). |
+| **`@testing-library/jest-dom`** | ✅ built in | jest-dom matchers (`toBeInTheDocument`, …) are available on the vitest `expect` surface. |
+| **`vitest-canvas-mock`** | ✅ built in | `<canvas>.getContext('2d')` returns a no-op 2D context stub. |
+
+**`resolve.alias` / `test.alias`** — user-defined aliases from your `vitest.config.ts` are honored
+natively, in both the object form and the array (`find`/`replacement`) form:
+
+```ts
+export default defineConfig({
+  resolve: { alias: { '@': path.resolve(__dirname, './src') } },
+  test:    { alias: [{ find: '@math', replacement: path.resolve(__dirname, './lib/math.ts') }] },
+});
+```
+
+`@/foo` resolves to `src/foo` (and never captures `@scope/pkg` node_modules imports). A regex `find`
+is skipped (alias keys are strings); the alias target is taken from the last string literal in the
+value, which covers `path.resolve(__dirname, '…')`, `fileURLToPath(new URL('…', import.meta.url))`,
+and bare literals.
+
 ## Compatibility notes
 
 - A handful of vitest features that depend on a full Node runtime are stubbed/approximated; e2e

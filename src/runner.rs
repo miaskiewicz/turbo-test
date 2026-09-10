@@ -202,6 +202,35 @@ fn reset_app_registry() {
     });
 }
 
+/// Parsed `resolve.alias`/`test.alias` (from launcher's TURBO_ALIAS), as oxc alias entries. Cached
+/// for the process — the config is fixed for a whole run. Empty when no aliases are configured.
+fn config_alias_list() -> oxc_resolver::Alias {
+    thread_local! {
+        static ALIASES: RefCell<Option<oxc_resolver::Alias>> = const { RefCell::new(None) };
+    }
+    ALIASES.with(|c| {
+        if let Some(a) = c.borrow().as_ref() {
+            return a.clone();
+        }
+        let parsed: oxc_resolver::Alias = std::env::var("TURBO_ALIAS")
+            .ok()
+            .map(|raw| {
+                raw.split('\u{1e}')
+                    .filter_map(|rec| {
+                        let (k, v) = rec.split_once('\u{1f}')?;
+                        if k.is_empty() || v.is_empty() {
+                            return None;
+                        }
+                        Some((k.to_string(), vec![oxc_resolver::AliasValue::Path(v.to_string())]))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        *c.borrow_mut() = Some(parsed.clone());
+        parsed
+    })
+}
+
 /// Cached node-resolution Resolver (oxc_resolver) for bare specifiers / node_modules.
 fn base_resolve_options(tsconfig: Option<PathBuf>, esm: bool) -> oxc_resolver::ResolveOptions {
     let strs = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -239,6 +268,10 @@ fn base_resolve_options(tsconfig: Option<PathBuf>, esm: bool) -> oxc_resolver::R
         extensions: strs(&[".ts", ".tsx", ".mjs", ".js", ".jsx", ".cjs", ".json", ".node"]),
         condition_names: strs(conditions),
         main_fields: strs(mains),
+        // vitest/vite `resolve.alias` + `test.alias` (launcher → TURBO_ALIAS). oxc matches an alias
+        // key exactly or as a `key/`-prefixed path, so `@` -> /abs/src turns `@/foo` into
+        // /abs/src/foo (and leaves `@scope/pkg` alone). tsconfig `paths` stay separate (below).
+        alias: config_alias_list(),
         // tsconfig `paths` aliases (e.g. "@/*" -> "./src/*"): the module-runner keeps
         // `require("@/...")` in transformed output (esbuild transform doesn't apply paths), so
         // the resolver must. Manual with the nearest tsconfig (Auto discovers from cwd, wrong).
@@ -289,6 +322,23 @@ fn nearest_tsconfig_uncached(dir: &Path) -> Option<PathBuf> {
 /// Is `abs` an ES module (so its imports resolve with the "import" condition)? .mjs/.ts/.tsx are
 /// ESM; .cjs is CJS; .js follows the nearest package.json "type".
 fn is_esm_module(abs: &Path) -> bool {
+    // E12: memoize per-file. Pure function of the filesystem layout, stable for a whole run, but
+    // called on every module load (native_require) and re-reads package.json up the tree each time.
+    if e12_enabled() {
+        thread_local! {
+            static ESM_MEMO: RefCell<HashMap<PathBuf, bool>> = RefCell::new(HashMap::new());
+        }
+        if let Some(v) = ESM_MEMO.with(|m| m.borrow().get(abs).copied()) {
+            return v;
+        }
+        let v = is_esm_module_uncached(abs);
+        ESM_MEMO.with(|m| m.borrow_mut().insert(abs.to_path_buf(), v));
+        return v;
+    }
+    is_esm_module_uncached(abs)
+}
+
+fn is_esm_module_uncached(abs: &Path) -> bool {
     match abs.extension().and_then(|e| e.to_str()) {
         Some("mjs" | "mts" | "ts" | "tsx" | "jsx") => true,
         Some("cjs" | "cts") => false,
@@ -328,6 +378,26 @@ fn resolver_for(from_dir: &Path, esm: bool) -> std::rc::Rc<oxc_resolver::Resolve
 /// node (non-DOM) test environment and there's no vitest config — i.e. a CommonJS backend. Walks
 /// up from `entry`; a vitest config short-circuits to ESM-first.
 fn cjs_first_project(entry: &Path) -> bool {
+    // E12: memoize keyed by the start dir (entry.parent()). The result is a pure function of the
+    // directory's ancestor chain — NOT the filename — so every test file in a directory shares one
+    // answer, yet each file otherwise re-walks up reading ~11 config names + package.json per dir.
+    if e12_enabled() {
+        if let Some(dir) = entry.parent() {
+            thread_local! {
+                static CJS_MEMO: RefCell<HashMap<PathBuf, bool>> = RefCell::new(HashMap::new());
+            }
+            if let Some(v) = CJS_MEMO.with(|m| m.borrow().get(dir).copied()) {
+                return v;
+            }
+            let v = cjs_first_project_uncached(entry);
+            CJS_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v));
+            return v;
+        }
+    }
+    cjs_first_project_uncached(entry)
+}
+
+fn cjs_first_project_uncached(entry: &Path) -> bool {
     let mut dir = entry.parent();
     while let Some(d) = dir {
         for v in ["vitest.config.ts", "vitest.config.mts", "vitest.config.js", "vitest.config.mjs", "vite.config.ts", "vite.config.js"] {
@@ -361,6 +431,26 @@ fn kind_of(path: &Path) -> Kind {
 
 /// Nearest package.json `"type"` for a file (Node's module-determination rule).
 fn nearest_pkg_type(path: &Path) -> Option<&'static str> {
+    // E12: memoize keyed by the start dir (path.parent()). The nearest package.json "type" is a
+    // pure function of the ancestor chain — NOT the filename — so all files/modules in a directory
+    // share one answer; called on every module load (detect_kind), re-reading package.json up-tree.
+    if e12_enabled() {
+        if let Some(dir) = path.parent() {
+            thread_local! {
+                static PKG_TYPE_MEMO: RefCell<HashMap<PathBuf, Option<&'static str>>> = RefCell::new(HashMap::new());
+            }
+            if let Some(v) = PKG_TYPE_MEMO.with(|m| m.borrow().get(dir).copied()) {
+                return v;
+            }
+            let v = nearest_pkg_type_uncached(path);
+            PKG_TYPE_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v));
+            return v;
+        }
+    }
+    nearest_pkg_type_uncached(path)
+}
+
+fn nearest_pkg_type_uncached(path: &Path) -> Option<&'static str> {
     let mut dir = path.parent();
     while let Some(d) = dir {
         let pj = d.join("package.json");
@@ -438,6 +528,19 @@ pub fn resolve_spec_as(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf
 }
 
 fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
+    // Vite/plugin query suffixes (`./icon.svg?react`, `./x.svg?url`, `./y?raw`). oxc can't resolve a
+    // spec with a `?query`, so peel it off. `?react` (vite-plugin-svgr) is special: it yields a React
+    // component — resolve to a shared render-safe SVGR stub. Every other query resolves the base file
+    // (its content is served by the asset loader / text), so the import never hard-errors.
+    if let Some(qpos) = spec.find('?') {
+        let (base, query) = (&spec[..qpos], &spec[qpos + 1..]);
+        // svgr: the `react` query flag (`?react`, `?react&foo`) — a bare flag token split on `&`,
+        // NOT a value like `?foo=react`. `.svg` extension required.
+        if base.ends_with(".svg") && query.split('&').any(|t| t == "react") {
+            return svgr_stub_path(from_dir);
+        }
+        return resolve_spec_as_uncached(base, from_dir, esm);
+    }
     // A `node_modules/<pkg>/...` import (some tests `await import('node_modules/x/dist/y')`)
     // is really a bare specifier — strip the prefix so oxc resolves it from node_modules.
     let spec = spec.strip_prefix("node_modules/").unwrap_or(spec);
@@ -481,6 +584,66 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
     }
     None
 }
+
+/// A vite-plugin-svgr stub: a `./x.svg?react` import resolves here. A `forwardRef` React component
+/// that renders a real `<svg>` with the caller's props AND ref forwarded — enough for the
+/// near-universal test patterns (render it, query by role/testid, assert a forwarded ref) without
+/// svgr's real SVG→JSX transform. It builds the element with React's OWN `createElement`, so the
+/// element carries the version-correct `$$typeof` (React 18 vs 19 differ) and refs work — a
+/// hand-built element would hard-code one React era's symbol and silently drop refs.
+///
+/// `react` is imported by the CONCRETE PATH resolved from the importer (`from_dir`), not bare — the
+/// stub lives in the cache dir (no `node_modules`), and resolving react per-importer + keying the
+/// stub file by that path means every importer binds to exactly the react instance it would itself
+/// resolve (monorepo-safe: two packages with different react copies get two stub files, each bound
+/// correctly — no shared last-writer-wins state). Falls back to a bare `react` import when react
+/// can't be resolved. The filename also hashes the stub body, so an upgraded turbo-test never reuses
+/// a stale stub from the shared temp cache. `default` and legacy `ReactComponent` are the same
+/// component (svgr exports both).
+fn svgr_stub_path(from_dir: &Path) -> Option<PathBuf> {
+    // Import react by the exact path this importer resolves (so the stub shares the one instance);
+    // fall back to bare `react`. Single-quote + escape for embedding in the generated JS.
+    let react_spec = resolve_spec("react", from_dir)
+        .map(|p| {
+            let esc = p
+                .to_string_lossy()
+                .replace('\\', "\\\\")
+                .replace('\'', "\\'")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\u{2028}', "\\u2028")
+                .replace('\u{2029}', "\\u2029");
+            format!("'{esc}'")
+        })
+        .unwrap_or_else(|| "'react'".to_string());
+    let src = SVGR_STUB_TEMPLATE.replace("__REACT_SPEC__", &react_spec);
+    // Name the file by a hash of its CONTENT (which includes the resolved react path) so distinct
+    // react instances get distinct stubs and a changed stub never collides with a stale one.
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    src.hash(&mut h);
+    let path = cache_dir().join(format!("__turbo_svgr_stub_{:016x}.mjs", h.finish()));
+    if !path.exists() {
+        write_atomic(&path, &src);
+    }
+    std::fs::canonicalize(&path).ok()
+}
+
+/// Body of the svgr `?react` stub; `__REACT_SPEC__` is replaced with the quoted react import spec.
+const SVGR_STUB_TEMPLATE: &str = r#"// turbo-test: vite-plugin-svgr `?react` mock — a render-safe <svg> component.
+import { createElement, forwardRef } from __REACT_SPEC__;
+const SvgrMock = forwardRef(function SvgrMock(props, ref) {
+  var p = {};
+  if (props) { for (var k in props) { if (k !== 'ref' && k !== 'key') p[k] = props[k]; } }
+  if (p['aria-hidden'] === undefined && p['aria-label'] === undefined && p.title === undefined && p.role === undefined) {
+    p['aria-hidden'] = true;
+  }
+  if (ref !== undefined && ref !== null) p.ref = ref;
+  return createElement('svg', p);
+});
+export default SvgrMock;
+export { SvgrMock as ReactComponent };
+"#;
 
 /// Non-JS assets that Vite/Vitest stub: importing them must not crash the graph.
 fn is_asset(path: &Path) -> bool {
@@ -620,7 +783,16 @@ fn cache_dir() -> PathBuf {
     let d = std::env::var_os("TURBO_CACHE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("turbo-test-cache"));
-    let _ = std::fs::create_dir_all(&d);
+    // create_dir_all runs on every call (9 call sites per module load) though the dir only needs
+    // creating once. Memoize the (dir -> created) fact in a OnceLock keyed by the resolved path so
+    // the syscall fires exactly once per distinct cache dir for the life of the process.
+    static ENSURED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    let ensured = ENSURED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut set = ensured.lock().unwrap();
+    if set.insert(d.clone()) {
+        let _ = std::fs::create_dir_all(&d);
+    }
     d
 }
 
@@ -637,6 +809,26 @@ fn cache_key(abs: &Path, src: &str) -> u64 {
 
 /// Nearest project root containing esbuild (for dep bundling).
 fn project_root(file: &Path) -> Option<PathBuf> {
+    // E12: memoize keyed by the start dir (file.parent()). The esbuild project root is a pure
+    // function of the ancestor chain — NOT the filename — so all files/modules in a directory share
+    // one answer; called from many load paths, each re-walking with an exists() syscall per dir.
+    if e12_enabled() {
+        if let Some(dir) = file.parent() {
+            thread_local! {
+                static ROOT_MEMO: RefCell<HashMap<PathBuf, Option<PathBuf>>> = RefCell::new(HashMap::new());
+            }
+            if let Some(v) = ROOT_MEMO.with(|m| m.borrow().get(dir).cloned()) {
+                return v;
+            }
+            let v = project_root_uncached(file);
+            ROOT_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v.clone()));
+            return v;
+        }
+    }
+    project_root_uncached(file)
+}
+
+fn project_root_uncached(file: &Path) -> Option<PathBuf> {
     let mut d = file.parent();
     while let Some(dir) = d {
         if dir.join("node_modules/.bin/esbuild").exists() {
@@ -995,6 +1187,26 @@ fn find_config_key(s: &str, key: &str) -> Option<usize> {
 }
 
 fn vitest_setup_files(entry: &Path) -> Vec<PathBuf> {
+    // E12: memoize keyed by the start dir (entry.parent()). The setup-file list is a pure function
+    // of the ancestor chain — NOT the filename (resolved relative to the config dir, not the entry)
+    // — so every test file in a directory shares one answer; each otherwise re-walks configs up-tree.
+    if e12_enabled() {
+        if let Some(dir) = entry.parent() {
+            thread_local! {
+                static SETUP_MEMO: RefCell<HashMap<PathBuf, Vec<PathBuf>>> = RefCell::new(HashMap::new());
+            }
+            if let Some(v) = SETUP_MEMO.with(|m| m.borrow().get(dir).cloned()) {
+                return v;
+            }
+            let v = vitest_setup_files_uncached(entry);
+            SETUP_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v.clone()));
+            return v;
+        }
+    }
+    vitest_setup_files_uncached(entry)
+}
+
+fn vitest_setup_files_uncached(entry: &Path) -> Vec<PathBuf> {
     let mut dir = entry.parent();
     while let Some(d) = dir {
         for cfg in ["vitest.config.ts", "vitest.config.mts", "vite.config.ts", "vitest.config.js"] {
