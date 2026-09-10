@@ -5,6 +5,19 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.4.2] — browser_env: iframe realm, SwiftShader WebGL, content-dependent canvas
+
+Fidelity additions to the rtdom↔V8 `browser_env` DOM binding (consumed by turbo-surf's
+browserless render tier for its reCAPTCHA/anti-bot work):
+- **Bridged second-realm `<iframe>`** — `contentWindow`/`contentDocument` is a real
+  second window realm with two-way cross-realm `postMessage` (the channel a reCAPTCHA
+  anchor↔bframe handshake needs).
+- **SwiftShader WebGL context** — `getContext('webgl'|'webgl2')` returns a coherent
+  headless-Chrome ANGLE/Vulkan-SwiftShader signature (getParameter incl. UNMASKED_*,
+  ~40 limits, extension list, getShaderPrecisionFormat, deterministic readback);
+  previously `null`.
+- **Content-dependent canvas2d readback** — `toDataURL`/`toBlob`/`getImageData` now
+  hash the recorded draw ops (deterministic, non-empty) instead of a constant stub.
 ## [0.4.1] — memoize per-file config/project walks
 
 ### Performance
