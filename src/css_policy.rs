@@ -4,7 +4,7 @@ use turbo_dom_parser::rtdom::cascade::StylePolicy;
 
 #[derive(Default)]
 pub(super) struct PolicyState {
-    callback: Option<v8::Global<v8::Function>>,
+    callback: Option<v8::Weak<v8::Function>>,
     sheets: HashMap<Handle, (String, bool)>,
     inline: HashMap<Handle, Inline>,
     cascade: Option<(u64, StylePolicy)>,
@@ -29,12 +29,56 @@ fn authorize(
     let Some(callback) = callback else {
         return true;
     };
-    let callback = v8::Local::new(scope, callback);
+    let callback = dom_ownership::local(scope, callback);
     let root = with_tree(Tree::root).unwrap();
     let document = wrap(scope, root);
     let element = wrap(scope, node);
+    let units = with_tree(|tree| {
+        if kind == "style-src-attr" {
+            tree.get_attribute_utf16(node, "style").unwrap_or_default()
+        } else {
+            tree.text_content_utf16(node)
+        }
+    })
+    .unwrap_or_else(|| text.encode_utf16().collect());
+    authorize_element(scope, document, element, callback, kind, &units, initial)
+}
+fn authorize_element<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    document: v8::Local<'s, v8::Object>,
+    element: v8::Local<'s, v8::Object>,
+    callback: v8::Local<'s, v8::Function>,
+    kind: &str,
+    units: &[u16],
+    initial: Option<&[String]>,
+) -> bool {
+    let parser_position = initial.and_then(|_| {
+        node_parser_position(
+            scope,
+            element,
+            (kind == "style-src-attr").then_some("style"),
+        )
+    });
+    let owner_window = node_has_window_owner(scope, element);
+    let source = v8::Object::new(scope);
+    let null = v8::null(scope);
+    source.set_prototype(scope, null.into());
+    let key = v8::String::new(scope, "ownerWindow").unwrap();
+    let value = v8::Boolean::new(scope, owner_window);
+    source.set(scope, key.into(), value.into());
+    if let Some(position) = parser_position {
+        for (name, value) in [
+            ("offset", position.utf16_offset),
+            ("line", position.line),
+            ("column", position.column),
+        ] {
+            let key = v8::String::new(scope, name).unwrap();
+            let value = v8::Number::new(scope, value as f64);
+            source.set(scope, key.into(), value.into());
+        }
+    }
+    let text = unit_string(scope, units);
     let kind = v8::String::new(scope, kind).unwrap();
-    let text = v8::String::new(scope, text).unwrap();
     let metas: v8::Local<v8::Value> = if let Some(initial) = initial {
         let array = v8::Array::new(scope, initial.len() as i32);
         for (index, value) in initial.iter().enumerate() {
@@ -56,6 +100,7 @@ fn authorize(
                 kind.into(),
                 text.into(),
                 metas,
+                source.into(),
             ],
         )
         .is_some_and(|value| value.is_true())
@@ -121,6 +166,10 @@ fn applied_inline(scope: &mut v8::PinScope, node: Handle) -> String {
     })
 }
 fn sheet_allowed(scope: &mut v8::PinScope, node: Handle, initial: Option<&[String]>) -> bool {
+    let element = wrap(scope, node);
+    if !node_has_window_owner(scope, element) {
+        return false;
+    }
     let text = source(node, true);
     let cached = DOM.with(|dom| {
         dom.borrow()
@@ -157,33 +206,33 @@ pub(super) fn invalidate_sheet(node: Handle) {
     });
 }
 pub fn install(scope: &mut v8::PinScope, callback: v8::Local<v8::Function>) {
-    let callback = v8::Global::new(scope, callback);
+    let Some(callback) = dom_ownership::helper_function(scope, callback) else {
+        return;
+    };
     DOM.with(|dom| {
         dom.borrow_mut().as_mut().unwrap().css_policy = PolicyState {
-            callback: Some(callback),
+            callback: Some(callback.clone()),
             ..Default::default()
         }
     });
+    let callback = dom_ownership::local(scope, callback);
     // Native preorder preserves parser policy position. Later meta policies never
     // retroactively revoke a style that was already authorized.
-    let nodes = with_tree(|tree| {
-        let mut nodes = Vec::new();
-        let mut stack = vec![tree.root()];
-        while let Some(node) = stack.pop() {
-            nodes.push(node);
-            let children = tree.children(node);
-            stack.extend(children.into_iter().rev());
-        }
-        nodes
-    })
-    .unwrap_or_default();
+    let document = wrap(scope, with_tree(Tree::root).unwrap());
+    let nodes = template_contents::parser_policy_nodes(scope, document);
     let mut metas = Vec::new();
-    for node in nodes {
+    for element in nodes {
+        let _owner = DomScope::for_object(scope, element);
+        let Some(node) = handle_of(scope, element) else {
+            continue;
+        };
+        let owner_window = node_has_window_owner(scope, element);
         let (tag, style, meta) = with_tree(|tree| {
             (
                 tree.local_name(node).unwrap_or("").to_owned(),
                 tree.has_attribute(node, "style"),
-                if tree.local_name(node) == Some("meta")
+                if owner_window
+                    && tree.local_name(node) == Some("meta")
                     && tree
                         .parent(node)
                         .is_some_and(|parent| tree.local_name(parent) == Some("head"))
@@ -199,9 +248,26 @@ pub fn install(scope: &mut v8::PinScope, callback: v8::Local<v8::Function>) {
         })
         .unwrap();
         if style {
-            inline_changed(scope, node, Some(&metas));
+            if owner_window {
+                inline_changed(scope, node, Some(&metas));
+            } else {
+                // The parser checks attributes against its active document policy,
+                // even after template children move into their inert owner storage.
+                let units =
+                    with_tree(|tree| tree.get_attribute_utf16(node, "style").unwrap_or_default())
+                        .unwrap_or_default();
+                authorize_element(
+                    scope,
+                    document,
+                    element,
+                    callback,
+                    "style-src-attr",
+                    &units,
+                    Some(&metas),
+                );
+            }
         }
-        if tag == "style" {
+        if tag == "style" && owner_window {
             sheet_allowed(scope, node, Some(&metas));
         }
         if let Some(meta) = meta {
@@ -298,4 +364,52 @@ pub(super) fn register(scope: &mut v8::PinScope) {
     bind_method(scope, global, "__readAppliedInlineStyle", read_inline);
     bind_method(scope, global, "__writeAppliedInlineStyle", write_inline);
     bind_method(scope, global, "__isInlineSheetAllowed", read_sheet);
+}
+impl PolicyState {
+    pub(super) fn sweep_storage(&mut self, tree: &Tree) {
+        self.sheets.retain(|node, _| tree.is_live(*node));
+        self.inline.retain(|node, _| tree.is_live(*node));
+        self.cascade = None;
+    }
+}
+
+fn own_object<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    name: &str,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let key = v8::String::new(scope, name)?;
+    let descriptor = object.get_own_property_descriptor(scope, key.into())?;
+    let descriptor = v8::Local::<v8::Object>::try_from(descriptor).ok()?;
+    let value = v8::String::new(scope, "value")?;
+    if descriptor.has_own_property(scope, value.into()) != Some(true) {
+        return None;
+    }
+    v8::Local::<v8::Object>::try_from(descriptor.get(scope, value.into())?).ok()
+}
+
+pub(super) fn clear_adopted_sheets<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    shadow: v8::Local<'s, v8::Object>,
+) {
+    if scope.is_execution_terminating() {
+        return;
+    }
+    let Some(record) = get_interface_record(scope, shadow)
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+    else {
+        return;
+    };
+    let Some(target) = own_object(scope, record, "css")
+        .and_then(|css| own_object(scope, css, "adoption"))
+        .and_then(|adoption| own_object(scope, adoption, "target"))
+        .and_then(|target| v8::Local::<v8::Array>::try_from(target).ok())
+    else {
+        return;
+    };
+    // Mutate the private backing array, preserving every retained ObservableArray
+    // identity without consulting page-overridden getters or array methods.
+    let length = v8::String::new(scope, "length").unwrap();
+    let zero = v8::Integer::new(scope, 0);
+    target.set(scope, length.into(), zero.into());
 }

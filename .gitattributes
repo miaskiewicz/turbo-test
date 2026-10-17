@@ -1,0 +1,7 @@
+# Independent Chrome controls hash these exact source bytes on every platform.
+src/*.js text eol=lf
+src/*.json text eol=lf
+
+# Preserve the exact published MIT provider and license, including upstream CRLF/spacing.
+src/xpath_provider/xpath.js -text -whitespace
+src/xpath_provider/LICENSE -text -whitespace

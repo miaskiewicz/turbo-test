@@ -1,13 +1,16 @@
 //! Authored HTML handler bodies are compiled by V8 with native DOM scope extensions.
 use super::*;
+type SourceKey = (Handle, String);
+type SourceValue = Option<Vec<u16>>;
+type AdoptedSource = (SourceKey, SourceValue);
 #[derive(Default)]
 pub(super) struct State {
-    policy: Option<v8::Global<v8::Function>>,
+    policy: Option<v8::Weak<v8::Function>>,
     base: String,
-    sources: HashMap<(Handle, String), Option<String>>,
+    sources: HashMap<SourceKey, SourceValue>,
 }
-fn source(node: Handle, name: &str) -> Option<String> {
-    with_tree(|tree| tree.get_attribute(node, name).map(str::to_owned)).flatten()
+fn source(node: Handle, name: &str) -> Option<Vec<u16>> {
+    with_tree(|tree| tree.get_attribute_utf16(node, name)).flatten()
 }
 fn note(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
     let _dom = DomScope::for_object(scope, args.this());
@@ -82,11 +85,16 @@ pub(super) fn refresh(scope: &mut v8::PinScope, node: Handle, name: &str) {
     });
     let root = with_tree(Tree::root).unwrap();
     let document = wrap(scope, root);
-    let function = source.and_then(|text| {
+    let active = DOM.with(|dom| {
+        dom.borrow()
+            .as_ref()
+            .is_some_and(|state| state.browsing_context)
+    });
+    let function = source.filter(|_| active).and_then(|text| {
         if let Some(policy) = policy {
-            let callback = v8::Local::new(scope, policy);
+            let callback = dom_ownership::local(scope, policy);
             let kind = v8::String::new(scope, "script-src-attr").unwrap();
-            let code = v8::String::new(scope, &text).unwrap();
+            let code = v8::String::new_from_two_byte(scope, &text, v8::NewStringType::Normal)?;
             let receiver = v8::undefined(scope);
             if !callback
                 .call(
@@ -99,7 +107,7 @@ pub(super) fn refresh(scope: &mut v8::PinScope, node: Handle, name: &str) {
                 return None;
             }
         }
-        let code = v8::String::new(scope, &text).unwrap();
+        let code = v8::String::new_from_two_byte(scope, &text, v8::NewStringType::Normal)?;
         let resource = v8::String::new(
             scope,
             if base.is_empty() {
@@ -171,7 +179,15 @@ pub(super) fn install(
     policy: Option<v8::Local<v8::Function>>,
     base: &str,
 ) {
-    let policy = policy.map(|callback| v8::Global::new(scope, callback));
+    let policy = match policy {
+        Some(callback) => {
+            let Some(callback) = dom_ownership::helper_function(scope, callback) else {
+                return;
+            };
+            Some(callback)
+        }
+        None => None,
+    };
     DOM.with(|dom| {
         dom.borrow_mut().as_mut().unwrap().event_handlers = State {
             policy,
@@ -194,4 +210,51 @@ pub(super) fn install(
     for (node, name) in attrs {
         refresh(scope, node, &name);
     }
+}
+
+/// Keep the native source marker with an adopted node. Losing this marker makes
+/// the destination's first refresh overwrite a previously assigned on* callback.
+pub(super) fn take_adopted_sources(mapping: &[(Handle, Handle)]) -> Vec<AdoptedSource> {
+    let mapping = mapping.iter().copied().collect::<HashMap<_, _>>();
+    DOM.with(|dom| {
+        let mut dom = dom.borrow_mut();
+        let sources = &mut dom.as_mut().unwrap().event_handlers.sources;
+        let keys = sources
+            .keys()
+            .filter(|(node, _)| mapping.contains_key(node))
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.into_iter()
+            .map(|key| {
+                let value = sources.remove(&key).unwrap();
+                ((mapping[&key.0], key.1), value)
+            })
+            .collect()
+    })
+}
+pub(super) fn restore_adopted_sources(sources: Vec<AdoptedSource>) {
+    DOM.with(|dom| {
+        dom.borrow_mut()
+            .as_mut()
+            .unwrap()
+            .event_handlers
+            .sources
+            .extend(sources)
+    });
+}
+impl State {
+    pub(super) fn sweep_storage(&mut self, tree: &Tree) {
+        self.sources.retain(|(node, _), _| tree.is_live(*node));
+    }
+}
+
+/// Host-installed document URL, never read through guest location accessors.
+pub(super) fn document_url() -> String {
+    DOM.with(|dom| {
+        dom.borrow()
+            .as_ref()
+            .map(|dom| dom.event_handlers.base.clone())
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| "about:blank".to_owned())
+    })
 }

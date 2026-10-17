@@ -1,18 +1,21 @@
 use super::*;
-use turbo_dom_parser::rtdom::tree::AttributeData;
 
 /// A nonce is independent of its reflected attribute. Read only native ownership/state.
 pub fn nonce(scope: &mut v8::PinScope, node: v8::Local<v8::Object>) -> Option<String> {
+    nonce_units(scope, node).map(|units| String::from_utf16_lossy(&units))
+}
+pub(super) fn nonce_units(
+    scope: &mut v8::PinScope,
+    node: v8::Local<v8::Object>,
+) -> Option<Vec<u16>> {
     let _dom = DomScope::for_object(scope, node);
     let handle = handle_of(scope, node)?;
     if with_tree(|tree| tree.node_type_id(handle)) != Some(1) {
         return None;
     }
     DOM.with(|dom| dom.borrow().as_ref()?.nonces.get(&handle).cloned())
-        .or_else(|| {
-            with_tree(|tree| tree.get_attribute(handle, "nonce").map(str::to_owned)).flatten()
-        })
-        .or_else(|| Some(String::new()))
+        .or_else(|| with_tree(|tree| tree.get_attribute_utf16(handle, "nonce")).flatten())
+        .or_else(|| Some(Vec::new()))
 }
 
 pub fn clone_nonces(source: Handle, target: Handle, deep: bool) {
@@ -23,10 +26,16 @@ pub fn clone_nonces(source: Handle, target: Handle, deep: bool) {
         deep: bool,
         out: &mut Vec<(Handle, Handle)>,
     ) {
-        out.push((source, target));
-        if deep {
-            for (source, target) in tree.children(source).into_iter().zip(tree.children(target)) {
-                pairs(tree, source, target, true, out);
+        let mut pending = vec![(source, target)];
+        while let Some(pair) = pending.pop() {
+            out.push(pair);
+            if deep {
+                pending.extend(
+                    tree.children(pair.0)
+                        .into_iter()
+                        .zip(tree.children(pair.1))
+                        .rev(),
+                );
             }
         }
     }
@@ -54,10 +63,11 @@ pub fn copy_nonces(
     deep: bool,
 ) {
     fn flatten(tree: &Tree, node: Handle, deep: bool, out: &mut Vec<Handle>) {
-        out.push(node);
-        if deep {
-            for node in tree.children(node) {
-                flatten(tree, node, true, out);
+        let mut pending = vec![node];
+        while let Some(node) = pending.pop() {
+            out.push(node);
+            if deep {
+                pending.extend(tree.children(node).into_iter().rev());
             }
         }
     }
@@ -97,118 +107,124 @@ pub fn copy_nonces(
 struct Snapshot {
     old: Handle,
     kind: u8,
-    name: String,
-    namespace: Option<String>,
-    value: String,
-    doctype: Option<(String, String)>,
-    attributes: Vec<(Handle, AttributeData)>,
-    children: Vec<Snapshot>,
-    shadow: Option<Box<Snapshot>>,
+    name: Vec<u16>,
+    namespace: Option<Vec<u16>>,
+    value: Vec<u16>,
+    doctype: Option<(Vec<u16>, Vec<u16>)>,
+    attributes: Vec<(Handle, turbo_dom_parser::rtdom::tree::AttributeDataUtf16)>,
+    parent: Option<usize>,
+    shadow: bool,
 }
-fn capture(tree: &mut Tree, node: Handle) -> Result<Snapshot, &'static str> {
-    let kind = tree.node_type_id(node);
-    if !matches!(kind, 1 | 2 | 3 | 7 | 8 | 10 | 11) {
-        return Err("Adopting this native node kind is unsupported");
-    }
-    if kind == 1 && tree.local_name(node) == Some("template") {
-        return Err("Adopting template content is unsupported");
-    }
-    let attributes = tree
-        .attributes_namespaced(node)
-        .into_iter()
-        .map(|attribute| {
-            let handle = tree
-                .attribute_node(node, attribute.namespace.as_deref(), &attribute.local_name)
-                .unwrap();
-            (handle, attribute)
-        })
-        .collect();
-    let attr = tree.attribute_data(node).cloned();
-    let doctype = (kind == 10).then(|| {
-        (
-            tree.doctype_public_id(node).unwrap_or_default().to_owned(),
-            tree.doctype_system_id(node).unwrap_or_default().to_owned(),
-        )
-    });
-    let name = if kind == 7 {
-        tree.processing_instruction_target(node)
-            .unwrap_or_default()
-            .to_owned()
-    } else if kind == 10 {
-        tree.doctype_name(node).unwrap_or_default().to_owned()
-    } else {
-        attr.as_ref()
-            .map(|attr| attr.qualified_name.to_string())
-            .unwrap_or_else(|| tree.qualified_name(node).unwrap_or_default().to_owned())
-    };
-    let namespace = attr
-        .as_ref()
-        .and_then(|attr| attr.namespace.as_ref().map(ToString::to_string))
-        .or_else(|| tree.namespace_uri(node).map(str::to_owned));
-    let value = attr
-        .as_ref()
-        .map(|attr| attr.value.to_string())
-        .unwrap_or_else(|| tree.node_value(node).unwrap_or_default());
-    let children = tree
-        .children(node)
-        .into_iter()
-        .map(|node| capture(tree, node))
-        .collect::<Result<_, _>>()?;
-    let shadow = tree
-        .shadow_root(node)
-        .map(|node| capture(tree, node).map(Box::new))
-        .transpose()?;
-    Ok(Snapshot {
-        old: node,
-        kind,
-        name,
-        namespace,
-        value,
-        doctype,
-        attributes,
-        children,
-        shadow,
-    })
-}
+fn capture(tree: &mut Tree, node: Handle) -> Result<Vec<Snapshot>, &'static str> {
+    let mut records = Vec::new();
+    let mut pending = vec![(node, None, false)];
+    while let Some((node, parent, shadow)) = pending.pop() {
+        let kind = tree.node_type_id(node);
+        if !matches!(kind, 1 | 2 | 3 | 7 | 8 | 10 | 11) {
+            return Err("Adopting this native node kind is unsupported");
+        }
+        let attributes = tree
+            .attributes_units(node)
+            .into_iter()
+            .map(|attribute| {
+                let handle = tree
+                    .attribute_node_units(
+                        node,
+                        attribute.namespace.as_deref(),
+                        &attribute.local_name,
+                    )
+                    .unwrap();
+                (handle, attribute)
+            })
+            .collect();
+        let attr = tree.attribute_data_units(node);
+        let doctype = (kind == 10).then(|| {
+            (
+                tree.doctype_public_id_utf16(node).unwrap_or_default(),
+                tree.doctype_system_id_utf16(node).unwrap_or_default(),
+            )
+        });
+        let name = tree
+            .qualified_name_utf16(node)
+            .or_else(|| tree.processing_instruction_target_utf16(node))
+            .or_else(|| tree.doctype_name_utf16(node))
+            .unwrap_or_default();
+        let namespace = attr
+            .as_ref()
+            .and_then(|attr| attr.namespace.clone())
+            .or_else(|| tree.namespace_uri_utf16(node));
+        let value = tree.node_value_utf16(node).unwrap_or_default();
 
+        let index = records.len();
+        records.push(Snapshot {
+            old: node,
+            kind,
+            name,
+            namespace,
+            value,
+            doctype,
+            attributes,
+            parent,
+            shadow,
+        });
+        if let Some(shadow) = tree.shadow_root(node) {
+            pending.push((shadow, Some(index), true))
+        }
+        for child in tree.children(node).into_iter().rev() {
+            pending.push((child, Some(index), false))
+        }
+    }
+    Ok(records)
+}
 fn materialize(
     tree: &mut Tree,
-    source: Snapshot,
+    source: Vec<Snapshot>,
     supplied: Option<Handle>,
     mapping: &mut Vec<(Handle, Handle)>,
 ) -> Handle {
-    let target = supplied.unwrap_or_else(|| match source.kind {
-        2 => tree.create_attribute(source.namespace.as_deref(), &source.name, &source.value),
-        3 => tree.create_text_node(&source.value),
-        7 => tree.create_processing_instruction(&source.name, &source.value),
-        8 => tree.create_comment(&source.value),
-        10 => {
-            let (public_id, system_id) = source.doctype.as_ref().unwrap();
-            tree.create_document_type(&source.name, public_id, system_id)
+    let mut nodes = Vec::with_capacity(source.len());
+    for record in source {
+        let target = if record.shadow {
+            tree.attach_shadow(nodes[record.parent.expect("shadow host snapshot")])
+        } else if record.parent.is_none() && supplied.is_some() {
+            supplied.expect("supplied snapshot root")
+        } else {
+            match record.kind {
+                2 => tree.create_attribute_units(
+                    record.namespace.as_deref(),
+                    &record.name,
+                    &record.value,
+                ),
+                3 => tree.create_text_node_utf16(&record.value),
+                7 => tree.create_processing_instruction_units(&record.name, &record.value),
+                8 => tree.create_comment_utf16(&record.value),
+                10 => {
+                    let (public_id, system_id) = record.doctype.as_ref().expect("doctype snapshot");
+                    tree.create_document_type_units(&record.name, public_id, system_id)
+                }
+                11 => tree.create_document_fragment(),
+                _ => tree.create_element_namespace_units(record.namespace.as_deref(), &record.name),
+            }
+        };
+        mapping.push((record.old, target));
+        for (old, attribute) in record.attributes {
+            let node = tree.create_attribute_units(
+                attribute.namespace.as_deref(),
+                &attribute.qualified_name,
+                &attribute.value,
+            );
+            tree.set_attribute_node(target, node)
+                .expect("validated element attribute");
+            mapping.push((old, node));
         }
-        11 => tree.create_document_fragment(),
-        _ => tree.create_element_namespace(source.namespace.as_deref(), &source.name),
-    });
-    mapping.push((source.old, target));
-    for (old, attribute) in source.attributes {
-        let node = tree.create_attribute(
-            attribute.namespace.as_deref(),
-            &attribute.qualified_name,
-            &attribute.value,
-        );
-        tree.set_attribute_node(target, node)
-            .expect("validated element attribute");
-        mapping.push((old, node));
+        if !record.shadow {
+            if let Some(parent) = record.parent {
+                tree.append_child(nodes[parent], target)
+            }
+        }
+        nodes.push(target);
     }
-    for child in source.children {
-        let child = materialize(tree, child, None, mapping);
-        tree.append_child(target, child);
-    }
-    if let Some(shadow) = source.shadow {
-        let root = tree.attach_shadow(target);
-        materialize(tree, *shadow, Some(root), mapping);
-    }
-    target
+    nodes[0]
 }
 
 // Every already-visible node remains the SAME V8 object. Uncached handles are
@@ -233,11 +249,15 @@ pub fn adopt<'s>(
         if with_tree(|tree| tree.is_shadow_root(source_handle)).unwrap_or(false) {
             return Err("A shadow root cannot be adopted");
         }
+        html_popover::attribute_node_change(scope, source_handle, None);
         with_tree_mut(|tree| capture(tree, source_handle)).ok_or("Node tree unavailable")??
     };
     if source_id == target_id {
         let _source = DomScope::for_object(scope, node);
+        html_popover::attribute_node_change(scope, source_handle, None);
+        html_popover::disconnect(scope, source_handle, true);
         element_relations::attribute_node_changed(scope, source_handle);
+        range_live::removing(scope, source_handle);
         with_tree_mut(|tree| {
             if let Some(owner) = tree.attribute_owner(source_handle) {
                 let _ = tree.remove_attribute_node(owner, source_handle);
@@ -245,8 +265,10 @@ pub fn adopt<'s>(
                 tree.remove_child(parent, source_handle);
             }
         });
+        mutation_observers::flush(scope);
         return Ok(node);
     }
+    custom_elements::adopting(scope, node);
     let mapping = {
         let _target = DomScope::for_object(scope, document);
         let mut mapping = Vec::new();
@@ -254,9 +276,12 @@ pub fn adopt<'s>(
             .ok_or("Document tree unavailable")?;
         mapping
     };
-    let (cache, styles, listeners, nonces, modes) = {
+    let (cache, styles, listeners, nonces, modes, handlers, scripts, custom_states, checked_states) = {
         let _source = DomScope::for_object(scope, node);
+        html_popover::attribute_node_change(scope, source_handle, None);
+        html_popover::disconnect(scope, source_handle, true);
         element_relations::attribute_node_changed(scope, source_handle);
+        range_live::removing(scope, source_handle);
         with_tree_mut(|tree| {
             if let Some(owner) = tree.attribute_owner(source_handle) {
                 let _ = tree.remove_attribute_node(owner, source_handle);
@@ -264,15 +289,21 @@ pub fn adopt<'s>(
                 tree.remove_child(parent, source_handle);
             }
         });
+        mutation_observers::flush(scope);
         let mut cache = Vec::new();
         let mut nonces = Vec::new();
+        let mut scripts = Vec::new();
         let mut modes = Vec::new();
         DOM.with(|dom| {
             let mut dom = dom.borrow_mut();
             let state = dom.as_mut().unwrap();
             for (old, new) in &mapping {
+                state.checked_radios.remove(old);
                 if let Some(value) = state.cache.remove(old) {
                     cache.push((*new, value));
+                }
+                if let Some(value) = state.scripts.remove(old) {
+                    scripts.push((*new, value));
                 }
                 if let Some(value) = state.nonces.remove(old) {
                     nonces.push((*new, value));
@@ -282,6 +313,17 @@ pub fn adopt<'s>(
                 }
             }
         });
+        let ownership = DOM.with(|state| {
+            state
+                .borrow()
+                .as_ref()
+                .and_then(|state| state.ownership.clone())
+        });
+        if let Some(ownership) = ownership {
+            for (old, _) in &mapping {
+                ownership.borrow_mut().forget(scope, old.raw());
+            }
+        }
         let styles = STYLE.with(|styles| {
             let mut styles = styles.borrow_mut();
             mapping
@@ -310,11 +352,68 @@ pub fn adopt<'s>(
                 *active = None;
             }
         });
-        (cache, styles, listeners, nonces, modes)
+        let handlers = event_handlers::take_adopted_sources(&mapping);
+        let custom_states = with_tree_mut(|tree| {
+            mapping
+                .iter()
+                .map(|(old, new)| {
+                    let values = tree.custom_states_utf16(*old);
+                    tree.clear_custom_states(*old);
+                    (*new, values)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+        let checked_states = with_tree_mut(|tree| {
+            mapping
+                .iter()
+                .filter_map(|(old, new)| {
+                    let value =
+                        tree.form_property(*old, turbo_dom_parser::rtdom::tree::FormProp::Checked)?;
+                    tree.clear_form_property(
+                        *old,
+                        turbo_dom_parser::rtdom::tree::FormProp::Checked,
+                    );
+                    Some((*new, value))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+        (
+            cache,
+            styles,
+            listeners,
+            nonces,
+            modes,
+            handlers,
+            scripts,
+            custom_states,
+            checked_states,
+        )
     };
     let _target = DomScope::for_object(scope, document);
+    event_handlers::restore_adopted_sources(handlers);
+    with_tree_mut(|tree| {
+        for (node, value) in checked_states {
+            tree.set_form_property(
+                node,
+                turbo_dom_parser::rtdom::tree::FormProp::Checked,
+                value,
+            );
+        }
+        for (node, values) in custom_states {
+            for value in values {
+                tree.set_custom_state_utf16(node, &value, true);
+            }
+        }
+    });
+    for (_, node) in &mapping {
+        form_checked_state::refresh(*node);
+    }
     for (handle, object) in cache {
-        let local = v8::Local::new(scope, &object);
+        let Some(local) = object.to_local(scope) else {
+            continue;
+        };
         let handle_value = v8::Integer::new_from_unsigned(scope, handle.raw());
         let id = v8::BigInt::new_from_u64(scope, target_id);
         local.set_internal_field(0, handle_value.into());
@@ -326,26 +425,33 @@ pub fn adopt<'s>(
                 .cache
                 .insert(handle, object);
         });
+        dom_ownership::observe(scope, handle, local);
+        if with_tree(|tree| tree.is_shadow_root(handle)).unwrap_or(false) {
+            css_policy::clear_adopted_sheets(scope, local);
+        }
     }
     STYLE.with(|state| state.borrow_mut().extend(styles));
     LISTENERS.with(|state| state.borrow_mut().extend(listeners));
     DOM.with(|dom| {
         let mut dom = dom.borrow_mut();
         let state = dom.as_mut().unwrap();
+        state.scripts.extend(scripts);
         state.nonces.extend(nonces);
         state.shadow_modes.extend(modes);
     });
+    template_contents::relocate(scope, node);
+    custom_elements::adopted(scope, node);
     Ok(node)
 }
 
 // Preserve native node identity and embedder state: no JS remove/insert hooks run.
-// Live Range/iterator adjustment and custom-element reactions remain host work.
+// Range adjustment follows pre-remove semantics without running JS node hooks.
 fn move_node(
-    tree: &mut Tree,
+    tree: &Tree,
     parent: Handle,
     node: Handle,
     child: Option<Handle>,
-) -> Result<(), &'static str> {
+) -> Result<Option<Handle>, &'static str> {
     fn root(tree: &Tree, mut node: Handle) -> Handle {
         while let Some(parent) = tree.parent(node).or_else(|| tree.shadow_host(node)) {
             node = parent;
@@ -382,7 +488,9 @@ fn move_node(
             let children = tree.children(parent);
             let reference =
                 child.and_then(|child| children.iter().position(|value| *value == child));
-            if children.iter().any(|child| tree.node_type_id(*child) == 1)
+            if children
+                .iter()
+                .any(|child| *child != node && tree.node_type_id(*child) == 1)
                 || reference.is_some_and(|reference| {
                     children[reference..]
                         .iter()
@@ -393,8 +501,28 @@ fn move_node(
             }
         }
     }
-    tree.insert_before(parent, node, child);
-    Ok(())
+    Ok(child)
+}
+
+fn fragment_by_id(tree: &Tree, root: Handle, id: &[u16]) -> Option<Handle> {
+    if id.is_empty() {
+        return None;
+    }
+    let scalar = String::from_utf16_lossy(id);
+    let mut pending = tree.children(root);
+    pending.reverse();
+    while let Some(node) = pending.pop() {
+        if tree.get_attribute_ns_borrowed(node, None, "id") == Some(scalar.as_str())
+            && tree
+                .get_attribute_utf16(node, "id")
+                .is_some_and(|value| value == id)
+        {
+            return Some(node);
+        }
+        // DOM ancestry excludes a nested shadow root and inert template contents.
+        pending.extend(tree.children(node).into_iter().rev());
+    }
+    None
 }
 
 pub fn dispatch<'s>(
@@ -412,6 +540,30 @@ pub fn dispatch<'s>(
     };
     let kind = with_tree(|tree| tree.node_type_id(handle)).unwrap_or(0);
     match operation.as_str() {
+        "fragmentById" if kind == 11 => {
+            let Some(id) = dom_units(scope, args.get(2)) else {
+                return;
+            };
+            let found = with_tree(|tree| fragment_by_id(tree, handle, &id)).flatten();
+            if let Some(found) = found {
+                rv.set(wrap(scope, found).into());
+            } else {
+                rv.set(v8::null(scope).into());
+            }
+        }
+        "normalize" => range_live::normalize(scope, handle),
+        "replaceCharacterData" if matches!(kind, 3 | 4 | 7 | 8) => {
+            let Some(offset) = args.get(2).uint32_value(scope) else {
+                return;
+            };
+            let Some(count) = args.get(3).uint32_value(scope) else {
+                return;
+            };
+            let Some(data) = dom_units(scope, args.get(4)) else {
+                return;
+            };
+            replace_character_data(scope, handle, offset as usize, count as usize, &data);
+        }
         "stamp" => {
             let stamp =
                 with_tree(|tree| format!("{}:{}", DOM_ID.with(|id| id.get()), tree.version))
@@ -425,14 +577,16 @@ pub fn dispatch<'s>(
                     .as_ref()
                     .and_then(|dom| dom.basics_state.clone())
             });
-            let state = existing
-                .map(|state| v8::Local::new(scope, state))
-                .unwrap_or_else(|| {
-                    let state = v8::Object::new(scope);
-                    let stored = v8::Global::new(scope, state);
-                    DOM.with(|dom| dom.borrow_mut().as_mut().unwrap().basics_state = Some(stored));
-                    state
-                });
+            let state = if let Some(existing) = existing {
+                dom_ownership::local(scope, existing)
+            } else {
+                let state = v8::Object::new(scope);
+                let Some(stored) = dom_ownership::helper_object(scope, state) else {
+                    return;
+                };
+                DOM.with(|dom| dom.borrow_mut().as_mut().unwrap().basics_state = Some(stored));
+                state
+            };
             rv.set(state.into());
         }
         "move" if matches!(kind, 1 | 9 | 11) => {
@@ -459,28 +613,53 @@ pub fn dispatch<'s>(
                 Some(child_handle)
             };
             if error.is_none() {
-                error = with_tree_mut(|tree| move_node(tree, handle, moved_handle, reference))
-                    .and_then(Result::err);
+                match with_tree(|tree| move_node(tree, handle, moved_handle, reference)) {
+                    Some(Ok(reference)) => {
+                        range_live::removing(scope, moved_handle);
+                        let index = with_tree(|tree| {
+                            let children: Vec<_> = tree
+                                .children(handle)
+                                .into_iter()
+                                .filter(|&child| child != moved_handle)
+                                .collect();
+                            reference
+                                .and_then(|reference| {
+                                    children.iter().position(|&node| node == reference)
+                                })
+                                .unwrap_or(children.len())
+                        })
+                        .unwrap_or(0);
+                        range_live::inserting(scope, handle, index, 1);
+                        with_tree_mut(|tree| tree.insert_before(handle, moved_handle, reference));
+                        custom_elements::moved(scope, moved);
+                    }
+                    Some(Err(name)) => error = Some(name),
+                    None => return,
+                }
             }
             if let Some(error) = error {
                 rv.set(v8::String::new(scope, error).unwrap().into());
             }
         }
         "createPI" if kind == 9 => {
-            let target = args.get(2).to_rust_string_lossy(scope);
-            let data = args.get(3).to_rust_string_lossy(scope);
+            let Some(target) = dom_units(scope, args.get(2)) else {
+                return;
+            };
+            let Some(data) = dom_units(scope, args.get(3)) else {
+                return;
+            };
             let node =
-                with_tree_mut(|tree| tree.create_processing_instruction(&target, &data)).unwrap();
+                with_tree_mut(|tree| tree.create_processing_instruction_units(&target, &data))
+                    .unwrap();
             rv.set(wrap(scope, node).into());
         }
         "piTarget" if kind == 7 => {
             let target = with_tree(|tree| {
-                tree.processing_instruction_target(handle)
+                tree.processing_instruction_target_utf16(handle)
                     .unwrap_or_default()
-                    .to_owned()
             })
             .unwrap();
-            rv.set(v8::String::new(scope, &target).unwrap().into());
+            rv.set(unit_string(scope, &target).into());
         }
         "compatMode" if kind == 9 => {
             let mode = with_tree(|tree| tree.compat_mode()).unwrap_or("BackCompat");
@@ -498,29 +677,27 @@ pub fn dispatch<'s>(
         "doctypeFields" if kind == 10 => {
             let fields = with_tree(|tree| {
                 [
-                    tree.doctype_name(handle).unwrap_or_default().to_owned(),
-                    tree.doctype_public_id(handle)
-                        .unwrap_or_default()
-                        .to_owned(),
-                    tree.doctype_system_id(handle)
-                        .unwrap_or_default()
-                        .to_owned(),
+                    tree.doctype_name_utf16(handle).unwrap_or_default(),
+                    tree.doctype_public_id_utf16(handle).unwrap_or_default(),
+                    tree.doctype_system_id_utf16(handle).unwrap_or_default(),
                 ]
             })
             .unwrap();
             let array = v8::Array::new(scope, 3);
             for (index, value) in fields.iter().enumerate() {
-                let value = v8::String::new(scope, value).unwrap();
+                let value = unit_string(scope, value);
                 array.set_index(scope, index as u32, value.into());
             }
             rv.set(array.into());
         }
         "nonce" if kind == 1 => {
-            let value = nonce(scope, node).unwrap_or_default();
-            rv.set(v8::String::new(scope, &value).unwrap().into());
+            let value = nonce_units(scope, node).unwrap_or_default();
+            rv.set(unit_string(scope, &value).into());
         }
         "setNonce" if kind == 1 => {
-            let value = args.get(2).to_rust_string_lossy(scope);
+            let Some(value) = dom_units(scope, args.get(2)) else {
+                return;
+            };
             DOM.with(|dom| {
                 dom.borrow_mut()
                     .as_mut()
@@ -528,6 +705,19 @@ pub fn dispatch<'s>(
                     .nonces
                     .insert(handle, value);
             });
+        }
+        "import" if kind == 9 => {
+            let Ok(source) = v8::Local::<v8::Object>::try_from(args.get(2)) else {
+                return type_error(scope);
+            };
+            match import_document_node(scope, node, source, args.get(3).boolean_value(scope)) {
+                Ok(node) => rv.set(node.into()),
+                Err(error) => {
+                    if let Some(message) = v8::String::new(scope, error) {
+                        rv.set(message.into())
+                    }
+                }
+            }
         }
         "adopt" if kind == 9 => {
             let Ok(source) = v8::Local::<v8::Object>::try_from(args.get(2)) else {
@@ -551,6 +741,50 @@ fn type_error(scope: &mut v8::PinScope) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn fragment_id_lookup_is_iterative_and_distinguishes_repaired_scalar_ids() {
+        let mut tree = Tree::parse("<body></body>");
+        let root = tree.create_document_fragment();
+        let mut parent = root;
+        for _ in 0..8192 {
+            let child = tree.create_element("div");
+            tree.append_child(parent, child);
+            parent = child;
+        }
+        tree.set_attribute_utf16(parent, "id", &[0xd800]);
+        let replacement = tree.create_element("span");
+        tree.set_attribute_utf16(replacement, "id", &[0xfffd]);
+        tree.append_child(root, replacement);
+        assert_eq!(fragment_by_id(&tree, root, &[0xd800]), Some(parent));
+        assert_eq!(fragment_by_id(&tree, root, &[0xfffd]), Some(replacement));
+        assert_eq!(fragment_by_id(&tree, root, &[]), None);
+    }
+
+    #[test]
+    fn native_deep_adoption_snapshot_keeps_shadow_namespace_and_original_units_without_recursion() {
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(|| {
+                let source = format!("{}x{}", "<div>".repeat(8192), "</div>".repeat(8192));
+                let mut tree = Tree::parse(&source);
+                let root = tree.query_selector("body").unwrap();
+                let node = tree.first_child(root).unwrap();
+                let snapshot = capture(&mut tree, node).unwrap();
+                assert_eq!(snapshot.len(), 8193);
+                let mut target = Tree::parse("<body>");
+                let mut mapping = Vec::new();
+                let moved = materialize(&mut target, snapshot, None, &mut mapping);
+                assert_eq!(mapping.len(), 8193);
+                assert_eq!(target.text_content(moved), "x");
+                assert_eq!(
+                    turbo_dom_parser::rtdom::serialize::serialize_outer_utf16(&target, moved),
+                    source.encode_utf16().collect::<Vec<_>>()
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
     fn check_script(source: &str) {
         super::super::tests::init_v8();
         let isolate = &mut v8::Isolate::new(Default::default());
@@ -561,6 +795,10 @@ mod tests {
             scope,
             "<!DOCTYPE html><html><head></head><body></body></html>",
         );
+        let inert = parse_html_document(scope, "<!doctype html><body>", false);
+        let global = scope.get_current_context().global(scope);
+        let key = v8::String::new(scope, "inertDocument").unwrap();
+        global.set(scope, key.into(), inert.into());
         let scope = std::pin::pin!(v8::TryCatch::new(scope));
         let scope = &mut scope.init();
         let source = v8::String::new(scope, source).unwrap();
@@ -573,6 +811,69 @@ mod tests {
         }
         assert!(result.unwrap().is_true());
         reset();
+    }
+
+    #[test]
+    fn inert_document_factories_preserve_receiver_ownership_and_control_state() {
+        check_script(
+            r#"(()=>{
+          for(const tag of ['div','input','textarea','select','script','link','canvas','iframe']){
+            const node=inertDocument.createElement(tag);node.id='inert-'+tag;
+            if(node.ownerDocument!==inertDocument)throw new Error('wrong factory owner '+tag);
+            inertDocument.body.append(node);
+            if(inertDocument.getElementById(node.id)!==node||document.getElementById(node.id)!==null)throw new Error('factory trees alias');
+          }
+          const input=inertDocument.getElementById('inert-input');input.value='live';input.setAttribute('value','default');
+          if(input.value!=='live'||input.defaultValue!=='default')throw new Error('control wrapper lost');
+          let calls=0;const coerced=inertDocument.createElement({toString(){calls++;return 'span';}});
+          if(calls!==1||coerced.ownerDocument!==inertDocument||coerced.localName!=='span')throw new Error('tag conversion repeated');
+          const borrowed=Document.prototype.createElement.call(inertDocument,'em');
+          if(borrowed.ownerDocument!==inertDocument||borrowed.parentNode!==null)throw new Error('borrowed factory owner');
+          let converted=false,error;try{Document.prototype.createElement.call({}, {toString(){converted=true;return 'div';}})}catch(caught){error=caught.name}
+          if(error!=='TypeError'||converted)throw new Error('brand validation after coercion');
+          for(const [run,wanted] of [[()=>inertDocument.createElement(),'TypeError'],[()=>inertDocument.createElement(Symbol('tag')),'TypeError'],[()=>inertDocument.createElement('bad tag'),'InvalidCharacterError']]){let error;try{run()}catch(caught){error=caught.name}if(error!==wanted)throw new Error('factory validation '+error);}
+          const nodes=[inertDocument.createTextNode('text'),inertDocument.createComment('comment'),inertDocument.createDocumentFragment(),inertDocument.createElementNS('urn:custom','x:node'),inertDocument.createAttribute('data-test'),inertDocument.createAttributeNS('urn:custom','x:value')];
+          if(nodes.some(node=>node.ownerDocument!==inertDocument))throw new Error('other factory ownership');
+          return true;
+        })()"#,
+        );
+    }
+
+    #[test]
+    fn namespace_resolvers_keep_native_node_identity_and_resolution() {
+        check_script(
+            r#"(()=>{
+          const root=inertDocument.documentElement,child=inertDocument.createElementNS('urn:custom','x:node');root.append(child);
+          child.setAttributeNS('http://www.w3.org/2000/xmlns/','xmlns:y','urn:declared');
+          for(const node of [root,child,inertDocument,child.firstChild||inertDocument.createTextNode('text')])if(document.createNSResolver(node)!==node)throw new Error('resolver identity');
+          const resolver=inertDocument.createNSResolver(child);
+          if(resolver.lookupNamespaceURI('x')!=='urn:custom'||resolver.lookupNamespaceURI('y')!=='urn:declared'||document.createNSResolver(root).lookupNamespaceURI(null)!=='http://www.w3.org/1999/xhtml')throw new Error('namespace resolution');
+          let converted=false;for(const action of [()=>document.createNSResolver(),()=>document.createNSResolver(null),()=>document.createNSResolver({toString(){converted=true;return 'node'}}),()=>Document.prototype.createNSResolver.call({},child)]){let error;try{action()}catch(caught){error=caught.name}if(error!=='TypeError'||converted)throw new Error('resolver brand');}
+          return true;
+        })()"#,
+        );
+    }
+
+    #[test]
+    fn integrity_reflection_is_branded_and_updates_the_loader_attribute() {
+        check_script(
+            r#"(()=>{
+          for(const [tag,ctor] of [['script',HTMLScriptElement],['link',HTMLLinkElement]]){
+            const node=inertDocument.createElement(tag),property=Object.getOwnPropertyDescriptor(ctor.prototype,'integrity');
+            if(node.integrity!=='')throw new Error('initial integrity');
+            node.integrity='sha384-example';if(node.getAttribute('integrity')!=='sha384-example')throw new Error('loader attribute missing');
+            node.setAttribute('integrity','sha256-updated');if(node.integrity!=='sha256-updated')throw new Error('attribute reflection');
+            node.integrity=null;if(node.integrity!=='null')throw new Error('DOMString null conversion');
+            let calls=0;node.integrity={toString(){calls++;return 'sha512-once';}};if(calls!==1||node.getAttribute('integrity')!=='sha512-once')throw new Error('conversion repeated');
+            let converted=false;for(const wrong of [{},document.createElement('div'),document.createElementNS('urn:custom',tag)]){
+              let error;try{property.set.call(wrong,{toString(){converted=true;return 'bad';}})}catch(caught){error=caught.name}if(error!=='TypeError'||converted)throw new Error('wrong receiver accepted');
+            }
+            let error;try{node.integrity=Symbol('bad')}catch(caught){error=caught.name}if(error!=='TypeError'||node.integrity!=='sha512-once')throw new Error('symbol conversion mutated attribute');
+            node.removeAttribute('integrity');if(property.get.call(node)!=='')throw new Error('removed integrity');
+          }
+          return true;
+        })()"#,
+        );
     }
 
     #[test]
@@ -603,6 +904,28 @@ mod tests {
           if(JSON.stringify(errors)!==JSON.stringify(['HierarchyRequestError','HierarchyRequestError','NotFoundError','HierarchyRequestError','HierarchyRequestError','HierarchyRequestError','TypeError','TypeError','TypeError']))throw new Error(JSON.stringify(errors));
           if(c.parentNode!==a||a.parentNode!==document.body||b.childNodes.length!==0)throw new Error('invalid move mutated tree');
           const host=document.createElement('div');document.body.append(host);const shadow=host.attachShadow({mode:'open'});try{shadow.moveBefore(host,null);throw new Error('missing')}catch(error){if(error.name!=='HierarchyRequestError')throw error;}
+          return true;
+        })()"#,
+        );
+    }
+
+    #[test]
+    fn obsolete_document_methods_preserve_contents_and_ignore_arguments_with_real_receiver_checks()
+    {
+        check_script(
+            r#"(()=>{
+          inertDocument.body.innerHTML='<p>retained</p>';
+          const before=inertDocument.body.innerHTML;
+          for(const name of ['clear','captureEvents','releaseEvents']){
+            const descriptor=Object.getOwnPropertyDescriptor(Document.prototype,name),fn=descriptor.value;
+            if(fn.name!==name||fn.length!==0||!descriptor.enumerable||!descriptor.configurable||!descriptor.writable||Object.hasOwn(fn,'prototype')||!Function.prototype.toString.call(fn).includes('[native code]'))throw new Error('descriptor '+name);
+            let hooks=0;const ignored={toString(){hooks++;throw new Error('ignored argument')}};
+            if(fn.call(inertDocument,ignored)!==undefined||hooks||inertDocument.body.innerHTML!==before)throw new Error('legacy effects '+name);
+            for(const receiver of [{},null,Object.create(Document.prototype)]){
+              let denied=false;try{fn.call(receiver)}catch(error){denied=error instanceof TypeError}
+              if(!denied)throw new Error('receiver '+name);
+            }
+          }
           return true;
         })()"#,
         );

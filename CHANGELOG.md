@@ -5,9 +5,550 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
-## [0.4.6] - 2026-10-13
+- Normalize ASCII casing for the existing supported computed-font units and
+  grammar keywords using a captured private lowercase intrinsic. Preserve quoted
+  and custom font-family spelling and custom-property names. Native deferred-value
+  admission now recognizes the same five CSS-wide keywords case-insensitively
+  without accepting arbitrary identifiers. Additional independent Chrome155
+  cases reproduce and prevent mixed-case units yielding `NaNpx`, uppercase
+  shorthand misclassification and valid `INITIAL` resets being discarded.
+  Preserve scalar `calc()` line-height as an inherited factor rather than
+  misclassifying it as pixels. Unit-cancelling division remains unresolved.
+
+- Resolve computed font longhands and shorthand from actual owner-document
+  preferences and inherited values, including unitless versus absolute
+  line-height, relative sizes, arithmetic `calc()`, CSS-wide keywords and native
+  named/manual slot inheritance. Live declarations refresh after property-name
+  conversion, retain receiver brand checks, and return empty font values after
+  disconnection or browsing-context retirement. Independent Chrome155 controls
+  cover fractional serialization, inert/template ownership, realm borrowing and
+  adoption. Native embedders can set private scalar initial font preferences;
+  macOS `Times` is measured, while the other-platform `Times New Roman` default
+  remains uncertified. Metric-dependent units, viewport units, `min`/`max`/`clamp`,
+  custom-property substitution and per-element UA defaults remain outside this
+  bounded computed-font resolver; unresolved text survives inheritance without
+  fabricated zero or `undefined` values.
+
+- Add a host-only custom-element context retirement boundary. Retained frame
+  registries, definitions and existing instances stay usable, while automatic
+  construction, upgrades and reactions stop for the retired definition realm,
+  including already queued reactions and callbacks borrowed from an active
+  realm. Fresh Chrome155 controls cover detached-frame creation, innerHTML,
+  contextual fragments, explicit upgrades and existing-element adoption.
+
+- Clear constructed adopted stylesheets on every migrated ShadowRoot during
+  cross-document adoption, including nested closed roots, before custom-element
+  adopted callbacks. Preserve retained ObservableArray identity, same-document
+  adoption and disconnect/reconnect state, while bypassing poisoned public
+  ownerDocument/adoptedStyleSheets getters and array methods. Fresh Chrome155
+  controls cover unread roundtrips, foreign-realm sheets and assignment rejection.
+
+- Share custom-element reaction queues across nested CEReactions frames. Advance
+  the shared cursor before invoking a callback so reentrant adoption preserves
+  already queued callbacks, per-element order, exception reporting and the
+  original execution limits. Fresh Chrome155 controls cover callback realms,
+  error receivers, two-element interleaving and nested attribute reactions.
+- Parse Range contextual fragments through the public turbo-dom development
+  revision `aaeb290`, using the actual post-conversion boundary context,
+  namespace/integration attributes, form ancestry and document quirks mode.
+  Preserve foreign and template-associated owner documents, scoped registries
+  and inert nested templates without invoking a context-element constructor.
+- Parse template innerHTML into a detached native fragment before inert-owner
+  adoption, preventing premature custom-element construction and attribute
+  callbacks. Add a bounded independent Chrome155 parser/observer lifecycle
+  matrix with19 context cases, mutation notification/reentrancy controls and
+  reusable `scripts/dom-lifecycle-chrome-control.mjs` collection. XML parsing
+  and complete browser lifecycle parity remain separate work.
+
+- Preserve LF checkout bytes for native JavaScript sources and JSON controls so
+  independent Chrome source-hash assertions also verify on Windows. Licensed
+  XPath provider bytes retain their explicit no-conversion exceptions.
+
+- Reuse each private CSS rule record already resolved during import flattening
+  instead of looking it up again immediately in computed-style evaluation.
+  Preserve import/media traversal, source order and live retained declarations;
+  nested-import edits and detached-rule mutations have regression coverage.
+
+- Read already resolved parent computed values from their private backing records
+  within one calculation, avoiding exponential live-getter recursion through
+  inherited colors and percentage sizes. Retained external declarations still
+  refresh on subsequent reads. Independent Chrome mutation controls and bounded
+  stylesheet-scan regressions cover inheritance plus width/height chains.
+
+- Refresh the private stylesheet-list backing array once per computed-style
+  calculation instead of rescanning every style/link for each live-list index
+  and length read. Retained computed declarations still recompute on every
+  property access; independently measured Chrome controls cover CSSOM edits,
+  stylesheet insertion/removal/replacement, disabled sheets and zero public
+  document/style-list getter calls. No persistent
+  computed-style cache or browser-conformance claim is introduced.
+
+- Add genuine live, readonly `labels` NodeLists on Input, Button, TextArea,
+  Select, Output, Meter and Progress. Native light-tree associations preserve
+  first-ID targeting, null-namespace attributes, exact UTF-16 IDs,
+  hidden-input transitions, shadow scopes,
+  adoption and receiver-realm collection identity; share that authority with
+  ElementInternals and label.control, including custom controls before builtins.
+  Independent Chrome controls cover descriptors, wrong receivers, live mutations
+  and hostile public methods. Production iframe/retirement GC validation remains
+  a separate renderer gate with an explicit real-task collection policy.
+
+- Make the adopted-radio GC control resolve readiness without retaining the
+  load Event, clear its listener and record an explicit real-task GC policy.
+  Preserve the original non-repeatable WeakRef receipt, three fresh original
+  runs, three settled Chrome controls and actual native PageSession proof;
+  retained radios keep their genuine owner until release without extra roots.
+
+
+- Preserve an independent Chrome adversarial form-owner control for first-ID
+  non-form/SVG/HTML-case collisions, open/closed shadow boundaries, disabled
+  radio groups, external reset order, split moves and genuine XML documents.
+
+
+- Index selected radios by native node and prior native form owner, without
+  JavaScript roots. Normalize checked descendants and batch fragment order on
+  container moves, keep shadow-tree form lookup within its actual root, and
+  reassociate external radios after form ID/removal changes. Route the seven
+  existing control `.form` getters through genuine native ownership with readonly
+  per-interface brands and descriptors. Preserve detached
+  unowned radio behavior, genuine checked-accessor brands, cloning/adoption and
+  native storage reclamation with independent Chrome controls. Empty indexes
+  skip descendant traversal on ordinary non-radio moves.
+
+
+- Keep radio grouping in the native checkedness intrinsic, including checked/name/
+  type/form attribute changes, parsed subtrees, directly moved radios, and form reset. Restore
+  the prior selected radio after canceled clicks without guest checked hooks.
+  Preserve native checkedness overrides across actual cross-document adoption;
+  source-pinned Chrome controls cover dirty defaults, cloning, live old/new form
+  collections, cancellation and forced-GC observations.
+
+
+- Add genuine live HTMLFormControlsCollection and RadioNodeList interfaces, form
+  elements/length/iteration, owner-aware external/custom controls and cached named
+  groups. Private records support borrowed base accessors across real V8 contexts,
+  preserve measured named/index ordering and mutation behavior, and release owner
+  realms after retained collections are dropped. Independent Chrome controls cover
+  descriptor shapes, live membership, radio values, collisions and DOMString errors.
+  Broader radio dirty/default/reset/adoption lifecycle remains active follow-up;
+  genuine production iframe/retirement controls are supplied for integration gates.
+
+- Expose genuine Element.customElementRegistry with native receiver checks and
+  private creation/parser associations. Preserve scoped/null registries across
+  moves; global associations follow adoption to the new owner document without
+  retaining the former global registry; inert-null adoption rebinds correctly,
+  including unread descendants, ShadowRoots and multi-hop moves. Parse-completion
+  hooks record ownership before any public getter read, without enabling plain-DOM
+  reaction recording.
+  Independent Chrome controls cover unread parser nodes, adjacent HTML, inert
+  documents, cross-realm borrowing/adoption and property descriptors.
+
+- Reflect Input/Button formAction, formEnctype, formMethod and formTarget on their
+  own prototypes with native owner-document/base URL resolution, per-interface
+  string conversion, missing/invalid enum defaults and genuine receiver checks.
+  Independent Chrome controls include malformed URLs, attribute writes, borrowed
+  accessors, wrong namespace/local-name receivers and hostile public getters.
+
+- Match computed styles through captured genuine native selector and owner-document
+  intrinsics. Page overrides of matches/ownerDocument are not invoked internally;
+  live stylesheet mutations remain visible without new cascade caching.
+
+- Keep descriptor rules out of nested cssRules lists so the private native CSSHost
+  snapshot retains @property/@view-transition descriptor bodies. Independent Chrome
+  shape controls and poisoned-public-getter export regressions cover the boundary.
+
+- Validate complete @property and @view-transition descriptor blocks before
+  checking rule shells. Preserve validated registration descriptors and typed
+  navigation/types instead of dropping them as ordinary CSS declarations. This
+  retains CSSOM source; it does not implement property registration semantics.
+
+- Make the genuine ValidityState constructor prototype read-only, matching Chrome;
+  extend the independent form control oracle with descriptor and native brand checks.
+
+- Match Input/Button own prototype placement, enumerable control descriptors and
+  text-selection conversion/errors; setRangeText performs real replacement and
+  selection updates rather than an inert compatibility method.
+
+- Add measured native HTMLFormElement reflected attributes and live relList,
+  including action URL resolution from the host-installed document URL, enum
+  normalization, encoding alias, USVString action conversion and branded accessors.
+  Independent Chrome controls include relative/base and malformed URL serialization.
+
+- Suppress native form submission for disconnected forms before validation/events
+  and recheck connection after submit listeners, using the captured native Node
+  accessor. Independent Chrome controls cover removal and reconnection timing.
+
+- Add branded ElementInternals and CustomStateSet with native custom-element
+  admission, form ownership/validation, live labels, default ARIA and closed-shadow
+  access. Association, disabled and reset callbacks use native reaction queues.
+  Private V8 records preserve cross-realm brands and object-owned lifetimes.
+- Match native `:state()` selectors with exact UTF-16 membership, fresh clone/import
+  state and adoption migration. Branded setlike iterators resume after exhaustion
+  when new entries appear and retain their actual owner without host roots.
+- Add genuine FormDataEvent identity/descriptor behavior and host-only trusted
+  dispatch plus guarded form-entry construction transactions. Runtime adapters
+  provide real private File/FormData snapshots; a standalone binding supplies no
+  networking backend. Native FileList and radio grouping remain follow-up work. Dirty checkbox state, reset, clone and typed :checked now use native records.
+- Pin the public turbo-dom development revision
+  `fb60e6f90a5d373165cfd1045b090407ca945d47` for native custom-state selectors;
+  this does not imply registry publication of its 0.5.7 candidate.
+
+- Preserve FormData optional argument conversion and current-document authority
+  when no form is supplied; reject invalid HTMLElement submitters before the
+  empty result. Add a native base-target authority accessor for navigation adapters.
+
+- Expose a host-only native form entry-list constructor for private FormData
+  adapters, preserving submitter validation, duplicate ordering and UTF-8 hidden
+  charset values without dispatching validation or submit events.
+
+- Capture an optional host-only File/FormData value reader through document-owned
+  private V8 edges, so runtime adapters can provide genuine immutable snapshots
+  without trusting guest object shape or public metadata properties.
+
+- Add native-document-owned submission admission and queue callbacks with immutable
+  ordered text entry snapshots, submitter overrides and hidden charset-entry metadata.
+  Preserve validation/cancellation before transport; native FileList and full select
+  state support remain explicit follow-up work. Independent Chrome155 FormData
+  controls cover duplicate names, disabled/checked controls, text, charset and submitter.
+
+- Replace unconditional form-validity answers and no-op custom validity with live
+  native-DOM control state, branded ValidityState objects, required/custom/type/
+  pattern/numeric checks, trusted non-bubbling invalid events, and form validation.
+  Add a branded SubmitEvent and requestSubmit argument/admission/validation/event
+  behavior, preserving native submitter and Chrome155 composed-event differences.
+  Capture live control values and native accessors instead of reading guest overrides;
+  form-owner lookup includes explicit form IDs. Uncanceled navigation still needs a
+  consumer transport and reports a clear NotSupportedError instead of pretending
+  to submit; click default-action failures are reported as engine exceptions.
+
+- Implement Chrome155's AbstractRange → NodeRange → Range/StaticRange interface
+  hierarchy with native descriptors, constructor inheritance and genuine private
+  static boundaries. Static offsets retain their original values through native
+  tree mutations; getters accept authentic foreign-realm records and reject forged
+  or proxied receivers. Match sorted Web IDL dictionary conversion, unsigned offsets,
+  invalid node types, subclassing and poisoned public intrinsic controls. Keep live
+  Range mutation tracking unchanged. Real iframe retirement is a separate consumer gate.
+
+- Preserve quoted commas, comment-looking strings and escaped commas when CSSOM
+  serializes selector preludes. A lexical scan normalizes only actual separators;
+  fresh Chrome155 controls cover parsing, selectorText changes and cssText reloads.
+
+- Add a host-only per-document form-submission admission flag for sandboxed
+  consumers. Block the submit default action after an uncanceled control click
+  while preserving the click event; keep policy isolated across native documents.
+  The consumer supplies sandbox/CSP intersection; this does not implement form
+  navigation or destination authorization.
+
+- Add native private-state Trusted Types factory, policy and value brands, exact
+  UTF-16/USVString conversion, callback conversion and Chrome155 interface descriptors.
+  Cross-realm values retain their native brands without host roots. Authored Chrome
+  controls cover sink-type mappings and conversion errors. Native HTML, script,
+  attribute and Range sinks invoke immutable document-owned host authorization;
+  additive exports let consumers enforce parser/timer sinks and supply exact private
+  TrustedScript source to the engine without guest coercion. Production CSP and
+  eval/timer execution remain responsibilities of the consumer runtime.
+
+- Implement DocumentFragment.getElementById, inherited by ShadowRoot, through
+  iterative native tree-scope lookup. Preserve exact UTF-16 IDs, first-match order,
+  empty/missing behavior and native conversion/receiver errors without invoking
+  replaceable query/getAttribute methods. Extend the independent installed Chrome155
+  factory control with fragment/closed-shadow lookup, intrinsic-poisoning and ID changes;
+  add deep lookup and scalar-repair collision regressions.
+
+- Claim pending native mutation batches across all documents before invoking resource
+  consumers. A consumer's nested query can no longer drain another document's old
+  removal events into its inner custom-element reaction scope, so cross-realm adoption
+  callbacks observe the final ownerDocument. Add a regression with querying consumers
+  in both realms against the unchanged independent Chrome155 lifecycle control;
+  genuine nested mutations, interruption and GC contracts remain covered.
+
+- Implement genuine CustomElementRegistry and HTML element constructors over native nodes:
+  autonomous/customized construction, late upgrade, live attribute/connect/disconnect/adopt
+  callbacks, scoped registry lookup/initialization, clone/import behavior and trusted construction
+  error reporting.
+- Add native per-element custom-element reaction queues, including moveBefore connectedMoveCallback
+  and fallback lifecycle ordering; native RAII scopes recover from interrupted constructors,
+  definitions and callbacks without retaining page realms.
+- Replace isolate-rooted JavaScript collection-record maps/functions with context-free V8 Private
+  keys and per-object records; unused installed document contexts, custom-element nodes and scoped
+  shadow cycles now collect. Preserve cross-realm brands, frozen/proxy record support and
+  interruption behavior.
+- Add six fresh, source-hashed normal Chrome155/V8 .23 control pairs plus native
+  GC/termination/private-payload regressions. Form-associated ElementInternals lifecycle remains
+  follow-up work; these tests establish the measured contracts rather than full browser conformance.
+
+- Consume verified published `turbo-dom` 0.5.6 for parser provenance and native
+  template extraction; the dependency resolves from crates.io with its published
+  checksum, without a private DOM path override.
+
+- Preserve the native Window `onstorage` listener slot when combining parser
+  provenance and inert-template prerequisites. The handler keeps branded
+  descriptors, listener ordering, replacement and non-callable clearing; its
+  standalone regression is retained from the frozen storage-events checkpoint.
+
+- Preserve parser-time style-attribute CSP checks inside genuine template contents.
+  Native preorder follows the private template graph and passes the parsing
+  document's policy without activating inert stylesheets or inventing source
+  positions. The combined standalone cohort passes 214 contracts; the downstream
+  Chrome control retains its document-targeted report for a template attribute.
+
+- Combine the reviewed real associated inert template implementation with native
+  parser provenance and original-unit CSS callbacks. Template contents use their
+  actual separate document, so active queries and stylesheet authorization do
+  not cross into them. Imported inert storage conservatively has no new lexical
+  source token. The combined standalone cohort passes214 contracts; the additive
+  backend dependency is published in turbo-dom0.5.6.
+
+- Preserve authoritative original UTF-16 code units in native stylesheet and
+  style-attribute authorization callbacks. Scalar policy compatibility views
+  remain separate. A native regression covers independent lone high/low units
+  in both sources, supporting exact CSP report-sample delivery downstream.
+
+- Add opt-in original UTF-16 parser source positions for host installation and
+  private native node/attribute provenance. CSS authorization receives trusted
+  parser metadata and actual Window ownership. Inert template styles remain
+  unprepared until active adoption; initial and dynamic authorization stay
+  distinct. Native controls cover CRLF/non-BMP positions, illegal objects,
+  poisoned guest document access and template activation. Requires the additive
+  turbo-dom source-position API; full runtime report ingress is tested separately.
+
+- Implement HTMLScriptElement.text through native direct child Text/CDATA code
+  units and the existing native text replacement/preparation pipeline. Fresh
+  Chrome controls cover brands, descriptors, coercion, original units and actual
+  execution on connection or filling an empty connected script. Failed conversion
+  preserves nodes, Range boundaries and observer queues. The merged binding passes
+  179 standalone contracts; Trusted Types policy enforcement remains pending.
+
+- Consume published turbo-dom 0.5.5 and preserve original UTF-16 payloads, names,
+  namespaces, attributes, mutation records, parser input and inline handler/script
+  source through native two-byte V8 strings. Scalar compatibility views remain at
+  existing host boundaries. Independent document installation and iterative script
+  preparation cover real ownership and 8192-level host-stack regressions. Fresh
+  Chrome controls cover surrogate identity, BOMs, lookup/reflection, cloning and
+  source text. The merged standalone binding passes 177 native contracts; Surf
+  runtime module/frame source integration remains a separate pending gate.
+
+- Expose host-only native composed children/parent identities for layout. Closed
+  roots and manual assignment use private records; hidden fallback and unslotted
+  children have no composed parent. A native regression poisons public slot APIs
+  and preserves authentic internal projection without exposing closed roots.
+
+- Implement native named/manual shadow-slot distribution, live assignedSlot,
+  fallback flattening and trusted slotchange in the shared observer notification
+  microtask. Original wrapper edges preserve foreign adoption and manual stealing;
+  clearing an assignment releases its old slot. Source-pinned Chrome controls cover
+  brands, dictionaries, closed roots, light slot elements and reentrant ordering.
+  Actual V8 collection and a 4096-level iterative fallback walk guard retention
+  and native stack behavior. The complete binding cohort passes 165 tests.
+
+- Reflect HTMLIFrameElement.credentialless through genuine HTML iframe brands and captured native attribute operations; boolean conversion, descriptors, poisoned public methods and illegal receivers match a fresh Chrome 155 control.
+
+- Add the native-branded, live iframe sandbox DOMTokenList with Chrome155 token
+  support. Token-list PutForwards setters honor own value setters and failed
+  ordinary assignment; source-pinned Chrome controls cover identity, descriptors
+  and HTML namespace/local-name receiver behavior.
+
+- Reflect HTMLMetaElement name/httpEquiv/content/media/scheme through native attributes, with genuine HTML namespace/receiver brands, DOMString conversion and private native method capture. Saved normal Chrome155 descriptor/property/attribute/illegal-receiver controls cover the complete narrow surface.
 
 ### Fixed
+- Dispose cached native worlds safely after binding thread-local cells have been
+  destroyed. Availability guards preserve normal isolate restoration while the
+  isolate-owned saved state still clears before V8 handle invalidation. A real
+  thread-exit regression covers the cached-runtime initialization/drop order.
+- Partition native document, listener, observer, CSS and focus state by its actual
+  V8 isolate. Scoped activation restores the previous isolate/document after
+  nested work, cold installation and disposal; resetting or dropping one isolate
+  preserves its peers. Eight regressions cover identity, independent observers,
+  reset/disposal ordering and activation guards that outlive their isolate.
+- Consume published turbo-dom 0.5.4 bounded storage collection through its public
+  API. Genuine weak wrappers, private ownership edges and host-job node pins keep
+  reachable nodes alive; successful collection also removes stale scalar records.
+  Thirteen contracts cover retained/adopted nodes, pending mutations, job pins,
+  budgets and teardown. Collection is explicit; automatic host-boundary scheduling
+  remains consumer work, and multi-document calls are atomic per Tree.
+- Resolve computed colors through the public cascade serialization and private
+  linked-sheet values. Cover inherited/default CanvasText, CSS-wide keywords,
+  currentColor, disconnected elements and live declarations against a fresh
+  source-pinned Chrome 155 control. Broader system-color/color-scheme, variables
+  and layer cascade behavior remains open.
+- The combined canonical browser binding cohort passes 158 contracts on the
+  default 149.3.0 SDK. Consumer runtime scheduling and genuine native155 checks
+  remain separate; inherited runner warnings prevent claiming a strict full-repo
+  gate from this focused result.
+- Select HTML interfaces by exact namespace/local name rather than uppercasing
+  XML-created names. Preserve genuine HTMLUnknownElement versus valid custom-name
+  identity, reserved names and legacy generic/preformatted aliases. Control getters
+  and methods check native namespace/local-name brands even when borrowed or when
+  public prototypes are changed. A fresh 723-row authored Chrome155 matrix covers
+  these HTML/null-namespace mappings and foreign control brands; SVGScriptElement
+  and SVGImageElement projection/resource behavior remain separate open gaps.
+- Allocate native ownership component/helper maps in the actual Document realm.
+  A foreign script getter cannot retain its retired Window through another
+  Document’s map shape. Observer event draining no longer dirties unchanged graphs.
+  Two new regressions bring the current canonical cohort to 134 passing contracts.
+- Store script parser/force-async/already-started flags as native scalar node state.
+  Preserve clone/import/adoption and inert/retired-document behavior; prepare native
+  candidates after observer fanout, including nested and shadow-root scripts. Six
+  new contracts and a fresh Chrome155 control cover this subset. The integrated
+  canonical cohort passes 132 tests; runtime fetch/execution wiring, parser reentry,
+  SVG scripts, import maps and speculation rules remain open.
+- Keep Rusty V8 weak handles live through native slot/finalizer disposal using a
+  source-pinned, reproducible 149.3.0 dependency patch. Preserve its real SDK/native
+  engine identity and upstream license; the original teardown regression fails,
+  while 16 patched isolates and all 126 canonical binding contracts pass.
+- Make private helper publication fallible during iframe budget interruption,
+  preserving pending V8 termination and leaving interrupted helpers unpublished.
+  Normal construction and a canceled-interrupt retry remain covered.
+- Register inert document initializers on their callback creation realm. Shared
+  embedder ops no longer overwrite the main Window initializer with the last iframe
+  closure; a heap-traced retained-Document regression identified that native root.
+- Pin the captured RegExp exec intrinsic on private XML-name validation, so replacing
+  RegExp.prototype.exec cannot intercept native document factories. Validate doctype
+  delimiters directly; the expanded Chrome155 control covers seven poisoned intrinsics.
+- Replace native wrapper/helper/context roots with weak lookups and private
+  Document/component ownership. Keep genuine receiver and Node-argument owners
+  pinned during native callbacks, preserve ordinary exceptions and materialized
+  V8 termination, and invalidate interrupted wrapper publication before retry.
+  The combined canonical ownership/observer checkpoint passes 124 contracts;
+  dependency disposal regressions are tracked separately from that binding gate.
+- Deliver native MutationObserver records through one V8 notification microtask,
+  with per-observer options, old values, namespace filtering, transient removed
+  subtrees, static branded NodeLists and receiver checks. Compound insert/replace
+  algorithms emit their semantic batches, preserving ordered source removals and
+  failed cross-document conversion. Saved Chrome 155 controls and hostile builtin
+  regressions cover this subset. Add a trusted Document-private mutation consumer
+  for resource postconnection work, with observer fanout first and nested mutations.
+  Broader lifecycle, shadow slots, custom elements and UTF-16 work remain open.
+- Retain the native node projector privately on its owner Document, avoiding
+  page-replaced constructor and public projector getters during first wrapping,
+  including parser-created controls and independent documents. Reject inherited
+  tag-map entries and keep interrupted wrapping out of the identity cache. The
+  canonical browser binding cohort passes 119 contracts.
+- Preserve XML element case and document-specific default namespaces for native
+  createElement, including borrowed receivers and colon-containing XML names.
+  Keep createElement local names distinct from createElementNS qualified names;
+  saved Chrome controls cover HTML, XML, XHTML and SVG document factories.
+- Create genuine independent HTML/XML document trees through branded
+  DOMImplementation factories and Document constructors. Preserve native doctype
+  adoption identity, title conversion, receiver checks and foreign stylesheet
+  rejection, without page-replaced RegExp/String/Array/Map/Object hooks. Cover
+  ordinary parsed documents without factory metadata as well as the saved Chrome
+  155 factory control. XML parsing, CDATA and downstream XML helpers remain open.
+- Capture native node projection methods so first-time wrapping of Text, Attr,
+  Comment, elements and fragments cannot call page-replaced Function, WeakSet,
+  Object, Array or String methods. Cover this alongside repeated document installs
+  and the XPath private-intrinsic regression.
+- Consume published turbo-dom 0.5.3, including its additive mutation-event metadata
+  for observer delivery; browser observer queues remain a separate integration task.
+- Preserve native Node traversal/equality descriptors when rebuilding a document
+  in an existing realm; project compatibility delegates from that bootstrap's
+  actual raw node prototype rather than a previous constructor's prototype.
+- Adopt genuine foreign nodes during all native insertion methods after validating
+  the full destination sequence. Preserve cached node/descendant identity, listener
+  state and source Range adjustment. Single-node insertion validates references
+  and Document hierarchies before changing an owner or parent. DocumentFragment and ShadowRoot
+  insertion moves their children while keeping the original container and owner;
+  repeated arguments retain their observed ordering. An independent Chrome 155
+  collector covers borrowed methods, namespace data and single-node failure state.
+- Match Chrome155 variadic conversion before destination checks: drain fragments,
+  detach multi-node sequences, retain the last duplicate and resolve viable sibling
+  references. Failed compound insertion leaves converted nodes detached in their
+  source document and updates source Ranges; failed WebIDL conversion has no such
+  effects. A shared authored Chrome fixture covers failure and fragment overlap.
+- Expose the real empty, stable NodeList from Attr.childNodes with native receiver
+  branding. Include Attr and CDATA kinds in the Node receiver predicate; the HTML
+  binding still rejects createCDATASection and does not add an XML parser.
+- Make binding cleanup safe during thread-local runtime destruction regardless
+  of initialization order. Clear every remaining private handle cache while
+  treating already-destroyed TLS cells as released, including diagnostic storage.
+- Keep live Range boundaries synchronized with insertAdjacentHTML, outerHTML,
+  innerText and outerText replacement. Match Chrome's parent-offset collapse when
+  outerText appends and removes adjacent text, instead of applying normalize's
+  boundary-transfer behavior. The exact shared mutation collector and saved Chrome
+  155 control cover all four insertion positions and empty/multiline replacements.
+- Read stylesheet text, media and title through captured native DOM accessors,
+  preserving actual sheet identity across CSSOM edits despite page-defined getters.
+  Add a Rust-only CSSHost live export with private rule/declaration state, disabled
+  and media values, grouping and attached import provenance; bypass public getters,
+  iterators and poisoned prototypes with explicit graph/text budgets. Correct
+  font-face descriptor validation, mutable declaration edits and URL serialization.
+  Seven offline contracts include an independent installed Chrome155.0.8059.79 control;
+  this does not implement layout, font loading or complete CSS interface shapes.
+- Expose native-only generic EventTarget listener observation for embedding lifetime
+  management, using genuine private listener state and the creation realm. Cover
+  add/remove/once/abort cleanup, foreign targets and forged receivers without guest
+  getters or page-visible registration capabilities.
+- Update live Range boundaries through private weak native records for text edits,
+  UTF-16 offsets, splitting, insertion, removal, bulk child replacement, normalization,
+  state-preserving moves and node adoption. Match an independent Chrome155.0.8059.79
+  control without guest DOM getter/method hooks; cover foreign trees and actual V8
+  garbage collection. Geometry, remaining parsing/text mutation seams and lossless
+  unpaired UTF-16 storage remain open.
+- Implement native-tree Range clone/extract/delete/surround content operations,
+  real selected text, boundary ordering/offset/root validation, node intersections
+  and atomic insertion preflight. Preserve extracted node identity and nested
+  partial shells, genuine receiver checks and private final exception constructors.
+  Saved Chrome155 content/error controls and hostile DOM-method regressions cover
+  this subset; layout geometry and remaining mutation-seam coverage remain open.
+- Build DOM collection snapshots, private event paths and returned composed-path
+  copies through intrinsic own elements, bypassing guest numeric setters,
+  constructors/species and iterators while retaining live/native node identities.
+- Propagate native Node events through the actual owner Document and Window with capture,
+  target and bubble phases, stable composed paths, stop/removal/once/passive contracts and
+  immediate AbortSignal subscriptions. Nonbubbling resource errors reach Window capture;
+  element load events exclude Window. Preserve inert-document and shadow-root boundaries,
+  foreign event/signal brands, listener objects and native handler registration order.
+  Window onerror receives genuine ErrorEvent's five source/error arguments and return-true
+  cancellation; ordinary on* handlers receive one Event and cancel on return false.
+  Capture final trusted ErrorEvent/AbortSignal interfaces and the default AbortError
+  DOMException constructor after host environment installation. Expose dispatch records through
+  a Rust-only native_event_record seam with genuine/foreign/forged Event brand checks.
+  Generic EventTarget/subclass and AbortSignal listeners also use private native records:
+  no public registry fields, native receiver/foreign brands, real onabort handlers and
+  once/passive/signal/removal/stop semantics. Match measured registration order at direct
+  Window/generic/Signal targets while preserving Node/Document capture and bubble phases.
+  Create private listener/dispatch records without prototypes, append/copy/remove private
+  arrays through own indices without guest setters/species/iterators, and allocate native
+  facade data/construct arguments with intrinsic array creation. Expose Rust-only platform
+  brands and an idempotent opaque host target initializer in the actual creation realm.
+  Hostile index/species/iterator/state-setter controls retain callbacks with zero hooks.
+  Native Node abort-hook data and Window ErrorEvent argument arrays also bypass inherited
+  numeric setters during subscription and onerror dispatch.
+  Complete shadow retargeting/composed host crossing and listener exception reporting remain
+  explicit followups.
+- Implement the HTML-standard legacy Document clear/captureEvents/releaseEvents no-effect
+  methods with native Document receivers, descriptors and ignored-argument behavior.
+- Implement Document XPath evaluation/compiled expressions and XPathEvaluator over bounded
+  public-rtdom snapshots using the unmodified MIT xpath 0.0.35 provider in a private V8
+  context. Preserve real Node/Attr identity, namespace and foreign-case matching, corrected
+  following/preceding axes, scalar/snapshot/iterator contracts, mutation invalidation,
+  opaque native brands and owner-realm results for borrowed foreign interfaces. Enforce
+  explicit node/depth/string/expression/operation budgets; reject namespace-axis results
+  and fragment/shadow contexts. Keep the provider's automatic page installation disabled.
+- Capture popover task schedulers by the current native context document after host timer
+  installation, preserving independent frame queues and the parent's private scheduler.
+- Preserve createElement's actual Document receiver through control/iframe enrichment, with
+  single tag coercion, native ownership for inert documents, and IDL/name validation. Reflect
+  script/link integrity properties into loader attributes with native receiver checks. Add
+  legacy createNSResolver as validated Node identity backed by native namespace resolution.
+
+## [0.4.6] - 2026-10-13
+
+- Implement stable ObservableArray-backed stylesheet adoption for genuine Documents
+  and ShadowRoots. Private backing preserves ownership, conversion/error effects,
+  indexed/deletion/descriptor behavior and native-sheet constructor-document checks.
+  Renderer exports read captured private backing, bypassing page-owned adoption
+  getters; independent Chrome 155 mutation/ownership controls cover this subset.
+
+### Fixed
+- Back popover show/hide/toggle with native per-document state, auto/hint/manual ancestry
+  and source relationships, cancellable trusted beforetoggle events and coalesced trusted
+  toggle tasks on a privately captured host scheduler. Keep live :popover-open selector
+  composition and shadow-root separation without changing DOM attributes or styles. Handle
+  ordinary removal/moves, state-preserving moveBefore, null-namespace attribute changes,
+  inert documents and queued event identity across adoption. Preserve assigned on* source
+  markers during cross-document adoption. Autofocus/restoration, light-dismiss/backdrop,
+  fullscreen/modal integration, stateful CSS cascade and top-layer painting remain pending.
 - Validate native DOM insertion before changing parent links: reject ordinary and shadow-host
   ancestor cycles, enforce final Document element/doctype/text constraints, preserve nodes on
   invalid insertions, and check native Node brands, references and removal membership. Route
@@ -16,7 +557,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   Native hierarchy errors retain genuine DOMException identity through private constructors.
 - Use published turbo-dom 0.5.2 as the canonical DOM dependency. Add native HTML innerText/outerText
   mutation and supported rendered-text flow, nullable popover reflection and branded ToggleEvent
-  records; complete CSS layout and popover top-layer lifecycle remain unsupported.
+  records; complete CSS layout and top-layer painting remain unsupported.
 - Keep native `classList` and `part` token-list identity and live indexed state,
   validate mutations atomically, and reflect ARIA element references with private
   assignment state, attribute invalidation and shadow-tree scope checks. Add native

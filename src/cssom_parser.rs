@@ -9,7 +9,7 @@ use lightningcss::properties::{
     custom::{Token, TokenList, TokenOrValue},
     Property, PropertyId,
 };
-use lightningcss::rules::CssRule;
+use lightningcss::rules::{font_face::FontFaceProperty, CssRule};
 use lightningcss::stylesheet::PrinterOptions;
 use lightningcss::stylesheet::{ParserOptions, StyleSheet};
 use lightningcss::targets::{Features, Targets};
@@ -20,6 +20,7 @@ pub fn is_supported_property(name: &str) -> bool {
         || matches!(
             name,
             "content"
+                | "font-variant"
                 | "float"
                 | "clear"
                 | "direction"
@@ -45,12 +46,17 @@ fn deferred_value(tokens: &TokenList<'_>) -> bool {
     tokens.0.iter().any(|token| match token {
         TokenOrValue::Var(_) | TokenOrValue::Env(_) => true,
         TokenOrValue::Function(function) => deferred_value(&function.arguments),
-        TokenOrValue::Token(Token::Ident(name)) => matches!(
-            name.as_ref(),
-            "inherit" | "initial" | "unset" | "revert" | "revert-layer"
-        ),
+        TokenOrValue::Token(Token::Ident(name)) => {
+            ["inherit", "initial", "unset", "revert", "revert-layer"]
+                .iter()
+                .any(|keyword| name.eq_ignore_ascii_case(keyword))
+        }
         _ => false,
     })
+}
+
+pub(super) fn valid_selector(source: &str) -> bool {
+    valid_rule(&format!("{source} {{ color: red }}"))
 }
 
 fn valid_rule(source: &str) -> bool {
@@ -70,6 +76,8 @@ fn valid_rule(source: &str) -> bool {
 #[derive(Default)]
 struct CssParser {
     keyframes: bool,
+    font_face: bool,
+    raw_descriptors: bool,
 }
 
 fn consume(input: &mut Parser<'_, '_>) -> String {
@@ -111,6 +119,52 @@ impl<'i> QualifiedRuleParser<'i> for CssParser {
     }
 }
 
+// Font descriptors have their own grammar: ordinary property validation drops
+// `src` and wrongly admits layout properties inside @font-face.
+fn font_descriptor(name: &str, value: &str) -> Option<String> {
+    let source = format!("@font-face {{ {name}: {value}; }}");
+    let sheet = StyleSheet::parse(&source, ParserOptions::default()).ok()?;
+    let CssRule::FontFace(rule) = sheet.rules.0.first()? else {
+        return None;
+    };
+    let descriptor = rule.properties.first()?;
+    if !matches!(descriptor, FontFaceProperty::Custom(_)) {
+        return if matches!(descriptor, FontFaceProperty::Source(_)) {
+            descriptor
+                .to_css_string(PrinterOptions::default())
+                .ok()
+                .map(|text| format!("{text};"))
+        } else {
+            Some(format!("{name}: {value};"))
+        };
+    }
+    let mut source = ParserInput::new(value);
+    let mut input = Parser::new(&mut source);
+    let valid = match name {
+        "font-display" => input.expect_ident().is_ok_and(|value| {
+            matches!(
+                value.as_ref(),
+                "auto" | "block" | "swap" | "fallback" | "optional"
+            )
+        }),
+        "size-adjust" | "ascent-override" | "descent-override" | "line-gap-override" => {
+            (name != "size-adjust"
+                && input
+                    .try_parse(|input| input.expect_ident_matching("normal"))
+                    .is_ok())
+                || input.expect_percentage().is_ok_and(|value| value >= 0.0)
+        }
+        "font-feature-settings" | "font-variation-settings" => Property::parse(
+            PropertyId::from(name),
+            &mut input,
+            &ParserOptions::default(),
+        )
+        .is_ok_and(|property| !matches!(property, Property::Unparsed(_) | Property::Custom(_))),
+        _ => false,
+    };
+    (valid && input.expect_exhausted().is_ok()).then(|| format!("{name}: {value};"))
+}
+
 impl<'i> DeclarationParser<'i> for CssParser {
     type Declaration = String;
     type Error = ();
@@ -121,7 +175,26 @@ impl<'i> DeclarationParser<'i> for CssParser {
         _: &ParserState,
     ) -> Result<String, ParseError<'i, ()>> {
         let start = input.position();
+        if self.raw_descriptors {
+            return Ok(format!(
+                "{}: {};",
+                name.to_ascii_lowercase(),
+                consume(input)
+            ));
+        }
+        if self.font_face {
+            let value = consume(input);
+            return font_descriptor(&name.to_ascii_lowercase(), &value)
+                .ok_or_else(|| input.new_custom_error(()));
+        }
         let valid = input.parse_until_before(Delimiter::Bang, |input| {
+            // Lightning CSS does not model the CSS2 font-variant shorthand.
+            // Admit its measured caps subset without accepting arbitrary custom tokens.
+            if name.eq_ignore_ascii_case("font-variant") {
+                let value = input.expect_ident_cloned()?.to_ascii_lowercase();
+                input.expect_exhausted()?;
+                return Ok(matches!(value.as_str(), "normal" | "small-caps" | "initial" | "inherit" | "unset" | "revert" | "revert-layer"));
+            }
             let property=Property::parse(
                 PropertyId::from(lightningcss::values::string::CowArcStr::from(name.to_string())),
                 input,
@@ -145,6 +218,52 @@ impl<'i> DeclarationParser<'i> for CssParser {
             "{name}: {value}{};",
             if important { " !important" } else { "" }
         ))
+    }
+}
+
+// These rules require descriptors to validate the rule itself. Testing an empty
+// shell loses valid @property rules, while ordinary CSS properties lose navigation.
+fn typed_descriptor_rule(name: &str, prelude: &str, body: &str) -> Option<String> {
+    use lightningcss::rules::view_transition::ViewTransitionProperty;
+    let source = format!("@{name} {prelude} {{ {body} }}");
+    let sheet = StyleSheet::parse(&source, ParserOptions::default()).ok()?;
+    match sheet.rules.0.first()? {
+        CssRule::Property(rule) => {
+            let mut source = ParserInput::new(body);
+            let mut input = Parser::new(&mut source);
+            let mut parser = CssParser {
+                raw_descriptors: true,
+                ..Default::default()
+            };
+            let descriptors: Vec<_> = RuleBodyParser::new(&mut input, &mut parser)
+                .filter_map(Result::ok)
+                .collect();
+            let initial = descriptors
+                .iter()
+                .rev()
+                .find(|value| value.starts_with("initial-value:"));
+            let syntax = rule.syntax.to_css_string(PrinterOptions::default()).ok()?;
+            Some(format!(
+                "@property {prelude} {{ syntax: {syntax}; inherits: {};{} }}",
+                rule.inherits,
+                initial.map_or(String::new(), |value| format!(" {value}"))
+            ))
+        }
+        CssRule::ViewTransition(rule) => {
+            let descriptors: Vec<_> = rule
+                .properties
+                .iter()
+                .filter(|value| !matches!(value, ViewTransitionProperty::Custom(_)))
+                .filter_map(|value| {
+                    value
+                        .to_css_string(PrinterOptions::default())
+                        .ok()
+                        .map(|value| format!("{value};"))
+                })
+                .collect();
+            Some(format!("@view-transition {{ {} }}", descriptors.join(" ")))
+        }
+        _ => None,
     }
 }
 
@@ -177,6 +296,11 @@ impl<'i> AtRuleParser<'i> for CssParser {
         _: &ParserState,
         input: &mut Parser<'i, 't>,
     ) -> Result<String, ParseError<'i, ()>> {
+        if matches!(name.as_str(), "property" | "view-transition") {
+            let body = consume(input);
+            return typed_descriptor_rule(&name, &prelude, &body)
+                .ok_or_else(|| input.new_custom_error(()));
+        }
         let test = format!("@{name} {prelude} {{}}");
         if !valid_rule(&test) {
             return Err(input.new_custom_error(()));
@@ -192,13 +316,18 @@ impl<'i> AtRuleParser<'i> for CssParser {
                 | "position-try"
                 | "view-transition"
         ) {
-            RuleBodyParser::new(input, self)
+            let mut declarations = CssParser {
+                font_face: name == "font-face",
+                ..Default::default()
+            };
+            RuleBodyParser::new(input, &mut declarations)
                 .filter_map(Result::ok)
                 .collect::<Vec<_>>()
                 .join(" ")
         } else {
             let mut nested = CssParser {
                 keyframes: name == "keyframes" || name.ends_with("-keyframes"),
+                ..Default::default()
             };
             StyleSheetParser::new(input, &mut nested)
                 .filter_map(Result::ok)
@@ -297,6 +426,20 @@ mod tests {
         assert!(parse_one("a { width: nonsense; color: blue }")
             .unwrap()
             .contains("color: blue"));
+    }
+
+    #[test]
+    fn full_typed_descriptors_validate_before_empty_shells() {
+        let property = parse_one(
+            r#"@property --paint {syntax:"<color>";initial-value:transparent;inherits:false}"#,
+        )
+        .unwrap();
+        assert!(property.contains("initial-value: transparent;"));
+        assert!(property.contains("inherits: false;"));
+        assert!(parse_one(r#"@property --paint {syntax:"<color>";inherits:false}"#).is_none());
+        let transition = parse_one("@view-transition {navigation:auto;width:20px}").unwrap();
+        assert!(transition.contains("navigation: auto;"));
+        assert!(!transition.contains("width"));
     }
 
     #[test]

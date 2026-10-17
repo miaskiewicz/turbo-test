@@ -38,6 +38,49 @@ The DOM is on by default for `jsdom`/`happy-dom`/`turbo-dom` environments (and a
 `// @vitest-environment jsdom` pragma); `environment: 'node'` files get clean globals, just like
 vitest. There is **no environment to install or configure** — the Rust DOM ships inside the binary.
 
+## Native DOM lifecycle controls
+
+The development binding keeps constructed shadow stylesheet lists during
+same-document adoption and disconnect/reconnect, and clears them during
+cross-document adoption before custom-element adopted callbacks. Retained
+`adoptedStyleSheets` arrays keep their identity. Internal adoption reads private
+records instead of page-overridden DOM getters or array methods.
+
+Embedders call `retire_custom_element_context(context)` when a frame's browsing
+context is retired. This host-only boundary preserves retained registries,
+definitions and existing element identity while stopping automatic construction
+and callbacks from that definition realm, including reactions already queued.
+Ordinary inert documents remain distinct from retired frame contexts.
+
+Independent Chrome155 controls cover these stylesheet transitions, reentrant
+custom-element callbacks, contextual fragment ownership, scoped registries and
+inert templates. Computed font controls additionally cover actual owner-document
+preferences, live inheritance, arithmetic `calc()`, named/manual slots and
+retirement. Supported font units and grammar keywords are ASCII case-insensitive;
+quoted/custom family names and unresolved custom-property names retain their
+original spelling. The host-only `set_computed_font_defaults(context, family, size)`
+accepts a nonempty family and finite positive initial size. macOS `Times` is
+measured against Chrome155; other-platform `Times New Roman` remains a conventional,
+uncertified preference. Metric-dependent `ch`/`ex`, viewport units, `min`/`max`/
+`clamp`, custom-property substitution and per-element heading/form-control UA
+font defaults, full `font-variant` combinations and unit-cancelling division
+remain unsupported by this bounded resolver. Scalar `calc()` line-height retains
+its inherited factor. Unresolved font text is retained through descendants instead
+of manufacturing numeric values.
+Recollect a lifecycle control with the sibling turbo-surf CDP
+collector and a current Node version that provides WebSocket:
+
+```bash
+node scripts/dom-lifecycle-chrome-control.mjs \
+  --runner ../turbo-surf/harness/detection/chrome-cdp-trace.mjs \
+  --probe src/css_adoption_lifecycle_probe.js \
+  --out /tmp/css-adoption-control.json
+```
+
+These are bounded behavior controls; broader XML parsing and complete browser
+lifecycle conformance remain separate work. The development public DOM revision
+is pinned in Cargo manifests and does not imply a registry release.
+
 ## Benchmarks
 
 Two real production app suites, **same machine, same session, identical pass counts** (Apple

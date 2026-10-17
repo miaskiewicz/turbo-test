@@ -30,6 +30,7 @@ name = "m5-affected"
 path = "src/bin/m5_affected.rs"
 
 [dependencies]
+url = "2.5"
 v8 = "149.3.0"
 oxc_allocator = "0.134"
 oxc_parser = "0.134"
@@ -47,17 +48,20 @@ base64 = "0.22"
 # CSS Syntax, selector and declaration validation for the DOM's CSSOM facade.
 lightningcss = { version = "1.0.0-alpha.71", default-features = false }
 cssparser = "0.37"
-# P3: all-Rust DOM, from the published crate (crates.io `turbo-dom`). It's a standalone crate that
-# exports `rtdom` (Dom/Tree/NodeRef) unconditionally — no features needed. Kept under the
-# `turbo_dom_parser` import name via `package` so the existing `use turbo_dom_parser::rtdom::…` stands.
-# 0.3.4 adds native CharacterData mutation + ChildNode/ParentNode manip + insertAdjacent + toggleAttribute + getAttributeNS over rtdom.
-# 0.3.5 fixes rtdom::serialize escaping regular spaces to &nbsp; (U+00A0), which broke
-# whitespace-normalized getByRole/getByText/toHaveText matching against a serialized DOM.
-turbo-dom-parser = { package = "turbo-dom", version = "0.5.2" }
+# Public native rtdom API only. The immutable development revision supplies custom
+# state selectors, bounded storage accounting and actual-context fragments;
+# no registry release is implied.
+# Keep the existing turbo_dom_parser import name through the package alias.
+turbo-dom-parser = { package = "turbo-dom", version = "0.5.7", git = "https://github.com/miaskiewicz/turbo-dom", rev = "aaeb290c4fea12a1ed98185f1d0628758da53db1" }
 
-# Published PR #8 document/fragment APIs are supplied by turbo-dom 0.5.2.
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[patch.crates-io]
+v8 = { path = "vendor/rusty_v8" }
