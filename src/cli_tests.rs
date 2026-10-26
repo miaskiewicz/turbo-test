@@ -1242,6 +1242,20 @@ fn footer_summary_and_exit_code() {
         summary(0, &Totals::default(), 1, 0.0, (0, 0)),
         "\n0 files | 0 passed | 0 failed | 0 load-errors | 1 jobs | wall 0 ms | env setup 0.00 ms/file | cache 0% hit"
     );
+    // a pending test (a `.only` inside describe.skip, turbo-test#77) counts only in the total, and
+    // a file none of whose tests ran is skipped (vitest: `Tests  1 skipped (2)`)
+    let pending = TestReport {
+        tests: vec![
+            case("k > w", "pending", 0.0, ""),
+            case("k > v", "skipped", 0.0, ""),
+        ],
+        ..report(0, 0)
+    };
+    let res = vec![file_result(0, Path::new("k.test.js"), Ok(pending), 1.0)];
+    assert_eq!(
+        footer(1, &res, 1.0),
+        "\n Test Files  1 skipped (1)\n      Tests  1 skipped (2)\n   Duration  1ms"
+    );
     assert_eq!(
         footer(0, &[], 0.0),
         "\n Test Files  no tests\n      Tests  no tests\n   Duration  0ms"
