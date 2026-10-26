@@ -98,3 +98,65 @@ fn vi_dynamic_import_settled_waits_for_pending_imports() {
     let r = turbo_test(&p.dir, &[], &[]);
     assert_passes(&r, 3);
 }
+
+/// Item 3: `node:fs` `readdirSync` lists a directory (the report saw `[]`), with
+/// `{ withFileTypes: true }` Dirents and a `URL` argument, in Node's sorted order, and throws
+/// Node's ENOENT / ENOTDIR for a missing path / a file; `fs/promises` `readdir` the same.
+#[test]
+#[ignore = "turbo-test#79: fails until the fix"]
+fn readdir_sync_lists_names_dirents_and_url_arguments() {
+    let p = dropin(
+        "dropin-readdir",
+        &[
+            ("sub/x.txt", "hi\n"),
+            ("sub/b.txt", "b\n"),
+            ("sub/inner/.keep", ""),
+            (
+                "a.test.ts",
+                "import { expect, it } from 'vitest';\n\
+                 import { readdirSync } from 'node:fs';\n\
+                 import { fileURLToPath } from 'node:url';\n\
+                 const dir = fileURLToPath(new URL('./sub', import.meta.url)); // sub/x.txt exists\n\
+                 it('names', () => { expect(readdirSync(dir)).toEqual(['b.txt', 'inner', 'link', 'x.txt']); });\n\
+                 it('withFileTypes', () => { const [e] = readdirSync(dir, { withFileTypes: true }); expect(e?.isFile()).toBe(true); });\n",
+            ),
+            (
+                "b.test.ts",
+                "import { expect, it } from 'vitest';\n\
+                 import { readdirSync } from 'node:fs';\n\
+                 import { readdir } from 'node:fs/promises';\n\
+                 import { fileURLToPath } from 'node:url';\n\
+                 const url = new URL('./sub', import.meta.url);\n\
+                 const dir = fileURLToPath(url);\n\
+                 it('a URL or an encoding argument', () => {\n\
+                 \x20 expect(readdirSync(url)).toEqual(['b.txt', 'inner', 'link', 'x.txt']);\n\
+                 \x20 expect(readdirSync(dir, 'utf8')).toEqual(['b.txt', 'inner', 'link', 'x.txt']);\n\
+                 });\n\
+                 it('dirents', () => {\n\
+                 \x20 const es = readdirSync(url, { withFileTypes: true });\n\
+                 \x20 expect(es.map((e) => [e.name, e.isFile(), e.isDirectory(), e.isSymbolicLink(), e.parentPath])).toEqual([\n\
+                 \x20   ['b.txt', true, false, false, dir], ['inner', false, true, false, dir],\n\
+                 \x20   ['link', false, false, true, dir], ['x.txt', true, false, false, dir],\n\
+                 \x20 ]);\n\
+                 });\n\
+                 it('a missing directory or a file throws', () => {\n\
+                 \x20 let err: any, err2: any;\n\
+                 \x20 try { readdirSync(dir + '/nope'); } catch (e) { err = e; }\n\
+                 \x20 expect([err.message, err.code, err.errno, err.syscall, err.path]).toEqual([\n\
+                 \x20   `ENOENT: no such file or directory, scandir '${dir}/nope'`, 'ENOENT', -2, 'scandir', `${dir}/nope`,\n\
+                 \x20 ]);\n\
+                 \x20 try { readdirSync(dir + '/x.txt'); } catch (e) { err2 = e; }\n\
+                 \x20 expect([err2.message, err2.code, err2.errno]).toEqual([`ENOTDIR: not a directory, scandir '${dir}/x.txt'`, 'ENOTDIR', -20]);\n\
+                 });\n\
+                 it('promises.readdir', async () => {\n\
+                 \x20 expect(await readdir(url)).toEqual(['b.txt', 'inner', 'link', 'x.txt']);\n\
+                 \x20 expect((await readdir(dir, { withFileTypes: true })).map((e) => e.isDirectory())).toEqual([false, true, false, false]);\n\
+                 \x20 await expect(readdir(dir + '/nope')).rejects.toMatchObject({ code: 'ENOENT', syscall: 'scandir' });\n\
+                 });\n",
+            ),
+        ],
+    );
+    std::os::unix::fs::symlink("x.txt", p.path("sub/link")).unwrap();
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_passes(&r, 6);
+}
