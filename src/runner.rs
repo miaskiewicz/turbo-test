@@ -5130,10 +5130,18 @@ fn dynamic_import<'s>(
         if module.get_status() == v8::ModuleStatus::Uninstantiated {
             module.instantiate_module(scope, resolve_callback)?;
         }
-        if module.get_status() == v8::ModuleStatus::Instantiated {
-            module.evaluate(scope)?;
+        // evaluate() returns the module's evaluation promise (also for one already evaluated or
+        // still evaluating its top-level await): the import settles with it (turbo-test#82)
+        let evaluation = module.evaluate(scope)?;
+        let ns = module.get_module_namespace();
+        // (a synthetic module, e.g. a node builtin, evaluated before gives no promise)
+        match v8::Local::<v8::Promise>::try_from(evaluation) {
+            Ok(promise) => {
+                let namespace = v8::Function::builder(return_data).data(ns).build(scope)?;
+                promise.then(scope, namespace).map(Into::into)
+            }
+            Err(_) => Some(ns),
         }
-        Some(module.get_module_namespace())
     })();
 
     match ns {
@@ -5152,6 +5160,15 @@ fn dynamic_import<'s>(
         }
     }
     Some(promise)
+}
+
+/// A function returning its data value (the namespace a dynamic import settles with).
+fn return_data(
+    _scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    rv.set(args.data());
 }
 
 // ---- bootstrap + public API ----------------------------------------------

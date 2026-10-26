@@ -459,7 +459,6 @@ fn dynamic_import_of_a_lazy_stub_barrel_without_react_loads_the_real_package() {
 /// turbo-test#82: `import()` of a module with top-level await settles after the module has
 /// evaluated (Node 26 / vitest 4.1.12), not with a namespace whose bindings are uninitialised.
 #[test]
-#[ignore = "turbo-test#82: fails until the fix"]
 fn dynamic_import_waits_for_top_level_await() {
     let p = Project::new("rb-esm-tla");
     p.file("package.json", r#"{"type":"module"}"#);
