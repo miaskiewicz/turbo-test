@@ -6919,29 +6919,57 @@ fn drive_tests_bounded(
     })
 }
 
+/// The items of the array `obj[key]` (none when it is not an array).
+fn js_array<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+    key: &str,
+) -> Vec<v8::Local<'s, v8::Value>> {
+    let k = v8::String::new(scope, key).unwrap();
+    let arr = obj
+        .get(scope, k.into())
+        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok());
+    arr.map(|a| {
+        (0..a.length())
+            .filter_map(|i| a.get_index(scope, i))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// The string items of the arrays in `obj[key]` (a test's `logs` pairs).
+fn string_tuples<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+    key: &str,
+) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for v in js_array(scope, obj, key) {
+        if let Ok(item) = v8::Local::<v8::Array>::try_from(v) {
+            let fields = (0..item.length())
+                .map(|i| {
+                    item.get_index(scope, i)
+                        .map(|v| v.to_rust_string_lossy(scope))
+                        .unwrap_or_default()
+                })
+                .collect();
+            out.push(fields);
+        }
+    }
+    out
+}
+
 /// `[a, b]` string pairs of the array `obj[key]` (a test's `logs`).
 fn pairs_of<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     obj: v8::Local<'s, v8::Object>,
     key: &str,
 ) -> Vec<(String, String)> {
-    let k = v8::String::new(scope, key).unwrap();
-    let Some(arr) = obj
-        .get(scope, k.into())
-        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())
-    else {
-        return Vec::new();
-    };
-    (0..arr.length())
-        .filter_map(|i| arr.get_index(scope, i))
-        .filter_map(|v| v8::Local::<v8::Array>::try_from(v).ok())
-        .map(|pair| {
-            let at = |i| {
-                pair.get_index(scope, i)
-                    .map(|v| v.to_rust_string_lossy(scope))
-                    .unwrap_or_default()
-            };
-            (at(0), at(1))
+    string_tuples(scope, obj, key)
+        .into_iter()
+        .map(|mut p| {
+            p.resize(2, String::new());
+            (p.remove(0), p.remove(0))
         })
         .collect()
 }
@@ -6951,19 +6979,9 @@ fn errors_of<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     obj: v8::Local<'s, v8::Object>,
 ) -> Vec<crate::failure::ErrorInfo> {
-    let k = v8::String::new(scope, "errors").unwrap();
-    let Some(arr) = obj
-        .get(scope, k.into())
-        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())
-    else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
-    for i in 0..arr.length() {
-        if let Some(o) = arr
-            .get_index(scope, i)
-            .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
-        {
+    for v in js_array(scope, obj, "errors") {
+        if let Ok(o) = v8::Local::<v8::Object>::try_from(v) {
             out.push(error_info_of(scope, o));
         }
     }
@@ -7016,22 +7034,9 @@ fn suite_errors_of<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     summary: v8::Local<'s, v8::Object>,
 ) -> Vec<SuiteError> {
-    let k = v8::String::new(scope, "suite_errors").unwrap();
-    let Some(arr) = summary
-        .get(scope, k.into())
-        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())
-    else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
-    for i in 0..arr.length() {
-        let Some(o) = arr
-            .get_index(scope, i)
-            .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
-        else {
-            continue;
-        };
-        out.push({
+    for v in js_array(scope, summary, "suite_errors") {
+        if let Ok(o) = v8::Local::<v8::Object>::try_from(v) {
             let k = v8::String::new(scope, "name").unwrap();
             let name = o
                 .get(scope, k.into())
@@ -7042,12 +7047,12 @@ fn suite_errors_of<'s>(
                 .get(scope, k.into())
                 .and_then(|v| v.number_value(scope))
                 .unwrap_or(0.0);
-            SuiteError {
+            out.push(SuiteError {
                 name,
                 duration_ms,
                 errors: errors_of(scope, o),
-            }
-        });
+            });
+        }
     }
     out
 }

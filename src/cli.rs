@@ -1097,12 +1097,7 @@ fn load_error_info(error_msg: &str) -> crate::failure::ErrorInfo {
 /// { useGrouping: false, maximumFractionDigits: 10 })`.
 pub fn seconds(ms: f64) -> String {
     let s = format!("{:.10}", ms / 1000.0);
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s.is_empty() || s == "-0" {
-        "0".to_string()
-    } else {
-        s.to_string()
-    }
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// The current time as JavaScript's `new Date().toISOString()` (UTC, milliseconds).
