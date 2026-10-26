@@ -118,7 +118,7 @@ test('fs natives', () => {
   expect(fs.readFileSync(dir + '/sub/f.txt', 'utf8')).toBe('hello');
   expect(fs.readFileSync(dir + '/auto/created/g.txt', 'utf8')).toBe('parents made');
   expect(fs.readdirSync(root + '/seed').sort()).toEqual(['one.txt', 'two.txt']);
-  expect(fs.readdirSync(dir + '/nope')).toEqual([]);
+  expect(() => fs.readdirSync(dir + '/nope')).toThrow(`ENOENT: no such file or directory, scandir '${dir}/nope'`);
   expect(() => fs.readFileSync(dir + '/nope.txt')).toThrow('readFileSync ' + dir + '/nope.txt');
   expect(() => fs.writeFileSync(dir + '/sub/f.txt/x', 'a')).toThrow('writeFileSync ' + dir + '/sub/f.txt/x');
   fs.rmSync(dir + '/sub/f.txt');

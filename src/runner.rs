@@ -5381,7 +5381,8 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__fs_appendFileSync", fs_append_file_sync);
     bind_fn(scope, global, "__fs_mkdirSync", fs_mkdir_sync);
     bind_fn(scope, global, "__fs_rmSync", fs_rm_sync);
-    bind_fn(scope, global, "__fs_readdirSync", fs_readdir_sync);
+    bind_fn(scope, global, "__fs_readdir", fs_readdir);
+    bind_fn(scope, global, "__fs_stat", fs_stat);
     bind_fn(scope, global, "__fs_symlinkSync", fs_symlink_sync);
     // process.cwd(): the process's working directory, as vitest's workers report it; os.tmpdir()
     // and os.homedir() as Node computes them
@@ -5631,26 +5632,147 @@ fn fs_rm_sync(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv
     }
 }
 
-/// native fs.readdirSync(path) -> string[] of entry names
-fn fs_readdir_sync(
+/// Throw Node's error for a failed fs call: `ENOENT: no such file or directory, scandir '<path>'`
+/// with its `errno` (negative), `code`, `syscall` and `path`.
+fn throw_fs_error(scope: &mut v8::PinScope, e: &std::io::Error, syscall: &str, path: &str) {
+    let (code, desc) = errno_name(e).unwrap_or(("EIO", "i/o error"));
+    let msg = v8::String::new(scope, &format!("{code}: {desc}, {syscall} '{path}'")).unwrap();
+    let err = v8::Exception::error(scope, msg);
+    let obj = err.cast::<v8::Object>();
+    let errno = v8::Integer::new(scope, -e.raw_os_error().unwrap_or(5));
+    let key = v8::String::new(scope, "errno").unwrap();
+    obj.set(scope, key.into(), errno.into());
+    for (k, v) in [("code", code), ("syscall", syscall), ("path", path)] {
+        let k = v8::String::new(scope, k).unwrap();
+        let v = v8::String::new(scope, v).unwrap();
+        obj.set(scope, k.into(), v.into());
+    }
+    scope.throw_exception(err);
+}
+
+/// The `S_IFMT` bits of a file type (Node's Dirent / Stats kinds; 0 when unknown).
+fn file_type_bits(t: std::fs::FileType) -> u32 {
+    #[cfg(unix)]
+    use std::os::unix::fs::FileTypeExt;
+    #[cfg(unix)]
+    let special = [
+        (t.is_block_device(), 0o060000),
+        (t.is_char_device(), 0o020000),
+        (t.is_fifo(), 0o010000),
+        (t.is_socket(), 0o140000),
+    ];
+    #[cfg(not(unix))]
+    let special = [];
+    let kinds = [
+        (t.is_symlink(), 0o120000),
+        (t.is_dir(), 0o040000),
+        (t.is_file(), 0o100000),
+    ];
+    special
+        .iter()
+        .chain(&kinds)
+        .find(|k| k.0)
+        .map_or(0, |k| k.1)
+}
+
+/// native fs.readdir(path) -> [name, S_IFMT bits][] in Node's (byte) order; a failure throws
+/// Node's `scandir` error (runtime.js builds names or Dirents from it).
+fn fs_readdir(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
     let p = args.get(0).to_rust_string_lossy(scope);
-    let arr = v8::Array::new(scope, 0);
-    if let Ok(entries) = std::fs::read_dir(&p) {
-        let mut i = 0;
-        for e in entries.flatten() {
-            if let Some(name) = e.file_name().to_str() {
-                if let Some(s) = v8::String::new(scope, name) {
-                    arr.set_index(scope, i, s.into());
-                    i += 1;
-                }
-            }
-        }
-    }
-    rv.set(arr.into());
+    let entries = match std::fs::read_dir(&p) {
+        Ok(entries) => entries,
+        Err(e) => return throw_fs_error(scope, &e, "scandir", &p),
+    };
+    let mut list: Vec<(String, u32)> = entries
+        .flatten()
+        .map(|e| {
+            let bits = e.file_type().map(file_type_bits).unwrap_or(0);
+            (e.file_name().to_string_lossy().into_owned(), bits)
+        })
+        .collect();
+    list.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    let items: Vec<v8::Local<v8::Value>> = list
+        .iter()
+        .map(|(name, bits)| {
+            let name = v8::String::new(scope, name).unwrap().into();
+            let bits = v8::Integer::new_from_unsigned(scope, *bits).into();
+            v8::Array::new_with_elements(scope, &[name, bits]).into()
+        })
+        .collect();
+    rv.set(v8::Array::new_with_elements(scope, &items).into());
+}
+
+/// native fs.stat(path, lstat) -> Node's Stats fields in order (dev, mode, nlink, uid, gid, rdev,
+/// blksize, ino, size, blocks, atimeMs, mtimeMs, ctimeMs, birthtimeMs); a failure throws Node's
+/// `stat` / `lstat` error.
+fn fs_stat(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let p = args.get(0).to_rust_string_lossy(scope);
+    let lstat = args.get(1).boolean_value(scope);
+    let res = if lstat {
+        std::fs::symlink_metadata(&p)
+    } else {
+        std::fs::metadata(&p)
+    };
+    let m = match res {
+        Ok(m) => m,
+        Err(e) => return throw_fs_error(scope, &e, if lstat { "lstat" } else { "stat" }, &p),
+    };
+    let ms = |t: std::io::Result<std::time::SystemTime>| {
+        t.ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0.0, |d| d.as_secs_f64() * 1000.0)
+    };
+    #[cfg(unix)]
+    let fields = {
+        use std::os::unix::fs::MetadataExt;
+        let ctime = m.ctime() as f64 * 1000.0 + m.ctime_nsec() as f64 / 1e6;
+        [
+            m.dev() as f64,
+            m.mode() as f64,
+            m.nlink() as f64,
+            m.uid() as f64,
+            m.gid() as f64,
+            m.rdev() as f64,
+            m.blksize() as f64,
+            m.ino() as f64,
+            m.size() as f64,
+            m.blocks() as f64,
+            ms(m.accessed()),
+            ms(m.modified()),
+            ctime,
+            ms(m.created()),
+        ]
+    };
+    #[cfg(not(unix))]
+    let fields = {
+        let mode = if m.is_dir() { 0o040755 } else { 0o100644 };
+        let modified = ms(m.modified());
+        [
+            0.0,
+            mode as f64,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            4096.0,
+            0.0,
+            m.len() as f64,
+            0.0,
+            ms(m.accessed()),
+            modified,
+            modified,
+            ms(m.created()),
+        ]
+    };
+    let items: Vec<v8::Local<v8::Value>> = fields
+        .iter()
+        .map(|v| v8::Number::new(scope, *v).into())
+        .collect();
+    rv.set(v8::Array::new_with_elements(scope, &items).into());
 }
 
 /// Node builtin module names we shim; each has an entry in runtime.js `__nodeBuiltins` (a unit

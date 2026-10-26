@@ -1219,28 +1219,84 @@ const __path = {
 // glob-parent and others reach for path.posix / path.win32; expose both (posix is our default).
 __path.posix = __path;
 __path.win32 = Object.assign({}, __path, { sep: '\\', delimiter: ';' });
+// A path argument as Node takes it: a `file:` URL (fileURLToPath), a Buffer, or a string.
+const __fsPath = (p) => {
+  if (p !== null && typeof p === 'object' && typeof p.href === 'string' && typeof p.protocol === 'string') return globalThis.__fileURLToPath(p);
+  return String(p);
+};
+// Node's Dirent / Stats: the kind is the S_IFMT bits (a Dirent keeps them under a symbol, so
+// its own keys are `name` and `parentPath`; Stats reads them from `mode`).
+const __S_IFMT = 0o170000;
+const __kType = Symbol('type');
+const __kinds = { isFile: 0o100000, isDirectory: 0o040000, isBlockDevice: 0o060000, isCharacterDevice: 0o020000, isSymbolicLink: 0o120000, isFIFO: 0o010000, isSocket: 0o140000 };
+class Dirent {
+  constructor(name, type, parentPath) { this.name = name; this.parentPath = parentPath; this[__kType] = type; }
+}
+class StatsBase {}
+for (const [name, bits] of Object.entries(__kinds)) {
+  Object.defineProperty(Dirent.prototype, name, { value: function () { return this[__kType] === bits; }, writable: true, configurable: true });
+  Object.defineProperty(StatsBase.prototype, name, { value: function () { return (this.mode & __S_IFMT) === bits; }, writable: true, configurable: true });
+}
+const __statFields = ['dev', 'mode', 'nlink', 'uid', 'gid', 'rdev', 'blksize', 'ino', 'size', 'blocks', 'atimeMs', 'mtimeMs', 'ctimeMs', 'birthtimeMs'];
+class Stats extends StatsBase {
+  constructor(values) { super(); __statFields.forEach((k, i) => { this[k] = values[i]; }); }
+}
+for (const t of ['atime', 'mtime', 'ctime', 'birthtime']) {
+  Object.defineProperty(Stats.prototype, t, { get() { return new Date(Math.round(this[t + 'Ms'])); }, configurable: true, enumerable: false });
+}
+// statSync / lstatSync: `throwIfNoEntry: false` gives undefined for a missing entry.
+const __stat = (p, options, lstat) => {
+  try { return new Stats(globalThis.__fs_stat(__fsPath(p), lstat)); }
+  catch (e) { if (options && options.throwIfNoEntry === false && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) return undefined; throw e; }
+};
+// readdirSync: sorted names, or Dirents with `withFileTypes`; `recursive` walks breadth-first
+// as Node does (names relative to the base; a symlink to a directory is descended too).
+const __readdir = (p, options) => {
+  const base = __fsPath(p);
+  const opts = typeof options === 'object' && options !== null ? options : {};
+  const read = (dir) => globalThis.__fs_readdir(dir);
+  const join = (a, b) => (a.endsWith('/') ? a + b : a + '/' + b);
+  if (!opts.recursive) return read(base).map(([name, type]) => (opts.withFileTypes ? new Dirent(name, type, base) : name));
+  const out = [], queue = [base];
+  for (let i = 0; i < queue.length; i++) {
+    for (const [name, type] of read(queue[i])) {
+      const full = join(queue[i], name);
+      out.push(opts.withFileTypes ? new Dirent(name, type, queue[i]) : full.slice(base.length + (base.endsWith('/') ? 0 : 1)));
+      let dir = type === 0o040000;
+      if (type === 0o120000) { try { dir = (globalThis.__fs_stat(full, false)[1] & __S_IFMT) === 0o040000; } catch (e) {} }
+      if (dir) queue.push(full);
+    }
+  }
+  return out;
+};
+const __promised = (f) => (...a) => { try { return Promise.resolve(f(...a)); } catch (e) { return Promise.reject(e); } };
 const __fs = {
-  existsSync: (p) => globalThis.__fs_existsSync(String(p)),
-  readFileSync: (p, enc) => globalThis.__fs_readFileSync(String(p), enc ? String(typeof enc === 'string' ? enc : enc.encoding || 'utf8') : ''),
-  writeFileSync: (p, data) => globalThis.__fs_writeFileSync(String(p), data == null ? '' : (typeof data === 'string' ? data : String(data))),
+  Dirent,
+  Stats,
+  existsSync: (p) => globalThis.__fs_existsSync(__fsPath(p)),
+  readFileSync: (p, enc) => globalThis.__fs_readFileSync(__fsPath(p), enc ? String(typeof enc === 'string' ? enc : enc.encoding || 'utf8') : ''),
+  writeFileSync: (p, data) => globalThis.__fs_writeFileSync(__fsPath(p), data == null ? '' : (typeof data === 'string' ? data : String(data))),
   // a real append (O_APPEND on the Rust side), not read + rewrite: parallel workers appending to
   // one file would otherwise overwrite each other's lines.
-  appendFileSync: (p, data) => globalThis.__fs_appendFileSync(String(p), data == null ? '' : (typeof data === 'string' ? data : String(data))),
-  mkdirSync: (p) => globalThis.__fs_mkdirSync(String(p)),
-  rmSync: (p) => globalThis.__fs_rmSync(String(p)),
-  rmdirSync: (p) => globalThis.__fs_rmSync(String(p)),
-  unlinkSync: (p) => globalThis.__fs_rmSync(String(p)),
-  statSync: (p) => { const isDir = globalThis.__fs_existsSync(String(p)) && globalThis.__fs_readdirSync(String(p)).length >= 0 && !globalThis.__fs_existsSync(String(p) + '/.'); return { isFile: () => true, isDirectory: () => false, size: 0, mtimeMs: 0 }; },
-  readdirSync: (p) => globalThis.__fs_readdirSync(String(p)),
-  symlinkSync: (target, p) => globalThis.__fs_symlinkSync(String(target), String(p)),
+  appendFileSync: (p, data) => globalThis.__fs_appendFileSync(__fsPath(p), data == null ? '' : (typeof data === 'string' ? data : String(data))),
+  mkdirSync: (p) => globalThis.__fs_mkdirSync(__fsPath(p)),
+  rmSync: (p) => globalThis.__fs_rmSync(__fsPath(p)),
+  rmdirSync: (p) => globalThis.__fs_rmSync(__fsPath(p)),
+  unlinkSync: (p) => globalThis.__fs_rmSync(__fsPath(p)),
+  statSync: (p, options) => __stat(p, options, false),
+  lstatSync: (p, options) => __stat(p, options, true),
+  readdirSync: __readdir,
+  symlinkSync: (target, p) => globalThis.__fs_symlinkSync(__fsPath(target), __fsPath(p)),
   promises: {
     symlink: (target, p) => { try { __fs.symlinkSync(target, p); return Promise.resolve(); } catch (e) { return Promise.reject(e); } },
-    readFile: (p, enc) => Promise.resolve(globalThis.__fs_readFileSync(String(p), enc ? 'utf8' : '')),
-    writeFile: (p, data) => { globalThis.__fs_writeFileSync(String(p), data == null ? '' : String(data)); return Promise.resolve(); },
+    readFile: (p, enc) => Promise.resolve(globalThis.__fs_readFileSync(__fsPath(p), enc ? 'utf8' : '')),
+    writeFile: (p, data) => { globalThis.__fs_writeFileSync(__fsPath(p), data == null ? '' : String(data)); return Promise.resolve(); },
     appendFile: (p, data) => { try { __fs.appendFileSync(p, data); return Promise.resolve(); } catch (e) { return Promise.reject(e); } },
-    mkdir: (p) => { globalThis.__fs_mkdirSync(String(p)); return Promise.resolve(); },
-    rm: (p) => { globalThis.__fs_rmSync(String(p)); return Promise.resolve(); },
-    readdir: (p) => Promise.resolve(globalThis.__fs_readdirSync(String(p))),
+    mkdir: (p) => { globalThis.__fs_mkdirSync(__fsPath(p)); return Promise.resolve(); },
+    rm: (p) => { globalThis.__fs_rmSync(__fsPath(p)); return Promise.resolve(); },
+    readdir: __promised(__readdir),
+    stat: __promised((p, options) => __stat(p, options, false)),
+    lstat: __promised((p, options) => __stat(p, options, true)),
   },
 };
 const __module = {

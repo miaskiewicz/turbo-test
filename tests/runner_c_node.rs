@@ -259,13 +259,19 @@ fn builtins_without_a_shim_import_with_node_exports_on_both_paths() {
 /// Node's ENOENT (or return undefined with `throwIfNoEntry: false`), `Dirent` is exported, and
 /// the fs calls take a `file:` URL (Node 26 / vitest 4.1.12, environment node).
 #[test]
-#[ignore = "turbo-test#83: fails until the fix"]
 fn stat_sync_reports_the_entry_and_fs_calls_take_urls() {
     let p = Project::new("rc-stat");
     p.file("package.json", r#"{"type":"module"}"#);
     p.file("sub/x.txt", "hi\n");
     p.file("sub/inner/.keep", "");
     std::os::unix::fs::symlink("x.txt", p.path("sub/link")).unwrap();
+    std::fs::create_dir_all(p.path("sub/special")).unwrap();
+    let fifo = std::process::Command::new("mkfifo")
+        .arg(p.path("sub/special/fifo"))
+        .status()
+        .unwrap();
+    assert!(fifo.success());
+    let _socket = std::os::unix::net::UnixListener::bind(p.path("sub/special/sock")).unwrap();
     p.file(
         "a.test.ts",
         r#"import { expect, it } from 'vitest';
@@ -280,7 +286,7 @@ it('stat', () => {
   expect([d.isFile(), d.isDirectory(), d.isSymbolicLink()]).toEqual([false, true, false]);
   expect([statSync(dir + '/link').isFile(), statSync(dir + '/link').isSymbolicLink()]).toEqual([true, false]);
   expect([lstatSync(dir + '/link').isSymbolicLink(), lstatSync(dir + '/link').isFile()]).toEqual([true, false]);
-  expect(f.mtime instanceof Date && f.mtime.getTime() === f.mtimeMs && f.mtimeMs > 0).toBe(true);
+  expect([f.mtime instanceof Date, f.mtime.getTime() === Math.round(f.mtimeMs), f.mtimeMs > 1e12]).toEqual([true, true, true]);
   let err: any;
   try { statSync(dir + '/nope'); } catch (e) { err = e; }
   expect([err.message, err.code, err.errno, err.syscall, err.path]).toEqual([`ENOENT: no such file or directory, stat '${dir}/nope'`, 'ENOENT', -2, 'stat', `${dir}/nope`]);
@@ -291,7 +297,21 @@ it('stat', () => {
 });
 it('Dirent', () => {
   const [e] = readdirSync(dir, { withFileTypes: true });
-  expect([e instanceof fs.Dirent, e.constructor.name]).toEqual([true, 'Dirent']);
+  expect([e instanceof fs.Dirent, e.constructor.name, Object.keys(e)]).toEqual([true, 'Dirent', ['name', 'parentPath']]);
+});
+it('special files', () => {
+  const kinds = (x) => ['isFile', 'isDirectory', 'isSymbolicLink', 'isFIFO', 'isSocket', 'isCharacterDevice', 'isBlockDevice'].filter((k) => x[k]());
+  expect(readdirSync(dir + '/special', { withFileTypes: true }).map((e) => [e.name, kinds(e)])).toEqual([['fifo', ['isFIFO']], ['sock', ['isSocket']]]);
+  expect([kinds(statSync(dir + '/special/fifo')), kinds(statSync(dir + '/special/sock')), kinds(statSync('/dev/null'))]).toEqual([['isFIFO'], ['isSocket'], ['isCharacterDevice']]);
+  const s = statSync(dir + '/x.txt');
+  expect([s instanceof fs.Stats, s.constructor.name, Object.keys(s).join()]).toEqual([true, 'Stats', 'dev,mode,nlink,uid,gid,rdev,blksize,ino,size,blocks,atimeMs,mtimeMs,ctimeMs,birthtimeMs']);
+  expect([s.mode & 0o170000, s.nlink, s.blocks >= 0, s.atime.getTime() === Math.round(s.atimeMs), s.ctime.getTime() === Math.round(s.ctimeMs), s.birthtime.getTime() === Math.round(s.birthtimeMs)]).toEqual([0o100000, 1, true, true, true, true]);
+});
+it('fs/promises stat', async () => {
+  const p = await import('node:fs/promises');
+  expect((await p.stat(dir + '/inner')).isDirectory()).toBe(true);
+  expect((await p.lstat(dir + '/link')).isSymbolicLink()).toBe(true);
+  await expect(p.stat(dir + '/nope')).rejects.toMatchObject({ code: 'ENOENT', syscall: 'stat' });
 });
 it('URL arguments', () => {
   expect(existsSync(new URL('./sub/x.txt', import.meta.url))).toBe(true);
@@ -302,5 +322,5 @@ it('URL arguments', () => {
     );
     let r = turbo_test(&p.dir, &[], &[]);
     assert_eq!(r.code, Some(0), "{}", r.all());
-    assert!(r.stdout.contains("Tests  3 passed (3)"), "{}", r.all());
+    assert!(r.stdout.contains("Tests  5 passed (5)"), "{}", r.all());
 }

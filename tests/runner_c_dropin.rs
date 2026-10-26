@@ -103,7 +103,6 @@ fn vi_dynamic_import_settled_waits_for_pending_imports() {
 /// `{ withFileTypes: true }` Dirents and a `URL` argument, in Node's sorted order, and throws
 /// Node's ENOENT / ENOTDIR for a missing path / a file; `fs/promises` `readdir` the same.
 #[test]
-#[ignore = "turbo-test#79: fails until the fix"]
 fn readdir_sync_lists_names_dirents_and_url_arguments() {
     let p = dropin(
         "dropin-readdir",
@@ -111,6 +110,9 @@ fn readdir_sync_lists_names_dirents_and_url_arguments() {
             ("sub/x.txt", "hi\n"),
             ("sub/b.txt", "b\n"),
             ("sub/inner/.keep", ""),
+            ("tree/x.txt", "hi\n"),
+            ("tree/b.txt", "b\n"),
+            ("tree/inner/.keep", ""),
             (
                 "a.test.ts",
                 "import { expect, it } from 'vitest';\n\
@@ -148,6 +150,15 @@ fn readdir_sync_lists_names_dirents_and_url_arguments() {
                  \x20 try { readdirSync(dir + '/x.txt'); } catch (e) { err2 = e; }\n\
                  \x20 expect([err2.message, err2.code, err2.errno]).toEqual([`ENOTDIR: not a directory, scandir '${dir}/x.txt'`, 'ENOTDIR', -20]);\n\
                  });\n\
+                 it('recursive', () => {\n\
+                 \x20 const treeUrl = new URL('./tree', import.meta.url), tree = fileURLToPath(treeUrl);\n\
+                 \x20 expect(readdirSync(tree, { recursive: true })).toEqual(['b.txt', 'dlink', 'inner', 'link', 'x.txt', 'dlink/.keep', 'inner/.keep']);\n\
+                 \x20 expect(readdirSync(tree + '/', { recursive: true })).toEqual(['b.txt', 'dlink', 'inner', 'link', 'x.txt', 'dlink/.keep', 'inner/.keep']);\n\
+                 \x20 expect(readdirSync(treeUrl, { recursive: true, withFileTypes: true }).map((e) => [e.name, e.parentPath.slice(tree.length), e.isDirectory()])).toEqual([\n\
+                 \x20   ['b.txt', '', false], ['dlink', '', false], ['inner', '', true], ['link', '', false], ['x.txt', '', false],\n\
+                 \x20   ['.keep', '/dlink', false], ['.keep', '/inner', false],\n\
+                 \x20 ]);\n\
+                 });\n\
                  it('promises.readdir', async () => {\n\
                  \x20 expect(await readdir(url)).toEqual(['b.txt', 'inner', 'link', 'x.txt']);\n\
                  \x20 expect((await readdir(dir, { withFileTypes: true })).map((e) => e.isDirectory())).toEqual([false, true, false, false]);\n\
@@ -157,6 +168,8 @@ fn readdir_sync_lists_names_dirents_and_url_arguments() {
         ],
     );
     std::os::unix::fs::symlink("x.txt", p.path("sub/link")).unwrap();
+    std::os::unix::fs::symlink("x.txt", p.path("tree/link")).unwrap();
+    std::os::unix::fs::symlink("inner", p.path("tree/dlink")).unwrap();
     let r = turbo_test(&p.dir, &[], &[]);
-    assert_passes(&r, 6);
+    assert_passes(&r, 7);
 }
