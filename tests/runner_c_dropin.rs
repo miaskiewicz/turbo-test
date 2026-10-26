@@ -230,3 +230,74 @@ fn a_commonjs_exports_subpath_gives_named_exports() {
     let r = turbo_test(&p.dir, &[], &[]);
     assert_passes(&r, 1);
 }
+
+/// A stand-in for `react` (its automatic JSX runtime returns `{ type, props }` like React 19's
+/// elements, which the tests read).
+const REACT_STUB: [(&str, &str); 3] = [
+    (
+        "node_modules/react/package.json",
+        "{\"name\":\"react\",\"version\":\"19.0.0\",\"main\":\"index.js\"}\n",
+    ),
+    (
+        "node_modules/react/index.js",
+        "exports.createElement = (type, props) => ({ type, props });\n",
+    ),
+    (
+        "node_modules/react/jsx-runtime.js",
+        "exports.jsx = exports.jsxs = (type, props) => ({ type, props });\nexports.Fragment = 'f';\n",
+    ),
+];
+
+/// Item 1: `vi.mock` factories with TypeScript or JSX are transformed like the rest of the file,
+/// so the mock applies (the report: the typed factory fell through silently to the real module,
+/// the JSX one was a load error). Also generics, `as`, a `)` inside a string and `import.meta`.
+#[test]
+#[ignore = "turbo-test#79: fails until the fix"]
+fn mock_factories_with_typescript_or_jsx_are_applied() {
+    let mut files: Vec<(&str, &str)> = REACT_STUB.to_vec();
+    files.extend([
+        ("dep.ts", "export const greet = (n) => 'hi ' + n;\n"),
+        ("other.ts", "export const where = () => 'real';\n"),
+        (
+            "b.test.tsx",
+            "import { describe, expect, it, vi } from 'vitest';\n\
+             vi.mock('./dep', () => ({ greet: (n: string) => `mocked ${n}` }));\n\
+             import { greet } from './dep';\n\
+             describe('typed factory', () => {\n\
+             \x20 it('is applied', () => { expect(greet('a')).toBe('mocked a'); });\n\
+             });\n",
+        ),
+        (
+            "c.test.tsx",
+            "import { describe, expect, it, vi } from 'vitest';\n\
+             vi.mock('./dep', () => ({ greet: () => <i data-x=\"\" /> }));\n\
+             import { greet } from './dep';\n\
+             describe('jsx factory', () => { it('loads', () => { expect(greet('a')).toBeTruthy(); }); });\n",
+        ),
+        (
+            "d.test.tsx",
+            "import { describe, expect, it, vi } from 'vitest';\n\
+             vi.mock('./dep', () => ({ greet: () => <i data-x=\"\" /> }));\n\
+             import { greet } from './dep';\n\
+             describe('jsx factory', () => { it('is applied', () => { expect((greet as any)('a').props).toEqual({ 'data-x': '' }); }); });\n",
+        ),
+        (
+            "e.test.tsx",
+            "import { describe, expect, it, vi } from 'vitest';\n\
+             vi.mock('./dep', async () => {\n\
+             \x20 const actual = await vi.importActual<typeof import('./dep')>('./dep');\n\
+             \x20 return { ...actual, greet: ((n: string) => `generic ${actual.greet(n)} :)`) as typeof actual.greet };\n\
+             });\n\
+             vi.mock('./other', () => ({ where: (): string => import.meta.url.split('/').pop() as string }));\n\
+             import { greet } from './dep';\n\
+             import { where } from './other';\n\
+             describe('typed factories', () => {\n\
+             \x20 it('importActual generics, casts and a paren in a string', () => { expect(greet('b')).toBe('generic hi b :)'); });\n\
+             \x20 it('import.meta is the test file', () => { expect(where()).toBe('e.test.tsx'); });\n\
+             });\n",
+        ),
+    ]);
+    let p = dropin("dropin-ts-factories", &files);
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_passes(&r, 5);
+}
