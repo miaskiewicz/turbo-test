@@ -2615,9 +2615,20 @@
   }, 'computedStyleMap', 0), writable: true, enumerable: true, configurable: true });
   function inlineMap(element) { let map = weakGet(inlineMaps, element); if (!map) { map = newMap('StylePropertyMap', 'inline', element); weakSet(inlineMaps, element, map); } return map; }
   define(g.HTMLElement.prototype, 'attributeStyleMap', { __proto__: null, get: make(function () { apply(htmlCheck, this, []); return inlineMap(this); }, 'get attributeStyleMap', 0), enumerable: true, configurable: true });
+  // ElementCSSInlineStyle for SVG/MathML elements: only HTMLElement had `style`, so React's
+  // `svg.style.flex = ...` threw on undefined. Declared just before attributeStyleMap to keep
+  // Chrome's member order (style, attributeStyleMap). `style = text` forwards to cssText.
+  function defineInlineStyle(proto, space) {
+    define(proto, 'style', { __proto__: null,
+      get: make(function () { apply(elementCheck, this, []); if (apply(namespaceOf, this, []) !== space) throw new ErrorType('Illegal invocation'); return ns.makeInlineStyleDeclaration(this); }, 'get style', 0),
+      set: make(function (value) { apply(elementCheck, this, []); if (apply(namespaceOf, this, []) !== space) throw new ErrorType('Illegal invocation'); apply(Object.getOwnPropertyDescriptor(declarationPrototype, 'cssText').set, ns.makeInlineStyleDeclaration(this), [value]); }, 'set style', 1),
+      enumerable: true, configurable: true });
+  }
+  if (g.SVGElement && g.SVGElement.prototype) defineInlineStyle(g.SVGElement.prototype, SVG_NAMESPACE);
   if (g.SVGElement && g.SVGElement.prototype) define(g.SVGElement.prototype, 'attributeStyleMap', { __proto__: null, get: make(function () { apply(elementCheck, this, []); if (apply(namespaceOf, this, []) !== SVG_NAMESPACE) throw new ErrorType('Illegal invocation'); return inlineMap(this); }, 'get attributeStyleMap', 0), enumerable: true, configurable: true });
   // MathMLElement is installed only where the embedding gives MathML elements their own interface.
   const MathML = g.MathMLElement;
+  if (typeof MathML === 'function' && MathML.prototype && getProto(MathML.prototype) === g.Element.prototype) defineInlineStyle(MathML.prototype, 'http://www.w3.org/1998/Math/MathML');
   if (typeof MathML === 'function' && MathML.prototype && getProto(MathML.prototype) === g.Element.prototype) define(MathML.prototype, 'attributeStyleMap', { __proto__: null, get: make(function () { apply(elementCheck, this, []); if (apply(namespaceOf, this, []) !== 'http://www.w3.org/1998/Math/MathML') throw new ErrorType('Illegal invocation'); return inlineMap(this); }, 'get attributeStyleMap', 0), enumerable: true, configurable: true });
   {
     const proto = g.CSSStyleRule.prototype;

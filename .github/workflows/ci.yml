@@ -96,6 +96,7 @@ jobs:
           fixtures/compat/dom-prototype.test.ts
           fixtures/compat/namespace-attributes.test.ts
           fixtures/compat/reflected-attributes.test.ts
+          fixtures/compat/svg-style.test.ts
           fixtures/compat/ui-event-contracts.test.ts
 
       - uses: actions/upload-artifact@v4
