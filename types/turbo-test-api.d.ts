@@ -345,6 +345,8 @@ export interface ViAPI {
   unstubAllGlobals(): ViAPI;
   waitFor<T>(callback: () => T | Promise<T>, options?: any): Promise<T>;
   waitUntil<T>(callback: () => T | Promise<T>, options?: any): Promise<T>;
+  /** Wait for every pending dynamic `import()` (vitest's `waitForImportsToResolve`). */
+  dynamicImportSettled(): Promise<void>;
 }
 
 // jest's controller mirrors vi's surface (turbo-test backs both with the same implementation),

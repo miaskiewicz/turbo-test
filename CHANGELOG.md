@@ -159,6 +159,57 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   (no more `0 passed`), `no tests` when there is none, a passing `it.fails` is an `expected
   fail`, the `Tests` total counts every test, and a file none of whose tasks ran is a `skipped`
   file. turbo-test counted only failed and passed tests.
+- Drop-in blockers from a 529-file React/TS vitest suite (turbo-test#79), each with the
+  report's repro as a test and vitest 4.1.12 / Node 26 as the reference:
+  - `vi.mock` factories with TypeScript or JSX (item 1): on the ESM graph loader (a project
+    without esbuild) the entry's mock prepass stripped types only for `.ts` entries and never
+    transformed JSX, then dropped a prepass that did not compile — the mock fell through
+    silently to the real module (`Unexpected token ':'`, `as`, `<`, `...`). The prepass now
+    gets the file's own TS/JSX transform (its JSX runtime `require`, `import.meta` = the
+    entry's), the `vi.mock` calls are read from the AST (a `)` inside a factory's string no
+    longer cuts it; calls in comments are not mocks) and a prepass that cannot compile fails
+    the file with its SyntaxError instead of falling through.
+  - `vi.dynamicImportSettled()` (item 2): vitest's `waitForImportsToResolve` — a real-clock
+    macrotask, then every pending `import()`, until none is.
+  - `node:fs` `readdirSync` (item 3): Node's sorted order, `withFileTypes` Dirents
+    (`name`, `parentPath`, `is*()`), an encoding argument, `recursive`, a `file:` URL argument
+    and Node's `scandir` errors (a URL listed `[]`, a missing directory returned `[]`).
+  - SVG elements have `style` (item 4): fixed in turbo-dom-browser-env (turbo-dom#87, `style` on
+    `SVGElement` and a new `MathMLElement`, as Chrome 156); the pin moves to that branch.
+  - A package `exports` subpath to tsc-emitted CommonJS (item 5): a `.js` file without a
+    package.json `"type"` is an ES module only with ES module syntax (Node's detection, by
+    parsing); a comment mentioning "import " made the substring sniff load CommonJS as ESM
+    (`does not provide an export named 'blockFields'`). A file with no module syntax at all is
+    now CommonJS, as in Node.
+  - The V8 abort (`# Fatal error … Check failed: has_exception()`): under `isolate: false` a
+    file whose module threw while the graph evaluated left later modules linked to its mocks;
+    the next file evaluating one ran a synthetic module with no registry entry and V8 aborted
+    the whole run. The reuse reset drops modules that never finished evaluating, and a
+    synthetic module whose entry is gone fails its importer instead of the process.
+- `import()` of a module with top-level await settles after that module has evaluated
+  (turbo-test#82); it resolved at once with a namespace whose bindings were uninitialised.
+- `node:fs` follows Node (turbo-test#83, #86): `statSync` / `lstatSync` return `Stats` (real
+  kind, size, times, `fs.Stats`; `throwIfNoEntry`) — `statSync` called every path a 0-byte file;
+  `fs.Dirent`; every fs call takes a `file:` URL; `readFileSync` without an encoding is a
+  `Buffer`; `writeFileSync` / `appendFileSync` / `mkdirSync` no longer create missing parents
+  (`mkdirSync` honours `recursive` and returns the first directory created); `rmSync` needs
+  `recursive` for a directory (`ERR_FS_EISDIR`) and `force` for a missing path; `rmdirSync` /
+  `unlinkSync` / `rmSync` / the read and write calls throw Node's errors (`code`, `errno`,
+  `syscall`, `path`, message); `fs/promises` gains `stat`, `lstat`, `rmdir`, `unlink`.
+- `node:url` (turbo-test#84): `fileURLToPath` percent-decodes and rejects a non-file scheme, a
+  host and an encoded `/` with Node's errors; `pathToFileURL` returns an encoded `URL` resolved
+  against `process.cwd()` (it returned a string or a plain object). A file URL's `localhost` is
+  the empty host and its origin `null`.
+- `URL` percent-encodes the path and fragment (turbo-test#85): `new URL('file:///a b').href` is
+  `file:///a%20b`; input loses leading/trailing C0 controls and spaces and inner tabs/newlines;
+  `pathname` / `hash` setters encode.
+- `import.meta.url` is percent-encoded like Node's `pathToFileURL` (turbo-test#87) on both
+  loaders; a project path with a space or a non-ASCII character gave a raw `file://` string.
+- `console.*`, `util.inspect` and `util.format` format as Node's (turbo-test#93): `util.inspect`
+  is a port of Node's (depth 2, breakLength 80, compact 3: quoting, `[Object]`, `<ref *1>`,
+  `Map(n) {…}`, `[class X]`, grouped long arrays, multi-line objects, `util.inspect.custom`);
+  it was `JSON.stringify`, `util.format` ignored `%s %d …` and `console.log('a', {})` printed
+  `a [object Object]`.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain
