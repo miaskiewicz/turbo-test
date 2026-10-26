@@ -254,3 +254,53 @@ fn builtins_without_a_shim_import_with_node_exports_on_both_paths() {
         );
     }
 }
+
+/// turbo-test#83: `statSync` / `lstatSync` report the entry's real kind, size and times, throw
+/// Node's ENOENT (or return undefined with `throwIfNoEntry: false`), `Dirent` is exported, and
+/// the fs calls take a `file:` URL (Node 26 / vitest 4.1.12, environment node).
+#[test]
+#[ignore = "turbo-test#83: fails until the fix"]
+fn stat_sync_reports_the_entry_and_fs_calls_take_urls() {
+    let p = Project::new("rc-stat");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file("sub/x.txt", "hi\n");
+    p.file("sub/inner/.keep", "");
+    std::os::unix::fs::symlink("x.txt", p.path("sub/link")).unwrap();
+    p.file(
+        "a.test.ts",
+        r#"import { expect, it } from 'vitest';
+import * as fs from 'node:fs';
+import { readdirSync, statSync, lstatSync, existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+const dir = fileURLToPath(new URL('./sub', import.meta.url));
+it('stat', () => {
+  const f = statSync(new URL('./sub/x.txt', import.meta.url));
+  expect([f.isFile(), f.isDirectory(), f.isSymbolicLink(), f.size]).toEqual([true, false, false, 3]);
+  const d = statSync(dir + '/inner');
+  expect([d.isFile(), d.isDirectory(), d.isSymbolicLink()]).toEqual([false, true, false]);
+  expect([statSync(dir + '/link').isFile(), statSync(dir + '/link').isSymbolicLink()]).toEqual([true, false]);
+  expect([lstatSync(dir + '/link').isSymbolicLink(), lstatSync(dir + '/link').isFile()]).toEqual([true, false]);
+  expect(f.mtime instanceof Date && f.mtime.getTime() === f.mtimeMs && f.mtimeMs > 0).toBe(true);
+  let err: any;
+  try { statSync(dir + '/nope'); } catch (e) { err = e; }
+  expect([err.message, err.code, err.errno, err.syscall, err.path]).toEqual([`ENOENT: no such file or directory, stat '${dir}/nope'`, 'ENOENT', -2, 'stat', `${dir}/nope`]);
+  let lerr: any;
+  try { lstatSync(dir + '/nope'); } catch (e) { lerr = e; }
+  expect([lerr.message, lerr.syscall]).toEqual([`ENOENT: no such file or directory, lstat '${dir}/nope'`, 'lstat']);
+  expect(statSync(dir + '/nope', { throwIfNoEntry: false })).toBeUndefined();
+});
+it('Dirent', () => {
+  const [e] = readdirSync(dir, { withFileTypes: true });
+  expect([e instanceof fs.Dirent, e.constructor.name]).toEqual([true, 'Dirent']);
+});
+it('URL arguments', () => {
+  expect(existsSync(new URL('./sub/x.txt', import.meta.url))).toBe(true);
+  expect(existsSync(new URL('./sub/no.txt', import.meta.url))).toBe(false);
+  expect(readFileSync(new URL('./sub/x.txt', import.meta.url), 'utf8')).toBe('hi\n');
+});
+"#,
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(r.stdout.contains("Tests  3 passed (3)"), "{}", r.all());
+}
