@@ -501,3 +501,107 @@ fn the_footer_counts_as_vitest_get_state_string() {
         );
     }
 }
+
+/// The project behind `tests/data/junit-vitest-4.1.12.xml`: nested describes, a passing, a
+/// failing (number and object diffs) and a throwing test, skip / todo, console output, XML
+/// specials, a failing `beforeAll`, a file that fails to load and a skipped-only file.
+const JUNIT_FILES: [(&str, &str); 5] = [
+    ("package.json", "{\"type\":\"module\"}\n"),
+    (
+        "a.test.ts",
+        "import { describe, expect, it } from 'vitest';\n\
+         describe('outer', () => {\n\
+         \x20 it('passes', () => { expect(1).toBe(1); });\n\
+         \x20 describe('inner', () => {\n\
+         \x20   it('fails', () => { expect(1).toBe(2); });\n\
+         \x20   it.skip('skipped', () => {});\n\
+         \x20 });\n\
+         \x20 it.todo('todo');\n\
+         });\n\
+         it('objects', () => { expect({ a: 1, b: [1, 2] }).toEqual({ a: 2, b: [1, 2] }); });\n\
+         it('throws', () => { throw new TypeError('bad <thing> & \"x\"'); });\n\
+         it('top <&> \"q\"', () => { console.log('out line'); console.error('err line'); console.log('two', { a: 1 }); });\n",
+    ),
+    (
+        "b.test.ts",
+        "import { beforeAll, describe, it } from 'vitest';\n\
+         describe('hooked', () => {\n\
+         \x20 beforeAll(() => { throw new Error('hook boom'); });\n\
+         \x20 it('never', () => {});\n\
+         });\n\
+         it('b ok', () => {});\n",
+    ),
+    ("c.test.ts", "throw new Error('load boom');\n"),
+    (
+        "d.test.ts",
+        "import { it } from 'vitest';\nit.skip('only skipped', () => {});\n",
+    ),
+];
+
+/// A JUnit report with its run-dependent attributes (`time`, `timestamp`, `hostname`) blanked.
+fn normalize_junit(xml: &str) -> String {
+    let mut out = String::new();
+    let mut rest = xml;
+    while let Some(at) = ["time=\"", "timestamp=\"", "hostname=\""]
+        .iter()
+        .filter_map(|k| rest.find(&format!(" {k}")).map(|i| (i, *k)))
+        .min()
+    {
+        let (i, key) = at;
+        let start = i + 1 + key.len();
+        let end = start + rest[start..].find('"').unwrap();
+        out.push_str(&rest[..start]);
+        out.push_str(match key {
+            "time=\"" => "T",
+            "timestamp=\"" => "S",
+            _ => "H",
+        });
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// turbo-test#81: `--reporter junit` writes vitest 4.1.12's report byte for byte (once the
+/// timings, timestamps and host name are normalised) on both loaders, to stdout or to
+/// `--outputFile` (then stdout says where); the tests' console output is in the report only.
+#[test]
+#[ignore = "turbo-test#81: fails until the fix"]
+fn junit_is_vitests_report() {
+    let expected = include_str!("data/junit-vitest-4.1.12.xml");
+    for esbuild in [false, true] {
+        let p = Project::new("rep-junit-vitest");
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (path, src) in JUNIT_FILES {
+            p.file(path, src);
+        }
+        let r = turbo_test(&p.dir, &["--reporter", "junit"], &[]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert_eq!(
+            normalize_junit(&r.stdout),
+            expected,
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+        // stderr: only turbo-test's own summary line (no test console output)
+        assert!(
+            r.stderr.starts_with("4 files | ") && r.stderr.lines().count() == 1,
+            "esbuild={esbuild}\n{}",
+            r.stderr
+        );
+        let r = turbo_test(
+            &p.dir,
+            &["--reporter", "junit", "--outputFile", "out/r.xml"],
+            &[],
+        );
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert_eq!(
+            r.stdout,
+            format!("JUNIT report written to {}\n", path(&p, "out/r.xml"))
+        );
+        let file = std::fs::read_to_string(p.path("out/r.xml")).unwrap();
+        assert_eq!(normalize_junit(&file), expected, "esbuild={esbuild}");
+    }
+}
