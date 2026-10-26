@@ -7,24 +7,32 @@
 // `--silent` (host → globalThis.__TT_SILENT): suppress test console output entirely. Checked at
 // call time, not eval time — the host injects __TT_SILENT AFTER this module is snapshot-evaluated.
 const __noop = () => {};
-// The arguments are formatted as Node's util.format (turbo-test#93). With a reporter that keeps
-// the tests' output (`__TT_CAPTURE_LOGS`, junit: turbo-test#81) it is recorded on the running
-// test instead (__ttLog), as vitest's console does; outside a test it is dropped.
+// The arguments are formatted as Node's util.format (turbo-test#93). With vitest's reporters
+// (`__TT_CAPTURE_LOGS`: junit, default, verbose; turbo-test#81, #94) the output is recorded
+// instead (__ttLog), on the test, suite or file it belongs to, as vitest's console does.
 const __emit = (tag) => (...a) => {
   if (globalThis.__TT_SILENT) return;
   if (globalThis.__TT_CAPTURE_LOGS) return __ttLog(tag === '[error]' || tag === '[warn]' ? 'stderr' : 'stdout', __nodeFormat(...a) + '\n');
   globalThis.log(tag, __nodeFormat(...a));
 };
-// The running test's console output: [type, content] entries. vitest buffers each stream and
+// The console output: [type, content, tick] entries of the running test (junit) and
+// [type, content, tick, task] entries of the file (the human reporters; `task` is the test's or
+// suite's name path, '' for the file itself). vitest buffers each stream of each task and
 // flushes it once no write came for a macrotask, so writes with no macrotask between them form
 // one entry.
 let __ttTestLogs = null;
+let __ttFileLogs = [];
+let __ttLogTask = '';
 function __ttLog(type, content) {
-  if (!__ttTestLogs) return;
   const tick = __loop.ticks;
-  const last = __ttTestLogs.findLast((l) => l[0] === type);
-  if (last && last[2] === tick) last[1] += content;
-  else __ttTestLogs.push([type, content, tick]);
+  if (__ttTestLogs) {
+    const last = __ttTestLogs.findLast((l) => l[0] === type);
+    if (last && last[2] === tick) last[1] += content;
+    else __ttTestLogs.push([type, content, tick]);
+  }
+  const lastF = __ttFileLogs.findLast((l) => l[0] === type && l[3] === __ttLogTask);
+  if (lastF && lastF[2] === tick) lastF[1] += content;
+  else __ttFileLogs.push([type, content, tick, __ttLogTask]);
 }
 globalThis.console = {
   log: __emit('[log]'),
@@ -113,6 +121,10 @@ const __loop = {
   systemTime: 0,   // wall-clock base used by Date when faking
   RealDate: Date,
   realNow: Date.now.bind(Date),
+  // ms the real-mode drive loop jumped its clock instead of sleeping: a duration is the real
+  // time plus the jumps in it, what the code would take on Node (turbo-test#95)
+  waited: 0,
+  elapsed() { return __loop.realNow() + __loop.waited; },
 };
 function __schedule(cb, delay, interval) {
   const id = __loop.seq++;
@@ -165,6 +177,8 @@ __loop.stepMacro = function () {
   if (!m && !it) return false;
   // earliest-due wins; ties favor the user timer (matches scheduling order intent).
   const useInternal = it && (!m || it.due < m.due);
+  const due = useInternal ? it.due : m.due;
+  if (due > __loop.now) __loop.waited += due - __loop.now;
   if (useInternal) {
     __loop.now = Math.max(__loop.now, it.due);
     __clearInternal(it.id);
@@ -4424,8 +4438,12 @@ async function runSuite(suite, ancestors, summary, mode = '') {
     hookFailed = true;
     failed = true;
   }
+  // console output from here on belongs to this suite (the file for the root suite)
+  const outerTask = __ttLogTask;
+  const suiteTask = ancestors.length ? [...ancestors.slice(1), suite].map((x) => x.name).join(' > ') : '';
+  __ttLogTask = suiteTask;
   // a suite's hook errors (vitest's failed suite, a junit testcase of its own: turbo-test#81)
-  const suiteStart = __loop.realNow();
+  const suiteStart = __loop.elapsed();
   const suiteErrors = [];
   // in vitest's getSuites order (a suite before the suites inside it)
   const suiteSlot = summary.suite_errors.push(null) - 1;
@@ -4488,12 +4506,19 @@ async function runSuite(suite, ancestors, summary, mode = '') {
     const timeoutMs = (typeof t.timeout === 'number' && t.timeout > 0) ? t.timeout : __defaultTimeout();
     let lastErr;
     let ok = false;
-    // Real wall time for the per-test start / duration the reporters show. NOT performance.now()
-    // (stubbed to a constant 0 in this runtime, see the perf stub near top of file) nor Date.now()
-    // (fake timers / vi.setSystemTime replace it).
-    const __t0 = __loop.realNow();
+    // vitest keeps every failed attempt's error and counts the retries (`(retry x1)`)
+    const attemptErrors = [];
+    let tries = 0;
+    // Real wall time for the per-test start, and for the duration the reporters show plus the
+    // drive loop's clock jumps (turbo-test#95). NOT performance.now() (stubbed to a constant 0 in
+    // this runtime, see the perf stub near top of file) nor Date.now() (fake timers /
+    // vi.setSystemTime replace it).
+    const __t0 = __loop.elapsed();
+    const __start = __loop.realNow();
     __ttTestLogs = [];
+    __ttLogTask = chain.slice(1).map((s) => s.name).concat(t.name).join(' > ');
     for (let a = 0; a < attempts && !ok; a++) {
+      tries++;
       // Reset per-test snapshot + assertion-count state (snapshot counter is keyed by test name,
       // so distinct multi-snapshot tests don't collide; assertion enforcement resets each attempt).
       __snap.testName = label;
@@ -4534,6 +4559,7 @@ async function runSuite(suite, ancestors, summary, mode = '') {
         if (lastErr) { ok = true; lastErr = undefined; }
         else { ok = false; lastErr = new Error('expected test to fail, but it passed'); }
       }
+      if (!ok) attemptErrors.push(lastErr);
       // afterEach (incl. @testing-library cleanup) runs even when the test failed — otherwise a
       // failed test's mounted DOM leaks into the next test. Hook errors here don't fail a test
       // that already passed (matches the prior behavior; avoids mass cleanup-throw failures).
@@ -4541,9 +4567,10 @@ async function runSuite(suite, ancestors, summary, mode = '') {
         try { await h(); } catch (e) {}
       }
     }
-    const __dur = __loop.realNow() - __t0;
-    const timing = { duration_ms: __dur, start_ms: __t0, logs: __ttTestLogs.map((l) => [l[0], l[1]]) };
+    const __dur = __loop.elapsed() - __t0;
+    const timing = { duration_ms: __dur, start_ms: __start, retry_count: tries - 1, logs: __ttTestLogs.map((l) => [l[0], l[1]]) };
     __ttTestLogs = null;
+    __ttLogTask = suiteTask;
     // a passing it.fails is vitest's `expected fail` in the summary footer (#78)
     if (ok) { summary.passed++; summary.tests.push(__testRecord(t, chain, 'passed', t.fails ? { ...timing, expected_fail: true } : timing)); }
     else {
@@ -4561,8 +4588,8 @@ async function runSuite(suite, ancestors, summary, mode = '') {
         if (e0 && e0.stack) msg += '\n          @ ' + String(e0.stack).split('\n').slice(0, 5).join('\n          @ ');
       }
       summary.failures.push(`${label}: ${msg}`);
-      const failure = (lastErr && (lastErr.stack || lastErr.message)) || String(lastErr);
-      summary.tests.push(__testRecord(t, chain, 'failed', { ...timing, message: msg, failure_messages: [String(failure)], errors: [__errorInfo(lastErr)] }));
+      const failure = (e) => String((e && (e.stack || e.message)) || String(e));
+      summary.tests.push(__testRecord(t, chain, 'failed', { ...timing, message: msg, failure_messages: attemptErrors.map(failure), errors: attemptErrors.map(__errorInfo) }));
     }
   }
   if (!skipAll && !idle && !forbidden) {
@@ -4574,7 +4601,8 @@ async function runSuite(suite, ancestors, summary, mode = '') {
       }
     }
   }
-  if (suiteErrors.length && ancestors.length) summary.suite_errors[suiteSlot] = { name: suite.name, duration_ms: __loop.realNow() - suiteStart, errors: suiteErrors };
+  if (suiteErrors.length && ancestors.length) summary.suite_errors[suiteSlot] = { name: suite.name, duration_ms: __loop.elapsed() - suiteStart, errors: suiteErrors };
+  __ttLogTask = outerTask;
   record(failed ? 'fail' : skipAll || idle ? 'skip' : 'pass');
   return failed;
 }
@@ -4628,8 +4656,11 @@ globalThis.__tt = {
     // allowOnly off (host → __TT_FORBID_ONLY: --no-allowOnly, or vitest's default on CI): each
     // `.only` task fails in place, as vitest's `checkAllowOnly` (turbo-test#76).
     if (this.hasOnly) __interpretOnly(root, false, !!globalThis.__TT_FORBID_ONLY);
+    const waited = __loop.waited;
     await runSuite(root, [], summary);
+    summary.waited_ms = __loop.waited - waited;
     summary.snapshot = __snapFinish(summary.skippedNames);
+    summary.logs = __ttFileLogs.map((l) => [l[0], l[3], l[1]]);
     return summary;
   },
 };
@@ -4661,6 +4692,8 @@ globalThis.__ttCaptureHookBaseline = () => {
 // spy registry, unstubbing globals, poking React internals) was what broke interaction tests
 // ~100 files into a shared isolate — vitest proves none of that is needed.
 globalThis.__ttResetForNextFile = () => {
+  __ttFileLogs = [];
+  __ttLogTask = '';
   // turbo-test collects tests into a single global `root` (vitest scopes per file via
   // startTests([file])) — so we must drop the prior file's collected tests/suites. Setup files
   // run once per worker, so root.hooks only holds setup hooks; leave them in place.

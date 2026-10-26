@@ -134,8 +134,10 @@ impl Run {
 }
 
 /// Run an executable with `args` in `cwd`, an isolated TMPDIR/TURBO_CACHE_DIR under `cwd`,
-/// every inherited `TURBO_*` variable and every CI variable (`turbo_test::ci::env_vars`)
-/// removed, `TURBO_JOBS=2` unless `env` overrides it, and `env` applied last.
+/// every inherited `TURBO_*` variable, every CI variable (`turbo_test::ci::env_vars`) and every
+/// AI-agent variable (`turbo_test::agent::AGENT_VARS`, `EDITOR`, `TERM_PROGRAM`) removed,
+/// `TURBO_JOBS=2` and `TURBO_LEGACY_REPORTER=1` unless `env` overrides them, and `env` applied
+/// last.
 pub fn run_exe(exe: &str, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Run {
     let tmp = cwd.join(".tt-tmp");
     std::fs::create_dir_all(&tmp).unwrap();
@@ -152,9 +154,20 @@ pub fn run_exe(exe: &str, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Ru
     for k in turbo_test::ci::env_vars() {
         cmd.env_remove(k);
     }
+    // an AI agent running the tests (std-env isAgent) would switch the default reporter to
+    // vitest's agent reporter: every variable it reads is removed too
+    for k in turbo_test::agent::AGENT_VARS
+        .iter()
+        .chain(&["EDITOR", "TERM_PROGRAM"])
+    {
+        cmd.env_remove(k);
+    }
+    // the tests written against turbo-test's own PASS / FAIL lines keep them; the vitest human
+    // reporters (turbo-test#94) are checked with TURBO_LEGACY_REPORTER=0
     cmd.env("TMPDIR", &tmp)
         .env("TURBO_CACHE_DIR", cwd.join(".tt-cache"))
-        .env("TURBO_JOBS", "2");
+        .env("TURBO_JOBS", "2")
+        .env("TURBO_LEGACY_REPORTER", "1");
     for (k, v) in env {
         cmd.env(k, v);
     }

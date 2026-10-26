@@ -611,6 +611,8 @@ fn clone_outcome(r: &FileOutcome) -> FileOutcome {
             snapshot: rep.snapshot.clone(),
             setup_us: rep.setup_us,
             suite_errors: rep.suite_errors.clone(),
+            logs: rep.logs.clone(),
+            waited_ms: rep.waited_ms,
         }),
         Err(e) => Err(e.clone()),
     }
@@ -1005,6 +1007,59 @@ fn human_reporters() {
     for r in [Reporter::Json, Reporter::Junit, Reporter::Tap] {
         assert_eq!(render_human(r, &res), "", "{r:?}");
     }
+}
+
+#[test]
+fn vitests_human_reporter_kinds() {
+    use crate::human::Kind;
+    let kind = |r, explicit, legacy, agent| human_kind_for(r, explicit, legacy, agent);
+    assert_eq!(
+        kind(Reporter::Default, false, false, false),
+        Some(Kind::Default)
+    );
+    assert_eq!(
+        kind(Reporter::Default, true, false, false),
+        Some(Kind::Default)
+    );
+    // an agent gets the agent reporter only without --reporter
+    assert_eq!(
+        kind(Reporter::Default, false, false, true),
+        Some(Kind::Agent)
+    );
+    assert_eq!(
+        kind(Reporter::Default, true, false, true),
+        Some(Kind::Default)
+    );
+    assert_eq!(
+        kind(Reporter::Verbose, false, false, true),
+        Some(Kind::Verbose)
+    );
+    for r in [
+        Reporter::Dot,
+        Reporter::Json,
+        Reporter::Junit,
+        Reporter::Tap,
+    ] {
+        assert_eq!(kind(r, true, false, false), None, "{r:?}");
+    }
+    // TURBO_LEGACY_REPORTER: turbo-test's own lines for every reporter
+    assert_eq!(kind(Reporter::Default, false, true, true), None);
+    assert_eq!(kind(Reporter::Verbose, true, true, false), None);
+}
+
+#[test]
+fn local_times_are_hh_mm_ss() {
+    let secs = |hms: &str| -> i64 {
+        let p: Vec<i64> = hms.split(':').map(|x| x.parse().unwrap()).collect();
+        assert_eq!((p.len(), hms.len()), (3, 8), "{hms}");
+        p[0] * 3600 + p[1] * 60 + p[2]
+    };
+    let t = 1_700_000_000_000.0;
+    // 61s and a fraction later, whatever the zone
+    assert_eq!(
+        (secs(&local_hms(t + 61_900.0)) - secs(&local_hms(t))).rem_euclid(86_400),
+        61
+    );
 }
 
 #[test]

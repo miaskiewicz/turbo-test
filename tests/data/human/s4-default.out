@@ -1,0 +1,10 @@
+
+ RUN  v4.1.12 <root>
+
+ ❯ c.test.ts (0 test)
+
+ Test Files  1 failed (1)
+      Tests  no tests
+   Start at  <time>
+   Duration  <duration>
+

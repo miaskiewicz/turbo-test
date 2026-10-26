@@ -1,0 +1,13 @@
+
+ RUN  v4.1.12 <root>
+
+ ❯ a.test.ts (7 tests | 3 failed | 1 skipped | 1 todo) <ms>
+       × fails <ms>
+   × objects <ms>
+   × throws <ms>
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 2 passed | 1 skipped | 1 todo (7)
+   Start at  <time>
+   Duration  <duration>
+

@@ -1,0 +1,15 @@
+
+ RUN  v4.1.12 <root>
+
+ × a.test.ts > row 1 <ms>
+   → expected 1 to be 2 // Object.is equality
+ × a.test.ts > row 2 <ms>
+   → expected 1 to be 2 // Object.is equality
+ × a.test.ts > other <ms>
+   → expected 1 to be 2 // Object.is equality
+
+ Test Files  1 failed (1)
+      Tests  3 failed (3)
+   Start at  <time>
+   Duration  <duration>
+

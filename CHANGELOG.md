@@ -214,7 +214,22 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   footer. turbo-test wrote its own `<testsuites name="turbo-test">` format without skipped
   cases, failure bodies or output. vitest's comparison and call-count matchers
   (`toBeGreaterThan`, `toBeCloseTo`, `toHaveBeenCalledTimes`, …) now raise errors without a diff,
-  as vitest's do. The verbose / default reporters keep turbo-test's format (turbo-test#94).
+  as vitest's do.
+- The default and verbose reporters print what vitest 4.1.12 prints without colours
+  (turbo-test#94): the ` RUN  v4.1.12 <root>` banner, `stdout | file > task` console blocks,
+  vitest's module lines (` ❯ a.test.ts (3 tests | 1 failed) 12ms`, a failed file's tests under
+  it, a test over the 300ms slowTestThreshold even in a passing file) or verbose test lines with
+  each failure's messages, `(retry xN)`, the Failed Suites / Failed Tests sections on stderr with
+  code frames, numbered dividers and identical errors merged, and the footer with the Snapshots
+  lines (obsolete / removed keys per file), `Start at` and the duration breakdown. Without
+  `--reporter`, under an AI agent (std-env's `isAgent`: `AI_AGENT`, `CLAUDECODE`, `CODEX_*`, …),
+  the default is vitest's agent reporter: failed files and tests only, and only failed tasks'
+  console output. turbo-test printed its own `FAIL  a.test.ts  (0 passed, 1 failed)` lines and
+  a `1 files | 0 passed | … | cache 67% hit` line; `TURBO_LEGACY_REPORTER=1` keeps them. A
+  retried test keeps every attempt's error (json `failureMessages`, junit, the reporters).
+- A test's duration counts the time it waited on timers (turbo-test#95): the event loop jumps
+  its clock to the next timer instead of sleeping, so `await new Promise(r => setTimeout(r,
+  320))` took 0ms in every reporter; it is now ~320ms, as on Node.
 - `console.*`, `util.inspect` and `util.format` format as Node's (turbo-test#93): `util.inspect`
   is a port of Node's (depth 2, breakLength 80, compact 3: quoting, `[Object]`, `<ref *1>`,
   `Map(n) {…}`, `[class X]`, grouped long arrays, multi-line objects, `util.inspect.custom`);
