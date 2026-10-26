@@ -1,0 +1,8 @@
+{
+  "name": "@fx/pkg",
+  "version": "0.0.0",
+  "main": "./dist/index.js",
+  "exports": {
+    "./sub": { "import": "./dist/sub.js", "require": "./dist/sub.js" }
+  }
+}

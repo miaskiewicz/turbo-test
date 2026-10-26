@@ -5,6 +5,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Named ESM imports from a workspace package whose `exports` subpath points at tsc-emitted CommonJS failed with "does not provide an export named". `detect_kind` sniffed the file as ESM because a doc comment contained `import `/`export `; only line-leading statements count now, and `Object.defineProperty(exports, ...)` marks CJS. Part of #79.
+
 ### Release procedure
 
 - Determine missing V8 dependency versions through the official registry API,

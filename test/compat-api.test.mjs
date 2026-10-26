@@ -77,6 +77,13 @@ test('it.fails passes only when the test body throws', () => {
   assert.equal(j.numFailedTests, 0);
 });
 
+test('named ESM imports through an exports subpath that targets tsc-emitted CJS', () => {
+  const dir = path.join(ROOT, 'fixtures', 'cjs-subpath');
+  const j = parseJson(runIn(dir, ['--reporter', 'json', path.join(dir, 'subpath.test.ts')]).out);
+  assert.equal(j.numPassedTests, 3, JSON.stringify(j));
+  assert.equal(j.numFailedTests, 0);
+});
+
 test('describe.skipIf / runIf / concurrent / todo', () => {
   const j = parseJson(run(['--reporter', 'json', file('describe-variants.test.ts')]).out);
   // only the 3 included blocks run (2 skipped blocks contribute nothing); todo registers nothing

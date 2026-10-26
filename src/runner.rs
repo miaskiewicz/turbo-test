@@ -480,15 +480,21 @@ fn detect_kind(path: &Path) -> Kind {
             Some("commonjs") => Kind::Cjs,
             _ => {
                 let src = std::fs::read_to_string(path).unwrap_or_default();
-                let esm = src.contains("import ")
-                    || src.contains("import{")
-                    || src.contains("export ")
+                // Only a statement that STARTS a line counts as ESM syntax: tsc-emitted CJS routinely
+                // mentions "import "/"export " inside doc comments, and a substring match classified a
+                // workspace package's CommonJS as ESM, whose synthetic namespace has no named exports
+                // ("does not provide an export named ..."). Compact forms keep the substring test.
+                let esm = src.lines().any(|l| {
+                    let t = l.trim_start();
+                    t.starts_with("import ") || t.starts_with("export ")
+                }) || src.contains("import{")
                     || src.contains("export{")
-                    || src.contains("export*")
-                    || src.contains("export default");
+                    || src.contains("export*");
+                // tsc emits re-exports and __esModule as Object.defineProperty(exports, ...)
                 let cjs = src.contains("module.exports")
                     || src.contains("exports.")
                     || src.contains("exports[")
+                    || src.contains("Object.defineProperty(exports")
                     || src.contains("require(");
                 if cjs && !esm {
                     Kind::Cjs
