@@ -38,7 +38,6 @@ fn assert_passes(r: &common::Run, n: u32) {
 /// shorthand is compared with an HTML element's (turbo-dom#90 tracks the serialization) and the
 /// SVG declaration itself through longhands.
 #[test]
-#[ignore = "turbo-test#79: fails until the fix"]
 fn svg_elements_have_an_inline_style() {
     let p = dropin(
         "dropin-svg-style",
