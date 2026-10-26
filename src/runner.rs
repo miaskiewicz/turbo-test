@@ -3732,7 +3732,26 @@ extern "C" fn import_meta_callback(
     meta.create_data_property(scope, k.into(), v.into());
 }
 
+/// Every dynamic `import()` promise is handed to the runtime's `__ttTrackImport` so
+/// `vi.dynamicImportSettled()` can wait for the ones still in flight.
 fn dynamic_import_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    host_defined_options: v8::Local<'s, v8::Data>,
+    resource_name: v8::Local<'s, v8::Value>,
+    specifier: v8::Local<'s, v8::String>,
+    import_attributes: v8::Local<'s, v8::FixedArray>,
+) -> Option<v8::Local<'s, v8::Promise>> {
+    let promise = dynamic_import_inner(scope, host_defined_options, resource_name, specifier, import_attributes)?;
+    let global = scope.get_current_context().global(scope);
+    let key = v8::String::new(scope, "__ttTrackImport")?;
+    if let Some(f) = global.get(scope, key.into()).and_then(|v| v8::Local::<v8::Function>::try_from(v).ok()) {
+        let recv = v8::undefined(scope).into();
+        f.call(scope, recv, &[promise.into()]);
+    }
+    Some(promise)
+}
+
+fn dynamic_import_inner<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     _host_defined_options: v8::Local<'s, v8::Data>,
     resource_name: v8::Local<'s, v8::Value>,

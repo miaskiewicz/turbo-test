@@ -5,6 +5,12 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Added
+
+- `vi.dynamicImportSettled()`: resolves once every in-flight dynamic `import()` has settled. The
+  native import hook reports each import promise to the runtime, which waits (looping, since an
+  import can start another) instead of the method being absent. Part of #79.
+
 ### Release procedure
 
 - Determine missing V8 dependency versions through the official registry API,

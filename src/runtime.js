@@ -1712,6 +1712,14 @@ function __automock(mod, depth) {
   return mod;
 }
 const __spies = [];
+// Dynamic `import()` promises still in flight; the native import hook reports each one here so
+// vi.dynamicImportSettled() can wait for them (vitest: "wait for all imports to load").
+const __pendingImports = new Set();
+globalThis.__ttTrackImport = (p) => {
+  const done = () => { __pendingImports.delete(p); };
+  __pendingImports.add(p);
+  p.then(done, done);
+};
 globalThis.vi = {
   fn: (impl) => { const s = makeSpy(impl); __spies.push(s); return s; },
   spyOn: (obj, key) => {
@@ -1807,6 +1815,17 @@ globalThis.vi = {
     return globalThis.vi;
   },
   getMockedSystemTime: () => (__loop.fake ? new __loop.RealDate(__loop.systemTime + __loop.now) : null),
+  // Imports can start further imports, so loop until a pass finds nothing pending. The macrotask
+  // turn first (skipped under fake timers, which would never fire it) lets an import() issued
+  // from a just-run timer/effect register before we look.
+  dynamicImportSettled: async () => {
+    for (;;) {
+      if (!__loop.fake) await new Promise((r) => setTimeout(r, 0));
+      const pending = [...__pendingImports];
+      if (!pending.length) return;
+      await Promise.allSettled(pending);
+    }
+  },
   waitFor: async (fn, opts) => {
     const timeout = (opts && opts.timeout) || 1000;
     const interval = (opts && opts.interval) || 50;

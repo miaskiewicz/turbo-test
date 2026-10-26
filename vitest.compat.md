@@ -139,6 +139,7 @@ Mostly strong. Notable gaps:
 | `vi.stubGlobal/stubEnv` + `unstubAllGlobals/unstubAllEnvs` | ✅ | |
 | `vi.hoisted` | ✅ | Shared between mock-prepass & module. |
 | `vi.waitFor/waitUntil` | ✅ | |
+| `vi.dynamicImportSettled` | ✅ | awaits dynamic `import()`s still in flight |
 | `jest.*` alias | ✅ | Compatibility shim object. |
 | `toMatchObject` / `toContainEqual` / `toSatisfy` / `toHaveBeenCalledOnce` / `toHaveBeenNthCalledWith` | ✅ | Present (verified by `test/compat-api.test.mjs`). |
 | `bench()` | ❌ | No benchmark API. |
