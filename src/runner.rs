@@ -990,7 +990,34 @@ fn project_root_uncached(file: &Path) -> Option<PathBuf> {
         }
         d = dir.parent();
     }
+    // No project-local esbuild: pnpm keeps a transitive esbuild under node_modules/.pnpm and links
+    // no node_modules/.bin/esbuild, so every vi.mock factory used to fall back to raw (untransformed)
+    // evaluation. With turbo-test's own esbuild available (TURBO_ESBUILD, set by cli.js), the nearest
+    // ancestor that has node_modules is the root: bare imports resolve from there and the prepass
+    // writes into its node_modules.
+    if std::env::var_os("TURBO_ESBUILD").is_some() {
+        let mut d = file.parent();
+        while let Some(dir) = d {
+            if dir.join("node_modules").is_dir() {
+                return Some(dir.to_path_buf());
+            }
+            d = dir.parent();
+        }
+    }
     None
+}
+
+/// The esbuild binary for `root`: the project's own `node_modules/.bin/esbuild` when it has one,
+/// otherwise turbo-test's bundled esbuild (`TURBO_ESBUILD`, resolved by cli.js).
+fn esbuild_bin(root: &Path) -> PathBuf {
+    let local = root.join("node_modules/.bin/esbuild");
+    if local.exists() {
+        return local;
+    }
+    match std::env::var_os("TURBO_ESBUILD") {
+        Some(p) => PathBuf::from(p),
+        None => local,
+    }
 }
 
 /// Nearest ancestor with `node_modules/typescript` — the root `tsc_transform_esm` needs. Unlike
@@ -1046,7 +1073,7 @@ fn esbuild_bundle_full(
         Some(r) => r.to_path_buf(),
         None => project_root(file)?,
     };
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
     let mtime = std::fs::metadata(file)
         .ok()
@@ -2101,7 +2128,7 @@ process.stdout.write(out.outputText);
 /// (TS/decorators lowered), so this is a pure format conversion.
 fn esbuild_format_cjs(root: &Path, js: &str) -> Option<String> {
     use std::io::Write;
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(&root);
     let mut child = std::process::Command::new(&esbuild)
         .current_dir(root)
         .args([
@@ -2274,7 +2301,7 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
 /// esbuild's export getters to be CONFIGURABLE (so spyOn can redefine them). Cached.
 fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     let root = project_root(file)?;
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
     let raw = std::fs::read_to_string(file).ok()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -3088,7 +3115,7 @@ fn e12_enabled() -> bool {
 /// externalized so it's shared. Returns the bundled code. Cached by entry+mtime.
 fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     let root = project_root(abs)?;
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
     let mtime = std::fs::metadata(abs)
         .ok()
