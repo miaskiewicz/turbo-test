@@ -45,8 +45,9 @@ test('--reporter junit records failures as <failure> inside the failing testcase
   const xml = fs.readFileSync(out, 'utf8');
   assert.match(xml, /<testsuite\b[^>]*tests="3"[^>]*failures="1"/);
   assert.match(xml, /<testcase\b[^>]*name="math &gt; fails subtraction"[\s\S]*?<failure\b/);
-  // a passing case must NOT carry a <failure> (self-closing testcase tag)
-  assert.match(xml, /<testcase\b[^>]*name="math &gt; adds"[^>]*\/>/);
+  // a passing case carries no <failure>: its closing tag follows on the next line, as in
+  // vitest 4.1.12's report (turbo-test#81)
+  assert.match(xml, /<testcase\b[^>]*name="math &gt; adds" time="[^"]*">\n        <\/testcase>\n/);
 });
 
 test('junit XML escapes special characters in names/messages', () => {
