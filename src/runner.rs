@@ -5280,31 +5280,6 @@ fn native_call_site(
     }
 }
 
-/// Whether the run is on CI, as std-env's `isCI` (vitest's snapshot `update: 'none'` default there):
-/// `CI` set to anything but `false` / `0`, or a known CI provider's variable.
-fn is_ci(var: impl Fn(&str) -> Option<String>) -> bool {
-    if let Some(v) = var("CI") {
-        return !matches!(v.as_str(), "" | "false" | "0");
-    }
-    [
-        "GITHUB_ACTIONS",
-        "GITLAB_CI",
-        "CIRCLECI",
-        "TRAVIS",
-        "BUILDKITE",
-        "JENKINS_URL",
-        "TF_BUILD",
-        "TEAMCITY_VERSION",
-        "BITBUCKET_BUILD_NUMBER",
-        "CODEBUILD_BUILD_ARN",
-        "APPVEYOR",
-        "DRONE",
-        "SEMAPHORE",
-    ]
-    .iter()
-    .any(|k| var(k).is_some())
-}
-
 /// Re-bind native callbacks into a fresh (snapshot-derived) context.
 /// os.tmpdir() as Node's: TMPDIR, else TMP, else TEMP, else /tmp, without a trailing slash.
 fn node_tmpdir(var: impl Fn(&str) -> Option<String>) -> String {
@@ -5370,7 +5345,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     // comparison (vitest's --update semantics). Plumbed via TURBO_UPDATE_SNAPSHOTS env (set by
     // the CLI) → globalThis.__TT_UPDATE_SNAPSHOTS, read by toMatchSnapshot in the runtime.
     // On CI (vitest: std-env's isCI) a missing snapshot is not written: it fails (turbo-test#73).
-    if is_ci(|k| std::env::var(k).ok()) {
+    if crate::ci::is_ci_env() {
         run_js(scope, "globalThis.__TT_CI=true;");
     }
     if std::env::var("TURBO_UPDATE_SNAPSHOTS").is_ok() {
@@ -5692,7 +5667,8 @@ pub struct TestCase {
     /// `ancestorTitles`).
     pub title: String,
     pub ancestors: Vec<String>,
-    /// "passed" | "failed" | "skipped" | "todo".
+    /// "passed" | "failed" | "skipped" | "todo" | "pending" (a `.only` test inside describe.skip /
+    /// describe.todo, which vitest never runs: turbo-test#77).
     pub status: String,
     pub duration_ms: f64,
     /// Real start time (epoch ms) of a test that ran; 0 otherwise.
@@ -5703,6 +5679,10 @@ pub struct TestCase {
     pub failure_messages: Vec<String>,
     /// Where the test was registered (`includeTaskLocation`): 1-based line and column.
     pub location: Option<(u32, u32)>,
+    /// A failed test that never ran (a forbidden `.only`, turbo-test#76): no `duration`.
+    pub not_run: bool,
+    /// A passing `it.fails` test: vitest's `expected fail` in the summary footer (turbo-test#78).
+    pub expected_fail: bool,
 }
 
 impl TestReport {
@@ -6543,6 +6523,10 @@ fn drive_tests_bounded(
                         .and_then(|v| v.number_value(scope))
                         .unwrap_or(0.0)
                 };
+                let flag = |scope: &mut v8::PinScope, key: &str| -> bool {
+                    let k = v8::String::new(scope, key).unwrap();
+                    o.get(scope, k.into()).is_some_and(|v| v.is_true())
+                };
                 tests.push(TestCase {
                     name: text(scope, "name"),
                     title: text(scope, "title"),
@@ -6553,6 +6537,8 @@ fn drive_tests_bounded(
                     message: text(scope, "message"),
                     failure_messages: string_array(scope, o, "failure_messages"),
                     location: location_of(scope, o),
+                    not_run: flag(scope, "not_run"),
+                    expected_fail: flag(scope, "expected_fail"),
                 });
             }
         }

@@ -54,9 +54,8 @@ fn bail_stops_after_n_failures() {
     let r = tt(&p, &["--bail", "1", "--jobs", "1"]);
     assert_eq!(r.code, Some(1), "{}", r.all());
     assert!(
-        r.stdout.contains(
-            "\n Test Files  1 failed | 0 passed (3)\n      Tests  1 failed | 0 passed (1)\n"
-        ),
+        r.stdout
+            .contains("\n Test Files  1 failed (3)\n      Tests  1 failed (1)\n"),
         "{}",
         r.all()
     );
@@ -68,7 +67,8 @@ fn bail_stops_after_n_failures() {
     ] {
         let r = tt(&p, args);
         assert!(
-            r.stdout.contains(" Test Files  3 failed | 0 passed (3)"),
+            r.stdout
+                .contains(" Test Files  3 failed (3)\n      Tests  3 failed (3)\n"),
             "{args:?}: {}",
             r.all()
         );
@@ -234,7 +234,12 @@ fn silent_and_allow_only() {
     );
     let r = tt(&p, &["only.test.ts", "--allowOnly", "--no-allowOnly"]);
     assert_eq!(r.code, Some(1));
-    assert!(r.stdout.contains("--allowOnly is disabled"), "{}", r.all());
+    assert!(
+        r.stdout
+            .contains("Unexpected .only modifier. Remove it or pass --allowOnly argument"),
+        "{}",
+        r.all()
+    );
 }
 
 #[test]

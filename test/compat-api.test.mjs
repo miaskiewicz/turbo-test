@@ -14,9 +14,10 @@ const CLI = path.join(ROOT, 'cli.js');
 const FIX = path.join(ROOT, 'fixtures', 'compat');
 
 // CI variables put snapshots in vitest's CI mode (a missing snapshot fails, nothing is written);
-// these tests write snapshots, so they run without them.
-const CI_VARS = ['CI', 'GITHUB_ACTIONS', 'GITLAB_CI', 'CIRCLECI', 'TRAVIS', 'BUILDKITE', 'JENKINS_URL', 'TF_BUILD',
-  'TEAMCITY_VERSION', 'BITBUCKET_BUILD_NUMBER', 'CODEBUILD_BUILD_ARN', 'APPVEYOR', 'DRONE', 'SEMAPHORE'];
+// these tests write snapshots, so they run without any variable std-env's isCI reads (CI and the
+// provider table turbo-test decides it from, src/ci_providers.json).
+const CI_VARS = ['CI', ...JSON.parse(fs.readFileSync(path.join(ROOT, 'src', 'ci_providers.json'), 'utf8'))
+  .providers.map((p) => p.env)];
 const ENV = Object.fromEntries(Object.entries(process.env).filter(([k]) => !CI_VARS.includes(k)));
 function run(args) {
   const res = spawnSync('node', [CLI, ...args], { cwd: ROOT, encoding: 'utf8', env: ENV });

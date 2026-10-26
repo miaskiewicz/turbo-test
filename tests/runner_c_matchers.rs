@@ -255,3 +255,33 @@ fn inline_snapshots_are_written_back_as_vitest_writes_them() {
         assert_eq!(turbo_test(&p.dir, &["i.test.ts"], &[]).code, Some(0));
     }
 }
+
+#[test]
+fn snapshot_ci_mode_follows_std_env_is_ci() {
+    // turbo-test#74: vitest 4.1.12 picks snapshot update mode `none` (a missing snapshot fails,
+    // nothing is written) when std-env's isCI holds. Checked against vitest: CI=false and
+    // NOW_BUILDER=1 fail; VERCEL=1, NETLIFY_LOCAL=1, TF_BUILD=True and CI= write the snapshot.
+    let p = Project::new("rc-snapshot-is-ci");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "s.test.js",
+        "import { test, expect } from 'vitest'\ntest('snap', () => { expect({ a: 1 }).toMatchSnapshot() })\n",
+    );
+    let snap = p.path("__snapshots__/s.test.js.snap");
+    let cases: [(&[(&str, &str)], bool); 8] = [
+        (&[("CI", "false")], true),
+        (&[("CI", "0")], true),
+        (&[("NOW_BUILDER", "1")], true),
+        (&[("CI", ""), ("GITHUB_ACTIONS", "true")], true),
+        (&[("CI", "")], false),
+        (&[("VERCEL", "1")], false),
+        (&[("NETLIFY_LOCAL", "1")], false),
+        (&[("TF_BUILD", "True")], false),
+    ];
+    for (env, ci) in cases {
+        let _ = std::fs::remove_dir_all(p.path("__snapshots__"));
+        let r = turbo_test(&p.dir, &["s.test.js"], env);
+        assert_eq!(r.code, Some(if ci { 1 } else { 0 }), "{env:?}: {}", r.all());
+        assert_eq!(snap.exists(), !ci, "{env:?}: {}", r.all());
+    }
+}

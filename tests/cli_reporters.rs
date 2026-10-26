@@ -34,7 +34,7 @@ fn run(p: &Project, args: &[&str]) -> Run {
 
 const SUMMARY: &str = "3 files | 2 passed | 1 failed | 1 load-errors | 2 jobs | wall ";
 const FOOTER: &str =
-    "\n Test Files  2 failed | 1 passed (3)\n      Tests  1 failed | 2 passed (3)\n   Duration  ";
+    "\n Test Files  2 failed | 1 passed (3)\n      Tests  1 failed | 2 passed | 1 skipped (4)\n   Duration  ";
 
 #[test]
 fn default_text_reporter_and_unknown_fallback() {
@@ -255,7 +255,13 @@ fn skipped_or_filtered_files_are_not_empty() {
     ];
     let r = turbo_test(&p.dir, &files, &[]);
     assert_eq!(r.code, Some(0), "{}", r.all());
-    assert!(r.stdout.contains("Test Files  5 passed (5)"), "{}", r.all());
+    // vitest 4.1.12: files none of whose tasks run are skipped files (turbo-test#78)
+    assert!(
+        r.stdout
+            .contains("\n Test Files  5 skipped (5)\n      Tests  2 skipped | 1 todo (3)\n"),
+        "{}",
+        r.all()
+    );
     for f in files {
         assert!(
             r.stdout
@@ -444,4 +450,54 @@ fn output_file_artifacts() {
         r.all()
     );
     assert!(r.stdout.contains(FOOTER), "{}", r.all());
+}
+
+#[test]
+fn the_footer_counts_as_vitest_get_state_string() {
+    // turbo-test#78: vitest 4.1.12's summary (`getStateString`): `failed | passed | expected fail |
+    // skipped | todo (total)` with the zero parts left out, `no tests` when there is none, and a
+    // file none of whose tests ran counted `skipped`. Every line is vitest's for the same files.
+    let p = Project::new("rep-footer");
+    p.file(
+        "m.test.js",
+        "test('a', () => {})\ntest.skip('b', () => {})\ntest.todo('c')\ntest.fails('f', () => { throw 1 })\n",
+    );
+    p.file("s.test.js", "test.skip('b', () => {})\n");
+    p.file("t.test.js", "test.todo('t')\n");
+    p.file(
+        "f.test.js",
+        "test('x', () => { throw new Error('no') })\ntest.fails('g', () => {})\n",
+    );
+    p.file("l.test.js", "import './missing.js'\ntest('x', () => {})\n");
+    let cases: [(&[&str], &str, &str); 6] = [
+        (
+            &["m.test.js"],
+            "1 passed (1)",
+            "1 passed | 1 expected fail | 1 skipped | 1 todo (4)",
+        ),
+        (&["s.test.js"], "1 skipped (1)", "1 skipped (1)"),
+        (&["t.test.js"], "1 skipped (1)", "1 todo (1)"),
+        (&["f.test.js"], "1 failed (1)", "2 failed (2)"),
+        (&["l.test.js"], "1 failed (1)", "no tests"),
+        (
+            &[
+                "m.test.js",
+                "s.test.js",
+                "t.test.js",
+                "f.test.js",
+                "l.test.js",
+            ],
+            "2 failed | 1 passed | 2 skipped (5)",
+            "2 failed | 1 passed | 1 expected fail | 2 skipped | 2 todo (8)",
+        ),
+    ];
+    for (files, test_files, tests) in cases {
+        let r = turbo_test(&p.dir, files, &[]);
+        let want = format!("\n Test Files  {test_files}\n      Tests  {tests}\n   Duration  ");
+        assert!(
+            r.stdout.contains(&want),
+            "{files:?}: want {want:?}\n{}",
+            r.all()
+        );
+    }
 }

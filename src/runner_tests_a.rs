@@ -1380,3 +1380,111 @@ fn os_tmpdir_follows_node() {
     assert_eq!(node_tmpdir(env(&[])), "/tmp");
     assert_eq!(node_tmpdir(env(&[("TMPDIR", "/")])), "/");
 }
+
+/// turbo-test#74: CI detection is std-env's `isCI` (std-env 4.3.0, which vitest 4.1.12 installs):
+/// `CI` set to any non-empty value — `false` and `0` included — or the first provider whose
+/// variable is non-empty, unless that provider marks itself as not CI. Every expectation here is
+/// std-env's own answer (`scripts/check-ci-detection.mjs` checks the table against it).
+#[test]
+fn ci_detection_is_std_env_is_ci() {
+    use crate::ci::is_ci;
+    let env = |pairs: Vec<(&'static str, &'static str)>| {
+        move |k: &str| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        }
+    };
+    // one row per std-env provider, each variable set alone
+    let ci_rows = [
+        "APPVEYOR",
+        "AWS_APP_ID",
+        "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",
+        "INPUT_AZURE_STATIC_WEB_APPS_API_TOKEN",
+        "AC_APPCIRCLE",
+        "bamboo_planKey",
+        "BITBUCKET_COMMIT",
+        "BITRISE_IO",
+        "BUDDY_WORKSPACE_ID",
+        "BUILDKITE",
+        "CIRCLECI",
+        "CIRRUS_CI",
+        "CF_PAGES",
+        "WORKERS_CI",
+        "K_SERVICE",
+        "CLOUD_RUN_JOB",
+        "CODEBUILD_BUILD_ARN",
+        "CF_BUILD_ID",
+        "DRONE",
+        "DRONE_BUILD_EVENT",
+        "DSARI",
+        "GITHUB_ACTIONS",
+        "GITLAB_CI",
+        "CI_MERGE_REQUEST_ID",
+        "GO_PIPELINE_LABEL",
+        "LAYERCI",
+        "JENKINS_URL",
+        "HUDSON_URL",
+        "MAGNUM",
+        "NETLIFY",
+        "NEVERCODE",
+        "RENDER",
+        "SAILCI",
+        "SEMAPHORE",
+        "SCREWDRIVER",
+        "SHIPPABLE",
+        "TDDIUM",
+        "STRIDER",
+        "TEAMCITY_VERSION",
+        "TRAVIS",
+        "NOW_BUILDER",
+        "APPCENTER_BUILD_ID",
+        "STACKBLITZ",
+        "STORMKIT",
+        "CLEAVR",
+        "ZEABUR",
+        "CODESPHERE_APP_ID",
+        "RAILWAY_PROJECT_ID",
+        "RAILWAY_SERVICE_ID",
+        "DENO_DEPLOY",
+        "DENO_DEPLOYMENT_ID",
+        "FIREBASE_APP_HOSTING",
+        "EO_PAGES_CI",
+    ];
+    for k in ci_rows {
+        assert!(is_ci(env(vec![(k, "1")])), "{k}=1 is CI");
+        assert!(!is_ci(env(vec![(k, "")])), "{k}= (empty) is not CI");
+    }
+    // providers std-env names but does not count as CI (local / preview environments)
+    let not_ci_rows = [
+        "NETLIFY_LOCAL",
+        "VERCEL",
+        "VERCEL_ENV",
+        "CODESANDBOX_SSE",
+        "CODESANDBOX_HOST",
+    ];
+    for k in not_ci_rows {
+        assert!(!is_ci(env(vec![(k, "1")])), "{k}=1 is not CI");
+        assert!(is_ci(env(vec![(k, "1"), ("CI", "true")])), "{k}=1 CI=true");
+    }
+    // the first matching row decides
+    assert!(is_ci(env(vec![("NETLIFY", "1"), ("NETLIFY_LOCAL", "1")])));
+    assert!(is_ci(env(vec![("NOW_BUILDER", "1"), ("VERCEL", "1")])));
+    assert!(!is_ci(env(vec![
+        ("VERCEL", "1"),
+        ("RAILWAY_PROJECT_ID", "1")
+    ])));
+    // `CI`: any non-empty value; an empty one falls through to the providers
+    for v in ["true", "1", "false", "0", "yes"] {
+        assert!(is_ci(env(vec![("CI", v)])), "CI={v}");
+    }
+    assert!(!is_ci(env(vec![("CI", "")])));
+    assert!(is_ci(env(vec![("CI", ""), ("GITHUB_ACTIONS", "true")])));
+    assert!(!is_ci(env(vec![])));
+    // not in std-env's table; test environments do not count either
+    for k in ["TF_BUILD", "BITBUCKET_BUILD_NUMBER", "BUILD_ID", "TEST"] {
+        assert!(!is_ci(env(vec![(k, "1")])), "{k}=1 is not CI");
+    }
+    assert!(!is_ci(env(vec![("NODE_ENV", "test")])));
+}

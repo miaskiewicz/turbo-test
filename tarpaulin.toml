@@ -8,7 +8,7 @@
 # tarpaulin load the coverage maps of those executables so bin-only code is attributed.
 #
 # The gate measures production code only: the #[path] unit-test modules under src/ are
-# excluded. 9314/9315 lines (99.99%) are covered. The one known uncovered line is
+# excluded. 9348/9349 lines (99.99%) are covered. The one known uncovered line is
 # coverage_accumulate's "script with no ranges" skip in runner.rs: V8 never sends such input
 # (precise coverage always reports a script's top-level function), and the guard stays so a
 # malformed inspector payload is skipped rather than mapped as all-zero. The lines that were
