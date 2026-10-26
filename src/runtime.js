@@ -7,7 +7,8 @@
 // `--silent` (host → globalThis.__TT_SILENT): suppress test console output entirely. Checked at
 // call time, not eval time — the host injects __TT_SILENT AFTER this module is snapshot-evaluated.
 const __noop = () => {};
-const __emit = (tag) => (...a) => { if (!globalThis.__TT_SILENT) globalThis.log(tag, ...a.map(String)); };
+// The arguments are formatted as Node's util.format (turbo-test#93).
+const __emit = (tag) => (...a) => { if (!globalThis.__TT_SILENT) globalThis.log(tag, __nodeFormat(...a)); };
 globalThis.console = {
   log: __emit('[log]'),
   info: __emit('[info]'),
@@ -1420,13 +1421,378 @@ const __v8 = { serialize: (x) => { try { return JSON.stringify(x); } catch (e) {
 const __dc = { channel: () => ({ publish: () => {}, subscribe: () => {}, unsubscribe: () => {}, hasSubscribers: false }), hasSubscribers: () => false, subscribe: () => {}, unsubscribe: () => {} }; __dc.default = __dc;
 class __AsyncLocalStorage { constructor() { this._store = undefined; } run(store, cb, ...a) { const p = this._store; this._store = store; try { return cb(...a); } finally { this._store = p; } } getStore() { return this._store; } enterWith(s) { this._store = s; } disable() {} exit(cb, ...a) { return cb(...a); } }
 const __async_hooks = { AsyncLocalStorage: __AsyncLocalStorage, AsyncResource: class { runInAsyncScope(fn, thisArg, ...a) { return fn.apply(thisArg, a); } emitDestroy() { return this; } bind(fn) { return fn; } }, createHook: () => ({ enable() { return this; }, disable() { return this; } }), executionAsyncId: () => 0, triggerAsyncId: () => 0 }; __async_hooks.default = __async_hooks;
+// ---- Node's util.inspect / util.format (Node 26, colors off; turbo-test#93) ----
+// The shape of Node's formatValue / formatRaw / reduceToSingleString / groupArrayElements:
+// depth 2, breakLength 80, compact 3, maxArrayLength 100; console.log formats through it.
+const __inspectMeta = ['\\x00', '\\x01', '\\x02', '\\x03', '\\x04', '\\x05', '\\x06', '\\x07', '\\b', '\\t', '\\n', '\\x0B', '\\f', '\\r', '\\x0E', '\\x0F', '\\x10', '\\x11', '\\x12', '\\x13', '\\x14', '\\x15', '\\x16', '\\x17', '\\x18', '\\x19', '\\x1A', '\\x1B', '\\x1C', '\\x1D', '\\x1E', '\\x1F'];
+function __strEscape(str) {
+  let quote = "'";
+  if (str.includes("'")) {
+    if (!str.includes('"')) quote = '"';
+    else if (!str.includes('`') && !str.includes('${')) quote = '`';
+  }
+  let out = '';
+  for (const ch of str) {
+    const c = ch.charCodeAt(0);
+    if (ch === quote || ch === '\\') out += '\\' + ch;
+    else if (c < 0x20) out += __inspectMeta[c];
+    else if (c === 0x7f) out += '\\x7F';
+    else out += ch;
+  }
+  return quote + out + quote;
+}
+function __inspectKey(key) {
+  if (typeof key === 'symbol') return key.toString();
+  return /^[a-zA-Z_][a-zA-Z_0-9]*$/.test(key) ? key : __strEscape(key);
+}
+function __ctorName(obj) {
+  let o = obj;
+  while (o !== null && o !== undefined) {
+    const d = Object.getOwnPropertyDescriptor(o, 'constructor');
+    if (d && typeof d.value === 'function' && d.value.name !== '') return d.value.name;
+    o = Object.getPrototypeOf(o);
+  }
+  return null;
+}
+function __fnBase(fn, ctor) {
+  const src = Function.prototype.toString.call(fn);
+  if (src.startsWith('class') && /^class\s*[\s{A-Za-z_$]/.test(src)) {
+    let base = `[class ${fn.name || '(anonymous)'}`;
+    const sup = Object.getPrototypeOf(fn);
+    if (sup && sup.name) base += ` extends ${sup.name}`;
+    return base + ']';
+  }
+  let type = 'Function';
+  const tag = fn[Symbol.toStringTag];
+  if (tag === 'AsyncFunction' || tag === 'GeneratorFunction' || tag === 'AsyncGeneratorFunction') type = tag;
+  let base = `[${type}`;
+  base += fn.name ? `: ${fn.name}]` : ' (anonymous)]';
+  if (ctor === null) base += ' (null prototype)';
+  return base;
+}
+function __inspectPrimitive(v, ctx) {
+  switch (typeof v) {
+    case 'string': {
+      const trailer = '';
+      if (v.length > 16 && v.length > 80 - ctx.indentationLvl - 4) {
+        const parts = v.split(/(?<=\n)/);
+        if (parts.length > 1) return parts.map((l) => __strEscape(l)).join(` +\n${' '.repeat(ctx.indentationLvl + 2)}`) + trailer;
+      }
+      return __strEscape(v) + trailer;
+    }
+    case 'number': return Object.is(v, -0) ? '-0' : String(v);
+    case 'bigint': return `${v}n`;
+    case 'boolean': return String(v);
+    case 'undefined': return 'undefined';
+    case 'symbol': return v.toString();
+  }
+  return String(v);
+}
+function __formatValue(ctx, value, recurseTimes, typedArray) {
+  if (typeof value !== 'object' && typeof value !== 'function') return __inspectPrimitive(value, ctx);
+  if (value === null) return 'null';
+  // a [util.inspect.custom](depth, options, inspect) method formats its own value
+  const custom = value[Symbol.for('nodejs.util.inspect.custom')];
+  if (typeof custom === 'function' && custom !== __util.inspect) {
+    const r = custom.call(value, ctx.depth - recurseTimes, { depth: ctx.depth - recurseTimes }, __util.inspect);
+    if (r !== value) return typeof r === 'string' ? r : __formatValue(ctx, r, recurseTimes);
+  }
+  if (ctx.seen.includes(value)) {
+    let index = 1;
+    if (ctx.circular === undefined) { ctx.circular = new Map(); ctx.circular.set(value, index); }
+    else {
+      index = ctx.circular.get(value);
+      if (index === undefined) { index = ctx.circular.size + 1; ctx.circular.set(value, index); }
+    }
+    return `[Circular *${index}]`;
+  }
+  return __formatRaw(ctx, value, recurseTimes, typedArray);
+}
+function __formatProperty(ctx, value, recurseTimes, key, type, desc) {
+  let name, str;
+  desc = desc || Object.getOwnPropertyDescriptor(value, key) || { value: value[key], enumerable: true };
+  if (desc.value !== undefined) {
+    const diff = ctx.compact !== true || type !== 0 ? 2 : 3;
+    ctx.indentationLvl += diff;
+    str = __formatValue(ctx, desc.value, recurseTimes);
+    ctx.indentationLvl -= diff;
+  } else if (desc.get !== undefined) {
+    str = desc.set !== undefined ? '[Getter/Setter]' : '[Getter]';
+  } else if (desc.set !== undefined) {
+    str = '[Setter]';
+  } else {
+    str = 'undefined';
+  }
+  if (type === 1) return str; // an array element (2: an array's extra key)
+  name = typeof key === 'symbol' ? key.toString() : desc.enumerable === false ? `[${key}]` : __inspectKey(key);
+  return `${name}: ${str}`;
+}
+function __groupArrayElements(ctx, output, value) {
+  let totalLength = 0;
+  let maxLength = 0;
+  let outputLength = output.length;
+  if (ctx.maxArrayLength < output.length) outputLength--;
+  const separatorSpace = 2;
+  const dataLen = new Array(outputLength);
+  for (let i = 0; i < outputLength; i++) {
+    const len = output[i].length;
+    dataLen[i] = len;
+    totalLength += len + separatorSpace;
+    if (maxLength < len) maxLength = len;
+  }
+  const actualMax = maxLength + separatorSpace;
+  if (actualMax * 3 + ctx.indentationLvl < ctx.breakLength && (totalLength / actualMax > 5 || maxLength <= 6)) {
+    const averageBias = Math.sqrt(actualMax - totalLength / output.length);
+    const biasedMax = Math.max(actualMax - 3 - averageBias, 1);
+    const columns = Math.min(
+      Math.round(Math.sqrt(2.5 * biasedMax * outputLength) / biasedMax),
+      Math.floor((ctx.breakLength - ctx.indentationLvl) / actualMax),
+      ctx.compact * 4,
+      15,
+    );
+    if (columns <= 1) return output;
+    const tmp = [];
+    const maxLineLength = [];
+    for (let i = 0; i < columns; i++) {
+      let lineLength = 0;
+      for (let j = i; j < output.length; j += columns) if (dataLen[j] > lineLength) lineLength = dataLen[j];
+      maxLineLength.push(lineLength + separatorSpace);
+    }
+    let padStart = true;
+    if (value !== undefined) {
+      for (let i = 0; i < output.length; i++) {
+        if (typeof value[i] !== 'number' && typeof value[i] !== 'bigint') { padStart = false; break; }
+      }
+    }
+    for (let i = 0; i < outputLength; i += columns) {
+      const max = Math.min(i + columns, outputLength);
+      let str = '';
+      let j = i;
+      for (; j < max - 1; j++) {
+        const padding = maxLineLength[j - i] + output[j].length - dataLen[j];
+        str += padStart ? `${output[j]}, `.padStart(padding, ' ') : `${output[j]}, `.padEnd(padding, ' ');
+      }
+      if (padStart) {
+        const padding = maxLineLength[j - i] + output[j].length - dataLen[j] - separatorSpace;
+        str += output[j].padStart(padding, ' ');
+      } else {
+        str += output[j];
+      }
+      tmp.push(str);
+    }
+    if (ctx.maxArrayLength < output.length) tmp.push(output[outputLength]);
+    output = tmp;
+  }
+  return output;
+}
+function __isBelowBreakLength(ctx, output, start, base) {
+  let totalLength = output.length + start;
+  if (totalLength + output.length > ctx.breakLength) return false;
+  for (let i = 0; i < output.length; i++) {
+    totalLength += output[i].length;
+    if (totalLength > ctx.breakLength) return false;
+  }
+  return base === '' || !base.includes('\n');
+}
+function __reduceToSingleString(ctx, output, base, braces, extrasType, recurseTimes, value) {
+  if (ctx.compact !== true) {
+    if (typeof ctx.compact === 'number' && ctx.compact >= 1) {
+      const entries = output.length;
+      if (extrasType === 2 && entries > 6) output = __groupArrayElements(ctx, output, value);
+      if (ctx.currentDepth - recurseTimes < ctx.compact && entries === output.length) {
+        const start = output.length + ctx.indentationLvl + braces[0].length + base.length + 10;
+        if (__isBelowBreakLength(ctx, output, start, base)) {
+          const joined = output.join(', ');
+          if (!joined.includes('\n')) return `${base ? `${base} ` : ''}${braces[0]} ${joined} ${braces[1]}`;
+        }
+      }
+    }
+    const indentation = `\n${' '.repeat(ctx.indentationLvl)}`;
+    return `${base ? `${base} ` : ''}${braces[0]}${indentation}  ${output.join(`,${indentation}  `)}${indentation}${braces[1]}`;
+  }
+  if (__isBelowBreakLength(ctx, output, 0, base)) return `${braces[0]}${base ? ` ${base}` : ''} ${output.join(', ')} ${braces[1]}`;
+  const indentation = ' '.repeat(ctx.indentationLvl);
+  const ln = base === '' && braces[0].length === 1 ? ' ' : `${base ? ` ${base}` : ''}\n${indentation}  `;
+  return `${braces[0]}${ln}${output.join(`,\n${indentation}  `)} ${braces[1]}`;
+}
+function __formatRaw(ctx, value, recurseTimes, typedArray) {
+  const ctor = __ctorName(value);
+  const tag = value[Symbol.toStringTag];
+  const prefix = (fallback, size) => {
+    let p = ctor === null ? `[${fallback}: null prototype] ` : `${ctor}${size} `;
+    if (typeof tag === 'string' && tag !== '' && tag !== (ctor || fallback)) p = `${p.slice(0, -1)} [${tag}] `;
+    return p;
+  };
+  let keys = Object.keys(value).concat(Object.getOwnPropertySymbols(value).filter((s) => Object.prototype.propertyIsEnumerable.call(value, s)));
+  let base = '';
+  let braces;
+  let extrasType = 0;
+  let formatter = () => [];
+  let noIterator = true;
+  if (Array.isArray(value)) {
+    const p = ctor !== 'Array' || (typeof tag === 'string' && tag !== '') ? prefix('Array', `(${value.length})`) : '';
+    keys = keys.filter((k) => typeof k === 'symbol' || !(/^(0|[1-9][0-9]*)$/.test(k) && Number(k) < value.length));
+    braces = [`${p}[`, ']'];
+    if (value.length === 0 && keys.length === 0) return `${braces[0]}]`;
+    extrasType = 2;
+    formatter = () => {
+      const out = [];
+      const len = Math.min(ctx.maxArrayLength, value.length);
+      let holes = 0;
+      for (let i = 0; i < len; i++) {
+        if (!Object.prototype.hasOwnProperty.call(value, i)) { holes++; continue; }
+        if (holes) { out.push(`<${holes} empty item${holes > 1 ? 's' : ''}>`); holes = 0; }
+        out.push(__formatProperty(ctx, value, recurseTimes, i, 1));
+      }
+      if (holes) out.push(`<${holes} empty item${holes > 1 ? 's' : ''}>`);
+      if (value.length > len) { const n = value.length - len; out.push(`... ${n} more item${n > 1 ? 's' : ''}`); }
+      return out;
+    };
+  } else if (value instanceof Map) {
+    noIterator = false;
+    braces = [`${prefix('Map', `(${value.size})`)}{`, '}'];
+    if (value.size === 0 && keys.length === 0) return `${braces[0]}}`;
+    formatter = () => {
+      const out = [];
+      ctx.indentationLvl += 2;
+      for (const [k, v] of value) out.push(`${__formatValue(ctx, k, recurseTimes)} => ${__formatValue(ctx, v, recurseTimes)}`);
+      ctx.indentationLvl -= 2;
+      return out;
+    };
+  } else if (value instanceof Set) {
+    noIterator = false;
+    braces = [`${prefix('Set', `(${value.size})`)}{`, '}'];
+    if (value.size === 0 && keys.length === 0) return `${braces[0]}}`;
+    formatter = () => {
+      const out = [];
+      ctx.indentationLvl += 2;
+      for (const v of value) out.push(__formatValue(ctx, v, recurseTimes));
+      ctx.indentationLvl -= 2;
+      return out;
+    };
+  } else if (ArrayBuffer.isView(value) && !(value instanceof DataView)) {
+    if (globalThis.Buffer && globalThis.Buffer.isBuffer && globalThis.Buffer.isBuffer(value)) {
+      const bytes = Array.from(value.subarray(0, 50), (b) => b.toString(16).padStart(2, '0')).join(' ');
+      const more = value.length > 50 ? ` ... ${value.length - 50} more byte${value.length - 50 > 1 ? 's' : ''}` : '';
+      return `<${ctor || 'Buffer'}${bytes ? ` ${bytes}` : ''}${more}>`;
+    }
+    keys = keys.filter((k) => !/^(0|[1-9][0-9]*)$/.test(k));
+    braces = [`${prefix(tag || 'TypedArray', `(${value.length})`)}[`, ']'];
+    if (value.length === 0 && keys.length === 0) return `${braces[0]}]`;
+    extrasType = 2;
+    formatter = () => {
+      const out = [];
+      const len = Math.min(ctx.maxArrayLength, value.length);
+      for (let i = 0; i < len; i++) out.push(__inspectPrimitive(value[i], ctx));
+      if (value.length > len) { const n = value.length - len; out.push(`... ${n} more item${n > 1 ? 's' : ''}`); }
+      return out;
+    };
+  } else {
+    if (typeof value === 'function') {
+      base = __fnBase(value, ctor);
+      if (keys.length === 0) return base;
+      braces = ['{', '}'];
+    } else if (value instanceof RegExp) {
+      base = RegExp.prototype.toString.call(value);
+      if (keys.length === 0) return base;
+      braces = ['{', '}'];
+    } else if (value instanceof Date) {
+      base = Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
+      if (keys.length === 0) return base;
+      braces = ['{', '}'];
+    } else if (value instanceof Error) {
+      base = value.stack ? String(value.stack) : `[${Error.prototype.toString.call(value)}]`;
+      keys = keys.filter((k) => k !== 'stack' && k !== 'message');
+      if (keys.length === 0) return base;
+      braces = ['{', '}'];
+    } else if (value instanceof Number || value instanceof String || value instanceof Boolean) {
+      const type = value instanceof Number ? 'Number' : value instanceof String ? 'String' : 'Boolean';
+      base = `[${type}: ${__inspectPrimitive(value.valueOf(), ctx)}]`;
+      if (value instanceof String) keys = keys.filter((k) => !/^(0|[1-9][0-9]*)$/.test(k));
+      if (keys.length === 0) return base;
+      braces = ['{', '}'];
+    } else if (value instanceof Promise) {
+      braces = [`${prefix('Promise', '')}{`, '}'];
+      formatter = () => ['<pending>'];
+    } else if (value instanceof WeakMap || value instanceof WeakSet) {
+      braces = [`${prefix(value instanceof WeakMap ? 'WeakMap' : 'WeakSet', '')}{`, '}'];
+      formatter = () => ['<items unknown>'];
+    } else {
+      const p = ctor === 'Object' && !(typeof tag === 'string' && tag !== '') ? '' : prefix('Object', '');
+      braces = [`${p}{`, '}'];
+      if (keys.length === 0) return `${p}{}`;
+    }
+  }
+  if (recurseTimes > ctx.depth) {
+    const name = (ctor || tag || 'Object');
+    return Array.isArray(value) ? '[Array]' : `[${name}]`;
+  }
+  recurseTimes++;
+  ctx.seen.push(value);
+  ctx.currentDepth = recurseTimes;
+  let output = formatter();
+  for (const k of keys) output.push(__formatProperty(ctx, value, recurseTimes, k, extrasType));
+  ctx.seen.pop();
+  let res = __reduceToSingleString(ctx, output, base, braces, extrasType, recurseTimes, value);
+  if (ctx.circular !== undefined) {
+    const index = ctx.circular.get(value);
+    if (index !== undefined) res = `<ref *${index}> ${res}`;
+  }
+  void noIterator;
+  return res;
+}
+function __nodeInspect(value, opts) {
+  const ctx = { seen: [], indentationLvl: 0, currentDepth: 0, depth: 2, breakLength: 80, compact: 3, maxArrayLength: 100, circular: undefined };
+  if (opts) {
+    if (typeof opts.depth === 'number' || opts.depth === null) ctx.depth = opts.depth === null ? Infinity : opts.depth;
+    if (typeof opts.breakLength === 'number') ctx.breakLength = opts.breakLength;
+    if (opts.compact !== undefined) ctx.compact = opts.compact;
+  }
+  return __formatValue(ctx, value, 0);
+}
+// util.format: %s %d %i %f %j %o %O %c %%, the rest inspected (strings as they are)
+function __nodeFormat(...args) {
+  const first = args[0];
+  const insp = (v) => (typeof v === 'string' ? v : __nodeInspect(v));
+  if (typeof first !== 'string') return args.map(insp).join(' ');
+  let i = 1;
+  let out = '';
+  let last = 0;
+  for (let p = 0; p < first.length - 1; p++) {
+    if (first[p] !== '%') continue;
+    const c = first[p + 1];
+    if (c === '%') { out += first.slice(last, p) + '%'; last = p + 2; p++; continue; }
+    if (i >= args.length || !'sdifjoOc'.includes(c)) continue;
+    const a = args[i++];
+    let s;
+    switch (c) {
+      case 's':
+        s = typeof a === 'string' ? a : typeof a === 'bigint' ? `${a}n` : typeof a === 'symbol' ? String(a)
+          : typeof a === 'object' && a !== null ? __nodeInspect(a, { depth: 0 }) : Object.is(a, -0) ? '-0' : String(a);
+        break;
+      case 'd': s = typeof a === 'bigint' ? `${a}n` : typeof a === 'symbol' ? 'NaN' : (Object.is(Number(a), -0) ? '-0' : String(Number(a))); break;
+      case 'i': s = typeof a === 'bigint' ? `${a}n` : typeof a === 'symbol' ? 'NaN' : String(parseInt(a)); break;
+      case 'f': s = typeof a === 'symbol' ? 'NaN' : String(parseFloat(a)); break;
+      case 'j': try { s = JSON.stringify(a); } catch (e) { s = '[Circular]'; } break;
+      case 'o': s = __nodeInspect(a, { depth: 4 }); break;
+      case 'O': s = __nodeInspect(a); break;
+      case 'c': s = ''; break;
+    }
+    out += first.slice(last, p) + s;
+    last = p + 2;
+    p++;
+  }
+  out += first.slice(last);
+  for (; i < args.length; i++) out += ' ' + insp(args[i]);
+  return out;
+}
 const __util = {
   inherits(ctor, superCtor) { if (ctor && ctor.prototype && superCtor && superCtor.prototype) { ctor.super_ = superCtor; Object.setPrototypeOf(ctor.prototype, superCtor.prototype); } },
   promisify: (f) => (...args) => new Promise((res, rej) => { try { f(...args, (e, v) => e ? rej(e) : res(v)); } catch (e) { rej(e); } }),
   callbackify: (f) => (...args) => { const cb = args.pop(); Promise.resolve(f(...args)).then((v) => cb(null, v), (e) => cb(e)); },
-  inspect: (x) => { try { return typeof x === 'string' ? x : JSON.stringify(x); } catch (e) { return String(x); } },
-  format: (...a) => a.map((x) => typeof x === 'string' ? x : (() => { try { return JSON.stringify(x); } catch (e) { return String(x); } })()).join(' '),
-  formatWithOptions: (_o, ...a) => a.join(' '),
+  inspect: (x, opts) => __nodeInspect(x, opts),
+  format: (...a) => __nodeFormat(...a),
+  formatWithOptions: (_o, ...a) => __nodeFormat(...a),
   deprecate: (fn, _msg) => fn,
   debuglog: () => (() => {}),
   isDeepStrictEqual: (a, b) => { try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return a === b; } },
@@ -1434,6 +1800,7 @@ const __util = {
   TextEncoder: globalThis.TextEncoder,
   TextDecoder: globalThis.TextDecoder,
 };
+__util.inspect.custom = Symbol.for('nodejs.util.inspect.custom');
 // ---- querystring (Node's legacy API, per its docs; verified against Node's results) ----
 const __qsUnescape = (s) => {
   try { return decodeURIComponent(s); } catch (e) {

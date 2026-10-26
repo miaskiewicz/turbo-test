@@ -411,7 +411,6 @@ it('fs/promises', async () => {
 /// turbo-test#93: `util.inspect` / `util.format` and `console.log` format as Node's (values:
 /// Node 26; the file passes on vitest 4.1.12).
 #[test]
-#[ignore = "turbo-test#93: fails until the fix"]
 fn console_and_util_format_like_node() {
     let p = Project::new("rc-inspect");
     p.file("package.json", r#"{"type":"module"}"#);
@@ -436,6 +435,8 @@ it('util.inspect', () => {
   expect(util.inspect(Array.from({ length: 30 }, (_, i) => i))).toBe('[\n   0,  1,  2,  3,  4,  5,  6,  7,  8,\n   9, 10, 11, 12, 13, 14, 15, 16, 17,\n  18, 19, 20, 21, 22, 23, 24, 25, 26,\n  27, 28, 29\n]');
   expect(util.inspect({ a: 'x'.repeat(30), b: 'y'.repeat(30), c: 'z'.repeat(10) })).toBe(`{\n  a: '${'x'.repeat(30)}',\n  b: '${'y'.repeat(30)}',\n  c: 'zzzzzzzzzz'\n}`);
   expect(util.inspect({ a: { b: { c: { d: 1 } } } }, { depth: 0 })).toBe('{ a: [Object] }');
+  class Money { [util.inspect.custom]() { return 'Money<5>'; } }
+  expect([util.inspect.custom, util.inspect({ m: new Money() })]).toEqual([Symbol.for('nodejs.util.inspect.custom'), '{ m: Money<5> }']);
 });
 it('util.format', () => {
   expect([
