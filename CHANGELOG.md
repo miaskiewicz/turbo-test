@@ -142,6 +142,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `BITBUCKET_BUILD_NUMBER` or an empty value counted when vitest's does not). The table is data
   (`src/ci_providers.json`, read by `src/ci.rs`), checked against an installed std-env by
   `scripts/check-ci-detection.mjs`.
+- `.only` fails on CI (turbo-test#75): `allowOnly` defaults to `!isCI` as in vitest, so a stray
+  `.only` committed to a branch fails the CI run instead of silently narrowing it to one test.
+  `--allowOnly` / `--no-allowOnly` still decide when given (the last one wins).
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain

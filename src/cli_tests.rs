@@ -81,7 +81,7 @@ fn parse_defaults_and_files() {
     assert_eq!(o.reporter, Reporter::Default);
     assert_eq!(o.output_file, None);
     assert_eq!(o.bail, 0);
-    assert!(o.allow_only);
+    assert_eq!(o.allow_only, None);
     assert!(o.env.is_empty() && o.coverage.is_empty() && o.warnings.is_empty());
 }
 
@@ -151,9 +151,16 @@ fn parse_env_flags() {
 
 #[test]
 fn parse_allow_only_toggles() {
-    assert!(!parse(&["--no-allowOnly"]).allow_only);
-    assert!(parse(&["--no-allowOnly", "--allowOnly"]).allow_only);
-    assert!(!parse(&["--allowOnly", "--no-allowOnly"]).allow_only);
+    assert_eq!(parse(&[]).allow_only, None);
+    assert_eq!(parse(&["--no-allowOnly"]).allow_only, Some(false));
+    assert_eq!(
+        parse(&["--no-allowOnly", "--allowOnly"]).allow_only,
+        Some(true)
+    );
+    assert_eq!(
+        parse(&["--allowOnly", "--no-allowOnly"]).allow_only,
+        Some(false)
+    );
 }
 
 #[test]

@@ -122,8 +122,9 @@ pub struct Options {
     pub output_file: Option<String>,
     /// `--bail N`: stop pulling new files once cumulative failed tests >= N (0 = disabled).
     pub bail: usize,
-    /// `--no-allowOnly`: error if any `.only` test is collected (vitest CI default).
-    pub allow_only: bool,
+    /// `--allowOnly` / `--no-allowOnly` (the last one given); `None` is vitest's default,
+    /// `!isCI` (`crate::ci`): a `.only` fails on CI (turbo-test#75).
+    pub allow_only: Option<bool>,
     /// Env vars the runtime reads (`TURBO_TEST_TIMEOUT`, …), set in this order before the run.
     pub env: Vec<(&'static str, String)>,
     /// Coverage configuration calls, applied in this order before the run.
@@ -172,7 +173,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
         reporter: Reporter::Default,
         output_file: None,
         bail: 0,
-        allow_only: true,
+        allow_only: None,
         env: Vec::new(),
         coverage: Vec::new(),
         warnings: Vec::new(),
@@ -216,9 +217,9 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             "--bail" => o.bail = value().and_then(|v| v.parse().ok()).unwrap_or(0),
             // `--silent` → suppress test console.* output; runtime reads __TT_SILENT.
             "--silent" => o.env.push(("TURBO_TEST_SILENT", "1".to_string())),
-            // `--allowOnly` / `--no-allowOnly` → permit (default) or forbid stray `.only` tests.
-            "--allowOnly" => o.allow_only = true,
-            "--no-allowOnly" => o.allow_only = false,
+            // `--allowOnly` / `--no-allowOnly` → permit or forbid `.only` tests (default: !isCI).
+            "--allowOnly" => o.allow_only = Some(true),
+            "--no-allowOnly" => o.allow_only = Some(false),
             "--shard" => {
                 if let Some(v) = value() {
                     if let Some((i, n)) = v.split_once('/') {
@@ -1181,8 +1182,9 @@ pub fn run(opts: Options) -> i32 {
         eprintln!("{USAGE}");
         return 2;
     }
-    // --no-allowOnly: plumb to the runtime (which fails any file that collected a `.only`).
-    if !opts.allow_only {
+    // allowOnly off (--no-allowOnly, or vitest's default on CI): plumb to the runtime, which
+    // fails the `.only` tasks.
+    if !opts.allow_only.unwrap_or_else(|| !crate::ci::is_ci_env()) {
         std::env::set_var("TURBO_TEST_FORBID_ONLY", "1");
     }
     let files = apply_shard(opts.files, opts.shard);

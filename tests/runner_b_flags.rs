@@ -243,7 +243,6 @@ fn cjs_bytecode_cache_is_written_reused_and_survives_corruption() {
 }
 
 #[test]
-#[ignore = "turbo-test#75: fails until the fix"]
 fn only_is_forbidden_on_ci_unless_allow_only() {
     // turbo-test#75: vitest 4.1.12 defaults allowOnly to !isCI (std-env): on CI a stray `.only`
     // fails the run unless --allowOnly is passed. Checked against vitest: CI=1 and
