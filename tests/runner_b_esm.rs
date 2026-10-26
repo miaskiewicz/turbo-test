@@ -113,18 +113,18 @@ test('fs natives', () => {
   fs.mkdirSync(dir + '/sub/deeper', { recursive: true });
   expect(fs.existsSync(dir + '/sub/deeper')).toBe(true);
   fs.writeFileSync(dir + '/sub/f.txt', 'hello');
-  fs.writeFileSync(dir + '/auto/created/g.txt', 'parents made');
+  expect(() => fs.writeFileSync(dir + '/auto/created/g.txt', 'no parents')).toThrow(`ENOENT: no such file or directory, open '${dir}/auto/created/g.txt'`);
   expect(fs.existsSync(dir + '/sub/f.txt')).toBe(true);
   expect(fs.readFileSync(dir + '/sub/f.txt', 'utf8')).toBe('hello');
-  expect(fs.readFileSync(dir + '/auto/created/g.txt', 'utf8')).toBe('parents made');
+  expect(fs.existsSync(dir + '/auto')).toBe(false);
   expect(fs.readdirSync(root + '/seed').sort()).toEqual(['one.txt', 'two.txt']);
   expect(() => fs.readdirSync(dir + '/nope')).toThrow(`ENOENT: no such file or directory, scandir '${dir}/nope'`);
-  expect(() => fs.readFileSync(dir + '/nope.txt')).toThrow('readFileSync ' + dir + '/nope.txt');
-  expect(() => fs.writeFileSync(dir + '/sub/f.txt/x', 'a')).toThrow('writeFileSync ' + dir + '/sub/f.txt/x');
+  expect(() => fs.readFileSync(dir + '/nope.txt')).toThrow(`ENOENT: no such file or directory, open '${dir}/nope.txt'`);
+  expect(() => fs.writeFileSync(dir + '/sub/f.txt/x', 'a')).toThrow(`ENOTDIR: not a directory, open '${dir}/sub/f.txt/x'`);
   fs.rmSync(dir + '/sub/f.txt');
   expect(fs.existsSync(dir + '/sub/f.txt')).toBe(false);
-  fs.rmSync(dir + '/missing-entry');
-  fs.rmSync(dir);
+  fs.rmSync(dir + '/missing-entry', { force: true });
+  fs.rmSync(dir, { recursive: true });
   expect(fs.existsSync(dir)).toBe(false);
 });
 "#,

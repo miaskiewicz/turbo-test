@@ -59,8 +59,8 @@ test('appendFileSync and promises.appendFile', async () => {
   fs.appendFileSync(f, 'b');
   await fs.promises.appendFile(f, 'c\n');
   expect(fs.readFileSync(f, 'utf8')).toBe('abc\n');
-  expect(() => fs.appendFileSync(root + '/package.json/x', 'a')).toThrow('appendFileSync ' + root + '/package.json/x');
-  await expect(fs.promises.appendFile(root + '/package.json/x', 'a')).rejects.toThrow('appendFileSync ' + root + '/package.json/x');
+  expect(() => fs.appendFileSync(root + '/package.json/x', 'a')).toThrow(`ENOTDIR: not a directory, open '${root}/package.json/x'`);
+  await expect(fs.promises.appendFile(root + '/package.json/x', 'a')).rejects.toThrow(`ENOTDIR: not a directory, open '${root}/package.json/x'`);
 });
 "#,
     );
@@ -330,7 +330,6 @@ it('URL arguments', () => {
 /// errors (code, errno, syscall, path, message), no implicit parent directories, `recursive` /
 /// `force` options, Buffers without an encoding. Values: Node 26 (vitest 4.1.12 runs node:fs).
 #[test]
-#[ignore = "turbo-test#86: fails until the fix"]
 fn fs_calls_fail_and_succeed_like_node() {
     let p = Project::new("rc-fs-node");
     p.file("package.json", r#"{"type":"module"}"#);

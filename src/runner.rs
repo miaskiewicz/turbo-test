@@ -5428,11 +5428,14 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__fs_existsSync", fs_exists_sync);
     bind_fn(scope, global, "__fs_readFileSync", fs_read_file_sync);
     bind_fn(scope, global, "__fs_writeFileSync", fs_write_file_sync);
-    bind_fn(scope, global, "__fs_appendFileSync", fs_append_file_sync);
     bind_fn(scope, global, "__fs_mkdirSync", fs_mkdir_sync);
     bind_fn(scope, global, "__fs_rmSync", fs_rm_sync);
     bind_fn(scope, global, "__fs_readdir", fs_readdir);
     bind_fn(scope, global, "__fs_stat", fs_stat);
+    bind_fn(scope, global, "__fs_readFile", fs_read_file);
+    bind_fn(scope, global, "__fs_writeFile", fs_write_file);
+    bind_fn(scope, global, "__fs_mkdir", fs_mkdir);
+    bind_fn(scope, global, "__fs_remove", fs_remove);
     bind_fn(scope, global, "__fs_symlinkSync", fs_symlink_sync);
     // process.cwd(): the process's working directory, as vitest's workers report it; os.tmpdir()
     // and os.homedir() as Node computes them
@@ -5586,40 +5589,21 @@ fn fs_write_file_sync(
     }
 }
 
-/// native fs.appendFileSync(path, data): a real append (O_APPEND), so concurrent appenders from
-/// parallel workers each land whole instead of racing a read-modify-write. Parents are created,
-/// like `fs_write_file_sync`.
-fn fs_append_file_sync(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    use std::io::Write;
-    let p = args.get(0).to_rust_string_lossy(scope);
-    let data = args.get(1).to_rust_string_lossy(scope);
-    if let Some(parent) = Path::new(&p).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let res = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&p)
-        .and_then(|mut f| f.write_all(data.as_bytes()));
-    if let Err(e) = res {
-        throw(scope, &format!("appendFileSync {p}: {e}"));
-    }
-}
-
 /// The Node error code and description of an OS error (`EEXIST`, "file already exists"), as
 /// libuv names them; None for an error that is not one of these.
 fn errno_name(e: &std::io::Error) -> Option<(&'static str, &'static str)> {
-    const NAMES: [(i32, &str, &str); 5] = [
+    const NAMES: [(i32, &str, &str); 6] = [
         (2, "ENOENT", "no such file or directory"),
         (13, "EACCES", "permission denied"),
         (17, "EEXIST", "file already exists"),
         (20, "ENOTDIR", "not a directory"),
         (1, "EPERM", "operation not permitted"),
+        (21, "EISDIR", "illegal operation on a directory"),
     ];
+    // ENOTEMPTY's number differs by OS (66 on macOS, 39 on Linux)
+    if e.kind() == std::io::ErrorKind::DirectoryNotEmpty {
+        return Some(("ENOTEMPTY", "directory not empty"));
+    }
     let errno = e.raw_os_error()?;
     NAMES
         .iter()
@@ -5685,19 +5669,138 @@ fn fs_rm_sync(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv
 /// Throw Node's error for a failed fs call: `ENOENT: no such file or directory, scandir '<path>'`
 /// with its `errno` (negative), `code`, `syscall` and `path`.
 fn throw_fs_error(scope: &mut v8::PinScope, e: &std::io::Error, syscall: &str, path: &str) {
+    throw_fs_error_at(scope, e, syscall, Some(path));
+}
+
+/// throw_fs_error for a call Node reports without a path (`EISDIR: …, read`).
+fn throw_fs_error_at(
+    scope: &mut v8::PinScope,
+    e: &std::io::Error,
+    syscall: &str,
+    path: Option<&str>,
+) {
     let (code, desc) = errno_name(e).unwrap_or(("EIO", "i/o error"));
-    let msg = v8::String::new(scope, &format!("{code}: {desc}, {syscall} '{path}'")).unwrap();
+    let msg = match path {
+        Some(path) => format!("{code}: {desc}, {syscall} '{path}'"),
+        None => format!("{code}: {desc}, {syscall}"),
+    };
+    let msg = v8::String::new(scope, &msg).unwrap();
     let err = v8::Exception::error(scope, msg);
     let obj = err.cast::<v8::Object>();
     let errno = v8::Integer::new(scope, -e.raw_os_error().unwrap_or(5));
     let key = v8::String::new(scope, "errno").unwrap();
     obj.set(scope, key.into(), errno.into());
-    for (k, v) in [("code", code), ("syscall", syscall), ("path", path)] {
+    let fields = [
+        ("code", Some(code)),
+        ("syscall", Some(syscall)),
+        ("path", path),
+    ];
+    for (k, v) in fields.iter().filter_map(|(k, v)| Some((*k, (*v)?))) {
         let k = v8::String::new(scope, k).unwrap();
         let v = v8::String::new(scope, v).unwrap();
         obj.set(scope, k.into(), v.into());
     }
     scope.throw_exception(err);
+}
+
+/// native fs.readFile(path, text): the file's contents (a string, else a Uint8Array); Node's
+/// `open` error, or `read` (no path) for a directory.
+fn fs_read_file(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use std::io::Read;
+    let p = args.get(0).to_rust_string_lossy(scope);
+    let mut file = match std::fs::File::open(&p) {
+        Ok(f) => f,
+        Err(e) => return throw_fs_error(scope, &e, "open", &p),
+    };
+    let mut bytes = Vec::new();
+    if let Err(e) = file.read_to_end(&mut bytes) {
+        return throw_fs_error_at(scope, &e, "read", None);
+    }
+    if args.get(1).boolean_value(scope) {
+        let text = v8::String::new(scope, &String::from_utf8_lossy(&bytes)).unwrap();
+        return rv.set(text.into());
+    }
+    let len = bytes.len();
+    let store = v8::ArrayBuffer::new_backing_store_from_vec(bytes).make_shared();
+    let buffer = v8::ArrayBuffer::with_backing_store(scope, &store);
+    rv.set(v8::Uint8Array::new(scope, buffer, 0, len).unwrap().into());
+}
+
+/// native fs.writeFile(path, data, append): write (or append) a string or a byte view; Node's
+/// `open` error (parents are not created).
+fn fs_write_file(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    use std::io::Write;
+    let p = args.get(0).to_rust_string_lossy(scope);
+    let data = args.get(1);
+    let bytes = match v8::Local::<v8::ArrayBufferView>::try_from(data) {
+        Ok(view) => {
+            let mut buf = vec![0; view.byte_length()];
+            view.copy_contents(&mut buf);
+            buf
+        }
+        Err(_) => data.to_rust_string_lossy(scope).into_bytes(),
+    };
+    let append = args.get(2).boolean_value(scope);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(append)
+        .truncate(!append)
+        .open(&p);
+    // (a failing write itself — a full disk — is reported as the open)
+    if let Err(e) = file.and_then(|mut f| f.write_all(&bytes)) {
+        throw_fs_error(scope, &e, "open", &p);
+    }
+}
+
+/// native fs.mkdir(path, recursive): Node's `mkdir` error; recursive returns the first
+/// directory it created, as given (`w/q` for `w/q/r/s`), or undefined.
+fn fs_mkdir(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let p = args.get(0).to_rust_string_lossy(scope);
+    if !args.get(1).boolean_value(scope) {
+        if let Err(e) = std::fs::create_dir(&p) {
+            throw_fs_error(scope, &e, "mkdir", &p);
+        }
+        return;
+    }
+    let first = Path::new(&p)
+        .ancestors()
+        .take_while(|a| !a.as_os_str().is_empty() && !a.exists())
+        .last()
+        .map(|a| a.to_string_lossy().into_owned());
+    if let Err(e) = std::fs::create_dir_all(&p) {
+        return throw_fs_error(scope, &e, "mkdir", &p);
+    }
+    if let Some(first) = first {
+        rv.set(v8::String::new(scope, &first).unwrap().into());
+    }
+}
+
+/// native fs.rmdir / unlink / rm-tree(path, op): remove a directory (`rmdir`), a file
+/// (`unlink`) or a whole tree (`rm`), with Node's error for that syscall.
+fn fs_remove(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let p = args.get(0).to_rust_string_lossy(scope);
+    let op = args.get(1).to_rust_string_lossy(scope);
+    let res = match op.as_str() {
+        "rmdir" => std::fs::remove_dir(&p),
+        "unlink" => std::fs::remove_file(&p),
+        _ => std::fs::remove_dir_all(&p),
+    };
+    if let Err(e) = res {
+        throw_fs_error(scope, &e, &op, &p);
+    }
 }
 
 /// The `S_IFMT` bits of a file type (Node's Dirent / Stats kinds; 0 when unknown).

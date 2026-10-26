@@ -1270,31 +1270,60 @@ const __readdir = (p, options) => {
   }
   return out;
 };
+// readFileSync / writeFileSync / appendFileSync / mkdirSync / rmSync / rmdirSync / unlinkSync
+// with Node's errors and options (turbo-test#86): a string with an encoding, else a Buffer; no
+// implicit parent directories; mkdir `recursive`, rm `recursive` / `force`.
+const __encodingOf = (o) => (typeof o === 'string' ? o : o && o.encoding) || null;
+const __readFile = (p, options) => {
+  const enc = __encodingOf(options);
+  const utf8 = enc === 'utf8' || enc === 'utf-8';
+  const data = globalThis.__fs_readFile(__fsPath(p), utf8);
+  if (utf8) return data;
+  const buf = globalThis.Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+  return enc ? buf.toString(enc) : buf;
+};
+const __writeFile = (p, data, append) => globalThis.__fs_writeFile(__fsPath(p), ArrayBuffer.isView(data) ? data : String(data), append);
+const __mkdir = (p, options) => globalThis.__fs_mkdir(__fsPath(p), !!(options && typeof options === 'object' && options.recursive));
+const __rm = (p, options) => {
+  const path = __fsPath(p), o = options || {};
+  let st;
+  try { st = globalThis.__fs_stat(path, true); } catch (e) { if (o.force && e.code === 'ENOENT') return; throw e; }
+  if ((st[1] & __S_IFMT) !== 0o040000) return globalThis.__fs_remove(path, 'unlink');
+  if (!o.recursive) {
+    const e = new Error(`Path is a directory: rm returned EISDIR (is a directory) ${path}`);
+    Object.defineProperty(e, 'name', { value: 'SystemError', configurable: true, writable: true });
+    Object.assign(e, { code: 'ERR_FS_EISDIR', errno: 21, syscall: 'rm', path });
+    throw e;
+  }
+  globalThis.__fs_remove(path, 'rm');
+};
 const __promised = (f) => (...a) => { try { return Promise.resolve(f(...a)); } catch (e) { return Promise.reject(e); } };
 const __fs = {
   Dirent,
   Stats,
   existsSync: (p) => globalThis.__fs_existsSync(__fsPath(p)),
-  readFileSync: (p, enc) => globalThis.__fs_readFileSync(__fsPath(p), enc ? String(typeof enc === 'string' ? enc : enc.encoding || 'utf8') : ''),
-  writeFileSync: (p, data) => globalThis.__fs_writeFileSync(__fsPath(p), data == null ? '' : (typeof data === 'string' ? data : String(data))),
+  readFileSync: __readFile,
+  writeFileSync: (p, data) => __writeFile(p, data, false),
   // a real append (O_APPEND on the Rust side), not read + rewrite: parallel workers appending to
   // one file would otherwise overwrite each other's lines.
-  appendFileSync: (p, data) => globalThis.__fs_appendFileSync(__fsPath(p), data == null ? '' : (typeof data === 'string' ? data : String(data))),
-  mkdirSync: (p) => globalThis.__fs_mkdirSync(__fsPath(p)),
-  rmSync: (p) => globalThis.__fs_rmSync(__fsPath(p)),
-  rmdirSync: (p) => globalThis.__fs_rmSync(__fsPath(p)),
-  unlinkSync: (p) => globalThis.__fs_rmSync(__fsPath(p)),
+  appendFileSync: (p, data) => __writeFile(p, data, true),
+  mkdirSync: __mkdir,
+  rmSync: __rm,
+  rmdirSync: (p) => globalThis.__fs_remove(__fsPath(p), 'rmdir'),
+  unlinkSync: (p) => globalThis.__fs_remove(__fsPath(p), 'unlink'),
   statSync: (p, options) => __stat(p, options, false),
   lstatSync: (p, options) => __stat(p, options, true),
   readdirSync: __readdir,
   symlinkSync: (target, p) => globalThis.__fs_symlinkSync(__fsPath(target), __fsPath(p)),
   promises: {
     symlink: (target, p) => { try { __fs.symlinkSync(target, p); return Promise.resolve(); } catch (e) { return Promise.reject(e); } },
-    readFile: (p, enc) => Promise.resolve(globalThis.__fs_readFileSync(__fsPath(p), enc ? 'utf8' : '')),
-    writeFile: (p, data) => { globalThis.__fs_writeFileSync(__fsPath(p), data == null ? '' : String(data)); return Promise.resolve(); },
-    appendFile: (p, data) => { try { __fs.appendFileSync(p, data); return Promise.resolve(); } catch (e) { return Promise.reject(e); } },
-    mkdir: (p) => { globalThis.__fs_mkdirSync(__fsPath(p)); return Promise.resolve(); },
-    rm: (p) => { globalThis.__fs_rmSync(__fsPath(p)); return Promise.resolve(); },
+    readFile: __promised(__readFile),
+    writeFile: __promised((p, data) => __writeFile(p, data, false)),
+    appendFile: __promised((p, data) => __writeFile(p, data, true)),
+    mkdir: __promised(__mkdir),
+    rm: __promised(__rm),
+    rmdir: __promised((p) => globalThis.__fs_remove(__fsPath(p), 'rmdir')),
+    unlink: __promised((p) => globalThis.__fs_remove(__fsPath(p), 'unlink')),
     readdir: __promised(__readdir),
     stat: __promised((p, options) => __stat(p, options, false)),
     lstat: __promised((p, options) => __stat(p, options, true)),
