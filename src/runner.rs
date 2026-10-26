@@ -5966,6 +5966,8 @@ pub struct TestReport {
     pub setup_us: f64,
     /// The suites whose hooks failed, in vitest's suite order.
     pub suite_errors: Vec<SuiteError>,
+    /// The file's console output while captured: (stream, task name path, content).
+    pub logs: Vec<(String, String, String)>,
 }
 
 /// A test file's snapshot outcome, as @vitest/snapshot's `SnapshotResult` (turbo-test#73).
@@ -6907,6 +6909,13 @@ fn drive_tests_bounded(
     }
     let snapshot = snapshot_of(scope, summary);
     let suite_errors = suite_errors_of(scope, summary);
+    let logs = string_tuples(scope, summary, "logs")
+        .into_iter()
+        .map(|mut l| {
+            l.resize(3, String::new());
+            (l.remove(0), l.remove(0), l.remove(0))
+        })
+        .collect();
     Ok(TestReport {
         passed,
         failed,
@@ -6916,6 +6925,7 @@ fn drive_tests_bounded(
         snapshot,
         setup_us: 0.0,
         suite_errors,
+        logs,
     })
 }
 

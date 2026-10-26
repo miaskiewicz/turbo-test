@@ -55,6 +55,9 @@ pub struct FileResult {
     pub suite_errors: Vec<runner::SuiteError>,
     /// The error a file failed to load with, when the runner saw one (junit's `<failure>`).
     pub load_error_info: Option<crate::failure::ErrorInfo>,
+    /// Its console output: (`stdout` / `stderr`, the test's or suite's name path or `""` for
+    /// the file, content), for vitest's human reporters.
+    pub logs: Vec<(String, String, String)>,
 }
 
 /// Which reporter to emit. Anything turbo-test does not implement is accepted-and-ignored and
@@ -123,6 +126,8 @@ pub struct Options {
     pub jobs: usize,
     pub shard: Option<(usize, usize)>,
     pub reporter: Reporter,
+    /// `--reporter` was given (without it, vitest picks its agent reporter under an AI agent).
+    pub reporter_explicit: bool,
     pub output_file: Option<String>,
     /// `--bail N`: stop pulling new files once cumulative failed tests >= N (0 = disabled).
     pub bail: usize,
@@ -175,6 +180,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
         jobs: default_jobs,
         shard: None,
         reporter: Reporter::Default,
+        reporter_explicit: false,
         output_file: None,
         bail: 0,
         allow_only: None,
@@ -236,7 +242,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             // `--reporter <r>`: select an output reporter. Implemented: default, dot, json,
             // junit, tap, verbose. Any other value (html, tap-flat, hanging-process, …) is
             // accepted-and-ignored → falls back to the text reporter (never an error).
-            "--reporter" | "--reporters" => o.reporter = Reporter::parse(value().as_deref()),
+            "--reporter" | "--reporters" => {
+                o.reporter = Reporter::parse(value().as_deref());
+                o.reporter_explicit = true;
+            }
             // `--outputFile <path>`: write the active reporter's output to a file (vitest writes
             // the reporter artifact here — JUnit XML, TAP, JSON). Text/dot/verbose still print.
             "--outputFile" | "--output-file" => o.output_file = value(),
@@ -592,6 +601,7 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
                 dur_ms,
                 suite_errors: rep.suite_errors,
                 load_error_info: None,
+                logs: rep.logs,
             }
         }
         Err(e) => FileResult {
@@ -609,6 +619,7 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
             dur_ms,
             suite_errors: Vec::new(),
             load_error_info: runner::take_load_error(),
+            logs: Vec::new(),
         },
     }
 }
@@ -780,7 +791,7 @@ fn json_strs(items: &[String]) -> String {
 
 /// A load error's message as vitest's JSON `message` shows it: the error's own message, without
 /// turbo-test's load-phase prefix (`module errored: `, …) and the error's `<Name>: ` prefix.
-fn file_message(error_msg: &str) -> String {
+pub(crate) fn file_message(error_msg: &str) -> String {
     let mut m = error_msg;
     for p in ["module errored: ", "evaluate threw: ", "instantiate: "] {
         if let Some(rest) = m.strip_prefix(p) {
@@ -1197,6 +1208,30 @@ pub fn render_artifact(
     }
 }
 
+/// The vitest human reporter for this run (`None`: an artifact reporter, `dot`, or
+/// `TURBO_LEGACY_REPORTER` set to anything but `0` — turbo-test's own PASS / FAIL lines).
+pub fn human_kind(reporter: Reporter, explicit: bool) -> Option<crate::human::Kind> {
+    let legacy = std::env::var("TURBO_LEGACY_REPORTER").is_ok_and(|v| !v.is_empty() && v != "0");
+    match reporter {
+        _ if legacy => None,
+        Reporter::Verbose => Some(crate::human::Kind::Verbose),
+        Reporter::Default if !explicit && crate::agent::is_agent_env() => {
+            Some(crate::human::Kind::Agent)
+        }
+        Reporter::Default => Some(crate::human::Kind::Default),
+        _ => None,
+    }
+}
+
+/// `new Date(ms).toTimeString().split(' ')[0]`: the local `HH:MM:SS` (`TZ` decides the zone).
+pub fn local_hms(epoch_ms: f64) -> String {
+    let secs = (epoch_ms / 1000.0) as libc::time_t;
+    // SAFETY: localtime_r writes into `tm`, which outlives the call.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&secs, &mut tm) };
+    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+}
+
 /// The directory junit names failure frames relative to: `--root` (TURBO_ROOT), else the
 /// working directory.
 fn junit_root() -> PathBuf {
@@ -1288,6 +1323,15 @@ pub fn state_string(counts: [usize; 5], total: usize) -> String {
 /// results, not `file_count` — under `--bail` some files never run, and those must NOT be
 /// reported as passed; the total stays the discovered file count.
 pub fn footer(file_count: usize, res: &[FileResult], wall_ms: f64) -> String {
+    let (files, tests) = footer_counts(file_count, res);
+    format!(
+        "\n Test Files  {files}\n      Tests  {tests}\n   Duration  {}",
+        format_duration(wall_ms),
+    )
+}
+
+/// The footer's `Test Files` and `Tests` values (vitest's `getStateString`).
+pub fn footer_counts(file_count: usize, res: &[FileResult]) -> (String, String) {
     let mut files = [0usize; 5];
     for r in res {
         let ran = r
@@ -1316,11 +1360,9 @@ pub fn footer(file_count: usize, res: &[FileResult], wall_ms: f64) -> String {
         };
         tests[slot] += 1;
     }
-    format!(
-        "\n Test Files  {}\n      Tests  {}\n   Duration  {}",
+    (
         state_string(files, file_count),
         state_string(tests, all.len()),
-        format_duration(wall_ms),
     )
 }
 
@@ -1400,9 +1442,12 @@ pub fn run(opts: Options) -> i32 {
     // stderr then (like the summary line below).
     let artifact_on_stdout = opts.reporter.is_artifact() && opts.output_file.is_none();
     runner::CONSOLE_TO_STDERR.store(artifact_on_stdout, Ordering::Relaxed);
-    // junit (vitest): each test's console output goes into its test case, and failure frames
-    // are named in the original source (the test file's transform map, location.rs)
-    if opts.reporter == Reporter::Junit {
+    // vitest's human reporters (turbo-test#94) unless TURBO_LEGACY_REPORTER keeps turbo-test's
+    // compact PASS / FAIL lines; without --reporter an AI agent gets vitest's agent reporter.
+    // They, and junit (vitest), print each task's console output with its task, and failure
+    // frames named in the original source (the test file's transform map, location.rs)
+    let human = human_kind(opts.reporter, opts.reporter_explicit);
+    if human.is_some() || opts.reporter == Reporter::Junit {
         std::env::set_var("TURBO_CAPTURE_LOGS", "1");
         std::env::set_var("TURBO_TASK_LOCATION", "1");
         std::env::set_var("TURBO_ERROR_FRAMES", "1");
@@ -1427,6 +1472,25 @@ pub fn run(opts: Options) -> i32 {
     let wall_ms = wall.elapsed().as_secs_f64() * 1000.0;
 
     let t = tally(&res);
+    if let Some(kind) = human {
+        save_durations(&hist_path, &update_history(hist, &files, &res));
+        let root = junit_root();
+        let (test_files, tests) = footer_counts(files.len(), &res);
+        let run = crate::human::Run {
+            root: &root,
+            names: &names,
+            wall_ms,
+            start: local_hms(start_ms),
+            test_files,
+            tests,
+        };
+        let (out, err) = crate::human::render(kind, &res, &run);
+        // vitest's human reporters write no --outputFile
+        print!("{out}");
+        eprint!("{err}");
+        let cov_ok = !coverage::enabled() || coverage::report();
+        return exit_code(&t, cov_ok);
+    }
     print!("{}", render_human(opts.reporter, &res));
     save_durations(&hist_path, &update_history(hist, &files, &res));
 

@@ -121,7 +121,6 @@ fn project(name: &str, files: &[(&str, &str)], esbuild: bool) -> Project {
 /// and test lines, the Failed Suites / Failed Tests sections with code frames on stderr, the
 /// footer with `Start at` and the duration breakdown.
 #[test]
-#[ignore = "turbo-test#94: fails until the fix"]
 fn human_reporters_print_what_vitest_prints() {
     for (scenario, files) in SCENARIOS {
         for reporter in ["default", "verbose"] {
@@ -152,7 +151,6 @@ fn human_reporters_print_what_vitest_prints() {
 /// Under an AI agent (std-env `isAgent`: `AI_AGENT`, `CLAUDECODE`, …) vitest's default is its
 /// agent reporter: no colours, only failed modules and tests, console output of failed tasks only.
 #[test]
-#[ignore = "turbo-test#94: fails until the fix"]
 fn an_agent_gets_vitests_agent_reporter() {
     for (scenario, files) in SCENARIOS {
         let p = project(&format!("hr-{scenario}-agent"), files, false);
