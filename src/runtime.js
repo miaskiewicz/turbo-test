@@ -2766,6 +2766,22 @@ function __ttMock(spec, factory, vitest, isDoMock) {
   if (globalThis.__ttRegisterMock && dir && __ttRegisterMockNow(dir, spec, exports, key)) return;
   (globalThis.__pendingMocks || (globalThis.__pendingMocks = [])).push({ spec: String(spec), exports, vitest, key });
 }
+// vi.dynamicImportSettled (vitest's waitForImportsToResolve): wait a macrotask on the real
+// clock (vitest's safe timers, so fake timers do not hold it), then for every import() still
+// pending — the loader's import() hook tracks them — and again until none is left.
+const __ttPendingImports = new Set();
+globalThis.__ttTrackImport = (p) => {
+  __ttPendingImports.add(p);
+  const done = () => { __ttPendingImports.delete(p); };
+  p.then(done, done);
+  return p;
+};
+async function __ttImportsSettled() {
+  await new Promise((resolve) => __scheduleInternal(resolve, 0));
+  if (!__ttPendingImports.size) return;
+  await Promise.allSettled([...__ttPendingImports]);
+  return __ttImportsSettled();
+}
 globalThis.vi = {
   fn: (impl) => { const s = makeSpy(impl); __spies.push(s); return s; },
   spyOn: (obj, key) => {
@@ -2797,6 +2813,7 @@ globalThis.vi = {
   },
   doMock: (spec, factory) => __ttMock(spec, factory, true, true),
   doUnmock: (spec) => globalThis.vi.unmock(spec),
+  dynamicImportSettled: () => __ttImportsSettled(),
   clearAllMocks: () => { __spies.forEach((s) => s.mockClear()); },
   resetAllMocks: () => { __spies.forEach((s) => s.mockReset()); },
   restoreAllMocks: () => { __spies.forEach((s) => { if (s.mockRestore) s.mockRestore(); }); },

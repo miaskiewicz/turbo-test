@@ -4962,14 +4962,31 @@ fn dynamic_import_callback<'s>(
     // vitest awaits a vi.doMock's async factory before an import() of its module resolves
     // (turbo-test#42 item 6): while one is pending (runtime.js __ttImportWait), the import runs
     // once it is registered
-    if let Some(wait) = do_mock_wait(scope, resource_name, specifier) {
-        let data = v8::Array::new_with_elements(scope, &[resource_name, specifier.into()]);
-        let then = v8::Function::builder(import_after_do_mock)
-            .data(data.into())
-            .build(scope)?;
-        return wait.then(scope, then);
+    let promise = match do_mock_wait(scope, resource_name, specifier) {
+        Some(wait) => {
+            let data = v8::Array::new_with_elements(scope, &[resource_name, specifier.into()]);
+            let then = v8::Function::builder(import_after_do_mock)
+                .data(data.into())
+                .build(scope)?;
+            wait.then(scope, then)?
+        }
+        None => dynamic_import(scope, resource_name, specifier)?,
+    };
+    track_import(scope, promise);
+    Some(promise)
+}
+
+/// Hand an import()'s promise to runtime.js `__ttTrackImport` (vi.dynamicImportSettled waits
+/// for the pending ones, turbo-test#79 item 2).
+fn track_import(scope: &mut v8::PinScope, promise: v8::Local<v8::Promise>) {
+    let global = scope.get_current_context().global(scope);
+    let track = v8::String::new(scope, "__ttTrackImport")
+        .and_then(|k| global.get(scope, k.into()))
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok());
+    if let Some(track) = track {
+        let undefined = v8::undefined(scope).into();
+        track.call(scope, undefined, &[promise.into()]);
     }
-    dynamic_import(scope, resource_name, specifier)
 }
 
 /// The pending async vi.doMock registration an import() of `specifier` from the module

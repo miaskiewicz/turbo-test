@@ -64,7 +64,6 @@ fn svg_elements_have_an_inline_style() {
 /// Item 2: `vi.dynamicImportSettled()` exists and waits for in-flight `import()`s (the report
 /// calls it in a setup file's `afterAll`), with the real timer even under fake timers.
 #[test]
-#[ignore = "turbo-test#79: fails until the fix"]
 fn vi_dynamic_import_settled_waits_for_pending_imports() {
     let p = dropin(
         "dropin-import-settled",
