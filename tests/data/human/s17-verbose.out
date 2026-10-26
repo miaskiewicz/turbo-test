@@ -1,0 +1,26 @@
+
+ RUN  v4.1.12 <root>
+
+stdout | a.test.ts > values
+1 str true null undefined Symbol(s) 10n
+{
+  n: 1,
+  s: 'x',
+  b: false,
+  u: undefined,
+  nl: null,
+  f: [Function: f],
+  arrow: [Function: arrow],
+  re: /a+/g,
+  d: 1970-01-01T00:00:00.000Z,
+  k: K { v: 1 }
+}
+[ 1, 'a', [ 2, [ 3, [Array] ] ] ] Map(1) { 'k' => 1 } Set(1) { 'v' }
+
+ ✓ a.test.ts > values <ms>
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  <time>
+   Duration  <duration>
+

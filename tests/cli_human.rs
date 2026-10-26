@@ -90,9 +90,6 @@ const OBSOLETE: &[(&str, &str)] = &[
     ("__snapshots__/b.test.ts.snap", OLD_SNAP),
 ];
 
-/// More scenarios: a slow test (over vitest's 300ms slowTestThreshold) in a passing and in a
-/// failed file, retried tests, obsolete snapshots and, with `-u`, removed ones, identical errors
-/// merged, console output per task. Each with the extra arguments both runners get.
 /// A scenario: its name, its files and the arguments both runners get.
 type Scenario = (
     &'static str,
@@ -100,7 +97,10 @@ type Scenario = (
     &'static [&'static str],
 );
 
-const MORE: [Scenario; 7] = [
+/// More scenarios: a slow test (over vitest's 300ms slowTestThreshold) in a passing and in a
+/// failed file, retried tests, obsolete snapshots and, with `-u`, removed ones, identical errors
+/// merged, console output per task, diffs of strings and objects, console values.
+const MORE: [Scenario; 9] = [
     (
         "s7",
         &[(
@@ -166,6 +166,36 @@ const MORE: [Scenario; 7] = [
              \x20   beforeAll(() => { console.log('calm hook'); });\n\
              \x20   it('passes', () => { console.log('in passing'); });\n\
              \x20 });\n\
+             });\n",
+        )],
+        &[],
+    ),
+    // the diffs vitest prints (and colours): short strings, lines, arrays, objects, numbers
+    (
+        "s16",
+        &[(
+            "a.test.ts",
+            "import { expect, it } from 'vitest';\n\
+             it('short strings', () => { expect('hello world').toBe('hello there'); });\n\
+             it('lines', () => { expect('a\\nb\\nc').toBe('a\\nB\\nc'); });\n\
+             it('arrays', () => { expect([1, 2, 3]).toEqual([1, 3]); });\n\
+             it('nested', () => { expect({ a: 'x', n: { m: [true, null] } }).toEqual({ a: 'y', n: { m: [false, null] } }); });\n\
+             it('numbers', () => { expect(0.1 + 0.2).toBe(0.3); });\n",
+        )],
+        &[],
+    ),
+    // console values, as Node's util.inspect prints (and colours) them
+    (
+        "s17",
+        &[(
+            "a.test.ts",
+            "import { it } from 'vitest';\n\
+             class K { constructor() { this.v = 1; } }\n\
+             it('values', () => {\n\
+             \x20 console.log(1, 'str', true, null, undefined, Symbol('s'), 10n);\n\
+             \x20 console.log({ n: 1, s: 'x', b: false, u: undefined, nl: null, f() {}, arrow: () => 1, re: /a+/g, d: new Date(0), k: new K() });\n\
+             \x20 console.log([1, 'a', [2, [3, [4, [5]]]]], new Map([['k', 1]]), new Set(['v']));\n\
+             \x20 console.error('%s is %d', 'n', 42, { x: 1 });\n\
              });\n",
         )],
         &[],
@@ -317,6 +347,90 @@ fn slow_tests_retries_and_obsolete_snapshots_print_what_vitest_prints() {
                 reference(scenario, reporter, "err"),
                 "{ctx}"
             );
+        }
+    }
+}
+
+/// Coloured `text` as `tests/data/human-color` spells it: the project root, the `Start at` and
+/// `Duration` lines, and every duration's digits (` 12ms`, ` 12\x1b[2mms`).
+fn normalize_colored(text: &str, root: &str) -> String {
+    text.replace(root, "<root>")
+        .split('\n')
+        .map(|l| {
+            if l.contains("   Start at ") {
+                return "<start>".to_string();
+            }
+            if l.contains("   Duration ") {
+                return "<duration>".to_string();
+            }
+            let mut out = String::new();
+            let mut rest = l;
+            while let Some(i) = rest.find(|c: char| c.is_ascii_digit()) {
+                let digits = rest[i..].len()
+                    - rest[i..]
+                        .trim_start_matches(|c: char| c.is_ascii_digit())
+                        .len();
+                let after = &rest[i + digits..];
+                let duration = (after.starts_with("ms") || after.starts_with("\x1b[2mms"))
+                    && rest[..i].ends_with(' ');
+                out.push_str(&rest[..i]);
+                out.push_str(if duration {
+                    "<n>"
+                } else {
+                    &rest[i..i + digits]
+                });
+                rest = after;
+            }
+            out.push_str(rest);
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Without `NO_COLOR` (and no agent) vitest colours its output even in a pipe (tinyrainbow):
+/// the labels, symbols, counts and durations, the console values (Node's util.inspect colours),
+/// the diffs, the frames and the syntax-highlighted code frames (tinyhighlight). Every scenario
+/// with both reporters on both loaders, against `tests/data/human-color`.
+#[test]
+#[ignore = "turbo-test#94: fails until the fix"]
+fn coloured_output_is_vitests() {
+    let all = SCENARIOS
+        .iter()
+        .map(|(name, files)| (*name, *files, &[][..]))
+        .chain(MORE.iter().copied());
+    for (scenario, files, args) in all {
+        for reporter in ["default", "verbose"] {
+            for esbuild in [false, true] {
+                let p = project(&format!("hc-{scenario}-{reporter}"), files, esbuild);
+                let root = p.dir.display().to_string();
+                let mut argv: Vec<&str> = args.to_vec();
+                argv.extend(["--reporter", reporter]);
+                let env = [
+                    ("TURBO_LEGACY_REPORTER", "0"),
+                    ("TURBO_JOBS", "1"),
+                    ("TERM", "xterm-256color"),
+                ];
+                let r = turbo_test(&p.dir, &argv, &env);
+                let ctx = format!("{scenario} {reporter} esbuild={esbuild}\n{}", r.all());
+                let reference = |stream: &str| {
+                    let path = common::repo_root()
+                        .join("tests/data/human-color")
+                        .join(format!("{scenario}-{reporter}.{stream}"));
+                    std::fs::read_to_string(&path)
+                        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                };
+                assert_eq!(
+                    normalize_colored(&r.stdout, &root),
+                    reference("out"),
+                    "{ctx}"
+                );
+                assert_eq!(
+                    normalize_colored(&r.stderr, &root),
+                    reference("err"),
+                    "{ctx}"
+                );
+            }
         }
     }
 }

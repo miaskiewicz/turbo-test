@@ -1,0 +1,30 @@
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.12 [39m[90m<root>[39m
+
+[90mstdout[2m | a.test.ts
+[22m[39mfile level
+
+[90mstdout[2m | a.test.ts[2m > [22m[2mouter
+[22m[39mouter hook
+
+[90mstdout[2m | a.test.ts[2m > [22m[2mouter[2m > [22m[2minner
+[22m[39minner hook
+
+[90mstdout[2m | a.test.ts[2m > [22m[2mouter[2m > [22m[2minner[2m > [22m[2mfails
+[22m[39min failing
+
+[90mstdout[2m | a.test.ts[2m > [22m[2mouter[2m > [22m[2mcalm
+[22m[39mcalm hook
+
+[90mstdout[2m | a.test.ts[2m > [22m[2mouter[2m > [22m[2mcalm[2m > [22m[2mpasses
+[22m[39min passing
+
+ [31m×[39m a.test.ts[2m > [22mouter[2m > [22minner[2m > [22mfails[32m <n>[2mms[22m[39m
+[31m   → expected 1 to be 2 // Object.is equality[39m
+ [32m✓[39m a.test.ts[2m > [22mouter[2m > [22mcalm[2m > [22mpasses[32m <n>[2mms[22m[39m
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m1 passed[39m[22m[90m (2)[39m
+<start>
+<duration>
+
