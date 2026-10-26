@@ -324,3 +324,87 @@ it('URL arguments', () => {
     assert_eq!(r.code, Some(0), "{}", r.all());
     assert!(r.stdout.contains("Tests  5 passed (5)"), "{}", r.all());
 }
+
+/// turbo-test#86: readFileSync / writeFileSync / appendFileSync / mkdirSync / rmSync /
+/// rmdirSync / unlinkSync (and their fs/promises forms) fail and succeed as Node's do: its
+/// errors (code, errno, syscall, path, message), no implicit parent directories, `recursive` /
+/// `force` options, Buffers without an encoding. Values: Node 26 (vitest 4.1.12 runs node:fs).
+#[test]
+#[ignore = "turbo-test#86: fails until the fix"]
+fn fs_calls_fail_and_succeed_like_node() {
+    let p = Project::new("rc-fs-node");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file("w/f.txt", "hi\n");
+    p.file("w/full/x/.keep", "");
+    p.file(
+        "a.test.ts",
+        r#"import { expect, it } from 'vitest';
+import * as fs from 'node:fs';
+const err = (f: () => unknown) => { try { f(); return 'no throw'; } catch (e: any) { return [e.name, e.code, e.errno, e.syscall, e.path, e.message]; } };
+it('readFileSync', () => {
+  expect(err(() => fs.readFileSync('w/nope.txt'))).toEqual(['Error', 'ENOENT', -2, 'open', 'w/nope.txt', "ENOENT: no such file or directory, open 'w/nope.txt'"]);
+  expect(err(() => fs.readFileSync('w/full'))).toEqual(['Error', 'EISDIR', -21, 'read', undefined, 'EISDIR: illegal operation on a directory, read']);
+  const b = fs.readFileSync('w/f.txt');
+  expect([Buffer.isBuffer(b), b.toString('hex')]).toEqual([true, '68690a']);
+  expect([fs.readFileSync('w/f.txt', 'utf8'), fs.readFileSync('w/f.txt', { encoding: 'utf8' }), fs.readFileSync('w/f.txt', 'latin1')]).toEqual(['hi\n', 'hi\n', 'hi\n']);
+});
+it('writeFileSync / appendFileSync', () => {
+  expect(err(() => fs.writeFileSync('w/a/b/c.txt', 'x'))).toEqual(['Error', 'ENOENT', -2, 'open', 'w/a/b/c.txt', "ENOENT: no such file or directory, open 'w/a/b/c.txt'"]);
+  expect(err(() => fs.writeFileSync('w/f.txt/x', 'x'))).toEqual(['Error', 'ENOTDIR', -20, 'open', 'w/f.txt/x', "ENOTDIR: not a directory, open 'w/f.txt/x'"]);
+  expect(err(() => fs.writeFileSync('w/full', 'x'))).toEqual(['Error', 'EISDIR', -21, 'open', 'w/full', "EISDIR: illegal operation on a directory, open 'w/full'"]);
+  expect(err(() => fs.appendFileSync('w/a/b/c.txt', 'x'))).toEqual(['Error', 'ENOENT', -2, 'open', 'w/a/b/c.txt', "ENOENT: no such file or directory, open 'w/a/b/c.txt'"]);
+  fs.writeFileSync('w/bin', Buffer.from([0, 255, 1]));
+  fs.appendFileSync('w/bin', new Uint8Array([2]));
+  expect(fs.readFileSync('w/bin').toString('hex')).toBe('00ff0102');
+  fs.writeFileSync('w/u8', new Uint8Array([104, 105]));
+  expect(fs.readFileSync('w/u8', 'utf8')).toBe('hi');
+  expect(fs.existsSync('w/a')).toBe(false);
+});
+it('mkdirSync', () => {
+  expect(err(() => fs.mkdirSync('w/m/n'))).toEqual(['Error', 'ENOENT', -2, 'mkdir', 'w/m/n', "ENOENT: no such file or directory, mkdir 'w/m/n'"]);
+  expect(err(() => fs.mkdirSync('w/f.txt'))).toEqual(['Error', 'EEXIST', -17, 'mkdir', 'w/f.txt', "EEXIST: file already exists, mkdir 'w/f.txt'"]);
+  expect(err(() => fs.mkdirSync('w/full'))).toEqual(['Error', 'EEXIST', -17, 'mkdir', 'w/full', "EEXIST: file already exists, mkdir 'w/full'"]);
+  expect(fs.mkdirSync('w/m2')).toBeUndefined();
+  expect([fs.mkdirSync('w/q/r/s', { recursive: true }), fs.mkdirSync('./w/q3/r', { recursive: true }), fs.mkdirSync('w/q/r/s', { recursive: true })]).toEqual(['w/q', './w/q3', undefined]);
+  expect(err(() => fs.mkdirSync('w/f.txt/z', { recursive: true }))).toEqual(['Error', 'ENOTDIR', -20, 'mkdir', 'w/f.txt/z', "ENOTDIR: not a directory, mkdir 'w/f.txt/z'"]);
+  expect(fs.statSync('w/q/r/s').isDirectory()).toBe(true);
+});
+it('rmSync / rmdirSync / unlinkSync', () => {
+  expect(err(() => fs.rmSync('w/nope'))).toEqual(['Error', 'ENOENT', -2, 'lstat', 'w/nope', "ENOENT: no such file or directory, lstat 'w/nope'"]);
+  expect(fs.rmSync('w/nope', { force: true })).toBeUndefined();
+  fs.mkdirSync('w/d/e', { recursive: true });
+  expect(err(() => fs.rmSync('w/d'))).toEqual(['SystemError', 'ERR_FS_EISDIR', 21, 'rm', 'w/d', 'Path is a directory: rm returned EISDIR (is a directory) w/d']);
+  fs.rmSync('w/d', { recursive: true });
+  expect(fs.existsSync('w/d')).toBe(false);
+  fs.writeFileSync('w/g.txt', 'g');
+  fs.rmSync('w/g.txt');
+  expect(fs.existsSync('w/g.txt')).toBe(false);
+  expect(err(() => fs.rmdirSync('w/nope'))).toEqual(['Error', 'ENOENT', -2, 'rmdir', 'w/nope', "ENOENT: no such file or directory, rmdir 'w/nope'"]);
+  expect(err(() => fs.rmdirSync('w/f.txt'))).toEqual(['Error', 'ENOTDIR', -20, 'rmdir', 'w/f.txt', "ENOTDIR: not a directory, rmdir 'w/f.txt'"]);
+  fs.mkdirSync('w/ne/x', { recursive: true });
+  const ne: any = err(() => fs.rmdirSync('w/ne'));
+  expect([ne[1], ne[3], ne[5]]).toEqual(['ENOTEMPTY', 'rmdir', "ENOTEMPTY: directory not empty, rmdir 'w/ne'"]);
+  fs.rmdirSync('w/ne/x');
+  expect(fs.existsSync('w/ne/x')).toBe(false);
+  expect(err(() => fs.unlinkSync('w/nope'))).toEqual(['Error', 'ENOENT', -2, 'unlink', 'w/nope', "ENOENT: no such file or directory, unlink 'w/nope'"]);
+  fs.unlinkSync('w/u8');
+  expect(fs.existsSync('w/u8')).toBe(false);
+});
+it('fs/promises', async () => {
+  const p = fs.promises;
+  expect(await p.mkdir('w/p4/z', { recursive: true })).toBe('w/p4');
+  await expect(p.rm('w/nope')).rejects.toMatchObject({ code: 'ENOENT', syscall: 'lstat' });
+  await expect(p.unlink('w/nope')).rejects.toMatchObject({ code: 'ENOENT', syscall: 'unlink' });
+  await expect(p.rmdir('w/nope')).rejects.toMatchObject({ code: 'ENOENT', syscall: 'rmdir' });
+  await expect(p.readFile('w/nope')).rejects.toMatchObject({ code: 'ENOENT', syscall: 'open' });
+  await expect(p.writeFile('w/a/b', 'x')).rejects.toMatchObject({ code: 'ENOENT', syscall: 'open' });
+  await expect(p.mkdir('w/f.txt')).rejects.toMatchObject({ code: 'EEXIST', syscall: 'mkdir' });
+  expect(Buffer.isBuffer(await p.readFile('w/f.txt'))).toBe(true);
+  expect(await p.readFile('w/f.txt', 'utf8')).toBe('hi\n');
+});
+"#,
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(r.stdout.contains("Tests  5 passed (5)"), "{}", r.all());
+}
