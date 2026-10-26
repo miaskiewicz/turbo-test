@@ -407,3 +407,53 @@ it('fs/promises', async () => {
     assert_eq!(r.code, Some(0), "{}", r.all());
     assert!(r.stdout.contains("Tests  5 passed (5)"), "{}", r.all());
 }
+
+/// turbo-test#93: `util.inspect` / `util.format` and `console.log` format as Node's (values:
+/// Node 26; the file passes on vitest 4.1.12).
+#[test]
+#[ignore = "turbo-test#93: fails until the fix"]
+fn console_and_util_format_like_node() {
+    let p = Project::new("rc-inspect");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "a.test.ts",
+        r#"import { expect, it } from 'vitest';
+import util from 'node:util';
+class Foo { a = 1; }
+it('util.inspect', () => {
+  const circ: any = { name: 'c' }; circ.self = circ;
+  expect([
+    util.inspect('x'), util.inspect({ a: 1, 'b-c': [1, 2] }), util.inspect(new Map([['a', 1]])), util.inspect(new Set([1])),
+    util.inspect({ a: { b: { c: { d: 1 } } } }), util.inspect([undefined, null, -0, 1n]), util.inspect(new Foo()),
+    util.inspect(Object.create(null)), util.inspect(circ), util.inspect([, 1]), util.inspect("it's"), util.inspect(() => {}),
+    util.inspect(class A {}), util.inspect(new Date(0)), util.inspect(Symbol('q')), util.inspect({ get g() { return 1; } }),
+  ]).toEqual([
+    "'x'", "{ a: 1, 'b-c': [ 1, 2 ] }", "Map(1) { 'a' => 1 }", 'Set(1) { 1 }',
+    '{ a: { b: { c: [Object] } } }', '[ undefined, null, -0, 1n ]', 'Foo { a: 1 }',
+    '[Object: null prototype] {}', "<ref *1> { name: 'c', self: [Circular *1] }", '[ <1 empty item>, 1 ]', '"it\'s"', '[Function (anonymous)]',
+    '[class A]', '1970-01-01T00:00:00.000Z', 'Symbol(q)', '{ g: [Getter] }',
+  ]);
+  expect(util.inspect(Array.from({ length: 30 }, (_, i) => i))).toBe('[\n   0,  1,  2,  3,  4,  5,  6,  7,  8,\n   9, 10, 11, 12, 13, 14, 15, 16, 17,\n  18, 19, 20, 21, 22, 23, 24, 25, 26,\n  27, 28, 29\n]');
+  expect(util.inspect({ a: 'x'.repeat(30), b: 'y'.repeat(30), c: 'z'.repeat(10) })).toBe(`{\n  a: '${'x'.repeat(30)}',\n  b: '${'y'.repeat(30)}',\n  c: 'zzzzzzzzzz'\n}`);
+  expect(util.inspect({ a: { b: { c: { d: 1 } } } }, { depth: 0 })).toBe('{ a: [Object] }');
+});
+it('util.format', () => {
+  expect([
+    util.format('%s=%d', 'n', 42, { x: 1 }), util.format('%s %d %i %f %j %o %O %% %c|', 'str', 42.5, 42.5, '3.5', { a: 1 }, { b: 2 }, { c: 3 }, 'css'),
+    util.format(1, 2), util.format('%s', { a: { b: 1 } }), util.format('%s:%s', 'x'), util.format('100%', 1),
+  ]).toEqual(['n=42 { x: 1 }', 'str 42.5 42 3.5 {"a":1} { b: 2 } { c: 3 } % |', '1 2', '{ a: [Object] }', 'x:%s', '100% 1']);
+});
+it('console.log', () => { console.log('two', { a: 1 }, [1, 'b']); });
+"#,
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(r.stdout.contains("Tests  3 passed (3)"), "{}", r.all());
+    assert!(
+        r.stdout
+            .lines()
+            .any(|l| l.ends_with(" two { a: 1 } [ 1, 'b' ]")),
+        "{}",
+        r.all()
+    );
+}
