@@ -7,8 +7,25 @@
 // `--silent` (host → globalThis.__TT_SILENT): suppress test console output entirely. Checked at
 // call time, not eval time — the host injects __TT_SILENT AFTER this module is snapshot-evaluated.
 const __noop = () => {};
-// The arguments are formatted as Node's util.format (turbo-test#93).
-const __emit = (tag) => (...a) => { if (!globalThis.__TT_SILENT) globalThis.log(tag, __nodeFormat(...a)); };
+// The arguments are formatted as Node's util.format (turbo-test#93). With a reporter that keeps
+// the tests' output (`__TT_CAPTURE_LOGS`, junit: turbo-test#81) it is recorded on the running
+// test instead (__ttLog), as vitest's console does; outside a test it is dropped.
+const __emit = (tag) => (...a) => {
+  if (globalThis.__TT_SILENT) return;
+  if (globalThis.__TT_CAPTURE_LOGS) return __ttLog(tag === '[error]' || tag === '[warn]' ? 'stderr' : 'stdout', __nodeFormat(...a) + '\n');
+  globalThis.log(tag, __nodeFormat(...a));
+};
+// The running test's console output: [type, content] entries. vitest buffers each stream and
+// flushes it once no write came for a macrotask, so writes with no macrotask between them form
+// one entry.
+let __ttTestLogs = null;
+function __ttLog(type, content) {
+  if (!__ttTestLogs) return;
+  const tick = __loop.ticks;
+  const last = __ttTestLogs.findLast((l) => l[0] === type);
+  if (last && last[2] === tick) last[1] += content;
+  else __ttTestLogs.push([type, content, tick]);
+}
 globalThis.console = {
   log: __emit('[log]'),
   info: __emit('[info]'),
@@ -137,7 +154,9 @@ __loop.drainNextTicks = function () {
 // Real mode: run the single earliest-due macrotask (Rust drains micro/nextTick around it).
 // Considers BOTH the user macro queue and the internal test-timeout queue, firing whichever is
 // due first — so a hung test (no user timers) still advances to its timeout and rejects.
+__loop.ticks = 0;
 __loop.stepMacro = function () {
+  __loop.ticks++;
   __dropStaleTimers();
   __loop.macro.sort((a, b) => a.due - b.due || a.id - b.id);
   __loop.internal.sort((a, b) => a.due - b.due || a.id - b.id);
@@ -2660,6 +2679,7 @@ function makeExpect(actual, negated = false) {
   };
   // chai's assert with vitest's templates (turbo-test#71)
   const c = (pass, msg, notMsg, exp, act = actual) => __chaiAssert(negated, pass, msg, notMsg, actual, exp, act);
+  const cn = (pass, msg, notMsg, exp, act = actual) => __chaiAssert(negated, pass, msg, notMsg, actual, exp, act, false);
   const spyOf = () => {
     if (!(typeof actual === 'function' && actual._isMockFunction === true)) throw new TypeError(`${__inspect(actual)} is not a spy or a call to a spy!`);
     return actual;
@@ -2728,15 +2748,15 @@ function makeExpect(actual, negated = false) {
     toBeUndefined() { c(actual === undefined, 'expected #{this} to be undefined', 'expected #{this} not to be undefined', undefined); },
     toBeDefined() { c(actual !== undefined, 'expected #{this} to be defined', 'expected #{this} to be undefined', actual); },
     toBeNaN() { c(Number.isNaN(actual), 'expected #{this} to be NaN', 'expected #{this} not to be NaN', NaN); },
-    toBeGreaterThan(n) { numbers(actual, 'actual'); numbers(n, 'expected'); c(actual > n, `expected ${actual} to be greater than ${n}`, `expected ${actual} to be not greater than ${n}`, n); },
-    toBeGreaterThanOrEqual(n) { numbers(actual, 'actual'); numbers(n, 'expected'); c(actual >= n, `expected ${actual} to be greater than or equal to ${n}`, `expected ${actual} to be not greater than or equal to ${n}`, n); },
-    toBeLessThan(n) { numbers(actual, 'actual'); numbers(n, 'expected'); c(actual < n, `expected ${actual} to be less than ${n}`, `expected ${actual} to be not less than ${n}`, n); },
-    toBeLessThanOrEqual(n) { numbers(actual, 'actual'); numbers(n, 'expected'); c(actual <= n, `expected ${actual} to be less than or equal to ${n}`, `expected ${actual} to be not less than or equal to ${n}`, n); },
+    toBeGreaterThan(n) { numbers(actual, 'actual'); numbers(n, 'expected'); cn(actual > n, `expected ${actual} to be greater than ${n}`, `expected ${actual} to be not greater than ${n}`, n); },
+    toBeGreaterThanOrEqual(n) { numbers(actual, 'actual'); numbers(n, 'expected'); cn(actual >= n, `expected ${actual} to be greater than or equal to ${n}`, `expected ${actual} to be not greater than or equal to ${n}`, n); },
+    toBeLessThan(n) { numbers(actual, 'actual'); numbers(n, 'expected'); cn(actual < n, `expected ${actual} to be less than ${n}`, `expected ${actual} to be not less than ${n}`, n); },
+    toBeLessThanOrEqual(n) { numbers(actual, 'actual'); numbers(n, 'expected'); cn(actual <= n, `expected ${actual} to be less than or equal to ${n}`, `expected ${actual} to be not less than or equal to ${n}`, n); },
     toBeCloseTo(n, d = 2) {
       let pass = false, expectedDiff = 0, receivedDiff = 0;
       if ((n === Infinity && actual === Infinity) || (n === -Infinity && actual === -Infinity)) pass = true;
       else { expectedDiff = 10 ** -d / 2; receivedDiff = Math.abs(actual - n); pass = receivedDiff < expectedDiff; }
-      c(pass, `expected #{this} to be close to #{exp}, received difference is ${receivedDiff}, but expected ${expectedDiff}`, `expected #{this} to not be close to #{exp}, received difference is ${receivedDiff}, but expected ${expectedDiff}`, n);
+      cn(pass, `expected #{this} to be close to #{exp}, received difference is ${receivedDiff}, but expected ${expectedDiff}`, `expected #{this} to not be close to #{exp}, received difference is ${receivedDiff}, but expected ${expectedDiff}`, n);
     },
     toContain(x) {
       if (typeof Node !== 'undefined' && actual instanceof Node) {
@@ -2926,7 +2946,7 @@ function makeExpect(actual, negated = false) {
     toHaveBeenCalledTimes(times) {
       const spy = spyOf();
       const n = spy.mock.calls.length;
-      c(n === times, `expected "${spy.getMockName()}" to be called #{exp} times, but got ${n} times`, `expected "${spy.getMockName()}" to not be called #{exp} times`, times, n);
+      cn(n === times, `expected "${spy.getMockName()}" to be called #{exp} times, but got ${n} times`, `expected "${spy.getMockName()}" to not be called #{exp} times`, times, n);
     },
     toHaveBeenCalledWith(...a) {
       const spy = spyOf();
@@ -2939,7 +2959,7 @@ function makeExpect(actual, negated = false) {
     toHaveBeenCalledOnce() {
       const spy = spyOf();
       const n = spy.mock.calls.length;
-      c(n === 1, `expected "${spy.getMockName()}" to be called once, but got ${n} times`, `expected "${spy.getMockName()}" to not be called once`, 1, n);
+      cn(n === 1, `expected "${spy.getMockName()}" to be called once, but got ${n} times`, `expected "${spy.getMockName()}" to not be called once`, 1, n);
     },
     toHaveBeenLastCalledWith(...a) {
       const spy = spyOf();
@@ -2955,7 +2975,7 @@ function makeExpect(actual, negated = false) {
     toHaveReturned() {
       const spy = spyOf();
       const pass = spy.mock.calls.length > 0 && spy.mock.results.some((r) => r.type !== 'throw');
-      c(pass, `expected "${spy.getMockName()}" to be successfully called at least once`, `expected "${spy.getMockName()}" to not be successfully called`, pass, !pass);
+      cn(pass, `expected "${spy.getMockName()}" to be successfully called at least once`, `expected "${spy.getMockName()}" to not be successfully called`, pass, !pass);
     },
     toHaveReturnedWith(v) {
       const spy = spyOf();
@@ -3715,9 +3735,11 @@ function __chaiMsg(tpl, obj, exp, act) {
   return tpl.replace(/#\{this\}/g, () => __objDisplay(obj)).replace(/#\{act\}/g, () => __objDisplay(act)).replace(/#\{exp\}/g, () => __objDisplay(exp));
 }
 // chai `assert(pass, msg, negatedMsg, expected, actual)` for an assertion on `obj`.
-function __chaiAssert(negated, pass, msg, notMsg, obj, exp, act) {
+// `showDiff` false: vitest's comparison and call-count matchers pass it (no diff is printed);
+// chai also drops the diff when both values are undefined.
+function __chaiAssert(negated, pass, msg, notMsg, obj, exp, act, showDiff = true) {
   if (negated ? !pass : pass) return;
-  throw new __ChaiAssertionError(__chaiMsg(negated ? notMsg : msg, obj, exp, act), { actual: act, expected: exp });
+  throw new __ChaiAssertionError(__chaiMsg(negated ? notMsg : msg, obj, exp, act), { actual: act, expected: exp, showDiff: showDiff && !(exp === undefined && act === undefined) });
 }
 // The asymmetric matchers' vitest names and samples.
 function __asymName(m) {
@@ -4327,6 +4349,31 @@ globalThis.afterAll = (fn) => current.hooks.aa.push(fn);
 // (`passed` / `failed` / `skipped` / `todo`), and for a test that ran its real start time and
 // duration (ms) and its failure messages (each error's `stack`, else its `message`, as vitest's
 // JSON reporter) (#63).
+// A failure as vitest's reporters print it (@vitest/utils processError + printErrorInner):
+// name, message, the diff of expected / actual, the stack and the cause (turbo-test#81).
+function __errorInfo(e) {
+  if (e === null || (typeof e !== 'object' && typeof e !== 'function')) {
+    const s = String(e);
+    return { name: '', message: s.split('\n')[0], diff: '', stack: s, cause: null };
+  }
+  let diff = '';
+  if (e.showDiff || (e.showDiff === undefined && e.expected !== undefined && e.actual !== undefined)) {
+    try { diff = __printDiffOrStringify(e.actual, e.expected); } catch (err) { diff = ''; }
+  }
+  const cause = e.cause && typeof e.cause === 'object' && 'name' in e.cause ? __errorInfo(e.cause) : null;
+  return { name: String(e.name || 'Unknown Error'), message: e.message === undefined ? '' : String(e.message), diff: diff || '', stack: String(e.stack || ''), cause };
+}
+globalThis.__ttErrorInfo = (e) => __errorInfo(e);
+// @vitest/utils printDiffOrStringify(received, expected)
+function __printDiffOrStringify(received, expected) {
+  if (typeof expected === 'string' && typeof received === 'string' && expected.length > 0 && received.length > 0
+    && expected.length <= 20000 && received.length <= 20000 && expected !== received && !expected.includes('\n') && !received.includes('\n')) {
+    return `Expected: "${expected}"\nReceived: "${received}"`;
+  }
+  const d = __vdiff(expected, received);
+  if (!d) return '';
+  return d.startsWith('- Expected:\n') ? d : `- Expected\n+ Received\n\n${d}`;
+}
 function __testRecord(t, chain, status, extra) {
   return {
     name: chain.map((s) => s.name).filter(Boolean).concat(t.name).join(' > '),
@@ -4377,10 +4424,16 @@ async function runSuite(suite, ancestors, summary, mode = '') {
     hookFailed = true;
     failed = true;
   }
+  // a suite's hook errors (vitest's failed suite, a junit testcase of its own: turbo-test#81)
+  const suiteStart = __loop.realNow();
+  const suiteErrors = [];
+  // in vitest's getSuites order (a suite before the suites inside it)
+  const suiteSlot = summary.suite_errors.push(null) - 1;
   if (!skipAll && !idle && !forbidden) {
     for (const h of suite.hooks.ba) {
       try { await h(); } catch (e) {
         summary.failures.push(`${suite.name || '<root>'} beforeAll: ${(e && e.message) || String(e)}`);
+        suiteErrors.push(__errorInfo(e));
         hookFailed = true;
         failed = true;
         break;
@@ -4439,6 +4492,7 @@ async function runSuite(suite, ancestors, summary, mode = '') {
     // (stubbed to a constant 0 in this runtime, see the perf stub near top of file) nor Date.now()
     // (fake timers / vi.setSystemTime replace it).
     const __t0 = __loop.realNow();
+    __ttTestLogs = [];
     for (let a = 0; a < attempts && !ok; a++) {
       // Reset per-test snapshot + assertion-count state (snapshot counter is keyed by test name,
       // so distinct multi-snapshot tests don't collide; assertion enforcement resets each attempt).
@@ -4458,7 +4512,9 @@ async function runSuite(suite, ancestors, summary, mode = '') {
           timer = __scheduleInternal(() => rej(new Error(`test timed out in ${timeoutMs}ms`)), timeoutMs);
         });
         try {
-          await Promise.race([Promise.resolve().then(() => t.fn()), timed]);
+          // called as a plain function, as vitest calls it (its stack frame has no method name)
+          const fn = t.fn;
+          await Promise.race([Promise.resolve().then(() => fn()), timed]);
         } finally {
           __clearInternal(timer);
         }
@@ -4486,7 +4542,8 @@ async function runSuite(suite, ancestors, summary, mode = '') {
       }
     }
     const __dur = __loop.realNow() - __t0;
-    const timing = { duration_ms: __dur, start_ms: __t0 };
+    const timing = { duration_ms: __dur, start_ms: __t0, logs: __ttTestLogs.map((l) => [l[0], l[1]]) };
+    __ttTestLogs = null;
     // a passing it.fails is vitest's `expected fail` in the summary footer (#78)
     if (ok) { summary.passed++; summary.tests.push(__testRecord(t, chain, 'passed', t.fails ? { ...timing, expected_fail: true } : timing)); }
     else {
@@ -4505,17 +4562,19 @@ async function runSuite(suite, ancestors, summary, mode = '') {
       }
       summary.failures.push(`${label}: ${msg}`);
       const failure = (lastErr && (lastErr.stack || lastErr.message)) || String(lastErr);
-      summary.tests.push(__testRecord(t, chain, 'failed', { ...timing, message: msg, failure_messages: [String(failure)] }));
+      summary.tests.push(__testRecord(t, chain, 'failed', { ...timing, message: msg, failure_messages: [String(failure)], errors: [__errorInfo(lastErr)] }));
     }
   }
   if (!skipAll && !idle && !forbidden) {
     for (const h of suite.hooks.aa) {
       try { await h(); } catch (e) {
         summary.failures.push(`${suite.name || '<root>'} afterAll: ${(e && e.message) || String(e)}`);
+        suiteErrors.push(__errorInfo(e));
         failed = true;
       }
     }
   }
+  if (suiteErrors.length && ancestors.length) summary.suite_errors[suiteSlot] = { name: suite.name, duration_ms: __loop.realNow() - suiteStart, errors: suiteErrors };
   record(failed ? 'fail' : skipAll || idle ? 'skip' : 'pass');
   return failed;
 }
@@ -4557,7 +4616,7 @@ globalThis.__tt = {
   async run() {
     // `suites`: one state per describe block ('pass' / 'fail' / 'skip' / 'todo'), for the JSON
     // reporter's suite counts.
-    const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [], suites: [], skippedNames: [] };
+    const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [], suites: [], skippedNames: [], suite_errors: [] };
     // vitest (runner `runFiles`): a file that collected NO task at all — no test or suite, skipped
     // and todo ones included — fails with "No test suite found in file <path>" unless
     // passWithNoTests. Reported as the file's only failure entry with no failed test; the CLI

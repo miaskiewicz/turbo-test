@@ -538,7 +538,8 @@ fn root_names_files_relative_to_the_root() {
     assert!(
         r.stdout.contains("<testsuite name=\"b.test.js\"")
             && r.stdout
-                .contains("<testcase name=\"bad\" classname=\"inner/a.test.js\""),
+                .contains("<testcase classname=\"inner/a.test.js\" name=\"bad\" time=\"")
+            && r.stdout.contains("\n ❯ inner/a.test.js:1:53\n"),
         "{}",
         r.all()
     );

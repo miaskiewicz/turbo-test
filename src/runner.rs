@@ -1567,6 +1567,11 @@ fn run_setup_file(
                 let ev = module.evaluate(tc);
                 tc.perform_microtask_checkpoint();
                 let caught = caught_message(tc, "unknown");
+                let exc = match module.get_status() {
+                    v8::ModuleStatus::Errored => Some(module.get_exception()),
+                    _ => tc.exception(),
+                };
+                note_load_error(tc, exc);
                 evaluate_error(caught, ev.is_some(), module.get_status(), || {
                     module.get_exception().to_rust_string_lossy(tc)
                 })
@@ -2206,6 +2211,14 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
 /// built uncached with the emitter's source map, whose lines follow the mock hoisting and the
 /// shared-`let` prelude so the map stays aligned with the code that runs.
 fn native_transform_cjs_located(file: &Path) -> Option<String> {
+    let (code, segs, raw) = native_transform_cjs_mapped(file)?;
+    crate::location::set_map(file, segs, &raw);
+    Some(code)
+}
+
+/// `native_transform_cjs` with the map of its lines back to the source (and that source): the
+/// test file's for test locations, another app module's while failure frames are printed.
+fn native_transform_cjs_mapped(file: &Path) -> Option<(String, crate::location::Segments, String)> {
     let raw = with_binder(file, std::fs::read_to_string(file).ok()?, true);
     let legacy_decorators = decorator_metadata_enabled(file) && file_has_decorator(&raw);
     let emitted = crate::esm_cjs::emit_mapped(file, &raw, legacy_decorators)?;
@@ -2220,8 +2233,7 @@ fn native_transform_cjs_located(file: &Path) -> Option<String> {
         .iter()
         .map(|o| o.and_then(|i| map.get(i).cloned()).unwrap_or_default())
         .collect();
-    crate::location::set_map(file, segs, &raw);
-    Some(code)
+    Some((code, segs, raw))
 }
 
 /// Native (oxc) counterpart of `esbuild_bundle_dep_cjs` for node_modules files (P2b). Instead of
@@ -3201,6 +3213,13 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
                     if let Some(code) = native_transform_cjs_located(abs) {
                         return Some(code);
                     }
+                } else if crate::location::frames_enabled() {
+                    // failure frames (junit) in this module map back too; its code runs below
+                    // the CJS wrapper's first line
+                    if let Some((code, segs, _)) = native_transform_cjs_mapped(abs) {
+                        crate::location::set_module_map(abs, segs, 1);
+                        return Some(code);
+                    }
                 }
                 if let Some(code) = native_transform_cjs(abs) {
                     return Some(code);
@@ -3237,6 +3256,17 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
     if !legacy_decorators && crate::location::is_entry(abs) {
         if let Ok((code, mappings)) = crate::transform::transform_mapped(abs, &raw) {
             crate::location::set_map(abs, crate::coverage::mappings_segments(&mappings), &raw);
+            return Some(code);
+        }
+    }
+    // Another app module while failure frames are printed (junit): keep its map too.
+    if !legacy_decorators
+        && crate::location::frames_enabled()
+        && !abs.components().any(|c| c.as_os_str() == "node_modules")
+    {
+        if let Ok((code, mappings)) = crate::transform::transform_mapped(abs, &raw) {
+            let map = crate::coverage::mappings_segments(&mappings);
+            crate::location::set_module_map(abs, map, 0);
             return Some(code);
         }
     }
@@ -3732,7 +3762,10 @@ fn load_cjs_inner<'s>(
         if located {
             crate::location::set_offset(abs, 1);
         }
-        let origin = if crate::coverage::enabled() || located {
+        // (failure frames name an app module's file too: junit, turbo-test#81)
+        let framed = crate::location::frames_enabled()
+            && !abs.components().any(|c| c.as_os_str() == "node_modules");
+        let origin = if crate::coverage::enabled() || located || framed {
             v8::String::new(tc, &abs.to_string_lossy()).map(|name| script_origin(tc, name))
         } else {
             None
@@ -5508,6 +5541,10 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     if crate::location::enabled() {
         prelude.push_str("globalThis.__TT_TASK_LOCATION=true;");
     }
+    // --reporter junit → each test's console output goes to the report (turbo-test#81)
+    if std::env::var("TURBO_CAPTURE_LOGS").is_ok() {
+        prelude.push_str("globalThis.__TT_CAPTURE_LOGS=true;");
+    }
     // --passWithNoTests (launcher) → a file with no tests at all passes instead of failing
     if std::env::var("TURBO_PASS_WITH_NO_TESTS").is_ok() {
         prelude.push_str("globalThis.__TT_PASS_WITH_NO_TESTS=true;");
@@ -5927,6 +5964,8 @@ pub struct TestReport {
     pub snapshot: Option<SnapshotResult>,
     /// Per-file environment setup time (isolate+context-from-snapshot+natives), µs.
     pub setup_us: f64,
+    /// The suites whose hooks failed, in vitest's suite order.
+    pub suite_errors: Vec<SuiteError>,
 }
 
 /// A test file's snapshot outcome, as @vitest/snapshot's `SnapshotResult` (turbo-test#73).
@@ -5967,6 +6006,19 @@ pub struct TestCase {
     pub not_run: bool,
     /// A passing `it.fails` test: vitest's `expected fail` in the summary footer (turbo-test#78).
     pub expected_fail: bool,
+    /// Its console output (`stdout` / `stderr`, content) while logs are captured (junit).
+    pub logs: Vec<(String, String)>,
+    /// The error it failed with (junit's `<failure>`, turbo-test#81).
+    pub errors: Vec<crate::failure::ErrorInfo>,
+}
+
+/// A `describe` whose `beforeAll` / `afterAll` failed: a failed suite, reported by junit as a
+/// test case of its own (turbo-test#81).
+#[derive(Debug, Clone, Default)]
+pub struct SuiteError {
+    pub name: String,
+    pub duration_ms: f64,
+    pub errors: Vec<crate::failure::ErrorInfo>,
 }
 
 impl TestReport {
@@ -6136,6 +6188,7 @@ fn mock_externalizable(factory: &str) -> bool {
 }
 
 pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
+    LOAD_ERROR.with(|e| e.borrow_mut().take());
     // Per-file native-DOM lifecycle: reset the thread-local DOM (fresh document per file) and, when
     // debugging (TURBO_RUST_DOM_LOG), dump the missing-member access log — on ANY exit incl. a load
     // failure (the surface React/testing-library touched is recorded during the failed load).
@@ -6367,6 +6420,8 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
                     let tc = std::pin::pin!(v8::TryCatch::new(scope));
                     let tc = &mut tc.init();
                     if load_cjs(tc, &entry_abs, false).is_none() {
+                        let exc = tc.exception();
+                        note_load_error(tc, exc);
                         Some(
                             caught_message(tc, "entry load failed")
                                 .unwrap_or_else(|| "entry load failed".into()),
@@ -6400,6 +6455,8 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
                 let tc = &mut tc.init();
                 let ok = module.instantiate_module(tc, resolve_callback);
                 if ok != Some(true) {
+                    let exc = tc.exception();
+                    note_load_error(tc, exc);
                     break 'work Err(instantiate_error(caught_message(tc, "unknown")));
                 }
             }
@@ -6409,6 +6466,11 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
                 let ev = module.evaluate(tc);
                 tc.perform_microtask_checkpoint();
                 let caught = caught_message(tc, "unknown");
+                let exc = match module.get_status() {
+                    v8::ModuleStatus::Errored => Some(module.get_exception()),
+                    _ => tc.exception(),
+                };
+                note_load_error(tc, exc);
                 evaluate_error(caught, ev.is_some(), module.get_status(), || {
                     module.get_exception().to_rust_string_lossy(tc)
                 })
@@ -6571,6 +6633,8 @@ fn run_test_file_reused(
                     let tc = std::pin::pin!(v8::TryCatch::new(scope));
                     let tc = &mut tc.init();
                     if load_cjs(tc, entry_abs, false).is_none() {
+                        let exc = tc.exception();
+                        note_load_error(tc, exc);
                         Some(
                             caught_message(tc, "entry load failed")
                                 .unwrap_or_else(|| "entry load failed".into()),
@@ -6601,6 +6665,8 @@ fn run_test_file_reused(
                 let tc = &mut tc.init();
                 let ok = module.instantiate_module(tc, resolve_callback);
                 if ok != Some(true) {
+                    let exc = tc.exception();
+                    note_load_error(tc, exc);
                     break 'work Err(instantiate_error(caught_message(tc, "unknown")));
                 }
             }
@@ -6610,6 +6676,11 @@ fn run_test_file_reused(
                 let ev = module.evaluate(tc);
                 tc.perform_microtask_checkpoint();
                 let caught = caught_message(tc, "unknown");
+                let exc = match module.get_status() {
+                    v8::ModuleStatus::Errored => Some(module.get_exception()),
+                    _ => tc.exception(),
+                };
+                note_load_error(tc, exc);
                 evaluate_error(caught, ev.is_some(), module.get_status(), || {
                     module.get_exception().to_rust_string_lossy(tc)
                 })
@@ -6828,11 +6899,14 @@ fn drive_tests_bounded(
                     location: location_of(scope, o),
                     not_run: flag(scope, "not_run"),
                     expected_fail: flag(scope, "expected_fail"),
+                    logs: pairs_of(scope, o, "logs"),
+                    errors: errors_of(scope, o),
                 });
             }
         }
     }
     let snapshot = snapshot_of(scope, summary);
+    let suite_errors = suite_errors_of(scope, summary);
     Ok(TestReport {
         passed,
         failed,
@@ -6841,7 +6915,173 @@ fn drive_tests_bounded(
         suites,
         snapshot,
         setup_us: 0.0,
+        suite_errors,
     })
+}
+
+/// `[a, b]` string pairs of the array `obj[key]` (a test's `logs`).
+fn pairs_of<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+    key: &str,
+) -> Vec<(String, String)> {
+    let k = v8::String::new(scope, key).unwrap();
+    let Some(arr) = obj
+        .get(scope, k.into())
+        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())
+    else {
+        return Vec::new();
+    };
+    (0..arr.length())
+        .filter_map(|i| arr.get_index(scope, i))
+        .filter_map(|v| v8::Local::<v8::Array>::try_from(v).ok())
+        .map(|pair| {
+            let at = |i| {
+                pair.get_index(scope, i)
+                    .map(|v| v.to_rust_string_lossy(scope))
+                    .unwrap_or_default()
+            };
+            (at(0), at(1))
+        })
+        .collect()
+}
+
+/// The `errors` of a test record or a suite error (runtime.js `__errorInfo` objects).
+fn errors_of<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+) -> Vec<crate::failure::ErrorInfo> {
+    let k = v8::String::new(scope, "errors").unwrap();
+    let Some(arr) = obj
+        .get(scope, k.into())
+        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for i in 0..arr.length() {
+        if let Some(o) = arr
+            .get_index(scope, i)
+            .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
+        {
+            out.push(error_info_of(scope, o));
+        }
+    }
+    out
+}
+
+/// An `__errorInfo` object as an [`ErrorInfo`](crate::failure::ErrorInfo): its stack's frames
+/// in the test file are mapped back to the original source (location.rs).
+fn error_info_of<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    o: v8::Local<'s, v8::Object>,
+) -> crate::failure::ErrorInfo {
+    let text = |key: &str| {
+        let k = v8::String::new(scope, key).unwrap();
+        o.get(scope, k.into())
+            .filter(|v| !v.is_undefined() && !v.is_null())
+            .map(|v| v.to_rust_string_lossy(scope))
+            .unwrap_or_default()
+    };
+    let (name, message, diff, stack) = (text("name"), text("message"), text("diff"), text("stack"));
+    let frames = crate::failure::parse_stack(&stack)
+        .into_iter()
+        .map(|mut f| {
+            let script = f.file.to_string_lossy().into_owned();
+            if let Some((line, col)) =
+                crate::location::resolve_frame(&script, f.line as usize, f.col as usize)
+            {
+                (f.line, f.col) = (line, col);
+            }
+            f
+        })
+        .collect();
+    let k = v8::String::new(scope, "cause").unwrap();
+    let cause = o
+        .get(scope, k.into())
+        .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
+        .map(|c| Box::new(error_info_of(scope, c)));
+    crate::failure::ErrorInfo {
+        name,
+        message,
+        diff,
+        frames,
+        cause,
+    }
+}
+
+/// The run summary's `suite_errors` (runtime.js `runSuite`; unfilled slots are suites that did
+/// not fail).
+fn suite_errors_of<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    summary: v8::Local<'s, v8::Object>,
+) -> Vec<SuiteError> {
+    let k = v8::String::new(scope, "suite_errors").unwrap();
+    let Some(arr) = summary
+        .get(scope, k.into())
+        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for i in 0..arr.length() {
+        let Some(o) = arr
+            .get_index(scope, i)
+            .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
+        else {
+            continue;
+        };
+        out.push({
+            let k = v8::String::new(scope, "name").unwrap();
+            let name = o
+                .get(scope, k.into())
+                .map(|v| v.to_rust_string_lossy(scope))
+                .unwrap_or_default();
+            let k = v8::String::new(scope, "duration_ms").unwrap();
+            let duration_ms = o
+                .get(scope, k.into())
+                .and_then(|v| v.number_value(scope))
+                .unwrap_or(0.0);
+            SuiteError {
+                name,
+                duration_ms,
+                errors: errors_of(scope, o),
+            }
+        });
+    }
+    out
+}
+
+thread_local! {
+    /// The error the running file failed to load with (its entry, instantiation or evaluation),
+    /// for junit's synthetic test case (turbo-test#81).
+    static LOAD_ERROR: RefCell<Option<crate::failure::ErrorInfo>> = const { RefCell::new(None) };
+}
+
+/// Record the exception `exc` a file's load failed with (runtime.js `__ttErrorInfo` gives its
+/// name, message, diff and stack).
+fn note_load_error(scope: &mut v8::PinScope, exc: Option<v8::Local<v8::Value>>) {
+    let Some(exc) = exc else {
+        return;
+    };
+    let global = scope.get_current_context().global(scope);
+    let info = v8::String::new(scope, "__ttErrorInfo")
+        .and_then(|k| global.get(scope, k.into()))
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok())
+        .and_then(|f| {
+            let undefined = v8::undefined(scope).into();
+            f.call(scope, undefined, &[exc])
+        })
+        .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok());
+    if let Some(info) = info {
+        let info = error_info_of(scope, info);
+        LOAD_ERROR.with(|e| *e.borrow_mut() = Some(info));
+    }
+}
+
+/// The error the last file run on this thread failed to load with, if any.
+pub fn take_load_error() -> Option<crate::failure::ErrorInfo> {
+    LOAD_ERROR.with(|e| e.borrow_mut().take())
 }
 
 /// The run summary's `snapshot` counts (runtime.js `__snapFinish`), when the file has any.

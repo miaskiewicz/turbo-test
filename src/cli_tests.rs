@@ -44,6 +44,7 @@ fn case(name: &str, status: &str, ms: f64, message: &str) -> TestCase {
         location: None,
         not_run: false,
         expected_fail: false,
+        ..Default::default()
     }
 }
 
@@ -609,6 +610,7 @@ fn clone_outcome(r: &FileOutcome) -> FileOutcome {
             suites: rep.suites.clone(),
             snapshot: rep.snapshot.clone(),
             setup_us: rep.setup_us,
+            suite_errors: rep.suite_errors.clone(),
         }),
         Err(e) => Err(e.clone()),
     }
@@ -1080,28 +1082,10 @@ fn json_file_messages_and_numbers() {
 #[test]
 fn junit_reporter() {
     let (files, res) = sample();
-    let x = render_junit(&files, &res, &tally(&res));
-    let expected = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-<testsuites name=\"turbo-test\" tests=\"5\" failures=\"2\" errors=\"1\">\n\
-\x20 <testsuite name=\"/p/a.test.ts\" tests=\"4\" failures=\"2\" errors=\"0\" time=\"1.234\">\n\
-\x20   <testcase name=\"suite &gt; adds\" classname=\"/p/a.test.ts\" time=\"0.001\"/>\n\
-\x20   <testcase name=\"suite &gt; breaks &lt;&amp;&gt;\" classname=\"/p/a.test.ts\" time=\"0.013\">\n\
-\x20     <failure message=\"expected &quot;1&quot;\nto be &apos;2&apos;\"/>\n\
-\x20   </testcase>\n\
-\x20   <testcase name=\"todo\" classname=\"/p/a.test.ts\" time=\"0.000\"/>\n\
-\x20   <testcase name=\"silent fail\" classname=\"/p/a.test.ts\" time=\"0.000\">\n\
-\x20     <failure message=\"\"/>\n\
-\x20   </testcase>\n\
-\x20 </testsuite>\n\
-\x20 <testsuite name=\"/p/b\\&quot;q.test.ts\" tests=\"1\" failures=\"0\" errors=\"0\" time=\"0.020\">\n\
-\x20   <testcase name=\"ok\" classname=\"/p/b\\&quot;q.test.ts\" time=\"0.002\"/>\n\
-\x20 </testsuite>\n\
-\x20 <testsuite name=\"/p/c&amp;&lt;x&gt;.test.ts\" tests=\"1\" failures=\"1\" errors=\"1\" time=\"0.005\">\n\
-\x20   <testcase name=\"/p/c&amp;&lt;x&gt;.test.ts\" classname=\"/p/c&amp;&lt;x&gt;.test.ts\">\n\
-\x20     <error message=\"module errored: Error: top &lt;boom&gt; &amp; &quot;q&quot;\"/>\n\
-\x20   </testcase>\n\
-\x20 </testsuite>\n\
-</testsuites>\n";
+    let x = junit_norm(&render_junit(&files, &res, Path::new("/p")));
+    // vitest 4.1.12's junit layout (turbo-test#81); a failed test with no error object (the
+    // fixture's) gets an `Error` failure from its message
+    let expected = "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<testsuites name=\"vitest tests\" tests=\"7\" failures=\"3\" errors=\"0\" time=\"1.254\">\n    <testsuite name=\"/p/a.test.ts\" timestamp=\"S\" hostname=\"H\" tests=\"5\" failures=\"2\" errors=\"0\" skipped=\"2\" time=\"1.234\">\n        <testcase classname=\"/p/a.test.ts\" name=\"suite &gt; adds\" time=\"0.0014\">\n        </testcase>\n        <testcase classname=\"/p/a.test.ts\" name=\"suite &gt; skipped one\" time=\"0\">\n            <skipped/>\n        </testcase>\n        <testcase classname=\"/p/a.test.ts\" name=\"suite &gt; breaks &lt;&amp;&gt;\" time=\"0.0126\">\n            <failure message=\"expected &quot;1&quot;\nto be &apos;2&apos;\" type=\"Error\">\nError: expected &quot;1&quot;\nto be &apos;2&apos;\n            </failure>\n        </testcase>\n        <testcase classname=\"/p/a.test.ts\" name=\"todo\" time=\"0\">\n            <skipped/>\n        </testcase>\n        <testcase classname=\"/p/a.test.ts\" name=\"silent fail\" time=\"0\">\n            <failure message=\"\" type=\"Error\">\nError:\n            </failure>\n        </testcase>\n    </testsuite>\n    <testsuite name=\"/p/b\\&quot;q.test.ts\" timestamp=\"S\" hostname=\"H\" tests=\"1\" failures=\"0\" errors=\"0\" skipped=\"0\" time=\"0.02\">\n        <testcase classname=\"/p/b\\&quot;q.test.ts\" name=\"ok\" time=\"0.002\">\n        </testcase>\n    </testsuite>\n    <testsuite name=\"/p/c&amp;&lt;x&gt;.test.ts\" timestamp=\"S\" hostname=\"H\" tests=\"1\" failures=\"1\" errors=\"0\" skipped=\"0\" time=\"0\">\n        <testcase classname=\"/p/c&amp;&lt;x&gt;.test.ts\" name=\"/p/c&amp;&lt;x&gt;.test.ts\" time=\"0\">\n            <failure message=\"top &lt;boom&gt; &amp; &quot;q&quot;\" type=\"Error\">\nError: top &lt;boom&gt; &amp; &quot;q&quot;\n            </failure>\n        </testcase>\n    </testsuite>\n</testsuites>";
     assert_eq!(x, expected);
 }
 
@@ -1131,24 +1115,20 @@ not ok 7 - /p/c&<x>.test.ts\n  ---\n  message: module errored: Error: top <boom>
 #[test]
 fn artifact_dispatch() {
     let (files, res) = sample();
-    let t = tally(&res);
     assert_eq!(
-        render_artifact(Reporter::Json, &files, &files, &res, &t, 7.0, true),
+        render_artifact(Reporter::Json, &files, &files, &res, 7.0, true),
         Some(render_json(&files, &res, 7.0, true))
     );
     assert_eq!(
-        render_artifact(Reporter::Junit, &files, &files, &res, &t, 0.0, false),
-        Some(render_junit(&files, &res, &t))
+        render_artifact(Reporter::Junit, &files, &files, &res, 0.0, false).map(|x| junit_norm(&x)),
+        Some(junit_norm(&render_junit(&files, &res, &junit_root())))
     );
     assert_eq!(
-        render_artifact(Reporter::Tap, &files, &files, &res, &t, 0.0, false),
+        render_artifact(Reporter::Tap, &files, &files, &res, 0.0, false),
         Some(render_tap(&files, &res))
     );
     for r in [Reporter::Default, Reporter::Dot, Reporter::Verbose] {
-        assert_eq!(
-            render_artifact(r, &files, &files, &res, &t, 0.0, false),
-            None
-        );
+        assert_eq!(render_artifact(r, &files, &files, &res, 0.0, false), None);
     }
 }
 
@@ -1161,14 +1141,28 @@ fn output_delivery() {
         emit_output(Some("ART"), Reporter::Json, None, &res),
         ("ART\n".to_string(), String::new())
     );
-    // artifact → file, parent dirs created, nothing printed
+    // artifact → file, parent dirs created; vitest's junit / json say where it went (junit
+    // writes each line with its newline, json one line without), tap says nothing
     let p = t.0.join("deep/er/report.xml");
     let ps = p.to_str().unwrap();
     assert_eq!(
         emit_output(Some("<x/>"), Reporter::Junit, Some(ps), &res),
+        (format!("JUNIT report written to {ps}\n"), String::new())
+    );
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "<x/>\n");
+    let j = t.0.join("r.json");
+    let js = j.to_str().unwrap();
+    assert_eq!(
+        emit_output(Some("{}"), Reporter::Json, Some(js), &res),
+        (format!("JSON report written to {js}\n"), String::new())
+    );
+    assert_eq!(std::fs::read_to_string(&j).unwrap(), "{}");
+    let tap = t.0.join("r.tap");
+    assert_eq!(
+        emit_output(Some("TAP"), Reporter::Tap, tap.to_str(), &res),
         (String::new(), String::new())
     );
-    assert_eq!(std::fs::read_to_string(&p).unwrap(), "<x/>");
+    assert_eq!(std::fs::read_to_string(&tap).unwrap(), "TAP");
     // unwritable target (a directory) → stderr message, no stdout
     let dir = t.0.to_str().unwrap();
     let (out, err) = emit_output(Some("x"), Reporter::Tap, Some(dir), &res);
@@ -1349,4 +1343,56 @@ fn files_are_named_relative_to_the_root() {
         display_names(&files[..1], Some(Path::new(""))),
         [PathBuf::from("sub/a.test.ts")]
     );
+}
+
+#[test]
+fn junit_numbers_dates_and_escapes_are_vitests() {
+    // (ms / 1000).toLocaleString('en-US', { useGrouping: false, maximumFractionDigits: 10 })
+    assert_eq!(seconds(0.0), "0");
+    assert_eq!(seconds(1.140542), "0.001140542");
+    assert_eq!(seconds(12345.0), "12.345");
+    assert_eq!(seconds(0.00000000001), "0");
+    assert_eq!(seconds(2000.0), "2");
+    // new Date(ms).toISOString()
+    assert_eq!(iso_time(0), "1970-01-01T00:00:00.000Z");
+    assert_eq!(iso_time(951_782_400_123), "2000-02-29T00:00:00.123Z");
+    assert_eq!(iso_time(1_793_048_123_456), "2026-10-26T20:55:23.456Z");
+    assert_eq!(iso_time(4_102_444_799_999), "2099-12-31T23:59:59.999Z");
+    // the five entities, forbidden and discouraged characters left out
+    assert_eq!(
+        xml_esc("a&<>\"'\u{0}\u{8}\t\n\u{b}\u{1f}\u{7f}\u{85}\u{9f}\u{fdd0}\u{fffe}\u{1fffe}z"),
+        "a&amp;&lt;&gt;&quot;&apos;\t\n\u{85}z"
+    );
+}
+
+#[test]
+fn junit_load_errors_without_an_error_object_name_their_kind() {
+    let e = load_error_info("module errored: TypeError: x is not a function");
+    assert_eq!(
+        (e.name.as_str(), e.message.as_str()),
+        ("TypeError", "x is not a function")
+    );
+    let e = load_error_info("No test suite found in file /p/a.test.ts");
+    assert_eq!(
+        (e.name.as_str(), e.message.as_str()),
+        ("Error", "No test suite found in file /p/a.test.ts")
+    );
+    let e = load_error_info("graph load failed");
+    assert_eq!(
+        (e.name.as_str(), e.message.as_str()),
+        ("Error", "graph load failed")
+    );
+}
+
+/// A junit report with its run-dependent `timestamp` / `hostname` blanked.
+fn junit_norm(x: &str) -> String {
+    x.lines()
+        .map(|l| match (l.find(" timestamp=\""), l.find(" tests=\"")) {
+            (Some(a), Some(b)) if a < b => {
+                format!("{} timestamp=\"S\" hostname=\"H\"{}", &l[..a], &l[b..])
+            }
+            _ => l.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
