@@ -133,6 +133,32 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `-u`-updated ones are written back into the test file; obsolete snapshots are reported and
   removed by `-u` (an emptied snapshot file deleted); on CI a missing snapshot fails instead of
   being written; the JSON report's `snapshot` summary has vitest's counts.
+- CI detection is std-env's `isCI`, as vitest 4.1.12 decides it (std-env 4.3.0; turbo-test#74):
+  `CI` set to any non-empty value counts (`CI=false` and `CI=0` included), and otherwise the
+  first provider row of std-env's table whose variable is non-empty decides — 58 rows, among them
+  Vercel `NOW_BUILDER`, Netlify, Bamboo, Cloudflare Pages and Google Cloud Run, while
+  `NETLIFY_LOCAL`, `VERCEL`, `VERCEL_ENV` and `CODESANDBOX_*` do not count. turbo-test checked
+  13 fixed variables (so a missing snapshot was written on most providers' CI, and `TF_BUILD` /
+  `BITBUCKET_BUILD_NUMBER` or an empty value counted when vitest's does not). The table is data
+  (`src/ci_providers.json`, read by `src/ci.rs`), checked against an installed std-env by
+  `scripts/check-ci-detection.mjs`.
+- `.only` fails on CI (turbo-test#75): `allowOnly` defaults to `!isCI` as in vitest, so a stray
+  `.only` committed to a branch fails the CI run instead of silently narrowing it to one test.
+  `--allowOnly` / `--no-allowOnly` still decide when given (the last one wins).
+- A forbidden `.only` fails as in vitest (turbo-test#76): with allowOnly off each `.only` task
+  fails in place with vitest's message (`[Vitest] Unexpected .only modifier. Remove it or pass
+  --allowOnly argument to bypass this error`) and does not run — a `test.only` is a failed test
+  (no hooks, no body), a `describe.only` a failed suite whose hooks do not run and whose tests
+  are skipped. turbo-test ran the `.only` tests (they passed) and added one file-level failure,
+  so the counts and the JSON report differed from vitest's.
+- A `test.only` inside `describe.skip` / `describe.todo` is reported `pending` (turbo-test#77):
+  vitest does not interpret `.only` inside those blocks, so the test keeps mode `only`, never
+  runs and counts only in the total; turbo-test reported it `skipped` / `todo`.
+- The summary footer counts as vitest's `getStateString` (turbo-test#78): `Test Files` and `Tests`
+  read `failed | passed | expected fail | skipped | todo (total)` with the zero parts left out
+  (no more `0 passed`), `no tests` when there is none, a passing `it.fails` is an `expected
+  fail`, the `Tests` total counts every test, and a file none of whose tasks ran is a `skipped`
+  file. turbo-test counted only failed and passed tests.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain

@@ -3858,7 +3858,15 @@ async function runSuite(suite, ancestors, summary, mode = '') {
   // nothing in it runs: no hooks either
   const idle = !skipAll && !__runnable(suite, ancestors);
   let hookFailed = mode === 'hook';
-  if (!skipAll && !idle) {
+  // a forbidden `describe.only` (turbo-test#76) fails the suite like a throwing beforeAll, but
+  // none of its hooks run
+  const forbidden = !skipAll && !!suite.forbiddenOnly;
+  if (forbidden) {
+    summary.failures.push(`${suite.name}: ${__ONLY_FORBIDDEN}`);
+    hookFailed = true;
+    failed = true;
+  }
+  if (!skipAll && !idle && !forbidden) {
     for (const h of suite.hooks.ba) {
       try { await h(); } catch (e) {
         summary.failures.push(`${suite.name || '<root>'} beforeAll: ${(e && e.message) || String(e)}`);
@@ -3882,12 +3890,29 @@ async function runSuite(suite, ancestors, summary, mode = '') {
     // a describe.todo block makes its tests todo and a describe.skip block skips them (an
     // it.todo stays todo); otherwise -t, then the test's own todo / skip / `.only`.
     const filtered = !skipAll && __tt.namePattern && !__tt.namePattern.test(fullName);
+    // a `.only` test inside describe.skip / describe.todo: vitest's interpretTaskModes does not
+    // descend there, so it keeps mode `only`, never runs and is reported `pending` (#77)
+    if (t.only && (skipAll === 'skip' || skipAll === 'todo')) {
+      summary.tests.push(__testRecord(t, chain, 'pending'));
+      summary.skippedNames.push(label);
+      continue;
+    }
     const todo = !hookFailed && (skipAll === 'todo' || (!filtered && !!t.todo));
     if (todo || hookFailed || skipAll || filtered || t.skip || t.notOnly) {
       summary.skipped++;
-      summary.tests.push(__testRecord(t, chain, todo ? 'todo' : 'skipped'));
+      // a forbidden `.only` test that does not run keeps its error (vitest)
+      const extra = t.forbiddenOnly ? { failure_messages: [__onlyForbiddenError()] } : undefined;
+      summary.tests.push(__testRecord(t, chain, todo ? 'todo' : 'skipped', extra));
       // vitest marks a skipped test's snapshots checked (not obsolete)
       if (!todo) summary.skippedNames.push(label);
+      continue;
+    }
+    // a forbidden `.only` test fails without running: no hooks, no body, no duration (#76)
+    if (t.forbiddenOnly) {
+      failed = true;
+      summary.failed++;
+      summary.failures.push(`${label}: ${__ONLY_FORBIDDEN}`);
+      summary.tests.push(__testRecord(t, chain, 'failed', { message: __ONLY_FORBIDDEN, failure_messages: [__onlyForbiddenError()], not_run: true }));
       continue;
     }
     // retry: per-test `{ retry }` wins; else the global default (--retry → __TT_DEFAULT_RETRY).
@@ -3951,7 +3976,8 @@ async function runSuite(suite, ancestors, summary, mode = '') {
     }
     const __dur = __loop.realNow() - __t0;
     const timing = { duration_ms: __dur, start_ms: __t0 };
-    if (ok) { summary.passed++; summary.tests.push(__testRecord(t, chain, 'passed', timing)); }
+    // a passing it.fails is vitest's `expected fail` in the summary footer (#78)
+    if (ok) { summary.passed++; summary.tests.push(__testRecord(t, chain, 'passed', t.fails ? { ...timing, expected_fail: true } : timing)); }
     else {
       failed = true;
       summary.failed++;
@@ -3971,7 +3997,7 @@ async function runSuite(suite, ancestors, summary, mode = '') {
       summary.tests.push(__testRecord(t, chain, 'failed', { ...timing, message: msg, failure_messages: [String(failure)] }));
     }
   }
-  if (!skipAll && !idle) {
+  if (!skipAll && !idle && !forbidden) {
     for (const h of suite.hooks.aa) {
       try { await h(); } catch (e) {
         summary.failures.push(`${suite.name || '<root>'} afterAll: ${(e && e.message) || String(e)}`);
@@ -3985,16 +4011,24 @@ async function runSuite(suite, ancestors, summary, mode = '') {
 
 // `.only` (vitest `interpretTaskModes`): with a `.only` in the file, a task runs when it or an
 // enclosing suite is `.only` — except that inside a suite holding `.only` tasks only those run.
-// Every other test is marked `notOnly` (skipped) (turbo-test#65).
+// Every other test is marked `notOnly` (skipped) (turbo-test#65). With allowOnly off
+// (`forbid`), vitest's `checkAllowOnly` marks each `.only` task it reaches — not those inside a
+// describe.skip / describe.todo — failed with its message, and the task does not run (#76).
 function __someOnly(suite) {
   return suite.tasks.some((t) => t.only || (t.suite && __someOnly(t)));
 }
-function __interpretOnly(suite, parentIsOnly) {
+const __ONLY_FORBIDDEN = '[Vitest] Unexpected .only modifier. Remove it or pass --allowOnly argument to bypass this error';
+function __onlyForbiddenError() {
+  const e = new Error(__ONLY_FORBIDDEN);
+  return String(e.stack || `Error: ${__ONLY_FORBIDDEN}`);
+}
+function __interpretOnly(suite, parentIsOnly, forbid) {
   const suiteIsOnly = parentIsOnly || !!suite.only;
   const hasSomeOnly = __someOnly(suite);
   for (const t of suite.tasks) {
     const include = hasSomeOnly ? !!t.only || (!!t.suite && __someOnly(t)) : suiteIsOnly || !!t.only;
-    if (t.suite) __interpretOnly(t, include);
+    if (forbid && t.only) t.forbiddenOnly = true;
+    if (t.suite) __interpretOnly(t, include, forbid && !t.mode);
     else if (!include) t.notOnly = true;
   }
 }
@@ -4021,13 +4055,9 @@ globalThis.__tt = {
       summary.failures.push(`No test suite found in file ${globalThis.__ttFile}`);
       return summary;
     }
-    // --no-allowOnly (host → __TT_FORBID_ONLY): a stray `.only` must fail the run (vitest CI
-    // default). Record it as a failure so it surfaces in the report and flips the exit code.
-    if (globalThis.__TT_FORBID_ONLY && this.hasOnly) {
-      summary.failed++;
-      summary.failures.push('found `.only` test(s) but --allowOnly is disabled (--no-allowOnly)');
-    }
-    if (this.hasOnly) __interpretOnly(root, false);
+    // allowOnly off (host → __TT_FORBID_ONLY: --no-allowOnly, or vitest's default on CI): each
+    // `.only` task fails in place, as vitest's `checkAllowOnly` (turbo-test#76).
+    if (this.hasOnly) __interpretOnly(root, false, !!globalThis.__TT_FORBID_ONLY);
     await runSuite(root, [], summary);
     summary.snapshot = __snapFinish(summary.skippedNames);
     return summary;

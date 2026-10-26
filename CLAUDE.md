@@ -34,6 +34,10 @@ A release where these disagree is a bug. Bump both in the same commit.
   is the CI `coverage` gate. New code needs behaviour-asserting tests (happy path + edge
   cases) that keep every line covered; never add coverage-only no-op tests. The single
   remaining uncovered line (a V8-unreachable guard) is explained in tarpaulin.toml.
+- CI detection (snapshot update mode `none` on CI) is std-env's `isCI`: `src/ci.rs` over the
+  provider table `src/ci_providers.json`. When vitest's std-env changes, re-check the table with
+  `node scripts/check-ci-detection.mjs <dir with vitest installed>` (0 mismatches). The test
+  harnesses (`tests/common`, `test/compat-api.test.mjs`) drop every variable of that table.
 - In-process V8 unit tests must boot isolates from `runner::framework_snapshot()`: the
   read-only heap is process-wide, so a default-snapshot isolate alive alongside
   framework-snapshot ones aborts the test binary.

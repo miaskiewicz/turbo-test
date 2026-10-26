@@ -355,7 +355,7 @@ cargo fmt --check            # CI job `lint`, with:
 cargo clippy --all-targets -- -D warnings
 ```
 
-The Rust crate is gated at **>= 99.98% line coverage** (9314/9315 lines; cargo-tarpaulin,
+The Rust crate is gated at **>= 99.98% line coverage** (9348/9349 lines; cargo-tarpaulin,
 Llvm engine; CI job `coverage`). Subprocess runs of the instrumented binaries are attributed through
 `tarpaulin.toml`'s `objects`; the `#[path]` unit-test modules are excluded from the figure.
 

@@ -241,3 +241,182 @@ fn cjs_bytecode_cache_is_written_reused_and_survives_corruption() {
     let junk = turbo_test(&p.dir, &[], &[]);
     assert_eq!(junk.code, Some(0), "{}", junk.all());
 }
+
+#[test]
+fn only_is_forbidden_on_ci_unless_allow_only() {
+    // turbo-test#75: vitest 4.1.12 defaults allowOnly to !isCI (std-env): on CI a stray `.only`
+    // fails the run unless --allowOnly is passed. Checked against vitest: CI=1 and
+    // GITHUB_ACTIONS=1 exit 1, `CI=1 --allowOnly` and no CI variable exit 0.
+    let p = plain("rb-flags-only-ci");
+    p.file(
+        "o.test.js",
+        "test.only('one', () => { expect(1).toBe(1); });\ntest('two', () => {});\n",
+    );
+    for env in [[("CI", "1")], [("GITHUB_ACTIONS", "1")]] {
+        let r = turbo_test(&p.dir, &["o.test.js"], &env);
+        assert_eq!(r.code, Some(1), "{env:?}: {}", r.all());
+        let r = turbo_test(&p.dir, &["o.test.js", "--allowOnly"], &env);
+        assert_eq!(r.code, Some(0), "{env:?} --allowOnly: {}", r.all());
+        let r = turbo_test(
+            &p.dir,
+            &["o.test.js", "--allowOnly", "--no-allowOnly"],
+            &env,
+        );
+        assert_eq!(r.code, Some(1), "{env:?} --no-allowOnly last: {}", r.all());
+    }
+    let r = turbo_test(&p.dir, &["o.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+}
+
+#[test]
+fn a_forbidden_only_fails_each_only_task_without_running_it() {
+    // turbo-test#76: with allowOnly off, vitest 4.1.12 (`checkAllowOnly`) fails each `.only` task
+    // in place, without running it: a `.only` test is a failed test (no beforeEach, no body), a
+    // `describe.only` a failed suite whose hooks do not run and whose tests are skipped (a `.only`
+    // test in it keeps the error). Every expectation is vitest's output for this file.
+    let p = plain("rb-flags-only-forbidden");
+    p.file(
+        "e.test.js",
+        r#"beforeAll(() => console.log('ROOT beforeAll'))
+afterAll(() => console.log('ROOT afterAll'))
+beforeEach(() => console.log('ROOT beforeEach'))
+describe.only('s', () => {
+  beforeAll(() => console.log('S beforeAll'))
+  afterAll(() => console.log('S afterAll'))
+  test.only('x', () => console.log('RAN x'))
+  describe('nested', () => { test('y', () => console.log('RAN y')) })
+})
+describe('t', () => {
+  beforeAll(() => console.log('T beforeAll'))
+  test.only('z', () => console.log('RAN z'))
+  test.skip('sk', () => {})
+  test.todo('td')
+})
+"#,
+    );
+    let msg = "[Vitest] Unexpected .only modifier. Remove it or pass --allowOnly argument to bypass this error";
+    let r = turbo_test(
+        &p.dir,
+        &["--no-allowOnly", "--reporter", "json", "e.test.js"],
+        &[],
+    );
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    for ran in ["ROOT beforeAll", "T beforeAll", "ROOT afterAll"] {
+        assert!(r.stderr.contains(ran), "{ran}: {}", r.all());
+    }
+    for not_ran in ["S beforeAll", "S afterAll", "RAN ", "ROOT beforeEach"] {
+        assert!(!r.stderr.contains(not_ran), "{not_ran}: {}", r.all());
+    }
+    let j = json_report(&r);
+    let counts: Vec<_> = [
+        "numTotalTests",
+        "numPassedTests",
+        "numFailedTests",
+        "numPendingTests",
+        "numTodoTests",
+        "numTotalTestSuites",
+        "numPassedTestSuites",
+        "numFailedTestSuites",
+        "numPendingTestSuites",
+    ]
+    .iter()
+    .map(|k| j[k].as_u64().unwrap())
+    .collect();
+    assert_eq!(counts, [5, 0, 1, 3, 1, 4, 1, 3, 0], "{j:#}");
+    assert_eq!(j["success"], false);
+    let tests: Vec<(String, String, Vec<String>)> = j["testResults"][0]["assertionResults"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            let first_lines = a["failureMessages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m.as_str().unwrap().lines().next().unwrap().to_string())
+                .collect();
+            (
+                a["fullName"].as_str().unwrap().to_string(),
+                a["status"].as_str().unwrap().to_string(),
+                first_lines,
+            )
+        })
+        .collect();
+    let err = vec![format!("Error: {msg}")];
+    let t = |n: &str, s: &str, e: &Vec<String>| (n.to_string(), s.to_string(), e.clone());
+    assert_eq!(
+        tests,
+        [
+            t("s x", "skipped", &err),
+            t("s nested y", "skipped", &vec![]),
+            t("t z", "failed", &err),
+            t("t sk", "skipped", &vec![]),
+            t("t td", "todo", &vec![]),
+        ]
+    );
+    assert!(
+        j["testResults"][0]["assertionResults"][2]
+            .get("duration")
+            .is_none(),
+        "{j:#}"
+    );
+    // the default reporter names both failures with vitest's message
+    let r = turbo_test(&p.dir, &["--no-allowOnly", "e.test.js"], &[]);
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    assert!(r.stdout.contains(&format!("s: {msg}")), "{}", r.all());
+    assert!(r.stdout.contains(&format!("t > z: {msg}")), "{}", r.all());
+}
+
+#[test]
+fn an_only_test_inside_a_skipped_or_todo_block_is_pending() {
+    // turbo-test#77: vitest 4.1.12 does not descend into describe.skip / describe.todo when it
+    // interprets `.only`, so a `test.only` there keeps mode `only`, never runs, and its JSON
+    // status is `pending`, counted only in the total. Expectations: vitest's report of this file.
+    let p = plain("rb-flags-only-pending");
+    p.file(
+        "k.test.js",
+        "describe.skip('k', () => { test.only('w', () => {}); test('v', () => {}) })\n\
+         describe.todo('d', () => { describe('e', () => { test.only('q', () => {}) }) })\n\
+         test('top', () => {})\n",
+    );
+    for forbid in [false, true] {
+        let mut args = vec!["--reporter", "json", "k.test.js"];
+        if forbid {
+            args.push("--no-allowOnly");
+        }
+        let r = turbo_test(&p.dir, &args, &[]);
+        assert_eq!(r.code, Some(0), "{}", r.all());
+        let j = json_report(&r);
+        let statuses: Vec<_> = j["testResults"][0]["assertionResults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                (
+                    a["fullName"].as_str().unwrap(),
+                    a["status"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            [
+                ("k w", "pending"),
+                ("k v", "skipped"),
+                ("d e q", "pending"),
+                ("top", "skipped")
+            ]
+        );
+        let counts: Vec<_> = [
+            "numTotalTests",
+            "numPassedTests",
+            "numFailedTests",
+            "numPendingTests",
+            "numTodoTests",
+        ]
+        .iter()
+        .map(|k| j[k].as_u64().unwrap())
+        .collect();
+        assert_eq!(counts, [4, 0, 0, 2, 0], "{j:#}");
+    }
+}
