@@ -257,7 +257,6 @@ fn coverage_collects_project_sources_only() {
 /// evaluation must not abort the process (`# Fatal error … Check failed: has_exception()`). vitest
 /// 4.1.12: `a.test.ts` fails with the SyntaxError, `b.test.ts` passes against the real `dep.ts`.
 #[test]
-#[ignore = "turbo-test#79: fails until the fix"]
 fn a_file_left_half_linked_does_not_abort_the_next_file() {
     let p = reuse_project("rb-reuse-abort", false);
     p.file("package.json", r#"{"type":"module"}"#);

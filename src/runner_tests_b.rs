@@ -651,3 +651,21 @@ fn resolve_pending_mocks_tolerates_a_missing_or_throwing_resolver() {
         assert!(!RESOLVING_MOCKS.with(|f| f.get()));
     });
 }
+
+#[test]
+fn a_synthetic_module_without_exports_fails_evaluation_instead_of_aborting() {
+    // turbo-test#79: a synthetic module whose registry entry is gone (a reused isolate's reset)
+    // errors with a message; empty evaluation steps without an exception abort V8.
+    with_context(|scope, _| {
+        let module = make_synthetic(scope, &["x".to_string()]).unwrap();
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let tc = &mut tc.init();
+        assert_eq!(module.instantiate_module(tc, resolve_callback), Some(true));
+        let _ = module.evaluate(tc);
+        assert_eq!(module.get_status(), v8::ModuleStatus::Errored);
+        assert_eq!(
+            module.get_exception().to_rust_string_lossy(tc),
+            "Error: turbo-test: an imported module was unloaded before it was evaluated"
+        );
+    });
+}

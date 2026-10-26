@@ -202,10 +202,35 @@ fn invalidate_importers(target: &Path) {
     });
 }
 
+/// The ES modules of the registry that a failed file left linked but never evaluated: a module
+/// that threw while the graph evaluated stops the modules after it, which stay bound to that
+/// file's mocks (turbo-test#79). Evaluating one in a later file would evaluate those stale
+/// links, so the reuse reset drops them and the next importer loads them afresh.
+fn unevaluated_modules(scope: &mut v8::PinScope) -> Vec<PathBuf> {
+    let modules: Vec<(PathBuf, v8::Global<v8::Module>)> = REGISTRY.with(|r| {
+        let reg = r.borrow();
+        reg.esm_by_path
+            .iter()
+            .map(|(p, m)| (p.clone(), m.clone()))
+            .collect()
+    });
+    modules
+        .into_iter()
+        .filter(|(_, m)| {
+            !matches!(
+                v8::Local::new(scope, m).get_status(),
+                v8::ModuleStatus::Evaluated | v8::ModuleStatus::Errored
+            )
+        })
+        .map(|(p, _)| p)
+        .collect()
+}
+
 /// Per-file registry reset for the reuse path: drop app modules + ALL mocks, but KEEP genuinely
 /// evaluated node_modules modules so the next file reuses them (the whole point). Any node_modules
-/// path that was MOCKED in the prior file is evicted too, so the next file gets the real module.
-fn reset_app_registry() {
+/// path that was MOCKED in the prior file is evicted too, so the next file gets the real module,
+/// and so is every module in `stale` (unevaluated_modules).
+fn reset_app_registry(stale: &[PathBuf]) {
     REGISTRY.with(|r| {
         let mut reg = r.borrow_mut();
         let setup_mocks = SETUP_MOCKS.with(|s| s.borrow().clone());
@@ -222,7 +247,7 @@ fn reset_app_registry() {
             .filter(|p| !setup_mocks.contains(*p))
             .cloned()
             .collect();
-        let evict = |p: &PathBuf| test_mocked.contains(p);
+        let evict = |p: &PathBuf| test_mocked.contains(p) || stale.contains(p);
         reg.cjs_exports.retain(|p, _| !evict(p));
         reg.cjs_synth_by_path.retain(|p, _| !evict(p));
         reg.cjs_export_names.retain(|p, _| !evict(p));
@@ -3920,7 +3945,7 @@ fn synth_eval<'s>(
 ) -> Option<v8::Local<'s, v8::Value>> {
     v8::callback_scope!(unsafe scope, context);
     let hash = module.get_identity_hash().get();
-    let (exports_g, names, is_mock) = REGISTRY.with(|r| {
+    let entry = REGISTRY.with(|r| {
         let reg = r.borrow();
         let path = reg.path_by_hash.get(&hash)?.clone();
         let exports = reg.cjs_exports.get(&path)?.clone();
@@ -3930,7 +3955,17 @@ fn synth_eval<'s>(
             && path.extension().and_then(|e| e.to_str()) != Some("json");
         let names = reg.cjs_export_names.get(&path).cloned().unwrap_or_default();
         Some((exports, names, is_mock))
-    })?;
+    });
+    // A module whose exports were dropped (a reused isolate's reset) fails its importer's
+    // evaluation: evaluation steps that return nothing without an exception abort V8
+    // (`Check failed: has_exception()`, turbo-test#79).
+    let Some((exports_g, names, is_mock)) = entry else {
+        throw(
+            scope,
+            "turbo-test: an imported module was unloaded before it was evaluated",
+        );
+        return None;
+    };
     let exports = v8::Local::new(scope, &exports_g);
     let dkey = v8::String::new(scope, "default")?;
     // A mock's (factory result's / automock's) own `default` key IS its default export (vitest,
@@ -6222,7 +6257,8 @@ fn run_test_file_reused(
         } else {
             // drop app modules + test-file mocks (keep node_modules evals + setup mocks), then
             // wipe per-file framework state (tests/spies/timers/mocks/hoist/stubs/DOM document).
-            reset_app_registry();
+            let stale = unevaluated_modules(scope);
+            reset_app_registry(&stale);
             // undo any prior file's re-mock of a setup path (analytics etc.)
             restore_setup_mocks(scope);
             if let Some(code) = v8::String::new(
