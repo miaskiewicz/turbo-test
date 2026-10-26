@@ -69,6 +69,69 @@ const SCENARIOS: [(&str, &[(&str, &str)]); 6] = [
     ),
 ];
 
+const SNAP: &str = "// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html\n\n\
+                    exports[`gone 1`] = `2`;\n\nexports[`snap 1`] = `1`;\n";
+const OLD_SNAP: &str = "// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html\n\n\
+                        exports[`old 1`] = `1`;\n";
+/// Two files, one with an obsolete snapshot and one whose snapshot file has no snapshot left (the
+/// larger file first: vitest's sequencer runs files by size under --no-file-parallelism).
+const OBSOLETE: &[(&str, &str)] = &[
+    (
+        "a.test.ts",
+        "import { expect, it } from 'vitest';\n\
+         // the larger file: vitest's sequencer runs it first\n\
+         it('snap', () => { expect(1).toMatchSnapshot(); });\n",
+    ),
+    ("__snapshots__/a.test.ts.snap", SNAP),
+    (
+        "b.test.ts",
+        "import { it } from 'vitest';\nit('plain', () => {});\n",
+    ),
+    ("__snapshots__/b.test.ts.snap", OLD_SNAP),
+];
+
+/// More scenarios: a slow test (over vitest's 300ms slowTestThreshold) in a passing and in a
+/// failed file, retried tests, obsolete snapshots and, with `-u`, removed ones. Each with the
+/// extra arguments both runners get.
+const MORE: [(&str, &[(&str, &str)], &[&str]); 5] = [
+    (
+        "s7",
+        &[(
+            "a.test.ts",
+            "import { it } from 'vitest';\n\
+             it('slow', async () => { await new Promise(r => setTimeout(r, 320)); });\n\
+             it('\\ttab', () => {});\n",
+        )],
+        &[],
+    ),
+    (
+        "s8",
+        &[(
+            "a.test.ts",
+            "import { describe, it, expect } from 'vitest';\n\
+             describe('d', () => {\n\
+             \x20 it('slow', async () => { await new Promise(r => setTimeout(r, 320)); });\n\
+             \x20 it('f', () => { expect(1).toBe(2); });\n\
+             });\n",
+        )],
+        &[],
+    ),
+    (
+        "s9",
+        &[(
+            "a.test.ts",
+            "import { it } from 'vitest';\n\
+             let n = 0;\n\
+             let m = 0;\n\
+             it('flaky', { retry: 2 }, () => { n++; if (n < 2) throw new Error('once'); });\n\
+             it('always', { retry: 1 }, () => { throw new Error('nope ' + (++m)); });\n",
+        )],
+        &[],
+    ),
+    ("s10", OBSOLETE, &["--no-file-parallelism"]),
+    ("s11", OBSOLETE, &["--no-file-parallelism", "-u"]),
+];
+
 /// vitest's reference output for `scenario` and `reporter` (`.out` or `.err`).
 fn reference(scenario: &str, reporter: &str, stream: &str) -> String {
     let path = common::repo_root()
@@ -78,7 +141,7 @@ fn reference(scenario: &str, reporter: &str, stream: &str) -> String {
 }
 
 /// `text` with the run-dependent parts as the reference files spell them: the project root,
-/// the start time, the duration line and the durations that end a line.
+/// the start time, the duration line and every duration (` 12ms` before a space or the line end).
 fn normalize(text: &str, root: &str) -> String {
     text.replace(root, "<root>")
         .lines()
@@ -89,16 +152,22 @@ fn normalize(text: &str, root: &str) -> String {
             if l.starts_with("   Duration  ") {
                 return "   Duration  <duration>".to_string();
             }
-            match l.rsplit_once(' ') {
-                Some((head, ms))
-                    if ms.len() > 2
-                        && ms.ends_with("ms")
-                        && ms[..ms.len() - 2].bytes().all(|b| b.is_ascii_digit()) =>
-                {
-                    format!("{head} <ms>")
-                }
-                _ => l.to_string(),
-            }
+            let words: Vec<&str> = l.split(' ').collect();
+            words
+                .iter()
+                .enumerate()
+                .map(|(i, w)| {
+                    let ms = w.strip_suffix("ms").filter(|d| {
+                        i > 0 && !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())
+                    });
+                    if ms.is_some() {
+                        "<ms>"
+                    } else {
+                        w
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -171,5 +240,38 @@ fn an_agent_gets_vitests_agent_reporter() {
             reference(scenario, "agent", "err"),
             "{ctx}"
         );
+    }
+}
+
+/// The scenarios of [`MORE`] with each human reporter (the agent one under `AI_AGENT`), files
+/// run one at a time (`TURBO_JOBS=1`) in the order vitest's sequencer picks.
+#[test]
+#[ignore = "turbo-test#94: fails until the fix"]
+fn slow_tests_retries_and_obsolete_snapshots_print_what_vitest_prints() {
+    for (scenario, files, args) in MORE {
+        for reporter in ["default", "verbose", "agent"] {
+            let p = project(&format!("hr-{scenario}-{reporter}"), files, false);
+            let root = p.dir.display().to_string();
+            let mut argv: Vec<&str> = args.to_vec();
+            let mut env = vec![("TURBO_LEGACY_REPORTER", "0"), ("TURBO_JOBS", "1")];
+            if reporter == "agent" {
+                env.push(("AI_AGENT", "claude-code"));
+            } else {
+                argv.extend(["--reporter", reporter]);
+                env.push(("NO_COLOR", "1"));
+            }
+            let r = turbo_test(&p.dir, &argv, &env);
+            let ctx = format!("{scenario} {reporter}\n{}", r.all());
+            assert_eq!(
+                normalize(&r.stdout, &root),
+                reference(scenario, reporter, "out"),
+                "{ctx}"
+            );
+            assert_eq!(
+                normalize(&r.stderr, &root),
+                reference(scenario, reporter, "err"),
+                "{ctx}"
+            );
+        }
     }
 }
