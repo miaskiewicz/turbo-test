@@ -366,3 +366,58 @@ describe('t', () => {
     assert!(r.stdout.contains(&format!("s: {msg}")), "{}", r.all());
     assert!(r.stdout.contains(&format!("t > z: {msg}")), "{}", r.all());
 }
+
+#[test]
+#[ignore = "turbo-test#77: fails until the fix"]
+fn an_only_test_inside_a_skipped_or_todo_block_is_pending() {
+    // turbo-test#77: vitest 4.1.12 does not descend into describe.skip / describe.todo when it
+    // interprets `.only`, so a `test.only` there keeps mode `only`, never runs, and its JSON
+    // status is `pending`, counted only in the total. Expectations: vitest's report of this file.
+    let p = plain("rb-flags-only-pending");
+    p.file(
+        "k.test.js",
+        "describe.skip('k', () => { test.only('w', () => {}); test('v', () => {}) })\n\
+         describe.todo('d', () => { describe('e', () => { test.only('q', () => {}) }) })\n\
+         test('top', () => {})\n",
+    );
+    for forbid in [false, true] {
+        let mut args = vec!["--reporter", "json", "k.test.js"];
+        if forbid {
+            args.push("--no-allowOnly");
+        }
+        let r = turbo_test(&p.dir, &args, &[]);
+        assert_eq!(r.code, Some(0), "{}", r.all());
+        let j = json_report(&r);
+        let statuses: Vec<_> = j["testResults"][0]["assertionResults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                (
+                    a["fullName"].as_str().unwrap(),
+                    a["status"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            [
+                ("k w", "pending"),
+                ("k v", "skipped"),
+                ("d e q", "pending"),
+                ("top", "skipped")
+            ]
+        );
+        let counts: Vec<_> = [
+            "numTotalTests",
+            "numPassedTests",
+            "numFailedTests",
+            "numPendingTests",
+            "numTodoTests",
+        ]
+        .iter()
+        .map(|k| j[k].as_u64().unwrap())
+        .collect();
+        assert_eq!(counts, [4, 0, 0, 2, 0], "{j:#}");
+    }
+}
