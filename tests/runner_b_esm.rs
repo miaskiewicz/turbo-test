@@ -455,3 +455,31 @@ fn dynamic_import_of_a_lazy_stub_barrel_without_react_loads_the_real_package() {
     let r = turbo_test(&p.dir, &[], &[("TURBO_LAZY_STUBS", "fake-icons")]);
     assert_eq!(r.code, Some(0), "{}", r.all());
 }
+
+/// turbo-test#82: `import()` of a module with top-level await settles after the module has
+/// evaluated (Node 26 / vitest 4.1.12), not with a namespace whose bindings are uninitialised.
+#[test]
+#[ignore = "turbo-test#82: fails until the fix"]
+fn dynamic_import_waits_for_top_level_await() {
+    let p = Project::new("rb-esm-tla");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "tla.ts",
+        "await new Promise((r) => setTimeout(r, 20));\nexport const x = 1;\n",
+    );
+    p.file(
+        "a.test.ts",
+        "import { expect, it } from 'vitest';\n\
+         it('import() of a module with top-level await waits for it', async () => {\n\
+         \x20 const m = await import('./tla');\n\
+         \x20 expect(m.x).toBe(1);\n\
+         });\n",
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(
+        line_for(&r.stdout, "a.test.ts").starts_with("PASS"),
+        "{}",
+        r.all()
+    );
+}
