@@ -1189,7 +1189,8 @@ globalThis.__pathToFileURL = (p) => {
   for (const seg of path.split('/')) { if (seg === '..') out.pop(); else if (seg && seg !== '.') out.push(seg); }
   const resolved = '/' + out.join('/') + (out.length ? trailing : '');
   const url = new globalThis.URL('file:///');
-  url.pathname = resolved.replace(/%/g, '%25').replace(/\\/g, '%5C').replace(/\n/g, '%0A').replace(/\r/g, '%0D').replace(/\t/g, '%09');
+  // Node's set: controls, space, "#%<>?[\]^`{|}~ and DEL (the setter encodes non-ASCII)
+  url.pathname = resolved.replace(/[\x00-\x20"#%<>?[\\\]^`{|}~\x7f]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
   return url;
 };
 globalThis.__dirnameOf = (p) => { const s = String(p).replace(/\/+$/, ''); const i = s.lastIndexOf('/'); return i <= 0 ? '/' : s.slice(0, i); };

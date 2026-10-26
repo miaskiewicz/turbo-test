@@ -471,7 +471,6 @@ fn a_mock_factory_sees_the_files_top_level_bindings() {
 /// turbo-test#87: `import.meta.url` is the file's percent-encoded file URL (Node 26 / vitest
 /// 4.1.12 `pathToFileURL(filename).href`) on both loaders; `filename` / `dirname` are paths.
 #[test]
-#[ignore = "turbo-test#87: fails until the fix"]
 fn import_meta_url_is_percent_encoded() {
     for esbuild in [false, true] {
         let p = Project::new("rc meta dir €");

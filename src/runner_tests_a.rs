@@ -1494,3 +1494,20 @@ fn ci_detection_is_std_env_is_ci() {
     }
     assert!(!is_ci(env(vec![("NODE_ENV", "test")])));
 }
+
+#[test]
+fn file_urls_are_spelled_like_node_path_to_file_url() {
+    // expected: Node 26 `pathToFileURL(p).href` (turbo-test#87)
+    let ascii: String = (0x20u8..0x7f)
+        .filter(|&c| c != b'/')
+        .map(char::from)
+        .collect();
+    assert_eq!(
+        file_url(Path::new(&format!("/{ascii}"))),
+        "file:///%20!%22%23$%25&'()*+,-.0123456789:;%3C=%3E%3F@ABCDEFGHIJKLMNOPQRSTUVWXYZ%5B%5C%5D%5E_%60abcdefghijklmnopqrstuvwxyz%7B%7C%7D%7E"
+    );
+    assert_eq!(
+        file_url(Path::new("/a\u{1}\u{1f}\u{7f}b/€ x")),
+        "file:///a%01%1F%7Fb/%E2%82%AC%20x"
+    );
+}

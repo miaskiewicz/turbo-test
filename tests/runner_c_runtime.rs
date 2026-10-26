@@ -685,6 +685,10 @@ it('pathToFileURL', () => {
   expect(pathToFileURL('/d/').href).toBe('file:///d/');
   expect(url.pathToFileURL('/q r').href).toBe('file:///q%20r');
   expect(fileURLToPath(pathToFileURL('/r t/€'))).toBe('/r t/€');
+  let ascii = '';
+  for (let c = 0x20; c < 0x7f; c++) if (c !== 0x2f) ascii += String.fromCharCode(c);
+  expect(pathToFileURL('/' + ascii).href).toBe("file:///%20!%22%23$%25&'()*+,-.0123456789:;%3C=%3E%3F@ABCDEFGHIJKLMNOPQRSTUVWXYZ%5B%5C%5D%5E_%60abcdefghijklmnopqrstuvwxyz%7B%7C%7D%7E");
+  expect(pathToFileURL('/a\x01\x1f\x7fb').href).toBe('file:///a%01%1F%7Fb');
 });
 "#,
     );

@@ -1738,7 +1738,7 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String>
         let require = format!("globalThis.__mkRequire({entry_dir}, true)");
         let meta = format!(
             "({{ url: {}, filename: {}, dirname: {entry_dir} }})",
-            js_string_literal(&format!("file://{}", entry.display())),
+            js_string_literal(&file_url(entry)),
             js_string_literal(&entry.to_string_lossy()),
         );
         let scoped = |code: String| {
@@ -2271,8 +2271,9 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
         .unwrap_or("")
         .hash(&mut h);
     // v2: `import.meta` is filled in (fill_import_meta) instead of esbuild's empty object;
-    // v3: import() waits for a pending async vi.doMock (await_do_mocks_on_import)
-    "mr-cjs-v3".hash(&mut h);
+    // v3: import() waits for a pending async vi.doMock (await_do_mocks_on_import);
+    // v4: import.meta.url is the percent-encoded file URL (turbo-test#87)
+    "mr-cjs-v4".hash(&mut h);
     // esbuild can't emit decorator metadata. By default we DON'T pay that cost — only when a
     // decorator file actually threw at load (Mongoose @Prop / Sequelize @Column read design:type
     // at class-definition) does the loader retry with `prefer_metadata`, routing it through the
@@ -2374,8 +2375,8 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
 
 /// esbuild's `--format=cjs` turns `import.meta` into an empty object (`const import_meta = {};`,
 /// one per source module), so `import.meta.url` read as undefined. Give it the module's own
-/// location instead, as vitest/Node do: `url` (`file://` + path, the form the ESM-graph
-/// import.meta callback and the `url` shim use), `filename` and `dirname`. They come from the CJS
+/// location instead, as vitest/Node do: `url` (`pathToFileURL(__filename).href`, the
+/// percent-encoded form the ESM-graph import.meta callback gives too), `filename` and `dirname`. They come from the CJS
 /// wrapper's `__filename`/`__dirname` at run time — the transform cache is content-keyed, so the
 /// same source in two places shares one output. Replaced on the same line, so the inline source
 /// map (coverage) keeps its line mapping.
@@ -2396,7 +2397,7 @@ fn fill_import_meta(code: String) -> String {
         match decl {
             Some(name) => {
                 out.push_str(&format!(
-                    "const {name} = {{ url: \"file://\" + __filename, filename: __filename, dirname: __dirname }};"
+                    "const {name} = {{ url: globalThis.__pathToFileURL(__filename).href, filename: __filename, dirname: __dirname }};"
                 ));
                 out.push_str(&line[body.len()..]);
             }
@@ -4729,6 +4730,21 @@ fn native_require_cache(
     }
 }
 
+/// The file URL of an absolute `path` as Node's `pathToFileURL(path).href` spells it: controls,
+/// space, `"#%<>?[\\]^{|}~`, the backtick, DEL and every non-ASCII UTF-8 byte percent-encoded
+/// (turbo-test#87).
+fn file_url(path: &Path) -> String {
+    let mut out = String::from("file://");
+    for b in path.to_string_lossy().bytes() {
+        if b <= 0x20 || b >= 0x7f || b"\"#%<>?[\\]^`{|}~".contains(&b) {
+            out.push_str(&format!("%{b:02X}"));
+        } else {
+            out.push(b as char);
+        }
+    }
+    out
+}
+
 fn throw(scope: &mut v8::PinScope, msg: &str) {
     let m = v8::String::new(scope, msg).unwrap();
     let exc = v8::Exception::error(scope, m);
@@ -4970,7 +4986,7 @@ extern "C" fn import_meta_callback(
     let path = REGISTRY.with(|r| r.borrow().path_by_hash.get(&hash).cloned());
     let url = path
         .as_ref()
-        .map(|p| format!("file://{}", p.display()))
+        .map(|p| file_url(p))
         .unwrap_or_else(|| "file:///<unknown>".to_string());
     let k = v8::String::new(scope, "url").unwrap();
     let v = v8::String::new(scope, &url).unwrap();
