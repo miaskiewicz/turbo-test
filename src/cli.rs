@@ -1088,30 +1088,62 @@ pub fn format_duration(wall_ms: f64) -> String {
     }
 }
 
-/// `a failed | b passed (total)`, or just `b passed (total)` when nothing failed.
-pub fn count_line(failed: usize, passed: usize, total: usize) -> String {
-    if failed > 0 {
-        format!("{failed} failed | {passed} passed ({total})")
-    } else {
-        format!("{passed} passed ({total})")
+/// vitest's `getStateString`: `a failed | b passed | c expected fail | d skipped | e todo
+/// (total)` from `[failed, passed, expected fail, skipped, todo]`, the zero parts left out, and
+/// `no tests` when the total is 0 (turbo-test#78).
+pub fn state_string(counts: [usize; 5], total: usize) -> String {
+    if total == 0 {
+        return "no tests".to_string();
     }
+    let parts: Vec<String> = counts
+        .iter()
+        .zip(["failed", "passed", "expected fail", "skipped", "todo"])
+        .filter(|(n, _)| **n > 0)
+        .map(|(n, label)| format!("{n} {label}"))
+        .collect();
+    format!("{} ({total})", parts.join(" | "))
 }
 
-/// Vitest-style summary footer (`Test Files` / `Tests` / `Duration`). A file counts as failed if
-/// any test failed OR it failed to load. Counted from actual results, not `file_count` — under
-/// `--bail` some files never run, and those must NOT be reported as passed; the total stays the
-/// discovered file count.
-pub fn footer(file_count: usize, res: &[FileResult], t: &Totals, wall_ms: f64) -> String {
-    let failed_files = res.iter().filter(|r| r.failed_file).count();
-    let passed_files = res.len() - failed_files;
+/// Vitest's summary footer (`Test Files` / `Tests` / `Duration`), both lines as its
+/// `getStateString`. A file fails if it failed to load, a test failed or a suite / file-level
+/// error was reported; one with tasks none of which ran (skipped / todo / pending tests, or
+/// only skipped / todo suites) is `skipped`.
+/// The `Tests` total counts every test record, pending ones included. Counted from actual
+/// results, not `file_count` — under `--bail` some files never run, and those must NOT be
+/// reported as passed; the total stays the discovered file count.
+pub fn footer(file_count: usize, res: &[FileResult], wall_ms: f64) -> String {
+    let mut files = [0usize; 5];
+    for r in res {
+        let ran = r
+            .tests
+            .iter()
+            .any(|t| t.status == "passed" || t.status == "failed");
+        let slot = if r.failed_file {
+            0
+        } else if !ran && !(r.tests.is_empty() && r.suites.is_empty()) {
+            3
+        } else {
+            1
+        };
+        files[slot] += 1;
+    }
+    let mut tests = [0usize; 5];
+    let all: Vec<&TestCase> = res.iter().flat_map(|r| &r.tests).collect();
+    for t in &all {
+        let slot = match t.status.as_str() {
+            "failed" => 0,
+            "passed" if t.expected_fail => 2,
+            "passed" => 1,
+            "skipped" => 3,
+            "todo" => 4,
+            _ => continue,
+        };
+        tests[slot] += 1;
+    }
     format!(
         "\n Test Files  {}\n      Tests  {}\n   Duration  {}",
-        count_line(failed_files, passed_files, file_count),
-        count_line(
-            t.failed as usize,
-            t.passed as usize,
-            (t.passed + t.failed) as usize
-        ),
+        state_string(files, file_count),
+        state_string(tests, all.len()),
         format_duration(wall_ms),
     )
 }
@@ -1248,7 +1280,7 @@ pub fn run(opts: Options) -> i32 {
         eprintln!("{summary}");
     } else {
         // Human reporters get the vitest-style footer; the turbo diagnostic line follows it.
-        println!("{}", footer(files.len(), &res, &t, wall_ms));
+        println!("{}", footer(files.len(), &res, wall_ms));
         println!("{summary}");
     }
     let cov_ok = if coverage::enabled() {

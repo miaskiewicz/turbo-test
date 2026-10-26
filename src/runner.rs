@@ -5681,6 +5681,8 @@ pub struct TestCase {
     pub location: Option<(u32, u32)>,
     /// A failed test that never ran (a forbidden `.only`, turbo-test#76): no `duration`.
     pub not_run: bool,
+    /// A passing `it.fails` test: vitest's `expected fail` in the summary footer (turbo-test#78).
+    pub expected_fail: bool,
 }
 
 impl TestReport {
@@ -6521,6 +6523,10 @@ fn drive_tests_bounded(
                         .and_then(|v| v.number_value(scope))
                         .unwrap_or(0.0)
                 };
+                let flag = |scope: &mut v8::PinScope, key: &str| -> bool {
+                    let k = v8::String::new(scope, key).unwrap();
+                    o.get(scope, k.into()).is_some_and(|v| v.is_true())
+                };
                 tests.push(TestCase {
                     name: text(scope, "name"),
                     title: text(scope, "title"),
@@ -6531,10 +6537,8 @@ fn drive_tests_bounded(
                     message: text(scope, "message"),
                     failure_messages: string_array(scope, o, "failure_messages"),
                     location: location_of(scope, o),
-                    not_run: {
-                        let k = v8::String::new(scope, "not_run").unwrap();
-                        o.get(scope, k.into()).is_some_and(|v| v.is_true())
-                    },
+                    not_run: flag(scope, "not_run"),
+                    expected_fail: flag(scope, "expected_fail"),
                 });
             }
         }

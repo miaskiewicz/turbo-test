@@ -154,6 +154,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - A `test.only` inside `describe.skip` / `describe.todo` is reported `pending` (turbo-test#77):
   vitest does not interpret `.only` inside those blocks, so the test keeps mode `only`, never
   runs and counts only in the total; turbo-test reported it `skipped` / `todo`.
+- The summary footer counts as vitest's `getStateString` (turbo-test#78): `Test Files` and `Tests`
+  read `failed | passed | expected fail | skipped | todo (total)` with the zero parts left out
+  (no more `0 passed`), `no tests` when there is none, a passing `it.fails` is an `expected
+  fail`, the `Tests` total counts every test, and a file none of whose tasks ran is a `skipped`
+  file. turbo-test counted only failed and passed tests.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain

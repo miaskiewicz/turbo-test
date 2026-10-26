@@ -43,6 +43,7 @@ fn case(name: &str, status: &str, ms: f64, message: &str) -> TestCase {
         },
         location: None,
         not_run: false,
+        expected_fail: false,
     }
 }
 
@@ -1216,14 +1217,22 @@ fn footer_summary_and_exit_code() {
     assert_eq!(format_duration(999.4), "999ms");
     assert_eq!(format_duration(1000.0), "1.00s");
     assert_eq!(format_duration(12345.0), "12.35s");
-    assert_eq!(count_line(0, 4, 4), "4 passed (4)");
-    assert_eq!(count_line(1, 3, 5), "1 failed | 3 passed (5)");
+    // vitest's getStateString (turbo-test#78)
+    assert_eq!(state_string([0, 4, 0, 0, 0], 4), "4 passed (4)");
+    assert_eq!(state_string([1, 3, 0, 0, 0], 5), "1 failed | 3 passed (5)");
+    assert_eq!(state_string([2, 0, 0, 0, 0], 2), "2 failed (2)");
+    assert_eq!(
+        state_string([1, 1, 1, 2, 3], 9),
+        "1 failed | 1 passed | 1 expected fail | 2 skipped | 3 todo (9)"
+    );
+    assert_eq!(state_string([0, 0, 0, 0, 0], 2), " (2)");
+    assert_eq!(state_string([0, 0, 0, 0, 0], 0), "no tests");
 
     let (_, res) = sample();
     let t = tally(&res);
     assert_eq!(
-        footer(4, &res, &t, 250.0),
-        "\n Test Files  2 failed | 1 passed (4)\n      Tests  2 failed | 3 passed (5)\n   Duration  250ms"
+        footer(4, &res, 250.0),
+        "\n Test Files  2 failed | 1 passed (4)\n      Tests  2 failed | 2 passed | 1 skipped | 1 todo (6)\n   Duration  250ms"
     );
     assert_eq!(
         summary(4, &t, 2, 250.4, (3, 1)),
@@ -1234,8 +1243,8 @@ fn footer_summary_and_exit_code() {
         "\n0 files | 0 passed | 0 failed | 0 load-errors | 1 jobs | wall 0 ms | env setup 0.00 ms/file | cache 0% hit"
     );
     assert_eq!(
-        footer(0, &[], &Totals::default(), 0.0),
-        "\n Test Files  0 passed (0)\n      Tests  0 passed (0)\n   Duration  0ms"
+        footer(0, &[], 0.0),
+        "\n Test Files  no tests\n      Tests  no tests\n   Duration  0ms"
     );
 
     assert_eq!(exit_code(&Totals::default(), true), 0);
@@ -1280,6 +1289,7 @@ fn a_suite_error_without_a_failed_test_fails_the_file() {
     let file = PathBuf::from("a.test.ts");
     let rep = TestReport {
         failures: vec!["No test found in suite empty".into()],
+        tests: vec![case("ok", "passed", 1.0, "")],
         ..report(1, 0)
     };
     let res = vec![file_result(0, &file, Ok(rep), 1.0)];
@@ -1292,8 +1302,8 @@ fn a_suite_error_without_a_failed_test_fails_the_file() {
     let t = tally(&res);
     assert_eq!((t.passed, t.failed, t.errors, t.failed_files), (1, 0, 0, 1));
     assert_eq!(
-        footer(1, &res, &t, 1.0),
-        "\n Test Files  1 failed | 0 passed (1)\n      Tests  1 passed (1)\n   Duration  1ms"
+        footer(1, &res, 1.0),
+        "\n Test Files  1 failed (1)\n      Tests  1 passed (1)\n   Duration  1ms"
     );
     assert_eq!(exit_code(&t, true), 1);
     let j: serde_json::Value =

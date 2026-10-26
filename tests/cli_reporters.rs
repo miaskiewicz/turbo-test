@@ -34,7 +34,7 @@ fn run(p: &Project, args: &[&str]) -> Run {
 
 const SUMMARY: &str = "3 files | 2 passed | 1 failed | 1 load-errors | 2 jobs | wall ";
 const FOOTER: &str =
-    "\n Test Files  2 failed | 1 passed (3)\n      Tests  1 failed | 2 passed (3)\n   Duration  ";
+    "\n Test Files  2 failed | 1 passed (3)\n      Tests  1 failed | 2 passed | 1 skipped (4)\n   Duration  ";
 
 #[test]
 fn default_text_reporter_and_unknown_fallback() {
@@ -255,7 +255,13 @@ fn skipped_or_filtered_files_are_not_empty() {
     ];
     let r = turbo_test(&p.dir, &files, &[]);
     assert_eq!(r.code, Some(0), "{}", r.all());
-    assert!(r.stdout.contains("Test Files  5 passed (5)"), "{}", r.all());
+    // vitest 4.1.12: files none of whose tasks run are skipped files (turbo-test#78)
+    assert!(
+        r.stdout
+            .contains("\n Test Files  5 skipped (5)\n      Tests  2 skipped | 1 todo (3)\n"),
+        "{}",
+        r.all()
+    );
     for f in files {
         assert!(
             r.stdout
@@ -447,7 +453,6 @@ fn output_file_artifacts() {
 }
 
 #[test]
-#[ignore = "turbo-test#78: fails until the fix"]
 fn the_footer_counts_as_vitest_get_state_string() {
     // turbo-test#78: vitest 4.1.12's summary (`getStateString`): `failed | passed | expected fail |
     // skipped | todo (total)` with the zero parts left out, `no tests` when there is none, and a

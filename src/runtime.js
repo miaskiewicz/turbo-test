@@ -3976,7 +3976,8 @@ async function runSuite(suite, ancestors, summary, mode = '') {
     }
     const __dur = __loop.realNow() - __t0;
     const timing = { duration_ms: __dur, start_ms: __t0 };
-    if (ok) { summary.passed++; summary.tests.push(__testRecord(t, chain, 'passed', timing)); }
+    // a passing it.fails is vitest's `expected fail` in the summary footer (#78)
+    if (ok) { summary.passed++; summary.tests.push(__testRecord(t, chain, 'passed', t.fails ? { ...timing, expected_fail: true } : timing)); }
     else {
       failed = true;
       summary.failed++;

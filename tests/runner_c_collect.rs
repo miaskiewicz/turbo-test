@@ -308,7 +308,7 @@ fn a_failing_before_all_skips_its_suite_and_an_empty_describe_fails() {
     );
     assert!(
         r.stdout
-            .contains("\n Test Files  2 failed | 0 passed (2)\n      Tests  2 passed (2)\n"),
+            .contains("\n Test Files  2 failed (2)\n      Tests  2 passed | 2 skipped (4)\n"),
         "{}",
         r.all()
     );
