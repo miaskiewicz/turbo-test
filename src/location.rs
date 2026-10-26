@@ -45,6 +45,22 @@ struct Entry {
 
 thread_local! {
     static ENTRY: RefCell<Option<Entry>> = const { RefCell::new(None) };
+    /// The other transformed modules' maps, `(map, lines before the code)`, while a reporter
+    /// prints failure frames ([`frames_enabled`]): an error's frames in a helper module map back
+    /// too (turbo-test#81). Per worker thread; a module's map does not depend on the test file.
+    static MODULES: RefCell<std::collections::HashMap<PathBuf, (Segments, usize)>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Whether failure frames are printed (`--reporter junit` sets `TURBO_ERROR_FRAMES`): the
+/// loaders then keep a source map for every app module they transform.
+pub fn frames_enabled() -> bool {
+    std::env::var_os("TURBO_ERROR_FRAMES").is_some()
+}
+
+/// `path`'s transformed code maps back through `map`; `offset` lines precede the code.
+pub fn set_module_map(path: &Path, map: Segments, offset: usize) {
+    MODULES.with(|m| m.borrow_mut().insert(path.to_path_buf(), (map, offset)));
 }
 
 /// A new test file starts on this thread (no map, no wrapper offset yet). `src` is its source: one
@@ -97,6 +113,35 @@ fn with_entry(path: &Path, f: impl FnOnce(&mut Entry)) {
             f(e);
         }
     });
+}
+
+/// The original `(line, column)` of an error's stack frame at generated `(line, column)`
+/// (1-based) of the script named `script` — the mapped point itself, not snapped to a call (a
+/// `throw new Error` is not one); `None` for a frame outside the test file (turbo-test#81).
+pub fn resolve_frame(script: &str, line: usize, column: usize) -> Option<(u32, u32)> {
+    let mapped = |map: &Segments, offset: usize| {
+        let line = line.checked_sub(offset).filter(|l| *l > 0)?;
+        let (l, c, _) = lookup(map, line - 1, column.saturating_sub(1) as u32)?;
+        Some((l + 1, c + 1))
+    };
+    let entry = ENTRY.with(|e| {
+        let e = e.borrow();
+        let e = e.as_ref().filter(|e| e.path.as_os_str() == script)?;
+        Some(match &e.map {
+            Some(map) => mapped(map, e.line_offset),
+            None => e
+                .identity
+                .then_some((line.checked_sub(e.line_offset)? as u32, column as u32)),
+        })
+    });
+    match entry {
+        Some(found) => found,
+        None => MODULES.with(|m| {
+            let m = m.borrow();
+            let (map, offset) = m.get(Path::new(script))?;
+            mapped(map, *offset)
+        }),
+    }
 }
 
 /// The original `(line, column)` of a stack frame at generated `(line, column)` (1-based) of the

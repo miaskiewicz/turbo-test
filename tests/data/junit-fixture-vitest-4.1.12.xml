@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="5" failures="2" errors="0" time="T">
+    <testsuite name="a.test.ts" timestamp="S" hostname="H" tests="3" failures="1" errors="0" skipped="1" time="T">
+        <testcase classname="a.test.ts" name="adds &lt;&amp;&gt;" time="T">
+        </testcase>
+        <testcase classname="a.test.ts" name="later" time="T">
+            <skipped/>
+        </testcase>
+        <testcase classname="a.test.ts" name="breaks" time="T">
+            <failure message="expected &apos;x&apos; to be &apos;y&apos; // Object.is equality" type="AssertionError">
+AssertionError: expected &apos;x&apos; to be &apos;y&apos; // Object.is equality
+
+Expected: &quot;y&quot;
+Received: &quot;x&quot;
+
+ ❯ a.test.ts:3:36
+            </failure>
+        </testcase>
+    </testsuite>
+    <testsuite name="b.test.ts" timestamp="S" hostname="H" tests="1" failures="0" errors="0" skipped="0" time="T">
+        <testcase classname="b.test.ts" name="ok" time="T">
+        </testcase>
+    </testsuite>
+    <testsuite name="c.test.ts" timestamp="S" hostname="H" tests="1" failures="1" errors="0" skipped="0" time="T">
+        <testcase classname="c.test.ts" name="c.test.ts" time="T">
+            <failure message="top &lt;boom&gt;" type="Error">
+Error: top &lt;boom&gt;
+ ❯ c.test.ts:1:7
+            </failure>
+        </testcase>
+    </testsuite>
+</testsuites>

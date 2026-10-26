@@ -250,3 +250,55 @@ fn coverage_collects_project_sources_only() {
     assert_eq!(m["functions"]["covered"], 1, "{m}");
     assert!(m["functions"]["total"].as_u64().unwrap() >= 2, "{m}");
 }
+
+/// turbo-test#79 (V8 abort): under `isolate: false`, a file whose module throws a SyntaxError
+/// while it evaluates leaves the modules after it linked but never evaluated — `y.ts`, bound to
+/// the file's mock of `dep.ts`. The next file imports `y.ts` again once that mock is gone; its
+/// evaluation must not abort the process (`# Fatal error … Check failed: has_exception()`). vitest
+/// 4.1.12: `a.test.ts` fails with the SyntaxError, `b.test.ts` passes against the real `dep.ts`.
+#[test]
+fn a_file_left_half_linked_does_not_abort_the_next_file() {
+    let p = reuse_project("rb-reuse-abort", false);
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "vitest.config.mjs",
+        "export default { test: { isolate: false } }\n",
+    );
+    p.file("dep.ts", "export const v = 0;\n");
+    p.file("boom.ts", "JSON.parse('{');\n");
+    p.file(
+        "y.ts",
+        "import { v } from './dep'; export const y = () => v;\n",
+    );
+    p.file(
+        "a.test.ts",
+        "import { expect, it, vi } from 'vitest';\n\
+         vi.mock('./dep', () => ({ v: 1 }));\n\
+         import './boom';\n\
+         import { y } from './y';\n\
+         it('a', () => { expect(y()).toBe(1); });\n",
+    );
+    p.file(
+        "b.test.ts",
+        "import { expect, it } from 'vitest';\n\
+         import { y } from './y';\n\
+         it('b', () => { expect(y()).toBe(0); });\n",
+    );
+    let r = turbo_test(&p.dir, &["--jobs", "1"], &[]);
+    assert!(!r.all().contains("Fatal error"), "{}", r.all());
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    let line = |f: &str| {
+        r.stdout
+            .lines()
+            .find(|l| l.contains(&format!(" {f}  ")))
+            .unwrap_or_else(|| panic!("{f}\n{}", r.all()))
+            .to_string()
+    };
+    assert!(
+        line("a.test.ts").starts_with("ERROR")
+            && line("a.test.ts").contains("SyntaxError: Expected property name"),
+        "{}",
+        r.all()
+    );
+    assert!(line("b.test.ts").starts_with("PASS"), "{}", r.all());
+}

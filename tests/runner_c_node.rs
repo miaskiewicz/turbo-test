@@ -59,8 +59,8 @@ test('appendFileSync and promises.appendFile', async () => {
   fs.appendFileSync(f, 'b');
   await fs.promises.appendFile(f, 'c\n');
   expect(fs.readFileSync(f, 'utf8')).toBe('abc\n');
-  expect(() => fs.appendFileSync(root + '/package.json/x', 'a')).toThrow('appendFileSync ' + root + '/package.json/x');
-  await expect(fs.promises.appendFile(root + '/package.json/x', 'a')).rejects.toThrow('appendFileSync ' + root + '/package.json/x');
+  expect(() => fs.appendFileSync(root + '/package.json/x', 'a')).toThrow(`ENOTDIR: not a directory, open '${root}/package.json/x'`);
+  await expect(fs.promises.appendFile(root + '/package.json/x', 'a')).rejects.toThrow(`ENOTDIR: not a directory, open '${root}/package.json/x'`);
 });
 "#,
     );
@@ -253,4 +253,208 @@ fn builtins_without_a_shim_import_with_node_exports_on_both_paths() {
             r.all()
         );
     }
+}
+
+/// turbo-test#83: `statSync` / `lstatSync` report the entry's real kind, size and times, throw
+/// Node's ENOENT (or return undefined with `throwIfNoEntry: false`), `Dirent` is exported, and
+/// the fs calls take a `file:` URL (Node 26 / vitest 4.1.12, environment node).
+#[test]
+fn stat_sync_reports_the_entry_and_fs_calls_take_urls() {
+    let p = Project::new("rc-stat");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file("sub/x.txt", "hi\n");
+    p.file("sub/inner/.keep", "");
+    std::os::unix::fs::symlink("x.txt", p.path("sub/link")).unwrap();
+    std::fs::create_dir_all(p.path("sub/special")).unwrap();
+    let fifo = std::process::Command::new("mkfifo")
+        .arg(p.path("sub/special/fifo"))
+        .status()
+        .unwrap();
+    assert!(fifo.success());
+    let _socket = std::os::unix::net::UnixListener::bind(p.path("sub/special/sock")).unwrap();
+    p.file(
+        "a.test.ts",
+        r#"import { expect, it } from 'vitest';
+import * as fs from 'node:fs';
+import { readdirSync, statSync, lstatSync, existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+const dir = fileURLToPath(new URL('./sub', import.meta.url));
+it('stat', () => {
+  const f = statSync(new URL('./sub/x.txt', import.meta.url));
+  expect([f.isFile(), f.isDirectory(), f.isSymbolicLink(), f.size]).toEqual([true, false, false, 3]);
+  const d = statSync(dir + '/inner');
+  expect([d.isFile(), d.isDirectory(), d.isSymbolicLink()]).toEqual([false, true, false]);
+  expect([statSync(dir + '/link').isFile(), statSync(dir + '/link').isSymbolicLink()]).toEqual([true, false]);
+  expect([lstatSync(dir + '/link').isSymbolicLink(), lstatSync(dir + '/link').isFile()]).toEqual([true, false]);
+  expect([f.mtime instanceof Date, f.mtime.getTime() === Math.round(f.mtimeMs), f.mtimeMs > 1e12]).toEqual([true, true, true]);
+  let err: any;
+  try { statSync(dir + '/nope'); } catch (e) { err = e; }
+  expect([err.message, err.code, err.errno, err.syscall, err.path]).toEqual([`ENOENT: no such file or directory, stat '${dir}/nope'`, 'ENOENT', -2, 'stat', `${dir}/nope`]);
+  let lerr: any;
+  try { lstatSync(dir + '/nope'); } catch (e) { lerr = e; }
+  expect([lerr.message, lerr.syscall]).toEqual([`ENOENT: no such file or directory, lstat '${dir}/nope'`, 'lstat']);
+  expect(statSync(dir + '/nope', { throwIfNoEntry: false })).toBeUndefined();
+});
+it('Dirent', () => {
+  const [e] = readdirSync(dir, { withFileTypes: true });
+  expect([e instanceof fs.Dirent, e.constructor.name, Object.keys(e)]).toEqual([true, 'Dirent', ['name', 'parentPath']]);
+});
+it('special files', () => {
+  const kinds = (x) => ['isFile', 'isDirectory', 'isSymbolicLink', 'isFIFO', 'isSocket', 'isCharacterDevice', 'isBlockDevice'].filter((k) => x[k]());
+  expect(readdirSync(dir + '/special', { withFileTypes: true }).map((e) => [e.name, kinds(e)])).toEqual([['fifo', ['isFIFO']], ['sock', ['isSocket']]]);
+  expect([kinds(statSync(dir + '/special/fifo')), kinds(statSync(dir + '/special/sock')), kinds(statSync('/dev/null'))]).toEqual([['isFIFO'], ['isSocket'], ['isCharacterDevice']]);
+  const s = statSync(dir + '/x.txt');
+  expect([s instanceof fs.Stats, s.constructor.name, Object.keys(s).join()]).toEqual([true, 'Stats', 'dev,mode,nlink,uid,gid,rdev,blksize,ino,size,blocks,atimeMs,mtimeMs,ctimeMs,birthtimeMs']);
+  expect([s.mode & 0o170000, s.nlink, s.blocks >= 0, s.atime.getTime() === Math.round(s.atimeMs), s.ctime.getTime() === Math.round(s.ctimeMs), s.birthtime.getTime() === Math.round(s.birthtimeMs)]).toEqual([0o100000, 1, true, true, true, true]);
+});
+it('fs/promises stat', async () => {
+  const p = await import('node:fs/promises');
+  expect((await p.stat(dir + '/inner')).isDirectory()).toBe(true);
+  expect((await p.lstat(dir + '/link')).isSymbolicLink()).toBe(true);
+  await expect(p.stat(dir + '/nope')).rejects.toMatchObject({ code: 'ENOENT', syscall: 'stat' });
+});
+it('URL arguments', () => {
+  expect(existsSync(new URL('./sub/x.txt', import.meta.url))).toBe(true);
+  expect(existsSync(new URL('./sub/no.txt', import.meta.url))).toBe(false);
+  expect(readFileSync(new URL('./sub/x.txt', import.meta.url), 'utf8')).toBe('hi\n');
+});
+"#,
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(r.stdout.contains("Tests  5 passed (5)"), "{}", r.all());
+}
+
+/// turbo-test#86: readFileSync / writeFileSync / appendFileSync / mkdirSync / rmSync /
+/// rmdirSync / unlinkSync (and their fs/promises forms) fail and succeed as Node's do: its
+/// errors (code, errno, syscall, path, message), no implicit parent directories, `recursive` /
+/// `force` options, Buffers without an encoding. Values: Node 26 (vitest 4.1.12 runs node:fs).
+#[test]
+fn fs_calls_fail_and_succeed_like_node() {
+    let p = Project::new("rc-fs-node");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file("w/f.txt", "hi\n");
+    p.file("w/full/x/.keep", "");
+    p.file(
+        "a.test.ts",
+        r#"import { expect, it } from 'vitest';
+import * as fs from 'node:fs';
+const err = (f: () => unknown) => { try { f(); return 'no throw'; } catch (e: any) { return [e.name, e.code, e.errno, e.syscall, e.path, e.message]; } };
+it('readFileSync', () => {
+  expect(err(() => fs.readFileSync('w/nope.txt'))).toEqual(['Error', 'ENOENT', -2, 'open', 'w/nope.txt', "ENOENT: no such file or directory, open 'w/nope.txt'"]);
+  expect(err(() => fs.readFileSync('w/full'))).toEqual(['Error', 'EISDIR', -21, 'read', undefined, 'EISDIR: illegal operation on a directory, read']);
+  const b = fs.readFileSync('w/f.txt');
+  expect([Buffer.isBuffer(b), b.toString('hex')]).toEqual([true, '68690a']);
+  expect([fs.readFileSync('w/f.txt', 'utf8'), fs.readFileSync('w/f.txt', { encoding: 'utf8' }), fs.readFileSync('w/f.txt', 'latin1')]).toEqual(['hi\n', 'hi\n', 'hi\n']);
+});
+it('writeFileSync / appendFileSync', () => {
+  expect(err(() => fs.writeFileSync('w/a/b/c.txt', 'x'))).toEqual(['Error', 'ENOENT', -2, 'open', 'w/a/b/c.txt', "ENOENT: no such file or directory, open 'w/a/b/c.txt'"]);
+  expect(err(() => fs.writeFileSync('w/f.txt/x', 'x'))).toEqual(['Error', 'ENOTDIR', -20, 'open', 'w/f.txt/x', "ENOTDIR: not a directory, open 'w/f.txt/x'"]);
+  expect(err(() => fs.writeFileSync('w/full', 'x'))).toEqual(['Error', 'EISDIR', -21, 'open', 'w/full', "EISDIR: illegal operation on a directory, open 'w/full'"]);
+  expect(err(() => fs.appendFileSync('w/a/b/c.txt', 'x'))).toEqual(['Error', 'ENOENT', -2, 'open', 'w/a/b/c.txt', "ENOENT: no such file or directory, open 'w/a/b/c.txt'"]);
+  fs.writeFileSync('w/bin', Buffer.from([0, 255, 1]));
+  fs.appendFileSync('w/bin', new Uint8Array([2]));
+  expect(fs.readFileSync('w/bin').toString('hex')).toBe('00ff0102');
+  fs.writeFileSync('w/u8', new Uint8Array([104, 105]));
+  expect(fs.readFileSync('w/u8', 'utf8')).toBe('hi');
+  expect(fs.existsSync('w/a')).toBe(false);
+});
+it('mkdirSync', () => {
+  expect(err(() => fs.mkdirSync('w/m/n'))).toEqual(['Error', 'ENOENT', -2, 'mkdir', 'w/m/n', "ENOENT: no such file or directory, mkdir 'w/m/n'"]);
+  expect(err(() => fs.mkdirSync('w/f.txt'))).toEqual(['Error', 'EEXIST', -17, 'mkdir', 'w/f.txt', "EEXIST: file already exists, mkdir 'w/f.txt'"]);
+  expect(err(() => fs.mkdirSync('w/full'))).toEqual(['Error', 'EEXIST', -17, 'mkdir', 'w/full', "EEXIST: file already exists, mkdir 'w/full'"]);
+  expect(fs.mkdirSync('w/m2')).toBeUndefined();
+  expect([fs.mkdirSync('w/q/r/s', { recursive: true }), fs.mkdirSync('./w/q3/r', { recursive: true }), fs.mkdirSync('w/q/r/s', { recursive: true })]).toEqual(['w/q', './w/q3', undefined]);
+  expect(err(() => fs.mkdirSync('w/f.txt/z', { recursive: true }))).toEqual(['Error', 'ENOTDIR', -20, 'mkdir', 'w/f.txt/z', "ENOTDIR: not a directory, mkdir 'w/f.txt/z'"]);
+  expect(fs.statSync('w/q/r/s').isDirectory()).toBe(true);
+});
+it('rmSync / rmdirSync / unlinkSync', () => {
+  expect(err(() => fs.rmSync('w/nope'))).toEqual(['Error', 'ENOENT', -2, 'lstat', 'w/nope', "ENOENT: no such file or directory, lstat 'w/nope'"]);
+  expect(fs.rmSync('w/nope', { force: true })).toBeUndefined();
+  fs.mkdirSync('w/d/e', { recursive: true });
+  expect(err(() => fs.rmSync('w/d'))).toEqual(['SystemError', 'ERR_FS_EISDIR', 21, 'rm', 'w/d', 'Path is a directory: rm returned EISDIR (is a directory) w/d']);
+  fs.rmSync('w/d', { recursive: true });
+  expect(fs.existsSync('w/d')).toBe(false);
+  fs.writeFileSync('w/g.txt', 'g');
+  fs.rmSync('w/g.txt');
+  expect(fs.existsSync('w/g.txt')).toBe(false);
+  expect(err(() => fs.rmdirSync('w/nope'))).toEqual(['Error', 'ENOENT', -2, 'rmdir', 'w/nope', "ENOENT: no such file or directory, rmdir 'w/nope'"]);
+  expect(err(() => fs.rmdirSync('w/f.txt'))).toEqual(['Error', 'ENOTDIR', -20, 'rmdir', 'w/f.txt', "ENOTDIR: not a directory, rmdir 'w/f.txt'"]);
+  fs.mkdirSync('w/ne/x', { recursive: true });
+  const ne: any = err(() => fs.rmdirSync('w/ne'));
+  expect([ne[1], ne[3], ne[5]]).toEqual(['ENOTEMPTY', 'rmdir', "ENOTEMPTY: directory not empty, rmdir 'w/ne'"]);
+  fs.rmdirSync('w/ne/x');
+  expect(fs.existsSync('w/ne/x')).toBe(false);
+  expect(err(() => fs.unlinkSync('w/nope'))).toEqual(['Error', 'ENOENT', -2, 'unlink', 'w/nope', "ENOENT: no such file or directory, unlink 'w/nope'"]);
+  fs.unlinkSync('w/u8');
+  expect(fs.existsSync('w/u8')).toBe(false);
+});
+it('fs/promises', async () => {
+  const p = fs.promises;
+  expect(await p.mkdir('w/p4/z', { recursive: true })).toBe('w/p4');
+  await expect(p.rm('w/nope')).rejects.toMatchObject({ code: 'ENOENT', syscall: 'lstat' });
+  await expect(p.unlink('w/nope')).rejects.toMatchObject({ code: 'ENOENT', syscall: 'unlink' });
+  await expect(p.rmdir('w/nope')).rejects.toMatchObject({ code: 'ENOENT', syscall: 'rmdir' });
+  await expect(p.readFile('w/nope')).rejects.toMatchObject({ code: 'ENOENT', syscall: 'open' });
+  await expect(p.writeFile('w/a/b', 'x')).rejects.toMatchObject({ code: 'ENOENT', syscall: 'open' });
+  await expect(p.mkdir('w/f.txt')).rejects.toMatchObject({ code: 'EEXIST', syscall: 'mkdir' });
+  expect(Buffer.isBuffer(await p.readFile('w/f.txt'))).toBe(true);
+  expect(await p.readFile('w/f.txt', 'utf8')).toBe('hi\n');
+});
+"#,
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(r.stdout.contains("Tests  5 passed (5)"), "{}", r.all());
+}
+
+/// turbo-test#93: `util.inspect` / `util.format` and `console.log` format as Node's (values:
+/// Node 26; the file passes on vitest 4.1.12).
+#[test]
+fn console_and_util_format_like_node() {
+    let p = Project::new("rc-inspect");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "a.test.ts",
+        r#"import { expect, it } from 'vitest';
+import util from 'node:util';
+class Foo { a = 1; }
+it('util.inspect', () => {
+  const circ: any = { name: 'c' }; circ.self = circ;
+  expect([
+    util.inspect('x'), util.inspect({ a: 1, 'b-c': [1, 2] }), util.inspect(new Map([['a', 1]])), util.inspect(new Set([1])),
+    util.inspect({ a: { b: { c: { d: 1 } } } }), util.inspect([undefined, null, -0, 1n]), util.inspect(new Foo()),
+    util.inspect(Object.create(null)), util.inspect(circ), util.inspect([, 1]), util.inspect("it's"), util.inspect(() => {}),
+    util.inspect(class A {}), util.inspect(new Date(0)), util.inspect(Symbol('q')), util.inspect({ get g() { return 1; } }),
+  ]).toEqual([
+    "'x'", "{ a: 1, 'b-c': [ 1, 2 ] }", "Map(1) { 'a' => 1 }", 'Set(1) { 1 }',
+    '{ a: { b: { c: [Object] } } }', '[ undefined, null, -0, 1n ]', 'Foo { a: 1 }',
+    '[Object: null prototype] {}', "<ref *1> { name: 'c', self: [Circular *1] }", '[ <1 empty item>, 1 ]', '"it\'s"', '[Function (anonymous)]',
+    '[class A]', '1970-01-01T00:00:00.000Z', 'Symbol(q)', '{ g: [Getter] }',
+  ]);
+  expect(util.inspect(Array.from({ length: 30 }, (_, i) => i))).toBe('[\n   0,  1,  2,  3,  4,  5,  6,  7,  8,\n   9, 10, 11, 12, 13, 14, 15, 16, 17,\n  18, 19, 20, 21, 22, 23, 24, 25, 26,\n  27, 28, 29\n]');
+  expect(util.inspect({ a: 'x'.repeat(30), b: 'y'.repeat(30), c: 'z'.repeat(10) })).toBe(`{\n  a: '${'x'.repeat(30)}',\n  b: '${'y'.repeat(30)}',\n  c: 'zzzzzzzzzz'\n}`);
+  expect(util.inspect({ a: { b: { c: { d: 1 } } } }, { depth: 0 })).toBe('{ a: [Object] }');
+  class Money { [util.inspect.custom]() { return 'Money<5>'; } }
+  expect([util.inspect.custom, util.inspect({ m: new Money() })]).toEqual([Symbol.for('nodejs.util.inspect.custom'), '{ m: Money<5> }']);
+});
+it('util.format', () => {
+  expect([
+    util.format('%s=%d', 'n', 42, { x: 1 }), util.format('%s %d %i %f %j %o %O %% %c|', 'str', 42.5, 42.5, '3.5', { a: 1 }, { b: 2 }, { c: 3 }, 'css'),
+    util.format(1, 2), util.format('%s', { a: { b: 1 } }), util.format('%s:%s', 'x'), util.format('100%', 1),
+  ]).toEqual(['n=42 { x: 1 }', 'str 42.5 42 3.5 {"a":1} { b: 2 } { c: 3 } % |', '1 2', '{ a: [Object] }', 'x:%s', '100% 1']);
+});
+it('console.log', () => { console.log('two', { a: 1 }, [1, 'b']); });
+"#,
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(r.stdout.contains("Tests  3 passed (3)"), "{}", r.all());
+    assert!(
+        r.stdout
+            .lines()
+            .any(|l| l.ends_with(" two { a: 1 } [ 1, 'b' ]")),
+        "{}",
+        r.all()
+    );
 }

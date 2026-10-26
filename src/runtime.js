@@ -7,7 +7,25 @@
 // `--silent` (host → globalThis.__TT_SILENT): suppress test console output entirely. Checked at
 // call time, not eval time — the host injects __TT_SILENT AFTER this module is snapshot-evaluated.
 const __noop = () => {};
-const __emit = (tag) => (...a) => { if (!globalThis.__TT_SILENT) globalThis.log(tag, ...a.map(String)); };
+// The arguments are formatted as Node's util.format (turbo-test#93). With a reporter that keeps
+// the tests' output (`__TT_CAPTURE_LOGS`, junit: turbo-test#81) it is recorded on the running
+// test instead (__ttLog), as vitest's console does; outside a test it is dropped.
+const __emit = (tag) => (...a) => {
+  if (globalThis.__TT_SILENT) return;
+  if (globalThis.__TT_CAPTURE_LOGS) return __ttLog(tag === '[error]' || tag === '[warn]' ? 'stderr' : 'stdout', __nodeFormat(...a) + '\n');
+  globalThis.log(tag, __nodeFormat(...a));
+};
+// The running test's console output: [type, content] entries. vitest buffers each stream and
+// flushes it once no write came for a macrotask, so writes with no macrotask between them form
+// one entry.
+let __ttTestLogs = null;
+function __ttLog(type, content) {
+  if (!__ttTestLogs) return;
+  const tick = __loop.ticks;
+  const last = __ttTestLogs.findLast((l) => l[0] === type);
+  if (last && last[2] === tick) last[1] += content;
+  else __ttTestLogs.push([type, content, tick]);
+}
 globalThis.console = {
   log: __emit('[log]'),
   info: __emit('[info]'),
@@ -136,7 +154,9 @@ __loop.drainNextTicks = function () {
 // Real mode: run the single earliest-due macrotask (Rust drains micro/nextTick around it).
 // Considers BOTH the user macro queue and the internal test-timeout queue, firing whichever is
 // due first — so a hung test (no user timers) still advances to its timeout and rejects.
+__loop.ticks = 0;
 __loop.stepMacro = function () {
+  __loop.ticks++;
   __dropStaleTimers();
   __loop.macro.sort((a, b) => a.due - b.due || a.id - b.id);
   __loop.internal.sort((a, b) => a.due - b.due || a.id - b.id);
@@ -393,7 +413,8 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
 if (typeof globalThis.URL === 'undefined') {
   globalThis.URL = class URL {
     constructor(url, base) {
-      url = String(url);
+      // leading/trailing C0 controls and spaces go, tabs and newlines anywhere (WHATWG)
+      url = String(url).replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, '').replace(/[\t\n\r]/g, '');
       if (base !== undefined && !/^[a-z][a-z0-9+.-]*:/i.test(url)) {
         url = URL._resolve(url, new globalThis.URL(String(base)));
       }
@@ -410,13 +431,14 @@ if (typeof globalThis.URL === 'undefined') {
       let searchStr;
       if (m) {
         this._hierarchical = true;
-        this.host = m[2] || '';
-        this.hostname = (m[2] || '').split(':')[0];
+        // a file URL's `localhost` host is the empty host (WHATWG)
+        this.host = this.protocol.toLowerCase() === 'file:' && /^localhost$/i.test(m[2]) ? '' : m[2] || '';
+        this.hostname = this.host.split(':')[0];
         this.port = (m[2] || '').split(':')[1] || '';
-        this.pathname = URL._removeDots(m[3] || '/');
+        this.pathname = m[3] || '/';
         searchStr = m[4] || '';
         this.hash = m[5] || '';
-        this.origin = this.protocol + '//' + this.host;
+        this.origin = this.protocol.toLowerCase() === 'file:' ? 'null' : this.protocol + '//' + this.host;
       } else {
         // opaque URL (no authority): everything after the scheme is the path (sans query/hash).
         this._hierarchical = false;
@@ -426,7 +448,7 @@ if (typeof globalThis.URL === 'undefined') {
         let cut = rest.length;
         if (qi >= 0) cut = Math.min(cut, qi);
         if (hi >= 0) cut = Math.min(cut, hi);
-        this.pathname = rest.slice(0, cut);
+        this._path = URL._encode(rest.slice(0, cut), URL._C0);
         const after = rest.slice(cut);
         const am = /^(\?[^#]*)?(#.*)?$/.exec(after) || [];
         searchStr = am[1] || ''; this.hash = am[2] || ''; this.origin = 'null';
@@ -436,14 +458,32 @@ if (typeof globalThis.URL === 'undefined') {
       // — previously href was frozen at construction and dropped them).
       this._sp = new globalThis.URLSearchParams(searchStr);
     }
+    // The path and fragment keep the WHATWG percent-encode sets (turbo-test#85): a hierarchical
+    // path is dot-normalised and encoded on every set, as Node's URL does.
+    get pathname() { return this._path; }
+    set pathname(v) { this._path = this._hierarchical ? URL._encode(URL._removeDots(String(v).replace(/^(?!\/)/, '/')), URL._PATH) : this._path; }
+    get hash() { return this._hash === '#' ? '' : this._hash; }
+    set hash(v) { v = String(v); this._hash = v === '' ? '' : '#' + URL._encode(v.replace(/^#/, ''), URL._FRAGMENT); }
+    // Percent-encode the code points of `s` in `set` (and every non-ASCII one, as UTF-8); an
+    // existing `%XX` stays as written.
+    static _encode(s, set) {
+      let out = '';
+      for (const ch of s) {
+        const c = ch.codePointAt(0);
+        if (c > 0x7e) { let e; try { e = encodeURIComponent(ch); } catch { e = '%EF%BF%BD'; } out += e; }
+        else if (c < 0x20 || set.includes(ch)) out += '%' + c.toString(16).toUpperCase().padStart(2, '0');
+        else out += ch;
+      }
+      return out;
+    }
     get searchParams() { return this._sp; }
     get search() { const s = this._sp.toString(); return s ? '?' + s : ''; }
     set search(v) { this._sp = new globalThis.URLSearchParams(String(v).replace(/^\?/, '')); }
     get href() {
       const auth = this._hierarchical ? this.protocol + '//' + this.host : this.protocol;
-      return auth + this.pathname + this.search + (this.hash || '');
+      return auth + this._path + this.search + this._hash;
     }
-    set href(v) { const u = new globalThis.URL(v); this.protocol = u.protocol; this.host = u.host; this.hostname = u.hostname; this.port = u.port; this.pathname = u.pathname; this.hash = u.hash; this.origin = u.origin; this._hierarchical = u._hierarchical; this._sp = u._sp; }
+    set href(v) { const u = new globalThis.URL(v); this.protocol = u.protocol; this.host = u.host; this.hostname = u.hostname; this.port = u.port; this._path = u._path; this._hash = u._hash; this.origin = u.origin; this._hierarchical = u._hierarchical; this._sp = u._sp; }
     toString() { return this.href; }
     // WHATWG relative-reference resolution against a parsed base (Node's `new URL(rel, base)`):
     // scheme-relative `//h/p`, absolute path `/p`, query-only `?q`, fragment-only `#f`, empty,
@@ -482,6 +522,9 @@ if (typeof globalThis.URL === 'undefined') {
       return '/' + out.join('/');
     }
     static createObjectURL() { return 'blob:mock'; }
+    static get _C0() { return '\x7f'; }
+    static get _PATH() { return '\x7f "#<>?^`{}'; }
+    static get _FRAGMENT() { return '\x7f "<>`'; }
     static revokeObjectURL() {}
     static parse(url, base) { try { return new globalThis.URL(url, base); } catch { return null; } }
     static canParse(url, base) { try { new globalThis.URL(url, base); return true; } catch { return false; } }
@@ -1149,7 +1192,27 @@ if (typeof globalThis.requestAnimationFrame === 'undefined') {
 }
 
 // ---- node builtin shims (so turbo-dom's loader reaches its native .node) ----
-globalThis.__fileURLToPath = (u) => String(u).replace(/^file:\/\//, '');
+// node:url's fileURLToPath / pathToFileURL (Node 26, posix; turbo-test#84)
+const __urlError = (code, message) => { const e = new TypeError(message); e.code = code; return e; };
+globalThis.__fileURLToPath = (u) => {
+  const url = typeof u === 'string' ? new globalThis.URL(u) : u;
+  if (url.protocol !== 'file:') throw __urlError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
+  if (url.hostname !== '') throw __urlError('ERR_INVALID_FILE_URL_HOST', `File URL host must be "localhost" or empty on ${globalThis.__ttPlatform || 'darwin'}`);
+  if (/%2f/i.test(url.pathname)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded / characters');
+  return decodeURIComponent(url.pathname);
+};
+globalThis.__pathToFileURL = (p) => {
+  let path = String(p);
+  if (!path.startsWith('/')) path = globalThis.process.cwd() + '/' + path;
+  const trailing = path.endsWith('/') ? '/' : '';
+  const out = [];
+  for (const seg of path.split('/')) { if (seg === '..') out.pop(); else if (seg && seg !== '.') out.push(seg); }
+  const resolved = '/' + out.join('/') + (out.length ? trailing : '');
+  const url = new globalThis.URL('file:///');
+  // Node's set: controls, space, "#%<>?[\]^`{|}~ and DEL (the setter encodes non-ASCII)
+  url.pathname = resolved.replace(/[\x00-\x20"#%<>?[\\\]^`{|}~\x7f]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
+  return url;
+};
 globalThis.__dirnameOf = (p) => { const s = String(p).replace(/\/+$/, ''); const i = s.lastIndexOf('/'); return i <= 0 ? '/' : s.slice(0, i); };
 const __os = {
   platform: () => globalThis.__ttPlatform || 'darwin', arch: () => globalThis.__ttArch || 'arm64', type: () => globalThis.__ttOsType || 'Darwin', release: () => '23.0.0',
@@ -1177,32 +1240,117 @@ const __path = {
 // glob-parent and others reach for path.posix / path.win32; expose both (posix is our default).
 __path.posix = __path;
 __path.win32 = Object.assign({}, __path, { sep: '\\', delimiter: ';' });
+// A path argument as Node takes it: a `file:` URL (fileURLToPath), a Buffer, or a string.
+const __fsPath = (p) => {
+  if (p !== null && typeof p === 'object' && typeof p.href === 'string' && typeof p.protocol === 'string') return globalThis.__fileURLToPath(p);
+  return String(p);
+};
+// Node's Dirent / Stats: the kind is the S_IFMT bits (a Dirent keeps them under a symbol, so
+// its own keys are `name` and `parentPath`; Stats reads them from `mode`).
+const __S_IFMT = 0o170000;
+const __kType = Symbol('type');
+const __kinds = { isFile: 0o100000, isDirectory: 0o040000, isBlockDevice: 0o060000, isCharacterDevice: 0o020000, isSymbolicLink: 0o120000, isFIFO: 0o010000, isSocket: 0o140000 };
+class Dirent {
+  constructor(name, type, parentPath) { this.name = name; this.parentPath = parentPath; this[__kType] = type; }
+}
+class StatsBase {}
+for (const [name, bits] of Object.entries(__kinds)) {
+  Object.defineProperty(Dirent.prototype, name, { value: function () { return this[__kType] === bits; }, writable: true, configurable: true });
+  Object.defineProperty(StatsBase.prototype, name, { value: function () { return (this.mode & __S_IFMT) === bits; }, writable: true, configurable: true });
+}
+const __statFields = ['dev', 'mode', 'nlink', 'uid', 'gid', 'rdev', 'blksize', 'ino', 'size', 'blocks', 'atimeMs', 'mtimeMs', 'ctimeMs', 'birthtimeMs'];
+class Stats extends StatsBase {
+  constructor(values) { super(); __statFields.forEach((k, i) => { this[k] = values[i]; }); }
+}
+for (const t of ['atime', 'mtime', 'ctime', 'birthtime']) {
+  Object.defineProperty(Stats.prototype, t, { get() { return new Date(Math.round(this[t + 'Ms'])); }, configurable: true, enumerable: false });
+}
+// statSync / lstatSync: `throwIfNoEntry: false` gives undefined for a missing entry.
+const __stat = (p, options, lstat) => {
+  try { return new Stats(globalThis.__fs_stat(__fsPath(p), lstat)); }
+  catch (e) { if (options && options.throwIfNoEntry === false && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) return undefined; throw e; }
+};
+// readdirSync: sorted names, or Dirents with `withFileTypes`; `recursive` walks breadth-first
+// as Node does (names relative to the base; a symlink to a directory is descended too).
+const __readdir = (p, options) => {
+  const base = __fsPath(p);
+  const opts = typeof options === 'object' && options !== null ? options : {};
+  const read = (dir) => globalThis.__fs_readdir(dir);
+  const join = (a, b) => (a.endsWith('/') ? a + b : a + '/' + b);
+  if (!opts.recursive) return read(base).map(([name, type]) => (opts.withFileTypes ? new Dirent(name, type, base) : name));
+  const out = [], queue = [base];
+  for (let i = 0; i < queue.length; i++) {
+    for (const [name, type] of read(queue[i])) {
+      const full = join(queue[i], name);
+      out.push(opts.withFileTypes ? new Dirent(name, type, queue[i]) : full.slice(base.length + (base.endsWith('/') ? 0 : 1)));
+      let dir = type === 0o040000;
+      if (type === 0o120000) { try { dir = (globalThis.__fs_stat(full, false)[1] & __S_IFMT) === 0o040000; } catch (e) {} }
+      if (dir) queue.push(full);
+    }
+  }
+  return out;
+};
+// readFileSync / writeFileSync / appendFileSync / mkdirSync / rmSync / rmdirSync / unlinkSync
+// with Node's errors and options (turbo-test#86): a string with an encoding, else a Buffer; no
+// implicit parent directories; mkdir `recursive`, rm `recursive` / `force`.
+const __encodingOf = (o) => (typeof o === 'string' ? o : o && o.encoding) || null;
+const __readFile = (p, options) => {
+  const enc = __encodingOf(options);
+  const utf8 = enc === 'utf8' || enc === 'utf-8';
+  const data = globalThis.__fs_readFile(__fsPath(p), utf8);
+  if (utf8) return data;
+  const buf = globalThis.Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+  return enc ? buf.toString(enc) : buf;
+};
+const __writeFile = (p, data, append) => globalThis.__fs_writeFile(__fsPath(p), ArrayBuffer.isView(data) ? data : String(data), append);
+const __mkdir = (p, options) => globalThis.__fs_mkdir(__fsPath(p), !!(options && typeof options === 'object' && options.recursive));
+const __rm = (p, options) => {
+  const path = __fsPath(p), o = options || {};
+  let st;
+  try { st = globalThis.__fs_stat(path, true); } catch (e) { if (o.force && e.code === 'ENOENT') return; throw e; }
+  if ((st[1] & __S_IFMT) !== 0o040000) return globalThis.__fs_remove(path, 'unlink');
+  if (!o.recursive) {
+    const e = new Error(`Path is a directory: rm returned EISDIR (is a directory) ${path}`);
+    Object.defineProperty(e, 'name', { value: 'SystemError', configurable: true, writable: true });
+    Object.assign(e, { code: 'ERR_FS_EISDIR', errno: 21, syscall: 'rm', path });
+    throw e;
+  }
+  globalThis.__fs_remove(path, 'rm');
+};
+const __promised = (f) => (...a) => { try { return Promise.resolve(f(...a)); } catch (e) { return Promise.reject(e); } };
 const __fs = {
-  existsSync: (p) => globalThis.__fs_existsSync(String(p)),
-  readFileSync: (p, enc) => globalThis.__fs_readFileSync(String(p), enc ? String(typeof enc === 'string' ? enc : enc.encoding || 'utf8') : ''),
-  writeFileSync: (p, data) => globalThis.__fs_writeFileSync(String(p), data == null ? '' : (typeof data === 'string' ? data : String(data))),
+  Dirent,
+  Stats,
+  existsSync: (p) => globalThis.__fs_existsSync(__fsPath(p)),
+  readFileSync: __readFile,
+  writeFileSync: (p, data) => __writeFile(p, data, false),
   // a real append (O_APPEND on the Rust side), not read + rewrite: parallel workers appending to
   // one file would otherwise overwrite each other's lines.
-  appendFileSync: (p, data) => globalThis.__fs_appendFileSync(String(p), data == null ? '' : (typeof data === 'string' ? data : String(data))),
-  mkdirSync: (p) => globalThis.__fs_mkdirSync(String(p)),
-  rmSync: (p) => globalThis.__fs_rmSync(String(p)),
-  rmdirSync: (p) => globalThis.__fs_rmSync(String(p)),
-  unlinkSync: (p) => globalThis.__fs_rmSync(String(p)),
-  statSync: (p) => { const isDir = globalThis.__fs_existsSync(String(p)) && globalThis.__fs_readdirSync(String(p)).length >= 0 && !globalThis.__fs_existsSync(String(p) + '/.'); return { isFile: () => true, isDirectory: () => false, size: 0, mtimeMs: 0 }; },
-  readdirSync: (p) => globalThis.__fs_readdirSync(String(p)),
-  symlinkSync: (target, p) => globalThis.__fs_symlinkSync(String(target), String(p)),
+  appendFileSync: (p, data) => __writeFile(p, data, true),
+  mkdirSync: __mkdir,
+  rmSync: __rm,
+  rmdirSync: (p) => globalThis.__fs_remove(__fsPath(p), 'rmdir'),
+  unlinkSync: (p) => globalThis.__fs_remove(__fsPath(p), 'unlink'),
+  statSync: (p, options) => __stat(p, options, false),
+  lstatSync: (p, options) => __stat(p, options, true),
+  readdirSync: __readdir,
+  symlinkSync: (target, p) => globalThis.__fs_symlinkSync(__fsPath(target), __fsPath(p)),
   promises: {
     symlink: (target, p) => { try { __fs.symlinkSync(target, p); return Promise.resolve(); } catch (e) { return Promise.reject(e); } },
-    readFile: (p, enc) => Promise.resolve(globalThis.__fs_readFileSync(String(p), enc ? 'utf8' : '')),
-    writeFile: (p, data) => { globalThis.__fs_writeFileSync(String(p), data == null ? '' : String(data)); return Promise.resolve(); },
-    appendFile: (p, data) => { try { __fs.appendFileSync(p, data); return Promise.resolve(); } catch (e) { return Promise.reject(e); } },
-    mkdir: (p) => { globalThis.__fs_mkdirSync(String(p)); return Promise.resolve(); },
-    rm: (p) => { globalThis.__fs_rmSync(String(p)); return Promise.resolve(); },
-    readdir: (p) => Promise.resolve(globalThis.__fs_readdirSync(String(p))),
+    readFile: __promised(__readFile),
+    writeFile: __promised((p, data) => __writeFile(p, data, false)),
+    appendFile: __promised((p, data) => __writeFile(p, data, true)),
+    mkdir: __promised(__mkdir),
+    rm: __promised(__rm),
+    rmdir: __promised((p) => globalThis.__fs_remove(__fsPath(p), 'rmdir')),
+    unlink: __promised((p) => globalThis.__fs_remove(__fsPath(p), 'unlink')),
+    readdir: __promised(__readdir),
+    stat: __promised((p, options) => __stat(p, options, false)),
+    lstat: __promised((p, options) => __stat(p, options, true)),
   },
 };
 const __module = {
-  createRequire: (url) => globalThis.__mkRequire(globalThis.__dirnameOf(globalThis.__fileURLToPath(url))),
+  createRequire: (url) => globalThis.__mkRequire(globalThis.__dirnameOf(String(url).startsWith('file:') ? globalThis.__fileURLToPath(url) : String(url))),
   Module: function () {},
   builtinModules: [],
 };
@@ -1292,13 +1440,378 @@ const __v8 = { serialize: (x) => { try { return JSON.stringify(x); } catch (e) {
 const __dc = { channel: () => ({ publish: () => {}, subscribe: () => {}, unsubscribe: () => {}, hasSubscribers: false }), hasSubscribers: () => false, subscribe: () => {}, unsubscribe: () => {} }; __dc.default = __dc;
 class __AsyncLocalStorage { constructor() { this._store = undefined; } run(store, cb, ...a) { const p = this._store; this._store = store; try { return cb(...a); } finally { this._store = p; } } getStore() { return this._store; } enterWith(s) { this._store = s; } disable() {} exit(cb, ...a) { return cb(...a); } }
 const __async_hooks = { AsyncLocalStorage: __AsyncLocalStorage, AsyncResource: class { runInAsyncScope(fn, thisArg, ...a) { return fn.apply(thisArg, a); } emitDestroy() { return this; } bind(fn) { return fn; } }, createHook: () => ({ enable() { return this; }, disable() { return this; } }), executionAsyncId: () => 0, triggerAsyncId: () => 0 }; __async_hooks.default = __async_hooks;
+// ---- Node's util.inspect / util.format (Node 26, colors off; turbo-test#93) ----
+// The shape of Node's formatValue / formatRaw / reduceToSingleString / groupArrayElements:
+// depth 2, breakLength 80, compact 3, maxArrayLength 100; console.log formats through it.
+const __inspectMeta = ['\\x00', '\\x01', '\\x02', '\\x03', '\\x04', '\\x05', '\\x06', '\\x07', '\\b', '\\t', '\\n', '\\x0B', '\\f', '\\r', '\\x0E', '\\x0F', '\\x10', '\\x11', '\\x12', '\\x13', '\\x14', '\\x15', '\\x16', '\\x17', '\\x18', '\\x19', '\\x1A', '\\x1B', '\\x1C', '\\x1D', '\\x1E', '\\x1F'];
+function __strEscape(str) {
+  let quote = "'";
+  if (str.includes("'")) {
+    if (!str.includes('"')) quote = '"';
+    else if (!str.includes('`') && !str.includes('${')) quote = '`';
+  }
+  let out = '';
+  for (const ch of str) {
+    const c = ch.charCodeAt(0);
+    if (ch === quote || ch === '\\') out += '\\' + ch;
+    else if (c < 0x20) out += __inspectMeta[c];
+    else if (c === 0x7f) out += '\\x7F';
+    else out += ch;
+  }
+  return quote + out + quote;
+}
+function __inspectKey(key) {
+  if (typeof key === 'symbol') return key.toString();
+  return /^[a-zA-Z_][a-zA-Z_0-9]*$/.test(key) ? key : __strEscape(key);
+}
+function __ctorName(obj) {
+  let o = obj;
+  while (o !== null && o !== undefined) {
+    const d = Object.getOwnPropertyDescriptor(o, 'constructor');
+    if (d && typeof d.value === 'function' && d.value.name !== '') return d.value.name;
+    o = Object.getPrototypeOf(o);
+  }
+  return null;
+}
+function __fnBase(fn, ctor) {
+  const src = Function.prototype.toString.call(fn);
+  if (src.startsWith('class') && /^class\s*[\s{A-Za-z_$]/.test(src)) {
+    let base = `[class ${fn.name || '(anonymous)'}`;
+    const sup = Object.getPrototypeOf(fn);
+    if (sup && sup.name) base += ` extends ${sup.name}`;
+    return base + ']';
+  }
+  let type = 'Function';
+  const tag = fn[Symbol.toStringTag];
+  if (tag === 'AsyncFunction' || tag === 'GeneratorFunction' || tag === 'AsyncGeneratorFunction') type = tag;
+  let base = `[${type}`;
+  base += fn.name ? `: ${fn.name}]` : ' (anonymous)]';
+  if (ctor === null) base += ' (null prototype)';
+  return base;
+}
+function __inspectPrimitive(v, ctx) {
+  switch (typeof v) {
+    case 'string': {
+      const trailer = '';
+      if (v.length > 16 && v.length > 80 - ctx.indentationLvl - 4) {
+        const parts = v.split(/(?<=\n)/);
+        if (parts.length > 1) return parts.map((l) => __strEscape(l)).join(` +\n${' '.repeat(ctx.indentationLvl + 2)}`) + trailer;
+      }
+      return __strEscape(v) + trailer;
+    }
+    case 'number': return Object.is(v, -0) ? '-0' : String(v);
+    case 'bigint': return `${v}n`;
+    case 'boolean': return String(v);
+    case 'undefined': return 'undefined';
+    case 'symbol': return v.toString();
+  }
+  return String(v);
+}
+function __formatValue(ctx, value, recurseTimes, typedArray) {
+  if (typeof value !== 'object' && typeof value !== 'function') return __inspectPrimitive(value, ctx);
+  if (value === null) return 'null';
+  // a [util.inspect.custom](depth, options, inspect) method formats its own value
+  const custom = value[Symbol.for('nodejs.util.inspect.custom')];
+  if (typeof custom === 'function' && custom !== __util.inspect) {
+    const r = custom.call(value, ctx.depth - recurseTimes, { depth: ctx.depth - recurseTimes }, __util.inspect);
+    if (r !== value) return typeof r === 'string' ? r : __formatValue(ctx, r, recurseTimes);
+  }
+  if (ctx.seen.includes(value)) {
+    let index = 1;
+    if (ctx.circular === undefined) { ctx.circular = new Map(); ctx.circular.set(value, index); }
+    else {
+      index = ctx.circular.get(value);
+      if (index === undefined) { index = ctx.circular.size + 1; ctx.circular.set(value, index); }
+    }
+    return `[Circular *${index}]`;
+  }
+  return __formatRaw(ctx, value, recurseTimes, typedArray);
+}
+function __formatProperty(ctx, value, recurseTimes, key, type, desc) {
+  let name, str;
+  desc = desc || Object.getOwnPropertyDescriptor(value, key) || { value: value[key], enumerable: true };
+  if (desc.value !== undefined) {
+    const diff = ctx.compact !== true || type !== 0 ? 2 : 3;
+    ctx.indentationLvl += diff;
+    str = __formatValue(ctx, desc.value, recurseTimes);
+    ctx.indentationLvl -= diff;
+  } else if (desc.get !== undefined) {
+    str = desc.set !== undefined ? '[Getter/Setter]' : '[Getter]';
+  } else if (desc.set !== undefined) {
+    str = '[Setter]';
+  } else {
+    str = 'undefined';
+  }
+  if (type === 1) return str; // an array element (2: an array's extra key)
+  name = typeof key === 'symbol' ? key.toString() : desc.enumerable === false ? `[${key}]` : __inspectKey(key);
+  return `${name}: ${str}`;
+}
+function __groupArrayElements(ctx, output, value) {
+  let totalLength = 0;
+  let maxLength = 0;
+  let outputLength = output.length;
+  if (ctx.maxArrayLength < output.length) outputLength--;
+  const separatorSpace = 2;
+  const dataLen = new Array(outputLength);
+  for (let i = 0; i < outputLength; i++) {
+    const len = output[i].length;
+    dataLen[i] = len;
+    totalLength += len + separatorSpace;
+    if (maxLength < len) maxLength = len;
+  }
+  const actualMax = maxLength + separatorSpace;
+  if (actualMax * 3 + ctx.indentationLvl < ctx.breakLength && (totalLength / actualMax > 5 || maxLength <= 6)) {
+    const averageBias = Math.sqrt(actualMax - totalLength / output.length);
+    const biasedMax = Math.max(actualMax - 3 - averageBias, 1);
+    const columns = Math.min(
+      Math.round(Math.sqrt(2.5 * biasedMax * outputLength) / biasedMax),
+      Math.floor((ctx.breakLength - ctx.indentationLvl) / actualMax),
+      ctx.compact * 4,
+      15,
+    );
+    if (columns <= 1) return output;
+    const tmp = [];
+    const maxLineLength = [];
+    for (let i = 0; i < columns; i++) {
+      let lineLength = 0;
+      for (let j = i; j < output.length; j += columns) if (dataLen[j] > lineLength) lineLength = dataLen[j];
+      maxLineLength.push(lineLength + separatorSpace);
+    }
+    let padStart = true;
+    if (value !== undefined) {
+      for (let i = 0; i < output.length; i++) {
+        if (typeof value[i] !== 'number' && typeof value[i] !== 'bigint') { padStart = false; break; }
+      }
+    }
+    for (let i = 0; i < outputLength; i += columns) {
+      const max = Math.min(i + columns, outputLength);
+      let str = '';
+      let j = i;
+      for (; j < max - 1; j++) {
+        const padding = maxLineLength[j - i] + output[j].length - dataLen[j];
+        str += padStart ? `${output[j]}, `.padStart(padding, ' ') : `${output[j]}, `.padEnd(padding, ' ');
+      }
+      if (padStart) {
+        const padding = maxLineLength[j - i] + output[j].length - dataLen[j] - separatorSpace;
+        str += output[j].padStart(padding, ' ');
+      } else {
+        str += output[j];
+      }
+      tmp.push(str);
+    }
+    if (ctx.maxArrayLength < output.length) tmp.push(output[outputLength]);
+    output = tmp;
+  }
+  return output;
+}
+function __isBelowBreakLength(ctx, output, start, base) {
+  let totalLength = output.length + start;
+  if (totalLength + output.length > ctx.breakLength) return false;
+  for (let i = 0; i < output.length; i++) {
+    totalLength += output[i].length;
+    if (totalLength > ctx.breakLength) return false;
+  }
+  return base === '' || !base.includes('\n');
+}
+function __reduceToSingleString(ctx, output, base, braces, extrasType, recurseTimes, value) {
+  if (ctx.compact !== true) {
+    if (typeof ctx.compact === 'number' && ctx.compact >= 1) {
+      const entries = output.length;
+      if (extrasType === 2 && entries > 6) output = __groupArrayElements(ctx, output, value);
+      if (ctx.currentDepth - recurseTimes < ctx.compact && entries === output.length) {
+        const start = output.length + ctx.indentationLvl + braces[0].length + base.length + 10;
+        if (__isBelowBreakLength(ctx, output, start, base)) {
+          const joined = output.join(', ');
+          if (!joined.includes('\n')) return `${base ? `${base} ` : ''}${braces[0]} ${joined} ${braces[1]}`;
+        }
+      }
+    }
+    const indentation = `\n${' '.repeat(ctx.indentationLvl)}`;
+    return `${base ? `${base} ` : ''}${braces[0]}${indentation}  ${output.join(`,${indentation}  `)}${indentation}${braces[1]}`;
+  }
+  if (__isBelowBreakLength(ctx, output, 0, base)) return `${braces[0]}${base ? ` ${base}` : ''} ${output.join(', ')} ${braces[1]}`;
+  const indentation = ' '.repeat(ctx.indentationLvl);
+  const ln = base === '' && braces[0].length === 1 ? ' ' : `${base ? ` ${base}` : ''}\n${indentation}  `;
+  return `${braces[0]}${ln}${output.join(`,\n${indentation}  `)} ${braces[1]}`;
+}
+function __formatRaw(ctx, value, recurseTimes, typedArray) {
+  const ctor = __ctorName(value);
+  const tag = value[Symbol.toStringTag];
+  const prefix = (fallback, size) => {
+    let p = ctor === null ? `[${fallback}: null prototype] ` : `${ctor}${size} `;
+    if (typeof tag === 'string' && tag !== '' && tag !== (ctor || fallback)) p = `${p.slice(0, -1)} [${tag}] `;
+    return p;
+  };
+  let keys = Object.keys(value).concat(Object.getOwnPropertySymbols(value).filter((s) => Object.prototype.propertyIsEnumerable.call(value, s)));
+  let base = '';
+  let braces;
+  let extrasType = 0;
+  let formatter = () => [];
+  let noIterator = true;
+  if (Array.isArray(value)) {
+    const p = ctor !== 'Array' || (typeof tag === 'string' && tag !== '') ? prefix('Array', `(${value.length})`) : '';
+    keys = keys.filter((k) => typeof k === 'symbol' || !(/^(0|[1-9][0-9]*)$/.test(k) && Number(k) < value.length));
+    braces = [`${p}[`, ']'];
+    if (value.length === 0 && keys.length === 0) return `${braces[0]}]`;
+    extrasType = 2;
+    formatter = () => {
+      const out = [];
+      const len = Math.min(ctx.maxArrayLength, value.length);
+      let holes = 0;
+      for (let i = 0; i < len; i++) {
+        if (!Object.prototype.hasOwnProperty.call(value, i)) { holes++; continue; }
+        if (holes) { out.push(`<${holes} empty item${holes > 1 ? 's' : ''}>`); holes = 0; }
+        out.push(__formatProperty(ctx, value, recurseTimes, i, 1));
+      }
+      if (holes) out.push(`<${holes} empty item${holes > 1 ? 's' : ''}>`);
+      if (value.length > len) { const n = value.length - len; out.push(`... ${n} more item${n > 1 ? 's' : ''}`); }
+      return out;
+    };
+  } else if (value instanceof Map) {
+    noIterator = false;
+    braces = [`${prefix('Map', `(${value.size})`)}{`, '}'];
+    if (value.size === 0 && keys.length === 0) return `${braces[0]}}`;
+    formatter = () => {
+      const out = [];
+      ctx.indentationLvl += 2;
+      for (const [k, v] of value) out.push(`${__formatValue(ctx, k, recurseTimes)} => ${__formatValue(ctx, v, recurseTimes)}`);
+      ctx.indentationLvl -= 2;
+      return out;
+    };
+  } else if (value instanceof Set) {
+    noIterator = false;
+    braces = [`${prefix('Set', `(${value.size})`)}{`, '}'];
+    if (value.size === 0 && keys.length === 0) return `${braces[0]}}`;
+    formatter = () => {
+      const out = [];
+      ctx.indentationLvl += 2;
+      for (const v of value) out.push(__formatValue(ctx, v, recurseTimes));
+      ctx.indentationLvl -= 2;
+      return out;
+    };
+  } else if (ArrayBuffer.isView(value) && !(value instanceof DataView)) {
+    if (globalThis.Buffer && globalThis.Buffer.isBuffer && globalThis.Buffer.isBuffer(value)) {
+      const bytes = Array.from(value.subarray(0, 50), (b) => b.toString(16).padStart(2, '0')).join(' ');
+      const more = value.length > 50 ? ` ... ${value.length - 50} more byte${value.length - 50 > 1 ? 's' : ''}` : '';
+      return `<${ctor || 'Buffer'}${bytes ? ` ${bytes}` : ''}${more}>`;
+    }
+    keys = keys.filter((k) => !/^(0|[1-9][0-9]*)$/.test(k));
+    braces = [`${prefix(tag || 'TypedArray', `(${value.length})`)}[`, ']'];
+    if (value.length === 0 && keys.length === 0) return `${braces[0]}]`;
+    extrasType = 2;
+    formatter = () => {
+      const out = [];
+      const len = Math.min(ctx.maxArrayLength, value.length);
+      for (let i = 0; i < len; i++) out.push(__inspectPrimitive(value[i], ctx));
+      if (value.length > len) { const n = value.length - len; out.push(`... ${n} more item${n > 1 ? 's' : ''}`); }
+      return out;
+    };
+  } else {
+    if (typeof value === 'function') {
+      base = __fnBase(value, ctor);
+      if (keys.length === 0) return base;
+      braces = ['{', '}'];
+    } else if (value instanceof RegExp) {
+      base = RegExp.prototype.toString.call(value);
+      if (keys.length === 0) return base;
+      braces = ['{', '}'];
+    } else if (value instanceof Date) {
+      base = Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
+      if (keys.length === 0) return base;
+      braces = ['{', '}'];
+    } else if (value instanceof Error) {
+      base = value.stack ? String(value.stack) : `[${Error.prototype.toString.call(value)}]`;
+      keys = keys.filter((k) => k !== 'stack' && k !== 'message');
+      if (keys.length === 0) return base;
+      braces = ['{', '}'];
+    } else if (value instanceof Number || value instanceof String || value instanceof Boolean) {
+      const type = value instanceof Number ? 'Number' : value instanceof String ? 'String' : 'Boolean';
+      base = `[${type}: ${__inspectPrimitive(value.valueOf(), ctx)}]`;
+      if (value instanceof String) keys = keys.filter((k) => !/^(0|[1-9][0-9]*)$/.test(k));
+      if (keys.length === 0) return base;
+      braces = ['{', '}'];
+    } else if (value instanceof Promise) {
+      braces = [`${prefix('Promise', '')}{`, '}'];
+      formatter = () => ['<pending>'];
+    } else if (value instanceof WeakMap || value instanceof WeakSet) {
+      braces = [`${prefix(value instanceof WeakMap ? 'WeakMap' : 'WeakSet', '')}{`, '}'];
+      formatter = () => ['<items unknown>'];
+    } else {
+      const p = ctor === 'Object' && !(typeof tag === 'string' && tag !== '') ? '' : prefix('Object', '');
+      braces = [`${p}{`, '}'];
+      if (keys.length === 0) return `${p}{}`;
+    }
+  }
+  if (recurseTimes > ctx.depth) {
+    const name = (ctor || tag || 'Object');
+    return Array.isArray(value) ? '[Array]' : `[${name}]`;
+  }
+  recurseTimes++;
+  ctx.seen.push(value);
+  ctx.currentDepth = recurseTimes;
+  let output = formatter();
+  for (const k of keys) output.push(__formatProperty(ctx, value, recurseTimes, k, extrasType));
+  ctx.seen.pop();
+  let res = __reduceToSingleString(ctx, output, base, braces, extrasType, recurseTimes, value);
+  if (ctx.circular !== undefined) {
+    const index = ctx.circular.get(value);
+    if (index !== undefined) res = `<ref *${index}> ${res}`;
+  }
+  void noIterator;
+  return res;
+}
+function __nodeInspect(value, opts) {
+  const ctx = { seen: [], indentationLvl: 0, currentDepth: 0, depth: 2, breakLength: 80, compact: 3, maxArrayLength: 100, circular: undefined };
+  if (opts) {
+    if (typeof opts.depth === 'number' || opts.depth === null) ctx.depth = opts.depth === null ? Infinity : opts.depth;
+    if (typeof opts.breakLength === 'number') ctx.breakLength = opts.breakLength;
+    if (opts.compact !== undefined) ctx.compact = opts.compact;
+  }
+  return __formatValue(ctx, value, 0);
+}
+// util.format: %s %d %i %f %j %o %O %c %%, the rest inspected (strings as they are)
+function __nodeFormat(...args) {
+  const first = args[0];
+  const insp = (v) => (typeof v === 'string' ? v : __nodeInspect(v));
+  if (typeof first !== 'string') return args.map(insp).join(' ');
+  let i = 1;
+  let out = '';
+  let last = 0;
+  for (let p = 0; p < first.length - 1; p++) {
+    if (first[p] !== '%') continue;
+    const c = first[p + 1];
+    if (c === '%') { out += first.slice(last, p) + '%'; last = p + 2; p++; continue; }
+    if (i >= args.length || !'sdifjoOc'.includes(c)) continue;
+    const a = args[i++];
+    let s;
+    switch (c) {
+      case 's':
+        s = typeof a === 'string' ? a : typeof a === 'bigint' ? `${a}n` : typeof a === 'symbol' ? String(a)
+          : typeof a === 'object' && a !== null ? __nodeInspect(a, { depth: 0 }) : Object.is(a, -0) ? '-0' : String(a);
+        break;
+      case 'd': s = typeof a === 'bigint' ? `${a}n` : typeof a === 'symbol' ? 'NaN' : (Object.is(Number(a), -0) ? '-0' : String(Number(a))); break;
+      case 'i': s = typeof a === 'bigint' ? `${a}n` : typeof a === 'symbol' ? 'NaN' : String(parseInt(a)); break;
+      case 'f': s = typeof a === 'symbol' ? 'NaN' : String(parseFloat(a)); break;
+      case 'j': try { s = JSON.stringify(a); } catch (e) { s = '[Circular]'; } break;
+      case 'o': s = __nodeInspect(a, { depth: 4 }); break;
+      case 'O': s = __nodeInspect(a); break;
+      case 'c': s = ''; break;
+    }
+    out += first.slice(last, p) + s;
+    last = p + 2;
+    p++;
+  }
+  out += first.slice(last);
+  for (; i < args.length; i++) out += ' ' + insp(args[i]);
+  return out;
+}
 const __util = {
   inherits(ctor, superCtor) { if (ctor && ctor.prototype && superCtor && superCtor.prototype) { ctor.super_ = superCtor; Object.setPrototypeOf(ctor.prototype, superCtor.prototype); } },
   promisify: (f) => (...args) => new Promise((res, rej) => { try { f(...args, (e, v) => e ? rej(e) : res(v)); } catch (e) { rej(e); } }),
   callbackify: (f) => (...args) => { const cb = args.pop(); Promise.resolve(f(...args)).then((v) => cb(null, v), (e) => cb(e)); },
-  inspect: (x) => { try { return typeof x === 'string' ? x : JSON.stringify(x); } catch (e) { return String(x); } },
-  format: (...a) => a.map((x) => typeof x === 'string' ? x : (() => { try { return JSON.stringify(x); } catch (e) { return String(x); } })()).join(' '),
-  formatWithOptions: (_o, ...a) => a.join(' '),
+  inspect: (x, opts) => __nodeInspect(x, opts),
+  format: (...a) => __nodeFormat(...a),
+  formatWithOptions: (_o, ...a) => __nodeFormat(...a),
   deprecate: (fn, _msg) => fn,
   debuglog: () => (() => {}),
   isDeepStrictEqual: (a, b) => { try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return a === b; } },
@@ -1306,6 +1819,7 @@ const __util = {
   TextEncoder: globalThis.TextEncoder,
   TextDecoder: globalThis.TextDecoder,
 };
+__util.inspect.custom = Symbol.for('nodejs.util.inspect.custom');
 // ---- querystring (Node's legacy API, per its docs; verified against Node's results) ----
 const __qsUnescape = (s) => {
   try { return decodeURIComponent(s); } catch (e) {
@@ -1741,8 +2255,7 @@ globalThis.__nodeBuiltins = {
   'node:os': __os,
   child_process: { execSync: () => '', exec: () => {}, spawnSync: () => ({ status: 0 }) },
   'node:child_process': { execSync: () => '' },
-  url: { fileURLToPath: globalThis.__fileURLToPath, pathToFileURL: (p) => ({ href: 'file://' + p, toString: () => 'file://' + p }), URL: globalThis.URL },
-  'node:url': { fileURLToPath: globalThis.__fileURLToPath, pathToFileURL: (p) => 'file://' + p },
+  url: { fileURLToPath: globalThis.__fileURLToPath, pathToFileURL: globalThis.__pathToFileURL, URL: globalThis.URL },
   util: __util,
   'node:util': __util,
   crypto: __crypto,
@@ -2020,7 +2533,7 @@ function __snapLoad() {
   st.loaded = true;
   st.sf = sf;
   st.exists = !!sf && globalThis.__fs_existsSync(sf.path);
-  st.data = st.exists ? __parseSnapFile(globalThis.__fs_readFileSync(sf.path, 'utf8')) : Object.create(null);
+  st.data = st.exists ? __parseSnapFile(globalThis.__fs_readFile(sf.path, true)) : Object.create(null);
   st.unchecked = new Set(Object.keys(st.data));
   st.dirty = false;
   st.inline = false;
@@ -2101,7 +2614,7 @@ function __inlineSplice(code, index, snap, name) {
 function __writeInlineSnapshots(writes) {
   const file = globalThis.__ttFile;
   if (!writes.length || !file) return;
-  const code = globalThis.__fs_readFileSync(file, 'utf8');
+  const code = globalThis.__fs_readFile(file, true);
   const starts = [0];
   for (let i = 0; i < code.length; i++) if (code[i] === '\n') starts.push(i + 1);
   // UTF-16 columns are string indices in JS
@@ -2111,7 +2624,7 @@ function __writeInlineSnapshots(writes) {
     .sort((x, y) => y[0] - x[0]);
   let out = code;
   for (const [a, b, text] of splices) out = out.slice(0, a) + text + out.slice(b);
-  if (out !== code) globalThis.__fs_writeFileSync(file, out);
+  if (out !== code) globalThis.__fs_writeFile(file, out, false);
 }
 function __snapMismatch(key, expected, actual) {
   const err = new Error(`Snapshot \`${key}\` mismatched`);
@@ -2143,11 +2656,11 @@ function __snapFinish(skipped) {
   let deleted = false;
   if ((st.dirty || st.unchecked.size) && (external || st.inline || st.raw)) {
     if (external) {
-      globalThis.__fs_mkdirSync(st.sf.dir);
-      globalThis.__fs_writeFileSync(st.sf.path, __serializeSnapFile(st.data));
+      globalThis.__fs_mkdir(st.sf.dir, true);
+      globalThis.__fs_writeFile(st.sf.path, __serializeSnapFile(st.data), false);
     }
   } else if (!external && st.exists) {
-    if (mode === 'all') globalThis.__fs_rmSync(st.sf.path);
+    if (mode === 'all') globalThis.__fs_remove(st.sf.path, 'unlink');
     deleted = true;
   }
   return {
@@ -2166,6 +2679,7 @@ function makeExpect(actual, negated = false) {
   };
   // chai's assert with vitest's templates (turbo-test#71)
   const c = (pass, msg, notMsg, exp, act = actual) => __chaiAssert(negated, pass, msg, notMsg, actual, exp, act);
+  const cn = (pass, msg, notMsg, exp, act = actual) => __chaiAssert(negated, pass, msg, notMsg, actual, exp, act, false);
   const spyOf = () => {
     if (!(typeof actual === 'function' && actual._isMockFunction === true)) throw new TypeError(`${__inspect(actual)} is not a spy or a call to a spy!`);
     return actual;
@@ -2234,15 +2748,15 @@ function makeExpect(actual, negated = false) {
     toBeUndefined() { c(actual === undefined, 'expected #{this} to be undefined', 'expected #{this} not to be undefined', undefined); },
     toBeDefined() { c(actual !== undefined, 'expected #{this} to be defined', 'expected #{this} to be undefined', actual); },
     toBeNaN() { c(Number.isNaN(actual), 'expected #{this} to be NaN', 'expected #{this} not to be NaN', NaN); },
-    toBeGreaterThan(n) { numbers(actual, 'actual'); numbers(n, 'expected'); c(actual > n, `expected ${actual} to be greater than ${n}`, `expected ${actual} to be not greater than ${n}`, n); },
-    toBeGreaterThanOrEqual(n) { numbers(actual, 'actual'); numbers(n, 'expected'); c(actual >= n, `expected ${actual} to be greater than or equal to ${n}`, `expected ${actual} to be not greater than or equal to ${n}`, n); },
-    toBeLessThan(n) { numbers(actual, 'actual'); numbers(n, 'expected'); c(actual < n, `expected ${actual} to be less than ${n}`, `expected ${actual} to be not less than ${n}`, n); },
-    toBeLessThanOrEqual(n) { numbers(actual, 'actual'); numbers(n, 'expected'); c(actual <= n, `expected ${actual} to be less than or equal to ${n}`, `expected ${actual} to be not less than or equal to ${n}`, n); },
+    toBeGreaterThan(n) { numbers(actual, 'actual'); numbers(n, 'expected'); cn(actual > n, `expected ${actual} to be greater than ${n}`, `expected ${actual} to be not greater than ${n}`, n); },
+    toBeGreaterThanOrEqual(n) { numbers(actual, 'actual'); numbers(n, 'expected'); cn(actual >= n, `expected ${actual} to be greater than or equal to ${n}`, `expected ${actual} to be not greater than or equal to ${n}`, n); },
+    toBeLessThan(n) { numbers(actual, 'actual'); numbers(n, 'expected'); cn(actual < n, `expected ${actual} to be less than ${n}`, `expected ${actual} to be not less than ${n}`, n); },
+    toBeLessThanOrEqual(n) { numbers(actual, 'actual'); numbers(n, 'expected'); cn(actual <= n, `expected ${actual} to be less than or equal to ${n}`, `expected ${actual} to be not less than or equal to ${n}`, n); },
     toBeCloseTo(n, d = 2) {
       let pass = false, expectedDiff = 0, receivedDiff = 0;
       if ((n === Infinity && actual === Infinity) || (n === -Infinity && actual === -Infinity)) pass = true;
       else { expectedDiff = 10 ** -d / 2; receivedDiff = Math.abs(actual - n); pass = receivedDiff < expectedDiff; }
-      c(pass, `expected #{this} to be close to #{exp}, received difference is ${receivedDiff}, but expected ${expectedDiff}`, `expected #{this} to not be close to #{exp}, received difference is ${receivedDiff}, but expected ${expectedDiff}`, n);
+      cn(pass, `expected #{this} to be close to #{exp}, received difference is ${receivedDiff}, but expected ${expectedDiff}`, `expected #{this} to not be close to #{exp}, received difference is ${receivedDiff}, but expected ${expectedDiff}`, n);
     },
     toContain(x) {
       if (typeof Node !== 'undefined' && actual instanceof Node) {
@@ -2315,12 +2829,12 @@ function makeExpect(actual, negated = false) {
         const st = __snapLoad();
         st.raw = true;
         const exists = globalThis.__fs_existsSync(path);
-        const expected = exists ? globalThis.__fs_readFileSync(path, 'utf8').replace(/\r\n/g, '\n') : undefined;
+        const expected = exists ? globalThis.__fs_readFile(path, true).replace(/\r\n/g, '\n') : undefined;
         const pass = expected === body;
         const write = () => {
           const slash = path.lastIndexOf('/');
-          if (slash > 0) globalThis.__fs_mkdirSync(path.slice(0, slash));
-          globalThis.__fs_writeFileSync(path, body);
+          if (slash > 0) globalThis.__fs_mkdir(path.slice(0, slash), true);
+          globalThis.__fs_writeFile(path, body, false);
         };
         if (!__snapReconcile(st, pass, expected !== undefined, write)) throw __snapMismatch(key, expected, body);
       });
@@ -2432,7 +2946,7 @@ function makeExpect(actual, negated = false) {
     toHaveBeenCalledTimes(times) {
       const spy = spyOf();
       const n = spy.mock.calls.length;
-      c(n === times, `expected "${spy.getMockName()}" to be called #{exp} times, but got ${n} times`, `expected "${spy.getMockName()}" to not be called #{exp} times`, times, n);
+      cn(n === times, `expected "${spy.getMockName()}" to be called #{exp} times, but got ${n} times`, `expected "${spy.getMockName()}" to not be called #{exp} times`, times, n);
     },
     toHaveBeenCalledWith(...a) {
       const spy = spyOf();
@@ -2445,7 +2959,7 @@ function makeExpect(actual, negated = false) {
     toHaveBeenCalledOnce() {
       const spy = spyOf();
       const n = spy.mock.calls.length;
-      c(n === 1, `expected "${spy.getMockName()}" to be called once, but got ${n} times`, `expected "${spy.getMockName()}" to not be called once`, 1, n);
+      cn(n === 1, `expected "${spy.getMockName()}" to be called once, but got ${n} times`, `expected "${spy.getMockName()}" to not be called once`, 1, n);
     },
     toHaveBeenLastCalledWith(...a) {
       const spy = spyOf();
@@ -2461,7 +2975,7 @@ function makeExpect(actual, negated = false) {
     toHaveReturned() {
       const spy = spyOf();
       const pass = spy.mock.calls.length > 0 && spy.mock.results.some((r) => r.type !== 'throw');
-      c(pass, `expected "${spy.getMockName()}" to be successfully called at least once`, `expected "${spy.getMockName()}" to not be successfully called`, pass, !pass);
+      cn(pass, `expected "${spy.getMockName()}" to be successfully called at least once`, `expected "${spy.getMockName()}" to not be successfully called`, pass, !pass);
     },
     toHaveReturnedWith(v) {
       const spy = spyOf();
@@ -2766,6 +3280,22 @@ function __ttMock(spec, factory, vitest, isDoMock) {
   if (globalThis.__ttRegisterMock && dir && __ttRegisterMockNow(dir, spec, exports, key)) return;
   (globalThis.__pendingMocks || (globalThis.__pendingMocks = [])).push({ spec: String(spec), exports, vitest, key });
 }
+// vi.dynamicImportSettled (vitest's waitForImportsToResolve): wait a macrotask on the real
+// clock (vitest's safe timers, so fake timers do not hold it), then for every import() still
+// pending — the loader's import() hook tracks them — and again until none is left.
+const __ttPendingImports = new Set();
+globalThis.__ttTrackImport = (p) => {
+  __ttPendingImports.add(p);
+  const done = () => { __ttPendingImports.delete(p); };
+  p.then(done, done);
+  return p;
+};
+async function __ttImportsSettled() {
+  await new Promise((resolve) => __scheduleInternal(resolve, 0));
+  if (!__ttPendingImports.size) return;
+  await Promise.allSettled([...__ttPendingImports]);
+  return __ttImportsSettled();
+}
 globalThis.vi = {
   fn: (impl) => { const s = makeSpy(impl); __spies.push(s); return s; },
   spyOn: (obj, key) => {
@@ -2797,6 +3327,7 @@ globalThis.vi = {
   },
   doMock: (spec, factory) => __ttMock(spec, factory, true, true),
   doUnmock: (spec) => globalThis.vi.unmock(spec),
+  dynamicImportSettled: () => __ttImportsSettled(),
   clearAllMocks: () => { __spies.forEach((s) => s.mockClear()); },
   resetAllMocks: () => { __spies.forEach((s) => s.mockReset()); },
   restoreAllMocks: () => { __spies.forEach((s) => { if (s.mockRestore) s.mockRestore(); }); },
@@ -3204,9 +3735,11 @@ function __chaiMsg(tpl, obj, exp, act) {
   return tpl.replace(/#\{this\}/g, () => __objDisplay(obj)).replace(/#\{act\}/g, () => __objDisplay(act)).replace(/#\{exp\}/g, () => __objDisplay(exp));
 }
 // chai `assert(pass, msg, negatedMsg, expected, actual)` for an assertion on `obj`.
-function __chaiAssert(negated, pass, msg, notMsg, obj, exp, act) {
+// `showDiff` false: vitest's comparison and call-count matchers pass it (no diff is printed);
+// chai also drops the diff when both values are undefined.
+function __chaiAssert(negated, pass, msg, notMsg, obj, exp, act, showDiff = true) {
   if (negated ? !pass : pass) return;
-  throw new __ChaiAssertionError(__chaiMsg(negated ? notMsg : msg, obj, exp, act), { actual: act, expected: exp });
+  throw new __ChaiAssertionError(__chaiMsg(negated ? notMsg : msg, obj, exp, act), { actual: act, expected: exp, showDiff: showDiff && !(exp === undefined && act === undefined) });
 }
 // The asymmetric matchers' vitest names and samples.
 function __asymName(m) {
@@ -3816,6 +4349,31 @@ globalThis.afterAll = (fn) => current.hooks.aa.push(fn);
 // (`passed` / `failed` / `skipped` / `todo`), and for a test that ran its real start time and
 // duration (ms) and its failure messages (each error's `stack`, else its `message`, as vitest's
 // JSON reporter) (#63).
+// A failure as vitest's reporters print it (@vitest/utils processError + printErrorInner):
+// name, message, the diff of expected / actual, the stack and the cause (turbo-test#81).
+function __errorInfo(e) {
+  if (e === null || (typeof e !== 'object' && typeof e !== 'function')) {
+    const s = String(e);
+    return { name: '', message: s.split('\n')[0], diff: '', stack: s, cause: null };
+  }
+  let diff = '';
+  if (e.showDiff || (e.showDiff === undefined && e.expected !== undefined && e.actual !== undefined)) {
+    try { diff = __printDiffOrStringify(e.actual, e.expected); } catch (err) { diff = ''; }
+  }
+  const cause = e.cause && typeof e.cause === 'object' && 'name' in e.cause ? __errorInfo(e.cause) : null;
+  return { name: String(e.name || 'Unknown Error'), message: e.message === undefined ? '' : String(e.message), diff: diff || '', stack: String(e.stack || ''), cause };
+}
+globalThis.__ttErrorInfo = (e) => __errorInfo(e);
+// @vitest/utils printDiffOrStringify(received, expected)
+function __printDiffOrStringify(received, expected) {
+  if (typeof expected === 'string' && typeof received === 'string' && expected.length > 0 && received.length > 0
+    && expected.length <= 20000 && received.length <= 20000 && expected !== received && !expected.includes('\n') && !received.includes('\n')) {
+    return `Expected: "${expected}"\nReceived: "${received}"`;
+  }
+  const d = __vdiff(expected, received);
+  if (!d) return '';
+  return d.startsWith('- Expected:\n') ? d : `- Expected\n+ Received\n\n${d}`;
+}
 function __testRecord(t, chain, status, extra) {
   return {
     name: chain.map((s) => s.name).filter(Boolean).concat(t.name).join(' > '),
@@ -3866,10 +4424,16 @@ async function runSuite(suite, ancestors, summary, mode = '') {
     hookFailed = true;
     failed = true;
   }
+  // a suite's hook errors (vitest's failed suite, a junit testcase of its own: turbo-test#81)
+  const suiteStart = __loop.realNow();
+  const suiteErrors = [];
+  // in vitest's getSuites order (a suite before the suites inside it)
+  const suiteSlot = summary.suite_errors.push(null) - 1;
   if (!skipAll && !idle && !forbidden) {
     for (const h of suite.hooks.ba) {
       try { await h(); } catch (e) {
         summary.failures.push(`${suite.name || '<root>'} beforeAll: ${(e && e.message) || String(e)}`);
+        suiteErrors.push(__errorInfo(e));
         hookFailed = true;
         failed = true;
         break;
@@ -3928,6 +4492,7 @@ async function runSuite(suite, ancestors, summary, mode = '') {
     // (stubbed to a constant 0 in this runtime, see the perf stub near top of file) nor Date.now()
     // (fake timers / vi.setSystemTime replace it).
     const __t0 = __loop.realNow();
+    __ttTestLogs = [];
     for (let a = 0; a < attempts && !ok; a++) {
       // Reset per-test snapshot + assertion-count state (snapshot counter is keyed by test name,
       // so distinct multi-snapshot tests don't collide; assertion enforcement resets each attempt).
@@ -3947,7 +4512,9 @@ async function runSuite(suite, ancestors, summary, mode = '') {
           timer = __scheduleInternal(() => rej(new Error(`test timed out in ${timeoutMs}ms`)), timeoutMs);
         });
         try {
-          await Promise.race([Promise.resolve().then(() => t.fn()), timed]);
+          // called as a plain function, as vitest calls it (its stack frame has no method name)
+          const fn = t.fn;
+          await Promise.race([Promise.resolve().then(() => fn()), timed]);
         } finally {
           __clearInternal(timer);
         }
@@ -3975,7 +4542,8 @@ async function runSuite(suite, ancestors, summary, mode = '') {
       }
     }
     const __dur = __loop.realNow() - __t0;
-    const timing = { duration_ms: __dur, start_ms: __t0 };
+    const timing = { duration_ms: __dur, start_ms: __t0, logs: __ttTestLogs.map((l) => [l[0], l[1]]) };
+    __ttTestLogs = null;
     // a passing it.fails is vitest's `expected fail` in the summary footer (#78)
     if (ok) { summary.passed++; summary.tests.push(__testRecord(t, chain, 'passed', t.fails ? { ...timing, expected_fail: true } : timing)); }
     else {
@@ -3994,17 +4562,19 @@ async function runSuite(suite, ancestors, summary, mode = '') {
       }
       summary.failures.push(`${label}: ${msg}`);
       const failure = (lastErr && (lastErr.stack || lastErr.message)) || String(lastErr);
-      summary.tests.push(__testRecord(t, chain, 'failed', { ...timing, message: msg, failure_messages: [String(failure)] }));
+      summary.tests.push(__testRecord(t, chain, 'failed', { ...timing, message: msg, failure_messages: [String(failure)], errors: [__errorInfo(lastErr)] }));
     }
   }
   if (!skipAll && !idle && !forbidden) {
     for (const h of suite.hooks.aa) {
       try { await h(); } catch (e) {
         summary.failures.push(`${suite.name || '<root>'} afterAll: ${(e && e.message) || String(e)}`);
+        suiteErrors.push(__errorInfo(e));
         failed = true;
       }
     }
   }
+  if (suiteErrors.length && ancestors.length) summary.suite_errors[suiteSlot] = { name: suite.name, duration_ms: __loop.realNow() - suiteStart, errors: suiteErrors };
   record(failed ? 'fail' : skipAll || idle ? 'skip' : 'pass');
   return failed;
 }
@@ -4046,7 +4616,7 @@ globalThis.__tt = {
   async run() {
     // `suites`: one state per describe block ('pass' / 'fail' / 'skip' / 'todo'), for the JSON
     // reporter's suite counts.
-    const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [], suites: [], skippedNames: [] };
+    const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [], suites: [], skippedNames: [], suite_errors: [] };
     // vitest (runner `runFiles`): a file that collected NO task at all — no test or suite, skipped
     // and todo ones included — fails with "No test suite found in file <path>" unless
     // passWithNoTests. Reported as the file's only failure entry with no failed test; the CLI

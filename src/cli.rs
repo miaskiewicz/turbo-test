@@ -51,6 +51,10 @@ pub struct FileResult {
     pub snapshot: Option<runner::SnapshotResult>,
     pub setup_us: f64,
     pub dur_ms: f64,
+    /// The suites whose hooks failed (junit test cases of their own).
+    pub suite_errors: Vec<runner::SuiteError>,
+    /// The error a file failed to load with, when the runner saw one (junit's `<failure>`).
+    pub load_error_info: Option<crate::failure::ErrorInfo>,
 }
 
 /// Which reporter to emit. Anything turbo-test does not implement is accepted-and-ignored and
@@ -550,8 +554,8 @@ pub fn execute_file(engine: &Engine, file: &Path) -> FileOutcome {
 pub const NO_SUITE_FOUND: &str = "No test suite found in file ";
 
 /// Turn one file's outcome into the reporters' [`FileResult`]. A "no test suite found" report is
-/// a file-level error, reported exactly like a load error (ERROR line, JSON `error`, JUnit
-/// `<error>` case, TAP `not ok`, counted as a failed file).
+/// a file-level error, reported exactly like a load error (ERROR line, JSON `error`, a failing
+/// JUnit case, TAP `not ok`, counted as a failed file).
 pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> FileResult {
     let r = match r {
         Ok(rep)
@@ -586,6 +590,8 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
                 snapshot: rep.snapshot,
                 setup_us: rep.setup_us,
                 dur_ms,
+                suite_errors: rep.suite_errors,
+                load_error_info: None,
             }
         }
         Err(e) => FileResult {
@@ -601,6 +607,8 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
             snapshot: None,
             setup_us: 0.0,
             dur_ms,
+            suite_errors: Vec::new(),
+            load_error_info: runner::take_load_error(),
         },
     }
 }
@@ -725,7 +733,8 @@ pub fn render_human(reporter: Reporter, res: &[FileResult]) -> String {
     out
 }
 
-/// XML-escape a string for JUnit attribute/text content.
+/// XML-escape a string for JUnit attribute/text content, as vitest's `escapeXML`: the five
+/// entities, and characters XML 1.0 forbids or discourages left out.
 pub fn xml_esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
     for c in s.chars() {
@@ -735,6 +744,14 @@ pub fn xml_esc(s: &str) -> String {
             '>' => o.push_str("&gt;"),
             '"' => o.push_str("&quot;"),
             '\'' => o.push_str("&apos;"),
+            '\0'..='\x08'
+            | '\x0b'
+            | '\x0c'
+            | '\x0e'..='\x1f'
+            | '\u{7f}'..='\u{84}'
+            | '\u{86}'..='\u{9f}' => {}
+            '\u{fdd0}'..='\u{fdef}' | '\u{fffd}'..='\u{ffff}' => {}
+            c if (c as u32) & 0xfffe == 0xfffe => {}
             _ => o.push(c),
         }
     }
@@ -928,69 +945,211 @@ pub fn render_json(
     out
 }
 
-/// JUnit XML: one `<testsuite>` per file, one `<testcase>` per non-skipped test.
-pub fn render_junit(files: &[PathBuf], res: &[FileResult], t: &Totals) -> String {
-    let total: u32 = res.iter().map(|r| r.passed + r.failed).sum();
-    let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    out.push_str(&format!(
-        "<testsuites name=\"turbo-test\" tests=\"{total}\" failures=\"{}\" errors=\"{}\">\n",
-        t.failed, t.errors
-    ));
+/// JUnit XML as vitest 4.1.12's junit reporter writes it (turbo-test#81): `<testsuites name="vitest
+/// tests">`, a `<testsuite>` per file (`timestamp`, `hostname`, `skipped`), a `<testcase>` per
+/// test (skipped / todo ones with `<skipped/>`) with its console output (`<system-out>` /
+/// `<system-err>`) and its `<failure message type>` holding the printed error
+/// ([`crate::failure::print_error`]), then a test case per suite whose hooks failed; a file that
+/// failed to load is one failing test case named after the file. Four-space indentation, every
+/// element's closing tag on a line of its own; durations in seconds as JavaScript prints them.
+/// `root` is the directory the failure frames are named relative to.
+pub fn render_junit(names: &[PathBuf], res: &[FileResult], root: &Path) -> String {
+    let host = hostname();
+    let mut lines: Vec<String> = vec!["<?xml version=\"1.0\" encoding=\"UTF-8\" ?>".to_string()];
+    let mut suites: Vec<Vec<String>> = Vec::new();
+    let (mut tests, mut failures, mut time) = (0usize, 0usize, 0.0f64);
     for r in res {
-        let suite = files[r.idx].to_string_lossy().to_string();
-        let secs = r.dur_ms / 1000.0;
-        // A file that failed to LOAD has no per-test list: emit one synthetic failing
-        // <testcase> carrying the load error, so the failure is never silently dropped.
-        if r.load_error {
-            out.push_str(&format!(
-                "  <testsuite name=\"{}\" tests=\"1\" failures=\"1\" errors=\"1\" time=\"{:.3}\">\n",
-                xml_esc(&suite),
-                secs
-            ));
-            out.push_str(&format!(
-                "    <testcase name=\"{}\" classname=\"{}\">\n      <error message=\"{}\"/>\n    </testcase>\n",
-                xml_esc(&suite),
-                xml_esc(&suite),
-                xml_esc(&r.error_msg)
-            ));
-            out.push_str("  </testsuite>\n");
-            continue;
-        }
-        out.push_str(&format!(
-            "  <testsuite name=\"{}\" tests=\"{}\" failures=\"{}\" errors=\"0\" time=\"{:.3}\">\n",
-            xml_esc(&suite),
-            r.passed + r.failed,
-            r.failed,
-            secs
-        ));
-        for tc in &r.tests {
-            if tc.status == "skipped" {
-                continue;
+        let name = names[r.idx].to_string_lossy().to_string();
+        let mut cases: Vec<String> = Vec::new();
+        let (mut n, mut failed, mut skipped) = (0usize, 0usize, 0usize);
+        for t in &r.tests {
+            n += 1;
+            let mut body = Vec::new();
+            for (stream, tag) in [("stdout", "system-out"), ("stderr", "system-err")] {
+                let logs: Vec<&(String, String)> = r_logs(t, stream);
+                if !logs.is_empty() {
+                    body.push(format!("            <{tag}>"));
+                    for (_, content) in logs {
+                        body.push(xml_esc(content));
+                    }
+                    body.push(format!("            </{tag}>"));
+                }
             }
-            out.push_str(&format!(
-                "    <testcase name=\"{}\" classname=\"{}\" time=\"{:.3}\"",
-                xml_esc(&tc.name),
-                xml_esc(&suite),
-                tc.duration_ms / 1000.0
-            ));
-            if tc.status == "failed" {
-                out.push_str(&format!(
-                    ">\n      <failure message=\"{}\"/>\n    </testcase>\n",
-                    xml_esc(&tc.message)
-                ));
-            } else {
-                out.push_str("/>\n");
+            if t.status == "skipped" || t.status == "todo" {
+                skipped += 1;
+                body.push("            <skipped/>".to_string());
             }
+            if t.status == "failed" {
+                failed += 1;
+                // a failure the runtime recorded no error object for (a forbidden `.only`)
+                let fallback = [load_error_info(&t.message)];
+                let errors = if t.errors.is_empty() {
+                    &fallback[..]
+                } else {
+                    &t.errors[..]
+                };
+                for e in errors {
+                    body.extend(failure_element(e, root));
+                }
+            }
+            cases.push(testcase(&name, &t.name, t.duration_ms, body));
         }
-        out.push_str("  </testsuite>\n");
+        for se in &r.suite_errors {
+            n += 1;
+            failed += 1;
+            let body = se
+                .errors
+                .iter()
+                .flat_map(|e| failure_element(e, root))
+                .collect();
+            cases.push(testcase(&name, &se.name, se.duration_ms, body));
+        }
+        if n == 0 && r.failed_file {
+            n = 1;
+            failed = 1;
+            let e = r
+                .load_error_info
+                .clone()
+                .unwrap_or_else(|| load_error_info(&r.error_msg));
+            cases.push(testcase(&name, &name, 0.0, failure_element(&e, root)));
+        }
+        let dur = if r.load_error { 0.0 } else { r.dur_ms };
+        let mut suite = vec![format!(
+            "    <testsuite name=\"{}\" timestamp=\"{}\" hostname=\"{}\" tests=\"{n}\" failures=\"{failed}\" errors=\"0\" skipped=\"{skipped}\" time=\"{}\">",
+            xml_esc(&name),
+            iso_now(),
+            xml_esc(&host),
+            seconds(dur)
+        )];
+        suite.extend(cases);
+        suite.push("    </testsuite>".to_string());
+        suites.push(suite);
+        tests += n;
+        failures += failed;
+        time += dur;
     }
-    out.push_str("</testsuites>\n");
-    out
+    lines.push(format!(
+        "<testsuites name=\"vitest tests\" tests=\"{tests}\" failures=\"{failures}\" errors=\"0\" time=\"{}\">",
+        seconds(time)
+    ));
+    lines.extend(suites.into_iter().flatten());
+    lines.push("</testsuites>".to_string());
+    lines.join("\n")
+}
+
+/// A test's captured console output on `stream`.
+fn r_logs<'t>(t: &'t TestCase, stream: &str) -> Vec<&'t (String, String)> {
+    t.logs.iter().filter(|(s, _)| s == stream).collect()
+}
+
+/// One `<testcase>` with its child lines.
+fn testcase(classname: &str, name: &str, ms: f64, body: Vec<String>) -> String {
+    let mut out = vec![format!(
+        "        <testcase classname=\"{}\" name=\"{}\" time=\"{}\">",
+        xml_esc(classname),
+        xml_esc(name),
+        seconds(ms)
+    )];
+    out.extend(body);
+    out.push("        </testcase>".to_string());
+    out.join("\n")
+}
+
+/// A `<failure>` element's lines for `e`.
+fn failure_element(e: &crate::failure::ErrorInfo, root: &Path) -> Vec<String> {
+    vec![
+        format!(
+            "            <failure message=\"{}\" type=\"{}\">",
+            xml_esc(&e.message),
+            xml_esc(&e.name)
+        ),
+        xml_esc(&crate::failure::print_error(e, root)),
+        "            </failure>".to_string(),
+    ]
+}
+
+/// A load error without the runner's error object (a setup file, a graph that did not load):
+/// its message as `Name: message` (the error name, else `Error`).
+fn load_error_info(error_msg: &str) -> crate::failure::ErrorInfo {
+    let mut m = error_msg;
+    for p in ["module errored: ", "evaluate threw: ", "instantiate: "] {
+        if let Some(rest) = m.strip_prefix(p) {
+            m = rest;
+            break;
+        }
+    }
+    let (name, message) = match m.split_once(": ") {
+        Some((name, rest))
+            if name.ends_with("Error") && name.chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            (name, rest)
+        }
+        _ => ("Error", m),
+    };
+    crate::failure::ErrorInfo {
+        name: name.to_string(),
+        message: message.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Milliseconds as vitest's junit `executionTime` prints seconds: `(ms / 1000).toLocaleString('en-US',
+/// { useGrouping: false, maximumFractionDigits: 10 })`.
+pub fn seconds(ms: f64) -> String {
+    let s = format!("{:.10}", ms / 1000.0);
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() || s == "-0" {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// The current time as JavaScript's `new Date().toISOString()` (UTC, milliseconds).
+fn iso_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    iso_time(now.as_millis() as i64)
+}
+
+/// `new Date(ms).toISOString()` for a time after 1970.
+pub fn iso_time(ms: i64) -> String {
+    let (days, rem) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
+    // civil-from-days (Howard Hinnant)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rem / 3_600_000,
+        rem / 60_000 % 60,
+        rem / 1000 % 60,
+        rem % 1000
+    )
+}
+
+/// The machine's host name, as Node's `os.hostname()` (the `hostname` command; `localhost`
+/// when it cannot run).
+fn hostname() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "localhost".to_string())
 }
 
 /// TAP v13: a flat numbered plan over every test across all files. A file that failed to LOAD has
 /// no per-test list: it is one `not ok N - <file>` point carrying the load error (the TAP twin of
-/// JUnit's synthetic `<error>` case), so the failure is never silently dropped from the plan.
+/// JUnit's failing case for the file), so the failure is never silently dropped from the plan.
 pub fn render_tap(files: &[PathBuf], res: &[FileResult]) -> String {
     let total: usize = res
         .iter()
@@ -1032,16 +1191,25 @@ pub fn render_artifact(
     files: &[PathBuf],
     names: &[PathBuf],
     res: &[FileResult],
-    t: &Totals,
     start_ms: f64,
     did_update: bool,
 ) -> Option<String> {
     match reporter {
         Reporter::Json => Some(render_json(files, res, start_ms, did_update)),
-        Reporter::Junit => Some(render_junit(names, res, t)),
+        Reporter::Junit => Some(render_junit(names, res, &junit_root())),
         Reporter::Tap => Some(render_tap(names, res)),
         _ => None,
     }
+}
+
+/// The directory junit names failure frames relative to: `--root` (TURBO_ROOT), else the
+/// working directory.
+fn junit_root() -> PathBuf {
+    let root = std::env::var_os("TURBO_ROOT")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    std::fs::canonicalize(&root).unwrap_or(root)
 }
 
 /// Write `text` to the `--outputFile` `path`, creating missing parent dirs. Returns the stderr
@@ -1069,7 +1237,20 @@ pub fn emit_output(
     let (mut stdout, mut stderr) = (String::new(), String::new());
     if let Some(text) = artifact {
         match output_file {
-            Some(path) => stderr = write_output_file(path, text),
+            Some(path) => {
+                // vitest's junit writes each line with its newline; its JSON report is one line
+                // without one. Both say where the report went (`JUNIT report written to …`).
+                let (kind, text) = match reporter {
+                    Reporter::Junit => ("JUNIT", format!("{text}\n")),
+                    Reporter::Json => ("JSON", text.to_string()),
+                    _ => ("", text.to_string()),
+                };
+                stderr = write_output_file(path, &text);
+                if stderr.is_empty() && !kind.is_empty() {
+                    let abs = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
+                    stdout = format!("{kind} report written to {}\n", abs.display());
+                }
+            }
             None => stdout = format!("{text}\n"),
         }
     } else if let (Some(path), false) = (output_file, reporter.is_artifact()) {
@@ -1224,6 +1405,13 @@ pub fn run(opts: Options) -> i32 {
     // stderr then (like the summary line below).
     let artifact_on_stdout = opts.reporter.is_artifact() && opts.output_file.is_none();
     runner::CONSOLE_TO_STDERR.store(artifact_on_stdout, Ordering::Relaxed);
+    // junit (vitest): each test's console output goes into its test case, and failure frames
+    // are named in the original source (the test file's transform map, location.rs)
+    if opts.reporter == Reporter::Junit {
+        std::env::set_var("TURBO_CAPTURE_LOGS", "1");
+        std::env::set_var("TURBO_TASK_LOCATION", "1");
+        std::env::set_var("TURBO_ERROR_FRAMES", "1");
+    }
 
     runner::init_v8(); // builds the framework snapshot once, before workers spawn
 
@@ -1248,15 +1436,7 @@ pub fn run(opts: Options) -> i32 {
     save_durations(&hist_path, &update_history(hist, &files, &res));
 
     let did_update = opts.env.iter().any(|(k, _)| *k == "TURBO_UPDATE_SNAPSHOTS");
-    let artifact = render_artifact(
-        opts.reporter,
-        &files,
-        &names,
-        &res,
-        &t,
-        start_ms,
-        did_update,
-    );
+    let artifact = render_artifact(opts.reporter, &files, &names, &res, start_ms, did_update);
     let (out, err) = emit_output(
         artifact.as_deref(),
         opts.reporter,
@@ -1275,8 +1455,9 @@ pub fn run(opts: Options) -> i32 {
         runner::transform_cache_stats(),
     );
     // Keep stdout clean for machine artifacts (json/junit/tap) printed to stdout — send the human
-    // summary to stderr so it doesn't corrupt the parsed output.
-    if artifact_on_stdout {
+    // summary to stderr so it doesn't corrupt the parsed output. Written to --outputFile, the
+    // artifact reporters print no footer either (vitest prints only `… report written to …`).
+    if opts.reporter.is_artifact() {
         eprintln!("{summary}");
     } else {
         // Human reporters get the vitest-style footer; the turbo diagnostic line follows it.

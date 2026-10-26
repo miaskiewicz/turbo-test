@@ -467,3 +467,38 @@ fn a_mock_factory_sees_the_files_top_level_bindings() {
         assert!(r.stdout.contains("Tests  2 passed (2)"), "{}", r.all());
     }
 }
+
+/// turbo-test#87: `import.meta.url` is the file's percent-encoded file URL (Node 26 / vitest
+/// 4.1.12 `pathToFileURL(filename).href`) on both loaders; `filename` / `dirname` are paths.
+#[test]
+fn import_meta_url_is_percent_encoded() {
+    for esbuild in [false, true] {
+        let p = Project::new("rc meta dir €");
+        if esbuild {
+            p.with_esbuild();
+            p.file("package.json", r#"{"name":"rc-meta"}"#);
+        } else {
+            p.file("package.json", r#"{"type":"module"}"#);
+        }
+        let entry = p.path("a.test.ts").display().to_string();
+        let url = format!(
+            "file://{}",
+            entry.replace(' ', "%20").replace('€', "%E2%82%AC")
+        );
+        p.file(
+            "a.test.ts",
+            &format!(
+                "import {{ expect, it }} from 'vitest';\n\
+                 import {{ fileURLToPath }} from 'node:url';\n\
+                 it('import.meta', () => {{\n\
+                 \x20 expect([import.meta.url, import.meta.filename, import.meta.dirname]).toEqual([{url:?}, {entry:?}, {dir:?}]);\n\
+                 \x20 expect(fileURLToPath(import.meta.url)).toBe(import.meta.filename);\n\
+                 }});\n",
+                dir = p.dir.display().to_string(),
+            ),
+        );
+        let r = turbo_test(&p.dir, &[], &[]);
+        assert_eq!(r.code, Some(0), "esbuild={esbuild}\n{}", r.all());
+        assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
+    }
+}

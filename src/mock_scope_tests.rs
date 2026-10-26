@@ -79,3 +79,54 @@ fn binder_and_scope_text() {
         "globalThis.__ttScopeNames([\"a\", \"K\"]);\nwith (globalThis.__ttScope) {\nf()\n}"
     );
 }
+
+#[test]
+fn mock_calls_are_read_from_the_ast() {
+    let calls = |src: &str| mock_calls(src, &["vi.mock", "jest.mock"]);
+    let pairs = |v: &[(&str, &str)]| {
+        Some(
+            v.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    // a ')' inside a string or template belongs to the factory (the text scan cut it there)
+    assert_eq!(
+        calls("vi.mock('./a', () => ({ s: 'a)', t: `:)` }));"),
+        pairs(&[("./a", "() => ({ s: 'a)', t: `:)` })")])
+    );
+    // calls in comments and strings are not calls; a template specifier without substitutions
+    // counts, a computed one and a non-literal do not; a third argument is not the factory
+    assert_eq!(
+        calls(
+            "// vi.mock('./c', () => 1)\nconst s = \"vi.mock('./s', f)\";\n\
+             vi.mock(`./t`, () => 2, { spy: true });\nvi.mock(`./${x}`, () => 3);\nvi.mock(name, () => 4);\n\
+             jest.mock('./j');"
+        ),
+        pairs(&[("./t", "() => 2"), ("./j", "")])
+    );
+    // TypeScript and JSX factories; a call inside a matched factory is part of it, not another
+    assert_eq!(
+        calls("vi.mock('./d', () => ({ g: (n: string) => <i>{n}</i>, h: vi.mock('./inner') }));"),
+        pairs(&[(
+            "./d",
+            "() => ({ g: (n: string) => <i>{n}</i>, h: vi.mock('./inner') })"
+        )])
+    );
+    // only the named callees, only as `object.property` of an identifier
+    assert_eq!(
+        calls("a.vi.mock('./x', f); vi['mock']('./y', f); mock('./z', f); vi.doMock('./w', f);"),
+        pairs(&[])
+    );
+    assert_eq!(
+        mock_calls("vi.doMock('./w', f);", &["vi.doMock"]),
+        pairs(&[("./w", "f")])
+    );
+    // a `<T>x` cast is not TSX: the TypeScript parse reads it
+    assert_eq!(
+        calls("const n = <number>1;\nvi.mock('./n', () => ({ n }));"),
+        pairs(&[("./n", "() => ({ n })")])
+    );
+    // source that parses as neither: None (the caller scans the text)
+    assert_eq!(calls("vi.mock('./u', () => (1"), None);
+}

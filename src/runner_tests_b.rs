@@ -435,6 +435,14 @@ fn coverage_accumulate_ignores_malformed_and_out_of_scope_scripts() {
     for f in [&good, &test_file, &spec_file, &nm, &bad_utf8] {
         assert!(!crate::coverage::has_meta(f), "{}", f.display());
     }
+    // an in-scope script V8 reports without functions is registered, with nothing to map
+    let empty = d.join("empty.js");
+    std::fs::write(&empty, "exports.y = 2;\n").unwrap();
+    coverage_accumulate(&format!(
+        r#"{{"result":{{"result":[{{"url":{},"functions":[]}}]}}}}"#,
+        serde_json::to_string(&empty.to_string_lossy()).unwrap()
+    ));
+    assert!(crate::coverage::has_meta(&empty));
 }
 
 #[test]
@@ -650,4 +658,74 @@ fn resolve_pending_mocks_tolerates_a_missing_or_throwing_resolver() {
         assert!(tc.has_caught());
         assert!(!RESOLVING_MOCKS.with(|f| f.get()));
     });
+}
+
+#[test]
+fn a_synthetic_module_without_exports_fails_evaluation_instead_of_aborting() {
+    // turbo-test#79: a synthetic module whose registry entry is gone (a reused isolate's reset)
+    // errors with a message; empty evaluation steps without an exception abort V8.
+    with_context(|scope, _| {
+        let module = make_synthetic(scope, &["x".to_string()]).unwrap();
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let tc = &mut tc.init();
+        assert_eq!(module.instantiate_module(tc, resolve_callback), Some(true));
+        let _ = module.evaluate(tc);
+        assert_eq!(module.get_status(), v8::ModuleStatus::Errored);
+        assert_eq!(
+            module.get_exception().to_rust_string_lossy(tc),
+            "Error: turbo-test: an imported module was unloaded before it was evaluated"
+        );
+    });
+}
+
+#[test]
+fn the_esm_mock_prepass_falls_back_and_fails_loudly_when_nothing_compiles() {
+    // turbo-test#79 item 1: a prepass that cannot compile was skipped silently, so the file ran
+    // against the real modules.
+    with_context(|scope, _| {
+        assert_eq!(
+            run_prepass(
+                scope,
+                "globalThis.__p = 'first';",
+                "globalThis.__p = 'fallback';"
+            ),
+            Ok(())
+        );
+        assert_eq!(eval(scope, "globalThis.__p"), "first");
+        // the first throws (or does not compile): the fallback runs
+        assert_eq!(
+            run_prepass(scope, "throw 1;", "globalThis.__p = 'after throw';"),
+            Ok(())
+        );
+        assert_eq!(eval(scope, "globalThis.__p"), "after throw");
+        assert_eq!(
+            run_prepass(
+                scope,
+                "(n: string) => n",
+                "globalThis.__p = 'after syntax';"
+            ),
+            Ok(())
+        );
+        assert_eq!(eval(scope, "globalThis.__p"), "after syntax");
+        // a fallback that throws is the factories' business (their error stand-ins)
+        assert_eq!(run_prepass(scope, "throw 1;", "throw 2;"), Ok(()));
+        // nothing compiles: the file fails with the SyntaxError
+        assert_eq!(
+            run_prepass(
+                scope,
+                "(n: string) => n",
+                "vi.mock('./d', (n: string) => n);"
+            ),
+            Err("SyntaxError: Unexpected token ':' (in the file's vi.mock factories)".to_string())
+        );
+    });
+}
+
+#[test]
+fn extract_mocks_scans_the_text_of_source_that_does_not_parse() {
+    // the AST is not available: the text scan still skips a non-literal specifier
+    assert_eq!(
+        extract_mocks("vi.mock(name, f);\nvi.mock('./x', g);\n("),
+        pairs(&[("./x", "g")])
+    );
 }

@@ -196,7 +196,7 @@ fn detect_kind_by_extension_and_package_type() {
     put(&d, "c/package.json", r#"{"type":"commonjs"}"#);
     let c = put(&d, "c/a.js", "export default 1;");
     assert_eq!(detect_kind(&c), Kind::Cjs);
-    // no explicit type -> syntax sniff
+    // no explicit type -> Node's syntax detection: ESM syntax is ESM, the rest CommonJS
     put(&d, "s/package.json", r#"{"name":"s"}"#);
     let cases = [
         ("cjs1.js", "module.exports = 1;", Kind::Cjs),
@@ -214,14 +214,20 @@ fn detect_kind_by_extension_and_package_type() {
             "import x from 'x'; module.exports = x;",
             Kind::Esm,
         ),
-        ("plain.js", "var a = 1;", Kind::Esm),
+        ("plain.js", "var a = 1;", Kind::Cjs),
+        (
+            "comment.js",
+            "// import these where needed\nexports.a = 1;",
+            Kind::Cjs,
+        ),
+        ("tla.js", "await Promise.resolve();", Kind::Esm),
     ];
     for (f, src, k) in cases {
         let p = put(&d, &format!("s/{f}"), src);
         assert_eq!(detect_kind(&p), k, "{f}");
     }
-    // unreadable file -> empty source -> ESM
-    assert_eq!(detect_kind(&d.join("s/missing.js")), Kind::Esm);
+    // unreadable file -> empty source -> CommonJS
+    assert_eq!(detect_kind(&d.join("s/missing.js")), Kind::Cjs);
 }
 
 // ---- project kind / resolution -------------------------------------------------------------
@@ -1487,4 +1493,21 @@ fn ci_detection_is_std_env_is_ci() {
         assert!(!is_ci(env(vec![(k, "1")])), "{k}=1 is not CI");
     }
     assert!(!is_ci(env(vec![("NODE_ENV", "test")])));
+}
+
+#[test]
+fn file_urls_are_spelled_like_node_path_to_file_url() {
+    // expected: Node 26 `pathToFileURL(p).href` (turbo-test#87)
+    let ascii: String = (0x20u8..0x7f)
+        .filter(|&c| c != b'/')
+        .map(char::from)
+        .collect();
+    assert_eq!(
+        file_url(Path::new(&format!("/{ascii}"))),
+        "file:///%20!%22%23$%25&'()*+,-.0123456789:;%3C=%3E%3F@ABCDEFGHIJKLMNOPQRSTUVWXYZ%5B%5C%5D%5E_%60abcdefghijklmnopqrstuvwxyz%7B%7C%7D%7E"
+    );
+    assert_eq!(
+        file_url(Path::new("/a\u{1}\u{1f}\u{7f}b/€ x")),
+        "file:///a%01%1F%7Fb/%E2%82%AC%20x"
+    );
 }

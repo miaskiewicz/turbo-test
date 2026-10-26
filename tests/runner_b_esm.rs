@@ -113,18 +113,18 @@ test('fs natives', () => {
   fs.mkdirSync(dir + '/sub/deeper', { recursive: true });
   expect(fs.existsSync(dir + '/sub/deeper')).toBe(true);
   fs.writeFileSync(dir + '/sub/f.txt', 'hello');
-  fs.writeFileSync(dir + '/auto/created/g.txt', 'parents made');
+  expect(() => fs.writeFileSync(dir + '/auto/created/g.txt', 'no parents')).toThrow(`ENOENT: no such file or directory, open '${dir}/auto/created/g.txt'`);
   expect(fs.existsSync(dir + '/sub/f.txt')).toBe(true);
   expect(fs.readFileSync(dir + '/sub/f.txt', 'utf8')).toBe('hello');
-  expect(fs.readFileSync(dir + '/auto/created/g.txt', 'utf8')).toBe('parents made');
+  expect(fs.existsSync(dir + '/auto')).toBe(false);
   expect(fs.readdirSync(root + '/seed').sort()).toEqual(['one.txt', 'two.txt']);
-  expect(fs.readdirSync(dir + '/nope')).toEqual([]);
-  expect(() => fs.readFileSync(dir + '/nope.txt')).toThrow('readFileSync ' + dir + '/nope.txt');
-  expect(() => fs.writeFileSync(dir + '/sub/f.txt/x', 'a')).toThrow('writeFileSync ' + dir + '/sub/f.txt/x');
+  expect(() => fs.readdirSync(dir + '/nope')).toThrow(`ENOENT: no such file or directory, scandir '${dir}/nope'`);
+  expect(() => fs.readFileSync(dir + '/nope.txt')).toThrow(`ENOENT: no such file or directory, open '${dir}/nope.txt'`);
+  expect(() => fs.writeFileSync(dir + '/sub/f.txt/x', 'a')).toThrow(`ENOTDIR: not a directory, open '${dir}/sub/f.txt/x'`);
   fs.rmSync(dir + '/sub/f.txt');
   expect(fs.existsSync(dir + '/sub/f.txt')).toBe(false);
-  fs.rmSync(dir + '/missing-entry');
-  fs.rmSync(dir);
+  fs.rmSync(dir + '/missing-entry', { force: true });
+  fs.rmSync(dir, { recursive: true });
   expect(fs.existsSync(dir)).toBe(false);
 });
 "#,
@@ -454,4 +454,31 @@ fn dynamic_import_of_a_lazy_stub_barrel_without_react_loads_the_real_package() {
     );
     let r = turbo_test(&p.dir, &[], &[("TURBO_LAZY_STUBS", "fake-icons")]);
     assert_eq!(r.code, Some(0), "{}", r.all());
+}
+
+/// turbo-test#82: `import()` of a module with top-level await settles after the module has
+/// evaluated (Node 26 / vitest 4.1.12), not with a namespace whose bindings are uninitialised.
+#[test]
+fn dynamic_import_waits_for_top_level_await() {
+    let p = Project::new("rb-esm-tla");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "tla.ts",
+        "await new Promise((r) => setTimeout(r, 20));\nexport const x = 1;\n",
+    );
+    p.file(
+        "a.test.ts",
+        "import { expect, it } from 'vitest';\n\
+         it('import() of a module with top-level await waits for it', async () => {\n\
+         \x20 const m = await import('./tla');\n\
+         \x20 expect(m.x).toBe(1);\n\
+         });\n",
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(
+        line_for(&r.stdout, "a.test.ts").starts_with("PASS"),
+        "{}",
+        r.all()
+    );
 }
