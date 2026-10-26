@@ -570,7 +570,9 @@ fn nearest_pkg_type_uncached(path: &Path) -> Option<&'static str> {
 }
 
 /// Kind for a resolved file. `.mjs`/`.ts`/`.tsx` are ESM, `.cjs` is CJS; ambiguous `.js`
-/// follows the nearest package.json `"type"` (Node's rule), falling back to a syntax sniff.
+/// follows the nearest package.json `"type"` (Node's rule), falling back to Node's syntax
+/// detection: ES module syntax makes it ESM, anything else is CommonJS (turbo-test#79 item 5:
+/// a comment mentioning "import " no longer makes tsc's CJS output an ES module).
 fn detect_kind(path: &Path) -> Kind {
     match path.extension().and_then(|e| e.to_str()) {
         Some("cjs") => Kind::Cjs,
@@ -580,20 +582,10 @@ fn detect_kind(path: &Path) -> Kind {
             Some("commonjs") => Kind::Cjs,
             _ => {
                 let src = std::fs::read_to_string(path).unwrap_or_default();
-                let esm = src.contains("import ")
-                    || src.contains("import{")
-                    || src.contains("export ")
-                    || src.contains("export{")
-                    || src.contains("export*")
-                    || src.contains("export default");
-                let cjs = src.contains("module.exports")
-                    || src.contains("exports.")
-                    || src.contains("exports[")
-                    || src.contains("require(");
-                if cjs && !esm {
-                    Kind::Cjs
-                } else {
+                if crate::transform::has_module_syntax(&src) {
                     Kind::Esm
+                } else {
+                    Kind::Cjs
                 }
             }
         },

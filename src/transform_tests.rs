@@ -213,3 +213,32 @@ fn enums_lower_like_tsc_with_legacy_decorators() {
     assert_enums_like_tsc(&transform_with(Path::new("e.ts"), ENUMS, true).unwrap());
     assert_enums_like_tsc(&transform_decorators_with_metadata(Path::new("e.ts"), ENUMS).unwrap());
 }
+
+#[test]
+fn module_syntax_follows_node_detection() {
+    // Node 26 `node x.js` with no package.json "type": ESM for these ...
+    for src in [
+        "import x from 'y';",
+        "export const a = 1;",
+        "export * from './b';",
+        "export default 1;",
+        "console.log(import.meta.url);",
+        "await Promise.resolve();",
+        "const el = <i />;\nexport { el };",
+    ] {
+        assert!(has_module_syntax(src), "{src}");
+    }
+    // ... and CommonJS for these: words in comments / strings, require, dynamic import()
+    for src in [
+        "",
+        "// import these where the editor renders\nexports.a = 1;",
+        "/* export default */ module.exports = 1;",
+        "const s = 'import x from y'; exports.s = s;",
+        "const m = require('m');",
+        "import('./lazy').then(() => {});",
+        "var await = 1; console.log(await);",
+        "this is not javascript",
+    ] {
+        assert!(!has_module_syntax(src), "{src}");
+    }
+}

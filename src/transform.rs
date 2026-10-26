@@ -144,6 +144,23 @@ pub fn transform_decorators_with_metadata(path: &Path, src: &str) -> Result<Stri
     Ok(Codegen::new().build(&program).code)
 }
 
+/// Whether Node loads `src` (a `.js` file with no package.json `"type"`) as an ES module — its
+/// syntax detection: an `import` / `export` declaration or `import.meta`, or code that only
+/// parses as a module (top-level `await`). Anything else is CommonJS; words in comments and
+/// strings do not count.
+pub fn has_module_syntax(src: &str) -> bool {
+    let parses = |source_type: SourceType| {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, src, source_type.with_jsx(true)).parse();
+        (
+            parsed.module_record.has_module_syntax,
+            parsed.errors.is_empty(),
+        )
+    };
+    let (module_syntax, _) = parses(SourceType::unambiguous());
+    module_syntax || (!parses(SourceType::cjs()).1 && parses(SourceType::mjs()).1)
+}
+
 /// Transform only when needed; otherwise return source unchanged.
 pub fn maybe_transform(path: &Path, src: String) -> Result<String, String> {
     if needs_transform(path) {

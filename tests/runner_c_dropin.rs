@@ -178,7 +178,6 @@ fn readdir_sync_lists_names_dirents_and_url_arguments() {
 /// named exports (cjs-module-lexer in Node / vitest). A comment in it mentioning "import " made
 /// the loader's module-kind sniff take the file for an ES module.
 #[test]
-#[ignore = "turbo-test#79: fails until the fix"]
 fn a_commonjs_exports_subpath_gives_named_exports() {
     let pkg = "node_modules/@scope/pkg";
     let index = "\"use strict\";\n\

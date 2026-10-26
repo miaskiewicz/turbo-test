@@ -196,7 +196,7 @@ fn detect_kind_by_extension_and_package_type() {
     put(&d, "c/package.json", r#"{"type":"commonjs"}"#);
     let c = put(&d, "c/a.js", "export default 1;");
     assert_eq!(detect_kind(&c), Kind::Cjs);
-    // no explicit type -> syntax sniff
+    // no explicit type -> Node's syntax detection: ESM syntax is ESM, the rest CommonJS
     put(&d, "s/package.json", r#"{"name":"s"}"#);
     let cases = [
         ("cjs1.js", "module.exports = 1;", Kind::Cjs),
@@ -214,14 +214,20 @@ fn detect_kind_by_extension_and_package_type() {
             "import x from 'x'; module.exports = x;",
             Kind::Esm,
         ),
-        ("plain.js", "var a = 1;", Kind::Esm),
+        ("plain.js", "var a = 1;", Kind::Cjs),
+        (
+            "comment.js",
+            "// import these where needed\nexports.a = 1;",
+            Kind::Cjs,
+        ),
+        ("tla.js", "await Promise.resolve();", Kind::Esm),
     ];
     for (f, src, k) in cases {
         let p = put(&d, &format!("s/{f}"), src);
         assert_eq!(detect_kind(&p), k, "{f}");
     }
-    // unreadable file -> empty source -> ESM
-    assert_eq!(detect_kind(&d.join("s/missing.js")), Kind::Esm);
+    // unreadable file -> empty source -> CommonJS
+    assert_eq!(detect_kind(&d.join("s/missing.js")), Kind::Cjs);
 }
 
 // ---- project kind / resolution -------------------------------------------------------------
