@@ -393,7 +393,8 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
 if (typeof globalThis.URL === 'undefined') {
   globalThis.URL = class URL {
     constructor(url, base) {
-      url = String(url);
+      // leading/trailing C0 controls and spaces go, tabs and newlines anywhere (WHATWG)
+      url = String(url).replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, '').replace(/[\t\n\r]/g, '');
       if (base !== undefined && !/^[a-z][a-z0-9+.-]*:/i.test(url)) {
         url = URL._resolve(url, new globalThis.URL(String(base)));
       }
@@ -413,7 +414,7 @@ if (typeof globalThis.URL === 'undefined') {
         this.host = m[2] || '';
         this.hostname = (m[2] || '').split(':')[0];
         this.port = (m[2] || '').split(':')[1] || '';
-        this.pathname = URL._removeDots(m[3] || '/');
+        this.pathname = m[3] || '/';
         searchStr = m[4] || '';
         this.hash = m[5] || '';
         this.origin = this.protocol + '//' + this.host;
@@ -426,7 +427,7 @@ if (typeof globalThis.URL === 'undefined') {
         let cut = rest.length;
         if (qi >= 0) cut = Math.min(cut, qi);
         if (hi >= 0) cut = Math.min(cut, hi);
-        this.pathname = rest.slice(0, cut);
+        this._path = URL._encode(rest.slice(0, cut), URL._C0);
         const after = rest.slice(cut);
         const am = /^(\?[^#]*)?(#.*)?$/.exec(after) || [];
         searchStr = am[1] || ''; this.hash = am[2] || ''; this.origin = 'null';
@@ -436,14 +437,32 @@ if (typeof globalThis.URL === 'undefined') {
       // — previously href was frozen at construction and dropped them).
       this._sp = new globalThis.URLSearchParams(searchStr);
     }
+    // The path and fragment keep the WHATWG percent-encode sets (turbo-test#85): a hierarchical
+    // path is dot-normalised and encoded on every set, as Node's URL does.
+    get pathname() { return this._path; }
+    set pathname(v) { this._path = this._hierarchical ? URL._encode(URL._removeDots(String(v).replace(/^(?!\/)/, '/')), URL._PATH) : this._path; }
+    get hash() { return this._hash === '#' ? '' : this._hash; }
+    set hash(v) { v = String(v); this._hash = v === '' ? '' : '#' + URL._encode(v.replace(/^#/, ''), URL._FRAGMENT); }
+    // Percent-encode the code points of `s` in `set` (and every non-ASCII one, as UTF-8); an
+    // existing `%XX` stays as written.
+    static _encode(s, set) {
+      let out = '';
+      for (const ch of s) {
+        const c = ch.codePointAt(0);
+        if (c > 0x7e) { let e; try { e = encodeURIComponent(ch); } catch { e = '%EF%BF%BD'; } out += e; }
+        else if (c < 0x20 || set.includes(ch)) out += '%' + c.toString(16).toUpperCase().padStart(2, '0');
+        else out += ch;
+      }
+      return out;
+    }
     get searchParams() { return this._sp; }
     get search() { const s = this._sp.toString(); return s ? '?' + s : ''; }
     set search(v) { this._sp = new globalThis.URLSearchParams(String(v).replace(/^\?/, '')); }
     get href() {
       const auth = this._hierarchical ? this.protocol + '//' + this.host : this.protocol;
-      return auth + this.pathname + this.search + (this.hash || '');
+      return auth + this._path + this.search + this._hash;
     }
-    set href(v) { const u = new globalThis.URL(v); this.protocol = u.protocol; this.host = u.host; this.hostname = u.hostname; this.port = u.port; this.pathname = u.pathname; this.hash = u.hash; this.origin = u.origin; this._hierarchical = u._hierarchical; this._sp = u._sp; }
+    set href(v) { const u = new globalThis.URL(v); this.protocol = u.protocol; this.host = u.host; this.hostname = u.hostname; this.port = u.port; this._path = u._path; this._hash = u._hash; this.origin = u.origin; this._hierarchical = u._hierarchical; this._sp = u._sp; }
     toString() { return this.href; }
     // WHATWG relative-reference resolution against a parsed base (Node's `new URL(rel, base)`):
     // scheme-relative `//h/p`, absolute path `/p`, query-only `?q`, fragment-only `#f`, empty,
@@ -482,6 +501,9 @@ if (typeof globalThis.URL === 'undefined') {
       return '/' + out.join('/');
     }
     static createObjectURL() { return 'blob:mock'; }
+    static get _C0() { return '\x7f'; }
+    static get _PATH() { return '\x7f "#<>?^`{}'; }
+    static get _FRAGMENT() { return '\x7f "<>`'; }
     static revokeObjectURL() {}
     static parse(url, base) { try { return new globalThis.URL(url, base); } catch { return null; } }
     static canParse(url, base) { try { new globalThis.URL(url, base); return true; } catch { return false; } }

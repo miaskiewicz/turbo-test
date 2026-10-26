@@ -624,7 +624,6 @@ fn process_stdout_and_stderr_write_reach_the_streams() {
 /// turbo-test#85: `URL` percent-encodes the path and the fragment with the WHATWG sets (values:
 /// Node 26 `new URL(...)`).
 #[test]
-#[ignore = "turbo-test#85: fails until the fix"]
 fn url_percent_encodes_the_path_and_fragment_like_node() {
     let p = Project::new("rc-url-encode");
     p.file("package.json", r#"{"type":"module"}"#);
@@ -642,6 +641,13 @@ it('percent-encodes', () => {
   const u = new URL('http://h/x');
   u.pathname = '/n m';
   expect(u.href).toBe('http://h/n%20m');
+  const f = new URL('http://h/x#');
+  expect([f.href, f.hash]).toEqual(['http://h/x#', '']);
+  f.hash = 'a b';
+  expect(f.href).toBe('http://h/x#a%20b');
+  f.hash = '';
+  expect(f.href).toBe('http://h/x');
+  expect([new URL('  http://h/a\tb\n ').href, new URL('mailto:a b\x01').href, new URL('mailto:x\x01y').href]).toEqual(['http://h/ab', 'mailto:a b', 'mailto:x%01y']);
 });
 "#,
     );
