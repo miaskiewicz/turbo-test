@@ -3656,6 +3656,11 @@ fn load_dep<'s>(scope: &mut v8::PinScope<'s, '_>, dep: &Path) -> Option<()> {
     }
 }
 
+/// V8 requires a module-resolve callback that returns nothing to have an exception pending; an
+/// empty return with none is `Check failed: has_exception()` and aborts the whole process. A
+/// dependency that fails to load (SyntaxError in the file or a mocked factory, unresolvable
+/// import) returns None here after the loaders' own TryCatch swallowed the exception, so
+/// re-throw it (or a generic error) and let instantiation fail as an ordinary load error.
 fn resolve_callback<'s>(
     context: v8::Local<'s, v8::Context>,
     specifier: v8::Local<'s, v8::String>,
@@ -3664,11 +3669,37 @@ fn resolve_callback<'s>(
 ) -> Option<v8::Local<'s, v8::Module>> {
     v8::callback_scope!(unsafe scope, context);
     let spec = specifier.to_rust_string_lossy(scope);
-    let lookup = if is_test_api_module(&spec) {
+    let (found, cause) = {
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let tc = &mut tc.init();
+        let found = resolve_module_inner(tc, &spec, referrer);
+        let cause = if found.is_none() && tc.has_caught() {
+            tc.exception().map(|e| e.to_rust_string_lossy(tc))
+        } else {
+            None
+        };
+        (found, cause)
+    };
+    match found {
+        Some(g) => Some(v8::Local::new(scope, &g)),
+        None => {
+            let why = cause.map(|c| format!(": {c}")).unwrap_or_default();
+            throw(scope, &format!("failed to load module '{spec}'{why}"));
+            None
+        }
+    }
+}
+
+fn resolve_module_inner(
+    scope: &mut v8::PinScope,
+    spec: &str,
+    referrer: v8::Local<v8::Module>,
+) -> Option<v8::Global<v8::Module>> {
+    let lookup = if is_test_api_module(spec) {
         ensure_vitest_builtin(scope);
         Some(vitest_key())
-    } else if is_node_builtin(&spec) {
-        ensure_node_builtin(scope, &spec);
+    } else if is_node_builtin(spec) {
+        ensure_node_builtin(scope, spec);
         Some(PathBuf::from(format!("<node:{spec}>")))
     } else {
         let ref_hash = referrer.get_identity_hash().get();
@@ -3682,7 +3713,7 @@ fn resolve_callback<'s>(
                 .get(from)
                 .cloned()
                 .or_else(|| from.parent().map(|p| p.to_path_buf()))?;
-            resolve_spec(&spec, &base)
+            resolve_spec(spec, &base)
         })
     };
     let abs = lookup?;
@@ -3694,7 +3725,7 @@ fn resolve_callback<'s>(
             .or_else(|| reg.cjs_synth_by_path.get(&abs))
             .cloned()
     }) {
-        return Some(v8::Local::new(scope, &g));
+        return Some(g);
     }
     // Externalized package not loaded yet (a setup bundle's `import 'react'` etc. under
     // --packages=external): lazy-load it now via the shared loaders so the bundle binds to the
@@ -3709,7 +3740,7 @@ fn resolve_callback<'s>(
         reg.esm_by_path
             .get(&abs)
             .or_else(|| reg.cjs_synth_by_path.get(&abs))
-            .map(|g| v8::Local::new(scope, g))
+            .cloned()
     })
 }
 

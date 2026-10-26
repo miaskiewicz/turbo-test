@@ -77,6 +77,23 @@ test('it.fails passes only when the test body throws', () => {
   assert.equal(j.numFailedTests, 0);
 });
 
+test('a SyntaxError while loading a file is a reported load error, never a V8 abort', () => {
+  const dir = path.join(FIX, 'load-errors');
+  for (const bad of ['imports-broken.test.ts', 'mock-syntax-error.test.ts']) {
+    const r = run(['--reporter', 'json', path.join(dir, bad), path.join(dir, 'ok.test.ts')]);
+    // status is null when the process was killed by a signal (SIGABRT from V8's CHECK)
+    assert.equal(r.code, 1, `${bad}: failing run exits 1, not a crash\n${r.out}\n${r.err}`);
+    assert.doesNotMatch(r.out + r.err, /Fatal error|has_exception/, bad);
+    const j = parseJson(r.out);
+    assert.equal(j.numPassedTests, 1, `${bad}: the healthy file still reports its test`);
+  }
+  // a setup file (ESM graph) importing a module that does not compile
+  const sd = path.join(dir, 'setup-case');
+  const s = runIn(sd, ['--reporter', 'json', path.join(sd, 'setup-broken.test.ts')]);
+  assert.notEqual(s.code, null, `setup file SyntaxError killed the process by signal\n${s.out}\n${s.err}`);
+  assert.doesNotMatch(s.out + s.err, /Fatal error|has_exception/);
+});
+
 test('describe.skipIf / runIf / concurrent / todo', () => {
   const j = parseJson(run(['--reporter', 'json', file('describe-variants.test.ts')]).out);
   // only the 3 included blocks run (2 skipped blocks contribute nothing); todo registers nothing
