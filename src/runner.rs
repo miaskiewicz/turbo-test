@@ -2300,6 +2300,19 @@ fn postprocess_mr_cjs(mut code: String) -> String {
         "var __toESM = ",
         "var __toESM = (m) => (m && m.__esModule ? m : (m && (typeof m === \"object\" || typeof m === \"function\") && !(\"default\" in m) && Object.defineProperty(m, \"default\", { value: m, configurable: true }), m)); var __toESM_unused = ",
     );
+    // esbuild --format=cjs emits an empty `import_meta`, so import.meta.url/dirname/filename were
+    // undefined in every test file (new URL('./x', import.meta.url) threw "Invalid URL"). Fill them
+    // from the CJS wrapper's __filename/__dirname.
+    // (esbuild writes `const` for transforms and `var` for bundles.)
+    let meta_decl = ["const import_meta = {};", "var import_meta = {};"]
+        .into_iter()
+        .find_map(|d| code.find(d).map(|at| (at, d.len())));
+    if let Some((at, len)) = meta_decl {
+        code.replace_range(
+            at..at + len,
+            "var import_meta = { url: \"file://\" + (__filename[0] === \"/\" ? \"\" : \"/\") + __filename.replace(/\\\\/g, \"/\"), filename: __filename, dirname: __dirname };",
+        );
+    }
     code
 }
 
@@ -3913,6 +3926,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__fs_mkdirSync", fs_mkdir_sync);
     bind_fn(scope, global, "__fs_rmSync", fs_rm_sync);
     bind_fn(scope, global, "__fs_readdirSync", fs_readdir_sync);
+    bind_fn(scope, global, "__fs_readdirTypes", fs_readdir_types);
     if std::env::var("TURBO_STACK").is_ok() {
         if let Some(code) = v8::String::new(scope, "globalThis.__TT_STACK=true") {
             if let Some(s) = v8::Script::compile(scope, code, None) {
@@ -4059,6 +4073,36 @@ fn fs_readdir_sync(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments
                 }
             }
         }
+    }
+    rv.set(arr.into());
+}
+
+/// native fs listing for readdirSync({ withFileTypes }) -> [[name, kind], ...] sorted by name, or
+/// null when the path can't be listed. kind: 0 file, 1 directory, 2 symlink, 3 other.
+fn fs_readdir_types(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let p = args.get(0).to_rust_string_lossy(scope);
+    let Ok(entries) = std::fs::read_dir(&p) else {
+        rv.set_null();
+        return;
+    };
+    let mut list: Vec<(String, i32)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let t = e.file_type().ok()?;
+            let kind = if t.is_symlink() { 2 } else if t.is_dir() { 1 } else if t.is_file() { 0 } else { 3 };
+            Some((name, kind))
+        })
+        .collect();
+    list.sort();
+    let arr = v8::Array::new(scope, 0);
+    for (i, (name, kind)) in list.iter().enumerate() {
+        let pair = v8::Array::new(scope, 2);
+        let n = v8::String::new(scope, name).unwrap();
+        let k = v8::Integer::new(scope, *kind);
+        pair.set_index(scope, 0, n.into());
+        pair.set_index(scope, 1, k.into());
+        arr.set_index(scope, i as u32, pair.into());
     }
     rv.set(arr.into());
 }

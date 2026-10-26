@@ -350,8 +350,18 @@ if (typeof globalThis.URL === 'undefined') {
   globalThis.URL = class URL {
     constructor(url, base) {
       url = String(url);
-      if (base && !/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
-        url = String(base).replace(/\/+$/, '') + '/' + url.replace(/^\/+/, '');
+      if (base && !/^[a-z][a-z0-9+.-]*:/i.test(url)) {
+        // RFC 3986 reference resolution against the base (the old "append to base" form turned
+        // new URL('./sub', 'file:///a/b.test.ts') into file:///a/b.test.ts/./sub).
+        const b = /^([a-z][a-z0-9+.-]*:)(\/\/[^/?#]*)?([^?#]*)(\?[^#]*)?/i.exec(String(base));
+        if (!b) throw new TypeError('Invalid URL: ' + url);
+        const origin = b[1] + (b[2] || '');
+        if (url.startsWith('//')) url = b[1] + url;
+        else if (url.startsWith('/')) url = origin + url;
+        else if (url.startsWith('?')) url = origin + b[3] + url;
+        else if (url.startsWith('#')) url = origin + b[3] + (b[4] || '') + url;
+        else if (url === '') url = origin + b[3] + (b[4] || '');
+        else url = origin + b[3].slice(0, b[3].lastIndexOf('/') + 1) + url;
       }
       // Real URL throws on input without a valid scheme (e.g. "not a url"). Matching this is
       // required for validators built on `new URL()` (e.g. zod's .url()).
@@ -369,7 +379,14 @@ if (typeof globalThis.URL === 'undefined') {
         this.host = m[2] || '';
         this.hostname = (m[2] || '').split(':')[0];
         this.port = (m[2] || '').split(':')[1] || '';
-        this.pathname = m[3] || '/';
+        // dot segments resolve at parse time (new URL('/a/../b', ...).pathname === '/b')
+        const segs = [];
+        for (const seg of (m[3] || '/').split('/').slice(1)) {
+          if (seg === '..') segs.pop();
+          else if (seg !== '.') segs.push(seg);
+        }
+        if (/(^|\/)\.\.?$/.test(m[3] || '')) segs.push('');
+        this.pathname = '/' + segs.join('/');
         searchStr = m[4] || '';
         this.hash = m[5] || '';
         this.origin = this.protocol + '//' + this.host;
@@ -1056,7 +1073,10 @@ if (typeof globalThis.requestAnimationFrame === 'undefined') {
 }
 
 // ---- node builtin shims (so turbo-dom's loader reaches its native .node) ----
-globalThis.__fileURLToPath = (u) => String(u).replace(/^file:\/\//, '');
+globalThis.__fileURLToPath = (u) => {
+  const p = String(u).replace(/^file:\/\/[^/]*/, '');
+  try { return decodeURIComponent(p); } catch { return p; }
+};
 globalThis.__dirnameOf = (p) => { const s = String(p).replace(/\/+$/, ''); const i = s.lastIndexOf('/'); return i <= 0 ? '/' : s.slice(0, i); };
 const __os = {
   platform: () => globalThis.__ttPlatform || 'darwin', arch: () => globalThis.__ttArch || 'arm64', type: () => globalThis.__ttOsType || 'Darwin', release: () => '23.0.0',
@@ -1084,6 +1104,42 @@ const __path = {
 // glob-parent and others reach for path.posix / path.win32; expose both (posix is our default).
 __path.posix = __path;
 __path.win32 = Object.assign({}, __path, { sep: '\\', delimiter: ';' });
+// fs.Dirent: kind is the native listing's code (0 file, 1 directory, 2 symlink, 3 other).
+class __Dirent {
+  constructor(name, parentPath, kind) { this.name = name; this.parentPath = parentPath; this.path = parentPath; this._k = kind; }
+  isFile() { return this._k === 0; }
+  isDirectory() { return this._k === 1; }
+  isSymbolicLink() { return this._k === 2; }
+  isBlockDevice() { return false; }
+  isCharacterDevice() { return false; }
+  isFIFO() { return false; }
+  isSocket() { return false; }
+}
+// readdirSync/readdir: string or file: URL path; { withFileTypes, recursive } like Node. Recursive
+// listings are breadth-first with paths relative to the root, as Node returns them.
+function __readdir(p, opts) {
+  const root = typeof p === 'object' && p !== null && typeof p.href === 'string' ? globalThis.__fileURLToPath(p.href) : String(p);
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const out = [];
+  const queue = [''];
+  while (queue.length) {
+    const rel = queue.shift();
+    const dir = rel ? root.replace(/\/+$/, '') + '/' + rel : root;
+    const entries = globalThis.__fs_readdirTypes(dir);
+    if (!entries) {
+      const exists = globalThis.__fs_existsSync(dir);
+      const err = new Error(exists ? `ENOTDIR: not a directory, scandir '${dir}'` : `ENOENT: no such file or directory, scandir '${dir}'`);
+      err.errno = exists ? -20 : -2; err.code = exists ? 'ENOTDIR' : 'ENOENT'; err.syscall = 'scandir'; err.path = dir;
+      throw err;
+    }
+    for (const [name, kind] of entries) {
+      const relName = rel ? rel + '/' + name : name;
+      out.push(o.withFileTypes ? new __Dirent(name, dir, kind) : relName);
+      if (o.recursive && kind === 1) queue.push(relName);
+    }
+  }
+  return out;
+}
 const __fs = {
   existsSync: (p) => globalThis.__fs_existsSync(String(p)),
   readFileSync: (p, enc) => globalThis.__fs_readFileSync(String(p), enc ? String(typeof enc === 'string' ? enc : enc.encoding || 'utf8') : ''),
@@ -1094,14 +1150,15 @@ const __fs = {
   rmdirSync: (p) => globalThis.__fs_rmSync(String(p)),
   unlinkSync: (p) => globalThis.__fs_rmSync(String(p)),
   statSync: (p) => { const isDir = globalThis.__fs_existsSync(String(p)) && globalThis.__fs_readdirSync(String(p)).length >= 0 && !globalThis.__fs_existsSync(String(p) + '/.'); return { isFile: () => true, isDirectory: () => false, size: 0, mtimeMs: 0 }; },
-  readdirSync: (p) => globalThis.__fs_readdirSync(String(p)),
+  readdirSync: (p, opts) => __readdir(p, opts),
   promises: {
     readFile: (p, enc) => Promise.resolve(globalThis.__fs_readFileSync(String(p), enc ? 'utf8' : '')),
     writeFile: (p, data) => { globalThis.__fs_writeFileSync(String(p), data == null ? '' : String(data)); return Promise.resolve(); },
     mkdir: (p) => { globalThis.__fs_mkdirSync(String(p)); return Promise.resolve(); },
     rm: (p) => { globalThis.__fs_rmSync(String(p)); return Promise.resolve(); },
-    readdir: (p) => Promise.resolve(globalThis.__fs_readdirSync(String(p))),
+    readdir: (p, opts) => { try { return Promise.resolve(__readdir(p, opts)); } catch (e) { return Promise.reject(e); } },
   },
+  Dirent: __Dirent,
 };
 const __module = {
   createRequire: (url) => globalThis.__mkRequire(globalThis.__dirnameOf(globalThis.__fileURLToPath(url))),

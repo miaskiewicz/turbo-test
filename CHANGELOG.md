@@ -5,6 +5,15 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Fixed
+
+- `node:fs` `readdirSync` returned `[]` for any directory reached through
+  `new URL('./dir', import.meta.url)`: the URL polyfill appended a relative reference to the whole
+  base (`file:///a/b.test.ts/./dir`) instead of resolving it (RFC 3986), and `fileURLToPath` did not
+  decode. Both fixed. `readdirSync`/`fs.promises.readdir` now also take URL objects, return `Dirent`s for
+  `{ withFileTypes: true }` (`isFile`/`isDirectory`/`isSymbolicLink`, `name`, `parentPath`), support
+  `{ recursive: true }` and throw `ENOENT`/`ENOTDIR` like Node instead of returning `[]`. Part of #79.
+
 ### Release procedure
 
 - Determine missing V8 dependency versions through the official registry API,
