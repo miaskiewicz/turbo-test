@@ -151,6 +151,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   (no hooks, no body), a `describe.only` a failed suite whose hooks do not run and whose tests
   are skipped. turbo-test ran the `.only` tests (they passed) and added one file-level failure,
   so the counts and the JSON report differed from vitest's.
+- A `test.only` inside `describe.skip` / `describe.todo` is reported `pending` (turbo-test#77):
+  vitest does not interpret `.only` inside those blocks, so the test keeps mode `only`, never
+  runs and counts only in the total; turbo-test reported it `skipped` / `todo`.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain

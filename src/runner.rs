@@ -5667,7 +5667,8 @@ pub struct TestCase {
     /// `ancestorTitles`).
     pub title: String,
     pub ancestors: Vec<String>,
-    /// "passed" | "failed" | "skipped" | "todo".
+    /// "passed" | "failed" | "skipped" | "todo" | "pending" (a `.only` test inside describe.skip /
+    /// describe.todo, which vitest never runs: turbo-test#77).
     pub status: String,
     pub duration_ms: f64,
     /// Real start time (epoch ms) of a test that ran; 0 otherwise.

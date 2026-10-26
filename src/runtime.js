@@ -3890,6 +3890,13 @@ async function runSuite(suite, ancestors, summary, mode = '') {
     // a describe.todo block makes its tests todo and a describe.skip block skips them (an
     // it.todo stays todo); otherwise -t, then the test's own todo / skip / `.only`.
     const filtered = !skipAll && __tt.namePattern && !__tt.namePattern.test(fullName);
+    // a `.only` test inside describe.skip / describe.todo: vitest's interpretTaskModes does not
+    // descend there, so it keeps mode `only`, never runs and is reported `pending` (#77)
+    if (t.only && (skipAll === 'skip' || skipAll === 'todo')) {
+      summary.tests.push(__testRecord(t, chain, 'pending'));
+      summary.skippedNames.push(label);
+      continue;
+    }
     const todo = !hookFailed && (skipAll === 'todo' || (!filtered && !!t.todo));
     if (todo || hookFailed || skipAll || filtered || t.skip || t.notOnly) {
       summary.skipped++;

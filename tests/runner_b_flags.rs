@@ -368,7 +368,6 @@ describe('t', () => {
 }
 
 #[test]
-#[ignore = "turbo-test#77: fails until the fix"]
 fn an_only_test_inside_a_skipped_or_todo_block_is_pending() {
     // turbo-test#77: vitest 4.1.12 does not descend into describe.skip / describe.todo when it
     // interprets `.only`, so a `test.only` there keeps mode `only`, never runs, and its JSON

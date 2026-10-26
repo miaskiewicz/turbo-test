@@ -128,7 +128,7 @@ Mostly strong. Notable gaps:
 
 | API | status | Notes |
 |---|---|---|
-| `describe` / `.skip` / `.only` / `.each` | ✅ | `.each` titles are formatted as vitest's `formatTitle`: printf placeholders (`%s %d %i %f %j %o %O %c %%`), `%#` / `%$`, `$key` / `$a.b` / `$0` attributes and the tagged-template table, with values rendered as vitest's loupe `inspect` / `objDisplay`. A function title is its `name`, as in vitest. |
+| `describe` / `.skip` / `.only` / `.each` | ✅ | `.each` titles are formatted as vitest's `formatTitle`: printf placeholders (`%s %d %i %f %j %o %O %c %%`), `%#` / `%$`, `$key` / `$a.b` / `$0` attributes and the tagged-template table, with values rendered as vitest's loupe `inspect` / `objDisplay`. A function title is its `name`, as in vitest. A `test.only` inside `describe.skip` / `describe.todo` never runs and is reported `pending`, as vitest leaves it (turbo-test#77). |
 | `describe.todo` / `.skipIf` / `.runIf` / `.concurrent` | ✅ | All four added (`runtime.js`). `todo` registers nothing; `skipIf`/`runIf` register the whole block only when the condition allows; `concurrent` is an accepted alias (tests still run **sequentially** within a file). |
 | `it`/`test`, `.skip`/`.only`/`.todo`/`.each`/`.for`/`.skipIf`/`.runIf` | ✅ | `.for` (also `describe.for`) passes each row as one argument, then a minimal test context (`{ expect }`; the fixtures under `it.extend`). |
 | `it.concurrent` | 🟡 | Accepted as alias; tests still run **sequentially** within a file. |
