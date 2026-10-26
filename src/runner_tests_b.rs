@@ -435,6 +435,14 @@ fn coverage_accumulate_ignores_malformed_and_out_of_scope_scripts() {
     for f in [&good, &test_file, &spec_file, &nm, &bad_utf8] {
         assert!(!crate::coverage::has_meta(f), "{}", f.display());
     }
+    // an in-scope script V8 reports without functions is registered, with nothing to map
+    let empty = d.join("empty.js");
+    std::fs::write(&empty, "exports.y = 2;\n").unwrap();
+    coverage_accumulate(&format!(
+        r#"{{"result":{{"result":[{{"url":{},"functions":[]}}]}}}}"#,
+        serde_json::to_string(&empty.to_string_lossy()).unwrap()
+    ));
+    assert!(crate::coverage::has_meta(&empty));
 }
 
 #[test]
@@ -711,4 +719,13 @@ fn the_esm_mock_prepass_falls_back_and_fails_loudly_when_nothing_compiles() {
             Err("SyntaxError: Unexpected token ':' (in the file's vi.mock factories)".to_string())
         );
     });
+}
+
+#[test]
+fn extract_mocks_scans_the_text_of_source_that_does_not_parse() {
+    // the AST is not available: the text scan still skips a non-literal specifier
+    assert_eq!(
+        extract_mocks("vi.mock(name, f);\nvi.mock('./x', g);\n("),
+        pairs(&[("./x", "g")])
+    );
 }

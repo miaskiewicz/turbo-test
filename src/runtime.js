@@ -2514,7 +2514,7 @@ function __snapLoad() {
   st.loaded = true;
   st.sf = sf;
   st.exists = !!sf && globalThis.__fs_existsSync(sf.path);
-  st.data = st.exists ? __parseSnapFile(globalThis.__fs_readFileSync(sf.path, 'utf8')) : Object.create(null);
+  st.data = st.exists ? __parseSnapFile(globalThis.__fs_readFile(sf.path, true)) : Object.create(null);
   st.unchecked = new Set(Object.keys(st.data));
   st.dirty = false;
   st.inline = false;
@@ -2595,7 +2595,7 @@ function __inlineSplice(code, index, snap, name) {
 function __writeInlineSnapshots(writes) {
   const file = globalThis.__ttFile;
   if (!writes.length || !file) return;
-  const code = globalThis.__fs_readFileSync(file, 'utf8');
+  const code = globalThis.__fs_readFile(file, true);
   const starts = [0];
   for (let i = 0; i < code.length; i++) if (code[i] === '\n') starts.push(i + 1);
   // UTF-16 columns are string indices in JS
@@ -2605,7 +2605,7 @@ function __writeInlineSnapshots(writes) {
     .sort((x, y) => y[0] - x[0]);
   let out = code;
   for (const [a, b, text] of splices) out = out.slice(0, a) + text + out.slice(b);
-  if (out !== code) globalThis.__fs_writeFileSync(file, out);
+  if (out !== code) globalThis.__fs_writeFile(file, out, false);
 }
 function __snapMismatch(key, expected, actual) {
   const err = new Error(`Snapshot \`${key}\` mismatched`);
@@ -2637,11 +2637,11 @@ function __snapFinish(skipped) {
   let deleted = false;
   if ((st.dirty || st.unchecked.size) && (external || st.inline || st.raw)) {
     if (external) {
-      globalThis.__fs_mkdirSync(st.sf.dir);
-      globalThis.__fs_writeFileSync(st.sf.path, __serializeSnapFile(st.data));
+      globalThis.__fs_mkdir(st.sf.dir, true);
+      globalThis.__fs_writeFile(st.sf.path, __serializeSnapFile(st.data), false);
     }
   } else if (!external && st.exists) {
-    if (mode === 'all') globalThis.__fs_rmSync(st.sf.path);
+    if (mode === 'all') globalThis.__fs_remove(st.sf.path, 'unlink');
     deleted = true;
   }
   return {
@@ -2809,12 +2809,12 @@ function makeExpect(actual, negated = false) {
         const st = __snapLoad();
         st.raw = true;
         const exists = globalThis.__fs_existsSync(path);
-        const expected = exists ? globalThis.__fs_readFileSync(path, 'utf8').replace(/\r\n/g, '\n') : undefined;
+        const expected = exists ? globalThis.__fs_readFile(path, true).replace(/\r\n/g, '\n') : undefined;
         const pass = expected === body;
         const write = () => {
           const slash = path.lastIndexOf('/');
-          if (slash > 0) globalThis.__fs_mkdirSync(path.slice(0, slash));
-          globalThis.__fs_writeFileSync(path, body);
+          if (slash > 0) globalThis.__fs_mkdir(path.slice(0, slash), true);
+          globalThis.__fs_writeFile(path, body, false);
         };
         if (!__snapReconcile(st, pass, expected !== undefined, write)) throw __snapMismatch(key, expected, body);
       });

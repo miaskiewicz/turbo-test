@@ -300,3 +300,34 @@ fn mock_factories_with_typescript_or_jsx_are_applied() {
     let r = turbo_test(&p.dir, &[], &[]);
     assert_passes(&r, 5);
 }
+
+/// Item 1's other half: a mock prepass that cannot compile fails the file with its SyntaxError
+/// (vitest: `Error: Transform failed …`, a failed file) instead of leaving the real modules in
+/// place — on the fresh and the reused (`isolate: false`) isolate alike.
+#[test]
+fn a_mock_factory_that_cannot_compile_fails_the_file() {
+    for config in [
+        "export default { test: { environment: 'happy-dom' } }\n",
+        "export default { test: { environment: 'happy-dom', isolate: false } }\n",
+    ] {
+        let p = dropin(
+            "dropin-bad-factory",
+            &[
+                ("vitest.config.mjs", config),
+                ("dep.ts", "export const v = 1;\n"),
+                (
+                    "a.test.ts",
+                    "import { it, vi } from 'vitest';\nvi.mock('./dep', () => ({ v: new.target }));\nit('x', () => {});\n",
+                ),
+            ],
+        );
+        let r = turbo_test(&p.dir, &[], &[]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert!(
+            r.stdout.lines().any(|l| l
+                == "ERROR a.test.ts  (SyntaxError: new.target expression is not allowed here (in the file's vi.mock factories))"),
+            "{config}\n{}",
+            r.all()
+        );
+    }
+}

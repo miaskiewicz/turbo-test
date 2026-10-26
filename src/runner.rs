@@ -1528,9 +1528,7 @@ fn run_setup_file(
     // A setup file that throws fails every test file that uses it, with its error (vitest).
     let failed = |e: String| Err(format!("setup file {}: {e}", file.display()));
     if mr_enabled() && esbuild_transform_cjs(file, false).is_some() {
-        if let Err(e) = run_entry_mocks(scope, file) {
-            return failed(e);
-        }
+        run_entry_mocks(scope, file).or_else(failed)?;
         // the setup's vi.hoisted() calls re-hit the prepass cache by index; afterwards the cache
         // is cleared so the test file's own vi.hoisted() calls never read the setup's values
         run_js(scope, "globalThis.__hoistedIdx = 0;");
@@ -5426,10 +5424,6 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__ttRequireStack", native_require_stack);
     bind_fn(scope, global, "__ttCache", native_require_cache);
     bind_fn(scope, global, "__fs_existsSync", fs_exists_sync);
-    bind_fn(scope, global, "__fs_readFileSync", fs_read_file_sync);
-    bind_fn(scope, global, "__fs_writeFileSync", fs_write_file_sync);
-    bind_fn(scope, global, "__fs_mkdirSync", fs_mkdir_sync);
-    bind_fn(scope, global, "__fs_rmSync", fs_rm_sync);
     bind_fn(scope, global, "__fs_readdir", fs_readdir);
     bind_fn(scope, global, "__fs_stat", fs_stat);
     bind_fn(scope, global, "__fs_readFile", fs_read_file);
@@ -5556,39 +5550,6 @@ fn fs_exists_sync(
     rv.set_bool(Path::new(&p).exists());
 }
 
-/// native fs.readFileSync(path, enc) -> string (utf8) — enc ignored, always returns text
-fn fs_read_file_sync(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let p = args.get(0).to_rust_string_lossy(scope);
-    match std::fs::read_to_string(&p) {
-        Ok(s) => {
-            if let Some(v) = v8::String::new(scope, &s) {
-                rv.set(v.into());
-            }
-        }
-        Err(e) => throw(scope, &format!("readFileSync {p}: {e}")),
-    }
-}
-
-/// native fs.writeFileSync(path, data)
-fn fs_write_file_sync(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    let p = args.get(0).to_rust_string_lossy(scope);
-    let data = args.get(1).to_rust_string_lossy(scope);
-    if let Some(parent) = Path::new(&p).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(e) = std::fs::write(&p, data) {
-        throw(scope, &format!("writeFileSync {p}: {e}"));
-    }
-}
-
 /// The Node error code and description of an OS error (`EEXIST`, "file already exists"), as
 /// libuv names them; None for an error that is not one of these.
 fn errno_name(e: &std::io::Error) -> Option<(&'static str, &'static str)> {
@@ -5642,27 +5603,6 @@ fn fs_symlink_sync(
             }
         }
         scope.throw_exception(err);
-    }
-}
-
-/// native fs.mkdirSync(path, opts) — always recursive (safe)
-fn fs_mkdir_sync(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    let p = args.get(0).to_rust_string_lossy(scope);
-    let _ = std::fs::create_dir_all(&p);
-}
-
-/// native fs.rmSync / rmdirSync / unlinkSync(path) — best-effort remove
-fn fs_rm_sync(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
-    let p = args.get(0).to_rust_string_lossy(scope);
-    let path = Path::new(&p);
-    if path.is_dir() {
-        let _ = std::fs::remove_dir_all(path);
-    } else {
-        let _ = std::fs::remove_file(path);
     }
 }
 
