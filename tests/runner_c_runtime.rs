@@ -620,3 +620,66 @@ fn process_stdout_and_stderr_write_reach_the_streams() {
         r.all()
     );
 }
+
+/// turbo-test#85: `URL` percent-encodes the path and the fragment with the WHATWG sets (values:
+/// Node 26 `new URL(...)`).
+#[test]
+#[ignore = "turbo-test#85: fails until the fix"]
+fn url_percent_encodes_the_path_and_fragment_like_node() {
+    let p = Project::new("rc-url-encode");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "a.test.js",
+        r#"import { expect, it } from 'vitest';
+it('percent-encodes', () => {
+  const parts = (s) => { const u = new URL(s); return [u.href, u.pathname, u.hash]; };
+  expect(parts('file:///a b')).toEqual(['file:///a%20b', '/a%20b', '']);
+  expect(parts('http://h/a b#e f')).toEqual(['http://h/a%20b#e%20f', '/a%20b', '#e%20f']);
+  expect(parts('http://h/x"<>`{}|^')).toEqual(['http://h/x%22%3C%3E%60%7B%7D|%5E', '/x%22%3C%3E%60%7B%7D|%5E', '']);
+  expect(parts('http://h/€#€')).toEqual(['http://h/%E2%82%AC#%E2%82%AC', '/%E2%82%AC', '#%E2%82%AC']);
+  expect(parts('http://h/%41%zz#%20')).toEqual(['http://h/%41%zz#%20', '/%41%zz', '#%20']);
+  expect(new URL('./c d', 'file:///p q/r').href).toBe('file:///p%20q/c%20d');
+  const u = new URL('http://h/x');
+  u.pathname = '/n m';
+  expect(u.href).toBe('http://h/n%20m');
+});
+"#,
+    );
+    assert_passes(&turbo_test(&p.dir, &[], &[]), 1);
+}
+
+/// turbo-test#84: `node:url` `fileURLToPath` decodes and validates like Node, `pathToFileURL`
+/// returns an encoded `URL` (values: Node 26 on darwin; the same through `url`).
+#[test]
+#[ignore = "turbo-test#84: fails until the fix"]
+fn file_url_conversions_follow_node() {
+    let p = Project::new("rc-file-url");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "a.test.js",
+        r#"import { expect, it } from 'vitest';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import * as url from 'url';
+it('fileURLToPath', () => {
+  expect(['file:///a%20b', 'file:///a/b%23c?x#y', 'file://localhost/x', 'file:///%E2%82%AC'].map((s) => fileURLToPath(s))).toEqual(['/a b', '/a/b#c', '/x', '/€']);
+  expect(fileURLToPath(new URL('file:///u%20v'))).toBe('/u v');
+  const err = (s) => { try { fileURLToPath(s); return 'no throw'; } catch (e) { return [e.name, e.code, e.message]; } };
+  expect(err('http://x/y')).toEqual(['TypeError', 'ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file']);
+  expect(err('file:///a%2Fb')).toEqual(['TypeError', 'ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded / characters']);
+  expect(err('file://host/x')).toEqual(['TypeError', 'ERR_INVALID_FILE_URL_HOST', 'File URL host must be "localhost" or empty on darwin']);
+  expect(url.fileURLToPath('file:///a%20b')).toBe('/a b');
+});
+it('pathToFileURL', () => {
+  const u = pathToFileURL('/a b#c?d%e');
+  expect([u instanceof URL, u.href, u.pathname]).toEqual([true, 'file:///a%20b%23c%3Fd%25e', '/a%20b%23c%3Fd%25e']);
+  expect(pathToFileURL('/x/€/y').href).toBe('file:///x/%E2%82%AC/y');
+  expect(pathToFileURL('/t\tn').href).toBe('file:///t%09n');
+  expect(pathToFileURL('rel/x').href).toBe('file://' + process.cwd() + '/rel/x');
+  expect(pathToFileURL('/d/').href).toBe('file:///d/');
+  expect(url.pathToFileURL('/q r').href).toBe('file:///q%20r');
+  expect(fileURLToPath(pathToFileURL('/r t/€'))).toBe('/r t/€');
+});
+"#,
+    );
+    assert_passes(&turbo_test(&p.dir, &[], &[]), 2);
+}
