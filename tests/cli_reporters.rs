@@ -587,6 +587,34 @@ fn junit_is_vitests_report() {
     }
 }
 
+/// turbo-test#96: every test function gets vitest's TestContext — `task` (its name, ids, suite,
+/// file, result), `skip(note?)` / `skip(condition, note?)` (skipped at run time, even when the
+/// PendingError is caught), `onTestFinished` (after afterEach, last registered first) /
+/// `onTestFailed`, `signal`, `expect`, `annotate` (junit `<properties>`); beforeEach / afterEach
+/// get it too, `.for` rows and `it.extend` fixtures see the same context, `.each` handlers do
+/// not. `tests/data/junit-context-vitest-4.1.12.xml` is vitest 4.1.12's report (the tests log
+/// what they see), on both loaders.
+#[test]
+#[ignore = "turbo-test#96: fails until the fix"]
+fn test_functions_get_vitests_test_context() {
+    for esbuild in [false, true] {
+        let p = Project::new("rep-junit-context");
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", "{\"type\":\"module\"}\n");
+        p.file("a.test.ts", include_str!("data/context/a.test.ts"));
+        let r = turbo_test(&p.dir, &["--reporter", "junit"], &[]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert_eq!(
+            normalize_junit(&r.stdout),
+            include_str!("data/junit-context-vitest-4.1.12.xml"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+    }
+}
+
 /// turbo-test#81, the failure bodies: string / multi-line / type-mismatch / empty diffs, no diff
 /// for the comparison matchers (vitest passes showDiff false), a helper module's frame with its
 /// function name (mapped back through that module's transform), an error's cause, and console
