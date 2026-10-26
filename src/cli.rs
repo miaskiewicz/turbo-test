@@ -554,8 +554,8 @@ pub fn execute_file(engine: &Engine, file: &Path) -> FileOutcome {
 pub const NO_SUITE_FOUND: &str = "No test suite found in file ";
 
 /// Turn one file's outcome into the reporters' [`FileResult`]. A "no test suite found" report is
-/// a file-level error, reported exactly like a load error (ERROR line, JSON `error`, JUnit
-/// `<error>` case, TAP `not ok`, counted as a failed file).
+/// a file-level error, reported exactly like a load error (ERROR line, JSON `error`, a failing
+/// JUnit case, TAP `not ok`, counted as a failed file).
 pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> FileResult {
     let r = match r {
         Ok(rep)
