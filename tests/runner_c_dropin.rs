@@ -60,3 +60,42 @@ fn svg_elements_have_an_inline_style() {
     let r = turbo_test(&p.dir, &[], &[]);
     assert_passes(&r, 1);
 }
+
+/// Item 2: `vi.dynamicImportSettled()` exists and waits for in-flight `import()`s (the report
+/// calls it in a setup file's `afterAll`), with the real timer even under fake timers.
+#[test]
+#[ignore = "turbo-test#79: fails until the fix"]
+fn vi_dynamic_import_settled_waits_for_pending_imports() {
+    let p = dropin(
+        "dropin-import-settled",
+        &[
+            (
+                "a.test.ts",
+                "import { expect, it, vi } from 'vitest';\n\
+                 it('exists', () => { expect(typeof (vi as any).dynamicImportSettled).toBe('function'); });\n",
+            ),
+            (
+                "tla.ts",
+                "await new Promise((r) => setTimeout(r, 20));\nexport const x = 1;\n",
+            ),
+            (
+                "b.test.ts",
+                "import { expect, it, vi } from 'vitest';\n\
+                 it('settles in-flight imports', async () => {\n\
+                 \x20 const seen: number[] = [];\n\
+                 \x20 import('./tla').then((m) => seen.push(m.x));\n\
+                 \x20 expect(seen).toEqual([]);\n\
+                 \x20 await vi.dynamicImportSettled();\n\
+                 \x20 expect(seen).toEqual([1]);\n\
+                 });\n\
+                 it('resolves with undefined under fake timers', async () => {\n\
+                 \x20 vi.useFakeTimers();\n\
+                 \x20 await expect(vi.dynamicImportSettled()).resolves.toBeUndefined();\n\
+                 \x20 vi.useRealTimers();\n\
+                 });\n",
+            ),
+        ],
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_passes(&r, 3);
+}
