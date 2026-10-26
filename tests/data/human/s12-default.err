@@ -1,0 +1,40 @@
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  a.test.ts > row 1
+ FAIL  a.test.ts > row 2
+AssertionError: expected 1 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 1
+
+ ❯ a.test.ts:2:45
+      1| import { expect, it } from 'vitest';
+      2| it.each([1, 2])('row %i', () => { expect(1).toBe(2); });
+       |                                             ^
+      3| it('other', () => { expect(1).toBe(2); });
+      4|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  a.test.ts > other
+AssertionError: expected 1 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 1
+
+ ❯ a.test.ts:3:31
+      1| import { expect, it } from 'vitest';
+      2| it.each([1, 2])('row %i', () => { expect(1).toBe(2); });
+      3| it('other', () => { expect(1).toBe(2); });
+       |                               ^
+      4|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+

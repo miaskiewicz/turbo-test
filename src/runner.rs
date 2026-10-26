@@ -5968,6 +5968,8 @@ pub struct TestReport {
     pub suite_errors: Vec<SuiteError>,
     /// The file's console output while captured: (stream, task name path, content).
     pub logs: Vec<(String, String, String)>,
+    /// ms the drive loop's clock jumped while the tests ran (turbo-test#95).
+    pub waited_ms: f64,
 }
 
 /// A test file's snapshot outcome, as @vitest/snapshot's `SnapshotResult` (turbo-test#73).
@@ -6008,6 +6010,8 @@ pub struct TestCase {
     pub not_run: bool,
     /// A passing `it.fails` test: vitest's `expected fail` in the summary footer (turbo-test#78).
     pub expected_fail: bool,
+    /// How many times it was retried (vitest's `retryCount`, `(retry x1)`).
+    pub retry_count: u32,
     /// Its console output (`stdout` / `stderr`, content) while logs are captured (junit).
     pub logs: Vec<(String, String)>,
     /// The error it failed with (junit's `<failure>`, turbo-test#81).
@@ -6901,6 +6905,7 @@ fn drive_tests_bounded(
                     location: location_of(scope, o),
                     not_run: flag(scope, "not_run"),
                     expected_fail: flag(scope, "expected_fail"),
+                    retry_count: num(scope, "retry_count") as u32,
                     logs: pairs_of(scope, o, "logs"),
                     errors: errors_of(scope, o),
                 });
@@ -6926,6 +6931,7 @@ fn drive_tests_bounded(
         setup_us: 0.0,
         suite_errors,
         logs,
+        waited_ms: f64::from(get_num(scope, "waited_ms")),
     })
 }
 

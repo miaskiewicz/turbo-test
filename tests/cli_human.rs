@@ -91,9 +91,16 @@ const OBSOLETE: &[(&str, &str)] = &[
 ];
 
 /// More scenarios: a slow test (over vitest's 300ms slowTestThreshold) in a passing and in a
-/// failed file, retried tests, obsolete snapshots and, with `-u`, removed ones. Each with the
-/// extra arguments both runners get.
-const MORE: [(&str, &[(&str, &str)], &[&str]); 5] = [
+/// failed file, retried tests, obsolete snapshots and, with `-u`, removed ones, identical errors
+/// merged, console output per task. Each with the extra arguments both runners get.
+/// A scenario: its name, its files and the arguments both runners get.
+type Scenario = (
+    &'static str,
+    &'static [(&'static str, &'static str)],
+    &'static [&'static str],
+);
+
+const MORE: [Scenario; 7] = [
     (
         "s7",
         &[(
@@ -130,6 +137,39 @@ const MORE: [(&str, &[(&str, &str)], &[&str]); 5] = [
     ),
     ("s10", OBSOLETE, &["--no-file-parallelism"]),
     ("s11", OBSOLETE, &["--no-file-parallelism", "-u"]),
+    // two tests failing with the same stack: one error under both FAIL lines
+    (
+        "s12",
+        &[(
+            "a.test.ts",
+            "import { expect, it } from 'vitest';\n\
+             it.each([1, 2])('row %i', () => { expect(1).toBe(2); });\n\
+             it('other', () => { expect(1).toBe(2); });\n",
+        )],
+        &[],
+    ),
+    // console output of the file, its suites' hooks and its tests: the agent reporter prints
+    // that of failed tasks only, each when its task finishes
+    (
+        "s14",
+        &[(
+            "a.test.ts",
+            "import { beforeAll, describe, expect, it } from 'vitest';\n\
+             console.log('file level');\n\
+             describe('outer', () => {\n\
+             \x20 beforeAll(() => { console.log('outer hook'); });\n\
+             \x20 describe('inner', () => {\n\
+             \x20   beforeAll(() => { console.log('inner hook'); });\n\
+             \x20   it('fails', () => { console.log('in failing'); expect(1).toBe(2); });\n\
+             \x20 });\n\
+             \x20 describe('calm', () => {\n\
+             \x20   beforeAll(() => { console.log('calm hook'); });\n\
+             \x20   it('passes', () => { console.log('in passing'); });\n\
+             \x20 });\n\
+             });\n",
+        )],
+        &[],
+    ),
 ];
 
 /// vitest's reference output for `scenario` and `reporter` (`.out` or `.err`).
@@ -243,14 +283,19 @@ fn an_agent_gets_vitests_agent_reporter() {
     }
 }
 
-/// The scenarios of [`MORE`] with each human reporter (the agent one under `AI_AGENT`), files
-/// run one at a time (`TURBO_JOBS=1`) in the order vitest's sequencer picks.
+/// The scenarios of [`MORE`] with each human reporter (the agent one under `AI_AGENT`) on both
+/// loaders, files run one at a time (`TURBO_JOBS=1`) in the order vitest's sequencer picks.
 #[test]
-#[ignore = "turbo-test#94: fails until the fix"]
 fn slow_tests_retries_and_obsolete_snapshots_print_what_vitest_prints() {
     for (scenario, files, args) in MORE {
-        for reporter in ["default", "verbose", "agent"] {
-            let p = project(&format!("hr-{scenario}-{reporter}"), files, false);
+        for (reporter, esbuild) in [
+            ("default", false),
+            ("default", true),
+            ("verbose", false),
+            ("verbose", true),
+            ("agent", false),
+        ] {
+            let p = project(&format!("hr-{scenario}-{reporter}"), files, esbuild);
             let root = p.dir.display().to_string();
             let mut argv: Vec<&str> = args.to_vec();
             let mut env = vec![("TURBO_LEGACY_REPORTER", "0"), ("TURBO_JOBS", "1")];
@@ -261,7 +306,7 @@ fn slow_tests_retries_and_obsolete_snapshots_print_what_vitest_prints() {
                 env.push(("NO_COLOR", "1"));
             }
             let r = turbo_test(&p.dir, &argv, &env);
-            let ctx = format!("{scenario} {reporter}\n{}", r.all());
+            let ctx = format!("{scenario} {reporter} esbuild={esbuild}\n{}", r.all());
             assert_eq!(
                 normalize(&r.stdout, &root),
                 reference(scenario, reporter, "out"),

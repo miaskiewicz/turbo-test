@@ -37,7 +37,12 @@ pub struct Run<'a> {
     /// The Test Files and Tests lines (cli::footer's).
     pub test_files: String,
     pub tests: String,
+    /// `-u` / `--update`: obsolete snapshots were removed.
+    pub did_update: bool,
 }
+
+/// vitest's default `slowTestThreshold`, ms: a slower passing test gets a line of its own.
+const SLOW_MS: f64 = 300.0;
 
 /// `(stdout, stderr)` of `kind` for the run.
 pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
@@ -45,17 +50,12 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
     out.push_str(&format!("\n RUN  v4.1.12 {}\n\n", run.root.display()));
     for r in res {
         let name = run.names[r.idx].to_string_lossy().to_string();
-        let failed_tasks: Vec<String> = r
-            .tests
-            .iter()
-            .filter(|t| t.status == "failed")
-            .map(test_path)
-            .chain(r.suite_errors.iter().map(|s| s.name.clone()))
-            .collect();
-        for (stream, task, content) in &r.logs {
-            if kind == Kind::Agent && !failed_tasks.contains(task) {
-                continue;
-            }
+        let logs: Vec<&(String, String, String)> = if kind == Kind::Agent {
+            agent_logs(r)
+        } else {
+            r.logs.iter().collect()
+        };
+        for (stream, task, content) in logs {
             let header = if task.is_empty() {
                 name.clone()
             } else {
@@ -89,20 +89,29 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
                     continue;
                 }
                 out.push_str(&module_line(r, &name));
+                // DefaultReporter.printTestCase (the agent reporter prints only failed tests)
                 for t in &r.tests {
-                    let failed = t.status == "failed";
-                    if !failed && (kind == Kind::Agent || !r.failed_file) {
-                        continue;
-                    }
                     let pad = "  ".repeat(t.ancestors.len() + 1);
-                    out.push_str(&format!(" {pad}{} {}{}\n", symbol(t), t.title, suffix(t)));
+                    let (title, suffix) = (&t.title, suffix(t));
+                    let line = if t.status == "failed" {
+                        format!(" {pad}× {title}{suffix}\n")
+                    } else if kind == Kind::Agent {
+                        continue;
+                    } else if t.duration_ms > SLOW_MS {
+                        format!(" {pad}✓ {title} {suffix}\n")
+                    } else if r.failed_file {
+                        format!(" {pad}{} {title}{suffix}\n", symbol(t))
+                    } else {
+                        continue;
+                    };
+                    out.push_str(&line);
                 }
             }
         }
     }
     err.push_str(&errors_summary(res, run));
     out.push('\n');
-    for line in snapshot_lines(res) {
+    for line in snapshot_lines(res, run) {
         out.push_str(&line);
         out.push('\n');
     }
@@ -111,7 +120,7 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
     out.push_str(&format!("   Start at  {}\n", run.start));
     let (tests, setup, files) = res.iter().fold((0.0, 0.0, 0.0), |(t, s, f), r| {
         let ran: f64 = r.tests.iter().map(|t| t.duration_ms).sum();
-        (t + ran, s + r.setup_us / 1000.0, f + r.dur_ms)
+        (t + ran, s + r.setup_us / 1000.0, f + r.dur_ms + r.waited_ms)
     });
     out.push_str(&format!(
         "   Duration  {} (transform 0ms, setup 0ms, import {}, tests {}, environment {})\n\n",
@@ -121,6 +130,49 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
         format_time(setup),
     ));
     (out, err)
+}
+
+/// The console output the agent reporter prints (vitest's `silent: 'passed-only'`): only that of
+/// failed tasks — the file, a suite holding a failed test or whose hook failed, a failed test —
+/// each task's output when the task finishes (tests, then their suites inside out, the file last).
+fn agent_logs(r: &FileResult) -> Vec<&(String, String, String)> {
+    let paths: Vec<String> = r.tests.iter().map(test_path).collect();
+    let within = |p: &str, task: &str| p == task || p.starts_with(&format!("{task} > "));
+    let failed = |task: &str| {
+        task.is_empty() && r.failed_file
+            || r.tests
+                .iter()
+                .zip(&paths)
+                .any(|(t, p)| t.status == "failed" && within(p, task))
+            || r.suite_errors
+                .iter()
+                .any(|s| task == s.name || task.ends_with(&format!(" > {}", s.name)))
+    };
+    // the order tasks finish in: each test, then each suite it closes (innermost first)
+    let mut order: Vec<String> = Vec::new();
+    for (i, t) in r.tests.iter().enumerate() {
+        order.push(paths[i].clone());
+        let next = r.tests.get(i + 1).map_or(&[][..], |n| &n.ancestors[..]);
+        for depth in (0..t.ancestors.len()).rev() {
+            if next.get(..=depth) != Some(&t.ancestors[..=depth]) {
+                order.push(t.ancestors[..=depth].join(" > "));
+            }
+        }
+    }
+    let rank = |task: &str| {
+        if task.is_empty() {
+            usize::MAX
+        } else {
+            order
+                .iter()
+                .position(|o| o == task)
+                .unwrap_or(usize::MAX - 1)
+        }
+    };
+    let mut logs: Vec<&(String, String, String)> =
+        r.logs.iter().filter(|(_, task, _)| failed(task)).collect();
+    logs.sort_by_key(|(_, task, _)| rank(task));
+    logs
 }
 
 /// vitest's `formatTime`.
@@ -150,13 +202,17 @@ fn symbol(t: &TestCase) -> &'static str {
     }
 }
 
-/// ` 3ms` for a test that ran (vitest prints the rounded duration of a test with a result).
+/// vitest's getTestCaseSuffix: ` 3ms` for a test that ran (the rounded duration of a test with
+/// a result), then ` (retry x2)` for a retried one.
 fn suffix(t: &TestCase) -> String {
+    let mut s = String::new();
     if (t.status == "passed" || t.status == "failed") && !t.not_run {
-        format!(" {}ms", t.duration_ms.round())
-    } else {
-        String::new()
+        s.push_str(&format!(" {}ms", t.duration_ms.round()));
     }
+    if t.retry_count > 0 {
+        s.push_str(&format!(" (retry x{})", t.retry_count));
+    }
+    s
 }
 
 /// A failed test's errors (one from its message when the runtime recorded no error object).
@@ -200,20 +256,44 @@ fn module_line(r: &FileResult, name: &str) -> String {
     let dur = if r.load_error {
         String::new()
     } else {
-        format!(" {}ms", r.dur_ms.round())
+        format!(" {}ms", (r.dur_ms + r.waited_ms).round())
     };
     format!(" {sym} {name} ({state}){dur}\n")
 }
 
-/// The footer's Snapshots lines (vitest's renderSnapshotSummary).
-fn snapshot_lines(res: &[FileResult]) -> Vec<String> {
-    let (mut added, mut unmatched, mut updated, mut unchecked) = (0, 0, 0, 0);
-    for s in res.iter().filter_map(|r| r.snapshot.as_ref()) {
+/// The footer's Snapshots lines (vitest's renderSnapshotSummary over the files' results added
+/// up): written, failed, updated, files removed / obsolete, then the obsolete (or, under `-u`,
+/// removed) snapshots with `↳ ./file` and `  · key` lines per file; a blank line after more
+/// than one line.
+fn snapshot_lines(res: &[FileResult], run: &Run) -> Vec<String> {
+    let (mut added, mut unmatched, mut updated, mut unchecked, mut files_removed) = (0, 0, 0, 0, 0);
+    let mut keys = Vec::new();
+    for r in res {
+        let Some(s) = &r.snapshot else { continue };
         added += s.added;
         unmatched += s.unmatched;
         updated += s.updated;
         unchecked += s.unchecked;
+        files_removed += u32::from(s.file_deleted);
+        if !s.unchecked_keys.is_empty() {
+            let name = run.names[r.idx].to_string_lossy().replace('\\', "/");
+            let dir = match Path::new(&name).parent() {
+                Some(d) if !d.as_os_str().is_empty() => d.to_string_lossy().to_string(),
+                _ => ".".to_string(),
+            };
+            let base = Path::new(&name)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            keys.push(format!("↳ {dir}/{base}"));
+            keys.extend(s.unchecked_keys.iter().map(|k| format!("  · {k}")));
+        }
     }
+    let gone = if run.did_update {
+        "removed"
+    } else {
+        "obsolete"
+    };
     let mut items = Vec::new();
     if added > 0 {
         items.push(format!("{added} written"));
@@ -224,8 +304,12 @@ fn snapshot_lines(res: &[FileResult]) -> Vec<String> {
     if updated > 0 {
         items.push(format!("{updated} updated "));
     }
+    if files_removed > 0 {
+        items.push(format!("{files_removed} files {gone} "));
+    }
     if unchecked > 0 {
-        items.push(format!("{unchecked} obsolete"));
+        items.push(format!("{unchecked} {gone}"));
+        items.extend(keys);
     }
     let mut lines: Vec<String> = items
         .iter()
@@ -238,16 +322,14 @@ fn snapshot_lines(res: &[FileResult]) -> Vec<String> {
     lines
 }
 
-/// One error to report: the name it is reported under (` FAIL  <name>`) and the error.
-struct Reported {
-    name: String,
-    error: ErrorInfo,
-}
-
-/// The Failed Suites / Failed Tests sections (stderr).
+/// The Failed Suites / Failed Tests sections (stderr), as vitest's printErrorsSummary: each
+/// section counts its tasks; identical errors (vitest: the same stack and diff) are printed once
+/// under every task's ` FAIL  <name>` line; the dividers number the printed errors out of all the
+/// tasks' errors (vitest's counter does not account for merged ones).
 fn errors_summary(res: &[FileResult], run: &Run) -> String {
-    let mut suites: Vec<Reported> = Vec::new();
-    let mut tests: Vec<Reported> = Vec::new();
+    // (task name, its errors) per section
+    let mut suites: Vec<(String, Vec<ErrorInfo>)> = Vec::new();
+    let mut tests: Vec<(String, Vec<ErrorInfo>)> = Vec::new();
     for r in res {
         let name = run.names[r.idx].to_string_lossy().to_string();
         if r.failed_file && r.tests.is_empty() && r.suite_errors.is_empty() {
@@ -256,43 +338,41 @@ fn errors_summary(res: &[FileResult], run: &Run) -> String {
                 message: crate::cli::file_message(&r.error_msg),
                 ..Default::default()
             });
-            suites.push(Reported {
-                name: format!("{name} [ {name} ]"),
-                error,
-            });
+            suites.push((format!("{name} [ {name} ]"), vec![error]));
         }
         for s in &r.suite_errors {
-            for e in &s.errors {
-                suites.push(Reported {
-                    name: format!("{name} > {}", s.name),
-                    error: e.clone(),
-                });
-            }
+            suites.push((format!("{name} > {}", s.name), s.errors.clone()));
         }
         for t in r.tests.iter().filter(|t| t.status == "failed") {
-            for e in errors(t) {
-                tests.push(Reported {
-                    name: format!("{name} > {}", test_path(t)),
-                    error: e,
-                });
-            }
+            tests.push((format!("{name} > {}", test_path(t)), errors(t)));
         }
     }
-    let total = suites.len() + tests.len();
+    let total: usize = suites.iter().chain(&tests).map(|(_, e)| e.len()).sum();
     let mut out = String::new();
     let mut n = 0;
-    for (title, list) in [("Failed Suites", &suites), ("Failed Tests", &tests)] {
-        if list.is_empty() {
+    for (title, tasks) in [("Failed Suites", &suites), ("Failed Tests", &tests)] {
+        if tasks.is_empty() {
             continue;
         }
         out.push_str(&format!(
             "\n{}\n\n",
-            divider(&format!(" {title} {} ", list.len()), None)
+            divider(&format!(" {title} {} ", tasks.len()), None)
         ));
-        for rep in list.iter() {
+        let mut queue: Vec<(&ErrorInfo, Vec<&str>)> = Vec::new();
+        for (name, errors) in tasks.iter() {
+            for e in errors {
+                match queue.iter_mut().find(|(q, _)| *q == e) {
+                    Some((_, names)) => names.push(name),
+                    None => queue.push((e, vec![name])),
+                }
+            }
+        }
+        for (error, names) in queue {
             n += 1;
-            out.push_str(&format!(" FAIL  {}\n", rep.name));
-            out.push_str(&print_error(&rep.error, run.root, true, ""));
+            for name in names {
+                out.push_str(&format!(" FAIL  {name}\n"));
+            }
+            out.push_str(&print_error(error, run.root, true, ""));
             out.push_str(&format!(
                 "{}\n\n",
                 divider(&format!("[{n}/{total}]"), Some(1))

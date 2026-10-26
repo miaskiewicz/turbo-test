@@ -58,6 +58,9 @@ pub struct FileResult {
     /// Its console output: (`stdout` / `stderr`, the test's or suite's name path or `""` for
     /// the file, content), for vitest's human reporters.
     pub logs: Vec<(String, String, String)>,
+    /// ms its tests waited on timers (the drive loop's clock jumps, turbo-test#95): vitest's
+    /// file duration counts them.
+    pub waited_ms: f64,
 }
 
 /// Which reporter to emit. Anything turbo-test does not implement is accepted-and-ignored and
@@ -602,6 +605,7 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
                 suite_errors: rep.suite_errors,
                 load_error_info: None,
                 logs: rep.logs,
+                waited_ms: rep.waited_ms,
             }
         }
         Err(e) => FileResult {
@@ -620,6 +624,7 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
             suite_errors: Vec::new(),
             load_error_info: runner::take_load_error(),
             logs: Vec::new(),
+            waited_ms: 0.0,
         },
     }
 }
@@ -1212,13 +1217,23 @@ pub fn render_artifact(
 /// `TURBO_LEGACY_REPORTER` set to anything but `0` — turbo-test's own PASS / FAIL lines).
 pub fn human_kind(reporter: Reporter, explicit: bool) -> Option<crate::human::Kind> {
     let legacy = std::env::var("TURBO_LEGACY_REPORTER").is_ok_and(|v| !v.is_empty() && v != "0");
+    human_kind_for(reporter, explicit, legacy, crate::agent::is_agent_env())
+}
+
+/// [`human_kind`] for a `legacy` switch and whether an AI `agent` runs the tests: without
+/// `--reporter` (`explicit`) an agent gets vitest's agent reporter.
+pub fn human_kind_for(
+    reporter: Reporter,
+    explicit: bool,
+    legacy: bool,
+    agent: bool,
+) -> Option<crate::human::Kind> {
+    use crate::human::Kind;
     match reporter {
         _ if legacy => None,
-        Reporter::Verbose => Some(crate::human::Kind::Verbose),
-        Reporter::Default if !explicit && crate::agent::is_agent_env() => {
-            Some(crate::human::Kind::Agent)
-        }
-        Reporter::Default => Some(crate::human::Kind::Default),
+        Reporter::Verbose => Some(Kind::Verbose),
+        Reporter::Default if agent && !explicit => Some(Kind::Agent),
+        Reporter::Default => Some(Kind::Default),
         _ => None,
     }
 }
@@ -1483,6 +1498,7 @@ pub fn run(opts: Options) -> i32 {
             start: local_hms(start_ms),
             test_files,
             tests,
+            did_update: opts.env.iter().any(|(k, _)| *k == "TURBO_UPDATE_SNAPSHOTS"),
         };
         let (out, err) = crate::human::render(kind, &res, &run);
         // vitest's human reporters write no --outputFile
