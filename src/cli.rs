@@ -1149,7 +1149,7 @@ fn hostname() -> String {
 
 /// TAP v13: a flat numbered plan over every test across all files. A file that failed to LOAD has
 /// no per-test list: it is one `not ok N - <file>` point carrying the load error (the TAP twin of
-/// JUnit's synthetic `<error>` case), so the failure is never silently dropped from the plan.
+/// JUnit's failing case for the file), so the failure is never silently dropped from the plan.
 pub fn render_tap(files: &[PathBuf], res: &[FileResult]) -> String {
     let total: usize = res
         .iter()

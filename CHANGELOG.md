@@ -205,6 +205,16 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `pathname` / `hash` setters encode.
 - `import.meta.url` is percent-encoded like Node's `pathToFileURL` (turbo-test#87) on both
   loaders; a project path with a space or a non-ASCII character gave a raw `file://` string.
+- `--reporter junit` writes vitest 4.1.12's report (turbo-test#81): vitest's element layout and
+  attributes, skipped / todo cases, failed suites as cases, a load error as a failing case named
+  after the file, each test's console output in `<system-out>` / `<system-err>`, and the
+  failure printed as vitest prints it — the expected / actual diff and stack frames mapped back
+  to the test file and the app modules (`src/failure.rs`). With `--outputFile` stdout says
+  `JUNIT report written to <path>` (`JSON report written to <path>` for json) instead of the
+  footer. turbo-test wrote its own `<testsuites name="turbo-test">` format without skipped
+  cases, failure bodies or output. vitest's comparison and call-count matchers
+  (`toBeGreaterThan`, `toBeCloseTo`, `toHaveBeenCalledTimes`, …) now raise errors without a diff,
+  as vitest's do. The verbose / default reporters keep turbo-test's format (turbo-test#94).
 - `console.*`, `util.inspect` and `util.format` format as Node's (turbo-test#93): `util.inspect`
   is a port of Node's (depth 2, breakLength 80, compact 3: quoting, `[Object]`, `<ref *1>`,
   `Map(n) {…}`, `[class X]`, grouped long arrays, multi-line objects, `util.inspect.custom`);
