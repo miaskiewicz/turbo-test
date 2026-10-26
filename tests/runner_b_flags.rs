@@ -269,7 +269,6 @@ fn only_is_forbidden_on_ci_unless_allow_only() {
 }
 
 #[test]
-#[ignore = "turbo-test#76: fails until the fix"]
 fn a_forbidden_only_fails_each_only_task_without_running_it() {
     // turbo-test#76: with allowOnly off, vitest 4.1.12 (`checkAllowOnly`) fails each `.only` task
     // in place, without running it: a `.only` test is a failed test (no beforeEach, no body), a

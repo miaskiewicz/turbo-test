@@ -234,7 +234,12 @@ fn silent_and_allow_only() {
     );
     let r = tt(&p, &["only.test.ts", "--allowOnly", "--no-allowOnly"]);
     assert_eq!(r.code, Some(1));
-    assert!(r.stdout.contains("--allowOnly is disabled"), "{}", r.all());
+    assert!(
+        r.stdout
+            .contains("Unexpected .only modifier. Remove it or pass --allowOnly argument"),
+        "{}",
+        r.all()
+    );
 }
 
 #[test]

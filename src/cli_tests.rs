@@ -42,6 +42,7 @@ fn case(name: &str, status: &str, ms: f64, message: &str) -> TestCase {
             vec![format!("Error: {message}\n    at x")]
         },
         location: None,
+        not_run: false,
     }
 }
 

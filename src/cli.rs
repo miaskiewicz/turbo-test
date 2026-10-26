@@ -822,7 +822,7 @@ fn assertion_result(t: &TestCase) -> String {
     if !t.title.is_empty() {
         full.push(t.title.clone());
     }
-    let ran = t.status == "passed" || t.status == "failed";
+    let ran = (t.status == "passed" || t.status == "failed") && !t.not_run;
     let location = t.location.map_or(String::new(), |(line, column)| {
         format!(",\"location\":{{\"line\":{line},\"column\":{column}}}")
     });

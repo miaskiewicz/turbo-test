@@ -145,6 +145,12 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - `.only` fails on CI (turbo-test#75): `allowOnly` defaults to `!isCI` as in vitest, so a stray
   `.only` committed to a branch fails the CI run instead of silently narrowing it to one test.
   `--allowOnly` / `--no-allowOnly` still decide when given (the last one wins).
+- A forbidden `.only` fails as in vitest (turbo-test#76): with allowOnly off each `.only` task
+  fails in place with vitest's message (`[Vitest] Unexpected .only modifier. Remove it or pass
+  --allowOnly argument to bypass this error`) and does not run — a `test.only` is a failed test
+  (no hooks, no body), a `describe.only` a failed suite whose hooks do not run and whose tests
+  are skipped. turbo-test ran the `.only` tests (they passed) and added one file-level failure,
+  so the counts and the JSON report differed from vitest's.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain

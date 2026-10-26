@@ -82,7 +82,7 @@ subcommand layer** — `argv[0]` that isn't a flag is treated as a test-file pat
 | `--includeTaskLocation` | ✅ | **DONE** | `cli.rs` → `TURBO_TASK_LOCATION` (also set by the launcher from config `test.includeTaskLocation: true`) → `__TT_TASK_LOCATION`: each test records the original `{ line, column }` of the call that registered it (`location.rs`), written by `--reporter json`. |
 | `--silent` | ✅ | **P2 — DONE** | `cli.rs` → `TURBO_TEST_SILENT` → `__TT_SILENT` global; `runtime.js` console.log/info/warn/error become no-ops (checked at call time, since the global is injected after the runtime module is snapshot-evaluated). |
 | `--changed [since]` | 🟡 | **P2 — DONE (direct filter)** | `cli.js` `gitChanged()`: `git diff --name-only [since]` + `--cached` + untracked (`ls-files --others`), intersected with discovered test files (absolute paths). `since` arg is optional (working-tree vs HEAD/index by default). When nothing changed → exit 0 (running nothing is not a failure). When git is unavailable / not a repo → runs all. **Gap:** this is a direct changed-*file* filter, NOT an affected-graph — a test that imports a changed *source* file but is itself unchanged is NOT re-run (no import graph built; the `m5-affected` graph idea is still unwired). |
-| `--allowOnly` / `--no-allowOnly` | 🟡 | **P3 — DONE** | Both flags accepted (`cli.rs`, the last one wins). Default `!isCI` as vitest (`src/ci.rs`): `.only` is allowed locally and forbidden on CI (turbo-test#75). `--no-allowOnly` → `TURBO_TEST_FORBID_ONLY` → `__TT_FORBID_ONLY`; `runtime.js` `__tt.run()` records a failure (flipping the exit code) for any **file** that collected a `.only`. **Partial**: per-file granularity — the failure is attributed to the file, and the file's `.only` tests still execute (vitest collect-time errors before running); the run exits non-zero with a clear message, which is the CI-relevant behavior. |
+| `--allowOnly` / `--no-allowOnly` | ✅ | **P3 — DONE** | Both flags accepted (`cli.rs`, the last one wins). Default `!isCI` as vitest (`src/ci.rs`): `.only` is allowed locally and forbidden on CI (turbo-test#75). allowOnly off → `TURBO_TEST_FORBID_ONLY` → `__TT_FORBID_ONLY`; `runtime.js` `__interpretOnly` fails each `.only` task in place as vitest's `checkAllowOnly` (turbo-test#76): a `.only` test is a failed test that does not run (no `beforeEach`/`afterEach`, no `duration`), a `describe.only` a failed suite whose hooks do not run and whose tests are skipped; nothing inside `describe.skip`/`describe.todo` is checked. Message: `[Vitest] Unexpected .only modifier. Remove it or pass --allowOnly argument to bypass this error`. |
 | `--watch` / `-w` | ❌ | ⏸ | No watcher. |
 | `--ui` | ❌ | ⏸ | No browser UI. |
 | `--browser` | ❌ | ⏸ | No browser-mode. |
@@ -217,7 +217,7 @@ All four are locked by `test/cli-compat.test.mjs` (`npm test`).
 
 **P1 — ✅ ALL SHIPPED 2026-06-17** (across reporters / api / config-env / runflags batches):
 - ✅ test `{ timeout }` enforcement + `--testTimeout`; ✅ `--bail <n>` (file-granular); ✅ `--retry`;
-  ✅ `--silent`; ✅ `--allowOnly`/`--no-allowOnly` (partial, see §2); ✅ `--maxWorkers`/`--minWorkers`.
+  ✅ `--silent`; ✅ `--allowOnly`/`--no-allowOnly` (default `!isCI`, see §2); ✅ `--maxWorkers`/`--minWorkers`.
 - ✅ `--reporter junit/tap/verbose/dot/default` + `--outputFile`.
 - ✅ `-c/--config`; ✅ `--root`/`--dir`; ✅ `--isolate`/`--no-isolate`; ✅ `--changed`; ✅ `--environment`
   selection (`node` skips DOM); ✅ `--globals` accepted (`--no-globals` no-op, see §2).

@@ -5678,6 +5678,8 @@ pub struct TestCase {
     pub failure_messages: Vec<String>,
     /// Where the test was registered (`includeTaskLocation`): 1-based line and column.
     pub location: Option<(u32, u32)>,
+    /// A failed test that never ran (a forbidden `.only`, turbo-test#76): no `duration`.
+    pub not_run: bool,
 }
 
 impl TestReport {
@@ -6528,6 +6530,10 @@ fn drive_tests_bounded(
                     message: text(scope, "message"),
                     failure_messages: string_array(scope, o, "failure_messages"),
                     location: location_of(scope, o),
+                    not_run: {
+                        let k = v8::String::new(scope, "not_run").unwrap();
+                        o.get(scope, k.into()).is_some_and(|v| v.is_true())
+                    },
                 });
             }
         }
