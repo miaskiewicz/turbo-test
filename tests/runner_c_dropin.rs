@@ -252,7 +252,6 @@ const REACT_STUB: [(&str, &str); 3] = [
 /// so the mock applies (the report: the typed factory fell through silently to the real module,
 /// the JSX one was a load error). Also generics, `as`, a `)` inside a string and `import.meta`.
 #[test]
-#[ignore = "turbo-test#79: fails until the fix"]
 fn mock_factories_with_typescript_or_jsx_are_applied() {
     let mut files: Vec<(&str, &str)> = REACT_STUB.to_vec();
     files.extend([

@@ -144,6 +144,32 @@ pub fn transform_decorators_with_metadata(path: &Path, src: &str) -> Result<Stri
     Ok(Codegen::new().build(&program).code)
 }
 
+/// `code` (the transformed mock prepass, a classic script) with each `import.meta` replaced by
+/// `import_meta_expr` (the entry's). Code that does not parse is returned unchanged.
+pub fn replace_import_meta(code: &str, import_meta_expr: &str) -> String {
+    use oxc_ast_visit::Visit;
+    struct Metas(Vec<(u32, u32)>);
+    impl<'a> Visit<'a> for Metas {
+        fn visit_meta_property(&mut self, it: &oxc_ast::ast::MetaProperty<'a>) {
+            if it.meta.name == "import" {
+                self.0.push((it.span.start, it.span.end));
+            }
+        }
+    }
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+    if !parsed.errors.is_empty() {
+        return code.to_string();
+    }
+    let mut metas = Metas(Vec::new());
+    metas.visit_program(&parsed.program);
+    let mut out = code.to_string();
+    for (start, end) in metas.0.into_iter().rev() {
+        out.replace_range(start as usize..end as usize, import_meta_expr);
+    }
+    out
+}
+
 /// Whether Node loads `src` (a `.js` file with no package.json `"type"`) as an ES module — its
 /// syntax detection: an `import` / `export` declaration or `import.meta`, or code that only
 /// parses as a module (top-level `await`). Anything else is CommonJS; words in comments and

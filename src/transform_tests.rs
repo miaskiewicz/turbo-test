@@ -242,3 +242,17 @@ fn module_syntax_follows_node_detection() {
         assert!(!has_module_syntax(src), "{src}");
     }
 }
+
+#[test]
+fn import_meta_is_replaced_in_the_prepass() {
+    assert_eq!(
+        replace_import_meta("f(import.meta.url, () => import.meta);\nnew.target;", "M"),
+        "f(M.url, () => M);\nnew.target;"
+    );
+    assert_eq!(replace_import_meta("const a = 1;", "M"), "const a = 1;");
+    // unparsable code is left alone
+    assert_eq!(
+        replace_import_meta("import.meta.url (", "M"),
+        "import.meta.url ("
+    );
+}

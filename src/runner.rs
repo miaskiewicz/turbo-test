@@ -1528,7 +1528,9 @@ fn run_setup_file(
     // A setup file that throws fails every test file that uses it, with its error (vitest).
     let failed = |e: String| Err(format!("setup file {}: {e}", file.display()));
     if mr_enabled() && esbuild_transform_cjs(file, false).is_some() {
-        run_entry_mocks(scope, file);
+        if let Err(e) = run_entry_mocks(scope, file) {
+            return failed(e);
+        }
         // the setup's vi.hoisted() calls re-hit the prepass cache by index; afterwards the cache
         // is cleared so the test file's own vi.hoisted() calls never read the setup's values
         run_js(scope, "globalThis.__hoistedIdx = 0;");
@@ -1578,6 +1580,30 @@ fn run_setup_file(
     resolve_pending_mocks(scope);
     drain_pending_mocks(scope, file.parent().unwrap_or(Path::new(".")), true);
     err.map_or(Ok(()), failed)
+}
+
+/// The ESM-graph mock prepass: run `first` (the hoisted declarations + the vi.mock calls), else
+/// `fallback` (the calls alone) when it throws or does not compile. A prepass that cannot
+/// compile at all fails the file with the SyntaxError: its mocks would otherwise fall through
+/// silently to the real modules (turbo-test#79 item 1). A factory that throws registers its
+/// error stand-in in runtime.js.
+fn run_prepass(scope: &mut v8::PinScope, first: &str, fallback: &str) -> Result<(), String> {
+    if run_js_ok(scope, first) {
+        return Ok(());
+    }
+    let tc = std::pin::pin!(v8::TryCatch::new(scope));
+    let tc = &mut tc.init();
+    let code = v8::String::new(tc, fallback).ok_or("prepass too long")?;
+    match v8::Script::compile(tc, code, None) {
+        Some(script) => {
+            let _ = script.run(tc);
+            Ok(())
+        }
+        None => Err(format!(
+            "{} (in the file's vi.mock factories)",
+            caught_message(tc, "SyntaxError").unwrap_or_default()
+        )),
+    }
 }
 
 /// Run `js` as a script; whether it completed without throwing (the exception is cleared).
@@ -1663,7 +1689,7 @@ fn extract_hoisted(src: &str) -> Vec<String> {
 /// emitted into a generated pre-pass module, bundled with esbuild (so JSX/import factories
 /// transform correctly), executed (factories run → __pendingMocks), then drained relative to
 /// the entry dir. This is how hoisted entry mocks work with bundling.
-fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
+fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String> {
     let src = std::fs::read_to_string(entry).unwrap_or_default();
     let dir = entry.parent().unwrap_or(Path::new("."));
     // The dir the entry's runtime vi.mock / vi.doMock calls resolve from when the module has no
@@ -1673,7 +1699,7 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
     run_js(scope, &format!("globalThis.__ttEntryDir = {entry_dir};"));
     let mocks = extract_mocks(&src);
     if mocks.is_empty() {
-        return;
+        return Ok(());
     }
     let Some(root) = project_root(entry) else {
         // No esbuild project (ESM graph): the runtime runs this file's prepass like the esbuild
@@ -1704,30 +1730,40 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
         );
         // the factories see the file's top-level bindings through its scope (mock_scope.rs)
         let bindings = factory_bindings(entry, &src, false);
-        // a TypeScript file's factories (and hoisted declarations) carry types: strip them
-        let ts = matches!(
-            entry.extension().and_then(|e| e.to_str()),
-            Some("ts" | "mts" | "cts")
+        // the factories (and hoisted declarations) get the file's own TS / JSX transform, as
+        // vitest transforms the whole file; in the script it becomes, `import.meta` is the
+        // entry's and `require` (the JSX runtime's) resolves from it (turbo-test#79 item 1)
+        let ext = entry.extension().and_then(|e| e.to_str()).unwrap_or("js");
+        let transform = crate::transform::needs_transform(entry);
+        let require = format!("globalThis.__mkRequire({entry_dir}, true)");
+        let meta = format!(
+            "({{ url: {}, filename: {}, dirname: {entry_dir} }})",
+            js_string_literal(&format!("file://{}", entry.display())),
+            js_string_literal(&entry.to_string_lossy()),
         );
         let scoped = |code: String| {
-            let code = if ts {
-                crate::transform::transform(Path::new("prepass.ts"), &code).unwrap_or(code)
+            let code = if transform {
+                crate::transform::transform(Path::new(&format!("prepass.{ext}")), &code)
+                    .unwrap_or(code)
             } else {
                 code
             };
-            if bindings.is_empty() {
+            let code = crate::transform::replace_import_meta(&code, &meta);
+            let code = if bindings.is_empty() {
                 code
             } else {
                 crate::mock_scope::with_scope(&code, &bindings)
-            }
+            };
+            // the transform's own `require("react/jsx-runtime")` (a file without imports)
+            format!("((require) => {{\n{code}\n}})({require});")
         };
-        if !run_js_ok(
+        let prepass = run_prepass(
             scope,
             &scoped(format!("(() => {{\n{hoisted}\n{calls}}})();")),
-        ) {
-            run_js_ok(scope, &scoped(format!("(() => {{\n{calls}}})();")));
-        }
+            &scoped(format!("(() => {{\n{calls}}})();")),
+        );
         run_js(scope, "globalThis.__ttDir = globalThis.__ttPrevDir;");
+        prepass?;
         resolve_pending_mocks(scope);
         drain_pending_mocks(scope, dir, false);
         // These registrations are this file's prepass: the module's own vi.mock call keeps them
@@ -1741,7 +1777,7 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
                 run_js(scope, &format!("__ttPrepassMocks.add({key});"));
             }
         }
-        return;
+        return Ok(());
     };
     // React is imported here too: mock factories commonly reference the test's module-scope
     // `React` (e.g. `React.useEffect` inside a returned component) which isn't in this prepass.
@@ -1864,7 +1900,7 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
         resolve_pending_mocks(scope);
         drain_pending_mocks(scope, entry.parent().unwrap_or(Path::new(".")), false);
         RESOLVING_MOCKS.with(|f| f.set(prev_resolving));
-        return;
+        return Ok(());
     }
     let bundled = esbuild_bundle(&p, &[]).unwrap_or_else(|| p.clone());
     set_mock_prepass(scope, true);
@@ -1889,6 +1925,7 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
     set_mock_prepass(scope, false);
     resolve_pending_mocks(scope);
     drain_pending_mocks(scope, entry.parent().unwrap_or(Path::new(".")), false);
+    Ok(())
 }
 
 /// Mark the entry's mock prepass for runtime.js. The prepass runs the factories outside the
@@ -3265,8 +3302,13 @@ fn extract_do_mocks(src: &str) -> Vec<(String, String)> {
 }
 
 /// `(spec, factory)` of every call to either needle with a string-literal first argument, in
-/// source order.
+/// source order: from the AST (mock_scope::mock_calls), or for source that does not parse by
+/// scanning the text (balanced parentheses).
 fn extract_mock_calls(src: &str, needles: [&str; 2]) -> Vec<(String, String)> {
+    let callees = needles.map(|n| n.trim_end_matches('('));
+    if let Some(calls) = crate::mock_scope::mock_calls(src, &callees) {
+        return calls;
+    }
     let mut out = Vec::new();
     let bytes = src.as_bytes();
     let mut i = 0;
@@ -6240,7 +6282,9 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
             // 1. entry-file vi.mock(): hoisted + registered before instantiation, via a
             //    transformed pre-pass (handles JSX/factory transforms), drained to the
             //    path-keyed mock registry. Its specifiers were externalized from the bundle.
-            run_entry_mocks(scope, &entry_abs);
+            if let Err(e) = run_entry_mocks(scope, &entry_abs) {
+                break 'work Err(e);
+            }
 
             // Reset the vi.hoisted index (keep the cache the prepass filled) so the entry's
             // `const x = vi.hoisted(...)` calls reuse the SAME objects the mock factories closed
@@ -6453,7 +6497,9 @@ fn run_test_file_reused(
             if let Some(e) = REUSE_SETUP_ERROR.with(|e| e.borrow().clone()) {
                 break 'work Err(e);
             }
-            run_entry_mocks(scope, entry_abs);
+            if let Err(e) = run_entry_mocks(scope, entry_abs) {
+                break 'work Err(e);
+            }
             {
                 let g = scope.get_current_context().global(scope);
                 if let Some(k) = v8::String::new(scope, "__hoistedIdx") {

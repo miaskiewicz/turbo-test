@@ -160,6 +160,67 @@ pub fn with_scope(code: &str, bindings: &[Binding]) -> String {
     )
 }
 
+/// The `(specifier, factory source)` of every call to one of `callees` (`"vi.mock"`, …) whose
+/// first argument is a string literal (or a template literal without substitutions), in source
+/// order, read from the AST: calls in comments or strings are not calls, and the factory is its
+/// whole argument whatever parentheses its strings hold (turbo-test#79 item 1). A call inside a
+/// matched factory is not visited. None when `src` parses as neither TSX nor TypeScript.
+pub fn mock_calls(src: &str, callees: &[&str]) -> Option<Vec<(String, String)>> {
+    for source_type in [SourceType::tsx(), SourceType::ts()] {
+        let alloc = Allocator::default();
+        let parsed = Parser::new(&alloc, src, source_type).parse();
+        if !parsed.errors.is_empty() {
+            continue;
+        }
+        let mut calls = MockCalls {
+            src,
+            callees,
+            out: Vec::new(),
+        };
+        oxc_ast_visit::Visit::visit_program(&mut calls, &parsed.program);
+        return Some(calls.out);
+    }
+    None
+}
+
+struct MockCalls<'s> {
+    src: &'s str,
+    callees: &'s [&'s str],
+    out: Vec<(String, String)>,
+}
+
+impl<'a> oxc_ast_visit::Visit<'a> for MockCalls<'_> {
+    fn visit_call_expression(&mut self, it: &oxc_ast::ast::CallExpression<'a>) {
+        use oxc_ast::ast::{Argument, Expression};
+        use oxc_span::GetSpan;
+        let callee = match &it.callee {
+            Expression::StaticMemberExpression(m) => match &m.object {
+                Expression::Identifier(o) => Some(format!("{}.{}", o.name, m.property.name)),
+                _ => None,
+            },
+            _ => None,
+        };
+        let spec = match it.arguments.first() {
+            Some(Argument::StringLiteral(s)) => Some(s.value.to_string()),
+            Some(Argument::TemplateLiteral(t)) if t.expressions.is_empty() => t
+                .quasis
+                .first()
+                .map(|q| q.value.cooked.unwrap_or(q.value.raw).to_string()),
+            _ => None,
+        };
+        match (callee, spec) {
+            (Some(callee), Some(spec)) if self.callees.contains(&callee.as_str()) => {
+                let factory = it.arguments.get(1).map_or("", |f| {
+                    let span = f.span();
+                    &self.src[span.start as usize..span.end as usize]
+                });
+                self.out.push((spec, factory.to_string()));
+            }
+            _ => oxc_ast_visit::walk::walk_call_expression(self, it),
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "mock_scope_tests.rs"]
 mod tests;
