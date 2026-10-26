@@ -173,3 +173,61 @@ fn readdir_sync_lists_names_dirents_and_url_arguments() {
     let r = turbo_test(&p.dir, &[], &[]);
     assert_passes(&r, 7);
 }
+
+/// Item 5 (reduced): a package `exports` subpath whose target is tsc-emitted CommonJS gives its
+/// named exports (cjs-module-lexer in Node / vitest). A comment in it mentioning "import " made
+/// the loader's module-kind sniff take the file for an ES module.
+#[test]
+#[ignore = "turbo-test#79: fails until the fix"]
+fn a_commonjs_exports_subpath_gives_named_exports() {
+    let pkg = "node_modules/@scope/pkg";
+    let index = "\"use strict\";\n\
+        var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {\n\
+        \x20   if (k2 === undefined) k2 = k;\n\
+        \x20   var desc = Object.getOwnPropertyDescriptor(m, k);\n\
+        \x20   if (!desc || (\"get\" in desc ? !m.__esModule : desc.writable || desc.configurable)) {\n\
+        \x20     desc = { enumerable: true, get: function() { return m[k]; } };\n\
+        \x20   }\n\
+        \x20   Object.defineProperty(o, k2, desc);\n\
+        }) : (function(o, m, k, k2) {\n\
+        \x20   if (k2 === undefined) k2 = k;\n\
+        \x20   o[k2] = m[k];\n\
+        }));\n\
+        var __exportStar = (this && this.__exportStar) || function(m, exports) {\n\
+        \x20   for (var p in m) if (p !== \"default\" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);\n\
+        };\n\
+        Object.defineProperty(exports, \"__esModule\", { value: true });\n\
+        exports.inlineFields = void 0;\n\
+        __exportStar(require(\"./blocks\"), exports);\n\
+        var heading_1 = require(\"./heading\");\n\
+        Object.defineProperty(exports, \"headingFields\", { enumerable: true, get: function () { return heading_1.headingFields; } });\n\
+        // Inline fields: import these where the editor renders marks.\n\
+        exports.inlineFields = ['b'];\n";
+    let p = dropin(
+        "dropin-cjs-subpath",
+        &[
+            (
+                &format!("{pkg}/package.json"),
+                "{ \"name\": \"@scope/pkg\", \"version\": \"1.0.0\",\n\
+                 \x20 \"exports\": { \"./content-fields\": { \"import\": \"./dist/cjs/content-fields/index.js\", \"require\": \"./dist/cjs/content-fields/index.js\" } } }\n",
+            ),
+            (&format!("{pkg}/dist/cjs/content-fields/index.js"), index),
+            (
+                &format!("{pkg}/dist/cjs/content-fields/blocks.js"),
+                "\"use strict\";\nObject.defineProperty(exports, \"__esModule\", { value: true });\nexports.blockFields = void 0;\nexports.blockFields = ['a'];\n",
+            ),
+            (
+                &format!("{pkg}/dist/cjs/content-fields/heading.js"),
+                "\"use strict\";\nObject.defineProperty(exports, \"__esModule\", { value: true });\nexports.headingFields = void 0;\nexports.headingFields = ['h'];\n",
+            ),
+            (
+                "a.test.ts",
+                "import { expect, it } from 'vitest';\n\
+                 import { blockFields, headingFields, inlineFields } from '@scope/pkg/content-fields';\n\
+                 it('named exports', () => { expect([blockFields, headingFields, inlineFields]).toEqual([['a'], ['h'], ['b']]); });\n",
+            ),
+        ],
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_passes(&r, 1);
+}
