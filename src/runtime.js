@@ -411,13 +411,14 @@ if (typeof globalThis.URL === 'undefined') {
       let searchStr;
       if (m) {
         this._hierarchical = true;
-        this.host = m[2] || '';
-        this.hostname = (m[2] || '').split(':')[0];
+        // a file URL's `localhost` host is the empty host (WHATWG)
+        this.host = this.protocol.toLowerCase() === 'file:' && /^localhost$/i.test(m[2]) ? '' : m[2] || '';
+        this.hostname = this.host.split(':')[0];
         this.port = (m[2] || '').split(':')[1] || '';
         this.pathname = m[3] || '/';
         searchStr = m[4] || '';
         this.hash = m[5] || '';
-        this.origin = this.protocol + '//' + this.host;
+        this.origin = this.protocol.toLowerCase() === 'file:' ? 'null' : this.protocol + '//' + this.host;
       } else {
         // opaque URL (no authority): everything after the scheme is the path (sans query/hash).
         this._hierarchical = false;
@@ -1171,7 +1172,26 @@ if (typeof globalThis.requestAnimationFrame === 'undefined') {
 }
 
 // ---- node builtin shims (so turbo-dom's loader reaches its native .node) ----
-globalThis.__fileURLToPath = (u) => String(u).replace(/^file:\/\//, '');
+// node:url's fileURLToPath / pathToFileURL (Node 26, posix; turbo-test#84)
+const __urlError = (code, message) => { const e = new TypeError(message); e.code = code; return e; };
+globalThis.__fileURLToPath = (u) => {
+  const url = typeof u === 'string' ? new globalThis.URL(u) : u;
+  if (url.protocol !== 'file:') throw __urlError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
+  if (url.hostname !== '') throw __urlError('ERR_INVALID_FILE_URL_HOST', `File URL host must be "localhost" or empty on ${globalThis.__ttPlatform || 'darwin'}`);
+  if (/%2f/i.test(url.pathname)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded / characters');
+  return decodeURIComponent(url.pathname);
+};
+globalThis.__pathToFileURL = (p) => {
+  let path = String(p);
+  if (!path.startsWith('/')) path = globalThis.process.cwd() + '/' + path;
+  const trailing = path.endsWith('/') ? '/' : '';
+  const out = [];
+  for (const seg of path.split('/')) { if (seg === '..') out.pop(); else if (seg && seg !== '.') out.push(seg); }
+  const resolved = '/' + out.join('/') + (out.length ? trailing : '');
+  const url = new globalThis.URL('file:///');
+  url.pathname = resolved.replace(/%/g, '%25').replace(/\\/g, '%5C').replace(/\n/g, '%0A').replace(/\r/g, '%0D').replace(/\t/g, '%09');
+  return url;
+};
 globalThis.__dirnameOf = (p) => { const s = String(p).replace(/\/+$/, ''); const i = s.lastIndexOf('/'); return i <= 0 ? '/' : s.slice(0, i); };
 const __os = {
   platform: () => globalThis.__ttPlatform || 'darwin', arch: () => globalThis.__ttArch || 'arm64', type: () => globalThis.__ttOsType || 'Darwin', release: () => '23.0.0',
@@ -1224,7 +1244,7 @@ const __fs = {
   },
 };
 const __module = {
-  createRequire: (url) => globalThis.__mkRequire(globalThis.__dirnameOf(globalThis.__fileURLToPath(url))),
+  createRequire: (url) => globalThis.__mkRequire(globalThis.__dirnameOf(String(url).startsWith('file:') ? globalThis.__fileURLToPath(url) : String(url))),
   Module: function () {},
   builtinModules: [],
 };
@@ -1763,8 +1783,7 @@ globalThis.__nodeBuiltins = {
   'node:os': __os,
   child_process: { execSync: () => '', exec: () => {}, spawnSync: () => ({ status: 0 }) },
   'node:child_process': { execSync: () => '' },
-  url: { fileURLToPath: globalThis.__fileURLToPath, pathToFileURL: (p) => ({ href: 'file://' + p, toString: () => 'file://' + p }), URL: globalThis.URL },
-  'node:url': { fileURLToPath: globalThis.__fileURLToPath, pathToFileURL: (p) => 'file://' + p },
+  url: { fileURLToPath: globalThis.__fileURLToPath, pathToFileURL: globalThis.__pathToFileURL, URL: globalThis.URL },
   util: __util,
   'node:util': __util,
   crypto: __crypto,

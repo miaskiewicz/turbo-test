@@ -657,7 +657,6 @@ it('percent-encodes', () => {
 /// turbo-test#84: `node:url` `fileURLToPath` decodes and validates like Node, `pathToFileURL`
 /// returns an encoded `URL` (values: Node 26 on darwin; the same through `url`).
 #[test]
-#[ignore = "turbo-test#84: fails until the fix"]
 fn file_url_conversions_follow_node() {
     let p = Project::new("rc-file-url");
     p.file("package.json", r#"{"type":"module"}"#);
@@ -674,6 +673,8 @@ it('fileURLToPath', () => {
   expect(err('file:///a%2Fb')).toEqual(['TypeError', 'ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded / characters']);
   expect(err('file://host/x')).toEqual(['TypeError', 'ERR_INVALID_FILE_URL_HOST', 'File URL host must be "localhost" or empty on darwin']);
   expect(url.fileURLToPath('file:///a%20b')).toBe('/a b');
+  const local = new URL('file://LocalHost/x');
+  expect([local.href, local.host, local.origin]).toEqual(['file:///x', '', 'null']);
 });
 it('pathToFileURL', () => {
   const u = pathToFileURL('/a b#c?d%e');
