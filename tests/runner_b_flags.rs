@@ -241,3 +241,30 @@ fn cjs_bytecode_cache_is_written_reused_and_survives_corruption() {
     let junk = turbo_test(&p.dir, &[], &[]);
     assert_eq!(junk.code, Some(0), "{}", junk.all());
 }
+
+#[test]
+#[ignore = "turbo-test#75: fails until the fix"]
+fn only_is_forbidden_on_ci_unless_allow_only() {
+    // turbo-test#75: vitest 4.1.12 defaults allowOnly to !isCI (std-env): on CI a stray `.only`
+    // fails the run unless --allowOnly is passed. Checked against vitest: CI=1 and
+    // GITHUB_ACTIONS=1 exit 1, `CI=1 --allowOnly` and no CI variable exit 0.
+    let p = plain("rb-flags-only-ci");
+    p.file(
+        "o.test.js",
+        "test.only('one', () => { expect(1).toBe(1); });\ntest('two', () => {});\n",
+    );
+    for env in [[("CI", "1")], [("GITHUB_ACTIONS", "1")]] {
+        let r = turbo_test(&p.dir, &["o.test.js"], &env);
+        assert_eq!(r.code, Some(1), "{env:?}: {}", r.all());
+        let r = turbo_test(&p.dir, &["o.test.js", "--allowOnly"], &env);
+        assert_eq!(r.code, Some(0), "{env:?} --allowOnly: {}", r.all());
+        let r = turbo_test(
+            &p.dir,
+            &["o.test.js", "--allowOnly", "--no-allowOnly"],
+            &env,
+        );
+        assert_eq!(r.code, Some(1), "{env:?} --no-allowOnly last: {}", r.all());
+    }
+    let r = turbo_test(&p.dir, &["o.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+}
