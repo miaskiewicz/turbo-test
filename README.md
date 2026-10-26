@@ -353,11 +353,54 @@ npm test                     # node --test test/*.mjs (CLI compat + tsc type che
 cargo tarpaulin              # line-coverage gate (tarpaulin.toml), fails below 99.98%
 cargo fmt --check            # CI job `lint`, with:
 cargo clippy --all-targets -- -D warnings
+npm run complexity:rust      # CI job `complexity / rust (cc <= 15)` (needs cc-check, below)
+npm run complexity:js        # CI job `complexity / js (cc <= 15)`
 ```
 
 The Rust crate is gated at **>= 99.98% line coverage** (9348/9349 lines; cargo-tarpaulin,
 Llvm engine; CI job `coverage`). Subprocess runs of the instrumented binaries are attributed through
 `tarpaulin.toml`'s `objects`; the `#[path]` unit-test modules are excluded from the figure.
+
+### Complexity gates
+
+Every function's cyclomatic complexity must be <= 15: one limit for the whole repo, no
+allow-list, no baseline. Rust uses turbo-html2pdf's `cc-check` over every tracked `.rs` file
+(a `match` counts once; `if`/loops/`?`/`&&`/`||` add 1; closures are scored on their own),
+installed from its home rather than copied here:
+
+```sh
+cargo install --locked --git https://github.com/miaskiewicz/turbo-html2pdf \
+  --rev 923c89f791f3a89cb089a59626a25cef0a9cbd5f cc-check   # the rev CI pins
+```
+
+JS uses oxlint's ESLint-compatible `complexity` rule (`oxlint@1.87.0` via npx, no
+devDependency; `.oxlintrc.complexity.json`) over `cli.js`, `index.js` and `src/runtime.js`.
+
+Both CI jobs are **expected red** until the post-coverage refactor and run with
+`continue-on-error` meanwhile (red job, green workflow; not required checks yet). The limit was
+chosen from the distribution measured when the gate landed:
+
+| scope | functions | > 5 | > 10 | > 15 | > 20 | > 25 | > 30 | > 40 | max |
+|---|---|---|---|---|---|---|---|---|---|
+| Rust, all tracked `.rs` | 2673 | 161 | 44 | 24 | 14 | 9 | 5 | 2 | 44 |
+| JS (cli.js, index.js, src/runtime.js) | 1167 | 98 | 35 | 20 | 11 | 8 | 5 | 4 | 94 |
+
+At 15 the backlog is 44 functions; 10 would nearly double it (79) and reach into ordinary
+dispatch code, while 20 would leave a 16-20 band whose branch sets are already too large to
+test exhaustively. The backlog (`function:line=cc`; refactored only once unit-test coverage is
+complete, so the refactor cannot change behaviour silently):
+
+Rust (24):
+- `src/bin/m1_cjs.rs`: load_cjs:87=17
+- `src/bundler.rs`: bundle_capped:141=16
+- `src/cli.rs`: parse_args:168=19
+- `src/coverage.rs`: simple_match:236=17
+- `src/launcher.rs`: strip_comments:511=23, find_key_blocks:704=17, plan:1256=40
+- `src/mock_scope.rs`: bindings:30=16
+- `src/runner.rs`: esbuild_bundle_full:1019=25, run_entry_mocks:1649=25, esbuild_transform_cjs:2208=19, hoist_mock_setup_tracked:2366=29, shared_mock_lets:2609=18, used_in_shorthand:2678=17, strip_test_blocks:2747=29, replace_word:2876=28, read_transformed:3090=36, load_cjs_inner:3649=38, native_require:4159=44, install_natives:5296=24, coverage_accumulate:5700=18, run_test_file:5854=43, (closure):6181=26, drive_tests_bounded:6410=25
+
+JS (20; `function:<line>` is an anonymous function):
+- `src/runtime.js`: constructor:395=18, parse:1346=17, __utf8Decode:1369=20, _decode:1418=19, __deepEq:1455=70, function:1530=19, __matchesInner:1864=21, deepEqual:1895=17, __inlineSplice:2075=17, __snapFinish:2124=21, toThrow:2389=30, __automock:2615=19, __ttMock:2722=26, __inspectList:3030=23, __inspect:3078=64, __pfPrint:3257=68, __joinDiffs:3373=35, __vdiff:3457=20, __formatOne:3560=28, runSuite:3844=94
 
 ## License
 

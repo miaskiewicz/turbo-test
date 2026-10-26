@@ -33,7 +33,9 @@
   "scripts": {
     "build": "bash scripts/npm-build.sh",
     "test": "node --test 'test/*.mjs'",
-    "prepublishOnly": "bash scripts/npm-build.sh"
+    "prepublishOnly": "bash scripts/npm-build.sh",
+    "complexity:rust": "git ls-files -z '*.rs' | xargs -0 cc-check --max 15",
+    "complexity:js": "npx --yes oxlint@1.87.0 -c .oxlintrc.complexity.json cli.js index.js src/runtime.js"
   },
   "keywords": [
     "test",
