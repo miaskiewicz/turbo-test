@@ -133,6 +133,15 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `-u`-updated ones are written back into the test file; obsolete snapshots are reported and
   removed by `-u` (an emptied snapshot file deleted); on CI a missing snapshot fails instead of
   being written; the JSON report's `snapshot` summary has vitest's counts.
+- CI detection is std-env's `isCI`, as vitest 4.1.12 decides it (std-env 4.3.0; turbo-test#74):
+  `CI` set to any non-empty value counts (`CI=false` and `CI=0` included), and otherwise the
+  first provider row of std-env's table whose variable is non-empty decides — 58 rows, among them
+  Vercel `NOW_BUILDER`, Netlify, Bamboo, Cloudflare Pages and Google Cloud Run, while
+  `NETLIFY_LOCAL`, `VERCEL`, `VERCEL_ENV` and `CODESANDBOX_*` do not count. turbo-test checked
+  13 fixed variables (so a missing snapshot was written on most providers' CI, and `TF_BUILD` /
+  `BITBUCKET_BUILD_NUMBER` or an empty value counted when vitest's does not). The table is data
+  (`src/ci_providers.json`, read by `src/ci.rs`), checked against an installed std-env by
+  `scripts/check-ci-detection.mjs`.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain

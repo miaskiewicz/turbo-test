@@ -5280,31 +5280,6 @@ fn native_call_site(
     }
 }
 
-/// Whether the run is on CI, as std-env's `isCI` (vitest's snapshot `update: 'none'` default there):
-/// `CI` set to anything but `false` / `0`, or a known CI provider's variable.
-fn is_ci(var: impl Fn(&str) -> Option<String>) -> bool {
-    if let Some(v) = var("CI") {
-        return !matches!(v.as_str(), "" | "false" | "0");
-    }
-    [
-        "GITHUB_ACTIONS",
-        "GITLAB_CI",
-        "CIRCLECI",
-        "TRAVIS",
-        "BUILDKITE",
-        "JENKINS_URL",
-        "TF_BUILD",
-        "TEAMCITY_VERSION",
-        "BITBUCKET_BUILD_NUMBER",
-        "CODEBUILD_BUILD_ARN",
-        "APPVEYOR",
-        "DRONE",
-        "SEMAPHORE",
-    ]
-    .iter()
-    .any(|k| var(k).is_some())
-}
-
 /// Re-bind native callbacks into a fresh (snapshot-derived) context.
 /// os.tmpdir() as Node's: TMPDIR, else TMP, else TEMP, else /tmp, without a trailing slash.
 fn node_tmpdir(var: impl Fn(&str) -> Option<String>) -> String {
@@ -5370,7 +5345,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     // comparison (vitest's --update semantics). Plumbed via TURBO_UPDATE_SNAPSHOTS env (set by
     // the CLI) → globalThis.__TT_UPDATE_SNAPSHOTS, read by toMatchSnapshot in the runtime.
     // On CI (vitest: std-env's isCI) a missing snapshot is not written: it fails (turbo-test#73).
-    if is_ci(|k| std::env::var(k).ok()) {
+    if crate::ci::is_ci_env() {
         run_js(scope, "globalThis.__TT_CI=true;");
     }
     if std::env::var("TURBO_UPDATE_SNAPSHOTS").is_ok() {

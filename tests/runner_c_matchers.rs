@@ -257,7 +257,6 @@ fn inline_snapshots_are_written_back_as_vitest_writes_them() {
 }
 
 #[test]
-#[ignore = "turbo-test#74: fails until the fix"]
 fn snapshot_ci_mode_follows_std_env_is_ci() {
     // turbo-test#74: vitest 4.1.12 picks snapshot update mode `none` (a missing snapshot fails,
     // nothing is written) when std-env's isCI holds. Checked against vitest: CI=false and

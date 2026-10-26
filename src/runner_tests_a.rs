@@ -1386,8 +1386,8 @@ fn os_tmpdir_follows_node() {
 /// variable is non-empty, unless that provider marks itself as not CI. Every expectation here is
 /// std-env's own answer (`scripts/check-ci-detection.mjs` checks the table against it).
 #[test]
-#[ignore = "turbo-test#74: fails until the fix"]
 fn ci_detection_is_std_env_is_ci() {
+    use crate::ci::is_ci;
     let env = |pairs: Vec<(&'static str, &'static str)>| {
         move |k: &str| {
             pairs

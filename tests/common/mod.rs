@@ -134,8 +134,8 @@ impl Run {
 }
 
 /// Run an executable with `args` in `cwd`, an isolated TMPDIR/TURBO_CACHE_DIR under `cwd`,
-/// every inherited `TURBO_*` variable removed, `TURBO_JOBS=2` unless `env` overrides it, and
-/// `env` applied last.
+/// every inherited `TURBO_*` variable and every CI variable (`turbo_test::ci::env_vars`)
+/// removed, `TURBO_JOBS=2` unless `env` overrides it, and `env` applied last.
 pub fn run_exe(exe: &str, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Run {
     let tmp = cwd.join(".tt-tmp");
     std::fs::create_dir_all(&tmp).unwrap();
@@ -146,24 +146,10 @@ pub fn run_exe(exe: &str, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Ru
             cmd.env_remove(k);
         }
     }
-    // CI variables switch snapshots to vitest's CI mode (a missing snapshot fails); the tests set
-    // `CI` themselves where they check that.
-    for k in [
-        "CI",
-        "GITHUB_ACTIONS",
-        "GITLAB_CI",
-        "CIRCLECI",
-        "TRAVIS",
-        "BUILDKITE",
-        "JENKINS_URL",
-        "TF_BUILD",
-        "TEAMCITY_VERSION",
-        "BITBUCKET_BUILD_NUMBER",
-        "CODEBUILD_BUILD_ARN",
-        "APPVEYOR",
-        "DRONE",
-        "SEMAPHORE",
-    ] {
+    // CI variables switch snapshots to vitest's CI mode (a missing snapshot fails): every
+    // variable std-env's isCI reads is removed; the tests set them themselves where they check
+    // that.
+    for k in turbo_test::ci::env_vars() {
         cmd.env_remove(k);
     }
     cmd.env("TMPDIR", &tmp)

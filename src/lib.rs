@@ -4,6 +4,7 @@
 //! ModuleRunner. Public surface is deliberately small: plumbing, not framework.
 
 pub mod bundler;
+pub mod ci;
 pub mod cli;
 pub mod coverage;
 pub mod coverage_branch;
