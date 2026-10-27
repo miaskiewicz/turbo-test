@@ -10,13 +10,9 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 /// Members vitest has and turbo-test does not, each tracked by its own issue (vitest.compat.md):
-/// chai's BDD chain (`expect(x).to.be.equal(...)`), chai's `assert` and chai's internal `__flags`,
-/// `expect.poll`.
-const KNOWN_MISSING: [(&str, &str); 3] = [
-    ("expect", "__flags:object"),
-    ("expect", "assert:function"),
-    ("expect", "poll:function"),
-];
+/// chai's BDD chain (`expect(x).to.be.equal(...)`), chai's `assert` and chai's internal `__flags`.
+const KNOWN_MISSING: [(&str, &str); 2] =
+    [("expect", "__flags:object"), ("expect", "assert:function")];
 
 #[test]
 fn expect_members_are_vitests() {
@@ -162,7 +158,6 @@ fn rows_are_vitests(name: &str, file: &str, src: &str, want: &str) {
 }
 
 #[test]
-#[ignore = "turbo-test#161: fails until the fix"]
 fn expect_poll_is_vitests() {
     // turbo-test#161: expect.poll was undefined. vitest 4.1.12's rows: the matcher re-runs `fn`
     // every `interval` (50) ms until it passes or `timeout` (1000) ms ran out, then throws the
@@ -181,10 +176,9 @@ fn expect_poll_is_vitests() {
 }
 
 #[test]
-#[ignore = "turbo-test#161: fails until the fix"]
 fn expect_poll_not_awaited_fails_the_test() {
     // turbo-test#161: a poll matcher that is not awaited never runs and fails its test once the
-    // test is done, with vitest 4.1.12's error for each one (the last one first).
+    // test is done, with vitest 4.1.12's error for each one (the last one first) at its call site.
     let p = Project::new("rc-expect-poll-unawaited");
     p.file("package.json", r#"{ "type": "module" }"#);
     p.file(
@@ -200,7 +194,10 @@ fn expect_poll_not_awaited_fails_the_test() {
     let out = r.all();
     let not = "Error: expect.poll(assertion).not.toBe() was not awaited. This assertion is asynchronous and must be awaited; otherwise, it is not executed to avoid unhandled rejections:\n\nawait expect.poll(assertion).not.toBe()\n";
     let plain = "Error: expect.poll(assertion).toBe() was not awaited. This assertion is asynchronous and must be awaited; otherwise, it is not executed to avoid unhandled rejections:\n\nawait expect.poll(assertion).toBe()\n";
-    let (a, b) = (out.find(not), out.find(plain));
+    // each at its matcher's call site, as vitest's
+    let not = format!("{not}\n ❯ unawaited.test.js:5:28\n");
+    let plain = format!("{plain}\n ❯ unawaited.test.js:4:40\n");
+    let (a, b) = (out.find(&not), out.find(&plain));
     assert!(a.is_some() && b.is_some() && a < b, "{out}");
     assert!(out.contains("Tests  1 failed | 1 passed (2)"), "{out}");
 }

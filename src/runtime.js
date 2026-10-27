@@ -3459,6 +3459,8 @@ const __snap = {
   assertCount: 0,
   expectedAssertions: null, // number | null
   hasAssertions: false,
+  // the test running now (its hooks included), null between tests: expect.poll's
+  currentTest: null,
 };
 function __snapNextKey(name) {
   const n = (__snap.counters[name] || 0) + 1;
@@ -4258,6 +4260,71 @@ globalThis.expect.hasAssertions = function hasAssertions() {
   const error = new Error('expected any number of assertion, but got none');
   if (Error.captureStackTrace) Error.captureStackTrace(error, hasAssertions);
   __snap.hasAssertions = error;
+};
+// vitest's expect.poll(fn, { interval = 50, timeout = 1000, message }) (turbo-test#161): each
+// matcher re-runs fn until it passes or the timeout ran out, then throws the last error (its
+// cause `Matcher did not succeed in time.`). Its interval and timeout are internal timers, which
+// the test's fake timers do not see: on the virtual clock, or, while the timers are faked, each
+// retry comes at once and advances the fake clock by the interval, as vitest's real-time wait
+// followed by vi.advanceTimersByTime(interval). A matcher that is not awaited never runs and
+// fails the test when it is done.
+const __pollUnsupported = ['matchSnapshot', 'toMatchSnapshot', 'toMatchInlineSnapshot', 'toThrowErrorMatchingSnapshot', 'toThrowErrorMatchingInlineSnapshot', 'throws', 'Throw', 'throw', 'toThrow', 'toThrowError'];
+globalThis.expect.poll = function poll(fn, options = {}) {
+  const { interval = 50, timeout = 1000, message } = options;
+  __snap.assertCount++;
+  const test = __snap.currentTest;
+  if (!test) throw new Error('expect.poll() must be called inside a test');
+  fn = fn.bind(makeExpect(null, false, message));
+  const mk = (neg) => new Proxy(makeExpect(null, neg, message), { get(target, key) {
+    if (key === 'not') return mk(!neg);
+    if (key === 'resolves' || key === 'rejects') throw new SyntaxError(`expect.poll() is not supported in combination with .${key}`);
+    const matcher = Reflect.get(target, key);
+    if (typeof matcher !== 'function') return matcher;
+    if (typeof key === 'string' && __pollUnsupported.includes(key)) throw new SyntaxError(`expect.poll() is not supported in combination with .${key}(). Use vi.waitFor() if your assertion condition is unstable.`);
+    return function __VITEST_POLL_CHAIN__(...args) {
+      const STACK_TRACE_ERROR = new Error('STACK_TRACE_ERROR');
+      const withStack = (err) => {
+        if (err && typeof err === 'object' && STACK_TRACE_ERROR.stack !== undefined) err.stack = STACK_TRACE_ERROR.stack.replace(STACK_TRACE_ERROR.message, err.message);
+        return err;
+      };
+      const run = async () => {
+        let timedOut = false;
+        const timer = __scheduleInternal(() => { timedOut = true; }, timeout);
+        try {
+          while (true) {
+            const last = timedOut;
+            try {
+              const obj = await fn();
+              return await makeExpect(obj, neg, message)[key](...args);
+            } catch (err) {
+              if (last) {
+                if (err && typeof err === 'object' && err.cause == null) err.cause = new Error('Matcher did not succeed in time.');
+                throw withStack(err);
+              }
+              await new Promise((resolve) => __scheduleInternal(resolve, __loop.fake ? 0 : interval));
+              if (__loop.fake) __loop.advance(interval);
+            }
+          }
+        } finally {
+          __clearInternal(timer);
+        }
+      };
+      let awaited = false;
+      let result;
+      test.onFinished.push(() => {
+        if (awaited) return;
+        const assertion = `expect.poll(assertion).${neg ? 'not.' : ''}${String(key)}()`;
+        throw withStack(new Error(`${assertion} was not awaited. This assertion is asynchronous and must be awaited; otherwise, it is not executed to avoid unhandled rejections:\n\nawait ${assertion}\n`));
+      });
+      return {
+        then(onFulfilled, onRejected) { awaited = true; return (result ||= run()).then(onFulfilled, onRejected); },
+        catch(onRejected) { awaited = true; return (result ||= run()).catch(onRejected); },
+        finally(onFinally) { awaited = true; return (result ||= run()).finally(onFinally); },
+        [Symbol.toStringTag]: 'Promise',
+      };
+    };
+  } });
+  return mk(false);
 };
 // expect.addSnapshotSerializer: a pretty-format plugin every later snapshot uses (turbo-test#162)
 globalThis.expect.addSnapshotSerializer = (plugin) => { __snapSerializers.unshift(plugin); };
@@ -6830,6 +6897,7 @@ async function runSuite(suite, ancestors, summary, mode = '') {
       // Reset per-test snapshot + assertion-count state (snapshot counter is keyed by test name,
       // so distinct multi-snapshot tests don't collide; assertion enforcement resets each attempt).
       __snap.testName = label;
+      __snap.currentTest = t;
       for (const k of Object.keys(__snap.counters)) if (k === label || k.startsWith(`${label} > `)) __snap.counters[k] = 0;
       __snap.assertCount = 0;
       __snap.expectedAssertions = null;
@@ -6900,6 +6968,7 @@ async function runSuite(suite, ancestors, summary, mode = '') {
       // then its onTestFinished handlers, and onTestFailed ones when it failed (vitest's order)
       await __callTestHooks(t, t.onFinished, failWith);
       if (task.result.state === 'fail') await __callTestHooks(t, t.onFailed, failWith);
+      __snap.currentTest = null;
       // it.fails: invert the outcome once its hooks ran (vitest flips the final state) — an
       // error is the success condition, a clean pass fails.
       if (t.fails && !task.result.pending) {
