@@ -301,3 +301,79 @@ fn snapshot_ci_mode_follows_std_env_is_ci() {
         assert_eq!(snap.exists(), !ci, "{env:?}: {}", r.all());
     }
 }
+
+#[test]
+#[ignore = "turbo-test#112: fails until the fix"]
+fn urls_inspect_serialize_and_diff_like_node_and_vitest() {
+    // turbo-test#112: the URL / URLSearchParams globals printed their internals
+    // (`URL{ protocol: 'http:', …(8) }`, `URLSearchParams{ _: [ … ] }`) in util.inspect, JSON and
+    // vitest's diffs. Expected values: vitest 4.1.12 (diffs) and Node 26 (inspect, JSON).
+    let p = Project::new("rc-urls");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "u.test.js",
+        r#"import { test, expect } from 'vitest'
+import * as fs from 'node:fs'
+import util from 'node:util'
+test('shown', () => {
+  const u = new URL('http://a.com:8080/p/q?x=1&y=2#h')
+  fs.writeFileSync('out.txt', [
+    util.inspect(u), util.inspect({ a: { b: u } }), util.inspect({ a: { b: { c: u } } }),
+    util.inspect(new URLSearchParams('aaaaaaaaaaaaaaaaaaaaa=bbbbbbbbbbbbbbbbbbbbbbbbbbbb&cccccccccccccccccccccc=dddddddddddddddddddddddddddd&e=f')),
+    util.inspect(new URLSearchParams("q=it's")), util.inspect([new URLSearchParams('a=1')], { depth: 0 }),
+    JSON.stringify({ u: new URL('http://a/?x=1') }), Object.keys(new URLSearchParams('a=1')).length,
+    Object.prototype.toString.call(u), Object.prototype.toString.call(u.searchParams),
+  ].join('\n'))
+})
+test('url diff', () => { expect(new URL('http://a/')).toStrictEqual(new URL('http://b/')) })
+test('params diff', () => { expect({ s: new URLSearchParams('a=1'), n: 1 }).toEqual({ s: new URLSearchParams('a=2'), n: 2 }) })
+"#,
+    );
+    let r = turbo_test(&p.dir, &["u.test.js"], &[("NO_COLOR", "1")]);
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    let url = "URL {
+  href: 'http://a.com:8080/p/q?x=1&y=2#h',
+  origin: 'http://a.com:8080',
+  protocol: 'http:',
+  username: '',
+  password: '',
+  host: 'a.com:8080',
+  hostname: 'a.com',
+  port: '8080',
+  pathname: '/p/q',
+  search: '?x=1&y=2',
+  searchParams: URLSearchParams { 'x' => '1', 'y' => '2' },
+  hash: '#h'
+}";
+    let nested = format!(
+        "{{\n  a: {{\n    b: {}\n  }}\n}}",
+        url.replace('\n', "\n    ")
+    );
+    let want = [
+        url.to_string(),
+        nested,
+        "{ a: { b: { c: URL {} } } }".into(),
+        "URLSearchParams {
+  'aaaaaaaaaaaaaaaaaaaaa' => 'bbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+  'cccccccccccccccccccccc' => 'dddddddddddddddddddddddddddd',
+  'e' => 'f' }"
+            .into(),
+        r#"URLSearchParams { 'q' => "it's" }"#.into(),
+        "[ [Object] ]".into(),
+        r#"{"u":"http://a/?x=1"}"#.into(),
+        "0".into(),
+        "[object URL]".into(),
+        "[object URLSearchParams]".into(),
+    ]
+    .join("\n");
+    assert_eq!(std::fs::read_to_string(p.path("out.txt")).unwrap(), want);
+    let out = r.all();
+    assert!(
+        out.contains("- Expected\n+ Received\n\n- \"http://b/\"\n+ \"http://a/\"\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  {\n-   \"n\": 2,\n+   \"n\": 1,\n    \"s\": URLSearchParams {},\n  }\n"),
+        "{out}"
+    );
+}
