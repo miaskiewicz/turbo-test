@@ -5302,6 +5302,46 @@ fn loader_debug() -> bool {
 
 // ---- ESM graph ------------------------------------------------------------
 
+/// An app module importing the default of a mock whose `vi.mock` factory returned none: its
+/// source with every read of that binding guarded (mock_read.rs), so each throws vitest's error
+/// as on vitest's own module runner (turbo-test#151). `None` for every other module. A package
+/// is left alone: vitest loads it through Node, which never sees a mock (turbo-test#135).
+fn guard_mock_default_reads(scope: &mut v8::PinScope, abs: &Path, src: &str) -> Option<String> {
+    if abs.components().any(|c| c.as_os_str() == "node_modules") || !src.contains("import") {
+        return None;
+    }
+    let mocks: Vec<(PathBuf, v8::Global<v8::Value>)> = REGISTRY.with(|r| {
+        let reg = r.borrow();
+        reg.mocks
+            .keys()
+            .filter_map(|p| Some((p.clone(), reg.cjs_exports.get(p)?.clone())))
+            .collect()
+    });
+    if mocks.is_empty() {
+        return None;
+    }
+    let global = scope.get_current_context().global(scope);
+    let k = v8::String::new(scope, "__ttMockGuarded")?;
+    let f = v8::Local::<v8::Function>::try_from(global.get(scope, k.into())?).ok()?;
+    let undef: v8::Local<v8::Value> = v8::undefined(scope).into();
+    let guarded: std::collections::HashSet<PathBuf> = mocks
+        .into_iter()
+        .filter(|(_, g)| {
+            let exports = v8::Local::new(scope, g);
+            f.call(scope, undef, &[exports])
+                .is_some_and(|v| v.boolean_value(scope))
+        })
+        .map(|(p, _)| p)
+        .collect();
+    if guarded.is_empty() {
+        return None;
+    }
+    let dir = abs.parent()?;
+    crate::mock_read::guard_default_reads(src, &|spec| {
+        mock_key(spec, dir).is_some_and(|p| guarded.contains(&p))
+    })
+}
+
 fn load_graph<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     abs: &Path,
@@ -5326,6 +5366,7 @@ fn load_graph<'s>(
     } else {
         crate::esm_spy::spyable(abs, &raw).unwrap_or(raw)
     };
+    let raw = guard_mock_default_reads(scope, abs, &raw).unwrap_or(raw);
     // A generated bundle in the cache dir has no node_modules beside it; resolve its externalized
     // bare imports relative to the recorded source dir (set by esbuild_bundle_full).
     let dir = REGISTRY

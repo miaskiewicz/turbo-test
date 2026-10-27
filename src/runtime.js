@@ -4134,7 +4134,7 @@ function __ttMockDefault(m) {
   if (!s || !s.vitest || __ttLenientMockKeys.has(s.key)) return m;
   const d = () => m.default;
   // a bound function: callable, constructible, no own non-configurable `prototype`
-  return new Proxy(function () {}.bind(null), {
+  const stand = new Proxy(function () {}.bind(null), {
     get: (t, k) => Reflect.get(d(), k),
     has: (t, k) => k in d(),
     ownKeys: () => Reflect.ownKeys(d()),
@@ -4149,8 +4149,25 @@ function __ttMockDefault(m) {
     defineProperty: (t, k, desc) => Reflect.defineProperty(d(), k, desc),
     deleteProperty: (t, k) => Reflect.deleteProperty(d(), k),
   });
+  __ttMockStandIns.set(stand, m);
+  return stand;
 }
 globalThis.__ttMockDefault = __ttMockDefault;
+// The stand-ins __ttMockDefault made, to their mock.
+const __ttMockStandIns = new WeakMap();
+// Whether the mock `m` (a registered mock's exports) gets the stand-in default: a vi.mock
+// factory's, without its own `default`. The graph loader then guards its importers' reads.
+globalThis.__ttMockGuarded = (m) => {
+  const s = __ttStrictMocks.get(m);
+  return !!s && s.vitest && !__ttLenientMockKeys.has(s.key) && !Object.prototype.hasOwnProperty.call(m, 'default');
+};
+// Every read of a guarded default import (mock_read.rs, turbo-test#151): a stand-in's is a read
+// of its mock's `default` (vitest's error, or for a jest.mock the mock itself); any other value
+// is itself.
+globalThis.__ttMockRead = (v) => {
+  const m = __ttMockStandIns.get(v);
+  return m === undefined ? v : m.default;
+};
 // The ES-module view of a required module: what `import X from` / `import * as ns from` /
 // `import()` / `vi.importActual` read once lowered to `__toESM(require(...))` (turbo-test#122,
 // #133), vitest's `interopModule`. Mocks are themselves. turbo-test's own ES modules (marked by

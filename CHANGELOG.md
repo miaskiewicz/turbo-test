@@ -52,6 +52,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   (turbo-test#134): a CommonJS consumer requiring a dual package got its ES build's exports
   object (`Element type is invalid … got: object`). A require() of an import-only package still
   resolves it as an import.
+- ESM graph loader: every read of the default import of a `vi.mock` factory without `default`
+  throws vitest's `[vitest] No "default" export is defined on the "x" mock…` — `typeof X`,
+  `if (X)`, `X === y` too (turbo-test#151), where #137's stand-in threw only once used. An app
+  module importing such a default is compiled with each read of the binding wrapped in a check
+  (`src/mock_read.rs`); every other module's source is unchanged. Four interop-table rows.
 - Mocks and packages (turbo-test#135, #136, #137; rows of the #122 interop table): a `vi.mock`
   no longer reaches a package's own `require()` — vitest loads an external through Node, so
   `require('x')` inside `node_modules` gets the real `x` (a tsc package's `__importDefault`

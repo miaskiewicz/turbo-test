@@ -23,6 +23,10 @@ describe('vi.mock', () => {
   row(F, 'automock default', () => MexpObj);
   row(F, 'automock named', () => MexpObjComp);
   row(F, 'factory without default', () => DefNoFlag);
+  row(F, 'factory without default typeof', () => typeof DefNoFlag);
+  row(F, 'factory without default truthiness', () => (DefNoFlag ? 'truthy' : 'falsy'));
+  row(F, 'factory without default ===', () => DefNoFlag === undefined);
+  row(F, 'factory without default shorthand', () => ({ DefNoFlag }));
   row(F, 'importActual spread default', () => TscComp);
 });
 describe('vi.importActual', () => {

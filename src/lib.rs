@@ -20,6 +20,7 @@ pub mod human;
 pub mod import_glob;
 pub mod launcher;
 pub mod location;
+pub mod mock_read;
 pub mod mock_scope;
 pub mod napi_host;
 pub mod parse_error;
