@@ -55,6 +55,9 @@ libc = "0.2"
 # js-tokens' identifier classes, for vitest's code-frame highlighting
 unicode-id-start = "1.4"
 base64 = "0.22"
+# TextDecoder's legacy encodings (Shift_JIS, UTF-16, windows-125x, ...): the WHATWG Encoding
+# Standard implementation (turbo-test#119)
+encoding_rs = "0.8"
 # rolldown's diagnostic renderer (its ariadne fork, the version vite 8's rolldown links): a TS /
 # JSX module that does not transform fails with its report, as vite's oxc transform does
 # (turbo-test#113)

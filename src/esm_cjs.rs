@@ -132,6 +132,9 @@ pub(crate) struct LowerCtx<'r> {
     pub exports_obj: String,
     /// resolve a specifier → `SourceRef`. `None` = app mode (always `External`).
     pub resolve: Option<&'r dyn Fn(&str) -> SourceRef>,
+    /// the module's path for `import.meta` (bundler: each bundled module's own); `None` = the CJS
+    /// wrapper's `__filename` (app mode)
+    pub module_path: Option<String>,
 }
 
 impl LowerCtx<'_> {
@@ -166,6 +169,8 @@ struct EmitState<'a, 'r> {
     resolve: Option<&'r dyn Fn(&str) -> SourceRef>,
     /// set when the body now calls `__toESM` (see `ModuleParts::uses_to_esm`).
     uses_to_esm: bool,
+    /// `LowerCtx::module_path`
+    module_path: Option<String>,
 }
 
 impl<'a> EmitState<'a, '_> {
@@ -198,6 +203,33 @@ impl<'a> EmitState<'a, '_> {
             self.ast.identifier_name(span, self.ast.ident(&access.prop)),
             false,
         ))
+    }
+
+    /// `globalThis.__ttImportMeta(<module path>)` (the module path a string literal in bundler
+    /// mode, else the CJS wrapper's `__filename`), with `span` (the `import.meta`'s) for the map.
+    fn build_import_meta(&self, span: Span) -> Expression<'a> {
+        let path = match &self.module_path {
+            Some(p) => self
+                .ast
+                .expression_string_literal(span, self.ast.str(p), None),
+            None => self
+                .ast
+                .expression_identifier(span, self.ast.ident("__filename")),
+        };
+        let global = self
+            .ast
+            .expression_identifier(span, self.ast.ident("globalThis"));
+        let callee = Expression::StaticMemberExpression(
+            self.ast.alloc_static_member_expression(
+                span,
+                global,
+                self.ast
+                    .identifier_name(span, self.ast.ident("__ttImportMeta")),
+                false,
+            ),
+        );
+        let args = self.ast.vec1(Argument::from(path));
+        self.ast.expression_call(span, callee, NONE, args, false)
     }
 
     /// `f(arg)` for a global function name.
@@ -357,6 +389,14 @@ impl<'a> VisitMut<'a> for EmitState<'a, '_> {
                 }
             }
         }
+        // `import.meta` → runtime.js `__ttImportMeta(<module path>)` (a CJS script cannot hold
+        // `import.meta`: V8's "Cannot use 'import.meta' outside a module", turbo-test#123)
+        if let Expression::MetaProperty(m) = &*expr {
+            if m.meta.name == "import" && m.property.name == "meta" {
+                *expr = self.build_import_meta(m.span);
+                return;
+            }
+        }
         if matches!(expr, Expression::ImportExpression(_)) {
             // take the node out, rewrite its (recursively-visited) source into a require chain.
             let taken = std::mem::replace(expr, self.ast.expression_boolean_literal(SPAN, false));
@@ -453,6 +493,7 @@ fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -
     let ctx = LowerCtx {
         exports_obj: "__tt_exports".to_string(),
         resolve: None,
+        module_path: None,
     };
     let map_src = if with_map { Some((path, src)) } else { None };
     let (parts, mappings) = lower(ast, scoping, &ctx, &mut program, map_src)?;
@@ -524,6 +565,7 @@ fn lower<'a>(
         scoping,
         resolve: ctx.resolve,
         uses_to_esm: false,
+        module_path: ctx.module_path.clone(),
     };
     let mut body = p.body_stmts;
     for stmt in body.iter_mut() {

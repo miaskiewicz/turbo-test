@@ -270,8 +270,8 @@ fn native_transform_strict_mode_and_esbuild_fallbacks() {
         "node_modules/odd/index.js",
         "module.exports = { o: 8 };\nif (module.exports) return;\nmodule.exports = 0;\n",
     );
-    // import.meta survives the native emit and fails to compile in the CJS wrapper; the loader
-    // retries through esbuild (which lowers it)
+    // import.meta in an app module and a dep: the native emit and bundler lower it (runtime.js
+    // __ttImportMeta, turbo-test#123), esbuild's transforms fill it in
     p.file("meta.ts", "export const m = typeof import.meta;\n");
     p.file(
         "node_modules/metadep/package.json",

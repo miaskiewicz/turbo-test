@@ -13,14 +13,26 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   reported `Element type is invalid … got: object`; it now gives `exports.default`, as vitest.
   On the module runner a package's `exports.default` without `__esModule` is no longer its
   default (vitest gives the whole `module.exports`), while an app `.cjs` file's own `default`
-  is (both loaders); `export { default } from` reads through the same interop;
-  `import.meta` in a package's ES module no longer fails the native bundle ("Cannot use
-  'import.meta' outside a module") or reads `{}` in the esbuild fallback; `vi.importActual` /
+  is (both loaders); `export { default } from` reads through the same interop; `vi.importActual` /
   `importMock` called from a test body work on the ESM graph loader (they resolved from no
   directory and gave `undefined`); a `vi.mock` factory without `default` throws vitest's
   `[vitest] No "default" export is defined on the "x" mock. Did you forget to return it from
   "vi.mock"?` on access instead of giving the factory object (the missing-name message is
   vitest 4.1.12's too). Remaining differences are tracked in turbo-test#133–#137.
+- A project with no `node_modules/.bin/esbuild` — pnpm, whose transitive esbuild lives only under
+  `node_modules/.pnpm`, or one that does not depend on esbuild — now runs on turbo-test's own
+  esbuild (PR #80 by alphajew420, turbo-test#79): `cli.js` passes it as `TURBO_ESBUILD`, every
+  esbuild call site goes through one `esbuild_bin(root)` (the project's own first), and the
+  project root falls back to the nearest directory with `node_modules`. Such projects took the
+  ESM-graph loader, where `vi.spyOn` on a module's export was not seen by the module importing
+  it (vitest: it is).
+- `import.meta` on every loader path (turbo-test#123): the native CJS emitter and dep bundler
+  left `import.meta` in CommonJS output (`Cannot use 'import.meta' outside a module` when the
+  esbuild retry was unavailable or failed; an empty object when it ran), esbuild dep bundles
+  gave an empty object, and no path had `import.meta.env`. Each module now gets its own
+  `url` / `filename` / `dirname` plus vitest's `env` (live `process.env`, `DEV` / `PROD` / `SSR`
+  booleans), and `process.env` carries vite's `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` (`SSR`
+  off under a `jsdom` / `happy-dom` environment), as vitest sets them.
 - Config discovery (turbo-test#43 item 1): `setupFiles` are read from every config file vitest
   resolves, in its order (`vitest.config` then `vite.config`, each `.ts .mts .cts .js .mjs
   .cjs`); `vitest.config.{cts,mjs,cjs}` and `vite.config.{mts,cts,js,mjs,cjs}` were ignored and
@@ -337,8 +349,34 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   takes an ArrayBuffer, SharedArrayBuffer or any view (offset and length honoured; a
   `Uint16Array`/`DataView` decoded the whole buffer) and throws TypeError for anything else;
   `encoding` / `fatal` / `ignoreBOM` are prototype getters; the label is trimmed and
-  case-folded, accepting only the UTF-8 labels, and any other label throws RangeError
-  `ERR_ENCODING_NOT_SUPPORTED`. `Buffer#toString` keeps a BOM, as Node.
+  case-folded, accepting the UTF-8 labels (the legacy encodings followed in turbo-test#119), and
+  an unknown label throws RangeError `ERR_ENCODING_NOT_SUPPORTED`. `Buffer#toString` keeps a BOM, as Node.
+- `TextDecoder` decodes the legacy encodings Node 26 does (turbo-test#119): every WHATWG
+  Encoding label is accepted (`latin1` / `ascii` are `windows-1252`, `utf-16` is `utf-16le`,
+  `sjis` is `shift_jis`, ...; the `replacement` labels throw RangeError
+  `The "replacement" encoding is not supported`) and the single-byte, UTF-16LE/BE and CJK
+  multi-byte encodings decode natively through encoding_rs, with `fatal` (TypeError naming the
+  encoding), `ignoreBOM` and `stream` (a partial sequence or ISO-2022-JP's mode carries over).
+  Every other label threw RangeError `ERR_ENCODING_NOT_SUPPORTED`. Node's ICU big5 / euc-jp /
+  euc-kr / shift_jis decoders differ from the Encoding Standard on some bytes; turbo-test follows
+  the standard there (vitest.compat.md).
+- `FileReader` reads the Blob's bytes (turbo-test#132): `readAsArrayBuffer` and `readAsDataURL`
+  took char codes of the decoded text (`'€'` read as `[0xAC]`, now `[0xE2, 0x82, 0xAC]`; binary
+  that is not UTF-8 was mangled), and `readAsBinaryString` exists, as in jsdom / happy-dom.
+- `Blob` / `File` match Node 26 (turbo-test#128): `size` counts UTF-8 bytes (`['€']` was 1, now
+  3), `type` is lower-cased (or `''` with a character outside U+0020..U+007E), `arrayBuffer()`
+  returns the bytes (it was zero-filled), `slice(start, end, type)` honours its arguments
+  (negative and clamped bounds; it returned an empty Blob), `stream()` is a ReadableStream of one
+  chunk per part (it was `null`), `bytes()` and `textStream()` exist, the parts are copied at
+  construction, `endings: 'native'` turns CR / CRLF into LF, `size` / `type` / `name` /
+  `lastModified` are prototype accessors (`ERR_INVALID_THIS` off a Blob), toStringTag is
+  `Blob` / `File` (it was `Object`), `File` defaults `lastModified` to `Date.now()`, and the
+  constructors throw Node's errors (a non-iterable `blobParts`, a non-object `options`, a bad
+  `endings`, `File` with fewer than two arguments).
+- `Blob#text()` UTF-8-decodes the concatenated bytes of all parts once, as Node 26
+  (turbo-test#120): a sequence split across parts is one character (`[E2 82] + [AC]` gave two
+  U+FFFD, now `€`), one leading BOM is stripped (it was kept), and a nested Blob contributes its
+  bytes (its parts were joined as strings).
 - `URLSearchParams.set` replaces the first pair of the name in place and removes the others, as
   Node's (turbo-test#116); it moved the pair to the end (`a=1&b=2&a=3` set `a` gave `b=2&a=9`,
   Node `a=9&b=2`), in `toString()`, iteration and a URL's `href`.
@@ -394,6 +432,29 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   assertion, but got none` (framed where `hasAssertions` was called) and `Test timed out in 30ms.`
   + vitest's `If this is a long-running test, …` hint (framed at the `it(` call); they carried
   turbo-test's own messages and no frame.
+
+- A file that runs out of heap fails alone (turbo-test#124, from alphajew420's #104): V8's answer
+  to an exhausted heap is to abort the process, which lost every result of a 529-file
+  `isolate: false` run (#79). A near-heap-limit callback now terminates the file, it is reported
+  as `JavaScript heap out of memory (limit N MB): the file was aborted and its isolate discarded`
+  (not retried on the same kind of isolate), the run continues and exits 1 — vitest likewise
+  fails the run without losing the other files. Under isolate reuse a worker whose live heap
+  after a full GC passes `TURBO_HEAP_RECYCLE_MB` (default 60% of the heap limit) gets a new
+  isolate for its next file (setup files re-run), instead of growing until V8 aborts.
+  `TURBO_MAX_HEAP_MB` sets the per-isolate limit, `TURBO_HEAP_LOG=1` prints the heap after
+  every file. The setup-mock snapshot handles are now dropped before their isolate.
+- A finished file's spies no longer stay reachable under isolate reuse (turbo-test#124, from
+  alphajew420's #107): the registry behind `vi.clearAllMocks` / `resetAllMocks` /
+  `restoreAllMocks` held every `vi.fn()` / `vi.spyOn()` strongly for the worker's life, and each
+  keeps every call's arguments and receiver, so a reused isolate's live heap grew by every file's
+  call history (~70 MB per file in the fixture) until it ran out. It now holds spies weakly. Unlike
+  #107 a finished file's spies are not `mockClear()`ed: vitest 4.1.12 with `isolate: false` keeps a
+  spy's `mock.calls` across files when the spy is still referenced, and so does turbo-test.
+
+### Changed
+- `src/runtime.js` has one WHATWG UTF-8 decoder (turbo-test#121): `TextDecoder`, `URLSearchParams`
+  percent-decoding, `querystring.unescape` and `StringDecoder` share `__utf8Run` instead of three
+  copies of the maximal-subpart decoder. No behaviour change.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain

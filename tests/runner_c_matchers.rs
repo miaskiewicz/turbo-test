@@ -1036,3 +1036,529 @@ test('TextEncoder/TextDecoder', () => {
     }
     assert_eq!(got.lines().count(), want.lines().count());
 }
+
+#[test]
+fn blob_text_decodes_the_concatenated_bytes_like_nodes() {
+    // turbo-test#120: Blob#text UTF-8-decodes the bytes of all parts at once (a sequence split
+    // across parts is one character, one leading BOM is stripped), whatever the part types
+    // (string, ArrayBuffer, any view honouring offset and length, nested Blob, File, other values
+    // stringified). Expected: Node 26 (each row is [case, result]).
+    let p = Project::new("rc-blob-text");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "t.test.js",
+        r##"import { test } from 'vitest'
+import * as fs from 'node:fs'
+test('Blob#text', async () => {
+  const rows = []
+const t = async (name, f) => { let r; try { r = await f() } catch (e) { r = ['throws', e.name, e.code ?? null] } rows.push(JSON.stringify([name, r])) }
+const B = (...parts) => new Blob(parts).text()
+const cu = (s) => [...s].map((c) => c.codePointAt(0).toString(16))
+await t('split 3-byte', () => B(new Uint8Array([0xe2, 0x82]), new Uint8Array([0xac])))
+await t('split 4-byte over 3 parts', () => B(new Uint8Array([0xf0]), new Uint8Array([0x9f, 0x98]), new Uint8Array([0x80])))
+await t('split string then bytes', () => B('a', new Uint8Array([0xc3]), new Uint8Array([0xbc]), 'b'))
+await t('truncated then string', () => B(new Uint8Array([0xe2, 0x82]), 'x'))
+await t('bom stripped', async () => cu(await B(new Uint8Array([0xef, 0xbb, 0xbf, 0x41]))))
+await t('bom split', async () => cu(await B(new Uint8Array([0xef]), new Uint8Array([0xbb, 0xbf]), 'A')))
+await t('bom string part', async () => cu(await B('﻿A')))
+await t('bom second only', async () => cu(await B('A', new Uint8Array([0xef, 0xbb, 0xbf]))))
+await t('two boms', async () => cu(await B(new Uint8Array([0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf]))))
+await t('invalid', () => B(new Uint8Array([0xff, 0x41])))
+await t('ArrayBuffer part', () => B(new Uint8Array([0xe2, 0x82]).buffer, new Uint8Array([0xac]).buffer))
+await t('subarray part', () => B(new Uint8Array([0x61, 0x62, 0x63, 0x64]).subarray(1, 3)))
+await t('DataView part', () => B(new DataView(new Uint8Array([0x61, 0x62, 0x63, 0x64]).buffer, 1, 2)))
+await t('Uint16Array part', () => B(new Uint16Array([0x6261])))
+await t('nested blob bytes', () => B(new Blob([new Uint8Array([0xe2, 0x82])]), new Uint8Array([0xac])))
+await t('nested blob string', () => B('<', new Blob(['é', new Blob(['ü'])]), '>'))
+await t('lone surrogate string', async () => cu(await B('\uD800x')))
+await t('number part', () => B(12, null, undefined))
+await t('object part', () => B({ toString: () => 'o' }))
+await t('empty', () => B())
+await t('file', () => new File([new Uint8Array([0xe2, 0x82]), new Uint8Array([0xac])], 'f.txt').text())
+  fs.writeFileSync('out.txt', rows.join('\n'))
+})
+"##,
+    );
+    let r = turbo_test(&p.dir, &["t.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let got = std::fs::read_to_string(p.path("out.txt")).unwrap();
+    let want = r##"["split 3-byte","€"]
+["split 4-byte over 3 parts","😀"]
+["split string then bytes","aüb"]
+["truncated then string","�x"]
+["bom stripped",["41"]]
+["bom split",["41"]]
+["bom string part",["41"]]
+["bom second only",["41","feff"]]
+["two boms",["feff"]]
+["invalid","�A"]
+["ArrayBuffer part","€"]
+["subarray part","bc"]
+["DataView part","bc"]
+["Uint16Array part","ab"]
+["nested blob bytes","€"]
+["nested blob string","<éü>"]
+["lone surrogate string",["fffd","78"]]
+["number part","12nullundefined"]
+["object part","o"]
+["empty",""]
+["file","€"]"##;
+    for (g, w) in got.lines().zip(want.lines()) {
+        assert_eq!(g, w);
+    }
+    assert_eq!(got.lines().count(), want.lines().count());
+}
+
+#[test]
+fn text_decoder_legacy_encodings_are_nodes() {
+    // turbo-test#119: TextDecoder takes every WHATWG label Node 26 does (the replacement
+    // encoding's labels throw RangeError naming "replacement") and decodes the legacy encodings:
+    // single-byte tables (windows-1252 for latin1 / ascii), UTF-16LE/BE (lone surrogates and an
+    // odd byte -> U+FFFD, the encoding's own BOM stripped unless ignoreBOM) and the CJK multi-byte
+    // encodings, with fatal (TypeError naming the encoding), stream (partial sequences and the
+    // ISO-2022-JP mode carried over) and every BufferSource input. Rows only where Node's ICU
+    // decoders agree with the Encoding Standard (vitest.compat.md lists where they do not).
+    // Expected: Node 26 (each row is [case, result] or [case, ["throws", name, code, message]]).
+    let p = Project::new("rc-text-decoder-legacy");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "t.test.js",
+        r##"import { test } from 'vitest'
+import * as fs from 'node:fs'
+test('TextDecoder legacy encodings', () => {
+  const rows = []
+const t = (name, f) => { let r; try { r = f() } catch (e) { r = ['throws', e.name, e.code ?? null, e.message] } rows.push(JSON.stringify([name, r])) }
+const cu = (s) => [...s].map((c) => c.codePointAt(0).toString(16))
+const D = (label, bytes, opts) => cu(new TextDecoder(label, opts).decode(new Uint8Array(bytes)))
+// labels -> encoding (issue #119 list, aliases, case/whitespace, every WHATWG encoding)
+for (const l of ['latin1', 'utf-16le', 'windows-1252', 'shift_jis', 'utf-16be', 'iso-8859-2', 'ascii', 'ISO-8859-1', ' us-ascii\n', 'utf-16', 'UCS-2', 'unicodefffe', 'csshiftjis', 'sjis', 'ms_kanji', 'cp1250', 'iso-8859-8-i', 'iso_8859-15', 'l9', 'koi8-u', 'koi', 'mac', 'x-mac-cyrillic', 'dos-874', 'tis-620', 'ibm866', 'gbk', 'gb2312', 'x-gbk', 'gb18030', 'big5', 'big5-hkscs', 'euc-jp', 'iso-2022-jp', 'euc-kr', 'ks_c_5601-1987', 'windows-949', 'x-user-defined', 'iso-8859-16', 'windows-1258', 'x-cp1251'])
+  t('label ' + JSON.stringify(l), () => new TextDecoder(l).encoding)
+// rejected labels: the replacement encoding and near-misses
+for (const l of ['replacement', 'iso-2022-kr', 'hz-gb-2312', 'iso-2022-cn', 'csiso2022kr', 'utf-32', 'latin-1', 'utf16', 'windows1252', 'shift-jis'])
+  t('label bad ' + JSON.stringify(l), () => new TextDecoder(l).encoding)
+// getters on a legacy decoder
+t('get legacy', () => { const d = new TextDecoder('Shift_JIS', { fatal: true, ignoreBOM: true }); return [d.encoding, d.fatal, d.ignoreBOM] })
+// single-byte
+t('w1252 high', () => D('windows-1252', [0x41, 0x80, 0x81, 0x8d, 0x8f, 0x90, 0x9d, 0x9f, 0xa0, 0xe9, 0xff]))
+t('latin1 is w1252', () => D('latin1', [0x80, 0x9f, 0xe9]))
+t('ascii is w1252', () => D('ascii', [0x80, 0xff]))
+t('8859-2', () => D('iso-8859-2', [0xa1, 0xb1, 0xe6, 0xff]))
+t('8859-3 unmapped', () => D('iso-8859-3', [0xa5, 0x41, 0xae]))
+t('8859-3 fatal', () => D('iso-8859-3', [0x41, 0xa5], { fatal: true }))
+t('8859-7 euro', () => D('iso-8859-7', [0xa4, 0xc1]))
+t('8859-8-i', () => D('iso-8859-8-i', [0xe0, 0xfa]))
+t('koi8-r', () => D('koi8-r', [0xc1, 0xff, 0xa3]))
+t('koi8-u', () => D('koi8-u', [0xa4, 0xad]))
+t('ibm866', () => D('ibm866', [0x80, 0xb0, 0xff]))
+t('macintosh', () => D('macintosh', [0x80, 0xa5, 0xdb]))
+t('x-mac-cyrillic', () => D('x-mac-cyrillic', [0x80, 0xff]))
+t('windows-874', () => D('windows-874', [0x80, 0xa1, 0xdb]))
+t('windows-1251', () => D('windows-1251', [0x80, 0x98, 0xc0]))
+t('windows-1258', () => D('windows-1258', [0xcc, 0xd2]))
+t('x-user-defined', () => D('x-user-defined', [0x41, 0x7f, 0x80, 0xff]))
+t('single-byte bom kept', () => D('windows-1252', [0xef, 0xbb, 0xbf]))
+// UTF-16
+t('u16le', () => D('utf-16le', [0x41, 0x00, 0xac, 0x20, 0x3d, 0xd8, 0x00, 0xde]))
+t('u16be', () => D('utf-16be', [0x00, 0x41, 0x20, 0xac, 0xd8, 0x3d, 0xde, 0x00]))
+t('u16le odd', () => D('utf-16le', [0x41, 0x00, 0x42]))
+t('u16le lone high', () => D('utf-16le', [0x00, 0xd8, 0x41, 0x00]))
+t('u16le lone high end', () => D('utf-16le', [0x41, 0x00, 0x00, 0xd8]))
+t('u16le lone low', () => D('utf-16le', [0x00, 0xdc, 0x41, 0x00]))
+t('u16be lone high', () => D('utf-16be', [0xd8, 0x00, 0x00, 0x41]))
+t('u16le bom', () => D('utf-16le', [0xff, 0xfe, 0x41, 0x00]))
+t('u16le bom only first', () => D('utf-16le', [0xff, 0xfe, 0xff, 0xfe, 0x41, 0x00]))
+t('u16le bom ignore', () => D('utf-16le', [0xff, 0xfe, 0x41, 0x00], { ignoreBOM: true }))
+t('u16le other bom', () => D('utf-16le', [0xfe, 0xff, 0x41, 0x00]))
+t('u16be bom', () => D('utf-16be', [0xfe, 0xff, 0x00, 0x41]))
+t('u16be bom ignore', () => D('utf-16be', [0xfe, 0xff, 0x00, 0x41], { ignoreBOM: true }))
+t('u16le utf8 bom kept', () => D('utf-16le', [0xef, 0xbb]))
+t('u16le fatal odd', () => D('utf-16le', [0x41, 0x00, 0x42], { fatal: true }))
+t('u16le fatal lone', () => D('utf-16le', [0x00, 0xd8, 0x41, 0x00], { fatal: true }))
+t('u16le fatal valid', () => D('utf-16le', [0x3d, 0xd8, 0x00, 0xde], { fatal: true }))
+t('u16 label is le', () => D('utf-16', [0x41, 0x00]))
+// CJK (cases where ICU and WHATWG agree)
+t('shift_jis', () => D('shift_jis', [0x82, 0xa0, 0x41, 0x5c, 0x7e, 0xb1, 0x88, 0x9f, 0x81, 0x40]))
+t('shift_jis truncated', () => D('shift_jis', [0x41, 0x82]))
+t('shift_jis bad trail', () => D('shift_jis', [0x82, 0x20]))
+t('shift_jis fatal', () => D('shift_jis', [0x82], { fatal: true }))
+t('euc-jp', () => D('euc-jp', [0xa4, 0xa2, 0x8e, 0xb1, 0x8f, 0xb0, 0xa1, 0x41]))
+t('euc-jp truncated', () => D('euc-jp', [0xa4]))
+t('iso-2022-jp', () => D('iso-2022-jp', [0x1b, 0x24, 0x42, 0x24, 0x22, 0x1b, 0x28, 0x42, 0x41]))
+t('gbk', () => D('gbk', [0xc4, 0xe3, 0xba, 0xc3, 0x80, 0x41]))
+t('gb18030 4-byte', () => D('gb18030', [0x81, 0x30, 0x81, 0x30, 0x95, 0x32, 0x82, 0x36]))
+t('gb18030 truncated', () => D('gb18030', [0x81, 0x30]))
+t('big5', () => D('big5', [0xa4, 0x40, 0xa5, 0x41, 0x41]))
+t('big5 truncated', () => D('big5', [0xa4]))
+t('euc-kr', () => D('euc-kr', [0xb0, 0xa1, 0xc7, 0xd1, 0x41]))
+t('euc-kr truncated', () => D('euc-kr', [0xb0]))
+t('euc-kr fatal', () => D('euc-kr', [0xb0], { fatal: true }))
+// stream
+const S = (label, chunks, opts) => { const d = new TextDecoder(label, opts); const out = chunks.map((c, i) => d.decode(new Uint8Array(c), { stream: i < chunks.length - 1 })); return out.map(cu) }
+t('stream u16le split unit', () => S('utf-16le', [[0x41], [0x00, 0x42], [0x00]]))
+t('stream u16le split pair', () => S('utf-16le', [[0x3d, 0xd8], [0x00, 0xde], []]))
+t('stream u16le flush odd', () => S('utf-16le', [[0x41, 0x00, 0x42], []]))
+t('stream u16le bom split', () => S('utf-16le', [[0xff], [0xfe, 0x41, 0x00], []]))
+t('stream u16le bom once', () => S('utf-16le', [[0xff, 0xfe, 0x41, 0x00], [0xff, 0xfe], []]))
+t('stream sjis split', () => S('shift_jis', [[0x41, 0x82], [0xa0], []]))
+t('stream sjis flush', () => S('shift_jis', [[0x82], []]))
+t('stream gb18030 split', () => S('gb18030', [[0x81], [0x30, 0x81], [0x30]]))
+t('stream iso-2022-jp state', () => S('iso-2022-jp', [[0x1b, 0x24, 0x42], [0x24, 0x22], [0x1b, 0x28, 0x42, 0x41]]))
+t('stream reset after flush', () => { const d = new TextDecoder('utf-16le'); d.decode(new Uint8Array([0x41]), { stream: true }); return [cu(d.decode()), cu(d.decode(new Uint8Array([0xff, 0xfe, 0x42, 0x00])))] })
+t('stream fatal flush', () => { const d = new TextDecoder('utf-16le', { fatal: true }); return [d.decode(new Uint8Array([0x41]), { stream: true }), d.decode()] })
+t('fatal recovers', () => { const d = new TextDecoder('shift_jis', { fatal: true }); let a; try { d.decode(new Uint8Array([0x82]), { stream: true }); d.decode(new Uint8Array([0x20])) } catch (e) { a = e.name } return [a, cu(d.decode(new Uint8Array([0x82, 0xa0])))] })
+// input types reach the legacy path too
+t('legacy ArrayBuffer', () => cu(new TextDecoder('utf-16le').decode(new Uint8Array([0x41, 0x00]).buffer)))
+t('legacy subarray', () => cu(new TextDecoder('windows-1252').decode(new Uint8Array([0x41, 0x80, 0x42]).subarray(1, 2))))
+t('legacy DataView', () => cu(new TextDecoder('utf-16be').decode(new DataView(new Uint8Array([0x00, 0x00, 0x41, 0x00]).buffer, 1, 2))))
+t('legacy undefined', () => new TextDecoder('shift_jis').decode())
+t('legacy bad input', () => new TextDecoder('shift_jis').decode('ab'))
+t('legacy long', () => { const b = new Uint8Array(20000).fill(0xe9); const s = new TextDecoder('latin1').decode(b); return [s.length, s.charCodeAt(0), s.charCodeAt(19999)] })
+  fs.writeFileSync('out.txt', rows.join('\n'))
+})
+"##,
+    );
+    let r = turbo_test(&p.dir, &["t.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let got = std::fs::read_to_string(p.path("out.txt")).unwrap();
+    let want = r##"["label \"latin1\"","windows-1252"]
+["label \"utf-16le\"","utf-16le"]
+["label \"windows-1252\"","windows-1252"]
+["label \"shift_jis\"","shift_jis"]
+["label \"utf-16be\"","utf-16be"]
+["label \"iso-8859-2\"","iso-8859-2"]
+["label \"ascii\"","windows-1252"]
+["label \"ISO-8859-1\"","windows-1252"]
+["label \" us-ascii\\n\"","windows-1252"]
+["label \"utf-16\"","utf-16le"]
+["label \"UCS-2\"","utf-16le"]
+["label \"unicodefffe\"","utf-16be"]
+["label \"csshiftjis\"","shift_jis"]
+["label \"sjis\"","shift_jis"]
+["label \"ms_kanji\"","shift_jis"]
+["label \"cp1250\"","windows-1250"]
+["label \"iso-8859-8-i\"","iso-8859-8-i"]
+["label \"iso_8859-15\"","iso-8859-15"]
+["label \"l9\"","iso-8859-15"]
+["label \"koi8-u\"","koi8-u"]
+["label \"koi\"","koi8-r"]
+["label \"mac\"","macintosh"]
+["label \"x-mac-cyrillic\"","x-mac-cyrillic"]
+["label \"dos-874\"","windows-874"]
+["label \"tis-620\"","windows-874"]
+["label \"ibm866\"","ibm866"]
+["label \"gbk\"","gbk"]
+["label \"gb2312\"","gbk"]
+["label \"x-gbk\"","gbk"]
+["label \"gb18030\"","gb18030"]
+["label \"big5\"","big5"]
+["label \"big5-hkscs\"","big5"]
+["label \"euc-jp\"","euc-jp"]
+["label \"iso-2022-jp\"","iso-2022-jp"]
+["label \"euc-kr\"","euc-kr"]
+["label \"ks_c_5601-1987\"","euc-kr"]
+["label \"windows-949\"","euc-kr"]
+["label \"x-user-defined\"","x-user-defined"]
+["label \"iso-8859-16\"","iso-8859-16"]
+["label \"windows-1258\"","windows-1258"]
+["label \"x-cp1251\"","windows-1251"]
+["label bad \"replacement\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED","The \"replacement\" encoding is not supported"]]
+["label bad \"iso-2022-kr\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED","The \"replacement\" encoding is not supported"]]
+["label bad \"hz-gb-2312\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED","The \"replacement\" encoding is not supported"]]
+["label bad \"iso-2022-cn\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED","The \"replacement\" encoding is not supported"]]
+["label bad \"csiso2022kr\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED","The \"replacement\" encoding is not supported"]]
+["label bad \"utf-32\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED","The \"utf-32\" encoding is not supported"]]
+["label bad \"latin-1\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED","The \"latin-1\" encoding is not supported"]]
+["label bad \"utf16\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED","The \"utf16\" encoding is not supported"]]
+["label bad \"windows1252\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED","The \"windows1252\" encoding is not supported"]]
+["label bad \"shift-jis\"","shift_jis"]
+["get legacy",["shift_jis",true,true]]
+["w1252 high",["41","20ac","81","8d","8f","90","9d","178","a0","e9","ff"]]
+["latin1 is w1252",["20ac","178","e9"]]
+["ascii is w1252",["20ac","ff"]]
+["8859-2",["104","105","107","2d9"]]
+["8859-3 unmapped",["fffd","41","fffd"]]
+["8859-3 fatal",["throws","TypeError","ERR_ENCODING_INVALID_ENCODED_DATA","The encoded data was not valid for encoding iso-8859-3"]]
+["8859-7 euro",["20ac","391"]]
+["8859-8-i",["5d0","5ea"]]
+["koi8-r",["430","42a","451"]]
+["koi8-u",["454","491"]]
+["ibm866",["410","2591","a0"]]
+["macintosh",["c4","2022","20ac"]]
+["x-mac-cyrillic",["410","20ac"]]
+["windows-874",["20ac","e01","fffd"]]
+["windows-1251",["402","98","410"]]
+["windows-1258",["300","309"]]
+["x-user-defined",["41","7f","f780","f7ff"]]
+["single-byte bom kept",["ef","bb","bf"]]
+["u16le",["41","20ac","1f600"]]
+["u16be",["41","20ac","1f600"]]
+["u16le odd",["41","fffd"]]
+["u16le lone high",["fffd","41"]]
+["u16le lone high end",["41","fffd"]]
+["u16le lone low",["fffd","41"]]
+["u16be lone high",["fffd","41"]]
+["u16le bom",["41"]]
+["u16le bom only first",["feff","41"]]
+["u16le bom ignore",["feff","41"]]
+["u16le other bom",["fffe","41"]]
+["u16be bom",["41"]]
+["u16be bom ignore",["feff","41"]]
+["u16le utf8 bom kept",["bbef"]]
+["u16le fatal odd",["throws","TypeError","ERR_ENCODING_INVALID_ENCODED_DATA","The encoded data was not valid for encoding utf-16le"]]
+["u16le fatal lone",["throws","TypeError","ERR_ENCODING_INVALID_ENCODED_DATA","The encoded data was not valid for encoding utf-16le"]]
+["u16le fatal valid",["1f600"]]
+["u16 label is le",["41"]]
+["shift_jis",["3042","41","5c","7e","ff71","4e9c","3000"]]
+["shift_jis truncated",["41","fffd"]]
+["shift_jis bad trail",["fffd","20"]]
+["shift_jis fatal",["throws","TypeError","ERR_ENCODING_INVALID_ENCODED_DATA","The encoded data was not valid for encoding shift_jis"]]
+["euc-jp",["3042","ff71","4e02","41"]]
+["euc-jp truncated",["fffd"]]
+["iso-2022-jp",["3042","41"]]
+["gbk",["4f60","597d","20ac","41"]]
+["gb18030 4-byte",["80","20000"]]
+["gb18030 truncated",["fffd"]]
+["big5",["4e00","4e15","41"]]
+["big5 truncated",["fffd"]]
+["euc-kr",["ac00","d55c","41"]]
+["euc-kr truncated",["fffd"]]
+["euc-kr fatal",["throws","TypeError","ERR_ENCODING_INVALID_ENCODED_DATA","The encoded data was not valid for encoding euc-kr"]]
+["stream u16le split unit",[[],["41"],["42"]]]
+["stream u16le split pair",[[],["1f600"],[]]]
+["stream u16le flush odd",[["41"],["fffd"]]]
+["stream u16le bom split",[[],["41"],[]]]
+["stream u16le bom once",[["41"],["feff"],[]]]
+["stream sjis split",[["41"],["3042"],[]]]
+["stream sjis flush",[[],["fffd"]]]
+["stream gb18030 split",[[],[],["80"]]]
+["stream iso-2022-jp state",[[],["3042"],["41"]]]
+["stream reset after flush",[["fffd"],["42"]]]
+["stream fatal flush",["throws","TypeError","ERR_ENCODING_INVALID_ENCODED_DATA","The encoded data was not valid for encoding utf-16le"]]
+["fatal recovers",["TypeError",["3042"]]]
+["legacy ArrayBuffer",["41"]]
+["legacy subarray",["20ac"]]
+["legacy DataView",["41"]]
+["legacy undefined",""]
+["legacy bad input",["throws","TypeError","ERR_INVALID_ARG_TYPE","The \"input\" argument must be an instance of SharedArrayBuffer, ArrayBuffer or ArrayBufferView."]]
+["legacy long",[20000,233,233]]"##;
+    for (g, w) in got.lines().zip(want.lines()) {
+        assert_eq!(g, w);
+    }
+    assert_eq!(got.lines().count(), want.lines().count());
+}
+
+#[test]
+fn blob_and_file_surface_is_nodes() {
+    // turbo-test#128: Blob / File as Node 26: size in UTF-8 bytes, type lower-cased (or '' with a
+    // character outside U+0020..U+007E), parts copied at construction, endings, arrayBuffer() /
+    // bytes() / text() / stream() (one chunk per non-empty part) / textStream(), slice() with
+    // clamped and negative bounds and its own type, accessors on the prototype, toStringTag, the
+    // argument errors. Expected: Node 26.11 (each row is [case, result] or
+    // [case, ["throws", name, code]]).
+    let p = Project::new("rc-blob-surface");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "t.test.js",
+        r##"import { test } from 'vitest'
+import * as fs from 'node:fs'
+test('Blob / File surface', async () => {
+  const rows = []
+const t = async (name, f) => { let r; try { r = await f() } catch (e) { r = ['throws', e.name, e.code ?? null] } rows.push(JSON.stringify([name, r])) }
+const u8 = (x) => [...new Uint8Array(x)]
+const b = new Blob(['€', new Uint8Array([1, 2])], { type: 'TEXT/Plain' })
+await t('size mixed', () => b.size)
+await t('size astral', () => new Blob(['😀', 'é']).size)
+await t('size lone surrogate', () => new Blob(['\uD800']).size)
+await t('size nested', () => new Blob([b, new ArrayBuffer(4), new Uint16Array(3)]).size)
+await t('size empty', () => new Blob().size)
+await t('type lowercased', () => b.type)
+await t('type default', () => new Blob([]).type)
+await t('type non-ascii', () => new Blob([], { type: 'text/plainé' }).type)
+await t('type control', () => new Blob([], { type: 'a\nb' }).type)
+await t('type space kept', () => new Blob([], { type: ' A B ' }).type)
+await t('type number', () => new Blob([], { type: 12 }).type)
+await t('arrayBuffer', async () => u8(await b.arrayBuffer()))
+await t('arrayBuffer instance', async () => (await b.arrayBuffer()) instanceof ArrayBuffer)
+await t('bytes typeof', () => typeof b.bytes)
+await t('bytes', async () => { const x = await b.bytes(); return [x.constructor.name, [...x]] })
+await t('bytes fresh copy', async () => { const x = await b.bytes(); x[0] = 0; return [...(await b.bytes())] })
+await t('source copied', async () => { const s = new Uint8Array([5, 6]); const c = new Blob([s]); s[0] = 9; return [...(await c.bytes())] })
+await t('slice(1)', () => new Blob(['abc']).slice(1).text())
+await t('slice(1,2)', () => new Blob(['abcd']).slice(1, 2).text())
+await t('slice(-2)', () => new Blob(['abcd']).slice(-2).text())
+await t('slice(-10, -1)', () => new Blob(['abcd']).slice(-10, -1).text())
+await t('slice(3,1)', async () => { const s = new Blob(['abcd']).slice(3, 1); return [s.size, await s.text()] })
+await t('slice(10)', () => new Blob(['abcd']).slice(10).size)
+await t('slice(1.7, 3.2)', () => new Blob(['abcd']).slice(1.7, 3.2).text())
+await t('slice() keeps nothing of type', () => b.slice().type)
+await t('slice type', () => b.slice(0, 1, 'X/Y').type)
+await t('slice type non-ascii', () => b.slice(0, 1, 'é').type)
+await t('slice bytes', async () => [...(await b.slice(1, 4).bytes())])
+await t('slice returns Blob', () => Object.prototype.toString.call(new File(['ab'], 'f').slice(0, 1)))
+await t('stream typeof', () => typeof b.stream())
+await t('stream instance', () => b.stream() instanceof ReadableStream)
+await t('stream read', async () => { const r = b.stream().getReader(); const out = []; for (;;) { const { done, value } = await r.read(); if (done) break; out.push(value.constructor.name, ...value) } return out })
+await t('stream empty', async () => { const r = new Blob().stream().getReader(); return (await r.read()).done })
+await t('toStringTag Blob', () => Object.prototype.toString.call(b))
+await t('toStringTag File', () => Object.prototype.toString.call(new File([], 'f')))
+await t('File instanceof Blob', () => new File([], 'f') instanceof Blob)
+await t('File name', () => new File([], 12).name)
+await t('File size type', () => { const f = new File(['€x'], 'f', { type: 'A/B', lastModified: 7 }); return [f.size, f.type, f.lastModified] })
+await t('File lastModified default', () => typeof new File([], 'f').lastModified)
+await t('File bytes', async () => [...(await new File(['hi'], 'f').bytes())])
+await t('File slice', () => new File(['hello'], 'f').slice(1, 3).text())
+await t('own keys', () => Object.keys(b))
+const chunks = async (s) => { const r = s.getReader(); const out = []; for (;;) { const { done, value } = await r.read(); if (done) break; out.push(typeof value === 'string' ? value : [...value]) } return out }
+await t('stream chunks per part', () => chunks(new Blob(['', 'a', new Blob(['b', 'c']), new Uint8Array(0), 'd']).stream()))
+await t('stream chunks of slice', () => chunks(new Blob(['abc', 'def']).slice(1, 5).stream()))
+await t('textStream', () => chunks(new Blob(['ab', 'c']).textStream()))
+await t('textStream split char', () => chunks(new Blob([new Uint8Array([0xe2, 0x82]), new Uint8Array([0xac])]).textStream()))
+await t('endings native', () => new Blob(['a\rb\r\nc\n'], { endings: 'native' }).text())
+await t('endings transparent', () => new Blob(['a\rb\r\nc\n'], { endings: 'transparent' }).size)
+await t('endings bogus', () => new Blob([], { endings: 'bogus' }))
+await t('parts iterable', () => new Blob(new Set(['a', 'b'])).text())
+await t('parts undefined', () => new Blob(undefined).size)
+await t('parts null', () => new Blob(null))
+await t('parts string', () => new Blob('abc'))
+await t('parts plain object', () => new Blob({}))
+await t('options string', () => new Blob([], 'x'))
+await t('options null', () => new Blob([], null).type)
+await t('Blob() without new', () => Blob())
+await t('prototype size', () => Blob.prototype.size)
+await t('slice string start', () => new Blob(['ab']).slice('1').text())
+await t('slice undefined start', () => new Blob(['ab']).slice(undefined, 1).text())
+await t('File missing args', () => new File([]))
+await t('File lastModified coerced', () => [new File([], 'n', { lastModified: '5' }).lastModified, new File([], 'n', { lastModified: 1.9 }).lastModified])
+await t('lengths', () => [Blob.name, Blob.length, File.name, File.length])
+await t('Blob.prototype names', () => Object.getOwnPropertyNames(Blob.prototype))
+await t('File.prototype names', () => Object.getOwnPropertyNames(File.prototype))
+await t('File name is accessor', () => typeof Object.getOwnPropertyDescriptor(File.prototype, 'name').get)
+  fs.writeFileSync('out.txt', rows.join('\n'))
+})
+"##,
+    );
+    let r = turbo_test(&p.dir, &["t.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let got = std::fs::read_to_string(p.path("out.txt")).unwrap();
+    let want = r##"["size mixed",5]
+["size astral",6]
+["size lone surrogate",3]
+["size nested",15]
+["size empty",0]
+["type lowercased","text/plain"]
+["type default",""]
+["type non-ascii",""]
+["type control",""]
+["type space kept"," a b "]
+["type number","12"]
+["arrayBuffer",[226,130,172,1,2]]
+["arrayBuffer instance",true]
+["bytes typeof","function"]
+["bytes",["Uint8Array",[226,130,172,1,2]]]
+["bytes fresh copy",[226,130,172,1,2]]
+["source copied",[5,6]]
+["slice(1)","bc"]
+["slice(1,2)","b"]
+["slice(-2)","cd"]
+["slice(-10, -1)","abc"]
+["slice(3,1)",[0,""]]
+["slice(10)",0]
+["slice(1.7, 3.2)","c"]
+["slice() keeps nothing of type",""]
+["slice type","x/y"]
+["slice type non-ascii",""]
+["slice bytes",[130,172,1]]
+["slice returns Blob","[object Blob]"]
+["stream typeof","object"]
+["stream instance",true]
+["stream read",["Uint8Array",226,130,172,"Uint8Array",1,2]]
+["stream empty",true]
+["toStringTag Blob","[object Blob]"]
+["toStringTag File","[object File]"]
+["File instanceof Blob",true]
+["File name","12"]
+["File size type",[4,"a/b",7]]
+["File lastModified default","number"]
+["File bytes",[104,105]]
+["File slice","el"]
+["own keys",[]]
+["stream chunks per part",[[97],[98],[99],[100]]]
+["stream chunks of slice",[[98,99],[100,101]]]
+["textStream",["ab","c"]]
+["textStream split char",["€"]]
+["endings native","a\nb\nc\n"]
+["endings transparent",7]
+["endings bogus",["throws","TypeError","ERR_INVALID_ARG_VALUE"]]
+["parts iterable","ab"]
+["parts undefined",0]
+["parts null",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["parts string",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["parts plain object",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["options string",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["options null",""]
+["Blob() without new",["throws","TypeError",null]]
+["prototype size",["throws","TypeError","ERR_INVALID_THIS"]]
+["slice string start","b"]
+["slice undefined start","a"]
+["File missing args",["throws","TypeError","ERR_MISSING_ARGS"]]
+["File lastModified coerced",[5,1.9]]
+["lengths",["Blob",0,"File",2]]
+["Blob.prototype names",["constructor","type","size","slice","arrayBuffer","text","bytes","stream","textStream"]]
+["File.prototype names",["constructor","name","lastModified"]]
+["File name is accessor","function"]"##;
+    for (g, w) in got.lines().zip(want.lines()) {
+        assert_eq!(g, w);
+    }
+    assert_eq!(got.lines().count(), want.lines().count());
+}
+
+#[test]
+fn file_reader_reads_the_blob_bytes() {
+    // turbo-test#132: FileReader's readAsArrayBuffer / readAsDataURL / readAsBinaryString read the
+    // Blob's bytes (UTF-8 text and non-UTF-8 binary alike), not char codes of its decoded text.
+    // Node 26 has no FileReader; expected: jsdom (vitest's jsdom environment; happy-dom gives the
+    // same rows). Each row is [case, result].
+    let p = Project::new("rc-file-reader-bytes");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "t.test.js",
+        r##"import { test } from 'vitest'
+import * as fs from 'node:fs'
+test('FileReader bytes', async () => {
+  const rows = []
+const t = async (name, f) => { let r; try { r = await f() } catch (e) { r = ['throws', e.name, e.code ?? null] } rows.push(JSON.stringify([name, r])) }
+const read = (kind, blob) => new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => res(['error', String(r.error)]); r[kind](blob) })
+const ab = async (blob) => { const x = await read('readAsArrayBuffer', blob); return [x instanceof ArrayBuffer, [...new Uint8Array(x)]] }
+const bin = [0x00, 0x7f, 0x80, 0xc3, 0x28, 0xff, 0xfe]
+await t('arrayBuffer utf8', () => ab(new Blob(['€é'])))
+await t('arrayBuffer binary', () => ab(new Blob([new Uint8Array(bin)])))
+await t('arrayBuffer empty', () => ab(new Blob([])))
+await t('arrayBuffer file slice', () => ab(new File(['a€b'], 'f').slice(1, 4)))
+await t('dataURL utf8 typed', () => read('readAsDataURL', new Blob(['€é'], { type: 'text/plain' })))
+await t('dataURL binary untyped', () => read('readAsDataURL', new Blob([new Uint8Array(bin)])))
+await t('dataURL empty', () => read('readAsDataURL', new Blob([], { type: 'a/b' })))
+await t('binaryString utf8', () => read('readAsBinaryString', new Blob(['€é'])).then((s) => [...s].map((c) => c.charCodeAt(0))))
+await t('binaryString binary', () => read('readAsBinaryString', new Blob([new Uint8Array(bin)])).then((s) => [...s].map((c) => c.charCodeAt(0))))
+await t('text utf8', () => read('readAsText', new Blob(['€é'])))
+  fs.writeFileSync('out.txt', rows.join('\n'))
+})
+"##,
+    );
+    let r = turbo_test(&p.dir, &["t.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let got = std::fs::read_to_string(p.path("out.txt")).unwrap();
+    let want = r##"["arrayBuffer utf8",[true,[226,130,172,195,169]]]
+["arrayBuffer binary",[true,[0,127,128,195,40,255,254]]]
+["arrayBuffer empty",[true,[]]]
+["arrayBuffer file slice",[true,[226,130,172]]]
+["dataURL utf8 typed","data:text/plain;base64,4oKsw6k="]
+["dataURL binary untyped","data:application/octet-stream;base64,AH+Awyj//g=="]
+["dataURL empty","data:a/b;base64,"]
+["binaryString utf8",[226,130,172,195,169]]
+["binaryString binary",[0,127,128,195,40,255,254]]
+["text utf8","€é"]"##;
+    for (g, w) in got.lines().zip(want.lines()) {
+        assert_eq!(g, w);
+    }
+    assert_eq!(got.lines().count(), want.lines().count());
+}

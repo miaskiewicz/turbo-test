@@ -132,21 +132,6 @@ enum Module {
     },
 }
 
-/// `js` (the module at `path`) with each `import.meta` replaced by the object the module runner
-/// gives app files (`url`, `filename`, `dirname`): the bundle is a CommonJS script, where
-/// `import.meta` does not compile (turbo-test#122).
-fn with_import_meta<'j>(js: &'j str, path: &Path) -> std::borrow::Cow<'j, str> {
-    if !js.contains("import.meta") {
-        return std::borrow::Cow::Borrowed(js);
-    }
-    let quote = |p: &Path| serde_json::to_string(&p.to_string_lossy()).unwrap();
-    let (file, dir) = (quote(path), quote(path.parent().unwrap_or(path)));
-    let meta = format!(
-        "({{ url: globalThis.__pathToFileURL({file}).href, filename: {file}, dirname: {dir} }})"
-    );
-    std::borrow::Cow::Owned(crate::transform::replace_import_meta(js, &meta))
-}
-
 /// Bundle a node_modules package starting at `entry`. `None` → fall back to the esbuild bundle.
 pub fn bundle(entry: &Path) -> Option<String> {
     bundle_capped(entry, MAX_MODULES)
@@ -219,9 +204,10 @@ fn bundle_capped(entry: &Path, max_modules: usize) -> Option<String> {
                 let ctx = LowerCtx {
                     exports_obj: "__tt_exports".to_string(),
                     resolve: Some(&resolve),
+                    // the bundle runs in the entry's wrapper: each module names its own path
+                    module_path: Some(order[idx].to_string_lossy().into_owned()),
                 };
-                let js = with_import_meta(js, &order[idx]);
-                let parts = esm_cjs::transform_to_parts(&js, &ctx)?;
+                let parts = esm_cjs::transform_to_parts(js, &ctx)?;
                 if parts.has_module_syntax {
                     esm_cjs::assemble_module(
                         &parts.requires,

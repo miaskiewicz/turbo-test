@@ -59,7 +59,9 @@ globalThis.console = {
 // its isMusl() reads process.report().header.glibcVersionRuntime to pick gnu vs musl.
 // Hardcoding 'darwin'/'arm64' made every non-mac host load the macOS .node -> dlopen fails.
 globalThis.process = {
-  env: { NODE_ENV: 'test', VITEST: 'true', TZ: 'UTC', TURBO_DOM_PARSER: 'native' },
+  // vitest also sets vite's MODE / DEV / PROD / SSR / BASE_URL (SSR '' under a DOM environment:
+  // the runner sets it per file, turbo-test#123)
+  env: { NODE_ENV: 'test', VITEST: 'true', TZ: 'UTC', TURBO_DOM_PARSER: 'native', MODE: 'test', DEV: '1', PROD: '', SSR: '1', BASE_URL: '/' },
   platform: globalThis.__ttPlatform || 'darwin',
   arch: globalThis.__ttArch || 'arm64',
   // glibcVersionRuntime truthy => glibc (gnu); falsy => musl. __ttGlibc is the glibc
@@ -345,10 +347,43 @@ globalThis.localStorage = new __Storage();
 globalThis.sessionStorage = new __Storage();
 
 // ---- TextEncoder/TextDecoder (host globals; bare V8 has none) ----
-// WHATWG Encoding (UTF-8 only), checked row by row against Node 26 (turbo-test#118): lone
-// surrogates encode as U+FFFD, invalid UTF-8 decodes to U+FFFD per maximal subpart (or throws
-// with `fatal`), a leading BOM is stripped unless `ignoreBOM`, `stream` keeps a partial sequence.
+// WHATWG Encoding, checked row by row against Node 26 (turbo-test#118): lone surrogates encode
+// as U+FFFD, invalid UTF-8 decodes to U+FFFD per maximal subpart (or throws with `fatal`), a
+// leading BOM is stripped unless `ignoreBOM`, `stream` keeps a partial sequence. TextDecoder's
+// other encodings (turbo-test#119) decode natively through encoding_rs (src/text_decoder.rs).
 const __codecError = (Ctor, code, msg) => { const e = new Ctor(msg); e.code = code; return e; };
+// The one WHATWG UTF-8 decoder (turbo-test#121): b[start..end) (any indexable bytes) to a string,
+// one U+FFFD per maximal invalid subpart (or `onBad()`'s throw, for `fatal`). With `stream`, an
+// incomplete-but-valid sequence at the end is left undecoded; returns [string, where it starts].
+function __utf8Run(b, start, end, stream, onBad) {
+  const units = []; let out = '';
+  const unit = (u) => { units.push(u); if (units.length >= 8192) { out += String.fromCharCode.apply(null, units); units.length = 0; } };
+  const bad = () => { if (onBad) onBad(); unit(0xfffd); };
+  let i = start;
+  while (i < end) {
+    const c = b[i];
+    if (c < 0x80) { unit(c); i++; continue; }
+    let need; let cp; let lo = 0x80; let hi = 0xbf;
+    if (c >= 0xc2 && c <= 0xdf) { need = 1; cp = c & 0x1f; }
+    else if (c >= 0xe0 && c <= 0xef) { need = 2; cp = c & 0xf; if (c === 0xe0) lo = 0xa0; if (c === 0xed) hi = 0x9f; }
+    else if (c >= 0xf0 && c <= 0xf4) { need = 3; cp = c & 0x7; if (c === 0xf0) lo = 0x90; if (c === 0xf4) hi = 0x8f; }
+    else { bad(); i++; continue; }
+    let j = i + 1;
+    for (; j <= i + need && j < end; j++) {
+      if (b[j] < lo || b[j] > hi) break;
+      cp = (cp << 6) | (b[j] & 0x3f); lo = 0x80; hi = 0xbf;
+    }
+    if (j > i + need) {
+      if (cp < 0x10000) unit(cp);
+      else { cp -= 0x10000; unit(0xd800 + (cp >> 10)); unit(0xdc00 + (cp & 0x3ff)); }
+    } else if (j === end && stream) break; // valid so far: wait for more
+    else bad(); // one U+FFFD for the maximal subpart b[i..j)
+    i = j;
+  }
+  return [out + String.fromCharCode.apply(null, units), i];
+}
+// UTF-8 decode without BOM handling (Buffer#toString, querystring, URLSearchParams, StringDecoder)
+function __utf8Decode(b, start = 0, end = b.length) { return __utf8Run(b, start, end, false, null)[0]; }
 if (typeof globalThis.TextEncoder === 'undefined') {
   // UTF-8 bytes of s[i..] into out[j..] while they fit; returns [code units read, bytes written]
   const encodeTo = (s, out) => {
@@ -414,46 +449,31 @@ if (typeof globalThis.TextDecoder === 'undefined') {
   globalThis.TextDecoder = class TextDecoder {
     constructor(label = 'utf-8', opts = undefined) {
       const name = `${label}`.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '').replace(/[A-Z]+/g, (c) => c.toLowerCase());
-      if (!LABELS.includes(name)) throw __codecError(RangeError, 'ERR_ENCODING_NOT_SUPPORTED', `The "${label}" encoding is not supported`);
+      // UTF-8 here; any other WHATWG label names its encoding natively (undefined: not a label)
+      const encoding = LABELS.includes(name) ? 'utf-8' : globalThis.__ttTextEncoding(name);
+      if (encoding === undefined) throw __codecError(RangeError, 'ERR_ENCODING_NOT_SUPPORTED', `The "${label}" encoding is not supported`);
+      if (encoding === 'replacement') throw __codecError(RangeError, 'ERR_ENCODING_NOT_SUPPORTED', 'The "replacement" encoding is not supported');
       const o = options(opts);
-      state.set(this, { fatal: !!o.fatal, ignoreBOM: !!o.ignoreBOM, pending: null, bomSeen: false });
+      const id = encoding === 'utf-8' ? 0 : globalThis.__ttTextDecoderId();
+      state.set(this, { encoding, id, fatal: !!o.fatal, ignoreBOM: !!o.ignoreBOM, pending: null, bomSeen: false });
     }
-    get encoding() { self(this); return 'utf-8'; }
+    get encoding() { return self(this).encoding; }
     get fatal() { return self(this).fatal; }
     get ignoreBOM() { return self(this).ignoreBOM; }
     decode(input = undefined, opts = undefined) {
       const st = self(this);
       let b = bytesOf(input);
       const stream = !!options(opts).stream;
-      if (st.pending) { const m = new Uint8Array(st.pending.length + b.length); m.set(st.pending); m.set(b, st.pending.length); b = m; st.pending = null; }
-      const units = []; let out = '';
-      const n = b.length; let i = 0;
-      const unit = (u) => { units.push(u); if (units.length >= 8192) { out += String.fromCharCode.apply(null, units); units.length = 0; } };
-      const bad = () => {
-        if (st.fatal) { st.pending = null; st.bomSeen = false; throw __codecError(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', 'The encoded data was not valid for encoding utf-8'); }
-        unit(0xfffd);
-      };
-      while (i < n) {
-        const c = b[i];
-        if (c < 0x80) { unit(c); i++; continue; }
-        let need; let cp; let lo = 0x80; let hi = 0xbf;
-        if (c >= 0xc2 && c <= 0xdf) { need = 1; cp = c & 0x1f; }
-        else if (c >= 0xe0 && c <= 0xef) { need = 2; cp = c & 0xf; if (c === 0xe0) lo = 0xa0; if (c === 0xed) hi = 0x9f; }
-        else if (c >= 0xf0 && c <= 0xf4) { need = 3; cp = c & 0x7; if (c === 0xf0) lo = 0x90; if (c === 0xf4) hi = 0x8f; }
-        else { bad(); i++; continue; }
-        let j = i + 1;
-        for (; j <= i + need && j < n; j++) {
-          if (b[j] < lo || b[j] > hi) break;
-          cp = (cp << 6) | (b[j] & 0x3f); lo = 0x80; hi = 0xbf;
-        }
-        if (j > i + need) {
-          if (cp < 0x10000) unit(cp);
-          else { cp -= 0x10000; unit(0xd800 + (cp >> 10)); unit(0xdc00 + (cp & 0x3ff)); }
-        } else if (j === n && stream) { st.pending = b.slice(i); break; } // valid so far: wait for more
-        else bad(); // one U+FFFD for the maximal subpart b[i..j)
-        i = j;
+      if (st.id) {
+        const text = globalThis.__ttTextDecode(st.id, st.encoding, st.ignoreBOM, st.fatal, stream, b);
+        if (text === null) throw __codecError(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', `The encoded data was not valid for encoding ${st.encoding}`);
+        return text;
       }
-      out += String.fromCharCode.apply(null, units);
+      if (st.pending) { const m = new Uint8Array(st.pending.length + b.length); m.set(st.pending); m.set(b, st.pending.length); b = m; st.pending = null; }
+      const fail = () => { st.pending = null; st.bomSeen = false; throw __codecError(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', 'The encoded data was not valid for encoding utf-8'); };
+      const [decoded, rest] = __utf8Run(b, 0, b.length, stream, st.fatal ? fail : null);
+      if (rest < b.length) st.pending = b.slice(rest);
+      let out = decoded;
       if (!st.ignoreBOM && !st.bomSeen && out.length > 0) {
         st.bomSeen = true;
         if (out.charCodeAt(0) === 0xfeff) out = out.slice(1);
@@ -474,33 +494,12 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
     return String(v).toWellFormed();
   };
   const need = (n, got, what) => { if (got < n) throw new TypeError(`The ${what} must be specified`); };
-  // UTF-8 decode with U+FFFD for each maximal invalid subpart (WHATWG "UTF-8 decode without BOM")
-  const utf8 = (b) => {
-    let out = '';
-    for (let i = 0; i < b.length;) {
-      const c = b[i];
-      if (c < 0x80) { out += String.fromCharCode(c); i++; continue; }
-      let n; let cp; let lo = 0x80; let hi = 0xbf;
-      if (c >= 0xc2 && c <= 0xdf) { n = 1; cp = c & 0x1f; }
-      else if (c >= 0xe0 && c <= 0xef) { n = 2; cp = c & 0xf; if (c === 0xe0) lo = 0xa0; if (c === 0xed) hi = 0x9f; }
-      else if (c >= 0xf0 && c <= 0xf4) { n = 3; cp = c & 0x7; if (c === 0xf0) lo = 0x90; if (c === 0xf4) hi = 0x8f; }
-      else { out += '�'; i++; continue; }
-      let j = i + 1;
-      for (; j <= i + n; j++) {
-        if (j >= b.length || b[j] < lo || b[j] > hi) break;
-        cp = (cp << 6) | (b[j] & 0x3f); lo = 0x80; hi = 0xbf;
-      }
-      out += j > i + n ? String.fromCodePoint(cp) : '�';
-      i = j;
-    }
-    return out;
-  };
   // percent-decode (a `%` not followed by two hex digits stays as written), then UTF-8 decode.
   // Raw characters are whole UTF-8 sequences, so each run of %XX bytes decodes on its own.
   const pctDecode = (s) => s.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
     const b = [];
     for (let i = 0; i < run.length; i += 3) b.push(parseInt(run.slice(i + 1, i + 3), 16));
-    return utf8(b);
+    return __utf8Decode(b);
   });
   // application/x-www-form-urlencoded parser: pairs split on '&' (empty ones dropped), name and
   // value at the first '=', '+' is a space
@@ -820,38 +819,134 @@ if (typeof globalThis.AbortController === 'undefined') {
     abort(reason) { if (!this.signal || this.signal.aborted) return; this.signal.aborted = true; this.signal.reason = reason || new DOMException('Aborted', 'AbortError'); this.signal._fire(); }
   };
 }
+// Blob / File as Node 26's (turbo-test#120, #128): the parts' bytes are copied at construction
+// (strings as UTF-8, `endings: 'native'` turning CR / CRLF into LF), one chunk per non-empty
+// part, nested Blobs contributing their chunks; size / type / name / lastModified are prototype
+// accessors; slice() takes [Clamp]ed, negative-relative bounds and its own type.
 if (typeof globalThis.Blob === 'undefined') {
-  globalThis.Blob = class Blob {
-    constructor(parts = [], opts = {}) {
-      this._parts = parts || [];
-      this.type = (opts && opts.type) || '';
-      this.size = this._parts.reduce((n, p) => {
-        if (p == null) return n;
-        if (typeof p === 'string') return n + p.length;
-        if (typeof p.byteLength === 'number') return n + p.byteLength; // ArrayBuffer / TypedArray
-        if (typeof p.size === 'number') return n + p.size;             // Blob / File
-        if (typeof p.length === 'number') return n + p.length;
-        return n;
-      }, 0);
-    }
-    text() {
-      return Promise.resolve(this._parts.map((p) => {
-        if (typeof p === 'string') return p;
-        if (p instanceof ArrayBuffer) return new globalThis.TextDecoder('utf-8', { ignoreBOM: true }).decode(new Uint8Array(p));
-        if (p && p.buffer instanceof ArrayBuffer) return new globalThis.TextDecoder('utf-8', { ignoreBOM: true }).decode(p); // TypedArray
-        if (p && typeof p._parts !== 'undefined') return p._parts.join(''); // nested Blob
-        return String(p);
-      }).join(''));
-    }
-    arrayBuffer() { return Promise.resolve(new ArrayBuffer(this.size)); }
-    slice() { return new globalThis.Blob(); }
-    stream() { return null; }
+  const thisErr = (what) => __codecError(TypeError, 'ERR_INVALID_THIS', 'Value of "this" must be of type ' + what);
+  // a type with any character outside U+0020..U+007E is '', otherwise it is lower-cased
+  const normType = (t) => { const s = String(t); return /^[\x20-\x7e]*$/.test(s) ? s.toLowerCase() : ''; };
+  // WebIDL [Clamp] long long: NaN -> 0, ties to even
+  const clamp = (v) => {
+    const n = Number(v);
+    if (Number.isNaN(n)) return 0;
+    if (!Number.isFinite(n)) return n;
+    const f = Math.floor(n), d = n - f;
+    return d < 0.5 ? f : d > 0.5 ? f + 1 : (f % 2 === 0 ? f : f + 1);
   };
+  const received = (v) => typeof v === 'string' ? `type string ('${v}')` : `type ${typeof v} (${String(v)})`;
+  const concat = (chunks, size) => {
+    const out = new Uint8Array(size);
+    let at = 0;
+    for (const c of chunks) { out.set(c, at); at += c.length; }
+    return out;
+  };
+  globalThis.Blob = class Blob {
+    #chunks = [];
+    #size = 0;
+    #type = '';
+    constructor(blobParts = undefined, options = undefined) {
+      if (blobParts !== undefined && (blobParts === null || (typeof blobParts !== 'object' && typeof blobParts !== 'function') || typeof blobParts[Symbol.iterator] !== 'function'))
+        throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'Value cannot be converted to sequence.');
+      if (options != null && typeof options !== 'object' && typeof options !== 'function')
+        throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "options" argument must be a dictionary. Received ' + received(options));
+      const o = options == null ? {} : options;
+      const endings = o.endings === undefined ? 'transparent' : String(o.endings);
+      if (endings !== 'transparent' && endings !== 'native')
+        throw __codecError(TypeError, 'ERR_INVALID_ARG_VALUE', `The property 'options.endings' is invalid. Received '${endings}'`);
+      this.#type = o.type === undefined ? '' : normType(o.type);
+      const add = (c) => { if (c.length) { this.#chunks.push(c); this.#size += c.length; } };
+      for (const p of blobParts === undefined ? [] : blobParts) {
+        if (p instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && p instanceof SharedArrayBuffer)) add(new Uint8Array(p.slice(0)));
+        else if (ArrayBuffer.isView(p)) add(new Uint8Array(p.buffer, p.byteOffset, p.byteLength).slice());
+        else if (p !== null && typeof p === 'object' && #chunks in p) p.#chunks.forEach(add);
+        else {
+          let s = String(p);
+          if (endings === 'native') s = s.replace(/\r\n?/g, '\n');
+          add(new globalThis.TextEncoder().encode(s));
+        }
+      }
+    }
+    get type() { if (!(#chunks in this)) throw thisErr('Blob'); return this.#type; }
+    get size() { if (!(#chunks in this)) throw thisErr('Blob'); return this.#size; }
+    slice(start = undefined, end = undefined, contentType = undefined) {
+      if (!(#chunks in this)) throw thisErr('Blob');
+      const size = this.#size;
+      const rel = (v, dflt) => { if (v === undefined) return dflt; const n = clamp(v); return n < 0 ? Math.max(size + n, 0) : Math.min(n, size); };
+      const from = rel(start, 0), to = rel(end, size);
+      const out = new Blob([], contentType === undefined ? undefined : { type: contentType });
+      let at = 0;
+      for (const c of this.#chunks) {
+        const lo = Math.max(from - at, 0), hi = Math.min(to - at, c.length);
+        if (lo < hi) { out.#chunks.push(lo === 0 && hi === c.length ? c : c.subarray(lo, hi)); out.#size += hi - lo; }
+        at += c.length;
+      }
+      return out;
+    }
+    arrayBuffer() {
+      if (!(#chunks in this)) return Promise.reject(thisErr('Blob'));
+      return Promise.resolve(concat(this.#chunks, this.#size).buffer);
+    }
+    // WHATWG "UTF-8 decode" of all the bytes at once (turbo-test#120): a sequence split across
+    // parts is one character and one leading BOM is stripped, as Node's
+    text() {
+      if (!(#chunks in this)) return Promise.reject(thisErr('Blob'));
+      return Promise.resolve(new globalThis.TextDecoder().decode(concat(this.#chunks, this.#size)));
+    }
+    bytes() {
+      if (!(#chunks in this)) return Promise.reject(thisErr('Blob'));
+      return Promise.resolve(concat(this.#chunks, this.#size));
+    }
+    // a ReadableStream of one Uint8Array (a copy) per chunk
+    stream() {
+      if (!(#chunks in this)) throw thisErr('Blob');
+      const chunks = this.#chunks;
+      let i = 0;
+      return new globalThis.ReadableStream({
+        pull(c) {
+          if (i < chunks.length) c.enqueue(new Uint8Array(chunks[i++]));
+          if (i >= chunks.length) c.close();
+        },
+      });
+    }
+    // the chunks UTF-8-decoded as one stream (a sequence split across chunks is one character),
+    // empty pieces skipped
+    textStream() {
+      if (!(#chunks in this)) throw thisErr('Blob');
+      const chunks = this.#chunks;
+      const dec = new globalThis.TextDecoder();
+      let i = 0;
+      return new globalThis.ReadableStream({
+        pull(c) {
+          while (i < chunks.length) {
+            const s = dec.decode(chunks[i++], { stream: true });
+            if (s) { c.enqueue(s); if (i < chunks.length) return; }
+          }
+          const rest = dec.decode();
+          if (rest) c.enqueue(rest);
+          c.close();
+        },
+      });
+    }
+  };
+  Object.defineProperty(globalThis.Blob.prototype, Symbol.toStringTag, { value: 'Blob', configurable: true });
 }
 if (typeof globalThis.File === 'undefined') {
   globalThis.File = class File extends globalThis.Blob {
-    constructor(parts, name, opts) { super(parts, opts); this.name = String(name); this.lastModified = (opts && opts.lastModified) || 0; }
+    #name;
+    #lastModified;
+    constructor(fileBits, fileName, options = undefined) {
+      if (arguments.length < 2) throw __codecError(TypeError, 'ERR_MISSING_ARGS', 'The "fileBits" and "fileName" arguments must be specified');
+      super(fileBits, options);
+      this.#name = String(fileName);
+      const lm = options == null ? undefined : options.lastModified;
+      this.#lastModified = lm === undefined ? Date.now() : Number(lm);
+    }
+    get name() { if (!(#name in this)) throw __codecError(TypeError, 'ERR_INVALID_THIS', 'Value of "this" must be of type File'); return this.#name; }
+    get lastModified() { if (!(#name in this)) throw __codecError(TypeError, 'ERR_INVALID_THIS', 'Value of "this" must be of type File'); return this.#lastModified; }
   };
+  Object.defineProperty(globalThis.File.prototype, Symbol.toStringTag, { value: 'File', configurable: true });
 }
 // Pure base64 (no btoa<->Buffer interdependency — turbo-dom's btoa calls Buffer.from, so
 // Buffer.toString('base64') must NOT call back into btoa or it infinitely recurses).
@@ -888,10 +983,16 @@ if (typeof globalThis.FileReader === 'undefined') {
     _read(blob, kind) {
       Promise.resolve().then(async () => {
         try {
-          const text = blob && blob.text ? await blob.text() : '';
-          if (kind === 'data') { const bytes = []; for (let i = 0; i < text.length; i++) bytes.push(text.charCodeAt(i) & 255); this.result = 'data:' + ((blob && blob.type) || 'application/octet-stream') + ';base64,' + globalThis.__b64encodeBytes(bytes); }
-          else if (kind === 'buffer') { const u = new Uint8Array((text || '').length); for (let i = 0; i < u.length; i++) u[i] = text.charCodeAt(i) & 255; this.result = u.buffer; }
-          else this.result = text;
+          // the Blob's bytes, not char codes of its decoded text (turbo-test#132)
+          const bytes = async () => {
+            if (blob && typeof blob.bytes === 'function') return blob.bytes();
+            if (blob && typeof blob.arrayBuffer === 'function') return new Uint8Array(await blob.arrayBuffer());
+            return new globalThis.TextEncoder().encode(blob && blob.text ? await blob.text() : '');
+          };
+          if (kind === 'data') this.result = 'data:' + ((blob && blob.type) || 'application/octet-stream') + ';base64,' + globalThis.__b64encodeBytes(await bytes());
+          else if (kind === 'buffer') this.result = (await bytes()).slice().buffer;
+          else if (kind === 'binary') { const b = await bytes(); let s = ''; for (let i = 0; i < b.length; i += 8192) s += String.fromCharCode.apply(null, b.subarray(i, i + 8192)); this.result = s; }
+          else this.result = blob && blob.text ? await blob.text() : '';
           this.readyState = 2;
           const ev = { target: this };
           this._emit('load', ev); this._emit('loadend', ev);
@@ -905,6 +1006,7 @@ if (typeof globalThis.FileReader === 'undefined') {
     readAsDataURL(b) { this._read(b, 'data'); }
     readAsText(b) { this._read(b, 'text'); }
     readAsArrayBuffer(b) { this._read(b, 'buffer'); }
+    readAsBinaryString(b) { this._read(b, 'binary'); }
     addEventListener(n, f) { this['on' + n] = f; }
     removeEventListener(n) { this['on' + n] = null; }
     abort() { this._emit('abort', { target: this }); }
@@ -1472,6 +1574,35 @@ globalThis.__pathToFileURL = (p) => {
   return url;
 };
 globalThis.__dirnameOf = (p) => { const s = String(p).replace(/\/+$/, ''); const i = s.lastIndexOf('/'); return i <= 0 ? '/' : s.slice(0, i); };
+// import.meta (turbo-test#123): the module runner's CJS output (native emit + dep bundler, esbuild
+// transforms) calls __ttImportMeta(<module path>) where the source said `import.meta` — one object
+// per module path, like vitest's (url / filename / dirname / env); the ESM graph's host callback
+// adds the same `env`. vitest's import.meta.env: process.env, read and written live, DEV / PROD /
+// SSR as booleans (vitest module-evaluator createImportMetaEnvProxy).
+const __ttMetaBool = ['DEV', 'PROD', 'SSR'];
+globalThis.__ttImportMetaEnv = new Proxy({}, {
+  get: (_, k) => (typeof k !== 'string' ? undefined : __ttMetaBool.includes(k) ? !!globalThis.process.env[k] : globalThis.process.env[k]),
+  set: (_, k, v) => {
+    if (typeof k === 'string') globalThis.process.env[k] = __ttMetaBool.includes(k) ? (v ? '1' : '') : v;
+    return true;
+  },
+  has: (_, k) => k in globalThis.process.env,
+  deleteProperty: (_, k) => delete globalThis.process.env[k],
+  ownKeys: () => Reflect.ownKeys(globalThis.process.env),
+  getOwnPropertyDescriptor: (_, k) => {
+    if (!Object.prototype.hasOwnProperty.call(globalThis.process.env, k)) return undefined;
+    return { value: globalThis.__ttImportMetaEnv[k], writable: true, enumerable: true, configurable: true };
+  },
+});
+const __ttMetas = new Map();
+globalThis.__ttImportMeta = (filename) => {
+  let m = __ttMetas.get(filename);
+  if (!m) {
+    m = { url: globalThis.__pathToFileURL(filename).href, filename, dirname: globalThis.__dirnameOf(filename), env: globalThis.__ttImportMetaEnv };
+    __ttMetas.set(filename, m);
+  }
+  return m;
+};
 const __os = {
   platform: () => globalThis.__ttPlatform || 'darwin', arch: () => globalThis.__ttArch || 'arm64', type: () => globalThis.__ttOsType || 'Darwin', release: () => '23.0.0',
   version: () => 'Darwin Kernel', EOL: '\n', tmpdir: () => globalThis.__ttTmpdir || '/tmp', homedir: () => globalThis.__ttHomedir || '/', hostname: () => 'localhost',
@@ -2294,31 +2425,6 @@ const __querystring = {
 };
 __querystring.decode = __querystring.parse;
 __querystring.encode = __querystring.stringify;
-// WHATWG UTF-8 decode (one U+FFFD per maximal invalid subpart, like Node's Buffer#toString)
-function __utf8Decode(b, start, end) {
-  let s = '';
-  let i = start || 0;
-  end = end === undefined ? b.length : end;
-  while (i < end) {
-    const c = b[i];
-    if (c < 0x80) { s += String.fromCharCode(c); i++; continue; }
-    let need = 0, cp = 0, lo = 0x80, hi = 0xbf;
-    if (c >= 0xc2 && c <= 0xdf) { need = 1; cp = c & 0x1f; }
-    else if (c >= 0xe0 && c <= 0xef) { need = 2; cp = c & 0xf; if (c === 0xe0) lo = 0xa0; if (c === 0xed) hi = 0x9f; }
-    else if (c >= 0xf0 && c <= 0xf4) { need = 3; cp = c & 0x7; if (c === 0xf0) lo = 0x90; if (c === 0xf4) hi = 0x8f; }
-    else { s += '\ufffd'; i++; continue; }
-    let j = i + 1, k = 0;
-    for (; k < need && j < end; k++, j++) {
-      const x = b[j];
-      if (x < lo || x > hi) break;
-      lo = 0x80; hi = 0xbf;
-      cp = (cp << 6) | (x & 0x3f);
-    }
-    s += k < need ? '\ufffd' : String.fromCodePoint(cp);
-    i = j;
-  }
-  return s;
-}
 // Length of the incomplete-but-valid UTF-8 sequence at the end of b (0 if none).
 function __utf8Tail(b) {
   for (let back = 1; back <= 3 && back <= b.length; back++) {
@@ -3708,14 +3814,14 @@ function __automockProtoMethods(target, proto) {
     for (const k of Object.getOwnPropertyNames(p)) {
       if (k === 'constructor' || Object.prototype.hasOwnProperty.call(target, k)) continue;
       const d = Object.getOwnPropertyDescriptor(p, k);
-      if (typeof d.value === 'function') { const s = makeSpy(); __spies.push(s); target[k] = s; }
+      if (typeof d.value === 'function') { target[k] = __trackSpy(makeSpy()); }
     }
   }
 }
 function __automock(mod, depth) {
   depth = depth || 0;
   if (typeof mod === 'function') {
-    const m = makeSpy(); __spies.push(m);
+    const m = __trackSpy(makeSpy());
     if (depth < 3) {
       // own statics (class static methods are non-enumerable), not the function's built-ins
       for (const k of Object.getOwnPropertyNames(mod)) {
@@ -3743,7 +3849,26 @@ function __automock(mod, depth) {
   }
   return mod;
 }
-const __spies = [];
+// Registry behind vi.clearAllMocks/resetAllMocks/restoreAllMocks, held WEAKLY (turbo-test#124,
+// from alphajew420's miaskiewicz/turbo-test#107). Each spy keeps every call's arguments, receiver
+// and result (`mock.calls` / `instances` / `results`); a strong never-truncated array kept the
+// props, React elements and DOM nodes of every call of every finished file reachable for the
+// whole life of a reused isolate (#79: the heap grew until V8 aborted). A spy something else still
+// references (an installed spyOn, a setup file's vi.fn, a kept module's helper) stays registered
+// with its history, as in vitest; one only the registry knew about can no longer be observed.
+let __spyRefs = [];
+let __spyCompactAt = 4096;
+function __trackSpy(s) {
+  __spyRefs.push(new WeakRef(s));
+  if (__spyRefs.length > __spyCompactAt) {
+    __spyRefs = __spyRefs.filter((r) => r.deref() !== undefined);
+    __spyCompactAt = Math.max(4096, __spyRefs.length * 2);
+  }
+  return s;
+}
+function __eachSpy(f) {
+  for (const r of __spyRefs.slice()) { const s = r.deref(); if (s) f(s); }
+}
 // Record (specifier, evaluated-exports) into a queue the native loader drains after the
 // module runs, registering the mock keyed by the resolved absolute path. The factory runs
 // here, in the calling module's scope (so closures over setup-file vars work). `vitest` is
@@ -3941,7 +4066,7 @@ async function __ttImportsSettled() {
   return __ttImportsSettled();
 }
 globalThis.vi = {
-  fn: (impl) => { const s = makeSpy(impl); __spies.push(s); return s; },
+  fn: (impl) => __trackSpy(makeSpy(impl)),
   spyOn: (obj, key) => {
     const orig = obj[key];
     // Do NOT bind orig to obj — for a prototype-method spy (spyOn(Cls.prototype, 'm')) the
@@ -3955,8 +4080,7 @@ globalThis.vi = {
     const define = (v) => { try { Object.defineProperty(obj, key, { configurable: true, enumerable: true, writable: true, value: v }); } catch (e) { try { obj[key] = v; } catch (e2) {} } };
     s.mockRestore = () => define(orig);
     define(s);
-    __spies.push(s);
-    return s;
+    return __trackSpy(s);
   },
   // Record (specifier, evaluated-exports) into a queue the native loader drains after the
   // module runs, registering the mock keyed by the resolved absolute path. The factory runs
@@ -3972,9 +4096,9 @@ globalThis.vi = {
   doMock: (spec, factory) => __ttMock(spec, factory, true, true),
   doUnmock: (spec) => globalThis.vi.unmock(spec),
   dynamicImportSettled: () => __ttImportsSettled(),
-  clearAllMocks: () => { __spies.forEach((s) => s.mockClear()); },
-  resetAllMocks: () => { __spies.forEach((s) => s.mockReset()); },
-  restoreAllMocks: () => { __spies.forEach((s) => { if (s.mockRestore) s.mockRestore(); }); },
+  clearAllMocks: () => { __eachSpy((s) => s.mockClear()); },
+  resetAllMocks: () => { __eachSpy((s) => s.mockReset()); },
+  restoreAllMocks: () => { __eachSpy((s) => { if (s.mockRestore) s.mockRestore(); }); },
   stubGlobal: (k, v) => {
     const m = globalThis.__stubbedGlobals || (globalThis.__stubbedGlobals = new Map());
     if (!m.has(k)) m.set(k, { had: k in globalThis, val: globalThis[k] });
@@ -6114,10 +6238,6 @@ globalThis.__ttCaptureHookBaseline = () => {
     ba: root.hooks.ba.slice(),
     aa: root.hooks.aa.slice(),
   };
-  // Spies created during setup (e.g. the analytics trackEvent vi.fn()) are the first entries in
-  // __spies and must persist; everything appended by a test file is per-file and must be dropped
-  // on reset. Record the setup count as the truncation point.
-  globalThis.__ttSpyBaseline = __spies.length;
 };
 
 // Per-file reset, modeled on vitest's isolate:false loop (vitest/dist .../base*.js): with

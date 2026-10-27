@@ -990,7 +990,34 @@ fn project_root_uncached(file: &Path) -> Option<PathBuf> {
         }
         d = dir.parent();
     }
+    // No project-local esbuild: pnpm keeps a transitive esbuild under node_modules/.pnpm and links
+    // no node_modules/.bin/esbuild, so every vi.mock factory used to fall back to raw (untransformed)
+    // evaluation. With turbo-test's own esbuild available (TURBO_ESBUILD, set by cli.js), the nearest
+    // ancestor that has node_modules is the root: bare imports resolve from there and the prepass
+    // writes into its node_modules.
+    if std::env::var_os("TURBO_ESBUILD").is_some() {
+        let mut d = file.parent();
+        while let Some(dir) = d {
+            if dir.join("node_modules").is_dir() {
+                return Some(dir.to_path_buf());
+            }
+            d = dir.parent();
+        }
+    }
     None
+}
+
+/// The esbuild binary for `root`: the project's own `node_modules/.bin/esbuild` when it has one,
+/// otherwise turbo-test's bundled esbuild (`TURBO_ESBUILD`, resolved by cli.js).
+fn esbuild_bin(root: &Path) -> PathBuf {
+    let local = root.join("node_modules/.bin/esbuild");
+    if local.exists() {
+        return local;
+    }
+    match std::env::var_os("TURBO_ESBUILD") {
+        Some(p) => PathBuf::from(p),
+        None => local,
+    }
 }
 
 /// Nearest ancestor with `node_modules/typescript` — the root `tsc_transform_esm` needs. Unlike
@@ -1046,7 +1073,7 @@ fn esbuild_bundle_full(
         Some(r) => r.to_path_buf(),
         None => project_root(file)?,
     };
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
     let mtime = std::fs::metadata(file)
         .ok()
@@ -1231,6 +1258,24 @@ fn forced_env(s: &str) -> Option<String> {
             .ok()
             .map(|v| v.to_ascii_lowercase())
     })
+}
+
+/// vite's `process.env.SSR` for `file` as vitest sets it: `''` under a DOM environment
+/// (`jsdom` / `happy-dom`, configured or by pragma — vitest's web transform mode), else `'1'`
+/// (turbo-test#123; runtime.js starts it at `'1'`).
+fn set_ssr_env(scope: &mut v8::PinScope, file: &Path) {
+    let s = std::fs::read_to_string(file).unwrap_or_default();
+    let web = matches!(
+        forced_env(&s).as_deref(),
+        Some("jsdom") | Some("happy-dom") | Some("happydom")
+    );
+    run_js(
+        scope,
+        &format!(
+            "globalThis.process.env.SSR = '{}';",
+            if web { "" } else { "1" }
+        ),
+    );
 }
 
 /// Whether a file needs a DOM environment (so we don't impose one on pure-logic tests,
@@ -1739,9 +1784,9 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String>
         let ext = entry.extension().and_then(|e| e.to_str()).unwrap_or("js");
         let transform = crate::transform::needs_transform(entry);
         let require = format!("globalThis.__mkRequire({entry_dir}, true)");
+        // (runtime.js __ttImportMeta: url / filename / dirname / env, turbo-test#123)
         let meta = format!(
-            "({{ url: {}, filename: {}, dirname: {entry_dir} }})",
-            js_string_literal(&file_url(entry)),
+            "globalThis.__ttImportMeta({})",
             js_string_literal(&entry.to_string_lossy()),
         );
         let scoped = |code: String| {
@@ -2101,7 +2146,7 @@ process.stdout.write(out.outputText);
 /// (TS/decorators lowered), so this is a pure format conversion.
 fn esbuild_format_cjs(root: &Path, js: &str) -> Option<String> {
     use std::io::Write;
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(root);
     let mut child = std::process::Command::new(&esbuild)
         .current_dir(root)
         .args([
@@ -2183,8 +2228,9 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .hash(&mut h);
-    // v4: await_do_mocks_on_import; v5: `__toESM` is runtime.js's `__ttToESM` (turbo-test#122)
-    "native-cjs-v5".hash(&mut h);
+    // v4: await_do_mocks_on_import; v5: import.meta (turbo-test#123); v6: `__toESM` is
+    // runtime.js's `__ttToESM` (turbo-test#122)
+    "native-cjs-v6".hash(&mut h);
     // Legacy-decorator lowering happens inside esm_cjs::emit when the project enables
     // experimentalDecorators/emitDecoratorMetadata AND this file uses a decorator. Without it the
     // native emitter leaves `@Decorator` syntax intact (→ "Unexpected token 'export'") or lowers
@@ -2256,9 +2302,8 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .hash(&mut h);
-    // v4: import.meta is lowered (bundler::with_import_meta), `__toESM` is runtime.js's
-    // `__ttToESM` (turbo-test#122)
-    "native-dep-v4-bundle".hash(&mut h);
+    // v4: import.meta (turbo-test#123); v5: `__toESM` is runtime.js's `__ttToESM` (turbo-test#122)
+    "native-dep-v5-bundle".hash(&mut h);
     let cache = cache_dir().join(format!("ntvdep-{:016x}.cjs", h.finish()));
     if let Ok(c) = std::fs::read_to_string(&cache) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
@@ -2277,7 +2322,7 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
 /// esbuild's export getters to be CONFIGURABLE (so spyOn can redefine them). Cached.
 fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     let root = project_root(file)?;
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
     let raw = std::fs::read_to_string(file).ok()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -2288,9 +2333,10 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
         .hash(&mut h);
     // v2: `import.meta` is filled in (fill_import_meta) instead of esbuild's empty object;
     // v3: import() waits for a pending async vi.doMock (await_do_mocks_on_import);
-    // v4: import.meta.url is the percent-encoded file URL (turbo-test#87)
-    // v5: `__toESM` is runtime.js's `__ttToESM`, `__toCommonJS` marks the module (turbo-test#122)
-    "mr-cjs-v5".hash(&mut h);
+    // v4: import.meta.url is the percent-encoded file URL (turbo-test#87);
+    // v5: import.meta is runtime.js __ttImportMeta (env, one object per module; turbo-test#123)
+    // v6: `__toESM` is runtime.js's `__ttToESM`, `__toCommonJS` marks the module (turbo-test#122)
+    "mr-cjs-v6".hash(&mut h);
     // esbuild can't emit decorator metadata. By default we DON'T pay that cost — only when a
     // decorator file actually threw at load (Mongoose @Prop / Sequelize @Column read design:type
     // at class-definition) does the loader retry with `prefer_metadata`, routing it through the
@@ -2328,7 +2374,7 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
             .and_then(|r| r.ok())
         });
         if let Some(cjs) = meta_esm.and_then(|esm| esbuild_format_cjs(&root, &esm)) {
-            let code = await_do_mocks_on_import(fill_import_meta(postprocess_mr_cjs(cjs)));
+            let code = await_do_mocks_on_import(fill_import_meta(postprocess_mr_cjs(cjs), None));
             let mut code = hoist_mock_setup(&code);
             let shared = shared_mock_lets(&raw);
             if !shared.is_empty() {
@@ -2374,7 +2420,7 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
         return None;
     }
     let code = postprocess_mr_cjs(String::from_utf8(out.stdout).ok()?);
-    let mut code = await_do_mocks_on_import(fill_import_meta(code));
+    let mut code = await_do_mocks_on_import(fill_import_meta(code, None));
     // vitest-style vi.mock hoisting: move consumer requires below the vi.mock setup so the mock
     // is registered (immediately, in this module's scope) before the mocked module loads.
     code = hoist_mock_setup(&code);
@@ -2391,34 +2437,41 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
 }
 
 /// esbuild's `--format=cjs` turns `import.meta` into an empty object (`const import_meta = {};`,
-/// one per source module; `var import_meta = {};` in a package bundle, where `__filename` is the
-/// bundle entry's), so `import.meta.url` read as undefined. Give it the module's own
-/// location instead, as vitest/Node do: `url` (`pathToFileURL(__filename).href`, the
-/// percent-encoded form the ESM-graph import.meta callback gives too), `filename` and `dirname`. They come from the CJS
-/// wrapper's `__filename`/`__dirname` at run time — the transform cache is content-keyed, so the
-/// same source in two places shares one output. Replaced on the same line, so the inline source
-/// map (coverage) keeps its line mapping.
-fn fill_import_meta(code: String) -> String {
+/// one per source module), so `import.meta.url` read as undefined. Give it the module's own
+/// import.meta instead, as vitest/Node do: runtime.js `__ttImportMeta(<path>)` (`url` — the
+/// percent-encoded file URL the ESM-graph callback gives too — `filename`, `dirname` and vitest's
+/// `env`, turbo-test#123). A per-file transform's module is the CJS wrapper's `__filename` at run
+/// time (the transform cache is content-keyed, so the same source in two places shares one
+/// output). In a dep bundle (`bundle_root`: esbuild's cwd) each module's code follows esbuild's
+/// `// <path relative to the cwd>` comment, which names it. Replaced on the same line, so the
+/// inline source map (coverage) keeps its line mapping.
+fn fill_import_meta(code: String, bundle_root: Option<&Path>) -> String {
     if !code.contains("import_meta") {
         return code;
     }
     let mut out = String::with_capacity(code.len() + 96);
+    let mut module: Option<String> = None;
     for line in code.split_inclusive('\n') {
         let body = line.trim_end_matches('\n');
-        // `const` from the per-file transform, `var` from a package bundle
-        let (kw, rest) = match body.strip_prefix("const ") {
-            Some(r) => ("const", Some(r)),
-            None => ("var", body.strip_prefix("var ")),
-        };
-        let decl = rest.and_then(|r| r.strip_suffix(" = {};")).filter(|n| {
-            n.strip_prefix("import_meta")
-                .is_some_and(|d| d.bytes().all(|b| b.is_ascii_digit()))
-        });
+        if let (Some(root), Some(rel)) = (bundle_root, body.strip_prefix("// ")) {
+            let abs = root.join(rel);
+            if abs.is_file() {
+                module = Some(js_string_literal(&abs.to_string_lossy()));
+            }
+        }
+        let decl = body
+            .strip_prefix("const ")
+            .or_else(|| body.strip_prefix("var "))
+            .and_then(|r| r.strip_suffix(" = {};"))
+            .filter(|n| {
+                n.strip_prefix("import_meta")
+                    .is_some_and(|d| d.bytes().all(|b| b.is_ascii_digit()))
+            });
         match decl {
             Some(name) => {
-                out.push_str(&format!(
-                    "{kw} {name} = {{ url: globalThis.__pathToFileURL(__filename).href, filename: __filename, dirname: __dirname }};"
-                ));
+                let kw = &body[..body.find(' ').unwrap_or(0)];
+                let path = module.as_deref().unwrap_or("__filename");
+                out.push_str(&format!("{kw} {name} = globalThis.__ttImportMeta({path});"));
                 out.push_str(&line[body.len()..]);
             }
             None => out.push_str(line),
@@ -3101,7 +3154,7 @@ fn e12_enabled() -> bool {
 /// externalized so it's shared. Returns the bundled code. Cached by entry+mtime.
 fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     let root = project_root(abs)?;
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
     let mtime = std::fs::metadata(abs)
         .ok()
@@ -3112,9 +3165,9 @@ fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     abs.hash(&mut h);
     mtime.hash(&mut h);
-    // v2: `import.meta` is filled in (fill_import_meta), as in app files, `__toESM` is
-    // runtime.js's `__ttToESM` (turbo-test#122)
-    "mr-dep-v2".hash(&mut h);
+    // v2: import.meta filled (turbo-test#123); v3: `__toESM` is runtime.js's `__ttToESM`
+    // (turbo-test#122)
+    "mr-dep-v3".hash(&mut h);
     let cache = cache_dir().join(format!("mrdep-{:016x}.cjs", h.finish()));
     if let Ok(c) = std::fs::read_to_string(&cache) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
@@ -3153,7 +3206,10 @@ fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     // `__toESM(require(x), 1)` (node interop for ESM `import default`) sets `.default` to the
     // whole module, so `import styled from '@emotion/styled'` yields the exports object instead
     // of the styled function (breaking flux-ui etc.).
-    let code = fill_import_meta(postprocess_mr_cjs(String::from_utf8(out.stdout).ok()?));
+    let code = fill_import_meta(
+        postprocess_mr_cjs(String::from_utf8(out.stdout).ok()?),
+        Some(&root),
+    );
     write_atomic(&cache, &code);
     Some(code)
 }
@@ -5315,6 +5371,14 @@ extern "C" fn import_meta_callback(
             meta.create_data_property(scope, k.into(), v.into());
         }
     }
+    // vitest's import.meta.env (process.env, live; runtime.js), as the CJS paths' __ttImportMeta
+    // (turbo-test#123)
+    let global = context.global(scope);
+    let name = v8::String::new(scope, "__ttImportMetaEnv").unwrap();
+    if let Some(env) = global.get(scope, name.into()).filter(|v| v.is_object()) {
+        let k = v8::String::new(scope, "env").unwrap();
+        meta.create_data_property(scope, k.into(), env);
+    }
 }
 
 fn dynamic_import_callback<'s>(
@@ -5774,6 +5838,24 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         global,
         "__ttStructuredClone",
         crate::structured_clone::native_structured_clone,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttTextEncoding",
+        crate::text_decoder::native_text_encoding,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttTextDecoderId",
+        crate::text_decoder::native_text_decoder_id,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttTextDecode",
+        crate::text_decoder::native_text_decode,
     );
     if std::env::var("TURBO_STACK").is_ok() {
         if let Some(code) = v8::String::new(scope, "globalThis.__TT_STACK=true") {
@@ -6650,12 +6732,11 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         // snapshot; Context::new yields the baked default context (framework already
         // present). We time setup (isolate+context+natives) — the M3/M0 guardrail.
         let setup_start = std::time::Instant::now();
-        let blob = framework_snapshot();
-        let params =
-            v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(blob.clone()));
-        let isolate = &mut v8::Isolate::new(params);
+        let isolate = &mut v8::Isolate::new(isolate_params());
         isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
         isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
+        crate::heap_guard::install(isolate);
+        crate::heap_guard::arm();
         // Coverage: attach an inspector to this isolate BEFORE entering scopes (needs &mut isolate).
         let mut collector =
             crate::coverage::enabled().then(|| crate::coverage::Collector::new(isolate));
@@ -6693,6 +6774,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         }
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
 
+        set_ssr_env(scope, &entry_abs);
         let result = 'work: {
             // 0. DOM environment (turbo-dom) — only for files that need it, so pure-logic
             //    tests keep their clean globals (mirrors vitest per-file environment).
@@ -6801,6 +6883,19 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
             drive_tests(scope, global, &entry_abs)
         };
 
+        // A file that ran into the isolate's heap limit was terminated by the heap guard: report
+        // that, not whatever the half-unwound run happened to say.
+        let result = if crate::heap_guard::tripped() {
+            Err(crate::heap_guard::oom_message(
+                scope.get_heap_statistics().heap_size_limit(),
+            ))
+        } else {
+            result
+        };
+        if crate::heap_guard::log_enabled() {
+            log_heap(scope, &entry_abs, false);
+        }
+
         // Coverage: read out V8's precise counts for everything this file executed, then map the
         // byte ranges back to original source lines. Done before teardown (isolate still alive).
         if let Some(c) = collector.as_mut() {
@@ -6821,6 +6916,37 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     outcome
 }
 
+/// Create params for a worker isolate: the framework snapshot, plus an explicit heap limit when
+/// `TURBO_MAX_HEAP_MB` is set.
+fn isolate_params() -> v8::CreateParams {
+    let blob = framework_snapshot();
+    let params = v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(blob.clone()));
+    match crate::heap_guard::max_heap_bytes() {
+        Some(max) => params.heap_limits(0, max),
+        None => params,
+    }
+}
+
+/// `TURBO_HEAP_LOG`: the isolate's heap after a full GC, one stderr line per file.
+fn log_heap(scope: &mut v8::PinScope, entry: &Path, recycled: bool) {
+    scope.low_memory_notification();
+    let st = scope.get_heap_statistics();
+    let modules = REGISTRY.with(|r| {
+        let r = r.borrow();
+        r.cjs_exports.len() + r.esm_by_path.len()
+    });
+    eprintln!(
+        "[heap] {:?} used={}MB total={}MB limit={}MB modules={} recycled={} {}",
+        std::thread::current().id(),
+        crate::heap_guard::mb(st.used_heap_size()),
+        crate::heap_guard::mb(st.total_heap_size()),
+        crate::heap_guard::mb(st.heap_size_limit()),
+        modules,
+        recycled,
+        entry.display()
+    );
+}
+
 /// Reuse path: run one file on this worker's persistent isolate+context. node_modules modules
 /// stay evaluated across files; per-file framework + app state is reset between files.
 fn run_test_file_reused(
@@ -6834,17 +6960,17 @@ fn run_test_file_reused(
     // init the persistent isolate once per worker
     REUSE_ISO.with(|iso_cell| {
         if iso_cell.borrow().is_none() {
-            let blob = framework_snapshot();
-            let params =
-                v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(blob.clone()));
-            let mut isolate = v8::Isolate::new(params);
+            let mut isolate = v8::Isolate::new(isolate_params());
             isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
             isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
+            crate::heap_guard::install(&mut isolate);
             *iso_cell.borrow_mut() = Some(isolate);
         }
     });
 
-    REUSE_ISO.with(|iso_cell| {
+    crate::heap_guard::arm();
+    // (result, replace this worker's isolate before the next file)
+    let (outcome, recycle) = REUSE_ISO.with(|iso_cell| {
         let mut iso_b = iso_cell.borrow_mut();
         let isolate = iso_b.as_mut().unwrap();
         v8::scope!(let scope, isolate);
@@ -6905,6 +7031,7 @@ fn run_test_file_reused(
         }
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
 
+        set_ssr_env(scope, entry_abs);
         let result: Result<TestReport, String> = 'work: {
             // DOM: install once per worker; subsequent files reset it via env.reset() above.
             if needs_dom(entry_abs) && !DOM_INSTALLED.with(|d| d.get()) {
@@ -7010,13 +7137,44 @@ fn run_test_file_reused(
             drive_tests(scope, global, entry_abs)
         };
 
+        // Heap guard. A file that hit the limit was terminated mid-run: report the OOM and throw
+        // the isolate away. Otherwise a reused isolate only ever gets bigger (every file's module
+        // graph and DOM stays reachable by design, like vitest's `isolate: false`), so once its
+        // live heap passes the threshold after a full GC it is replaced and the next file boots a
+        // new one (re-running the setup files), instead of growing until V8 aborts the process.
+        let limit = scope.get_heap_statistics().heap_size_limit();
+        let tripped = crate::heap_guard::tripped();
+        let threshold = crate::heap_guard::recycle_threshold(limit);
+        let mut recycle = tripped;
+        if !tripped
+            && (crate::heap_guard::log_enabled()
+                || scope.get_heap_statistics().used_heap_size() > threshold / 2)
+        {
+            scope.low_memory_notification();
+            recycle = scope.get_heap_statistics().used_heap_size() > threshold;
+            if crate::heap_guard::log_enabled() {
+                log_heap(scope, entry_abs, recycle);
+            }
+        }
+        let result = if tripped {
+            Err(crate::heap_guard::oom_message(limit))
+        } else {
+            result
+        };
         // NOTE: no clear_registry() here — node_modules Globals stay alive for the next file;
         // app + mock entries are pruned at the top of the next file (reset_app_registry).
-        result.map(|mut r| {
-            r.setup_us = setup_us;
-            r
-        })
-    })
+        (
+            result.map(|mut r| {
+                r.setup_us = setup_us;
+                r
+            }),
+            recycle,
+        )
+    });
+    if recycle {
+        end_worker_reuse();
+    }
+    outcome
 }
 
 /// End-of-worker cleanup for the reuse path: drop registry Globals + the context while the
@@ -7027,6 +7185,9 @@ pub fn end_worker_reuse() {
         return;
     }
     clear_registry();
+    // Globals: drop them while the isolate is still alive (a recycled isolate is followed by more
+    // files on this thread, so a handle outliving its isolate would not stay harmless).
+    SETUP_MOCK_SNAPSHOT.with(|s| s.borrow_mut().clear());
     REUSE_CTX.with(|c| {
         let _ = c.borrow_mut().take();
     });
@@ -7035,7 +7196,6 @@ pub fn end_worker_reuse() {
     });
     DOM_INSTALLED.with(|d| d.set(false));
     SETUP_MOCKS.with(|s| s.borrow_mut().clear());
-    SETUP_MOCK_SNAPSHOT.with(|s| s.borrow_mut().clear());
     REUSE_SETUP_ERROR.with(|e| e.borrow_mut().take());
 }
 

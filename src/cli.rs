@@ -495,7 +495,9 @@ pub fn looks_transient(r: &FileOutcome) -> bool {
                         && (f.contains("document") || f.contains("window") || f.contains("DOM"))
                 })
         }
-        Err(_) => true,
+        // A file the heap guard stopped: same-mode retries would only run out of memory again
+        // (under reuse the fresh-isolate retry below still gives it a clean heap).
+        Err(e) => !crate::heap_guard::is_oom(e),
     }
 }
 
