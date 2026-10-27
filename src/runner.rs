@@ -1791,14 +1791,21 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String>
         // registers runtime.js's error stand-in, as the module's own call would. If the
         // replayed declarations fail, the mocks are registered without them.
         let hoisted = extract_hoisted(&src).join("\n");
+        // a jest.mock stays one: its factory is its own default (turbo-test#137)
+        let jest = extract_mock_calls(&src, ["jest.mock(", "jest.mock("]);
         let calls: String = mocks
             .iter()
             .map(|(spec, factory)| {
                 let s = js_string_literal(spec);
-                if factory.is_empty() {
-                    format!("vi.mock({s});\n")
+                let api = if jest.iter().any(|(j, f)| j == spec && f == factory) {
+                    "jest"
                 } else {
-                    format!("vi.mock({s}, {factory});\n")
+                    "vi"
+                };
+                if factory.is_empty() {
+                    format!("{api}.mock({s});\n")
+                } else {
+                    format!("{api}.mock({s}, {factory});\n")
                 }
             })
             .collect();
@@ -4358,8 +4365,13 @@ fn synth_eval<'s>(
                 esm_marked(scope, *o)
             }
         })
-        .and_then(|o| o.get(scope, dkey.into()))
-        .unwrap_or(exports);
+        .and_then(|o| o.get(scope, dkey.into()));
+    let default = match default {
+        Some(d) => d,
+        // a vi.mock factory without `default`: its use throws vitest's error (turbo-test#137)
+        None if is_mock => mock_default(scope, exports).unwrap_or(exports),
+        None => exports,
+    };
     module.set_synthetic_module_export(scope, dkey, default)?;
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(exports) {
         for n in names {
@@ -4379,6 +4391,19 @@ fn synth_eval<'s>(
         }
     }
     Some(v8::undefined(scope).into())
+}
+
+/// runtime.js's `__ttMockDefault(exports)`: the default export of a mock whose factory returned
+/// no `default` (a stand-in that throws vitest's error when used, turbo-test#137).
+fn mock_default<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    exports: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let global = scope.get_current_context().global(scope);
+    let k = v8::String::new(scope, "__ttMockDefault")?;
+    let f = v8::Local::<v8::Function>::try_from(global.get(scope, k.into())?).ok()?;
+    let undef = v8::undefined(scope).into();
+    f.call(scope, undef, &[exports])
 }
 
 // ---- Layer B: lazy module stubs -------------------------------------------
@@ -4728,6 +4753,17 @@ fn native_require(
     // a mocks entry without them would load the real module rather than serve an empty `{}`.
     // (an entry the test put into require.cache is served like a mock)
     let put = CACHE_PUT.with(|c| c.borrow().contains(&abs));
+    // A package's own require() sees no vi.mock: vitest loads an external through Node, which
+    // never consults the mock registry (turbo-test#135).
+    if !put
+        && dir.contains("/node_modules/")
+        && REGISTRY.with(|r| r.borrow().mocks.contains_key(&abs))
+    {
+        if let Some(g) = actual_exports(scope, &abs) {
+            rv.set(v8::Local::new(scope, &g));
+            return;
+        }
+    }
     let mocked = REGISTRY.with(|r| {
         let reg = r.borrow();
         (put || reg.mocks.contains_key(&abs)) && reg.cjs_exports.contains_key(&abs)
@@ -4874,6 +4910,57 @@ fn native_register_mock(
     }
 }
 
+/// The REAL exports of `abs`, never a registered mock: vi.importActual / importOriginal, and a
+/// package's own require() of a mocked module (turbo-test#135).
+fn actual_exports(scope: &mut v8::PinScope, abs: &Path) -> Option<v8::Global<v8::Value>> {
+    // importActual/importOriginal returns the REAL module, NOT a registered mock (else a factory
+    // doing `mockImplementation(actual.fn)` points the spy at itself → infinite recursion).
+    // Prefer the genuine exports cached when the real module was loaded (no re-run → no dual
+    // instances of singletons like react-query). If never really loaded, load it once with the
+    // mock records temporarily removed, then restore them.
+    if let Some(g) = REGISTRY.with(|r| r.borrow().real_exports.get(abs).cloned()) {
+        return Some(g);
+    }
+    let saved = REGISTRY.with(|r| {
+        let mut reg = r.borrow_mut();
+        if reg.mocks.contains_key(abs) {
+            let m = reg.mocks.remove(abs);
+            let e = reg.cjs_exports.remove(abs);
+            let s = reg.cjs_synth_by_path.remove(abs);
+            let n = reg.cjs_export_names.remove(abs);
+            Some((m, e, s, n))
+        } else {
+            None
+        }
+    });
+    let _ = load_cjs(scope, abs, true);
+    let real = REGISTRY.with(|r| {
+        r.borrow()
+            .real_exports
+            .get(abs)
+            .cloned()
+            .or_else(|| r.borrow().cjs_exports.get(abs).cloned())
+    });
+    if let Some((m, e, s, n)) = saved {
+        REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            if let Some(m) = m {
+                reg.mocks.insert(abs.to_path_buf(), m);
+            }
+            if let Some(e) = e {
+                reg.cjs_exports.insert(abs.to_path_buf(), e);
+            }
+            if let Some(s) = s {
+                reg.cjs_synth_by_path.insert(abs.to_path_buf(), s);
+            }
+            if let Some(n) = n {
+                reg.cjs_export_names.insert(abs.to_path_buf(), n);
+            }
+        });
+    }
+    real
+}
+
 /// __ttImportActual(dir, spec): load the REAL module (for vi.importActual / importOriginal in
 /// partial mocks like `{ ...await vi.importActual('@tanstack/react-query'), useQueryClient }`)
 /// and return its exports object so the factory can spread the real named exports.
@@ -4895,53 +4982,7 @@ fn native_import_actual(
     let Some(abs) = resolve_spec(&spec, Path::new(&dir)) else {
         return;
     };
-    // importActual/importOriginal returns the REAL module, NOT a registered mock (else a factory
-    // doing `mockImplementation(actual.fn)` points the spy at itself → infinite recursion).
-    // Prefer the genuine exports cached when the real module was loaded (no re-run → no dual
-    // instances of singletons like react-query). If never really loaded, load it once with the
-    // mock records temporarily removed, then restore them.
-    if let Some(g) = REGISTRY.with(|r| r.borrow().real_exports.get(&abs).cloned()) {
-        rv.set(v8::Local::new(scope, &g));
-        return;
-    }
-    let saved = REGISTRY.with(|r| {
-        let mut reg = r.borrow_mut();
-        if reg.mocks.contains_key(&abs) {
-            let m = reg.mocks.remove(&abs);
-            let e = reg.cjs_exports.remove(&abs);
-            let s = reg.cjs_synth_by_path.remove(&abs);
-            let n = reg.cjs_export_names.remove(&abs);
-            Some((m, e, s, n))
-        } else {
-            None
-        }
-    });
-    let _ = load_cjs(scope, &abs, true);
-    let real = REGISTRY.with(|r| {
-        r.borrow()
-            .real_exports
-            .get(&abs)
-            .cloned()
-            .or_else(|| r.borrow().cjs_exports.get(&abs).cloned())
-    });
-    if let Some((m, e, s, n)) = saved {
-        REGISTRY.with(|r| {
-            let mut reg = r.borrow_mut();
-            if let Some(m) = m {
-                reg.mocks.insert(abs.clone(), m);
-            }
-            if let Some(e) = e {
-                reg.cjs_exports.insert(abs.clone(), e);
-            }
-            if let Some(s) = s {
-                reg.cjs_synth_by_path.insert(abs.clone(), s);
-            }
-            if let Some(n) = n {
-                reg.cjs_export_names.insert(abs.clone(), n);
-            }
-        });
-    }
-    if let Some(g) = real {
+    if let Some(g) = actual_exports(scope, &abs) {
         rv.set(v8::Local::new(scope, &g));
     }
 }

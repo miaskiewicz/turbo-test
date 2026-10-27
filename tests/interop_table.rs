@@ -21,35 +21,13 @@ use std::path::Path;
 /// turbo-test's description: `(loader, row, turbo-test's value, issue)`. `loader` is `"mr"`,
 /// `"graph"` or `"*"` (both).
 const KNOWN: &[(&str, &str, &str, &str)] = &[
-    (
-        "*",
-        "mock|automock default",
-        "{Comp=fn:fn,a=number:1}",
-        "turbo-test#136",
-    ),
+    // an automock's namespace has only Node's keys (`default`, `module.exports`, the names
+    // cjs-module-lexer finds)
     (
         "*",
         "mock|automock named",
-        "fn:fn",
+        "fn:Comp",
         "turbo-test#136",
-    ),
-    (
-        "graph",
-        "mock|factory without default",
-        "{named=string:only}",
-        "turbo-test#137",
-    ),
-    (
-        "mr",
-        "mock|tsc-out",
-        "{default=fn:TscComp,named=string:n,viaDefault=fn:DefFlag,viaPlain={default=fn:Mocked},viaStar={default=obj}}!esm",
-        "turbo-test#135",
-    ),
-    (
-        "graph",
-        "mock|tsc-out",
-        "{default=fn:TscComp,named=string:n,viaDefault={default=fn:DefFlag,named=string:mocked},viaPlain={default=fn:Mocked},viaStar={default=obj}}!esm",
-        "turbo-test#135",
     ),
 ];
 
