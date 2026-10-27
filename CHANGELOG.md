@@ -347,6 +347,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   Every other label threw RangeError `ERR_ENCODING_NOT_SUPPORTED`. Node's ICU big5 / euc-jp /
   euc-kr / shift_jis decoders differ from the Encoding Standard on some bytes; turbo-test follows
   the standard there (vitest.compat.md).
+- `expect(value, message)` keeps its message (turbo-test#138): a failing matcher's error (chai
+  AssertionError or a jest-style / `expect.extend` matcher's Error, also through `.not`,
+  `.resolves` / `.rejects` and `expect.soft`) starts with `message: `, as vitest's
+  (`GOT<x>: expected 1 to be 2 // Object.is equality`); it was dropped from the error, the
+  default reporter and the json reporter's `failureMessages`.
 - `FileReader` behaves as jsdom's (turbo-test#139): a read sets `readyState` LOADING at once and
   fires `loadstart`, `progress` (with `loaded` / `total`), `load` and `loadend` (only `load` /
   `loadend` fired); `addEventListener` keeps every listener (it replaced `on<type>`) and

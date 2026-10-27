@@ -1651,7 +1651,6 @@ await t('listener this and order onload last', () => run((r, log, ev) => { r.onl
 }
 
 #[test]
-#[ignore = "turbo-test#138: fails until the fix"]
 fn expect_message_prefixes_the_failure_like_vitest() {
     // turbo-test#138: `expect(value, message)` prefixes `message: ` to the failure of every chai
     // and jest-style matcher (also through .not, .resolves / .rejects and expect.extend
@@ -1709,7 +1708,11 @@ fs.writeFileSync('out.txt', rows.join('\n'))
 test('reported', () => { expect(1, 'GOT<x>').toBe(2) })
 "##,
     );
-    let r = turbo_test(&p.dir, &["t.test.js"], &[("NO_COLOR", "1")]);
+    let r = turbo_test(
+        &p.dir,
+        &["t.test.js", "--reporter", "default"],
+        &[("NO_COLOR", "1"), ("TURBO_LEGACY_REPORTER", "0")],
+    );
     assert_eq!(r.code, Some(1), "{}", r.all());
     assert!(
         r.all()

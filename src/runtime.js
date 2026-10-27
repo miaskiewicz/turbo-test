@@ -3437,7 +3437,7 @@ function __snapFinish(skipped) {
 }
 
 // ---- expect ----
-function makeExpect(actual, negated = false) {
+function makeExpect(actual, negated = false, message = undefined) {
   // `msg` is a thunk: the failure message (and the formatting of the operands in it) is built
   // only when the assertion fails, as vitest does — formatting can throw (a native class
   // prototype whose members check their receiver) and must not fail a passing assertion.
@@ -3456,7 +3456,7 @@ function makeExpect(actual, negated = false) {
   };
   const argsEqual = (a, b) => a.length === b.length && a.every((x, i) => deepEqual(x, b[i]));
   const api = {
-    get not() { return makeExpect(actual, !negated); },
+    get not() { return makeExpect(actual, !negated, message); },
     toBeTypeOf(t) { c(typeof actual === t, 'expected #{this} to be type of #{exp}', 'expected #{this} not to be type of #{exp}', t, typeof actual); },
     // a jest-style matcher in vitest: a plain Error with its matcher hint
     toSatisfy(fn, message) {
@@ -3481,7 +3481,7 @@ function makeExpect(actual, negated = false) {
       const mk = (neg) => new Proxy({}, { get: (_, m) => {
         if (m === 'not') return mk(!neg);
         return (...args) => Promise.resolve(actual).then(
-          (v) => makeExpect(v, neg)[m](...args),
+          (v) => makeExpect(v, neg, message)[m](...args),
           (e) => { const err = new __ChaiAssertionError(`promise rejected "${__inspect(e)}" instead of resolving`, { showDiff: false }); err.cause = e; throw err; },
         );
       } });
@@ -3493,7 +3493,7 @@ function makeExpect(actual, negated = false) {
         return (...args) => Promise.resolve(actual).then(
           (v) => { throw new __ChaiAssertionError(`promise resolved "${__inspect(v)}" instead of rejecting`, { actual: v, expected: new Error('rejected promise') }); },
           // `.rejects.toThrow()` checks the rejection as a thrown error (vitest wraps it in a thrower)
-          (e) => (m === 'toThrow' || m === 'toThrowError' ? makeExpect(() => { throw e; }, neg) : makeExpect(e, neg))[m](...args),
+          (e) => (m === 'toThrow' || m === 'toThrowError' ? makeExpect(() => { throw e; }, neg, message) : makeExpect(e, neg, message))[m](...args),
         );
       } });
       return mk(negated);
@@ -3776,7 +3776,32 @@ function makeExpect(actual, negated = false) {
       return api;
     };
   }
+  // expect(value, message): vitest prefixes `message: ` to a matcher's failure (turbo-test#138)
+  if (message) {
+    for (const name of Object.keys(api)) {
+      const d = Object.getOwnPropertyDescriptor(api, name);
+      if (typeof d.value !== 'function') continue;
+      const matcher = d.value;
+      api[name] = (...args) => {
+        let r;
+        try { r = matcher(...args); } catch (e) { throw __withExpectMessage(e, message); }
+        return r && typeof r.then === 'function' ? r.then(undefined, (e) => { throw __withExpectMessage(e, message); }) : r;
+      };
+    }
+  }
   return api;
+}
+// `message: ` before the message (and the stack's first line) of an assertion failure: chai's
+// AssertionError or a jest-style matcher's plain Error, once; any other error (a TypeError from
+// a non-spy, ...) passes through
+const __prefixedErrors = new WeakSet();
+function __withExpectMessage(e, message) {
+  if (!(e instanceof __ChaiAssertionError || (e instanceof Error && e.constructor === Error)) || __prefixedErrors.has(e)) return e;
+  __prefixedErrors.add(e);
+  const before = `${e.name}: ${e.message}`;
+  e.message = `${message}: ${e.message}`;
+  if (typeof e.stack === 'string' && e.stack.startsWith(before)) e.stack = `${e.name}: ${e.message}` + e.stack.slice(before.length);
+  return e;
 }
 const __matcherUtils = {
   printReceived: (x) => fmt(x),
@@ -3794,7 +3819,7 @@ const __matcherUtils = {
   highlightTrailingWhitespace: (s) => s,
 };
 const __customMatchers = {};
-globalThis.expect = (actual) => { __snap.assertCount++; return makeExpect(actual); };
+globalThis.expect = (actual, message) => { __snap.assertCount++; return makeExpect(actual, false, message); };
 globalThis.expect.extend = (matchers) => { Object.assign(__customMatchers, matchers || {}); };
 // expect.assertions(n) / expect.hasAssertions(): record the expectation; runSuite verifies the
 // count at test end (see __snap.assertCount, reset per test). These calls do NOT count themselves.
@@ -3805,7 +3830,7 @@ globalThis.expect.hasAssertions = function hasAssertions() {
   if (Error.captureStackTrace) Error.captureStackTrace(error, hasAssertions);
   __snap.hasAssertions = error;
 };
-globalThis.expect.soft = (actual) => { __snap.assertCount++; return makeExpect(actual); };
+globalThis.expect.soft = (actual, message) => { __snap.assertCount++; return makeExpect(actual, false, message); };
 globalThis.expect.any = (ctor) => new Asymmetric('any', ctor);
 globalThis.expect.anything = () => new Asymmetric('anything');
 globalThis.expect.objectContaining = (s) => new Asymmetric('objectContaining', s);
