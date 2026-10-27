@@ -1511,3 +1511,55 @@ await t('File name is accessor', () => typeof Object.getOwnPropertyDescriptor(Fi
     }
     assert_eq!(got.lines().count(), want.lines().count());
 }
+
+#[test]
+#[ignore = "turbo-test#132: fails until the fix"]
+fn file_reader_reads_the_blob_bytes() {
+    // turbo-test#132: FileReader's readAsArrayBuffer / readAsDataURL / readAsBinaryString read the
+    // Blob's bytes (UTF-8 text and non-UTF-8 binary alike), not char codes of its decoded text.
+    // Node 26 has no FileReader; expected: jsdom (vitest's jsdom environment; happy-dom gives the
+    // same rows). Each row is [case, result].
+    let p = Project::new("rc-file-reader-bytes");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "t.test.js",
+        r##"import { test } from 'vitest'
+import * as fs from 'node:fs'
+test('FileReader bytes', async () => {
+  const rows = []
+const t = async (name, f) => { let r; try { r = await f() } catch (e) { r = ['throws', e.name, e.code ?? null] } rows.push(JSON.stringify([name, r])) }
+const read = (kind, blob) => new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => res(['error', String(r.error)]); r[kind](blob) })
+const ab = async (blob) => { const x = await read('readAsArrayBuffer', blob); return [x instanceof ArrayBuffer, [...new Uint8Array(x)]] }
+const bin = [0x00, 0x7f, 0x80, 0xc3, 0x28, 0xff, 0xfe]
+await t('arrayBuffer utf8', () => ab(new Blob(['€é'])))
+await t('arrayBuffer binary', () => ab(new Blob([new Uint8Array(bin)])))
+await t('arrayBuffer empty', () => ab(new Blob([])))
+await t('arrayBuffer file slice', () => ab(new File(['a€b'], 'f').slice(1, 4)))
+await t('dataURL utf8 typed', () => read('readAsDataURL', new Blob(['€é'], { type: 'text/plain' })))
+await t('dataURL binary untyped', () => read('readAsDataURL', new Blob([new Uint8Array(bin)])))
+await t('dataURL empty', () => read('readAsDataURL', new Blob([], { type: 'a/b' })))
+await t('binaryString utf8', () => read('readAsBinaryString', new Blob(['€é'])).then((s) => [...s].map((c) => c.charCodeAt(0))))
+await t('binaryString binary', () => read('readAsBinaryString', new Blob([new Uint8Array(bin)])).then((s) => [...s].map((c) => c.charCodeAt(0))))
+await t('text utf8', () => read('readAsText', new Blob(['€é'])))
+  fs.writeFileSync('out.txt', rows.join('\n'))
+})
+"##,
+    );
+    let r = turbo_test(&p.dir, &["t.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let got = std::fs::read_to_string(p.path("out.txt")).unwrap();
+    let want = r##"["arrayBuffer utf8",[true,[226,130,172,195,169]]]
+["arrayBuffer binary",[true,[0,127,128,195,40,255,254]]]
+["arrayBuffer empty",[true,[]]]
+["arrayBuffer file slice",[true,[226,130,172]]]
+["dataURL utf8 typed","data:text/plain;base64,4oKsw6k="]
+["dataURL binary untyped","data:application/octet-stream;base64,AH+Awyj//g=="]
+["dataURL empty","data:a/b;base64,"]
+["binaryString utf8",[226,130,172,195,169]]
+["binaryString binary",[0,127,128,195,40,255,254]]
+["text utf8","€é"]"##;
+    for (g, w) in got.lines().zip(want.lines()) {
+        assert_eq!(g, w);
+    }
+    assert_eq!(got.lines().count(), want.lines().count());
+}
