@@ -66,7 +66,6 @@ fn errors_print_as_vitest_print_error() {
 }
 
 #[test]
-#[ignore = "turbo-test#169: fails until the fix"]
 fn anonymous_async_frames_keep_their_location() {
     // turbo-test#169: V8 writes an anonymous function suspended at an await as
     // `at async <location>` (no parentheses); its location was read as `async /p/…` and the

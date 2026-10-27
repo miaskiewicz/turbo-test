@@ -67,7 +67,9 @@ pub fn parse_stack(stack: &str) -> Vec<Frame> {
         .filter_map(|rest| {
             let (method, loc) = match rest.strip_suffix(')').and_then(|r| r.rsplit_once(" (")) {
                 Some((m, loc)) => (m, loc),
-                None => ("", rest),
+                // an anonymous frame: `at <location>`, or `at async <location>` when it is
+                // suspended at an await (turbo-test#169)
+                None => ("", rest.strip_prefix("async ").unwrap_or(rest)),
             };
             let loc = loc.strip_prefix("file://").unwrap_or(loc);
             let (file_line, col) = loc.rsplit_once(':')?;

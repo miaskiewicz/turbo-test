@@ -7,7 +7,6 @@ mod common;
 use common::{turbo_test, Project};
 
 #[test]
-#[ignore = "turbo-test#169: fails until the fix"]
 fn an_error_made_after_an_await_keeps_the_test_file_frame() {
     let p = Project::new("rc-async-frame");
     p.file("package.json", r#"{ "type": "module" }"#);
