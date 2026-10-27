@@ -558,6 +558,19 @@ fn coloured_errors_are_printed_as_vitest() {
         print_error(&e, &dir, true, "", &C),
         "\x1b[31m\x1b[1mError\x1b[22m: bad\x1b[39m\n\x1b[90m \x1b[2m❯\x1b[22m f gone.ts:\x1b[2m1:1\x1b[22m\x1b[39m\n\x1b[36m \x1b[2m❯\x1b[22m a.test.ts:\x1b[2m1:1\x1b[22m\x1b[39m\n    \x1b[90m  1|\x1b[39m \x1b[35mthrow\x1b[39m \x1b[34m1\x1b[39m\x1b[33m;\x1b[39m\n    \x1b[90m   |\x1b[39m \x1b[31m^\x1b[39m\n    \x1b[90m  2|\x1b[39m\n\n"
     );
+    // a source over 100 000 characters is framed without highlighting
+    let big = dir.join("big.test.ts");
+    let filler = format!("//{}\n", "x".repeat(98)).repeat(1001);
+    std::fs::write(&big, format!("throw 1;\n{filler}")).unwrap();
+    let e = ErrorInfo {
+        frames: vec![frame(&big, "")],
+        ..error("bad")
+    };
+    let printed = print_error(&e, &dir, true, "", &C);
+    assert!(
+        printed.contains("\x1b[90m  1|\x1b[39m throw 1;\n"),
+        "{printed}"
+    );
     // a message over 5000 characters: only the name is red
     let long = error(&"m".repeat(5001));
     assert!(print_error(&long, &dir, false, "", &C)
