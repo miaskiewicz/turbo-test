@@ -1562,3 +1562,91 @@ await t('text utf8', () => read('readAsText', new Blob(['€é'])))
     }
     assert_eq!(got.lines().count(), want.lines().count());
 }
+
+#[test]
+#[ignore = "turbo-test#139: fails until the fix"]
+fn file_reader_events_encoding_and_abort_are_jsdoms() {
+    // turbo-test#139: FileReader as jsdom's (vitest's jsdom environment; Node 26 has none):
+    // readyState LOADING during a read, loadstart / progress / load / loadend with their
+    // readyState and progress fields, every listener (addEventListener deduplicated,
+    // removeEventListener by function, on<type> handlers in their slot), readAsText's encoding
+    // (BOM sniffing first, an unknown label falls back to UTF-8), abort() in each state and the
+    // InvalidStateError for a read while LOADING. Each row is [case, result].
+    let p = Project::new("rc-file-reader-events");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "t.test.js",
+        r##"import { test } from 'vitest'
+import * as fs from 'node:fs'
+test('FileReader events', async () => {
+  const rows = []
+const t = async (name, f) => { let r; try { r = await f() } catch (e) { r = ['throws', e.name, e.code ?? null] } rows.push(JSON.stringify([name, r])) }
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+const run = async (setup) => { const r = new FileReader(); const ev = []; const log = (tag) => (e) => ev.push([tag, e.type, r.readyState, e.target === r, e.loaded ?? null, e.total ?? null, e.lengthComputable ?? null]); await setup(r, log, ev); await sleep(30); return [r.readyState, r.result, r.error && r.error.name, ev] }
+const all = (r, log) => { for (const n of ['loadstart', 'progress', 'load', 'abort', 'error', 'loadend']) r.addEventListener(n, log('L')) }
+await t('constants', () => [FileReader.EMPTY, FileReader.LOADING, FileReader.DONE, FileReader.prototype.LOADING])
+await t('initial', () => { const r = new FileReader(); return [r.readyState, r.result, r.error] })
+await t('events readAsText', () => run((r, log, ev) => { all(r, log); r.readAsText(new Blob(['héllo'])); ev.push(['sync', r.readyState, r.result]) }))
+await t('events arrayBuffer', () => run((r, log, ev) => { all(r, log); r.readAsArrayBuffer(new Blob([new Uint8Array([1, 2, 3])])); ev.push(['sync', r.readyState]) }).then((x) => [x[0], [...new Uint8Array(x[1])], x[2], x[3]]))
+await t('events empty blob', () => run((r, log) => { all(r, log); r.readAsText(new Blob([])) }))
+await t('two listeners and on-handler fire', () => run((r, log) => { r.addEventListener('load', log('A')); r.addEventListener('load', log('B')); r.onload = log('on'); r.readAsText(new Blob(['x'])) }))
+await t('same listener once', () => run((r, log) => { const f = log('A'); r.addEventListener('load', f); r.addEventListener('load', f); r.readAsText(new Blob(['x'])) }))
+await t('removeEventListener one', () => run((r, log) => { const a = log('A'), b = log('B'); r.addEventListener('load', a); r.addEventListener('load', b); r.removeEventListener('load', a); r.readAsText(new Blob(['x'])) }))
+await t('removeEventListener other fn keeps on-handler', () => run((r, log) => { r.onload = log('on'); r.removeEventListener('load', () => {}); r.readAsText(new Blob(['x'])) }))
+await t('on-handler null', () => run((r, log) => { r.onload = log('on'); r.onload = null; r.addEventListener('load', log('A')); r.readAsText(new Blob(['x'])) }))
+await t('dispatchEvent', () => { const r = new FileReader(); const got = []; r.addEventListener('foo', (e) => got.push(e.type)); return [typeof r.dispatchEvent, r instanceof EventTarget, got] })
+await t('readAsText windows-1252', () => run((r) => r.readAsText(new Blob([new Uint8Array([0xe9, 0x80])]), 'windows-1252')))
+await t('readAsText shift_jis', () => run((r) => r.readAsText(new Blob([new Uint8Array([0x82, 0xa0])]), 'Shift_JIS')))
+await t('readAsText utf-16le', () => run((r) => r.readAsText(new Blob([new Uint8Array([0x41, 0x00])]), 'utf-16le')))
+await t('readAsText bad label', () => run((r) => r.readAsText(new Blob(['é']), 'nope')))
+await t('readAsText bom wins', () => run((r) => r.readAsText(new Blob([new Uint8Array([0xff, 0xfe, 0x41, 0x00])]), 'windows-1252')))
+await t('readAsText utf8 bom', () => run((r) => r.readAsText(new Blob([new Uint8Array([0xef, 0xbb, 0xbf, 0x41])]))))
+await t('readAsText charset from type', () => run((r) => r.readAsText(new Blob([new Uint8Array([0xe9])], { type: 'text/plain;charset=windows-1252' }))))
+await t('readAsText invalid utf8', () => run((r) => r.readAsText(new Blob([new Uint8Array([0xff, 0x41])]))))
+await t('read while loading', () => run((r, log, ev) => { r.readAsText(new Blob(['x'])); try { r.readAsText(new Blob(['y'])) } catch (e) { ev.push(['throws', e.name, e.code]) } }))
+await t('read again after done', () => run(async (r, log, ev) => { r.readAsText(new Blob(['x'])); await sleep(10); all(r, log); r.readAsText(new Blob(['yz'])); ev.push(['sync', r.readyState, r.result]) }))
+await t('abort while loading', () => run((r, log, ev) => { all(r, log); r.readAsText(new Blob(['x'])); r.abort(); ev.push(['after abort', r.readyState, r.result]) }))
+await t('abort when empty', () => run((r, log) => { all(r, log); r.abort() }))
+await t('abort when done', () => run(async (r, log, ev) => { r.readAsText(new Blob(['x'])); await sleep(10); all(r, log); r.abort(); ev.push(['after', r.readyState, r.result]) }))
+await t('abort then read again', () => run((r, log) => { r.readAsText(new Blob(['x'])); r.abort(); all(r, log); r.readAsText(new Blob(['y'])) }))
+await t('read non-blob', () => run((r, log, ev) => { try { r.readAsText('abc') } catch (e) { ev.push(['throws', e.name]) } }))
+await t('listener this and order onload last', () => run((r, log, ev) => { r.onloadend = function () { ev.push(['onloadend this', this === r]) }; r.addEventListener('loadend', function () { ev.push(['L this', this === r]) }); r.readAsText(new Blob(['x'])) }))
+  fs.writeFileSync('out.txt', rows.join('\n'))
+})
+"##,
+    );
+    let r = turbo_test(&p.dir, &["t.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let got = std::fs::read_to_string(p.path("out.txt")).unwrap();
+    let want = r##"["constants",[0,1,2,1]]
+["initial",[0,null,null]]
+["events readAsText",[2,"héllo",null,[["sync",1,null],["L","loadstart",1,true,0,0,false],["L","progress",1,true,6,6,true],["L","load",2,true,0,0,false],["L","loadend",2,true,0,0,false]]]]
+["events arrayBuffer",[2,[1,2,3],null,[["sync",1],["L","loadstart",1,true,0,0,false],["L","progress",1,true,3,3,true],["L","load",2,true,0,0,false],["L","loadend",2,true,0,0,false]]]]
+["events empty blob",[2,"",null,[["L","loadstart",1,true,0,0,false],["L","load",2,true,0,0,false],["L","loadend",2,true,0,0,false]]]]
+["two listeners and on-handler fire",[2,"x",null,[["A","load",2,true,0,0,false],["B","load",2,true,0,0,false],["on","load",2,true,0,0,false]]]]
+["same listener once",[2,"x",null,[["A","load",2,true,0,0,false]]]]
+["removeEventListener one",[2,"x",null,[["B","load",2,true,0,0,false]]]]
+["removeEventListener other fn keeps on-handler",[2,"x",null,[["on","load",2,true,0,0,false]]]]
+["on-handler null",[2,"x",null,[["A","load",2,true,0,0,false]]]]
+["dispatchEvent",["function",true,[]]]
+["readAsText windows-1252",[2,"é€",null,[]]]
+["readAsText shift_jis",[2,"あ",null,[]]]
+["readAsText utf-16le",[2,"A",null,[]]]
+["readAsText bad label",[2,"é",null,[]]]
+["readAsText bom wins",[2,"A",null,[]]]
+["readAsText utf8 bom",[2,"A",null,[]]]
+["readAsText charset from type",[2,"�",null,[]]]
+["readAsText invalid utf8",[2,"�A",null,[]]]
+["read while loading",[2,"x",null,[["throws","InvalidStateError",11]]]]
+["read again after done",[2,"yz",null,[["sync",1,null],["L","loadstart",1,true,0,0,false],["L","progress",1,true,2,2,true],["L","load",2,true,0,0,false],["L","loadend",2,true,0,0,false]]]]
+["abort while loading",[2,null,null,[["L","abort",2,true,0,0,false],["L","loadend",2,true,0,0,false],["after abort",2,null]]]]
+["abort when empty",[0,null,null,[]]]
+["abort when done",[2,null,null,[["after",2,null]]]]
+["abort then read again",[2,"y",null,[["L","loadstart",1,true,0,0,false],["L","progress",1,true,1,1,true],["L","load",2,true,0,0,false],["L","loadend",2,true,0,0,false]]]]
+["read non-blob",[0,null,null,[["throws","TypeError"]]]]
+["listener this and order onload last",[2,"x",null,[["onloadend this",true],["L this",true]]]]"##;
+    for (g, w) in got.lines().zip(want.lines()) {
+        assert_eq!(g, w);
+    }
+    assert_eq!(got.lines().count(), want.lines().count());
+}
