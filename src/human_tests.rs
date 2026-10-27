@@ -347,11 +347,11 @@ fn print_error_writes_frames_code_frame_and_cause() {
         })),
         ..Default::default()
     };
-    // node_modules frames are left out; the code frame follows the first frame of a file that
-    // exists; the cause has no code frame
+    // node_modules frames are printed (turbo-test#173); the code frame follows the first frame of
+    // a file that exists outside node_modules; the cause has no code frame
     assert_eq!(
         print_error(&e, &dir, true, false, "", &OFF),
-        "TypeError: bad\n\n- Expected\n+ Received\n\n ❯ gone.ts:2:1\n ❯ helper a.test.ts:2:1\n      1| x\n      2| throw 1\n       | ^\n      3|\n ❯ a.test.ts:2:1\n\nCaused by: Error: inner\n ❯ a.test.ts:2:1\n\n"
+        "TypeError: bad\n\n- Expected\n+ Received\n\n ❯ dep node_modules/dep/x.js:2:1\n ❯ gone.ts:2:1\n ❯ helper a.test.ts:2:1\n      1| x\n      2| throw 1\n       | ^\n      3|\n ❯ a.test.ts:2:1\n\nCaused by: Error: inner\n ❯ a.test.ts:2:1\n\n"
     );
     // without frames: no blank line after the message
     assert_eq!(
@@ -724,5 +724,54 @@ fn print_error_writes_vites_details_under_the_message() {
     assert_eq!(
         print_error(&empty, &dir, true, false, "", &OFF),
         "Error: m\n"
+    );
+}
+
+#[test]
+fn print_error_keeps_node_modules_frames() {
+    // turbo-test#173: a dependency's frame is printed (vitest's parser leaves out only its
+    // `stackIgnorePatterns`), gray, and the code frame follows the first frame of a file vitest
+    // transformed (not an external node_modules one)
+    let dir = std::env::temp_dir().join(format!("tt-human-nm-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("node_modules/k6dep")).unwrap();
+    let dep = dir.join("node_modules/k6dep/index.js");
+    std::fs::write(
+        &dep,
+        "export async function late() {\n  await null\n  throw new Error(\"late\")\n}\n",
+    )
+    .unwrap();
+    let src = dir.join("afail.test.js");
+    std::fs::write(
+        &src,
+        "import { test } from 'vitest'\nimport { late } from 'k6dep'\ntest('after await', async () => {\n  await late()\n})\n",
+    )
+    .unwrap();
+    let at = |file: PathBuf, method: &str, line: u32, col: u32| Frame {
+        method: method.into(),
+        file,
+        line,
+        col,
+    };
+    let e = ErrorInfo {
+        frames: vec![at(dep.clone(), "late", 3, 9), at(src.clone(), "", 4, 3)],
+        ..error("late")
+    };
+    assert_eq!(
+        print_error(&e, &dir, true, false, "", &OFF),
+        "Error: late\n ❯ late node_modules/k6dep/index.js:3:9\n ❯ afail.test.js:4:3\n      2| import { late } from 'k6dep'\n      3| test('after await', async () => {\n      4|   await late()\n       |   ^\n      5| })\n      6|\n\n"
+    );
+    // coloured: the dependency's frame gray, the nearest (the test file's) cyan
+    assert_eq!(
+        print_error(&e, &dir, false, false, "", &C),
+        format!(
+            "{}\n{}\n{}\n\n",
+            C.red(&format!("{}: late", C.bold("Error"))),
+            C.gray(&format!(
+                " {} late node_modules/k6dep/index.js:{}",
+                C.dim("❯"),
+                C.dim("3:9")
+            )),
+            C.cyan(&format!(" {} afail.test.js:{}", C.dim("❯"), C.dim("4:3")))
+        )
     );
 }

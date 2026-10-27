@@ -32,6 +32,16 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   gone.
 - Checked against rows, inline snapshots and a `.snap` file recorded with vitest 4.1.12
   (`tests/runner_c_expect_surface.rs`, `tests/data/expect_surface/{poll,serializer,utils}.*`).
+### Fixed — stack frames of dependencies and of eval code (turbo-test#173, #175)
+- The default / verbose / junit reporters left out every stack frame in `node_modules`; vitest
+  leaves out only its default `stackIgnorePatterns` (its own packages, chai, tinyspy, node
+  internals), so a dependency's frame (` ❯ late node_modules/k6dep/index.js:3:9`) is now printed.
+  The code frame still follows the first frame outside node_modules, as vitest's follows the
+  first module vite transformed (#173).
+- A frame in `eval` / `new Function` code printed as
+  `eval (eval at <anonymous> a.test.js:2:14), <anonymous>:3:41` without a code frame; it is now
+  the eval's origin, `eval a.test.js:2:14`, with its code frame, as vitest's stack parser reads
+  it (#175).
 
 ### Changed — expect(x) is a chai Assertion (turbo-test#160)
 - As in vitest, `expect(x)` is now a chai Assertion. turbo-test had no BDD chain:

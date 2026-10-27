@@ -564,9 +564,9 @@ fn divider(text: &str, right: Option<usize>, color: &dyn Fn(&str) -> String) -> 
 }
 
 /// vitest's `printErrorInner` into a string: `Name: message` (red, the name bold; a value
-/// without a message as its serialized form, turbo-test#97), the diff, the frames outside
-/// node_modules (the nearest cyan, the others gray) with the highlighted code frame after the
-/// nearest one (`code_frame`), a blank line, the error's properties as `Serialized Error` under a
+/// without a message as its serialized form, turbo-test#97), the diff, the frames (the nearest,
+/// the first outside node_modules, cyan, the others gray) with the highlighted code frame after
+/// the nearest one (`code_frame`), a blank line, the error's properties as `Serialized Error` under a
 /// divider (`properties`: vitest's `printProperties`, the verbose reporter's and junit's), the
 /// cause (its properties always: vitest prints the cause with the default).
 pub fn print_error(
@@ -616,12 +616,12 @@ pub fn print_error(
     if !e.diff.is_empty() {
         out.push_str(&format!("\n{}\n\n", e.diff));
     }
-    let frames: Vec<&Frame> = e
-        .frames
-        .iter()
-        .filter(|f| !f.file.components().any(|c| c.as_os_str() == "node_modules"))
-        .collect();
-    let nearest = frames.iter().position(|f| f.file.is_file());
+    // vitest's nearest frame is the first in a file vite transformed: not an external
+    // node_modules one (turbo-test#173)
+    let frames: Vec<&Frame> = e.frames.iter().collect();
+    let nearest = frames.iter().position(|f| {
+        f.file.is_file() && !f.file.components().any(|c| c.as_os_str() == "node_modules")
+    });
     for (i, f) in frames.iter().enumerate() {
         let path = f.file.strip_prefix(root).unwrap_or(&f.file);
         let at = format!(
