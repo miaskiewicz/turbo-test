@@ -33,6 +33,23 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `url` / `filename` / `dirname` plus vitest's `env` (live `process.env`, `DEV` / `PROD` / `SSR`
   booleans), and `process.env` carries vite's `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` (`SSR`
   off under a `jsdom` / `happy-dom` environment), as vitest sets them.
+- `vi.spyOn` on a module's export on the ESM-graph loader (turbo-test#131, the binary run without
+  `TURBO_ESBUILD` in a project without esbuild): V8's namespace objects are read-only, so the spy
+  was dropped and the importing module kept calling the original (`expected 'hi a!' to be
+  'spied!'`). Each app module now registers a setter for its own namespace (`src/esm_spy.rs`):
+  `export const` / `let` / `function` / `class`, renamed locals, `export default` (expression or
+  anonymous declaration) and re-exports (forwarded to the source module); `mockRestore` puts the
+  original back. On this loader the spy replaces the binding itself, so the module's own uses
+  see it too.
+- `import.meta.resolve` / `main` / `glob` / `vitest` (turbo-test#130): every module's
+  `import.meta` was `url, filename, dirname, env` only. It now has vitest 4.1.12's members in its
+  order: `resolve` (Node's, from the module: relative paths and URLs against it, builtins as
+  `node:` URLs, packages by the ESM conditions, `ERR_MODULE_NOT_FOUND` otherwise), `main`
+  (`false`), `glob` and, in the test file, the non-enumerable `vitest`. A full-name
+  `import.meta.glob(...)` call with literal arguments is expanded before the module's transform,
+  as vite does (`src/import_glob.rs`: eager / lazy, `import`, negated and array patterns,
+  `exhaustive`, relative and `/`-root patterns, the module itself, dot files and `node_modules`
+  skipped); any other call throws vitest's "statically replaced" error.
 - Config discovery (turbo-test#43 item 1): `setupFiles` are read from every config file vitest
   resolves, in its order (`vitest.config` then `vite.config`, each `.ts .mts .cts .js .mjs
   .cjs`); `vitest.config.{cts,mjs,cjs}` and `vite.config.{mts,cts,js,mjs,cjs}` were ignored and
@@ -360,6 +377,19 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   Every other label threw RangeError `ERR_ENCODING_NOT_SUPPORTED`. Node's ICU big5 / euc-jp /
   euc-kr / shift_jis decoders differ from the Encoding Standard on some bytes; turbo-test follows
   the standard there (vitest.compat.md).
+- `expect(value, message)` keeps its message (turbo-test#138): a failing matcher's error (chai
+  AssertionError or a jest-style / `expect.extend` matcher's Error, also through `.not`,
+  `.resolves` / `.rejects` and `expect.soft`) starts with `message: `, as vitest's
+  (`GOT<x>: expected 1 to be 2 // Object.is equality`); it was dropped from the error, the
+  default reporter and the json reporter's `failureMessages`.
+- `FileReader` behaves as jsdom's (turbo-test#139): a read sets `readyState` LOADING at once and
+  fires `loadstart`, `progress` (with `loaded` / `total`), `load` and `loadend` (only `load` /
+  `loadend` fired); `addEventListener` keeps every listener (it replaced `on<type>`) and
+  `removeEventListener` removes the given one; `on<type>` handlers hold their slot;
+  `readAsText(blob, encoding)` decodes with the label after BOM sniffing (it always used UTF-8);
+  `abort()` while LOADING cancels the read and fires `abort` / `loadend`; a read while LOADING
+  throws `InvalidStateError`, a non-Blob argument TypeError; `EMPTY` / `LOADING` / `DONE` exist
+  and a FileReader is an `EventTarget`.
 - `FileReader` reads the Blob's bytes (turbo-test#132): `readAsArrayBuffer` and `readAsDataURL`
   took char codes of the decoded text (`'€'` read as `[0xAC]`, now `[0xE2, 0x82, 0xAC]`; binary
   that is not UTF-8 was mangled), and `readAsBinaryString` exists, as in jsdom / happy-dom.

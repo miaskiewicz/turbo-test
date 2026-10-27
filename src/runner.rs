@@ -2254,7 +2254,7 @@ fn file_has_decorator(src: &str) -> bool {
 /// falls back to esbuild.
 fn native_transform_cjs(file: &Path) -> Option<String> {
     use std::hash::{Hash, Hasher};
-    let raw = with_binder(file, std::fs::read_to_string(file).ok()?, true);
+    let raw = with_binder(file, read_app_source(file)?, true);
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
     file.extension()
@@ -2303,7 +2303,7 @@ fn native_transform_cjs_located(file: &Path) -> Option<String> {
 /// `native_transform_cjs` with the map of its lines back to the source (and that source): the
 /// test file's for test locations, another app module's while failure frames are printed.
 fn native_transform_cjs_mapped(file: &Path) -> Option<(String, crate::location::Segments, String)> {
-    let raw = with_binder(file, std::fs::read_to_string(file).ok()?, true);
+    let raw = with_binder(file, read_app_source(file)?, true);
     let legacy_decorators = decorator_metadata_enabled(file) && file_has_decorator(&raw);
     let emitted = crate::esm_cjs::emit_mapped(file, &raw, legacy_decorators)?;
     let map = crate::coverage::inline_segments(&emitted)?;
@@ -2362,7 +2362,7 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     let root = project_root(file)?;
     let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
-    let raw = std::fs::read_to_string(file).ok()?;
+    let raw = read_app_source(file)?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
     file.extension()
@@ -2436,8 +2436,24 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
         }
         d = dir.parent();
     }
+    // a module whose import.meta.glob calls were expanded (turbo-test#130) goes in on stdin
+    let expanded = std::fs::read_to_string(file).ok().as_deref() != Some(raw.as_str());
     let mut cmd = std::process::Command::new(&esbuild);
-    cmd.current_dir(&root).arg(file).args([
+    cmd.current_dir(&root);
+    if expanded {
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("js");
+        let loader = match ext {
+            "ts" | "mts" | "cts" => "ts",
+            "tsx" | "jsx" => ext,
+            _ => "jsx",
+        };
+        cmd.arg(format!("--sourcefile={}", file.display()))
+            .arg(format!("--loader={loader}"))
+            .stdin(std::process::Stdio::piped());
+    } else {
+        cmd.arg(file);
+    }
+    cmd.args([
         "--format=cjs",
         "--platform=browser",
         "--jsx=automatic",
@@ -2454,7 +2470,18 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     if let Some(tc) = &tsconfig {
         cmd.arg(format!("--tsconfig={}", tc.display()));
     }
-    let out = cmd.stderr(std::process::Stdio::null()).output().ok()?;
+    let out = if expanded {
+        use std::io::Write;
+        let mut child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        child.stdin.take()?.write_all(raw.as_bytes()).ok()?;
+        child.wait_with_output().ok()?
+    } else {
+        cmd.stderr(std::process::Stdio::null()).output().ok()?
+    };
     if !out.status.success() {
         return None;
     }
@@ -3388,7 +3415,7 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
             }
         }
     }
-    let raw = with_binder(abs, std::fs::read_to_string(abs).ok()?, false);
+    let raw = with_binder(abs, read_app_source(abs)?, false);
     if !crate::transform::needs_transform(abs) {
         if crate::location::is_entry(abs) {
             crate::location::set_identity(abs);
@@ -4476,6 +4503,18 @@ fn factory_bindings(entry: &Path, src: &str, mr: bool) -> Vec<crate::mock_scope:
 
 /// `src` of the file `abs` as it loads: the test file gets the binder statement that hands its
 /// factories' bindings to the runtime, on a line of its own at the end (so no position moves).
+/// An app module's source as vite's transform sees it: `import.meta.glob` calls expanded against
+/// the file system (src/import_glob.rs, turbo-test#130), the vitest root (the working directory)
+/// the base of `/` patterns. node_modules are read as they are (vitest externalizes them).
+fn read_app_source(file: &Path) -> Option<String> {
+    let src = std::fs::read_to_string(file).ok()?;
+    if file.components().any(|c| c.as_os_str() == "node_modules") {
+        return Some(src);
+    }
+    let root = std::env::current_dir().ok()?;
+    Some(crate::import_glob::expand(file, &src, &root).unwrap_or(src))
+}
+
 fn with_binder(abs: &Path, src: String, mr: bool) -> String {
     if !TEST_FILE.with(|f| *f.borrow() == abs) {
         return src;
@@ -5160,6 +5199,12 @@ fn load_graph<'s>(
     // App code authored for the CJS world (NestJS seed runners, country-config loaders) reads them
     // at top level, so inject Node-CJS-equivalent module-local bindings when referenced.
     let raw = inject_dirname_esm(abs, &raw).unwrap_or(raw);
+    // vi.spyOn on an app module's namespace sets its export (turbo-test#131)
+    let raw = if abs.components().any(|c| c.as_os_str() == "node_modules") {
+        raw
+    } else {
+        crate::esm_spy::spyable(abs, &raw).unwrap_or(raw)
+    };
     // A generated bundle in the cache dir has no node_modules beside it; resolve its externalized
     // bare imports relative to the recorded source dir (set by esbuild_bundle_full).
     let dir = REGISTRY
@@ -5581,29 +5626,29 @@ extern "C" fn import_meta_callback(
     v8::scope!(let scope, scope);
     let hash = module.get_identity_hash().get();
     let path = REGISTRY.with(|r| r.borrow().path_by_hash.get(&hash).cloned());
-    let url = path
-        .as_ref()
-        .map(|p| file_url(p))
-        .unwrap_or_else(|| "file:///<unknown>".to_string());
-    let k = v8::String::new(scope, "url").unwrap();
-    let v = v8::String::new(scope, &url).unwrap();
-    meta.create_data_property(scope, k.into(), v.into());
-    // Node 20.11+/vitest also expose the file's path and directory
-    if let Some(p) = &path {
-        let dir = p.parent().unwrap_or(p);
-        for (name, val) in [("filename", p.as_path()), ("dirname", dir)] {
-            let k = v8::String::new(scope, name).unwrap();
-            let v = v8::String::new(scope, &val.to_string_lossy()).unwrap();
+    // vitest's members (filename / dirname / url / env / resolve / glob / main, the test file's
+    // `vitest`), as the CJS paths' __ttImportMeta: runtime.js fills V8's object (turbo-test#123,
+    // #130)
+    let global = context.global(scope);
+    let name = v8::String::new(scope, "__ttFillImportMeta").unwrap();
+    let fill = global
+        .get(scope, name.into())
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok());
+    match (path, fill) {
+        (Some(p), Some(fill)) => {
+            let file = v8::String::new(scope, &p.to_string_lossy()).unwrap();
+            let undefined = v8::undefined(scope).into();
+            fill.call(scope, undefined, &[meta.into(), file.into()]);
+        }
+        (p, _) => {
+            let url = p
+                .as_ref()
+                .map(|p| file_url(p))
+                .unwrap_or_else(|| "file:///<unknown>".to_string());
+            let k = v8::String::new(scope, "url").unwrap();
+            let v = v8::String::new(scope, &url).unwrap();
             meta.create_data_property(scope, k.into(), v.into());
         }
-    }
-    // vitest's import.meta.env (process.env, live; runtime.js), as the CJS paths' __ttImportMeta
-    // (turbo-test#123)
-    let global = context.global(scope);
-    let name = v8::String::new(scope, "__ttImportMetaEnv").unwrap();
-    if let Some(env) = global.get(scope, name.into()).filter(|v| v.is_object()) {
-        let k = v8::String::new(scope, "env").unwrap();
-        meta.create_data_property(scope, k.into(), env);
     }
 }
 
@@ -7519,7 +7564,7 @@ fn drive_tests_bounded(
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
         let js = format!(
-            "globalThis.__ttFile = {:?}; globalThis.__ttFileName = {};",
+            "globalThis.__ttFile = {:?}; globalThis.__ttFileName = {}; globalThis.__ttMetaOfTestFile?.();",
             entry_abs.to_string_lossy(),
             json_string(&task_file_name(entry_abs, &root))
         );
