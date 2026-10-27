@@ -76,7 +76,9 @@ globalThis.process = {
   argv: ['node', 'turbo-test'],
   cwd: () => globalThis.__ttProcessCwd || globalThis.__cwd || '/',
   nextTick: (fn, ...a) => __loop.nextTicks.push(() => fn(...a)),
-  hrtime: Object.assign(() => [0, 0], { bigint: () => 0n }),
+  // the real clock (real time plus the drive loop's jumps) since the runtime started
+  // (turbo-test#178; it was a constant [0, 0])
+  hrtime: __realHrtime,
   exit: () => {},
   on: () => globalThis.process,
   off: () => globalThis.process,
@@ -143,6 +145,23 @@ const __loop = {
   waited: 0,
   elapsed() { return __loop.realNow() + __loop.waited; },
 };
+// the real clock's origin (performance.timeOrigin): when the runtime started
+const __perfOrigin = __loop.realNow();
+// process.hrtime on the real clock (Node's [seconds, nanoseconds]; `prev` gives the difference)
+function __hrtimeOf(ms, prev) {
+  const secs = Math.floor(ms / 1000);
+  const nanos = Math.round((ms - secs * 1e3) * 1e6);
+  if (Array.isArray(prev)) {
+    if (prev[1] > 1e9) throw new TypeError("Number of nanoseconds can't exceed a billion");
+    let nanoDiff = nanos - prev[1];
+    let secDiff = secs - prev[0];
+    if (nanoDiff < 0) { nanoDiff += 1e9; secDiff -= 1; }
+    return [secDiff, nanoDiff];
+  }
+  return [secs, nanos];
+}
+function __realHrtime(prev) { return __hrtimeOf(__loop.elapsed() - __perfOrigin, prev); }
+__realHrtime.bigint = () => { const [s, n] = __realHrtime(); return BigInt(s) * 1000000000n + BigInt(n); };
 function __schedule(cb, delay, interval, fake) {
   const id = __loop.seq++;
   if (fake) __loop.fmacro.push({ id, due: __loop.fnow + Math.max(0, delay | 0), cb, interval, gen: __loop.gen });
@@ -188,7 +207,8 @@ function __fireFake(t) {
   __loop.fnow = Math.max(__loop.fnow, t.due);
   if (t.interval == null) __clearTimer(t.id);
   else t.due = __loop.fnow + t.interval;
-  try { t.cb(); } catch (e) { __reportUncaught(e); }
+  // a callback's error goes to the advance call (sinon rethrows it, turbo-test#177)
+  t.cb();
 }
 __loop.drainNextTicks = function () {
   let ran = false;
@@ -227,17 +247,21 @@ __loop.stepMacro = function () {
   return true;
 };
 // Fake mode: advance the fake clock, firing the fake timers in order (synchronous).
+// sinon's tick: every timer due in the range runs, also when one throws; the first error is
+// rethrown once the clock reached the target (turbo-test#177)
 __loop.advance = function (ms) {
   __dropStaleTimers();
   const target = __loop.fnow + Math.max(0, ms | 0);
   let guard = 0;
+  let first = null;
   while (guard++ < 1e6) {
     const next = __dueSorted(target)[0];
     if (!next) break;
-    __fireFake(next);
+    try { __fireFake(next); } catch (e) { if (!first) first = { e }; }
     __loop.drainNextTicks();
   }
   __loop.fnow = target;
+  if (first) throw first.e;
 };
 // sinon's tickAsync: a real macrotask before the first timer and after each one, so the
 // promise callbacks a timer starts run (and may set timers due within the range)
@@ -246,13 +270,15 @@ __loop.advanceAsync = async function (ms) {
   __dropStaleTimers();
   const target = __loop.fnow + Math.max(0, ms | 0);
   let guard = 0;
+  let first = null;
   while (guard++ < 1e6) {
     const next = __dueSorted(target)[0];
     if (!next) break;
-    __fireFake(next);
+    try { __fireFake(next); } catch (e) { if (!first) first = { e }; }
     await __realTick();
   }
   __loop.fnow = Math.max(__loop.fnow, target);
+  if (first) throw first.e;
 };
 // sinon's runAll / runAllAsync: fire the earliest timer until none is left, at most `loopLimit`
 // of them (vitest's default 10000, `useFakeTimers({ loopLimit })`): a timer chain or an
@@ -276,13 +302,11 @@ __loop.runAllAsync = async function () {
   await __realTick();
   if (__loop.fmacro.length) throw __loopLimitError();
 };
+// sinon's runToLast: tick to the latest timer pending now — every timer due up to it runs,
+// intervals and timers set on the way included (turbo-test#177)
 __loop.runOnlyPending = function () {
-  const snapshot = __loop.fmacro.slice().sort(__byDue);
-  for (const t of snapshot) {
-    if (!__loop.fmacro.includes(t)) continue;
-    __fireFake(t);
-    __loop.drainNextTicks();
-  }
+  const last = __loop.fmacro.slice().sort(__byDue).pop();
+  if (last) __loop.advance(last.due - __loop.fnow);
 };
 // sinon's runToLastAsync: tickAsync to the latest timer pending now
 __loop.runOnlyPendingAsync = async function () {
@@ -291,16 +315,22 @@ __loop.runOnlyPendingAsync = async function () {
 };
 // sinon's next() (+ vitest's tick(0)): the fake clock moves to the earliest fake timer and
 // fires every timer due then
+// (next() throws the timer's error before tick(0) runs the others)
 __loop.toNext = function () {
   const n = __loop.fmacro.slice().sort(__byDue)[0];
-  if (n) __loop.advance(n.due - __loop.fnow);
+  if (!n) return;
+  __fireFake(n);
+  __loop.drainNextTicks();
+  __loop.advance(0);
 };
 __loop.toNextAsync = async function () {
   await __realTick();
   const n = __loop.fmacro.slice().sort(__byDue)[0];
   if (!n) return;
-  __fireFake(n);
+  let err = null;
+  try { __fireFake(n); } catch (e) { err = { e }; }
   await __realTick();
+  if (err) throw err.e;
   __loop.advance(0);
 };
 // drop the fake clock's timers (useRealTimers / a fresh useFakeTimers: sinon's uninstall)
@@ -336,19 +366,7 @@ function __installTimers(set) {
 __installTimers(__realTimers);
 // Fake `process.hrtime` / `performance` (turbo-test#172): sinon's, counting the fake clock's
 // time since install (setSystemTime does not move them).
-function __fakeHrtime(prev) {
-  const ms = __loop.fnow - __loop.fstart;
-  const secs = Math.floor(ms / 1000);
-  const nanos = (ms - secs * 1e3) * 1e6;
-  if (Array.isArray(prev)) {
-    if (prev[1] > 1e9) throw new TypeError("Number of nanoseconds can't exceed a billion");
-    let nanoDiff = nanos - prev[1];
-    let secDiff = secs - prev[0];
-    if (nanoDiff < 0) { nanoDiff += 1e9; secDiff -= 1; }
-    return [secDiff, nanoDiff];
-  }
-  return [secs, nanos];
-}
+function __fakeHrtime(prev) { return __hrtimeOf(__loop.fnow - __loop.fstart, prev); }
 __fakeHrtime.bigint = () => { const [s, n] = __fakeHrtime(); return BigInt(s) * 1000000000n + BigInt(n); };
 __fakeHrtime.clock = __loop;
 // sinon's fake performance: `now()` on the fake clock, `timeOrigin` the clock's start, the other
@@ -1759,7 +1777,9 @@ if (typeof globalThis.MessageChannel === 'undefined') {
   globalThis.MessagePort = class MessagePort { postMessage() {} close() {} start() {} addEventListener() {} removeEventListener() {} };
 }
 if (typeof globalThis.performance === 'undefined') {
-  globalThis.performance = { now: () => 0, mark() {}, measure() {}, getEntriesByName: () => [], clearMarks() {}, clearMeasures() {} };
+  // now(): ms on the real clock since timeOrigin, the runtime's start (turbo-test#178; it was a
+  // constant 0)
+  globalThis.performance = { now: () => __loop.elapsed() - __perfOrigin, timeOrigin: __perfOrigin, mark() {}, measure() {}, getEntriesByName: () => [], clearMarks() {}, clearMeasures() {} };
 }
 if (typeof globalThis.btoa === 'undefined') {
   globalThis.btoa = (s) => { const c = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'; let o = '', i = 0; s = String(s); while (i < s.length) { const a = s.charCodeAt(i++), b = s.charCodeAt(i++), d = s.charCodeAt(i++); o += c[a >> 2] + c[((a & 3) << 4) | (b >> 4)] + (isNaN(b) ? '=' : c[((b & 15) << 2) | (d >> 6)]) + (isNaN(d) ? '=' : c[d & 63]); } return o; };
@@ -6996,8 +7016,7 @@ async function runSuite(suite, ancestors, summary, mode = '') {
     const attemptErrors = [];
     let tries = 0;
     // Real wall time for the per-test start, and for the duration the reporters show plus the
-    // drive loop's clock jumps (turbo-test#95). NOT performance.now() (stubbed to a constant 0 in
-    // this runtime, see the perf stub near top of file) nor Date.now() (fake timers /
+    // drive loop's clock jumps (turbo-test#95). NOT performance.now() (fake timers replace it) nor Date.now() (fake timers /
     // vi.setSystemTime replace it).
     const __t0 = __loop.elapsed();
     const __start = __loop.realNow();

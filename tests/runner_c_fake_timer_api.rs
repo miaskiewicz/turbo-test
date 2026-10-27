@@ -280,13 +280,11 @@ fn wait_for_and_wait_until_are_vitests() {
 }
 
 #[test]
-#[ignore = "turbo-test#177: fails until the fix"]
 fn run_only_pending_runs_to_the_last_timer_and_timer_errors_are_rethrown() {
     passes("rc-ft-177", "run177.test.js", RUN_177, 2);
 }
 
 #[test]
-#[ignore = "turbo-test#178: fails until the fix"]
 fn real_performance_now_and_hrtime_move() {
     passes("rc-ft-178", "perf178.test.js", PERF_178, 1);
 }
