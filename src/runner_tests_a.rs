@@ -1625,5 +1625,8 @@ fn a_serializers_variable_does_not_read_the_next_keys_list() {
         list("const s = [];\nexport default { test: { snapshotSerializers: s, setupFiles: ['./setup.js'] } };"),
         Vec::<String>::new()
     );
-    assert_eq!(list("test: { snapshotSerializers:\n  ['./a.js'] }"), ["./a.js"]);
+    assert_eq!(
+        list("test: { snapshotSerializers:\n  ['./a.js'] }"),
+        ["./a.js"]
+    );
 }

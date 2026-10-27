@@ -27,11 +27,8 @@ unsafe extern "C" fn near_heap_limit(data: *mut c_void, current: usize, _initial
         g.set(g.get() + 1);
         g.get()
     });
-    if grants > MAX_GRANTS {
-        current
-    } else {
-        current + GRANT_BYTES
-    }
+    // past MAX_GRANTS no more headroom: V8 aborts
+    current + if grants > MAX_GRANTS { 0 } else { GRANT_BYTES }
 }
 
 /// The callback's data: owned by the isolate (a slot), so it lives exactly as long as the isolate

@@ -194,7 +194,11 @@ fn a_missing_chai_fails_loudly() {
     );
     // a file that is not an ES module the emitter can lower
     let bad = p.file("bad-chai/index.js", "export const = ;\n");
-    let r = turbo_test(&p.dir, &["a.test.js"], &[("TURBO_CHAI", bad.to_str().unwrap())]);
+    let r = turbo_test(
+        &p.dir,
+        &["a.test.js"],
+        &[("TURBO_CHAI", bad.to_str().unwrap())],
+    );
     assert_eq!(r.code, Some(1), "{}", r.all());
     assert_eq!(
         r.stderr,

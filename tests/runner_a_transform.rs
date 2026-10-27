@@ -440,3 +440,63 @@ fn environment_pragmas_and_the_environment_flag() {
     );
     assert_eq!(counts(&r), passed(3, 3), "{}", r.all());
 }
+
+#[test]
+fn import_meta_glob_in_jsx_and_js_modules_on_the_esbuild_path() {
+    // the glob-expanded module goes to esbuild on stdin with its own loader: `jsx` for a .jsx and
+    // a .js module (vitest 4.1.12: both list the sibling module)
+    let p = Project::new("ra-glob-jsx");
+    p.with_esbuild();
+    p.file("package.json", r#"{"name":"ra-glob-jsx","type":"module"}"#);
+    p.file("src/mods/a.ts", "export const n = 1;\n");
+    p.file(
+        "src/v.jsx",
+        "export const viewGlob = () => Object.keys(import.meta.glob('./mods/*.ts'));\n",
+    );
+    p.file(
+        "src/p.js",
+        "export const plainGlob = () => Object.keys(import.meta.glob('./mods/*.ts', { eager: true }));\n",
+    );
+    p.file(
+        "a.test.ts",
+        "import { expect, it } from 'vitest';\nimport { viewGlob } from './src/v.jsx';\nimport { plainGlob } from './src/p.js';\n\
+         it('globs', () => { expect([viewGlob(), plainGlob()]).toEqual([['./mods/a.ts'], ['./mods/a.ts']]); });\n",
+    );
+    for env in [
+        &[][..],
+        &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")][..],
+    ] {
+        let r = turbo_test(&p.dir, &["--reporter", "json"], env);
+        assert_eq!(counts(&r), passed(1, 1), "{env:?}\n{}", r.all());
+    }
+}
+
+#[test]
+fn the_loader_debug_switch_names_a_module_that_does_not_transform() {
+    // TURBO_CJS_DEBUG: the oxc transform error of an app module on the ES-module graph is printed
+    // with the module's path; the file fails as without it
+    let p = Project::new("ra-xform-debug");
+    p.file(
+        "package.json",
+        r#"{"name":"ra-xform-debug","type":"module"}"#,
+    );
+    let dep = p.file(
+        "dep.ts",
+        "export const a = <T,>(x: T) => x;\nexport const b: = 1;\n",
+    );
+    p.file(
+        "a.test.ts",
+        "import { it } from 'vitest';\nimport { a } from './dep';\nit('a', () => { a(1); });\n",
+    );
+    let quiet = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+    let debug = turbo_test(&p.dir, &["--reporter", "json"], &[("TURBO_CJS_DEBUG", "1")]);
+    let line = format!("transform {}: ", dep.display());
+    assert!(!quiet.stderr.contains(&line), "{}", quiet.all());
+    assert!(
+        debug.stderr.lines().any(|l| l.starts_with(&line)),
+        "{}",
+        debug.all()
+    );
+    assert_eq!(counts(&quiet), counts(&debug));
+    assert_eq!(counts(&debug).2, ["error"], "{}", debug.all());
+}

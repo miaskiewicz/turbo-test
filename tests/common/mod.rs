@@ -151,6 +151,24 @@ pub fn run_exe_unset(
     env: &[(&str, &str)],
     unset: &[&str],
 ) -> Run {
+    let out = command(exe, cwd, args, env, unset)
+        .output()
+        .unwrap_or_else(|e| panic!("spawn {exe}: {e}"));
+    Run {
+        code: out.status.code(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+/// The command `run_exe_unset` runs, for a test that wires its streams itself.
+pub fn command(
+    exe: &str,
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    unset: &[&str],
+) -> Command {
     let tmp = cwd.join(".tt-tmp");
     std::fs::create_dir_all(&tmp).unwrap();
     let mut cmd = Command::new(exe);
@@ -195,12 +213,7 @@ pub fn run_exe_unset(
     for k in unset {
         cmd.env_remove(k);
     }
-    let out = cmd.output().unwrap_or_else(|e| panic!("spawn {exe}: {e}"));
-    Run {
-        code: out.status.code(),
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-    }
+    cmd
 }
 
 /// Run the `turbo-test` CLI (see `run_exe`).

@@ -341,7 +341,8 @@ fn a_label_without_context_is_named_in_the_title() {
 #[test]
 fn at_most_five_parse_errors_are_listed() {
     // vitest 4.1.12 for many.js = six top-level `return`s
-    let src = "return 1;\nreturn 2;\nreturn 3;\nreturn 4;\nreturn 5;\nreturn 6;\nexport const x = 1;\n";
+    let src =
+        "return 1;\nreturn 2;\nreturn 3;\nreturn 4;\nreturn 5;\nreturn 6;\nexport const x = 1;\n";
     let e = "A 'return' statement can only be used within a function body.";
     assert_eq!(
         err("many.js", src).unwrap(),

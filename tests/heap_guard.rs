@@ -36,7 +36,13 @@ fn messages(stdout: &str) -> Vec<(String, String)> {
         .iter()
         .map(|f| {
             (
-                f["name"].as_str().unwrap().rsplit('/').next().unwrap().to_string(),
+                f["name"]
+                    .as_str()
+                    .unwrap()
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .to_string(),
                 f["message"].as_str().unwrap_or("").to_string(),
             )
         })
@@ -118,7 +124,11 @@ fn without_the_log_switch_there_are_no_heap_lines() {
             &[("TURBO_JOBS", "1"), ("TURBO_HEAP_LOG", log)],
         );
         assert_eq!(r.code, Some(0), "{}", r.all());
-        assert!(!r.stderr.contains("[heap]"), "TURBO_HEAP_LOG={log:?}\n{}", r.all());
+        assert!(
+            !r.stderr.contains("[heap]"),
+            "TURBO_HEAP_LOG={log:?}\n{}",
+            r.all()
+        );
     }
 }
 

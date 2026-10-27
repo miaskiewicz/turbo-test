@@ -141,6 +141,17 @@ fn base_query_as_aliases_and_a_hashbang() {
          ({\"/src/a.ts\": () => import(\"./a.ts?raw\")});\n\
          ({\"./a.ts\": () => import(\"./a.ts?raw\").then((m) => m[\"x\"])});"
     );
+    // a quoted query key is form-encoded as an identifier one is
+    assert_eq!(
+        expand(
+            &file,
+            "import.meta.glob('./*.ts', { query: { 'a b': 1 } })",
+            &d.0,
+            &[]
+        )
+        .unwrap(),
+        "({\"./a.ts\": () => import(\"./a.ts?a+b=1\")})"
+    );
     // an alias outside the root: absolute keys
     let out = std::env::temp_dir();
     assert_eq!(
@@ -213,7 +224,8 @@ fn a_cast_import_meta_and_overlapping_patterns() {
     // listed once
     let d = project(&["m/a.ts", "m/b.ts", "t.ts"]);
     let file = d.0.join("t.ts");
-    let lazy = "({\"./m/a.ts\": () => import(\"./m/a.ts\"), \"./m/b.ts\": () => import(\"./m/b.ts\")})";
+    let lazy =
+        "({\"./m/a.ts\": () => import(\"./m/a.ts\"), \"./m/b.ts\": () => import(\"./m/b.ts\")})";
     for src in [
         "(import.meta satisfies any).glob('./m/*.ts')",
         "import.meta!.glob('./m/*.ts')",
