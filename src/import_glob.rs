@@ -7,9 +7,10 @@
 //! moves relative patterns and the keys to another directory; `query` (string or object) and the
 //! deprecated `as` add a `?query` to each import. Keys are as vite writes them, sorted: relative
 //! to `base`, else to the module for a relative pattern, else root-relative. As vite: the module
-//! itself, dot files and `node_modules` are skipped unless `exhaustive: true`. A call it cannot
-//! replace (another option, a non-literal argument) is left alone and throws vitest's error at
-//! run time (runtime.js).
+//! itself, dot files and `node_modules` are skipped unless `exhaustive: true`. A pattern it
+//! cannot anchor fails the module with vite's "Invalid glob" error (thrown on its first line);
+//! a call it cannot replace (another option, a non-literal argument) is left alone and throws
+//! vitest's error at run time (runtime.js).
 //!
 //! The replacement keeps the call's line count and the eager imports go on the first line, so
 //! the module's line numbers (test locations, source maps) do not move.
@@ -49,6 +50,25 @@ pub fn expand(file: &Path, src: &str, root: &Path, aliases: &[(String, String)])
         return None;
     }
     let dir = file.parent()?;
+    // vite fails the module at transform on a pattern it cannot anchor (turbo-test#149): the
+    // module throws vite's error when it is evaluated, before any of its code runs
+    let invalid = calls.iter().flat_map(|c| &c.patterns).find_map(|p| {
+        let p = p.strip_prefix('!').unwrap_or(p);
+        anchor(p, dir, root, aliases).is_none().then(|| {
+            format!("Invalid glob: \"{p}\" (resolved: \"{p}\"). It must start with '/' or './'")
+        })
+    });
+    if let Some(message) = invalid {
+        let at = if src.starts_with("#!") {
+            src.find('\n').map_or(src.len(), |n| n + 1)
+        } else {
+            0
+        };
+        let mut out = src.to_string();
+        let message = serde_json::to_string(&message).ok()?;
+        out.insert_str(at, &format!("throw new Error({message});"));
+        return Some(out);
+    }
     let mut out = src.to_string();
     let mut imports: Vec<String> = Vec::new();
     let mut changed = false;

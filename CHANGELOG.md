@@ -33,6 +33,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `url` / `filename` / `dirname` plus vitest's `env` (live `process.env`, `DEV` / `PROD` / `SSR`
   booleans), and `process.env` carries vite's `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` (`SSR`
   off under a `jsdom` / `happy-dom` environment), as vitest sets them.
+- An `import.meta.glob` pattern that is not relative, `/` or an alias fails its module, as vite
+  does at transform (turbo-test#149), with vite's `Invalid glob: "<pattern>" (resolved: …). It
+  must start with '/' or './'`; the call used to throw only when it ran, so the file's other
+  tests passed.
 - Asset imports give vite's strings (turbo-test#148): `import t from './t.txt?raw'`, `?url` and
   plain imports of images / fonts / media / `.txt` gave `'default'` on the module runner and `{}`
   on the ESM graph. Now `?raw` is the file's text, `?url` and known asset types the root-relative

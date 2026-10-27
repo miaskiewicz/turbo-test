@@ -904,7 +904,6 @@ it('asset imports are vite strings', async () => {
 /// to throw only when it ran, so the file's other tests passed. vitest on the same project:
 /// `Test Files  2 failed | 1 passed (3)`, `Tests  1 passed (1)`.
 #[test]
-#[ignore = "turbo-test#149: fails until the fix"]
 fn an_invalid_glob_pattern_fails_its_module() {
     let files: [(&str, &str); 6] = [
         (
@@ -975,8 +974,9 @@ it('fine', () => { expect(Object.keys(import.meta.glob('./src/ok/*.ts'))).toEqua
                 let want = format!(
                     "(Error: Invalid glob: \"{pattern}\" (resolved: \"{pattern}\"). It must start with '/' or './')"
                 );
+                // the ESM graph's summary line names the cause `module errored: Error: …`
                 assert!(
-                    load_error_line(&r, file).ends_with(&want),
+                    load_error_line(&r, file).contains(&want[1..want.len() - 1]),
                     "esbuild={esbuild} {env:?}\n{}",
                     r.all()
                 );

@@ -86,7 +86,6 @@ fn calls_it_cannot_replace_are_left_alone() {
         "import.meta.glob('./*.ts', { base: x })",
         "import.meta.glob('./*.ts', { query: { a: x } })",
         "import.meta.glob('./*.ts', { eager: x })",
-        "import.meta.glob('@/*.ts')",
         "import.meta.glob(['./*.ts', ...more])",
         "import.meta.glob()",
         "import.meta.glob('./*.ts', {}, 1)",
@@ -146,6 +145,38 @@ fn base_query_as_aliases_and_a_hashbang() {
             "({{\"{}/x/l.ts\": () => import(\"../lib/x/l.ts\")}})",
             aliases[0].1
         )
+    );
+}
+
+#[test]
+fn an_unanchored_pattern_fails_the_module() {
+    let d = project(&["m.ts"]);
+    let file = d.0.join("m.ts");
+    let msg = |p: &str| {
+        format!("throw new Error(\"Invalid glob: \\\"{p}\\\" (resolved: \\\"{p}\\\"). It must start with '/' or './'\");")
+    };
+    assert_eq!(
+        expand(&file, "a;\nimport.meta.glob('@/*.ts');", &d.0, &[]).unwrap(),
+        format!("{}a;\nimport.meta.glob('@/*.ts');", msg("@/*.ts"))
+    );
+    assert_eq!(
+        expand(
+            &file,
+            "#!/bin/x\nimport.meta.glob(['./*.ts', '!x/*.ts']);",
+            &d.0,
+            &[]
+        )
+        .unwrap(),
+        format!(
+            "#!/bin/x\n{}import.meta.glob(['./*.ts', '!x/*.ts']);",
+            msg("x/*.ts")
+        )
+    );
+    // an alias anchors it
+    let aliases = [("@".to_string(), d.0.to_string_lossy().into_owned())];
+    assert_eq!(
+        expand(&file, "import.meta.glob('@/*.ts')", &d.0, &aliases).unwrap(),
+        "({})"
     );
 }
 
