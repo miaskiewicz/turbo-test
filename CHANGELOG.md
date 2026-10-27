@@ -42,6 +42,12 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   panic) is retried. The same test pins it with `--isolate` (vitest's report is identical).
 
 ### Fixed
+- `--reporter tap` and `tap-flat` are vitest 4.1.12's TapReporter / TapFlatReporter
+  (turbo-test#170): `tap` printed one flat plan over every test with `message:` failure blocks;
+  it now nests each file and describe as a subtest with `# time=`, `# SKIP` / `# TODO`, TAP-escaped
+  names, annotations and vitest's `error:` / `at:` / `actual:` / `expected:` blocks, and
+  `tap-flat` (which fell back to the default reporter) is the flat `file > describe > test`
+  plan. Errors now carry processError's `showDiff` / `actual` / `expected`.
 - The `expect` surface is now vitest 4.1.12's, checked member by member against vitest
   (`tests/runner_c_expect_surface.rs`, turbo-test#152–#155). The asymmetric matchers are
   vitest's classes, with `$$typeof`, `asymmetricMatch`, `toString`, `getExpectedType` and

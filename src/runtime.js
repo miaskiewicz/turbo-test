@@ -6401,7 +6401,8 @@ globalThis.afterAll = (fn) => current.hooks.aa.push(fn);
 function __errorInfo(e) {
   const ser = __serializeError(e);
   let diff = '';
-  if (e !== null && typeof e === 'object' && (e.showDiff || (e.showDiff === undefined && e.expected !== undefined && e.actual !== undefined))) {
+  const diffable = e !== null && typeof e === 'object' && (e.showDiff || (e.showDiff === undefined && e.expected !== undefined && e.actual !== undefined));
+  if (diffable) {
     try { diff = __printDiffOrStringify(e.actual, e.expected); } catch (err) { diff = ''; }
   }
   const cause = e !== null && typeof e === 'object' && e.cause && typeof e.cause === 'object' && 'name' in e.cause ? __errorInfo(e.cause) : null;
@@ -6426,7 +6427,18 @@ function __errorInfo(e) {
     inspected,
     properties: props === null ? null : __inspect(props),
     rollup,
+    // processError's prettified actual / expected and the error's showDiff (vitest's TAP
+    // block, turbo-test#170)
+    show_diff: !!(e !== null && typeof e === 'object' && e.showDiff),
+    actual: diffable ? __prettifyValue(e.actual) : null,
+    expected: diffable ? __prettifyValue(e.expected) : null,
   };
+}
+// @vitest/utils prettifyValue: a string as it is, anything else pretty-formatted as the diff's
+// values (FORMAT_OPTIONS)
+function __prettifyValue(v) {
+  if (typeof v === 'string') return v;
+  try { return __pf(v, { indent: 2, basic: false, maxDepth: 20, errors: true }); } catch (err) { return String(v); }
 }
 // @vitest/utils processError's serialization: a primitive (or any falsy value) is `{ message }`,
 // anything else serializeValue's clone.
@@ -6660,6 +6672,11 @@ async function runSuite(suite, ancestors, summary, mode = '') {
   // A describe.skip / describe.todo block (or one inside it) runs nothing (#63).
   const skipAll = mode || suite.mode || '';
   const record = (state) => { if (ancestors.length) summary.suites.push(skipAll === 'todo' ? 'todo' : state); };
+  // a describe without tasks (failing, or a describe.todo / .skip one) is a TAP task of its own
+  // (turbo-test#170): where it sits among the tests, its mode and its describe path
+  if (ancestors.length && !suite.tasks.length) {
+    summary.empty_suites.push([String(summary.tests.length), skipAll || 'run', ...ancestors.slice(1).map((x) => x.name), suite.name].join('\u001f'));
+  }
   if (ancestors.length && !skipAll && !suite.tasks.length) {
     summary.failures.push(`No test found in suite ${suite.name}`);
     record('fail');
@@ -6952,7 +6969,7 @@ globalThis.__tt = {
   async run() {
     // `suites`: one state per describe block ('pass' / 'fail' / 'skip' / 'todo'), for the JSON
     // reporter's suite counts.
-    const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [], suites: [], skippedNames: [], suite_errors: [] };
+    const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [], suites: [], skippedNames: [], suite_errors: [], empty_suites: [] };
     // vitest (runner `runFiles`): a file that collected NO task at all — no test or suite, skipped
     // and todo ones included — fails with "No test suite found in file <path>" unless
     // passWithNoTests. Reported as the file's only failure entry with no failed test; the CLI

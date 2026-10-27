@@ -5,12 +5,31 @@
 mod common;
 use common::{turbo_test, Project, Run};
 
-/// The TAP lines of a `--reporter tap` run (one `ok N - name` / `not ok N - name` per test).
+/// The test points of a `--reporter tap-flat` run (`ok N - <file> > describe > test`, one per
+/// test), without the file, the `# time=` comment and the TAP escapes.
 fn tap_points(r: &Run) -> Vec<String> {
     r.stdout
         .lines()
         .filter(|l| l.starts_with("ok ") || l.starts_with("not ok "))
-        .map(str::to_string)
+        .map(|l| {
+            let l = match l.split_once(" - ") {
+                Some((point, name)) => {
+                    format!(
+                        "{point} - {}",
+                        name.split_once(" > ").map_or(name, |(_, n)| n)
+                    )
+                }
+                None => l.to_string(),
+            };
+            let l = match l.find(" # time=") {
+                Some(i) => l[..i].to_string(),
+                None => l,
+            };
+            // vitest's tapString escapes `\` and `#` in names
+            l.replace("\\\\", "\u{0}")
+                .replace("\\#", "#")
+                .replace('\u{0}', "\\")
+        })
         .collect()
 }
 
@@ -30,7 +49,7 @@ fn tasks_run_in_declaration_order() {
          })\n\
          test('last', () => { log.push('last'); expect(log.join()).toBe('first,inner,deep,inner2,last') })\n",
     );
-    let r = turbo_test(&p.dir, &["--reporter", "tap", "o.test.js"], &[]);
+    let r = turbo_test(&p.dir, &["--reporter", "tap-flat", "o.test.js"], &[]);
     assert_eq!(r.code, Some(0), "{}", r.all());
     assert_eq!(
         tap_points(&r),
@@ -72,7 +91,7 @@ fn only_runs_what_vitest_runs() {
            test('gx', () => {})\n\
          })\n",
     );
-    let r = turbo_test(&p.dir, &["--reporter", "tap", "o.test.js"], &[]);
+    let r = turbo_test(&p.dir, &["--reporter", "tap-flat", "o.test.js"], &[]);
     assert_eq!(r.code, Some(0), "{}", r.all());
     assert_eq!(
         tap_points(&r),
@@ -122,7 +141,11 @@ fn name_pattern_matches_the_space_joined_full_name() {
         ("^top$", &["top"]),
     ];
     for (pat, want) in cases {
-        let r = turbo_test(&p.dir, &["--reporter", "tap", "-t", pat, "a.test.js"], &[]);
+        let r = turbo_test(
+            &p.dir,
+            &["--reporter", "tap-flat", "-t", pat, "a.test.js"],
+            &[],
+        );
         assert_eq!(r.code, Some(0), "{pat}\n{}", r.all());
         assert_eq!(ran(&r), want, "{pat}\n{}", r.all());
     }
@@ -167,7 +190,7 @@ fn each_titles_are_formatted_like_vitest() {
     // `describe.each` kept the template. Expected = vitest 4.1.12's names for the same file.
     let p = Project::new("rc-collect-each");
     p.file("e.test.js", EACH_TITLES);
-    let r = turbo_test(&p.dir, &["--reporter", "tap", "e.test.js"], &[]);
+    let r = turbo_test(&p.dir, &["--reporter", "tap-flat", "e.test.js"], &[]);
     assert_eq!(r.code, Some(0), "{}", r.all());
     let names: Vec<String> = tap_points(&r)
         .iter()
@@ -243,7 +266,7 @@ describe.for([{ n: 'x' }])('d $n', (row) => {
 test.for([[1, 2]])('opts %i', { timeout: 100 }, ([a]) => { expect(a).toBe(1) })
 "#,
     );
-    let r = turbo_test(&p.dir, &["--reporter", "tap", "f.test.js"], &[]);
+    let r = turbo_test(&p.dir, &["--reporter", "tap-flat", "f.test.js"], &[]);
     assert_eq!(r.code, Some(0), "{}", r.all());
     assert_eq!(
         tap_points(&r),
@@ -284,7 +307,7 @@ fn a_failing_before_all_skips_its_suite_and_an_empty_describe_fails() {
         "e.test.js",
         "describe('empty', () => {})\ntest('ok', () => {})\n",
     );
-    let r = turbo_test(&p.dir, &["--reporter", "tap", "b.test.js"], &[]);
+    let r = turbo_test(&p.dir, &["--reporter", "tap-flat", "b.test.js"], &[]);
     assert_eq!(r.code, Some(1), "{}", r.all());
     assert_eq!(
         tap_points(&r),

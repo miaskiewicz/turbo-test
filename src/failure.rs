@@ -42,6 +42,11 @@ pub struct ErrorInfo {
     /// What vite's plugin container added to a module's parse / transform error (vitest's
     /// `__vitest_rollup_error__`, printed under the message; turbo-test#113).
     pub rollup: Option<RollupDetails>,
+    /// The error's `showDiff` and its `actual` / `expected` as @vitest/utils processError leaves
+    /// them (pretty-formatted unless strings; vitest's TAP block prints them, turbo-test#170).
+    pub show_diff: bool,
+    pub actual: Option<String>,
+    pub expected: Option<String>,
 }
 
 /// vite's details of a load error: the plugin that threw, the module's id, its `line:column`

@@ -1,5 +1,5 @@
 TAP version 13
-1..26
+1..29
 ok 1 - a.test.ts > passes # time=Tms
 not ok 2 - a.test.ts > numbers # time=Tms
     ---
@@ -106,3 +106,11 @@ ok 23 - d.test.ts > mixed > s # SKIP
 ok 24 - d.test.ts > mixed > p # time=Tms
 ok 25 - d.test.ts > runtime skip # SKIP
 ok 26 - d.test.ts > nested skip parent > child > x # SKIP
+not ok 27 - e.test.ts > outer > empty inner # time=Tms
+    ---
+    error:
+        name: "Error"
+        message: "No test found in suite empty inner"
+    ...
+ok 28 - e.test.ts > outer > ok # time=Tms
+ok 29 - e.test.ts > outer > todo inner # TODO

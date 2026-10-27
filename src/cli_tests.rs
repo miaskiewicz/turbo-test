@@ -213,6 +213,8 @@ fn parse_reporters_and_output_file() {
 fn reporter_helpers() {
     assert_eq!(Reporter::parse(None), Reporter::Default);
     assert_eq!(Reporter::parse(Some("tap")), Reporter::Tap);
+    assert_eq!(Reporter::parse(Some("tap-flat")), Reporter::TapFlat);
+    assert!(Reporter::TapFlat.is_artifact());
     assert!(
         Reporter::Json.is_artifact()
             && Reporter::Junit.is_artifact()
@@ -594,6 +596,7 @@ fn clone_outcome(r: &FileOutcome) -> FileOutcome {
             snapshot: rep.snapshot.clone(),
             setup_us: rep.setup_us,
             suite_errors: rep.suite_errors.clone(),
+            empty_suites: rep.empty_suites.clone(),
             logs: rep.logs.clone(),
             waited_ms: rep.waited_ms,
         }),
@@ -1248,49 +1251,182 @@ fn junit_reporter() {
 #[test]
 fn tap_reporter() {
     let (files, res) = sample();
-    // turbo-test#32 item 4: the load-error file (`files[2]`) is one `not ok` point carrying the
-    // error, like JUnit's / JSON's synthetic failing case — it was silently dropped.
-    let expected = "TAP version 13\n1..7\n\
-ok 1 - suite > adds\n\
-ok 2 - suite > skipped one # SKIP\n\
-not ok 3 - suite > breaks <&>\n  ---\n  message: expected \"1\" to be '2'\n  ...\n\
-ok 4 - todo\n\
-not ok 5 - silent fail\n\
-ok 6 - ok\n\
+    // vitest's TapReporter (turbo-test#170): a file a subtest, a describe nested in it, the
+    // load-error file (`files[2]`) a leaf with its error's block (turbo-test#32 item 4, #166);
+    // a failure without an error object is its message's block
+    let expected = r#"TAP version 13
+1..3
+not ok 1 - /p/a.test.ts # time=1234.00ms {
+    1..3
+    not ok 1 - suite # time=14.00ms {
+        1..3
+        ok 1 - adds # time=1.40ms
+        ok 2 - skipped one # SKIP
+        not ok 3 - breaks <&> # time=12.60ms
+            ---
+            error:
+                name: "Error"
+                message: "expected \"1\"
+to be '2'"
+            ...
+    }
+    ok 2 - todo # TODO
+    not ok 3 - silent fail # time=0.00ms
+        ...
+}
+ok 2 - /p/b\\"q.test.ts # time=20.00ms {
+    1..1
+    ok 1 - ok # time=2.00ms
+}
+not ok 3 - /p/c&<x>.test.ts
+    ---
+    error:
+        name: "Error"
+        message: "top <boom> & \"q\""
+    ...
+"#;
+    assert_eq!(render_tap(&files, &res, false), expected);
+    // tap-flat: one plan, `file > describe > test`
+    let flat = "TAP version 13\n1..7\n\
+ok 1 - /p/a.test.ts > suite > adds # time=1.40ms\n\
+ok 2 - /p/a.test.ts > suite > skipped one # SKIP\n\
+not ok 3 - /p/a.test.ts > suite > breaks <&> # time=12.60ms\n    ---\n    error:\n        name: \"Error\"\n        message: \"expected \\\"1\\\"\nto be '2'\"\n    ...\n\
+ok 4 - /p/a.test.ts > todo # TODO\n\
+not ok 5 - /p/a.test.ts > silent fail # time=0.00ms\n    ...\n\
+ok 6 - /p/b\\\\\"q.test.ts > ok # time=2.00ms\n\
 not ok 7 - /p/c&<x>.test.ts\n    ---\n    error:\n        name: \"Error\"\n        message: \"top <boom> & \\\"q\\\"\"\n    ...\n";
-    assert_eq!(render_tap(&files, &res), expected);
-    assert_eq!(render_tap(&[], &[]), "TAP version 13\n1..0\n");
-    // a load error is vitest's block (turbo-test#166): line breaks kept, `at:` its first frame,
-    // an empty message left empty
-    let only_err = vec![file_result(0, &files[0], Err("a\nb".into()), 1.0)];
-    assert_eq!(
-        render_tap(&files, &only_err),
-        "TAP version 13\n1..1\nnot ok 1 - /p/a.test.ts\n    ---\n    error:\n        name: \"Error\"\n        message: \"a\nb\"\n    ...\n"
-    );
+    assert_eq!(render_tap(&files, &res, true), flat);
+    assert_eq!(render_tap(&[], &[], false), "TAP version 13\n1..0\n");
+    assert_eq!(render_tap(&[], &[], true), "TAP version 13\n1..0\n");
     let mut framed = file_result(0, &files[0], Err("x".into()), 1.0);
     framed.load_error_info = Some(crate::failure::ErrorInfo {
-        name: "Unknown Error".into(),
+        name: String::new(),
         message: String::new(),
-        frames: vec![
-            crate::failure::Frame {
-                method: String::new(),
-                file: "/p/a.test.ts".into(),
-                line: 3,
-                col: 9,
-            },
-            crate::failure::Frame {
-                method: "f".into(),
-                file: "/p/b.ts".into(),
-                line: 1,
-                col: 1,
-            },
-        ],
+        frames: vec![crate::failure::Frame {
+            method: String::new(),
+            file: "/p/a.test.ts".into(),
+            line: 3,
+            col: 9,
+        }],
         ..Default::default()
     });
     assert_eq!(
-        render_tap(&files, &[framed]),
+        render_tap(&files, &[framed], false),
         "TAP version 13\n1..1\nnot ok 1 - /p/a.test.ts\n    ---\n    error:\n        name: \"Unknown Error\"\n        message: \n    at: \"/p/a.test.ts:3:9\"\n    ...\n"
     );
+}
+
+/// The rest of vitest's TAP shapes (turbo-test#170): annotations, a diff's `actual` /
+/// `expected`, every error of a test, `pending` / not-run tests, describes that never ran or
+/// whose hook failed, describes without tasks (failing / skip / todo) in their place, and TAP
+/// escapes in names.
+#[test]
+fn tap_reporter_shapes() {
+    let f = PathBuf::from("/p/a.test.ts");
+    let diff = crate::failure::ErrorInfo {
+        name: "AssertionError".into(),
+        message: "m".into(),
+        show_diff: true,
+        actual: Some("{\n  \"a\": 1,\n}".into()),
+        expected: Some("2".into()),
+        ..Default::default()
+    };
+    let plain = crate::failure::ErrorInfo {
+        name: "E".into(),
+        message: "n".into(),
+        actual: Some("x".into()),
+        ..Default::default()
+    };
+    let mut annotated = case("a#b\\c\nd", "passed", 1.0, "");
+    annotated.annotations = vec![runner::Annotation {
+        kind: "notice".into(),
+        message: "hi".into(),
+        line: 0,
+        col: 0,
+    }];
+    let mut errs = case("errs", "failed", 2.0, "m");
+    errs.errors = vec![diff, plain];
+    let mut only = case("forbidden", "failed", 0.0, "");
+    only.not_run = true;
+    let rep = TestReport {
+        tests: vec![
+            annotated,
+            errs,
+            only,
+            case("never > p", "pending", 0.0, ""),
+            case("hooked > h", "skipped", 0.0, ""),
+            case("mixed > s", "skipped", 0.0, ""),
+            case("mixed > r", "passed", 0.5, ""),
+        ],
+        suite_errors: vec![runner::SuiteError {
+            name: "hooked".into(),
+            ..Default::default()
+        }],
+        empty_suites: vec![
+            "3\u{1f}run\u{1f}never\u{1f}empty".into(),
+            "4\u{1f}todo\u{1f}td".into(),
+            "7\u{1f}skip\u{1f}mixed\u{1f}sk".into(),
+            "bad".into(),
+        ],
+        ..report(1, 2)
+    };
+    let res = vec![file_result(0, &f, Ok(rep), 9.0)];
+    let want = r#"TAP version 13
+1..1
+not ok 1 - /p/a.test.ts # time=9.00ms {
+    1..7
+    ok 1 - a\#b\\c d # time=1.00ms
+        # notice: hi
+    not ok 2 - errs # time=2.00ms
+        ---
+        error:
+            name: "AssertionError"
+            message: "m"
+        actual: "{
+  \"a\": 1,
+}"
+        expected: "2"
+        ---
+        error:
+            name: "E"
+            message: "n"
+        ...
+    not ok 3 - forbidden
+        ...
+    not ok 4 - never # time=0.00ms {
+        1..2
+        not ok 1 - empty # time=0.00ms
+            ---
+            error:
+                name: "Error"
+                message: "No test found in suite empty"
+            ...
+        ok 2 - p # SKIP
+    }
+    ok 5 - td # TODO
+    not ok 6 - hooked # time=0.00ms {
+        1..1
+        ok 1 - h # SKIP
+    }
+    ok 7 - mixed # time=0.50ms {
+        1..3
+        ok 1 - s # SKIP
+        ok 2 - r # time=0.50ms
+        ok 3 - sk # SKIP
+    }
+}
+"#;
+    assert_eq!(render_tap(std::slice::from_ref(&f), &res, false), want);
+    let flat = render_tap(&[f], &res, true);
+    assert!(flat.starts_with("TAP version 13\n1..10\n"), "{flat}");
+    for line in [
+        "not ok 4 - /p/a.test.ts > never > empty # time=0.00ms\n    ---\n    error:\n        name: \"Error\"\n        message: \"No test found in suite empty\"\n",
+        "ok 6 - /p/a.test.ts > td # TODO\n",
+        "ok 7 - /p/a.test.ts > hooked > h # SKIP\n",
+        "ok 10 - /p/a.test.ts > mixed > sk # SKIP\n",
+    ] {
+        assert!(flat.contains(line), "{line}\n{flat}");
+    }
 }
 
 #[test]
@@ -1306,7 +1442,11 @@ fn artifact_dispatch() {
     );
     assert_eq!(
         render_artifact(Reporter::Tap, &files, &files, &res, 0.0, false),
-        Some(render_tap(&files, &res))
+        Some(render_tap(&files, &res, false))
+    );
+    assert_eq!(
+        render_artifact(Reporter::TapFlat, &files, &files, &res, 0.0, false),
+        Some(render_tap(&files, &res, true))
     );
     for r in [Reporter::Default, Reporter::Dot, Reporter::Verbose] {
         assert_eq!(render_artifact(r, &files, &files, &res, 0.0, false), None);

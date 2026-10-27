@@ -1,5 +1,5 @@
 TAP version 13
-1..4
+1..5
 not ok 1 - a.test.ts # time=Tms {
     1..13
     ok 1 - passes # time=Tms
@@ -143,5 +143,19 @@ ok 4 - d.test.ts # time=Tms {
             1..1
             ok 1 - x # SKIP
         }
+    }
+}
+not ok 5 - e.test.ts # time=Tms {
+    1..1
+    not ok 1 - outer # time=Tms {
+        1..3
+        not ok 1 - empty inner # time=Tms
+            ---
+            error:
+                name: "Error"
+                message: "No test found in suite empty inner"
+            ...
+        ok 2 - ok # time=Tms
+        ok 3 - todo inner # TODO
     }
 }
