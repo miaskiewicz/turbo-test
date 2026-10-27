@@ -1514,6 +1514,81 @@ fn vitest_setup_files_uncached(entry: &Path) -> Vec<PathBuf> {
     Vec::new()
 }
 
+/// vitest's `snapshotSerializers` (turbo-test#167): the paths in the nearest vitest config,
+/// resolved against its directory (vitest resolves them against the root), memoized by the
+/// test file's directory as the setup files are.
+fn vitest_snapshot_serializers(entry: &Path) -> Vec<PathBuf> {
+    let Some(dir) = entry.parent() else {
+        return Vec::new();
+    };
+    thread_local! {
+        static SERIALIZERS_MEMO: RefCell<HashMap<PathBuf, Vec<PathBuf>>> = RefCell::new(HashMap::new());
+    }
+    if let Some(v) = SERIALIZERS_MEMO.with(|m| m.borrow().get(dir).cloned()) {
+        return v;
+    }
+    let v = vitest_snapshot_serializers_uncached(dir);
+    SERIALIZERS_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v.clone()));
+    v
+}
+
+fn vitest_snapshot_serializers_uncached(start: &Path) -> Vec<PathBuf> {
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        for cfg in VITEST_CONFIG_FILES {
+            if let Ok(s) = std::fs::read_to_string(d.join(cfg)) {
+                return config_string_list(&s, "snapshotSerializers")
+                    .into_iter()
+                    .map(|f| normalize_path(&d.join(f)))
+                    .collect();
+            }
+        }
+        dir = d.parent();
+    }
+    Vec::new()
+}
+
+/// The quoted strings of a config key's `[...]` list (empty when the key is absent).
+fn config_string_list(s: &str, key: &str) -> Vec<String> {
+    let Some(start) = find_config_key(s, key) else {
+        return Vec::new();
+    };
+    let tail = &s[start..];
+    let Some(lb) = tail.find('[') else {
+        return Vec::new();
+    };
+    let Some(rb) = tail[lb..].find(']') else {
+        return Vec::new();
+    };
+    tail[lb + 1..lb + rb]
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .trim_matches(|c| c == '\'' || c == '"' || c == '`')
+                .to_string()
+        })
+        .filter(|q| !q.is_empty())
+        .collect()
+}
+
+/// Add the config's snapshot serializers (`__ttLoadSnapshotSerializers` in runtime.js): a file
+/// whose module has no default object, or whose default cannot print, fails with vitest's error.
+fn load_snapshot_serializers(scope: &mut v8::PinScope, files: &[PathBuf]) -> Result<(), String> {
+    let list: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+    let js = format!(
+        "globalThis.__ttLoadSnapshotSerializers({})",
+        serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+    );
+    let tc = std::pin::pin!(v8::TryCatch::new(scope));
+    let tc = &mut tc.init();
+    if let Some(code) = v8::String::new(tc, &js) {
+        if let Some(script) = v8::Script::compile(tc, code, None) {
+            script.run(tc);
+        }
+    }
+    caught_message(tc, "snapshot serializers failed").map_or(Ok(()), Err)
+}
+
 /// Jest config parity: read `setupFiles` + `setupFilesAfterEnv` from a jest config in `dir`
 /// (`jest.config.{js,cjs,mjs,ts,json}` or a `"jest"` block in package.json), resolving Jest's
 /// `<rootDir>` token (rootDir defaults to the config dir). Returns None if no jest config here
@@ -7520,6 +7595,13 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
             //     global vi.mock()s, draining each into the path-keyed mock registry.
             for sf in &setup_files {
                 if let Err(e) = run_setup_file(scope, sf, &externals, &mock_targets) {
+                    break 'work Err(e);
+                }
+            }
+            // 0c. the config's snapshotSerializers (turbo-test#167), after the setup files
+            let serializers = vitest_snapshot_serializers(&entry_abs);
+            if !serializers.is_empty() {
+                if let Err(e) = load_snapshot_serializers(scope, &serializers) {
                     break 'work Err(e);
                 }
             }

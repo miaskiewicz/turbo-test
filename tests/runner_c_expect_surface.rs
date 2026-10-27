@@ -10,11 +10,8 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 /// Members vitest has and turbo-test does not, each tracked by its own issue (vitest.compat.md):
-/// `expect.poll` (turbo-test#161), `expect.addSnapshotSerializer` (#162).
-const KNOWN_MISSING: [(&str, &str); 2] = [
-    ("expect", "addSnapshotSerializer:function"),
-    ("expect", "poll:function"),
-];
+/// none since expect.poll (turbo-test#161) and expect.addSnapshotSerializer (#162).
+const KNOWN_MISSING: [(&str, &str); 0] = [];
 
 #[test]
 fn expect_members_are_vitests() {
@@ -179,4 +176,199 @@ fn a_missing_chai_fails_loudly() {
     );
     assert_eq!(r.stderr, want, "{}", r.all());
     assert!(!r.stdout.contains("passed"), "{}", r.all());
+}
+
+/// Runs `file` (from `tests/data/expect_surface`) in a fresh project, with and without esbuild,
+/// and compares the `out.txt` rows it writes with vitest 4.1.12's, line by line.
+fn rows_are_vitests(name: &str, file: &str, src: &str, want: &str) {
+    for esbuild in [false, true] {
+        let p = Project::new(name);
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", r#"{ "type": "module" }"#);
+        p.file(file, src);
+        let r = turbo_test(&p.dir, &[file], &[("NO_COLOR", "1")]);
+        assert_eq!(r.code, Some(0), "{}", r.all());
+        let got = std::fs::read_to_string(p.path("out.txt")).unwrap();
+        for (g, w) in got.lines().zip(want.lines()) {
+            assert_eq!(g, w, "esbuild={esbuild}");
+        }
+        assert_eq!(
+            got.lines().count(),
+            want.lines().count(),
+            "esbuild={esbuild}"
+        );
+    }
+}
+
+#[test]
+fn expect_poll_is_vitests() {
+    // turbo-test#161: expect.poll was undefined. vitest 4.1.12's rows: the matcher re-runs `fn`
+    // every `interval` (50) ms until it passes or `timeout` (1000) ms ran out, then throws the
+    // last error with the cause `Matcher did not succeed in time.`; the message option prefixes
+    // it; a throwing / rejecting fn is retried; the result is a thenable (`[object Promise]`);
+    // the snapshot / throw matchers and .resolves / .rejects are a SyntaxError; poll counts one
+    // assertion; outside a test it throws. The interval and timeout run on the virtual clock
+    // (Date.now() moves by them); under vi.useFakeTimers each retry advances the fake clock by
+    // `interval` (`[4,150]`: a fake 120 ms timer seen on the 4th call).
+    rows_are_vitests(
+        "rc-expect-poll",
+        "poll.test.js",
+        include_str!("data/expect_surface/poll.test.js"),
+        include_str!("data/expect_surface/poll.vitest.txt"),
+    );
+}
+
+#[test]
+fn expect_poll_not_awaited_fails_the_test() {
+    // turbo-test#161: a poll matcher that is not awaited never runs and fails its test once the
+    // test is done, with vitest 4.1.12's error for each one (the last one first) at its call site.
+    let p = Project::new("rc-expect-poll-unawaited");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "unawaited.test.js",
+        include_str!("data/expect_surface/poll_unawaited.test.js"),
+    );
+    let r = turbo_test(
+        &p.dir,
+        &["unawaited.test.js", "--reporter", "default"],
+        &[("NO_COLOR", "1"), ("TURBO_LEGACY_REPORTER", "0")],
+    );
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    let out = r.all();
+    let not = "Error: expect.poll(assertion).not.toBe() was not awaited. This assertion is asynchronous and must be awaited; otherwise, it is not executed to avoid unhandled rejections:\n\nawait expect.poll(assertion).not.toBe()\n";
+    let plain = "Error: expect.poll(assertion).toBe() was not awaited. This assertion is asynchronous and must be awaited; otherwise, it is not executed to avoid unhandled rejections:\n\nawait expect.poll(assertion).toBe()\n";
+    // each at its matcher's call site, as vitest's
+    let not = format!("{not}\n ❯ unawaited.test.js:5:28\n");
+    let plain = format!("{plain}\n ❯ unawaited.test.js:4:40\n");
+    let (a, b) = (out.find(&not), out.find(&plain));
+    assert!(a.is_some() && b.is_some() && a < b, "{out}");
+    assert!(out.contains("Tests  1 failed | 1 passed (2)"), "{out}");
+}
+
+#[test]
+fn snapshot_serializers_are_vitests() {
+    // turbo-test#162: expect.addSnapshotSerializer was undefined. A serializer (`serialize`, or
+    // the old `print` API) applies to every snapshot from then on, the newest first, inside
+    // objects too, with pretty-format's config / indentation / depth / refs / printer; it does
+    // not change toEqual's message; a serializer that cannot print fails the snapshot with
+    // PrettyFormatPluginError. Expected: the inline snapshots and the .snap file vitest 4.1.12
+    // wrote for the same file, and its rows.
+    let p = Project::new("rc-snapshot-serializers");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "serializer.test.js",
+        include_str!("data/expect_surface/serializer.test.js"),
+    );
+    let want_src = include_str!("data/expect_surface/serializer.vitest.js");
+    let want_snap = include_str!("data/expect_surface/serializer.vitest.snap");
+    let want_rows = include_str!("data/expect_surface/serializer.vitest.txt");
+    for pass in ["write", "check"] {
+        let r = turbo_test(&p.dir, &["serializer.test.js"], &[("NO_COLOR", "1")]);
+        assert_eq!(r.code, Some(0), "{pass}: {}", r.all());
+        assert_eq!(
+            std::fs::read_to_string(p.path("serializer.test.js")).unwrap(),
+            want_src,
+            "{pass}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.path("__snapshots__/serializer.test.js.snap")).unwrap(),
+            want_snap,
+            "{pass}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.path("out.txt")).unwrap(),
+            want_rows,
+            "{pass}"
+        );
+    }
+}
+
+#[test]
+fn matcher_utils_are_vitests() {
+    // turbo-test#163: a custom matcher's `this.utils` was JSON-based. vitest 4.1.12's (NO_COLOR):
+    // its members, printReceived / printExpected / stringify through pretty-format (trailing
+    // spaces as `·`, maxDepth, maxLength halving, options), matcherHint's every option, diff /
+    // printDiffOrStringify / printWithType, and the messages of matchers built on them.
+    rows_are_vitests(
+        "rc-matcher-utils",
+        "utils.test.js",
+        include_str!("data/expect_surface/utils.test.js"),
+        include_str!("data/expect_surface/utils.vitest.txt"),
+    );
+}
+
+#[test]
+fn snapshot_serializers_config_is_vitests() {
+    // turbo-test#167: the config's `snapshotSerializers` (paths relative to the root, an ES
+    // module's or a CommonJS module's default export) were not read. vitest 4.1.12 adds each one
+    // before the file runs, so they apply like expect.addSnapshotSerializer's (one added in the
+    // test comes first). Expected: the inline snapshots and the .snap file vitest wrote.
+    let p = Project::new("rc-snapshot-serializers-config");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    for (name, src) in [
+        (
+            "vitest.config.mjs",
+            include_str!("data/expect_surface/serializer_config/vitest.config.mjs"),
+        ),
+        (
+            "money-serializer.js",
+            include_str!("data/expect_surface/serializer_config/money-serializer.js"),
+        ),
+        (
+            "tagged-serializer.cjs",
+            include_str!("data/expect_surface/serializer_config/tagged-serializer.cjs"),
+        ),
+        (
+            "cfg.test.js",
+            include_str!("data/expect_surface/serializer_config/cfg.test.js"),
+        ),
+    ] {
+        p.file(name, src);
+    }
+    for pass in ["write", "check"] {
+        let r = turbo_test(&p.dir, &["cfg.test.js"], &[("NO_COLOR", "1")]);
+        assert_eq!(r.code, Some(0), "{pass}: {}", r.all());
+        assert_eq!(
+            std::fs::read_to_string(p.path("cfg.test.js")).unwrap(),
+            include_str!("data/expect_surface/serializer_config/cfg.vitest.js"),
+            "{pass}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.path("__snapshots__/cfg.test.js.snap")).unwrap(),
+            include_str!("data/expect_surface/serializer_config/cfg.vitest.snap"),
+            "{pass}"
+        );
+    }
+    // a serializer module without a default object, or one that cannot print: vitest's errors
+    let bad = Project::new("rc-snapshot-serializers-config-bad");
+    bad.file("package.json", r#"{ "type": "module" }"#);
+    bad.file(
+        "vitest.config.mjs",
+        "export default { test: { snapshotSerializers: ['./bad.js'] } }\n",
+    );
+    bad.file(
+        "a.test.js",
+        "import { test, expect } from 'vitest'\ntest('a', () => { expect(1).toBe(1) })\n",
+    );
+    let bad_js = bad.path("bad.js");
+    for (src, want) in [
+        (
+            "export const x = 1\n",
+            format!(
+                "Error: invalid snapshot serializer file {}. Must export a default object",
+                bad_js.display()
+            ),
+        ),
+        (
+            "export default { test: () => true }\n",
+            format!("TypeError: invalid snapshot serializer in {}. Must have a 'test' method along with either a 'serialize' or 'print' method.", bad_js.display()),
+        ),
+    ] {
+        bad.file("bad.js", src);
+        let r = turbo_test(&bad.dir, &["a.test.js"], &[("NO_COLOR", "1")]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert!(r.all().contains(&want), "missing {want:?} in\n{}", r.all());
+    }
 }

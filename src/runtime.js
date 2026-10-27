@@ -3568,10 +3568,6 @@ function deepEqual(a, b, strict = false) {
 // them first, as vitest's getCustomEqualityTesters()
 const __customTesters = [];
 
-function fmt(v) {
-  try { return typeof v === 'string' ? JSON.stringify(v) : (Array.isArray(v) || (v && typeof v === 'object')) ? JSON.stringify(v) : String(v); }
-  catch { return String(v); }
-}
 
 // ---- snapshots ----
 // Per-test state set by runSuite before each test: the full `describe > it` name and a
@@ -3584,6 +3580,8 @@ const __snap = {
   assertCount: 0,
   expectedAssertions: null, // number | null
   hasAssertions: false,
+  // the test running now (its hooks included), null between tests: expect.poll's
+  currentTest: null,
 };
 function __snapNextKey(name) {
   const n = (__snap.counters[name] || 0) + 1;
@@ -3601,9 +3599,24 @@ function __snapFile() {
 // vitest's snapshot serializer (turbo-test#73): pretty-format with vitest's snapshotFormat
 // (printBasicPrototype false, escapeString false), printFunctionName false, escapeRegex true and
 // the mock-function serializer; CRLF normalized.
+// expect.addSnapshotSerializer's serializers come first, the newest first (turbo-test#162).
 function __serialize(v) {
-  return __pf(v, { indent: 2, basic: false, escape: false, fnName: false, escapeRegex: true, mocks: true }).replace(/\r\n|\r/g, '\n');
+  return __pf(v, { indent: 2, basic: false, escape: false, fnName: false, escapeRegex: true, mocks: true, plugins: __snapSerializers }).replace(/\r\n|\r/g, '\n');
 }
+const __snapSerializers = [];
+// the config's snapshotSerializers (turbo-test#167), as vitest's loadSnapshotSerializers: each
+// file's default export, checked, then added in order (a file once per worker)
+const __snapSerializerFiles = new Set();
+globalThis.__ttLoadSnapshotSerializers = (files) => {
+  const loaded = files.filter((file) => !__snapSerializerFiles.has(file)).map((file) => {
+    const mo = globalThis.__ttToESM(globalThis.__ttImportActual('/', file));
+    if (!mo || typeof mo.default !== 'object' || mo.default === null) throw new Error(`invalid snapshot serializer file ${file}. Must export a default object`);
+    const config = mo.default;
+    if (typeof config.test !== 'function' || (typeof config.serialize !== 'function' && typeof config.print !== 'function')) throw new TypeError(`invalid snapshot serializer in ${file}. Must have a 'test' method along with either a 'serialize' or 'print' method.`);
+    return [file, config];
+  });
+  for (const [file, config] of loaded) { __snapSerializerFiles.add(file); __snapSerializers.unshift(config); }
+};
 // Read a .snap file (vitest's or turbo-test's older one: both are `exports[...] = ...;` JS).
 function __parseSnapFile(text) {
   const out = Object.create(null);
@@ -4191,20 +4204,54 @@ function __withExpectMessage(e, message) {
   if (typeof e.stack === 'string' && e.stack.startsWith(before)) e.stack = `${e.name}: ${e.message}` + e.stack.slice(before.length);
   return e;
 }
+// a custom matcher's `this.utils`: vitest's getMatcherUtils() with diff / stringify /
+// iterableEquality / subsetEquality (turbo-test#163), coloured as tinyrainbow colours them
+const __bold = __tr('\x1b[1m', '\x1b[22m', '\x1b[22m\x1b[1m');
+// @vitest/expect matcherHint
+function __matcherHint(matcherName, received = 'received', expected = 'expected', options = {}) {
+  const { comment = '', isDirectExpectCall = false, isNot = false, promise = '', secondArgument = '', expectedColor = __dcol.green, receivedColor = __dcol.red, secondArgumentColor = __dcol.green } = options;
+  const dim = __dcol.dim;
+  let hint = '';
+  let dimString = 'expect';
+  if (!isDirectExpectCall && received !== '') { hint += dim(`${dimString}(`) + receivedColor(received); dimString = ')'; }
+  if (promise !== '') { hint += dim(`${dimString}.`) + promise; dimString = ''; }
+  if (isNot) { hint += `${dim(`${dimString}.`)}not`; dimString = ''; }
+  if (matcherName.includes('.')) dimString += matcherName;
+  else { hint += dim(`${dimString}.`) + matcherName; dimString = ''; }
+  if (expected === '') dimString += '()';
+  else {
+    hint += dim(`${dimString}(`) + expectedColor(expected);
+    if (secondArgument) hint += dim(', ') + secondArgumentColor(secondArgument);
+    dimString = ')';
+  }
+  if (comment !== '') dimString += ` // ${comment}`;
+  if (dimString !== '') hint += dim(dimString);
+  return hint;
+}
+// trailing spaces of each line as `·` (printReceived / printExpected)
+const __trailingDots = (text) => text.replace(/\s+$/gm, (spaces) => '·'.repeat(spaces.length));
 const __matcherUtils = {
-  printReceived: (x) => fmt(x),
-  printExpected: (x) => fmt(x),
-  matcherHint: (name) => String(name || ''),
-  stringify: (x) => fmt(x),
-  diff: (a, b) => `- Expected: ${fmt(a)}\n+ Received: ${fmt(b)}`,
-  RECEIVED_COLOR: (s) => s,
-  EXPECTED_COLOR: (s) => s,
-  BOLD_WEIGHT: (s) => s,
-  DIM_COLOR: (s) => s,
-  EXPECTED_LABEL: 'Expected',
-  RECEIVED_LABEL: 'Received',
-  pluralize: (w, n) => `${n} ${w}${n === 1 ? '' : 's'}`,
-  highlightTrailingWhitespace: (s) => s,
+  EXPECTED_COLOR: (s) => __dcol.green(s),
+  RECEIVED_COLOR: (s) => __dcol.red(s),
+  INVERTED_COLOR: (s) => __dcol.inverse(s),
+  BOLD_WEIGHT: (s) => __bold(s),
+  DIM_COLOR: (s) => __dcol.dim(s),
+  // @vitest/utils diff(a, b, options): its omitAnnotationLines and a/bAnnotation
+  diff: (a, b, options) => {
+    const keep = __diffAnno;
+    __diffAnno = [options?.aAnnotation ?? 'Expected', options?.bAnnotation ?? 'Received'];
+    try { return __vdiff(a, b, !options?.omitAnnotationLines); } finally { __diffAnno = keep; }
+  },
+  matcherHint: __matcherHint,
+  printReceived: (object) => __dcol.red(__trailingDots(__vstringify(object))),
+  printExpected: (value) => __dcol.green(__trailingDots(__vstringify(value))),
+  printDiffOrStringify: (received, expected) => __printDiffOrStringify(received, expected),
+  printWithType: (name, value, print) => {
+    const type = Object.prototype.toString.call(value).slice(8, -1);
+    const hasType = type !== 'null' && type !== 'undefined' ? `${name} has type:  ${type}\n` : '';
+    return `${hasType}${name} has value: ${print(value)}`;
+  },
+  stringify: (object, maxDepth, options) => __vstringify(object, maxDepth, options),
 };
 const __customMatchers = {};
 // the `this` of a jest-style matcher (vitest's getMatcherState) and of an asymmetric matcher
@@ -4362,6 +4409,79 @@ globalThis.expect.hasAssertions = function hasAssertions() {
   if (Error.captureStackTrace) Error.captureStackTrace(error, hasAssertions);
   __snap.hasAssertions = error;
 };
+// vitest's expect.poll(fn, { interval = 50, timeout = 1000, message }) (turbo-test#161): each
+// matcher re-runs fn until it passes or the timeout ran out, then throws the last error (its
+// cause `Matcher did not succeed in time.`). Its interval and timeout are internal timers on the
+// real (virtual) clock, which the test's fake timers do not see; while the timers are faked,
+// each retry then also advances the fake clock by the interval, as vitest's real-time wait
+// followed by vi.advanceTimersByTime(interval). A matcher that is not awaited never runs and
+// fails the test when it is done. As vitest's, a proxy over one chai Assertion (`expect(null)`)
+// whose matchers run on fn's value as the assertion's `object`.
+const __pollUnsupported = ['matchSnapshot', 'toMatchSnapshot', 'toMatchInlineSnapshot', 'toThrowErrorMatchingSnapshot', 'toThrowErrorMatchingInlineSnapshot', 'throws', 'Throw', 'throw', 'toThrow', 'toThrowError'];
+globalThis.expect.poll = function poll(fn, options = {}) {
+  const { interval = 50, timeout = 1000, message } = options;
+  __snap.assertCount++;
+  const test = __snap.currentTest;
+  if (!test) throw new Error('expect.poll() must be called inside a test');
+  const assertion = __chai.expect(null, message);
+  fn = fn.bind(assertion);
+  const proxy = new Proxy(assertion, { get(target, key, receiver) {
+    if (key === 'resolves' || key === 'rejects') throw new SyntaxError(`expect.poll() is not supported in combination with .${key}`);
+    const matcher = Reflect.get(target, key, receiver);
+    if (typeof matcher !== 'function') return matcher instanceof __chai.Assertion ? proxy : matcher;
+    if (key === 'assert') return matcher;
+    if (typeof key === 'string' && __pollUnsupported.includes(key)) throw new SyntaxError(`expect.poll() is not supported in combination with .${key}(). Use vi.waitFor() if your assertion condition is unstable.`);
+    return function __VITEST_POLL_CHAIN__(...args) {
+      const STACK_TRACE_ERROR = new Error('STACK_TRACE_ERROR');
+      const withStack = (err) => {
+        if (err && typeof err === 'object' && STACK_TRACE_ERROR.stack !== undefined) err.stack = STACK_TRACE_ERROR.stack.replace(STACK_TRACE_ERROR.message, err.message);
+        return err;
+      };
+      const run = async () => {
+        let timedOut = false;
+        const timer = __scheduleInternal(() => { timedOut = true; }, timeout);
+        try {
+          while (true) {
+            const last = timedOut;
+            try {
+              const obj = await fn();
+              __cu.flag(assertion, 'object', obj);
+              return await matcher.call(assertion, ...args);
+            } catch (err) {
+              if (last) {
+                if (err && typeof err === 'object' && err.cause == null) err.cause = new Error('Matcher did not succeed in time.');
+                throw withStack(err);
+              }
+              await new Promise((resolve) => __scheduleInternal(resolve, interval));
+              if (__loop.fake) __loop.advance(interval);
+            }
+          }
+        } finally {
+          __clearInternal(timer);
+        }
+      };
+      let awaited = false;
+      let result;
+      test.onFinished.push(() => {
+        if (awaited) return;
+        const shown = `expect.poll(assertion).${__cu.flag(assertion, 'negate') ? 'not.' : ''}${String(key)}()`;
+        throw withStack(new Error(`${shown} was not awaited. This assertion is asynchronous and must be awaited; otherwise, it is not executed to avoid unhandled rejections:\n\nawait ${shown}\n`));
+      });
+      return {
+        then(onFulfilled, onRejected) { awaited = true; return (result ||= run()).then(onFulfilled, onRejected); },
+        catch(onRejected) { awaited = true; return (result ||= run()).catch(onRejected); },
+        finally(onFinally) { awaited = true; return (result ||= run()).finally(onFinally); },
+        [Symbol.toStringTag]: 'Promise',
+      };
+    };
+  } });
+  return proxy;
+};
+// expect.addSnapshotSerializer: a pretty-format plugin every later snapshot uses (turbo-test#162)
+globalThis.expect.addSnapshotSerializer = (plugin) => { __snapSerializers.unshift(plugin); };
+// expect.addSnapshotSerializer: a pretty-format plugin every later snapshot uses (turbo-test#162),
+// added with chai's addMethod as vitest adds it
+__cu.addMethod(globalThis.expect, 'addSnapshotSerializer', (plugin) => { __snapSerializers.unshift(plugin); });
 globalThis.expect.soft = (actual, message) => globalThis.expect(actual, message).withContext({ soft: true });
 // vitest adds these with chai's addMethod (on chai.expect, then copied): called on `expect`, they
 // leave chai's `__flags` on it
@@ -5350,8 +5470,77 @@ function __pf(val, o) {
     fnName: o.fnName !== false,
     escapeRegex: !!o.escapeRegex,
     mocks: !!o.mocks,
+    plugins: o.plugins || [],
   };
   return __pfPrint(val, cfg, '', 0, [], false);
+}
+// pretty-format plugins (expect.addSnapshotSerializer, turbo-test#162): a plugin is
+// `{ test, serialize }` or the older `{ test, print }`, tried before any built-in printing.
+// A plugin sees pretty-format's config; `__pfStubs` stand for vitest's 7 built-in snapshot
+// plugins in its `plugins` (printed natively here: the mock function and asymmetric matchers).
+const __PrettyFormatPluginError = class PrettyFormatPluginError extends Error {
+  constructor(message, stack) { super(message); this.stack = stack; this.name = this.constructor.name; }
+};
+const __pfStubs = Array.from({ length: 7 }, () => ({ test: () => false, serialize: () => '' }));
+const __pfCfgOf = new WeakMap();
+function __pfConfig(cfg) {
+  if (cfg.pretty) return cfg.pretty;
+  const none = () => ({ close: '', open: '' });
+  const pretty = {
+    callToJSON: cfg.toJSON,
+    colors: { comment: none(), content: none(), prop: none(), tag: none(), value: none() },
+    compareKeys: undefined,
+    escapeRegex: cfg.escapeRegex,
+    escapeString: cfg.escape,
+    indent: cfg.indent,
+    maxDepth: cfg.maxDepth,
+    maxWidth: Infinity,
+    min: cfg.min,
+    plugins: cfg.mocks ? [...cfg.plugins, ...__pfStubs] : cfg.plugins.slice(),
+    printBasicPrototype: cfg.basic,
+    printFunctionName: cfg.fnName,
+    printShadowRoot: true,
+    spacingInner: cfg.inner,
+    spacingOuter: cfg.outer,
+    maxOutputLength: 1e6,
+    _outputLengthPerDepth: [],
+  };
+  cfg.pretty = pretty;
+  __pfCfgOf.set(pretty, cfg);
+  return pretty;
+}
+// pretty-format's `printer` as a plugin calls it: with the config it was given, or its own copy
+function __pfPrinter(val, config, indentation, depth, refs, hasCalledToJSON) {
+  let cfg = __pfCfgOf.get(config);
+  if (!cfg) {
+    const plugins = config.plugins || [];
+    cfg = {
+      indent: config.indent, outer: config.spacingOuter, inner: config.spacingInner, min: !!config.min,
+      basic: config.printBasicPrototype !== false, maxDepth: config.maxDepth, escape: config.escapeString !== false,
+      toJSON: config.callToJSON !== false, errors: false, fnName: config.printFunctionName !== false,
+      escapeRegex: !!config.escapeRegex, mocks: plugins.some((p) => __pfStubs.includes(p)),
+      plugins: plugins.filter((p) => !__pfStubs.includes(p)),
+    };
+    cfg.pretty = config;
+    __pfCfgOf.set(config, cfg);
+  }
+  return __pfPrint(val, cfg, indentation, depth, refs, !!hasCalledToJSON);
+}
+function __pfPlugin(plugin, val, cfg, indentation, depth, refs) {
+  const config = __pfConfig(cfg);
+  let printed;
+  try {
+    printed = plugin.serialize != null
+      ? plugin.serialize(val, config, indentation, depth, refs, __pfPrinter)
+      : plugin.print(val, (valChild) => __pfPrinter(valChild, config, indentation, depth, refs), (str) => {
+        const indentationNext = indentation + config.indent;
+        return indentationNext + str.replaceAll(/\n/g, `\n${indentationNext}`);
+      }, { edgeSpacing: config.spacingOuter, min: config.min, spacing: config.spacingInner }, config.colors);
+  } catch (error) {
+    throw new __PrettyFormatPluginError(error.message, error.stack);
+  }
+  if (typeof printed !== 'string') throw new TypeError(`pretty-format: Plugin must return type "string" but instead returned "${typeof printed}".`);
+  return printed;
 }
 function __pfCtorName(v) {
   return (typeof v.constructor === 'function' && v.constructor.name) || 'Object';
@@ -5368,6 +5557,11 @@ function __pfItems(items, cfg, ind, depth, refs, print) {
   return out + cfg.outer + ind;
 }
 function __pfPrint(v, cfg, ind, depth, refs, calledToJSON) {
+  for (const plugin of cfg.plugins) {
+    let hit;
+    try { hit = plugin.test(v); } catch (error) { throw new __PrettyFormatPluginError(error.message, error.stack); }
+    if (hit) return __pfPlugin(plugin, v, cfg, ind, depth, refs);
+  }
   const p = (x, i) => __pfPrint(x, cfg, i, depth, refs, false);
   // @vitest/pretty-format's AsymmetricMatcher plugin: anything with vitest's `$$typeof`, printed by
   // its toString name (containing / matching samples) or its toAsymmetricMatcher()
@@ -5462,6 +5656,19 @@ function __pfProps(v, cfg, ind, depth, refs) {
 // @vitest/utils `stringify` (the call listings without a diff).
 function __stringify(v) {
   return __pf(v, { maxDepth: 10, escape: false });
+}
+// @vitest/utils `stringify(object, maxDepth = 10, { maxLength, ...prettyFormatOptions })`: an
+// output of maxLength (10000) or more is printed again at half the depth
+function __vstringify(object, maxDepth = 10, { maxLength, ...options } = {}) {
+  const max = maxLength ?? 1e4;
+  const o = { maxDepth, escapeString: false, ...options };
+  const pf = (callToJSON) => __pf(object, {
+    indent: o.indent, min: o.min, basic: o.printBasicPrototype, maxDepth: o.maxDepth, escape: o.escapeString,
+    toJSON: callToJSON ?? o.callToJSON, fnName: o.printFunctionName, escapeRegex: o.escapeRegex,
+  });
+  let result;
+  try { result = pf(); } catch { result = pf(false); }
+  return result.length >= max && maxDepth > 1 ? __vstringify(object, Math.floor(Math.min(maxDepth, Number.MAX_SAFE_INTEGER) / 2), { maxLength, ...options }) : result;
 }
 // tinyrainbow's colours for the diffs vitest's worker prints with its colours on (turbo-test#94:
 // `__TT_COLORS`, the coloured human reporters); identity otherwise.
@@ -5700,7 +5907,9 @@ function __lineDiff(a, b) {
   return out;
 }
 // jest-diff `printAnnotation` (vitest's diff options: `- Expected` green, `+ Received` red).
-const __annotation = () => `${__dcol.green('- Expected')}\n${__dcol.red('+ Received')}\n\n`;
+// the annotation names: utils.diff's aAnnotation / bAnnotation while it runs
+let __diffAnno = ['Expected', 'Received'];
+const __annotation = () => `${__dcol.green(`- ${__diffAnno[0]}`)}\n${__dcol.red(`+ ${__diffAnno[1]}`)}\n\n`;
 // jest-diff `joinAlignedDiffsNoExpand` (5 context lines, `@@` patch marks), each line as
 // printDiffLine colours it: deleted green, inserted red, common dim, the marks yellow.
 function __joinDiffs(diffs) {
@@ -6099,7 +6308,7 @@ function __vdiff(a, b, annotate = false) {
   const fmt = { indent: 2, basic: false, maxDepth: 20, errors: true };
   const fallback = { ...fmt, maxDepth: 8, toJSON: false };
   if (type !== __diffType(b)) {
-    return `${__dcol.green('- Expected:')}\n${__pf(a, fallback)}\n\n${__dcol.red('+ Received:')}\n${__pf(b, fallback)}`;
+    return `${__dcol.green(`- ${__diffAnno[0]}:`)}\n${__pf(a, fallback)}\n\n${__dcol.red(`+ ${__diffAnno[1]}:`)}\n${__pf(b, fallback)}`;
   }
   if (omitDifference) return undefined;
   const noDiff = __dcol.dim(__NO_DIFF);
@@ -6878,6 +7087,7 @@ async function runSuite(suite, ancestors, summary, mode = '') {
       // Reset per-test snapshot + assertion-count state (snapshot counter is keyed by test name,
       // so distinct multi-snapshot tests don't collide; assertion enforcement resets each attempt).
       __snap.testName = label;
+      __snap.currentTest = t;
       for (const k of Object.keys(__snap.counters)) if (k === label || k.startsWith(`${label} > `)) __snap.counters[k] = 0;
       __snap.assertCount = 0;
       __snap.expectedAssertions = null;
@@ -6948,6 +7158,7 @@ async function runSuite(suite, ancestors, summary, mode = '') {
       // then its onTestFinished handlers, and onTestFailed ones when it failed (vitest's order)
       await __callTestHooks(t, t.onFinished, failWith);
       if (task.result.state === 'fail') await __callTestHooks(t, t.onFailed, failWith);
+      __snap.currentTest = null;
       // it.fails: invert the outcome once its hooks ran (vitest flips the final state) — an
       // error is the success condition, a clean pass fails.
       if (t.fails && !task.result.pending) {

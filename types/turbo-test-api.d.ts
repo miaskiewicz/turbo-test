@@ -179,12 +179,64 @@ export interface Assertion {
   rejects: Assertion;
 }
 
+// a pretty-format plugin (expect.addSnapshotSerializer): `serialize`, or the older `print`
+export type SnapshotSerializer =
+  | {
+      test(val: any): boolean;
+      serialize(val: any, config: any, indentation: string, depth: number, refs: any[], printer: (val: any, config: any, indentation: string, depth: number, refs: any[]) => string): string;
+    }
+  | {
+      test(val: any): boolean;
+      print(val: any, serialize: (val: any) => string, indent: (str: string) => string, options: { edgeSpacing: string; min: boolean; spacing: string }, colors: any): string;
+    };
+
+// a custom matcher's `this.utils` (vitest's getMatcherUtils + diff / stringify / equalities)
+export interface MatcherUtils {
+  EXPECTED_COLOR(s: string): string;
+  RECEIVED_COLOR(s: string): string;
+  INVERTED_COLOR(s: string): string;
+  BOLD_WEIGHT(s: string): string;
+  DIM_COLOR(s: string): string;
+  diff(a: any, b: any, options?: { omitAnnotationLines?: boolean; aAnnotation?: string; bAnnotation?: string }): string | undefined;
+  matcherHint(
+    matcherName: string,
+    received?: string,
+    expected?: string,
+    options?: {
+      comment?: string;
+      isDirectExpectCall?: boolean;
+      isNot?: boolean;
+      promise?: string;
+      secondArgument?: string;
+      expectedColor?: (s: string) => string;
+      receivedColor?: (s: string) => string;
+      secondArgumentColor?: (s: string) => string;
+    },
+  ): string;
+  printReceived(object: any): string;
+  printExpected(value: any): string;
+  printDiffOrStringify(received: any, expected: any): string;
+  printWithType(name: string, value: any, print: (value: any) => string): string;
+  stringify(object: any, maxDepth?: number, options?: { maxLength?: number; [option: string]: any }): string;
+  iterableEquality(a: any, b: any, customTesters?: any[]): boolean | undefined;
+  subsetEquality(object: any, subset: any, customTesters?: any[]): boolean | undefined;
+}
+
+// `this` inside an expect.extend matcher
+export interface MatcherState {
+  [key: string]: any;
+  isNot: boolean | undefined;
+  promise: string;
+  equals(a: any, b: any, customTesters?: any[], strictCheck?: boolean): boolean;
+  utils: MatcherUtils;
+}
+
 export interface ExpectStatic {
   (actual: any, message?: string): Assertion;
-  // forward-compat: vitest exposes more statics (poll, addSnapshotSerializer, assert, and an
-  // expect.extend matcher's asymmetric form). Permit any `expect.X` rather than error.
+  // forward-compat: vitest exposes more statics (assert, and an expect.extend matcher's
+  // asymmetric form). Permit any `expect.X` rather than error.
   [key: string]: any;
-  extend(matchers: Record<string, (...args: any[]) => any>): void;
+  extend(matchers: Record<string, (this: MatcherState, ...args: any[]) => any>): void;
   assertions(count: number): void;
   hasAssertions(): void;
   fail(message?: string): never;
@@ -201,6 +253,10 @@ export interface ExpectStatic {
   toSatisfy(predicate: (value: any) => boolean, message?: string): any;
   addEqualityTesters(testers: Array<(this: { equals: (...args: any[]) => boolean }, a: any, b: any, customTesters: any[]) => boolean | undefined>): void;
   unreachable(message?: string): never;
+  // each matcher re-runs `fn` until it passes or `timeout` (1000 ms) runs out, every `interval`
+  // (50 ms); the matchers return promises that must be awaited
+  poll(fn: () => any, options?: { interval?: number; timeout?: number; message?: string }): Assertion;
+  addSnapshotSerializer(plugin: SnapshotSerializer): void;
   getState(): Record<string, any>;
   setState(state: Record<string, any>): void;
   not: {
