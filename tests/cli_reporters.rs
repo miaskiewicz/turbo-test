@@ -825,7 +825,6 @@ fn junit_frames_at_imported_calls_are_vitests() {
 /// frame in an imported `.js` module was not mapped back through the rewrite at all
 /// (`h2.js:2:78`); vitest 4.1.12 points at the callee. The module runner (esbuild) run too.
 #[test]
-#[ignore = "turbo-test#176: fails until the fix"]
 fn junit_frames_at_imported_calls_in_js_files_are_vitests() {
     for esbuild in [false, true] {
         let p = Project::new("rep-junit-js-call-frames");
