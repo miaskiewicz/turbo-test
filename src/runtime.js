@@ -400,13 +400,27 @@ const __TO_FAKE = ['setTimeout', 'clearTimeout', 'setImmediate', 'clearImmediate
 const __epochOf = (t) => (t == null ? 0 : typeof t === 'number' ? t : t instanceof __loop.RealDate || (t && typeof t.getTime === 'function') ? t.getTime() : Number(t) || 0);
 // vitest's runtime config, as far as the runtime reads it (vi.setConfig / vi.resetConfig):
 // `fakeTimers` is vitest's default (`loopLimit: 10_000`, `shouldClearNativeTimers`) under the
-// project's `test.fakeTimers` (__ttSetConfigFakeTimers, from the runner per file, turbo-test#180)
-const __ttConfigDefaults = () => ({ fakeTimers: { loopLimit: 10000, shouldClearNativeTimers: true } });
+// project's `test.fakeTimers` (turbo-test#180); `clearMocks` / `mockReset` / `restoreMocks` /
+// `unstubEnvs` / `unstubGlobals` undo mocks and stubs before each test (turbo-test#183). The
+// runner applies the project's config per file (__ttApplyConfig).
+const __ttConfigDefaults = () => ({ fakeTimers: { loopLimit: 10000, shouldClearNativeTimers: true }, clearMocks: false, mockReset: false, restoreMocks: false, unstubEnvs: false, unstubGlobals: false });
 let __ttConfig = __ttConfigDefaults();
 let __ttConfigSaved = null;
-globalThis.__ttSetConfigFakeTimers = (ft) => {
-  if (ft && typeof ft === 'object') __ttConfig.fakeTimers = Object.assign(__ttConfigDefaults().fakeTimers, ft);
+globalThis.__ttApplyConfig = (cfg) => {
+  if (!cfg || typeof cfg !== 'object') return;
+  const { fakeTimers, ...rest } = cfg;
+  if (fakeTimers && typeof fakeTimers === 'object') __ttConfig.fakeTimers = Object.assign(__ttConfigDefaults().fakeTimers, fakeTimers);
+  Object.assign(__ttConfig, rest);
 };
+// vitest's clearModuleMocks (onBeforeTryTask): before each attempt of a test, its beforeEach too
+function __clearModuleMocks() {
+  const vi = globalThis.vi;
+  if (__ttConfig.restoreMocks) vi.restoreAllMocks();
+  if (__ttConfig.mockReset) vi.resetAllMocks();
+  if (__ttConfig.clearMocks) vi.clearAllMocks();
+  if (__ttConfig.unstubEnvs) vi.unstubAllEnvs();
+  if (__ttConfig.unstubGlobals) vi.unstubAllGlobals();
+}
 // vi.useFakeTimers(config): a fresh fake clock (sinon's install with vitest's `now: Date.now()`);
 // a config without `loopLimit` (vi.setConfig replaced the default one) gets sinon's 1000
 function __installFake(cfg) {
@@ -7529,6 +7543,7 @@ async function runSuite(suite, ancestors, summary, mode = '') {
       const mark = attemptErrors.length;
       let beCleanups = [];
       try {
+        __clearModuleMocks();
         const returned = [];
         for (const s of chain) for (const h of s.hooks.be) { __loop.ticks++; returned.push(await h(ctx)); }
         beCleanups = returned;

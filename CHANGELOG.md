@@ -5,6 +5,32 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Fixed — the `vi`, mock and `jest` surface is vitest 4.1.12's and jest 30.5.2's (K8, turbo-test#179–#183)
+- The members of `vi`, of a `vi.fn()` / `vi.spyOn()` mock and its `mock`, and of `jest` were
+  diffed against vitest / jest and every missing or different member fixed
+  (`tests/runner_c_vi_surface.rs`, data recorded with the real ones). `vi.getRealSystemTime`
+  (declared, but undefined at runtime), `setTimerTickMode`, `defineHelper`, `mockObject` and
+  `resetConfig` were missing (turbo-test#179) and `setConfig` did nothing. A mock is now
+  @vitest/spy's: named `Mock` / after the original, the implementation's `length`,
+  `getMockImplementation`, `mockThrow(Once)`, `withImplementation`, `mock.contexts`, a
+  `lastCall` getter, no own `__impl` / `__name`; `mockReset` returns to `vi.fn(impl)`'s
+  implementation (it dropped it) and `mockReturnValue(undefined)` returns undefined (it fell
+  through to the implementation). `vi.spyOn` takes `'get'` / `'set'` (a getter's value was
+  replaced by a function) and throws vitest's errors for a primitive / missing / non-function
+  property (it installed a spy). `vi.restoreAllMocks` restores spyOn spies only, as vitest 4;
+  `stubGlobal` / `stubEnv` / `unstubAll*` / `*AllMocks` return `vi` with vitest's descriptor and
+  env semantics; `vi.mocked` no longer bolts a fake `mock` onto a plain function.
+- The config's `test.fakeTimers` is `vi.useFakeTimers()`'s default, with the argument merged
+  over it (turbo-test#180); it was not read.
+- `jest.useFakeTimers` reads jest's `now` / `doNotFake` / `timerLimit` / `advanceTimers` /
+  `legacyFakeTimers` (turbo-test#181) and jest's timer functions warn jest's message without fake
+  timers (they were silent no-ops) and return undefined. The jest object gains its missing timer
+  members, `createMockFromModule`, `setMock`, `deepUnmock`, `unstable_(un)mockModule`, `getSeed`,
+  `isEnvironmentTornDown`.
+- A failure inside a `vi.defineHelper` helper is located at the helper's call (turbo-test#182).
+- `clearMocks` / `mockReset` / `restoreMocks` / `unstubEnvs` / `unstubGlobals` in the config run
+  before each test, before its `beforeEach` hooks (turbo-test#183); they were ignored.
+
 ### Added — `expect.poll`, snapshot serializers, vitest's `this.utils` (K5, turbo-test#161–#163, #167)
 - `expect.poll(fn, { interval = 50, timeout = 1000, message })` (turbo-test#161) was undefined.
   As in vitest 4.1.12, each matcher re-runs `fn` until it passes or the timeout ran out, then

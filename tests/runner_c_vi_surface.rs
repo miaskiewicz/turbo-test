@@ -250,7 +250,6 @@ fn failed_block(out: &str) -> String {
 }
 
 #[test]
-#[ignore = "turbo-test#182: fails until the fix"]
 fn define_helper_errors_are_located_at_the_call() {
     // turbo-test#182: vitest drops the stack frames up to the last `__VITEST_HELPER__` one, so a
     // failure inside a vi.defineHelper helper (sync or async) is located at the helper's call;
@@ -276,7 +275,6 @@ fn define_helper_errors_are_located_at_the_call() {
 }
 
 #[test]
-#[ignore = "turbo-test#183: fails until the fix"]
 fn config_clears_restores_and_unstubs_before_each_test() {
     // turbo-test#183: test.clearMocks / mockReset / restoreMocks / unstubEnvs / unstubGlobals run
     // vi.clearAllMocks / resetAllMocks / restoreAllMocks / unstubAllEnvs / unstubAllGlobals

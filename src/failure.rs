@@ -66,12 +66,24 @@ pub struct RollupDetails {
 /// ([`without_eval`]). `async ` and a `file://` prefix are dropped,
 /// and so is an `Object.` receiver: the module runner calls an imported function on its
 /// module's exports object (`import_h.helper()`), where vitest's module objects have no
-/// constructor name, so V8 names vitest's frame `helper`.
+/// constructor name, so V8 names vitest's frame `helper`. The frames up to the last
+/// `__VITEST_HELPER__` one (`vi.defineHelper`'s wrapper) are left out, as vitest's
+/// parseStacktrace does, so a failure inside a helper is located at its call (turbo-test#182).
 pub fn parse_stack(stack: &str) -> Vec<Frame> {
-    stack
+    let frames: Vec<&str> = stack
         .lines()
         .filter_map(|l| l.trim_start().strip_prefix("at "))
-        .map(without_eval)
+        .collect();
+    let after_helper = frames
+        .iter()
+        .rposition(|f| {
+            f.rsplit_once(" (")
+                .is_some_and(|(method, _)| method.contains("__VITEST_HELPER__"))
+        })
+        .map_or(0, |i| i + 1);
+    frames[after_helper..]
+        .iter()
+        .map(|f| without_eval(f))
         .filter_map(|rest| {
             let rest = rest.as_str();
             let (method, loc) = match rest.strip_suffix(')').and_then(|r| r.rsplit_once(" (")) {

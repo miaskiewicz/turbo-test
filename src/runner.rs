@@ -1548,32 +1548,63 @@ fn vitest_snapshot_serializers_uncached(start: &Path) -> Vec<PathBuf> {
     Vec::new()
 }
 
-/// vitest's `test.fakeTimers` (turbo-test#180): the `{ ... }` object literal in the nearest vitest
-/// config, as source text (the runtime evaluates it), memoized by the test file's directory.
-fn vitest_fake_timers(entry: &Path) -> Option<String> {
+/// The parts of the nearest vitest config the runtime reads (`__ttApplyConfig`), as a JS object
+/// literal, memoized by the test file's directory: `test.fakeTimers`' `{ ... }` source
+/// (turbo-test#180) and the `clearMocks` / `mockReset` / `restoreMocks` / `unstubEnvs` /
+/// `unstubGlobals` switches set to `true` (turbo-test#183).
+fn vitest_runtime_config(entry: &Path) -> Option<String> {
     let dir = entry.parent()?;
     thread_local! {
-        static FAKE_TIMERS_MEMO: RefCell<HashMap<PathBuf, Option<String>>> = RefCell::new(HashMap::new());
+        static RUNTIME_CONFIG_MEMO: RefCell<HashMap<PathBuf, Option<String>>> = RefCell::new(HashMap::new());
     }
-    if let Some(v) = FAKE_TIMERS_MEMO.with(|m| m.borrow().get(dir).cloned()) {
+    if let Some(v) = RUNTIME_CONFIG_MEMO.with(|m| m.borrow().get(dir).cloned()) {
         return v;
     }
-    let v = vitest_fake_timers_uncached(dir);
-    FAKE_TIMERS_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v.clone()));
+    let v = vitest_runtime_config_uncached(dir);
+    RUNTIME_CONFIG_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v.clone()));
     v
 }
 
-fn vitest_fake_timers_uncached(start: &Path) -> Option<String> {
+fn vitest_runtime_config_uncached(start: &Path) -> Option<String> {
     let mut dir = Some(start);
     while let Some(d) = dir {
         for cfg in VITEST_CONFIG_FILES {
             if let Ok(s) = std::fs::read_to_string(d.join(cfg)) {
-                return config_object_literal(&s, "fakeTimers");
+                return runtime_config_literal(&s);
             }
         }
         dir = d.parent();
     }
     None
+}
+
+/// [`vitest_runtime_config`]'s literal from a config's text (`None` when it sets none of them).
+fn runtime_config_literal(s: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(ft) = config_object_literal(s, "fakeTimers") {
+        parts.push(format!("fakeTimers: {ft}"));
+    }
+    for key in [
+        "clearMocks",
+        "mockReset",
+        "restoreMocks",
+        "unstubEnvs",
+        "unstubGlobals",
+    ] {
+        if config_is_true(s, key) {
+            parts.push(format!("{key}: true"));
+        }
+    }
+    (!parts.is_empty()).then(|| format!("{{ {} }}", parts.join(", ")))
+}
+
+/// Whether a config key's value is `true`.
+fn config_is_true(s: &str, key: &str) -> bool {
+    find_config_key(s, key).is_some_and(|start| {
+        s[start..]
+            .split_once(':')
+            .is_some_and(|(_, v)| v.trim_start().starts_with("true"))
+    })
 }
 
 /// The `{ ... }` value of a config key, braces included (`None` when the key is absent or its
@@ -7632,13 +7663,13 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
                 setup_dom(scope, &entry_abs);
             }
 
-            // 0a. the config's test.fakeTimers (turbo-test#180): what vi.useFakeTimers() uses, in
-            //     the setup files too
-            //     (a literal that does not evaluate is left out, as vitest would fail earlier)
-            if let Some(ft) = vitest_fake_timers(&entry_abs) {
+            // 0a. the config's test.fakeTimers (what vi.useFakeTimers() uses, turbo-test#180) and
+            //     mock / stub switches (turbo-test#183), for the setup files too (a literal that
+            //     does not evaluate is left out, as vitest would fail earlier)
+            if let Some(cfg) = vitest_runtime_config(&entry_abs) {
                 run_js(
                     scope,
-                    &format!("try {{ globalThis.__ttSetConfigFakeTimers(({ft})); }} catch (e) {{}}"),
+                    &format!("try {{ globalThis.__ttApplyConfig(({cfg})); }} catch (e) {{}}"),
                 );
             }
             // 0b. project setupFiles: register jest-dom matchers (expect.extend) AND any

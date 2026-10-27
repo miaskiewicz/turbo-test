@@ -730,6 +730,33 @@ fn package_json_jest_block_is_the_top_level_jest_object_only() {
 }
 
 #[test]
+fn runtime_config_reads_fake_timers_and_the_mock_switches() {
+    // turbo-test#180 / #183: what __ttApplyConfig gets from the vitest config's text
+    assert_eq!(runtime_config_literal("export default { test: {} }"), None);
+    assert_eq!(
+        runtime_config_literal(
+            "test: { fakeTimers: { now: 1, toFake: ['Date'] }, restoreMocks: true, clearMocks: false, unstubGlobals:true }"
+        )
+        .as_deref(),
+        Some("{ fakeTimers: { now: 1, toFake: ['Date'] }, restoreMocks: true, unstubGlobals: true }")
+    );
+    assert_eq!(
+        runtime_config_literal("mockReset: true, unstubEnvs: true, fakeTimers: defaults")
+            .as_deref(),
+        Some("{ mockReset: true, unstubEnvs: true }")
+    );
+    assert_eq!(
+        config_object_literal("fakeTimers: { a: { b: 1 } }, x", "fakeTimers").as_deref(),
+        Some("{ a: { b: 1 } }")
+    );
+    assert_eq!(
+        config_object_literal("fakeTimers: { open", "fakeTimers"),
+        None
+    );
+    assert!(!config_is_true("clearMocks: 'true'", "clearMocks"));
+}
+
+#[test]
 fn config_string_value_quotes() {
     assert_eq!(
         config_string_value("rootDir: '<x>'", "rootDir").as_deref(),

@@ -32,6 +32,26 @@ fn stacks_keep_the_frames_in_files() {
 }
 
 #[test]
+fn stacks_start_after_the_last_define_helper_frame() {
+    // turbo-test#182: vitest's parseStacktrace drops the frames up to the last
+    // `__VITEST_HELPER__` (vi.defineHelper's wrapper); a file path naming it is not a method
+    let stack = "Error: x\n\
+                 \x20   at /p/h.test.ts:3:13\n\
+                 \x20   at __VITEST_HELPER__ (<anonymous>:10:1)\n\
+                 \x20   at /p/h.test.ts:5:1\n\
+                 \x20   at async __VITEST_HELPER__ (<anonymous>:12:1)\n\
+                 \x20   at /p/h.test.ts:10:3\n\
+                 \x20   at run (/p/__VITEST_HELPER__/r.ts:1:2)";
+    assert_eq!(
+        parse_stack(stack),
+        vec![
+            frame("", "/p/h.test.ts", 10, 3),
+            frame("run", "/p/__VITEST_HELPER__/r.ts", 1, 2),
+        ]
+    );
+}
+
+#[test]
 fn errors_print_as_vitest_print_error() {
     let root = Path::new("/p");
     let e = ErrorInfo {
