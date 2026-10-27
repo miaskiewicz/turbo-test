@@ -5124,6 +5124,9 @@ globalThis.__ttToESM = (m) => {
 // with a `default` (a package's CommonJS with its own `default` and no `__esModule` read through
 // a view, its own `default` staying what CommonJS code reads).
 globalThis.__ttToESMDep = (m, node) => {
+  // Node's namespace of a primitive module.exports: the value as default and 'module.exports'
+  // (turbo-test#193)
+  if (node && (m === null || (typeof m !== 'object' && typeof m !== 'function'))) return { default: m, 'module.exports': m };
   if (!m || (typeof m !== 'object' && typeof m !== 'function') || __ttStrictMocks.has(m) || __ttIsNs(m) || m[__ttEsmMark]) return m;
   if (node) return __ttNodeNs(m);
   if (m.__esModule || '__esModule' in m) return ('default' in m || m.default !== undefined) ? m : __ttCjsView(m);

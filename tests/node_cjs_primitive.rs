@@ -8,7 +8,6 @@ mod common;
 use common::{turbo_test, Project};
 
 #[test]
-#[ignore = "turbo-test#193: fails until the fix"]
 fn a_primitive_module_exports_is_nodes_namespace_default() {
     for esbuild in [false, true] {
         let p = Project::new(if esbuild { "ncp-mr" } else { "ncp-graph" });
