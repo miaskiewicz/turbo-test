@@ -46,7 +46,7 @@ A release where these disagree is a bug. Bump both in the same commit.
 - The DOM binding (window/document/CSSOM/forms/events, its probes, Chrome controls and
   tests) is the `turbo-dom-browser-env` crate in miaskiewicz/turbo-dom
   (`crates/turbo-dom-browser-env`); the runner only calls
-  `turbo_dom_browser_env::browser_env::{install, enabled, reset}`. Fix DOM behaviour there.
+  `turbo_dom_browser_env::browser_env::{install, enabled, reset, flush_ownership}`. Fix DOM behaviour there.
 - V8 is turbo-dom's rusty_v8 fork `turbo-dom-v8` (aliased `v8`). No V8 source is vendored
   here. `bash scripts/check-single-v8.sh` must pass (one turbo-dom-v8, no v8/v8x/turbo-surf-v8).
 - Pre-publish, `Cargo.toml`'s `[patch.crates-io]` pins those crates to git revs; drop it
