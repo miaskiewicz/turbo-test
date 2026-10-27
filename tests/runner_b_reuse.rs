@@ -124,6 +124,52 @@ fn module_runner_reuse_with_setup_mocks_remocks_dom_and_fresh_retry() {
     assert!(s.iter().filter(|&&n| n == 1).count() >= 2, "{s:?}");
 }
 
+/// turbo-test#150: under reuse the worker's DOM was installed once but dropped after every file,
+/// so the next DOM file read a dead `document` ("Illegal invocation") and only passed on its
+/// fresh-isolate re-run. vitest 4.1.12 (`isolate: false`, happy-dom) keeps one document for the
+/// worker: the second file sees the first file's document and body, and each file runs once.
+#[test]
+#[ignore = "turbo-test#150: fails until the fix"]
+fn reuse_keeps_one_document_for_the_worker() {
+    let p = reuse_project("rb-reuse-dom", false);
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { isolate: false } };\n",
+    );
+    for f in ["d1", "d2"] {
+        p.file(
+            &format!("{f}.test.tsx"),
+            &format!(
+                "import fs from 'node:fs';\nfs.appendFileSync('runs.log', '{f}\\n');\n\
+                 test('{f}', () => {{ const prev = globalThis.__doc; \
+                 console.log('DOC {f} prev=' + (prev ? prev === document : 'none') + ' body=' + document.body.innerHTML); \
+                 globalThis.__doc = document; document.body.innerHTML = '<b>{f}</b>'; expect(document.body.textContent).toBe('{f}'); }});\n"
+            ),
+        );
+    }
+    let r = turbo_test(&p.dir, &["--jobs", "1", "--reporter", "verbose"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let runs = std::fs::read_to_string(p.dir.join("runs.log")).unwrap();
+    let mut runs: Vec<&str> = runs.lines().collect();
+    runs.sort();
+    assert_eq!(runs, ["d1", "d2"], "each file runs once\n{}", r.all());
+    let mut docs: Vec<&str> = r
+        .stdout
+        .lines()
+        .filter_map(|l| l.split("DOC ").nth(1))
+        .collect();
+    docs.sort();
+    let first = if docs[0].contains("prev=none") { 0 } else { 1 };
+    let (a, b) = (docs[first], docs[1 - first]);
+    assert!(a.ends_with("prev=none body="), "{docs:?}");
+    let other = &a[..2];
+    assert_eq!(
+        b,
+        format!("{} prev=true body=<b>{other}</b>", &b[..2]),
+        "{docs:?}"
+    );
+}
+
 #[test]
 fn esm_graph_reuse_reports_load_errors_and_retries_fresh() {
     let p = reuse_project("rb-reuse-esm", false);
