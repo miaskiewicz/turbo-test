@@ -333,6 +333,16 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   Every other label threw RangeError `ERR_ENCODING_NOT_SUPPORTED`. Node's ICU big5 / euc-jp /
   euc-kr / shift_jis decoders differ from the Encoding Standard on some bytes; turbo-test follows
   the standard there (vitest.compat.md).
+- `Blob` / `File` match Node 26 (turbo-test#128): `size` counts UTF-8 bytes (`['€']` was 1, now
+  3), `type` is lower-cased (or `''` with a character outside U+0020..U+007E), `arrayBuffer()`
+  returns the bytes (it was zero-filled), `slice(start, end, type)` honours its arguments
+  (negative and clamped bounds; it returned an empty Blob), `stream()` is a ReadableStream of one
+  chunk per part (it was `null`), `bytes()` and `textStream()` exist, the parts are copied at
+  construction, `endings: 'native'` turns CR / CRLF into LF, `size` / `type` / `name` /
+  `lastModified` are prototype accessors (`ERR_INVALID_THIS` off a Blob), toStringTag is
+  `Blob` / `File` (it was `Object`), `File` defaults `lastModified` to `Date.now()`, and the
+  constructors throw Node's errors (a non-iterable `blobParts`, a non-object `options`, a bad
+  `endings`, `File` with fewer than two arguments).
 - `Blob#text()` UTF-8-decodes the concatenated bytes of all parts once, as Node 26
   (turbo-test#120): a sequence split across parts is one character (`[E2 82] + [AC]` gave two
   U+FFFD, now `€`), one leading BOM is stripped (it was kept), and a nested Blob contributes its

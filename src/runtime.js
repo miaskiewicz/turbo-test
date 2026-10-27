@@ -817,48 +817,134 @@ if (typeof globalThis.AbortController === 'undefined') {
     abort(reason) { if (!this.signal || this.signal.aborted) return; this.signal.aborted = true; this.signal.reason = reason || new DOMException('Aborted', 'AbortError'); this.signal._fire(); }
   };
 }
+// Blob / File as Node 26's (turbo-test#120, #128): the parts' bytes are copied at construction
+// (strings as UTF-8, `endings: 'native'` turning CR / CRLF into LF), one chunk per non-empty
+// part, nested Blobs contributing their chunks; size / type / name / lastModified are prototype
+// accessors; slice() takes [Clamp]ed, negative-relative bounds and its own type.
 if (typeof globalThis.Blob === 'undefined') {
+  const thisErr = (what) => __codecError(TypeError, 'ERR_INVALID_THIS', 'Value of "this" must be of type ' + what);
+  // a type with any character outside U+0020..U+007E is '', otherwise it is lower-cased
+  const normType = (t) => { const s = String(t); return /^[\x20-\x7e]*$/.test(s) ? s.toLowerCase() : ''; };
+  // WebIDL [Clamp] long long: NaN -> 0, ties to even
+  const clamp = (v) => {
+    const n = Number(v);
+    if (Number.isNaN(n)) return 0;
+    if (!Number.isFinite(n)) return n;
+    const f = Math.floor(n), d = n - f;
+    return d < 0.5 ? f : d > 0.5 ? f + 1 : (f % 2 === 0 ? f : f + 1);
+  };
+  const received = (v) => typeof v === 'string' ? `type string ('${v}')` : `type ${typeof v} (${String(v)})`;
+  const concat = (chunks, size) => {
+    const out = new Uint8Array(size);
+    let at = 0;
+    for (const c of chunks) { out.set(c, at); at += c.length; }
+    return out;
+  };
   globalThis.Blob = class Blob {
-    constructor(parts = [], opts = {}) {
-      this._parts = parts || [];
-      this.type = (opts && opts.type) || '';
-      this.size = this._parts.reduce((n, p) => {
-        if (p == null) return n;
-        if (typeof p === 'string') return n + p.length;
-        if (typeof p.byteLength === 'number') return n + p.byteLength; // ArrayBuffer / TypedArray
-        if (typeof p.size === 'number') return n + p.size;             // Blob / File
-        if (typeof p.length === 'number') return n + p.length;
-        return n;
-      }, 0);
+    #chunks = [];
+    #size = 0;
+    #type = '';
+    constructor(blobParts = undefined, options = undefined) {
+      if (blobParts !== undefined && (blobParts === null || (typeof blobParts !== 'object' && typeof blobParts !== 'function') || typeof blobParts[Symbol.iterator] !== 'function'))
+        throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'Value cannot be converted to sequence.');
+      if (options != null && typeof options !== 'object' && typeof options !== 'function')
+        throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "options" argument must be a dictionary. Received ' + received(options));
+      const o = options == null ? {} : options;
+      const endings = o.endings === undefined ? 'transparent' : String(o.endings);
+      if (endings !== 'transparent' && endings !== 'native')
+        throw __codecError(TypeError, 'ERR_INVALID_ARG_VALUE', `The property 'options.endings' is invalid. Received '${endings}'`);
+      this.#type = o.type === undefined ? '' : normType(o.type);
+      const add = (c) => { if (c.length) { this.#chunks.push(c); this.#size += c.length; } };
+      for (const p of blobParts === undefined ? [] : blobParts) {
+        if (p instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && p instanceof SharedArrayBuffer)) add(new Uint8Array(p.slice(0)));
+        else if (ArrayBuffer.isView(p)) add(new Uint8Array(p.buffer, p.byteOffset, p.byteLength).slice());
+        else if (p !== null && typeof p === 'object' && #chunks in p) p.#chunks.forEach(add);
+        else {
+          let s = String(p);
+          if (endings === 'native') s = s.replace(/\r\n?/g, '\n');
+          add(new globalThis.TextEncoder().encode(s));
+        }
+      }
     }
-    // the bytes of every part, concatenated: strings as UTF-8, buffers and views as their bytes,
-    // nested Blobs as theirs, anything else stringified
-    _bytes() {
-      const chunks = this._parts.map((p) => {
-        if (p instanceof ArrayBuffer) return new Uint8Array(p);
-        if (ArrayBuffer.isView(p)) return new Uint8Array(p.buffer, p.byteOffset, p.byteLength);
-        if (p && typeof p._bytes === 'function') return p._bytes(); // nested Blob / File
-        return new globalThis.TextEncoder().encode(typeof p === 'string' ? p : String(p));
-      });
-      const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+    get type() { if (!(#chunks in this)) throw thisErr('Blob'); return this.#type; }
+    get size() { if (!(#chunks in this)) throw thisErr('Blob'); return this.#size; }
+    slice(start = undefined, end = undefined, contentType = undefined) {
+      if (!(#chunks in this)) throw thisErr('Blob');
+      const size = this.#size;
+      const rel = (v, dflt) => { if (v === undefined) return dflt; const n = clamp(v); return n < 0 ? Math.max(size + n, 0) : Math.min(n, size); };
+      const from = rel(start, 0), to = rel(end, size);
+      const out = new Blob([], contentType === undefined ? undefined : { type: contentType });
       let at = 0;
-      for (const c of chunks) { out.set(c, at); at += c.length; }
+      for (const c of this.#chunks) {
+        const lo = Math.max(from - at, 0), hi = Math.min(to - at, c.length);
+        if (lo < hi) { out.#chunks.push(lo === 0 && hi === c.length ? c : c.subarray(lo, hi)); out.#size += hi - lo; }
+        at += c.length;
+      }
       return out;
+    }
+    arrayBuffer() {
+      if (!(#chunks in this)) return Promise.reject(thisErr('Blob'));
+      return Promise.resolve(concat(this.#chunks, this.#size).buffer);
     }
     // WHATWG "UTF-8 decode" of all the bytes at once (turbo-test#120): a sequence split across
     // parts is one character and one leading BOM is stripped, as Node's
     text() {
-      return Promise.resolve(new globalThis.TextDecoder().decode(this._bytes()));
+      if (!(#chunks in this)) return Promise.reject(thisErr('Blob'));
+      return Promise.resolve(new globalThis.TextDecoder().decode(concat(this.#chunks, this.#size)));
     }
-    arrayBuffer() { return Promise.resolve(new ArrayBuffer(this.size)); }
-    slice() { return new globalThis.Blob(); }
-    stream() { return null; }
+    bytes() {
+      if (!(#chunks in this)) return Promise.reject(thisErr('Blob'));
+      return Promise.resolve(concat(this.#chunks, this.#size));
+    }
+    // a ReadableStream of one Uint8Array (a copy) per chunk
+    stream() {
+      if (!(#chunks in this)) throw thisErr('Blob');
+      const chunks = this.#chunks;
+      let i = 0;
+      return new globalThis.ReadableStream({
+        pull(c) {
+          if (i < chunks.length) c.enqueue(new Uint8Array(chunks[i++]));
+          if (i >= chunks.length) c.close();
+        },
+      });
+    }
+    // the chunks UTF-8-decoded as one stream (a sequence split across chunks is one character),
+    // empty pieces skipped
+    textStream() {
+      if (!(#chunks in this)) throw thisErr('Blob');
+      const chunks = this.#chunks;
+      const dec = new globalThis.TextDecoder();
+      let i = 0;
+      return new globalThis.ReadableStream({
+        pull(c) {
+          while (i < chunks.length) {
+            const s = dec.decode(chunks[i++], { stream: true });
+            if (s) { c.enqueue(s); if (i < chunks.length) return; }
+          }
+          const rest = dec.decode();
+          if (rest) c.enqueue(rest);
+          c.close();
+        },
+      });
+    }
   };
+  Object.defineProperty(globalThis.Blob.prototype, Symbol.toStringTag, { value: 'Blob', configurable: true });
 }
 if (typeof globalThis.File === 'undefined') {
   globalThis.File = class File extends globalThis.Blob {
-    constructor(parts, name, opts) { super(parts, opts); this.name = String(name); this.lastModified = (opts && opts.lastModified) || 0; }
+    #name;
+    #lastModified;
+    constructor(fileBits, fileName, options = undefined) {
+      if (arguments.length < 2) throw __codecError(TypeError, 'ERR_MISSING_ARGS', 'The "fileBits" and "fileName" arguments must be specified');
+      super(fileBits, options);
+      this.#name = String(fileName);
+      const lm = options == null ? undefined : options.lastModified;
+      this.#lastModified = lm === undefined ? Date.now() : Number(lm);
+    }
+    get name() { if (!(#name in this)) throw __codecError(TypeError, 'ERR_INVALID_THIS', 'Value of "this" must be of type File'); return this.#name; }
+    get lastModified() { if (!(#name in this)) throw __codecError(TypeError, 'ERR_INVALID_THIS', 'Value of "this" must be of type File'); return this.#lastModified; }
   };
+  Object.defineProperty(globalThis.File.prototype, Symbol.toStringTag, { value: 'File', configurable: true });
 }
 // Pure base64 (no btoa<->Buffer interdependency — turbo-dom's btoa calls Buffer.from, so
 // Buffer.toString('base64') must NOT call back into btoa or it infinitely recurses).

@@ -1348,7 +1348,6 @@ t('legacy long', () => { const b = new Uint8Array(20000).fill(0xe9); const s = n
 }
 
 #[test]
-#[ignore = "turbo-test#128: fails until the fix"]
 fn blob_and_file_surface_is_nodes() {
     // turbo-test#128: Blob / File as Node 26: size in UTF-8 bytes, type lower-cased (or '' with a
     // character outside U+0020..U+007E), parts copied at construction, endings, arrayBuffer() /
