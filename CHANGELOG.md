@@ -301,6 +301,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - Node-API fixtures `api.c`, `async.c`, `cleanup.c`, `apiversion.c`, `refs.c`, `selfreg.c`,
   `fatal.c` and `unknown.c` with their specs; every spec also passes against Node 26.11 with the
   same compiled addon (but its host-only cases).
+- `coloured_output_is_vitests` no longer flakes under load (turbo-test#109): a file or test over
+  vitest's 300ms slowTestThreshold turns its duration yellow where vitest's reference is green.
+  The coloured normalizer now checks each duration's colour against its measured value, then
+  spells it the same whatever the colour.
 
 ## [0.6.0] - 2026-10-26 — turbo-dom consolidation
 
