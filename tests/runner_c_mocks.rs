@@ -146,6 +146,131 @@ fn esm_graph_import_meta_has_filename_and_dirname() {
     assert_passes(&turbo_test(&p.dir, &[], &[]), 1);
 }
 
+/// turbo-test#123: `import.meta` (url / filename / dirname, `env`) on every loader path — the
+/// module runner's native (oxc) CJS emit and dep bundler, its esbuild transforms and dep bundles,
+/// and the ESM graph — in the test file, an app module, a setup file, a `vi.mock` factory (the
+/// test file's) and ES-module packages (each module its own location). The report's
+/// `Cannot use 'import.meta' outside a module` was an `import.meta` left in CJS output. vitest
+/// 4.1.12 on the same project: all 7 pass (its `import.meta.env` reads and writes
+/// `process.env`, with `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` set there).
+#[test]
+#[ignore = "turbo-test#123: fails until the fix"]
+fn import_meta_works_on_every_loader_path() {
+    let files: [(&str, &str); 10] = [
+        ("package.json", "{\"name\":\"rc-meta-paths\",\"type\":\"module\"}\n"),
+        (
+            "vitest.config.mjs",
+            "export default { test: { setupFiles: ['./setup.ts'] } }\n",
+        ),
+        (
+            "setup.ts",
+            "(globalThis as any).__setupMeta = [import.meta.url, import.meta.env.MODE];\n",
+        ),
+        (
+            "src/app.ts",
+            "export const appMeta = () => ({ url: import.meta.url, filename: import.meta.filename, \
+             dirname: import.meta.dirname, mode: import.meta.env.MODE, same: import.meta === import.meta });\n",
+        ),
+        ("src/other.ts", "export const where = (): string => 'real';\n"),
+        (
+            "node_modules/esm-pkg/package.json",
+            "{\"name\":\"esm-pkg\",\"type\":\"module\",\"exports\":\"./lib/index.js\"}\n",
+        ),
+        (
+            "node_modules/esm-pkg/lib/index.js",
+            "import { h } from './sub/h.js';\nexport const own = () => import.meta.url;\nexport const sub = h;\n",
+        ),
+        (
+            "node_modules/esm-pkg/lib/sub/h.js",
+            "export const h = () => [import.meta.url, import.meta.dirname];\n",
+        ),
+        (
+            "node_modules/mjsdep/package.json",
+            "{\"name\":\"mjsdep\",\"main\":\"index.mjs\"}\n",
+        ),
+        (
+            "node_modules/mjsdep/index.mjs",
+            "export const asset = () => new URL('./x.txt', import.meta.url).href;\n",
+        ),
+    ];
+    let test = r#"import { expect, it, vi } from 'vitest';
+import { appMeta } from './src/app';
+import { where } from './src/other';
+import { own, sub } from 'esm-pkg';
+import { asset } from 'mjsdep';
+vi.mock('./src/other', () => ({ where: (): string => import.meta.url }));
+const P = process.cwd();
+it('the test file', () => {
+  expect([import.meta.url, import.meta.filename, import.meta.dirname]).toEqual([`file://${P}/a.test.ts`, `${P}/a.test.ts`, P]);
+  expect(import.meta).toBe(import.meta);
+});
+it('an app module', () => {
+  expect(appMeta()).toEqual({ url: `file://${P}/src/app.ts`, filename: `${P}/src/app.ts`, dirname: `${P}/src`, mode: 'test', same: true });
+});
+it('ES-module packages', () => {
+  expect(own()).toBe(`file://${P}/node_modules/esm-pkg/lib/index.js`);
+  expect(sub()).toEqual([`file://${P}/node_modules/esm-pkg/lib/sub/h.js`, `${P}/node_modules/esm-pkg/lib/sub`]);
+  expect(asset()).toBe(`file://${P}/node_modules/mjsdep/x.txt`);
+});
+it('a setup file', () => { expect((globalThis as any).__setupMeta).toEqual([`file://${P}/setup.ts`, 'test']); });
+it('a mock factory is the test file', () => { expect(where()).toBe(`file://${P}/a.test.ts`); });
+it('import.meta.env', () => {
+  const env = import.meta.env as any;
+  expect([env.MODE, env.DEV, env.PROD, env.SSR, env.BASE_URL, env.NODE_ENV, env.TT_UNSET]).toEqual(['test', true, false, true, '/', 'test', undefined]);
+  expect([process.env.MODE, process.env.DEV, process.env.PROD, process.env.SSR, process.env.BASE_URL]).toEqual(['test', '1', '', '1', '/']);
+  process.env.TT_META_X = 'a';
+  expect(env.TT_META_X).toBe('a');
+  env.TT_META_Y = 'b';
+  expect(process.env.TT_META_Y).toBe('b');
+  env.DEV = false;
+  expect([process.env.DEV, env.DEV]).toEqual(['', false]);
+  env.DEV = true;
+  expect(['MODE' in env, 'TT_UNSET' in env]).toEqual([true, false]);
+  expect(import.meta.env).toBe(import.meta.env);
+});
+"#;
+    for esbuild in [true, false] {
+        let p = Project::new(if esbuild {
+            "rc-meta-paths"
+        } else {
+            "rc-meta-paths-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in files {
+            p.file(f, c);
+        }
+        p.file("a.test.ts", test);
+        // vitest's web transform mode: SSR is off under a DOM environment
+        p.file(
+            "b.test.ts",
+            "// @vitest-environment happy-dom\nimport { expect, it } from 'vitest';\n\
+             it('SSR under a DOM environment', () => {\n\
+             \x20 expect([(import.meta.env as any).SSR, process.env.SSR, (import.meta.env as any).DEV]).toEqual([false, '', true]);\n\
+             });\n",
+        );
+        let envs: &[&[(&str, &str)]] = if esbuild {
+            &[
+                &[],
+                &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
+                &[("TURBO_REUSE_ISOLATE", "1")],
+            ]
+        } else {
+            &[&[], &[("TURBO_REUSE_ISOLATE", "1")]]
+        };
+        for env in envs {
+            let r = turbo_test(&p.dir, &[], env);
+            assert!(
+                r.stdout.contains("Tests  7 passed (7)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            assert_eq!(r.code, Some(0), "esbuild={esbuild} {env:?}\n{}", r.all());
+        }
+    }
+}
+
 #[test]
 fn import_meta_keeps_coverage_line_mapping() {
     let p = esbuild_project("rc-import-meta-cov");
