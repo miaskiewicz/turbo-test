@@ -615,6 +615,107 @@ it('a decorator-metadata module', () => {
     }
 }
 
+/// turbo-test#146: a namespace spy reaches the importers only, as vitest 4.1.12's exports
+/// objects: the exporting module's own references keep the original, a spy on a re-export
+/// (`export { x } from`, an exported import, `export *`) stays on that namespace, a spy on the
+/// source shows through its re-exports, and a dynamically imported namespace is the same one. On
+/// the ESM graph the spy replaced the binding itself (`dep.greetTwice` called the spy). vitest on
+/// the same project: 9 passed.
+#[test]
+#[ignore = "turbo-test#146: fails until the fix"]
+fn a_namespace_spy_leaves_the_modules_own_references_alone() {
+    let files: [(&str, &str); 5] = [
+        (
+            "package.json",
+            "{\"name\":\"rc-ns-own\",\"type\":\"module\"}\n",
+        ),
+        (
+            "src/dep.ts",
+            r#"export const greet = (n: string): string => 'hi ' + n;
+export const greetTwice = (n: string): string => greet(n) + ' ' + greet(n);
+export function fn(): string { return 'fn'; }
+export const callsFn = (): string => fn();
+export default function def(): string { return 'def'; }
+export const callsDef = (): string => def();
+"#,
+        ),
+        (
+            "src/star.ts",
+            r#"export const starred = (): string => 'star';
+export const callsStarred = (): string => starred();
+"#,
+        ),
+        (
+            "src/barrel.ts",
+            r#"import { fn } from './dep';
+export { greet as hello } from './dep';
+export { fn as viaImport };
+export * from './star';
+export const barrelOwn = (): string => 'own';
+"#,
+        ),
+        (
+            "src/svc.ts",
+            r#"import def, { greet, fn } from './dep';
+import { hello, starred, viaImport, barrelOwn } from './barrel';
+export const all = (): string[] => [greet('a'), fn(), def(), hello('b'), starred(), viaImport(), barrelOwn()];
+"#,
+        ),
+    ];
+    let test = r#"import { expect, it, vi, afterEach } from 'vitest';
+import * as dep from './src/dep';
+import * as barrel from './src/barrel';
+import * as star from './src/star';
+import { all } from './src/svc';
+afterEach(() => { vi.restoreAllMocks(); });
+const ORIG = ['hi a', 'fn', 'def', 'hi b', 'star', 'fn', 'own'];
+it.each([
+  ['dep.greet', () => vi.spyOn(dep, 'greet').mockReturnValue('S'), ['S', 'fn', 'def', 'S', 'star', 'fn', 'own'], () => [dep.greetTwice('x'), dep.greet('x')], ['hi x hi x', 'S']],
+  ['dep.fn', () => vi.spyOn(dep, 'fn').mockReturnValue('S'), ['hi a', 'S', 'def', 'hi b', 'star', 'S', 'own'], () => [dep.callsFn(), barrel.viaImport()], ['fn', 'S']],
+  ['dep.default', () => vi.spyOn(dep, 'default').mockReturnValue('S'), ['hi a', 'fn', 'S', 'hi b', 'star', 'fn', 'own'], () => [dep.callsDef(), dep.default()], ['def', 'S']],
+  ['barrel.hello', () => vi.spyOn(barrel, 'hello').mockReturnValue('S'), ['hi a', 'fn', 'def', 'S', 'star', 'fn', 'own'], () => [dep.greet('x'), barrel.hello('x')], ['hi x', 'S']],
+  ['barrel.viaImport', () => vi.spyOn(barrel, 'viaImport').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'star', 'S', 'own'], () => [dep.fn(), dep.callsFn()], ['fn', 'fn']],
+  ['barrel.starred', () => vi.spyOn(barrel, 'starred').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'S', 'fn', 'own'], () => [star.starred(), star.callsStarred()], ['star', 'star']],
+  ['star.starred', () => vi.spyOn(star, 'starred').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'S', 'fn', 'own'], () => [barrel.starred(), star.callsStarred()], ['S', 'star']],
+  ['barrel.barrelOwn', () => vi.spyOn(barrel, 'barrelOwn').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'star', 'fn', 'S'], () => [barrel.barrelOwn()], ['S']],
+])('vi.spyOn(%s)', (_name, spy, expected, more, moreExpected) => {
+  spy();
+  expect(all()).toEqual(expected);
+  expect((more as () => string[])()).toEqual(moreExpected);
+  vi.restoreAllMocks();
+  expect(all()).toEqual(ORIG);
+});
+it('a dynamically imported namespace', async () => {
+  const m = await import('./src/dep');
+  vi.spyOn(m, 'greet').mockReturnValue('D');
+  expect([m.greet('x'), dep.greet('x'), all()[0], m.greetTwice('x')]).toEqual(['D', 'D', 'D', 'hi x hi x']);
+});
+"#;
+    for esbuild in [false, true] {
+        let p = Project::new(if esbuild {
+            "rc-ns-own"
+        } else {
+            "rc-ns-own-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in files {
+            p.file(f, c);
+        }
+        p.file("own.test.ts", test);
+        for env in [&[][..], &[("TURBO_REUSE_ISOLATE", "1")][..]] {
+            let r = turbo_test(&p.dir, &[], env);
+            assert!(
+                r.stdout.contains("Tests  9 passed (9)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            assert_eq!(r.code, Some(0), "esbuild={esbuild} {env:?}\n{}", r.all());
+        }
+    }
+}
+
 #[test]
 fn import_meta_keeps_coverage_line_mapping() {
     let p = esbuild_project("rc-import-meta-cov");
