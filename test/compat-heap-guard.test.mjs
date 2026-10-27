@@ -73,7 +73,7 @@ test('a file that runs out of memory fails alone and the run continues', () => {
   );
 });
 
-test('a finished file\'s spy history is released, so spies do not grow a reused isolate', { todo: 'turbo-test#124' }, () => {
+test('a finished file\'s spy history is released, so spies do not grow a reused isolate', () => {
   // 12 files x ~60 MB of recorded call arguments under a 400 MB cap, and recycling disabled: only
   // releasing each finished file's call history keeps the isolate under the cap. Within a file
   // every spy still sees all of its calls (the fixtures assert mock.calls.length).

@@ -3708,14 +3708,14 @@ function __automockProtoMethods(target, proto) {
     for (const k of Object.getOwnPropertyNames(p)) {
       if (k === 'constructor' || Object.prototype.hasOwnProperty.call(target, k)) continue;
       const d = Object.getOwnPropertyDescriptor(p, k);
-      if (typeof d.value === 'function') { const s = makeSpy(); __spies.push(s); target[k] = s; }
+      if (typeof d.value === 'function') { target[k] = __trackSpy(makeSpy()); }
     }
   }
 }
 function __automock(mod, depth) {
   depth = depth || 0;
   if (typeof mod === 'function') {
-    const m = makeSpy(); __spies.push(m);
+    const m = __trackSpy(makeSpy());
     if (depth < 3) {
       // own statics (class static methods are non-enumerable), not the function's built-ins
       for (const k of Object.getOwnPropertyNames(mod)) {
@@ -3741,7 +3741,26 @@ function __automock(mod, depth) {
   }
   return mod;
 }
-const __spies = [];
+// Registry behind vi.clearAllMocks/resetAllMocks/restoreAllMocks, held WEAKLY (turbo-test#124,
+// from alphajew420's miaskiewicz/turbo-test#107). Each spy keeps every call's arguments, receiver
+// and result (`mock.calls` / `instances` / `results`); a strong never-truncated array kept the
+// props, React elements and DOM nodes of every call of every finished file reachable for the
+// whole life of a reused isolate (#79: the heap grew until V8 aborted). A spy something else still
+// references (an installed spyOn, a setup file's vi.fn, a kept module's helper) stays registered
+// with its history, as in vitest; one only the registry knew about can no longer be observed.
+let __spyRefs = [];
+let __spyCompactAt = 4096;
+function __trackSpy(s) {
+  __spyRefs.push(new WeakRef(s));
+  if (__spyRefs.length > __spyCompactAt) {
+    __spyRefs = __spyRefs.filter((r) => r.deref() !== undefined);
+    __spyCompactAt = Math.max(4096, __spyRefs.length * 2);
+  }
+  return s;
+}
+function __eachSpy(f) {
+  for (const r of __spyRefs.slice()) { const s = r.deref(); if (s) f(s); }
+}
 // Record (specifier, evaluated-exports) into a queue the native loader drains after the
 // module runs, registering the mock keyed by the resolved absolute path. The factory runs
 // here, in the calling module's scope (so closures over setup-file vars work). `vitest` is
@@ -3883,7 +3902,7 @@ async function __ttImportsSettled() {
   return __ttImportsSettled();
 }
 globalThis.vi = {
-  fn: (impl) => { const s = makeSpy(impl); __spies.push(s); return s; },
+  fn: (impl) => __trackSpy(makeSpy(impl)),
   spyOn: (obj, key) => {
     const orig = obj[key];
     // Do NOT bind orig to obj — for a prototype-method spy (spyOn(Cls.prototype, 'm')) the
@@ -3897,8 +3916,7 @@ globalThis.vi = {
     const define = (v) => { try { Object.defineProperty(obj, key, { configurable: true, enumerable: true, writable: true, value: v }); } catch (e) { try { obj[key] = v; } catch (e2) {} } };
     s.mockRestore = () => define(orig);
     define(s);
-    __spies.push(s);
-    return s;
+    return __trackSpy(s);
   },
   // Record (specifier, evaluated-exports) into a queue the native loader drains after the
   // module runs, registering the mock keyed by the resolved absolute path. The factory runs
@@ -3914,9 +3932,9 @@ globalThis.vi = {
   doMock: (spec, factory) => __ttMock(spec, factory, true, true),
   doUnmock: (spec) => globalThis.vi.unmock(spec),
   dynamicImportSettled: () => __ttImportsSettled(),
-  clearAllMocks: () => { __spies.forEach((s) => s.mockClear()); },
-  resetAllMocks: () => { __spies.forEach((s) => s.mockReset()); },
-  restoreAllMocks: () => { __spies.forEach((s) => { if (s.mockRestore) s.mockRestore(); }); },
+  clearAllMocks: () => { __eachSpy((s) => s.mockClear()); },
+  resetAllMocks: () => { __eachSpy((s) => s.mockReset()); },
+  restoreAllMocks: () => { __eachSpy((s) => { if (s.mockRestore) s.mockRestore(); }); },
   stubGlobal: (k, v) => {
     const m = globalThis.__stubbedGlobals || (globalThis.__stubbedGlobals = new Map());
     if (!m.has(k)) m.set(k, { had: k in globalThis, val: globalThis[k] });
@@ -6056,10 +6074,6 @@ globalThis.__ttCaptureHookBaseline = () => {
     ba: root.hooks.ba.slice(),
     aa: root.hooks.aa.slice(),
   };
-  // Spies created during setup (e.g. the analytics trackEvent vi.fn()) are the first entries in
-  // __spies and must persist; everything appended by a test file is per-file and must be dropped
-  // on reset. Record the setup count as the truncation point.
-  globalThis.__ttSpyBaseline = __spies.length;
 };
 
 // Per-file reset, modeled on vitest's isolate:false loop (vitest/dist .../base*.js): with

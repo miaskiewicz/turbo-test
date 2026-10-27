@@ -390,6 +390,13 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   isolate for its next file (setup files re-run), instead of growing until V8 aborts.
   `TURBO_MAX_HEAP_MB` sets the per-isolate limit, `TURBO_HEAP_LOG=1` prints the heap after
   every file. The setup-mock snapshot handles are now dropped before their isolate.
+- A finished file's spies no longer stay reachable under isolate reuse (turbo-test#124, from
+  alphajew420's #107): the registry behind `vi.clearAllMocks` / `resetAllMocks` /
+  `restoreAllMocks` held every `vi.fn()` / `vi.spyOn()` strongly for the worker's life, and each
+  keeps every call's arguments and receiver, so a reused isolate's live heap grew by every file's
+  call history (~70 MB per file in the fixture) until it ran out. It now holds spies weakly. Unlike
+  #107 a finished file's spies are not `mockClear()`ed: vitest 4.1.12 with `isolate: false` keeps a
+  spy's `mock.calls` across files when the spy is still referenced, and so does turbo-test.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain
