@@ -803,6 +803,31 @@ fn reuse_failure_adopts_fresh_result() {
     assert_eq!(s.calls(), (1, 2));
 }
 
+#[test]
+#[ignore = "turbo-test#126: fails until the fix"]
+fn reuse_keeps_a_report_and_retries_only_a_file_that_did_not_run() {
+    // vitest isolate:false runs a file once on the shared worker and reports that run: a report
+    // with failures (or with nothing passed) is adopted, with no fresh run (turbo-test#126)
+    for (passed, failed) in [(2, 1), (0, 0)] {
+        let s = Script::new(vec![Ok(report(passed, failed))], vec![Ok(report(3, 0))], true);
+        let r = exec(&s).unwrap();
+        assert_eq!((r.passed, r.failed), (passed, failed));
+        assert_eq!(s.calls(), (1, 0));
+    }
+    // a file that did not run its tests (load error, panic, out of memory) is re-run fresh
+    let s = Script::new(vec![Err("graph load failed".into())], vec![Ok(report(4, 0))], true);
+    assert_eq!(exec(&s).unwrap().passed, 4);
+    assert_eq!(s.calls(), (3, 1));
+    let oom = crate::heap_guard::oom_message(256 << 20);
+    let s = Script::new(vec![Err(oom.clone())], vec![Ok(report(1, 0))], true);
+    assert_eq!(exec(&s).unwrap().passed, 1);
+    // J2 (turbo-test#124): out of memory is not retried on the same kind of isolate
+    assert_eq!(s.calls(), (1, 1));
+    let s = Script::new(vec![Err(oom.clone())], vec![Err(oom.clone())], true);
+    assert_eq!(exec(&s).unwrap_err(), oom);
+    assert_eq!(s.calls(), (1, 1));
+}
+
 // ---- file results / worker pool -----------------------------------------------------------
 
 #[test]
