@@ -2142,7 +2142,7 @@ dependencies = [
 [[package]]
 name = "turbo-dom"
 version = "0.6.0"
-source = "git+https://github.com/miaskiewicz/turbo-dom?rev=4c473ef947f9031120ff10ec4c7cc0a6e906ec85#4c473ef947f9031120ff10ec4c7cc0a6e906ec85"
+source = "git+https://github.com/miaskiewicz/turbo-dom?rev=f50e6cb41449bc5e2e214007e08ebdc32a9bdfb5#f50e6cb41449bc5e2e214007e08ebdc32a9bdfb5"
 dependencies = [
  "cssparser",
  "html5ever",
@@ -2151,12 +2151,13 @@ dependencies = [
  "rustc-hash",
  "smallvec",
  "smol_str",
+ "unicode-bidi",
 ]
 
 [[package]]
 name = "turbo-dom-browser-env"
 version = "0.6.0"
-source = "git+https://github.com/miaskiewicz/turbo-dom?rev=4c473ef947f9031120ff10ec4c7cc0a6e906ec85#4c473ef947f9031120ff10ec4c7cc0a6e906ec85"
+source = "git+https://github.com/miaskiewicz/turbo-dom?rev=f50e6cb41449bc5e2e214007e08ebdc32a9bdfb5#f50e6cb41449bc5e2e214007e08ebdc32a9bdfb5"
 dependencies = [
  "cssparser",
  "lightningcss",
@@ -2214,6 +2215,12 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "unicode-bidi"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
 name = "unicode-id-start"
