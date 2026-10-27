@@ -39,6 +39,19 @@ pub struct ErrorInfo {
     /// otherwise identical compile errors as vitest's stacks do (the human reporters print one
     /// module's error once, under every file whose import of it failed).
     pub source: Option<std::path::PathBuf>,
+    /// What vite's plugin container added to a module's parse / transform error (vitest's
+    /// `__vitest_rollup_error__`, printed under the message; turbo-test#113).
+    pub rollup: Option<RollupDetails>,
+}
+
+/// vite's details of a load error: the plugin that threw, the module's id, its `line:column`
+/// and vite's code frame (each empty when vite gave none).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RollupDetails {
+    pub plugin: String,
+    pub id: String,
+    pub loc: String,
+    pub frame: String,
 }
 
 /// The frames of a V8 `stack` (`    at fn (/abs/file.ts:3:9)` / `    at /abs/file.ts:3:9`) that

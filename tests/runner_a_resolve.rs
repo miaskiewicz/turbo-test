@@ -224,12 +224,21 @@ test('entry mocks register without esbuild', () => expect(dep()).toBe('mocked'))
         "{}",
         r.all()
     );
+    // the file that does not transform fails with vite's oxc report, nothing on stderr
+    // (turbo-test#113)
+    let j = json_report(&r);
+    let bad = j["testResults"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"].as_str().unwrap().ends_with("src/bad.test.ts"))
+        .unwrap();
+    let message = bad["message"].as_str().unwrap();
     assert!(
-        r.stderr.contains(&format!(
-            "transform {}: parse errors",
-            p.path("src/bad.test.ts").display()
-        )),
-        "{}",
-        r.all()
+        message.starts_with(
+            "Transform failed with 1 error:\n\n\x1b[31m[PARSE_ERROR] \x1b[0mUnexpected token\n"
+        ) && message.contains(" src/bad.test.ts:1:19 "),
+        "{message:?}"
     );
+    assert!(!r.stderr.contains("transform "), "{}", r.all());
 }

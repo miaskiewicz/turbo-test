@@ -585,6 +585,34 @@ pub fn print_error(
     } else {
         c.red(&format!("{}: {}", c.bold(&name), e.message)) + "\n"
     };
+    // vite's details (`__vitest_rollup_error__`): `  Plugin: …`, `  File: <id>[:line:col]` and
+    // its code frame indented two spaces (turbo-test#113)
+    if let Some(r) = &e.rollup {
+        let mut lines = Vec::new();
+        if !r.plugin.is_empty() {
+            lines.push(format!("  Plugin: {}", c.magenta(&r.plugin)));
+        }
+        if !r.id.is_empty() {
+            let loc = if r.loc.is_empty() {
+                String::new()
+            } else {
+                format!(":{}", r.loc)
+            };
+            lines.push(format!("  File: {}{loc}", c.cyan(&r.id)));
+        }
+        if !r.frame.is_empty() {
+            let frame: Vec<String> = r
+                .frame
+                .split('\n')
+                .map(|l| format!("  {}", l.strip_suffix('\r').unwrap_or(l)))
+                .collect();
+            lines.push(c.yellow(&frame.join("\n")));
+        }
+        if !lines.is_empty() {
+            out.push_str(&lines.join("\n"));
+            out.push('\n');
+        }
+    }
     if !e.diff.is_empty() {
         out.push_str(&format!("\n{}\n\n", e.diff));
     }

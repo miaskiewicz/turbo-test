@@ -234,28 +234,17 @@ fn cjs_loader_diagnostics_for_unreadable_unparsable_and_throwing_modules() {
     // esbuild-only transform: the retry would produce the same code, so it is skipped
     let esb = turbo_test(&p.dir, &[], &[("TURBO_NATIVE_CJS", "0")]);
     assert_passes(&esb, 1);
-    assert!(
-        esb.stderr
-            .contains("rx.ts :: SyntaxError: Invalid regular expression"),
-        "{}",
-        esb.all()
-    );
-    let quiet = turbo_test(&p.dir, &[], &[]);
-    assert_passes(&quiet, 1);
-    let e = &quiet.stderr;
-    assert!(
-        e.contains("  cjs read/transform failed: ") && e.contains("badutf.cjs"),
-        "{e}"
-    );
-    assert!(
-        e.contains("  cjs compile failed: ") && e.contains("syntax.cjs :: SyntaxError"),
-        "{e}"
-    );
-    assert!(!e.contains("cjs body threw"), "{e}");
-    assert!(
-        e.contains("rx.ts :: SyntaxError: Invalid regular expression"),
-        "{e}"
-    );
+    // the loader's diagnostics stay off stderr (vitest prints none, turbo-test#113)
+    for r in [&esb, &turbo_test(&p.dir, &[], &[])] {
+        assert_passes(r, 1);
+        for noise in [
+            "cjs read/transform failed",
+            "cjs compile failed",
+            "cjs body threw",
+        ] {
+            assert!(!r.stderr.contains(noise), "{noise}\n{}", r.all());
+        }
+    }
     let dbg = turbo_test(&p.dir, &[], &[("TURBO_CJS_DEBUG", "1")]);
     assert_passes(&dbg, 1);
     let line = dbg
@@ -266,6 +255,20 @@ fn cjs_loader_diagnostics_for_unreadable_unparsable_and_throwing_modules() {
     assert!(
         line.contains("throws.cjs :: Error: body boom :: Error: body boom | "),
         "{line}"
+    );
+    // TURBO_CJS_DEBUG prints them
+    let e = &dbg.stderr;
+    assert!(
+        e.contains("  cjs read/transform failed: ") && e.contains("badutf.cjs"),
+        "{e}"
+    );
+    assert!(
+        e.contains("  cjs compile failed: ") && e.contains("syntax.cjs :: SyntaxError"),
+        "{e}"
+    );
+    assert!(
+        e.contains("rx.ts :: SyntaxError: Invalid regular expression"),
+        "{e}"
     );
 }
 

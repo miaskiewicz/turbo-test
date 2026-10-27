@@ -3311,7 +3311,11 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
         }
     }
     let out = crate::transform::transform_with(abs, &raw, legacy_decorators)
-        .map_err(|e| eprintln!("transform {}: {e}", abs.display()))
+        .map_err(|e| {
+            if loader_debug() {
+                eprintln!("transform {}: {e}", abs.display());
+            }
+        })
         .ok()?;
     let _ = std::fs::write(&path, &out);
     Some(out)
@@ -3747,7 +3751,16 @@ fn load_cjs_inner<'s>(
         return Some(());
     }
     let Some(raw) = read_transformed(abs, true, prefer_metadata) else {
-        eprintln!("  cjs read/transform failed: {}", abs.display());
+        if loader_debug() {
+            eprintln!("  cjs read/transform failed: {}", abs.display());
+        }
+        // a TypeScript / JSX module oxc does not transform: vite's error, the module's compile
+        // error (turbo-test#113)
+        if let Some(e) = vite_error_value(scope, abs) {
+            let g = v8::Global::new(scope, e);
+            COMPILE_EXC.with(|c| *c.borrow_mut() = Some((g, abs.to_path_buf())));
+            scope.throw_exception(e);
+        }
         return None;
     };
     let wrapped =
@@ -3805,7 +3818,9 @@ fn load_cjs_inner<'s>(
                     v8::Script::compile(tc, code_fb, None).map(|s| v8::Global::new(tc, s))
                 });
                 if fb.is_none() {
-                    eprintln!("  cjs compile failed: {} :: {native_exc}", abs.display());
+                    if loader_debug() {
+                        eprintln!("  cjs compile failed: {} :: {native_exc}", abs.display());
+                    }
                     (None, native_err)
                 } else {
                     (fb, None)
@@ -3871,7 +3886,7 @@ fn load_cjs_inner<'s>(
                 dir_str.into(),
             ],
         );
-        if r.is_none() && tc.has_caught() && std::env::var("TURBO_CJS_DEBUG").is_ok() {
+        if r.is_none() && tc.has_caught() && loader_debug() {
             let stk = tc
                 .stack_trace()
                 .map(|s| s.to_rust_string_lossy(tc))
@@ -4835,36 +4850,77 @@ fn throw_with_code(scope: &mut v8::PinScope, msg: &str, code: &str) {
     scope.throw_exception(exc);
 }
 
-/// The error a module `abs` that V8 did not compile (`exc`) fails with: vite's for a JavaScript
-/// module that does not parse (crate::parse_error; turbo-test#108), else V8's — and always V8's
-/// for a dependency in node_modules (vitest leaves those to Node).
+/// The error a module `abs` that V8 did not compile (`exc`) fails with: vite's for a module that
+/// does not parse or transform (vite_error_value; turbo-test#108, #113), else V8's.
 fn vite_compile_error<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     abs: &Path,
     exc: v8::Local<'s, v8::Value>,
 ) -> v8::Local<'s, v8::Value> {
+    vite_error_value(scope, abs).unwrap_or(exc)
+}
+
+/// vite's error for the module `abs` when it does not parse (JavaScript) or transform
+/// (TypeScript / JSX), crate::parse_error, as vitest's module runner throws it: an Error with
+/// vite's name and message whose `__vitest_rollup_error__` holds what vite's plugin container
+/// adds (plugin, id, loc, frame — vitest's reporters print them). None for a module oxc takes
+/// and for a dependency in node_modules (vitest leaves those to Node).
+fn vite_error_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+) -> Option<v8::Local<'s, v8::Value>> {
     if abs.components().any(|c| c.as_os_str() == "node_modules") {
-        return exc;
+        return None;
     }
     let root = std::env::current_dir().unwrap_or_default();
-    let vite = std::fs::read_to_string(abs)
-        .ok()
-        .and_then(|src| crate::parse_error::vite_parse_error(abs, &src, &root));
-    let Some((name, message)) = vite else {
-        return exc;
+    let src = std::fs::read_to_string(abs).ok()?;
+    let dir = abs.parent()?;
+    let resolve = |spec: &str| resolve_spec(spec, dir).filter(|p| p.is_file());
+    let vite = crate::parse_error::vite_error(abs, &src, &root, &resolve)?;
+    let message = v8::String::new(scope, &vite.message)?;
+    let e = v8::Exception::error(scope, message);
+    let o = e.cast::<v8::Object>();
+    let set = |scope: &mut v8::PinScope<'s, '_>,
+               o: v8::Local<'s, v8::Object>,
+               k: &str,
+               v: v8::Local<'s, v8::Value>| {
+        if let Some(k) = v8::String::new(scope, k) {
+            o.set(scope, k.into(), v);
+        }
     };
-    let (Some(m), Some(k), Some(n)) = (
-        v8::String::new(scope, &message),
-        v8::String::new(scope, "name"),
-        v8::String::new(scope, name),
-    ) else {
-        return exc;
-    };
-    let e = v8::Exception::error(scope, m);
-    if name != "Error" {
-        e.cast::<v8::Object>().set(scope, k.into(), n.into());
+    if vite.name != "Error" {
+        let name = v8::String::new(scope, vite.name)?;
+        set(scope, o, "name", name.into());
     }
-    e
+    let details = v8::Object::new(scope);
+    if let Some(plugin) = vite.plugin {
+        let v = v8::String::new(scope, plugin)?;
+        set(scope, details, "plugin", v.into());
+    }
+    let id = v8::String::new(scope, &vite.id)?;
+    set(scope, details, "id", id.into());
+    if let Some((line, column)) = vite.loc {
+        let loc = v8::Object::new(scope);
+        let line = v8::Number::new(scope, line as f64);
+        set(scope, loc, "line", line.into());
+        let column = v8::Number::new(scope, column as f64);
+        set(scope, loc, "column", column.into());
+        set(scope, details, "loc", loc.into());
+    }
+    if let Some(frame) = &vite.frame {
+        let v = v8::String::new(scope, frame)?;
+        set(scope, details, "frame", v.into());
+    }
+    set(scope, o, "__vitest_rollup_error__", details.into());
+    Some(e)
+}
+
+/// TURBO_CJS_DEBUG: print the loaders' diagnostics (failed reads, transforms, compiles, module
+/// bodies that threw) to stderr; TURBO_NATIVE_CJS_STRICT (the native emitter's conformity
+/// measurement) prints them too. Otherwise stderr carries none of them (vitest prints none,
+/// turbo-test#113).
+fn loader_debug() -> bool {
+    std::env::var("TURBO_CJS_DEBUG").is_ok() || crate::esm_cjs::strict()
 }
 
 // ---- ESM graph ------------------------------------------------------------
@@ -4876,7 +4932,13 @@ fn load_graph<'s>(
     if let Some(g) = REGISTRY.with(|r| r.borrow().esm_by_path.get(abs).cloned()) {
         return Some(v8::Local::new(scope, &g));
     }
-    let raw = read_transformed(abs, false, false)?;
+    let Some(raw) = read_transformed(abs, false, false) else {
+        // a TypeScript / JSX module oxc does not transform: vite's error (turbo-test#113)
+        if let Some(e) = vite_error_value(scope, abs) {
+            scope.throw_exception(e);
+        }
+        return None;
+    };
     // CJS gets __dirname/__filename via the wrapper params; a real ES module has neither in scope.
     // App code authored for the CJS world (NestJS seed runners, country-config loaders) reads them
     // at top level, so inject Node-CJS-equivalent module-local bindings when referenced.
@@ -7259,6 +7321,24 @@ fn error_info_of<'s>(
         .get(scope, k.into())
         .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
         .map(|c| Box::new(error_info_of(scope, c)));
+    let k = v8::String::new(scope, "rollup").unwrap();
+    let rollup = o
+        .get(scope, k.into())
+        .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
+        .map(|r| {
+            let text = |key: &str| {
+                let k = v8::String::new(scope, key).unwrap();
+                r.get(scope, k.into())
+                    .map(|v| v.to_rust_string_lossy(scope))
+                    .unwrap_or_default()
+            };
+            crate::failure::RollupDetails {
+                plugin: text("plugin"),
+                id: text("id"),
+                loc: text("loc"),
+                frame: text("frame"),
+            }
+        });
     crate::failure::ErrorInfo {
         name,
         message,
@@ -7270,6 +7350,7 @@ fn error_info_of<'s>(
         frames,
         cause,
         source: None,
+        rollup,
     }
 }
 

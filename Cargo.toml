@@ -55,6 +55,10 @@ libc = "0.2"
 # js-tokens' identifier classes, for vitest's code-frame highlighting
 unicode-id-start = "1.4"
 base64 = "0.22"
+# rolldown's diagnostic renderer (its ariadne fork, the version vite 8's rolldown links): a TS /
+# JSX module that does not transform fails with its report, as vite's oxc transform does
+# (turbo-test#113)
+ariadne = { package = "rolldown-ariadne", version = "=0.6.0" }
 
 # `cargo tarpaulin` builds with `--cfg tarpaulin` (napi_host's coverage flush before an abort).
 [lints.rust]

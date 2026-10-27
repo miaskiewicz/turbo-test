@@ -331,6 +331,19 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   module and a node_modules dependency keep V8's SyntaxError, as Node gives it to vitest.
   turbo-test said `graph load failed` (printing `cannot resolve …` to stderr three times) and
   V8's SyntaxError.
+- Modules that do not transform or parse fail as vitest reports them (turbo-test#113): a
+  `.ts` / `.tsx` / `.mts` / `.cts` / `.jsx` module oxc does not parse (or whose syntax its
+  semantic check rejects, e.g. a redeclared `let`) fails with vite's `Transform failed with N
+  error(s):` and rolldown's diagnostics, rendered by rolldown's ariadne fork (new dependency
+  `rolldown-ariadne` 0.6.0, the version vite 8's rolldown links) — coloured, as vitest gives
+  them even under NO_COLOR —, where turbo-test said `graph load failed` / `failed to load
+  ./dep.ts` or V8's SyntaxError; a JavaScript module's `Parse failure` frame shows the code
+  rolldown parses, the module with its imports rewritten to vite's URLs; the default reporter's
+  Failed Suites entry prints vite's `Plugin:` / `File: <module>[:line:col]` / code frame lines
+  under such an error (vitest's `__vitest_rollup_error__`); and the loaders print nothing to
+  stderr about the files they could not read, transform or compile (`transform …: parse
+  errors`, `cjs read/transform failed`, `cjs compile failed`, up to three times per file) unless
+  `TURBO_CJS_DEBUG` (or the native emitter's `TURBO_NATIVE_CJS_STRICT` measurement) is set.
 - Hooks run in vitest's default `sequence.hooks: 'stack'` order (turbo-test#101): `afterEach` /
   `afterAll` last registered first (a suite's own before its parent's), and the functions
   `beforeEach` / `beforeAll` return run after the `afterEach` / `afterAll` hooks, last returned

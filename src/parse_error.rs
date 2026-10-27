@@ -1,42 +1,97 @@
-//! The error vitest fails a JavaScript module that does not parse with (turbo-test#108).
+//! The errors vitest fails a module that does not parse or transform with (turbo-test#108,
+//! turbo-test#113).
 //!
-//! vite transforms a `.js` / `.mjs` / `.cjs` module in two steps that parse it: the import
-//! analysis lexes it with es-module-lexer (a source the lexer rejects — an unbalanced `)` / `}`,
-//! an unterminated string, template or regular expression — fails with vite's "Failed to parse
-//! source for import analysis …"), then the SSR transform parses it with rolldown's oxc parser
-//! (any other syntax error is rolldown's `Parse failure: Parse failed with N error(s): …` with a
-//! code frame and the module's root-relative URL). turbo-test asks for this only after V8 failed
-//! to compile the module: a source oxc parses is left with V8's SyntaxError (an error only V8
-//! reports, as in vitest; turbo-test#99).
+//! vite transforms a `.ts` / `.tsx` / `.mts` / `.cts` / `.jsx` module with oxc first (its
+//! `vite:oxc` plugin): a module oxc does not parse fails with `Transform failed with N error(s):`
+//! and rolldown's diagnostics as ariadne renders them (coloured, whatever NO_COLOR says). A
+//! `.js` / `.mjs` / `.cjs` module is parsed twice: the import analysis lexes it with
+//! es-module-lexer (a source the lexer rejects — an unbalanced `)` / `}`, an unterminated string,
+//! template or regular expression — fails with vite's "Failed to parse source for import analysis
+//! …"), then rewrites its imports to vite's URLs, and the SSR transform parses that with
+//! rolldown's oxc parser (any other syntax error is rolldown's `Parse failure: Parse failed with N
+//! error(s): …` with a code frame of the rewritten code and the module's root-relative URL).
+//! turbo-test asks for these only after its own transform or V8's compile failed: a source oxc
+//! parses is left with V8's SyntaxError (an error only V8 reports, as in vitest; turbo-test#99).
+//! Each error carries what vite's plugin container adds to it (the plugin, the module, the
+//! position and vite's code frame), which vitest's reporters print under the message.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
-/// The (error name, message) vitest fails the module `path` (source `src`, project root `root`)
-/// with, when `path` is a JavaScript module oxc does not parse.
-pub fn vite_parse_error(path: &Path, src: &str, root: &Path) -> Option<(&'static str, String)> {
-    let ext = path.extension().and_then(|e| e.to_str())?;
-    if !matches!(ext, "js" | "mjs" | "cjs") {
-        return None;
+/// An error vite fails a module with: its name and message, and the details vitest keeps as
+/// `__vitest_rollup_error__` (the plugin that threw, the module's id, the 1-based line and
+/// 0-based column, vite's code frame).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViteError {
+    pub name: &'static str,
+    pub message: String,
+    pub plugin: Option<&'static str>,
+    pub id: String,
+    pub loc: Option<(usize, usize)>,
+    pub frame: Option<String>,
+}
+
+/// The error vitest fails the module `path` (source `src`, project root `root`) with when it
+/// does not parse (a JavaScript module) or transform (TypeScript / JSX); `resolve` resolves an
+/// import specifier of the module to a file (vite's import analysis rewrites the module's
+/// imports to their URLs before the parse that fails).
+pub fn vite_error(
+    path: &Path,
+    src: &str,
+    root: &Path,
+    resolve: &dyn Fn(&str) -> Option<PathBuf>,
+) -> Option<ViteError> {
+    match path.extension().and_then(|e| e.to_str())? {
+        "js" | "mjs" | "cjs" => vite_parse_error(path, src, root, resolve),
+        "ts" | "tsx" | "mts" | "cts" | "jsx" => vite_transform_error(path, src, root),
+        _ => None,
     }
+}
+
+/// vite's error for a JavaScript module oxc does not parse.
+fn vite_parse_error(
+    path: &Path,
+    src: &str,
+    root: &Path,
+    resolve: &dyn Fn(&str) -> Option<PathBuf>,
+) -> Option<ViteError> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, src, SourceType::mjs()).parse();
     if parsed.errors.is_empty() {
         return None;
     }
-    if lexer_rejects(src) {
-        return Some(("Error", IMPORT_ANALYSIS.to_string()));
+    let lexed = lex(src);
+    if let Some(at) = lexed.error {
+        // vite's plugin container: the position and frame unless the source looks binary
+        let shown = !src.contains('\u{fffd}');
+        return Some(ViteError {
+            name: "Error",
+            message: IMPORT_ANALYSIS.to_string(),
+            plugin: Some("vite:import-analysis"),
+            id: path.display().to_string(),
+            loc: shown.then(|| locate(src, at)),
+            frame: shown.then(|| vite_code_frame(src, at)),
+        });
     }
-    let n = parsed.errors.len();
+    // the code rolldown parses: the module with its imports rewritten to vite's URLs
+    let code = rewrite_imports(src, &lexed.imports, root, resolve);
+    let allocator = Allocator::default();
+    let reparsed = Parser::new(&allocator, &code, SourceType::mjs()).parse();
+    let (code, errors) = if reparsed.errors.is_empty() {
+        (src, &parsed.errors)
+    } else {
+        (code.as_str(), &reparsed.errors)
+    };
+    let n = errors.len();
     let mut message = format!(
         "Parse failed with {n} error{}:\n",
         if n < 2 { "" } else { "s" }
     );
     let mut pos = None;
-    for (i, e) in parsed.errors.iter().enumerate() {
+    for (i, e) in errors.iter().enumerate() {
         if i >= 5 {
             message.push_str("\n...");
             break;
@@ -48,8 +103,8 @@ pub fn vite_parse_error(path: &Path, src: &str, root: &Path) -> Option<(&'static
         let frames: Vec<String> = starts
             .iter()
             .map(|&at| {
-                let (line, column) = locate(src, at);
-                code_frame(src, line, column)
+                let (line, column) = locate(code, at);
+                code_frame(code, line, column)
             })
             .collect();
         message.push_str(&e.message);
@@ -57,14 +112,155 @@ pub fn vite_parse_error(path: &Path, src: &str, root: &Path) -> Option<(&'static
         message.push_str(&frames.join("\n"));
     }
     let url = module_url(path, root);
-    let at = match pos {
-        Some(at) => {
-            let (line, column) = locate(src, at);
-            format!("At file: {url}:{line}:{column}")
-        }
+    let loc = pos.map(|at| locate(code, at));
+    let at = match loc {
+        Some((line, column)) => format!("At file: {url}:{line}:{column}"),
         None => format!("At file: {url}"),
     };
-    Some(("RolldownError", format!("Parse failure: {message}\n{at}")))
+    Some(ViteError {
+        name: "RolldownError",
+        message: format!("Parse failure: {message}\n{at}"),
+        plugin: None,
+        id: url,
+        loc,
+        frame: pos.map(|at| vite_code_frame(code, at)),
+    })
+}
+
+/// vite's `vite:oxc` error for a TypeScript / JSX module oxc does not parse (or whose syntax its
+/// semantic check rejects): `Transform failed with N error(s):` and each error as rolldown
+/// renders it (ariadne, coloured; the file named relative to the working directory `root`).
+fn vite_transform_error(path: &Path, src: &str, root: &Path) -> Option<ViteError> {
+    let source_type = SourceType::from_path(path).ok()?;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, src, source_type).parse();
+    let errors = if parsed.errors.is_empty() {
+        oxc_semantic::SemanticBuilder::new()
+            .with_check_syntax_error(true)
+            .build(&parsed.program)
+            .errors
+    } else {
+        parsed.errors
+    };
+    if errors.is_empty() {
+        return None;
+    }
+    let file = relative(path, root);
+    let n = errors.len();
+    let mut message = format!(
+        "Transform failed with {n} error{}:\n",
+        if n < 2 { "" } else { "s" }
+    );
+    for (i, e) in errors.iter().enumerate() {
+        message.push('\n');
+        if i >= 5 {
+            message.push_str("...");
+            break;
+        }
+        let labels: Vec<(usize, usize, String)> = e
+            .labels
+            .iter()
+            .flatten()
+            .map(|l| {
+                (
+                    l.offset(),
+                    l.offset() + l.len(),
+                    l.label().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        let help = e.help.as_ref().map(|h| h.to_string());
+        message.push_str(&rolldown_diagnostic(&file, src, &e.message, &labels, help));
+    }
+    Some(ViteError {
+        name: "Error",
+        message,
+        plugin: Some("vite:oxc"),
+        id: path.display().to_string(),
+        loc: None,
+        frame: None,
+    })
+}
+
+/// rolldown's `PARSE_ERROR` diagnostic as it renders it in colour (`Diagnostic::to_color_string`):
+/// an ariadne report of the error's labels in `file` (source `src`) with the help line; a label
+/// whose line runs on for 300 characters either side of it in a source of 600 bytes or more is
+/// named in the title instead (`is_context_too_long`).
+fn rolldown_diagnostic(
+    file: &str,
+    src: &str,
+    title: &str,
+    labels: &[(usize, usize, String)],
+    help: Option<String>,
+) -> String {
+    use ariadne::{Config, IndexType, Label, Report, ReportKind};
+    let mut title = title.to_string();
+    // (rolldown builds the report on an empty source's 0..0, so the header names the first label)
+    let mut report =
+        Report::build(ReportKind::Error, (String::new(), 0..0)).with_code("PARSE_ERROR");
+    for (start, end, label) in labels {
+        if context_too_long(src, *start, *end) {
+            title.push_str(&format!("\n - {label} in {file} at {start}..{end}"));
+        } else {
+            report =
+                report.with_label(Label::new((file.to_string(), *start..*end)).with_message(label));
+        }
+    }
+    report.with_helps(help);
+    let mut out = Vec::new();
+    let written = report
+        .with_message(&title)
+        .with_config(
+            Config::default()
+                .with_color(true)
+                .with_index_type(IndexType::Byte)
+                .with_severity_prefix(false),
+        )
+        .finish()
+        .write_for_stdout(ariadne::sources([(file.to_string(), src)]), &mut out);
+    match written {
+        Ok(()) => String::from_utf8_lossy(&out).into_owned(),
+        Err(_) => format!("[PARSE_ERROR] {title}"),
+    }
+}
+
+/// rolldown's `is_context_too_long`: in a source of 600 bytes or more, whether the span
+/// `start..end` has no line break within 300 characters before or after it.
+fn context_too_long(src: &str, start: usize, end: usize) -> bool {
+    if src.len() < 600 {
+        return false;
+    }
+    let (Some(before), Some(after)) = (src.get(..start), src.get(end..)) else {
+        return true;
+    };
+    let bounded = |chars: &mut dyn Iterator<Item = char>| {
+        let mut n = 0;
+        for c in chars {
+            if c == '\n' {
+                return true;
+            }
+            n += 1;
+            if n > 300 {
+                break;
+            }
+        }
+        n < 300
+    };
+    !bounded(&mut after.chars()) || !bounded(&mut before.chars().rev())
+}
+
+/// `path` relative to `base`, with `/` separators (rolldown's `stabilize_path`).
+fn relative(path: &Path, base: &Path) -> String {
+    let p: Vec<_> = path.components().collect();
+    let b: Vec<_> = base.components().collect();
+    let common = p.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let mut parts: Vec<String> = vec!["..".to_string(); b.len() - common];
+    parts.extend(
+        p[common..]
+            .iter()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+    );
+    parts.join("/")
 }
 
 /// Whether the module `path` (source `src`) imports `spec` statically (`import … from`,
@@ -143,38 +339,105 @@ fn code_frame(src: &str, line: usize, column: usize) -> String {
         .join("\n")
 }
 
-/// Whether es-module-lexer rejects `src`: a `)` or `}` that closes nothing, a string that
-/// reaches a line break or the end, a template or regular expression that is not closed, or
-/// brackets / templates left open at the end. Strings, comments, templates and regular
+/// vite's `generateCodeFrame(source, pos)` (what its plugin container and SSR transform attach
+/// as `frame`): two lines either side of the one holding byte offset `at`, numbered in a column
+/// of at least three, `|  ` and the line (a line longer than 120 characters cut around the
+/// position with `...`), a `^` under the position.
+fn vite_code_frame(src: &str, at: usize) -> String {
+    const MAX: usize = 120;
+    let (line, column) = locate(src, at);
+    let width = 3.max(line.to_string().len() + 1);
+    let lines: Vec<&str> = src
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .collect();
+    let i = line - 1;
+    let mut out = Vec::new();
+    let first = i.saturating_sub(2);
+    for (j, text) in lines.iter().enumerate().take(i + 3).skip(first) {
+        let chars: Vec<char> = text.chars().collect();
+        let mut shown = text.to_string();
+        let mut under = column;
+        if chars.len() > MAX {
+            let from = if j == i {
+                column.saturating_sub(MAX / 2)
+            } else {
+                0
+            };
+            if j == i {
+                under = column - from + if from > 0 { 3 } else { 0 };
+            }
+            let prefix = if from > 0 { "..." } else { "" };
+            let suffix = if chars.len() - from > MAX { "..." } else { "" };
+            let take = MAX - prefix.len() - suffix.len();
+            let body: String = chars[from..].iter().take(take).collect();
+            shown = format!("{prefix}{body}{suffix}");
+        }
+        let number = (j + 1).to_string();
+        out.push(format!(
+            "{number}{}|  {shown}",
+            " ".repeat(width - number.len())
+        ));
+        if j == i {
+            out.push(format!("{}|  {}^", " ".repeat(width), " ".repeat(under)));
+        }
+    }
+    out.join("\n")
+}
+
+/// What es-module-lexer makes of a source: the byte offset it fails at (`e.idx`: a `)` or `}`
+/// that closes nothing; the line break or end a string or regular expression reaches; the end
+/// an open template reaches; 0 for brackets left open at the end), and the spans (quotes
+/// included) of the string specifiers of its imports (`import … from '…'`, `import '…'`,
+/// `export … from '…'`, `import('…')`).
+struct Lexed {
+    error: Option<usize>,
+    imports: Vec<std::ops::Range<usize>>,
+}
+
+/// Lex `src` as es-module-lexer does (see [`Lexed`]): strings, comments, templates and regular
 /// expressions are skipped as the lexer skips them; a `/` starts a regular expression after an
 /// operator, an opening bracket, a keyword that precedes an expression, or nothing.
-fn lexer_rejects(src: &str) -> bool {
+fn lex(src: &str) -> Lexed {
     let b = src.as_bytes();
     let mut i = 0;
+    let mut imports = Vec::new();
+    let failed = |at: usize, imports: Vec<std::ops::Range<usize>>| Lexed {
+        error: Some(at),
+        imports,
+    };
     // open `(` / `{` / `${`: true marks a template substitution
     let mut open: Vec<bool> = Vec::new();
     // the last significant token: punctuator byte, or 'w' for a word / number / literal end
     let mut last: Option<u8> = None;
     let mut last_word = String::new();
+    // the last token is the `(` of `import(`
+    let mut import_call = false;
     while i < b.len() {
         let c = b[i];
+        let after_import_call = std::mem::take(&mut import_call);
         match c {
             b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
+                import_call = after_import_call;
                 i += 1;
                 continue;
             }
-            b'(' | b'{' => open.push(false),
+            b'(' | b'{' => {
+                import_call = c == b'(' && last == Some(b'w') && last_word == "import";
+                open.push(false);
+            }
             b')' | b'}' => match open.pop() {
-                None => return true,
+                None => return failed(i, imports),
                 Some(true) if c == b'}' => {
                     // back in the template after `${ … }`
                     match template(b, i + 1, &mut open) {
                         Some(next) => {
                             i = next;
                             last = Some(b'w');
+                            last_word.clear();
                             continue;
                         }
-                        None => return true,
+                        None => return failed(b.len(), imports),
                     }
                 }
                 Some(_) => {}
@@ -183,32 +446,42 @@ fn lexer_rejects(src: &str) -> bool {
                 let mut j = i + 1;
                 loop {
                     match b.get(j) {
-                        None | Some(b'\n') | Some(b'\r') => return true,
+                        None => return failed(b.len(), imports),
+                        Some(b'\n') | Some(b'\r') => return failed(j, imports),
                         Some(b'\\') => j += 2,
                         Some(&q) if q == c => break,
                         Some(_) => j += 1,
                     }
                 }
+                let specifier = after_import_call
+                    || (last == Some(b'w') && matches!(last_word.as_str(), "from" | "import"));
+                if specifier {
+                    imports.push(i..j + 1);
+                }
                 i = j + 1;
                 last = Some(b'w');
+                last_word.clear();
                 continue;
             }
             b'`' => match template(b, i + 1, &mut open) {
                 Some(next) => {
                     i = next;
                     last = Some(b'w');
+                    last_word.clear();
                     continue;
                 }
-                None => return true,
+                None => return failed(b.len(), imports),
             },
             b'/' if b.get(i + 1) == Some(&b'/') => {
                 while i < b.len() && b[i] != b'\n' {
                     i += 1;
                 }
+                import_call = after_import_call;
                 continue;
             }
             b'/' if b.get(i + 1) == Some(&b'*') => {
                 i = src[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2);
+                import_call = after_import_call;
                 continue;
             }
             b'/' if regex_allowed(last, &last_word) => {
@@ -216,7 +489,8 @@ fn lexer_rejects(src: &str) -> bool {
                 let mut class = false;
                 loop {
                     match b.get(j) {
-                        None | Some(b'\n') | Some(b'\r') => return true,
+                        None => return failed(b.len(), imports),
+                        Some(b'\n') | Some(b'\r') => return failed(j, imports),
                         Some(b'\\') => j += 2,
                         Some(b'[') => {
                             class = true;
@@ -232,6 +506,7 @@ fn lexer_rejects(src: &str) -> bool {
                 }
                 i = j + 1;
                 last = Some(b'w');
+                last_word.clear();
                 continue;
             }
             _ => {}
@@ -251,7 +526,47 @@ fn lexer_rejects(src: &str) -> bool {
         last_word.clear();
         i += 1;
     }
-    !open.is_empty()
+    Lexed {
+        error: (!open.is_empty()).then_some(0),
+        imports,
+    }
+}
+
+/// Whether es-module-lexer rejects `src`.
+#[cfg(test)]
+fn lexer_rejects(src: &str) -> bool {
+    lex(src).error.is_some()
+}
+
+/// `src` with the import specifiers at `imports` rewritten as vite's import analysis rewrites
+/// them: a specifier that resolves (`resolve`) to a file becomes its URL in double quotes
+/// (root-relative inside `root`, `/@fs/<path>` outside it); a `node:` built-in and a specifier
+/// that does not resolve are left as written.
+fn rewrite_imports(
+    src: &str,
+    imports: &[std::ops::Range<usize>],
+    root: &Path,
+    resolve: &dyn Fn(&str) -> Option<PathBuf>,
+) -> String {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut out = String::with_capacity(src.len());
+    let mut at = 0;
+    for span in imports {
+        let spec = &src[span.start + 1..span.end - 1];
+        if spec.starts_with("node:") || spec.contains('\\') {
+            continue;
+        }
+        let Some(file) = resolve(spec) else {
+            continue;
+        };
+        out.push_str(&src[at..span.start]);
+        out.push('"');
+        out.push_str(&module_url(&file, &root));
+        out.push('"');
+        at = span.end;
+    }
+    out.push_str(&src[at..]);
+    out
 }
 
 /// Scan a template from `i` (just past the backtick or a substitution's `}`): the index past

@@ -1032,3 +1032,126 @@ fn load_errors_are_vites() {
         );
     }
 }
+
+/// turbo-test#113: a TypeScript / JSX module that does not transform fails with vite's oxc
+/// report (`Transform failed with N error(s):` and rolldown's ariadne diagnostics, coloured even
+/// under NO_COLOR); a JavaScript parse failure's code frame shows the module as vite's import
+/// analysis rewrote it (imports as `"/<root-relative url>"`); the default reporter's Failed
+/// Suites entry adds vite's `Plugin:` / `File:` / code frame lines; and nothing is printed to
+/// stderr about the failed transforms or compiles. `tests/data/transform-errors` holds the
+/// project and vitest 4.1.12's json messages, on both loaders.
+#[test]
+fn transform_errors_and_parse_failure_details_are_vites() {
+    const FILES: [&str; 12] = [
+        "badd.mjs",
+        "dep.ts",
+        "dp.test.js",
+        "entrysyn.test.ts",
+        "help.test.ts",
+        "ia.test.js",
+        "jsx.test.tsx",
+        "m.mjs",
+        "pf.test.js",
+        "sub/z.mjs",
+        "tsdep.test.ts",
+        "two.test.ts",
+    ];
+    let want: std::collections::BTreeMap<String, String> = serde_json::from_str(include_str!(
+        "data/transform-errors/messages-vitest-4.1.12.json"
+    ))
+    .unwrap();
+    for esbuild in [false, true] {
+        let p = Project::new("rep-transform-errors");
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", "{\"name\":\"x\"}\n");
+        for f in FILES {
+            let src = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/data/transform-errors")
+                    .join(f),
+            )
+            .unwrap();
+            p.file(f, &src);
+        }
+        let root = std::fs::canonicalize(&p.dir).unwrap().display().to_string();
+        let r = run(&p, &["--reporter", "json"]);
+        let j = json_report(&r);
+        let got: std::collections::BTreeMap<String, String> = j["testResults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                let name = t["name"].as_str().unwrap();
+                let file = name.rsplit('/').next().unwrap().to_string();
+                (file, t["message"].as_str().unwrap_or_default().to_string())
+            })
+            .collect();
+        for (file, message) in &want {
+            assert_eq!(
+                got.get(file),
+                Some(message),
+                "esbuild={esbuild} {file}\n{}",
+                r.all()
+            );
+        }
+        assert_eq!(got.len(), want.len(), "esbuild={esbuild}\n{}", r.all());
+        // no transform / compile noise on stderr (vitest prints none)
+        for noise in [
+            "transform ",
+            "cjs compile failed",
+            "cjs read/transform failed",
+        ] {
+            assert!(
+                !r.stderr.contains(noise),
+                "esbuild={esbuild} {noise:?}\n{}",
+                r.all()
+            );
+        }
+        // the Failed Suites entries: vite's Plugin / File / code frame after the message
+        let r = turbo_test(
+            &p.dir,
+            &[],
+            &[("TURBO_LEGACY_REPORTER", "0"), ("NO_COLOR", "1")],
+        );
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        let oxc = |file: &str, error_of: &str| {
+            format!(
+                "\nError: {}\n  Plugin: vite:oxc\n  File: {root}/{error_of}\n",
+                want[file]
+            )
+        };
+        let blocks = [
+            oxc("entrysyn.test.ts", "entrysyn.test.ts"),
+            oxc("tsdep.test.ts", "dep.ts"),
+            oxc("two.test.ts", "two.test.ts"),
+            oxc("help.test.ts", "help.test.ts"),
+            oxc("jsx.test.tsx", "jsx.test.tsx"),
+            format!(
+                "\nError: {}\n  Plugin: vite:import-analysis\n  File: {root}/ia.test.js:2:19\n  1  |  import {{ test }} from 'vitest';\n  2  |  test('t', () => {{}}));\n     |                     ^\n  3  |  \n",
+                want["ia.test.js"]
+            ),
+            format!(
+                "\nRolldownError: {}\n  File: /pf.test.js:5:6\n  3  |  //\n  4  |  import {{ y }} from \"/m.mjs\"; import fs from 'node:fs';\n  5  |  const = 1; import {{ z }} from \"/sub/z.mjs\";\n     |        ^\n  6  |  export {{ y as yy }} from \"/m.mjs\";\n  7  |  const d = import(\"/m.mjs\");\n",
+                want["pf.test.js"]
+            ),
+            format!(
+                "\nRolldownError: {}\n  File: /badd.mjs:2:6\n  1  |  export const k = 1;\n  2  |  const = 2;\n     |        ^\n  3  |  \n",
+                want["dp.test.js"]
+            ),
+        ];
+        for block in blocks {
+            assert!(
+                r.stderr.contains(&block),
+                "esbuild={esbuild} {block:?}\n{}",
+                r.all()
+            );
+        }
+        assert!(
+            !r.stderr.contains("graph load failed"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+    }
+}

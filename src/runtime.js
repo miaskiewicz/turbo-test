@@ -5297,6 +5297,12 @@ function __errorInfo(e) {
   // with its parsed frames, not modelled)
   const inspected = !ser.message && !(e instanceof Error) ? __nodeInspect(__plainOf({ ...ser, stacks: [] })) : null;
   const props = __errorProperties(ser);
+  // vite's details of a module's parse / transform error (printErrorInner's
+  // `__vitest_rollup_error__` lines, turbo-test#113)
+  const re = e !== null && typeof e === 'object' ? e.__vitest_rollup_error__ : undefined;
+  const rollup = re && typeof re === 'object'
+    ? { plugin: re.plugin ? String(re.plugin) : '', id: re.id ? String(re.id) : '', loc: re.loc ? `${re.loc.line}:${re.loc.column}` : '', frame: re.frame ? String(re.frame) : '' }
+    : null;
   return {
     name: ser.name ? String(ser.name) : 'Unknown Error',
     message: ser.message === undefined ? '' : String(ser.message),
@@ -5307,6 +5313,7 @@ function __errorInfo(e) {
     cause,
     inspected,
     properties: props === null ? null : __inspect(props),
+    rollup,
   };
 }
 // @vitest/utils processError's serialization: a primitive (or any falsy value) is `{ message }`,
