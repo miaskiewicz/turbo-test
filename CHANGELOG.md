@@ -247,6 +247,12 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   instead of giving the factory object; a `jest.mock` factory stays its own default there.
   Still differs: a named import of an automocked CommonJS module reads the mock where vitest
   reads `undefined` (needs #133's namespace).
+- The drive loop settles the DOM binding's deferred ownership work after every task
+  (`turbo_dom_browser_env::browser_env::flush_ownership`, miaskiewicz/turbo-dom#112, from
+  PR #105 by alphajew420): on trees of more than 256 nodes turbo-dom-browser-env now reconciles
+  wrapper ownership once per batch of mutating calls instead of after each one (building n nodes
+  was O(n^2): 94% of a worker on a React suite), and the host's event-loop turn settles the rest
+  so a subtree a task detached is collectable before the next task.
 - A project with no `node_modules/.bin/esbuild` — pnpm, whose transitive esbuild lives only under
   `node_modules/.pnpm`, or one that does not depend on esbuild — now runs on turbo-test's own
   esbuild (PR #80 by alphajew420, turbo-test#79): `cli.js` passes it as `TURBO_ESBUILD`, every

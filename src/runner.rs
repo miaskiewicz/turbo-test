@@ -8214,6 +8214,12 @@ fn drive_tests_bounded(
                 break;
             }
         }
+        // The task and its microtasks are done: settle the DOM ownership work a long run of
+        // mutating calls on a large tree deferred, so what the task detached is collectable
+        // before the next one (turbo-dom#112).
+        if turbo_dom_browser_env::browser_env::enabled() {
+            turbo_dom_browser_env::browser_env::flush_ownership(scope);
+        }
         if promise.state() != v8::PromiseState::Pending {
             break;
         }

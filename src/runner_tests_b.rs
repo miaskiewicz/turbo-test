@@ -534,6 +534,48 @@ fn drive_loop_gives_up_after_its_turn_budget() {
     assert_eq!(err, "event loop did not settle (possible infinite timers)");
 }
 
+/// turbo-dom#112: on a large tree the DOM binding defers ownership work across mutating calls;
+/// the drive loop settles it (`flush_ownership`) once the task's microtasks have drained, so a
+/// subtree the task detached is collectable before the next task.
+#[test]
+fn drive_loop_settles_deferred_dom_ownership_after_each_task() {
+    with_context(|scope, global| {
+        turbo_dom_browser_env::browser_env::install(scope);
+        eval(
+            scope,
+            "(() => {
+               const host = document.createElement('div');
+               document.body.appendChild(host);
+               for (let i = 0; i < 1500; i++) host.appendChild(document.createElement('p'));
+               const gone = document.createElement('section');
+               gone.id = 'gone';
+               host.appendChild(gone);
+               globalThis.__stepMacro = () => false;
+               globalThis.__tt.run = () => {
+                 document.getElementById('gone').remove();
+                 return new Promise(() => {});
+               };
+               return 1;
+             })()",
+        );
+        let gone = {
+            v8::scope!(let inner, scope);
+            let gone = eval_value(inner, "document.getElementById('gone')");
+            v8::Weak::new(inner, v8::Local::<v8::Object>::try_from(gone).unwrap())
+        };
+        // The task removes #gone (one call, deferred on a 1500-node tree) and never settles.
+        let _ = drive_tests_bounded(scope, global, Path::new("/t.test.js"), 5);
+        for _ in 0..3 {
+            scope.low_memory_notification();
+        }
+        assert!(
+            gone.is_empty(),
+            "the detached wrapper was collected after the task"
+        );
+        turbo_dom_browser_env::browser_env::reset();
+    });
+}
+
 #[test]
 fn call_global_bool_tolerates_missing_and_throwing_hooks() {
     with_context(|scope, global| {
