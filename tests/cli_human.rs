@@ -378,8 +378,15 @@ fn slow_tests_retries_and_obsolete_snapshots_print_what_vitest_prints() {
     }
 }
 
-/// Coloured `text` as `tests/data/human-color` spells it: the project root, the `Start at` and
-/// `Duration` lines, and every duration's digits (` 12ms`, ` 12\x1b[2mms`).
+/// The colour vitest's getDurationPrefix gives a duration: yellow over its 300ms
+/// slowTestThreshold, green otherwise.
+const SLOW_MS: u64 = 300;
+
+/// Coloured `text` as `tests/data/human-color` spells it (see [`reference_colours`]): the project
+/// root, the `Start at` and `Duration` lines, and every duration's digits (` 12ms`,
+/// ` 12\x1b[2mms`). A coloured duration must have its value's colour, then is spelled
+/// `\x1b[3?m <n>` whatever the colour: a test fast in vitest's reference can be slow on a loaded
+/// machine (turbo-test#109).
 fn normalize_colored(text: &str, root: &str) -> String {
     text.replace(root, "<root>")
         .split('\n')
@@ -400,7 +407,22 @@ fn normalize_colored(text: &str, root: &str) -> String {
                 let after = &rest[i + digits..];
                 let duration = (after.starts_with("ms") || after.starts_with("\x1b[2mms"))
                     && rest[..i].ends_with(' ');
+                // (a colour code's own digits went out already: look at what is written)
                 out.push_str(&rest[..i]);
+                let coloured =
+                    duration && (out.ends_with("\x1b[32m ") || out.ends_with("\x1b[33m "));
+                if coloured {
+                    let value: u64 = rest[i..i + digits].parse().unwrap();
+                    let yellow = out.ends_with("\x1b[33m ");
+                    assert_eq!(
+                        yellow,
+                        value > SLOW_MS,
+                        "{value}ms coloured {}: {l:?}",
+                        if yellow { "yellow" } else { "green" }
+                    );
+                    out.truncate(out.len() - "\x1b[32m ".len());
+                    out.push_str("\x1b[3?m ");
+                }
                 out.push_str(if duration {
                     "<n>"
                 } else {
@@ -413,6 +435,51 @@ fn normalize_colored(text: &str, root: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A coloured reference as [`normalize_colored`] spells its output: each duration's colour code is
+/// `\x1b[3?m` (the colour itself is checked against the measured value instead).
+fn reference_colours(text: String) -> String {
+    text.replace("\x1b[32m <n>", "\x1b[3?m <n>")
+        .replace("\x1b[33m <n>", "\x1b[3?m <n>")
+}
+
+/// turbo-test#109: a coloured duration is spelled `\x1b[3?m <n>` whatever its colour, once the
+/// colour is checked against its value (vitest's getDurationPrefix: yellow over the 300ms
+/// slowTestThreshold, green otherwise) — a test that is fast in vitest's reference can take
+/// over 300ms on a loaded machine.
+#[test]
+fn coloured_durations_are_normalized_after_their_colour_is_checked() {
+    let tail = "\x1b[2mms\x1b[22m\x1b[39m";
+    for (n, colour) in [
+        ("0", 32),
+        ("12", 32),
+        ("300", 32),
+        ("301", 33),
+        ("1412", 33),
+    ] {
+        assert_eq!(
+            normalize_colored(&format!(" a.test.ts\x1b[{colour}m {n}{tail} 7 tests"), "/r"),
+            format!(" a.test.ts\x1b[3?m <n>{tail} 7 tests"),
+            "{n}"
+        );
+    }
+    // a duration without a colour of its own (the plain reporters) keeps the rest as it is
+    assert_eq!(
+        normalize_colored("/r/a.ts 12ms 3", "/r"),
+        "<root>/a.ts <n>ms 3"
+    );
+}
+
+/// turbo-test#109: a duration in the wrong colour for its value is a failure, not normalized away.
+#[test]
+fn a_duration_coloured_against_the_threshold_fails() {
+    for (n, colour) in [("300", 33), ("301", 32), ("5", 33)] {
+        let r = std::panic::catch_unwind(|| {
+            normalize_colored(&format!("\x1b[{colour}m {n}\x1b[2mms"), "/r")
+        });
+        assert!(r.is_err(), "{n} in {colour} was accepted");
+    }
 }
 
 /// Without `NO_COLOR` (and no agent) vitest colours its output even in a pipe (tinyrainbow):
@@ -443,8 +510,10 @@ fn coloured_output_is_vitests() {
                     let path = common::repo_root()
                         .join("tests/data/human-color")
                         .join(format!("{scenario}-{reporter}.{stream}"));
-                    std::fs::read_to_string(&path)
-                        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                    reference_colours(
+                        std::fs::read_to_string(&path)
+                            .unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+                    )
                 };
                 assert_eq!(
                     normalize_colored(&r.stdout, &root),
@@ -497,8 +566,10 @@ fn dot_reporter_prints_what_vitest_prints() {
                         .join("tests/data")
                         .join(dir)
                         .join(format!("{scenario}.{stream}"));
-                    std::fs::read_to_string(&path)
-                        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                    reference_colours(
+                        std::fs::read_to_string(&path)
+                            .unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+                    )
                 };
                 let norm = |text: &str| {
                     if colored {
