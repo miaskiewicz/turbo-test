@@ -415,6 +415,46 @@ fn normalize_colored(text: &str, root: &str) -> String {
         .join("\n")
 }
 
+/// turbo-test#109: a coloured duration is spelled `\x1b[3?m <n>` whatever its colour, once the
+/// colour is checked against its value (vitest's getDurationPrefix: yellow over the 300ms
+/// slowTestThreshold, green otherwise) — a test that is fast in vitest's reference can take
+/// over 300ms on a loaded machine.
+#[test]
+#[ignore = "turbo-test#109: fails until the fix"]
+fn coloured_durations_are_normalized_after_their_colour_is_checked() {
+    let tail = "\x1b[2mms\x1b[22m\x1b[39m";
+    for (n, colour) in [
+        ("0", 32),
+        ("12", 32),
+        ("300", 32),
+        ("301", 33),
+        ("1412", 33),
+    ] {
+        assert_eq!(
+            normalize_colored(&format!(" a.test.ts\x1b[{colour}m {n}{tail} 7 tests"), "/r"),
+            format!(" a.test.ts\x1b[3?m <n>{tail} 7 tests"),
+            "{n}"
+        );
+    }
+    // a duration without a colour of its own (the plain reporters) keeps the rest as it is
+    assert_eq!(
+        normalize_colored("/r/a.ts 12ms 3", "/r"),
+        "<root>/a.ts <n>ms 3"
+    );
+}
+
+/// turbo-test#109: a duration in the wrong colour for its value is a failure, not normalized away.
+#[test]
+#[ignore = "turbo-test#109: fails until the fix"]
+fn a_duration_coloured_against_the_threshold_fails() {
+    for (n, colour) in [("300", 33), ("301", 32), ("5", 33)] {
+        let r = std::panic::catch_unwind(|| {
+            normalize_colored(&format!("\x1b[{colour}m {n}\x1b[2mms"), "/r")
+        });
+        assert!(r.is_err(), "{n} in {colour} was accepted");
+    }
+}
+
 /// Without `NO_COLOR` (and no agent) vitest colours its output even in a pipe (tinyrainbow):
 /// the labels, symbols, counts and durations, the console values (Node's util.inspect colours),
 /// the diffs, the frames and the syntax-highlighted code frames (tinyhighlight). Every scenario
