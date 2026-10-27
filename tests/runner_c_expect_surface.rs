@@ -246,7 +246,6 @@ fn snapshot_serializers_are_vitests() {
 }
 
 #[test]
-#[ignore = "turbo-test#163: fails until the fix"]
 fn matcher_utils_are_vitests() {
     // turbo-test#163: a custom matcher's `this.utils` was JSON-based. vitest 4.1.12's (NO_COLOR):
     // its members, printReceived / printExpected / stringify through pretty-format (trailing

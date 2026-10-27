@@ -3447,10 +3447,6 @@ function deepEqual(a, b, strict = false) {
 // them first, as vitest's getCustomEqualityTesters()
 const __customTesters = [];
 
-function fmt(v) {
-  try { return typeof v === 'string' ? JSON.stringify(v) : (Array.isArray(v) || (v && typeof v === 'object')) ? JSON.stringify(v) : String(v); }
-  catch { return String(v); }
-}
 
 // ---- snapshots ----
 // Per-test state set by runSuite before each test: the full `describe > it` name and a
@@ -4144,20 +4140,54 @@ function __withExpectMessage(e, message) {
   if (typeof e.stack === 'string' && e.stack.startsWith(before)) e.stack = `${e.name}: ${e.message}` + e.stack.slice(before.length);
   return e;
 }
+// a custom matcher's `this.utils`: vitest's getMatcherUtils() with diff / stringify /
+// iterableEquality / subsetEquality (turbo-test#163), coloured as tinyrainbow colours them
+const __bold = __tr('\x1b[1m', '\x1b[22m', '\x1b[22m\x1b[1m');
+// @vitest/expect matcherHint
+function __matcherHint(matcherName, received = 'received', expected = 'expected', options = {}) {
+  const { comment = '', isDirectExpectCall = false, isNot = false, promise = '', secondArgument = '', expectedColor = __dcol.green, receivedColor = __dcol.red, secondArgumentColor = __dcol.green } = options;
+  const dim = __dcol.dim;
+  let hint = '';
+  let dimString = 'expect';
+  if (!isDirectExpectCall && received !== '') { hint += dim(`${dimString}(`) + receivedColor(received); dimString = ')'; }
+  if (promise !== '') { hint += dim(`${dimString}.`) + promise; dimString = ''; }
+  if (isNot) { hint += `${dim(`${dimString}.`)}not`; dimString = ''; }
+  if (matcherName.includes('.')) dimString += matcherName;
+  else { hint += dim(`${dimString}.`) + matcherName; dimString = ''; }
+  if (expected === '') dimString += '()';
+  else {
+    hint += dim(`${dimString}(`) + expectedColor(expected);
+    if (secondArgument) hint += dim(', ') + secondArgumentColor(secondArgument);
+    dimString = ')';
+  }
+  if (comment !== '') dimString += ` // ${comment}`;
+  if (dimString !== '') hint += dim(dimString);
+  return hint;
+}
+// trailing spaces of each line as `·` (printReceived / printExpected)
+const __trailingDots = (text) => text.replace(/\s+$/gm, (spaces) => '·'.repeat(spaces.length));
 const __matcherUtils = {
-  printReceived: (x) => fmt(x),
-  printExpected: (x) => fmt(x),
-  matcherHint: (name) => String(name || ''),
-  stringify: (x) => fmt(x),
-  diff: (a, b) => `- Expected: ${fmt(a)}\n+ Received: ${fmt(b)}`,
-  RECEIVED_COLOR: (s) => s,
-  EXPECTED_COLOR: (s) => s,
-  BOLD_WEIGHT: (s) => s,
-  DIM_COLOR: (s) => s,
-  EXPECTED_LABEL: 'Expected',
-  RECEIVED_LABEL: 'Received',
-  pluralize: (w, n) => `${n} ${w}${n === 1 ? '' : 's'}`,
-  highlightTrailingWhitespace: (s) => s,
+  EXPECTED_COLOR: (s) => __dcol.green(s),
+  RECEIVED_COLOR: (s) => __dcol.red(s),
+  INVERTED_COLOR: (s) => __dcol.inverse(s),
+  BOLD_WEIGHT: (s) => __bold(s),
+  DIM_COLOR: (s) => __dcol.dim(s),
+  // @vitest/utils diff(a, b, options): its omitAnnotationLines and a/bAnnotation
+  diff: (a, b, options) => {
+    const keep = __diffAnno;
+    __diffAnno = [options?.aAnnotation ?? 'Expected', options?.bAnnotation ?? 'Received'];
+    try { return __vdiff(a, b, !options?.omitAnnotationLines); } finally { __diffAnno = keep; }
+  },
+  matcherHint: __matcherHint,
+  printReceived: (object) => __dcol.red(__trailingDots(__vstringify(object))),
+  printExpected: (value) => __dcol.green(__trailingDots(__vstringify(value))),
+  printDiffOrStringify: (received, expected) => __printDiffOrStringify(received, expected),
+  printWithType: (name, value, print) => {
+    const type = Object.prototype.toString.call(value).slice(8, -1);
+    const hasType = type !== 'null' && type !== 'undefined' ? `${name} has type:  ${type}\n` : '';
+    return `${hasType}${name} has value: ${print(value)}`;
+  },
+  stringify: (object, maxDepth, options) => __vstringify(object, maxDepth, options),
 };
 const __customMatchers = {};
 // the `this` of a jest-style matcher (vitest's getMatcherState) and of an asymmetric matcher
@@ -5309,6 +5339,19 @@ function __pfProps(v, cfg, ind, depth, refs) {
 function __stringify(v) {
   return __pf(v, { maxDepth: 10, escape: false });
 }
+// @vitest/utils `stringify(object, maxDepth = 10, { maxLength, ...prettyFormatOptions })`: an
+// output of maxLength (10000) or more is printed again at half the depth
+function __vstringify(object, maxDepth = 10, { maxLength, ...options } = {}) {
+  const max = maxLength ?? 1e4;
+  const o = { maxDepth, escapeString: false, ...options };
+  const pf = (callToJSON) => __pf(object, {
+    indent: o.indent, min: o.min, basic: o.printBasicPrototype, maxDepth: o.maxDepth, escape: o.escapeString,
+    toJSON: callToJSON ?? o.callToJSON, fnName: o.printFunctionName, escapeRegex: o.escapeRegex,
+  });
+  let result;
+  try { result = pf(); } catch { result = pf(false); }
+  return result.length >= max && maxDepth > 1 ? __vstringify(object, Math.floor(Math.min(maxDepth, Number.MAX_SAFE_INTEGER) / 2), { maxLength, ...options }) : result;
+}
 // tinyrainbow's colours for the diffs vitest's worker prints with its colours on (turbo-test#94:
 // `__TT_COLORS`, the coloured human reporters); identity otherwise.
 function __tr(open, close, replace = open) {
@@ -5546,7 +5589,9 @@ function __lineDiff(a, b) {
   return out;
 }
 // jest-diff `printAnnotation` (vitest's diff options: `- Expected` green, `+ Received` red).
-const __annotation = () => `${__dcol.green('- Expected')}\n${__dcol.red('+ Received')}\n\n`;
+// the annotation names: utils.diff's aAnnotation / bAnnotation while it runs
+let __diffAnno = ['Expected', 'Received'];
+const __annotation = () => `${__dcol.green(`- ${__diffAnno[0]}`)}\n${__dcol.red(`+ ${__diffAnno[1]}`)}\n\n`;
 // jest-diff `joinAlignedDiffsNoExpand` (5 context lines, `@@` patch marks), each line as
 // printDiffLine colours it: deleted green, inserted red, common dim, the marks yellow.
 function __joinDiffs(diffs) {
@@ -5945,7 +5990,7 @@ function __vdiff(a, b, annotate = false) {
   const fmt = { indent: 2, basic: false, maxDepth: 20, errors: true };
   const fallback = { ...fmt, maxDepth: 8, toJSON: false };
   if (type !== __diffType(b)) {
-    return `${__dcol.green('- Expected:')}\n${__pf(a, fallback)}\n\n${__dcol.red('+ Received:')}\n${__pf(b, fallback)}`;
+    return `${__dcol.green(`- ${__diffAnno[0]}:`)}\n${__pf(a, fallback)}\n\n${__dcol.red(`+ ${__diffAnno[1]}:`)}\n${__pf(b, fallback)}`;
   }
   if (omitDifference) return undefined;
   const noDiff = __dcol.dim(__NO_DIFF);
