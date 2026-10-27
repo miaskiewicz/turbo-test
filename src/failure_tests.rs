@@ -54,7 +54,7 @@ fn errors_print_as_vitest_print_error() {
     assert_eq!(
         print_error(&e, root),
         "AssertionError: expected 1 to be 2\n\n- Expected\n+ Received\n\n- 2\n+ 1\n\n \
-         ❯ a.test.ts:5:35\n ❯ helper /elsewhere/h.ts:2:9\n\nCaused by: TypeError: inner\n ❯ a.test.ts:6:1"
+         ❯ a.test.ts:5:35\n ❯ dep node_modules/d/i.js:1:1\n ❯ helper /elsewhere/h.ts:2:9\n\nCaused by: TypeError: inner\n ❯ a.test.ts:6:1"
     );
     // no diff, no frames
     let bare = ErrorInfo {
@@ -114,7 +114,6 @@ fn eval_frames_point_at_the_eval_origin() {
 }
 
 #[test]
-#[ignore = "turbo-test#173: fails until the fix"]
 fn stacks_drop_only_vitests_ignored_frames() {
     // turbo-test#173: vitest's parseStacktrace leaves out the frames its `stackIgnorePatterns`
     // match (its own packages, chai, tinyspy, node internals) and keeps a dependency's
