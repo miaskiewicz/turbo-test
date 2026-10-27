@@ -88,6 +88,32 @@ fn anonymous_async_frames_keep_their_location() {
 }
 
 #[test]
+#[ignore = "turbo-test#175: fails until the fix"]
+fn eval_frames_point_at_the_eval_origin() {
+    // turbo-test#175: a frame in code from `eval` / `new Function` is
+    // `at fn (eval at <caller> (<origin>), <anonymous>:L:C)`; vitest's parseSingleV8Stack drops
+    // the `(eval at …` and the `, <anonymous>:L:C` parts, so the frame is the eval's origin
+    // (a nested eval's location keeps a `)` and is dropped, as vitest drops it)
+    let stack = "Error: late\n\
+                 \x20   at eval (eval at <anonymous> (/p/afail.test.js:2:14), <anonymous>:3:41)\n\
+                 \x20   at f (eval at <anonymous> (file:///p/e.test.js:3:3), <anonymous>:2:9)\n\
+                 \x20   at async eval (eval at run (/p/r.js:7:5), <anonymous>:1:1)\n\
+                 \x20   at g (eval at h (eval at <anonymous> (/p/n.js:4:2)), <anonymous>:1:1)\n\
+                 \x20   at eval code (eval code:1:1)\n\
+                 \x20   at eval (<anonymous>:1:1)\n\
+                 \x20   at /p/afail.test.js:4:3";
+    assert_eq!(
+        parse_stack(stack),
+        vec![
+            frame("eval", "/p/afail.test.js", 2, 14),
+            frame("f", "/p/e.test.js", 3, 3),
+            frame("eval", "/p/r.js", 7, 5),
+            frame("", "/p/afail.test.js", 4, 3),
+        ]
+    );
+}
+
+#[test]
 #[ignore = "turbo-test#173: fails until the fix"]
 fn stacks_drop_only_vitests_ignored_frames() {
     // turbo-test#173: vitest's parseStacktrace leaves out the frames its `stackIgnorePatterns`
