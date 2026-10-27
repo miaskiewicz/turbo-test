@@ -712,6 +712,30 @@ fn hooks_run_in_vitests_order_with_its_cleanups_and_failures() {
     }
 }
 
+/// turbo-test#102: `expect.assertions(n)`, `expect.hasAssertions()` and a test timeout fail with
+/// vitest's messages and frames (hasAssertions: where it was called; a timeout: the `it(` call);
+/// `tests/data/junit-assertions-vitest-4.1.12.xml` is vitest 4.1.12's report, on both loaders.
+#[test]
+#[ignore = "turbo-test#102: fails until the fix"]
+fn assertion_count_and_timeout_errors_are_vitests() {
+    for esbuild in [false, true] {
+        let p = Project::new("rep-junit-assertions");
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", "{\"type\":\"module\"}\n");
+        p.file("a.test.ts", include_str!("data/assertions/a.test.ts"));
+        let r = turbo_test(&p.dir, &["--reporter", "junit"], &[]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert_eq!(
+            normalize_junit(&r.stdout),
+            include_str!("data/junit-assertions-vitest-4.1.12.xml"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+    }
+}
+
 /// turbo-test#81, the failure bodies: string / multi-line / type-mismatch / empty diffs, no diff
 /// for the comparison matchers (vitest passes showDiff false), a helper module's frame with its
 /// function name (mapped back through that module's transform), an error's cause, and console
