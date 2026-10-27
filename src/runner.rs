@@ -7066,8 +7066,10 @@ pub fn is_reuse_enabled() -> bool {
 }
 
 /// Authoritative fresh-isolate retry: run `entry` on a FRESH per-file isolate even under reuse.
-/// A file that failed under reuse may have hit a cross-file leak artifact; re-running it in a
-/// clean isolate (which is 6189/0 territory) is the source of truth. The worker's reuse REGISTRY
+/// A file whose run under reuse is not final (`cli::reuse_result_is_final`, turbo-test#126: a
+/// test failing with something other than an assertion, a load error, a panic, an out-of-memory
+/// abort) may have hit the reused isolate's own state; re-running it in a clean isolate is the
+/// source of truth. The worker's reuse REGISTRY
 /// is swapped out for the duration so the fresh isolate's Globals don't clobber the persistent
 /// reuse module cache (the saved registry's Globals stay valid — the persistent isolate lives on).
 pub fn run_test_file_fresh(entry: &Path) -> Result<TestReport, String> {

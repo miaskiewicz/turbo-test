@@ -341,26 +341,26 @@ fn transient_and_fresh_isolate_retries() {
         r.all()
     );
 
-    // isolate reuse: a still-failing file also gets the authoritative fresh-isolate re-run
+    // isolate reuse (vitest isolate:false, turbo-test#126): every file runs once and its report
+    // is final — no same-isolate retry, no fresh-isolate re-run of a failing file
     std::fs::remove_file(p.path("run.log")).unwrap();
     let r = tt(&p, &["--no-isolate", "--jobs", "1"]);
     assert_eq!(r.code, Some(1), "{}", r.all());
     assert!(
-        r.stdout.contains("FAIL  ") && r.stdout.contains("(0 passed, 1 failed)"),
+        r.stdout
+            .contains("FAIL  fail.test.ts  (0 passed, 1 failed)")
+            && r.stdout
+                .contains("FAIL  partial.test.ts  (1 passed, 1 failed)"),
         "{}",
         r.all()
     );
-    assert!(
-        count(&p, "fail") > 3,
-        "fresh retry under reuse: {:?}",
-        log(&p)
+    assert_eq!(
+        (count(&p, "fail"), count(&p, "partial"), count(&p, "pass")),
+        (1, 1, 1),
+        "{:?} {}",
+        log(&p),
+        r.all()
     );
-    assert!(
-        count(&p, "partial") > 1,
-        "partial failure gets a fresh retry under reuse: {:?}",
-        log(&p)
-    );
-    assert_eq!(count(&p, "pass"), 1);
 
     // --isolate wins over a config `isolate: false`
     p.file(

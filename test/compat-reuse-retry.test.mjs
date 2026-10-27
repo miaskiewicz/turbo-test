@@ -46,7 +46,7 @@ function run(args) {
 const sorted = (o) => Object.fromEntries(Object.keys(o).sort().map((k) => [k, o[k]]));
 
 for (const [label, args] of [['isolate: false in the config', []], ['--no-isolate', ['--no-isolate']]]) {
-  test(`a failing file runs once under isolate reuse and reports what vitest does (${label})`, { todo: 'turbo-test#126: fails until the fix' }, () => {
+  test(`a failing file runs once under isolate reuse and reports what vitest does (${label})`, () => {
     const r = run(args);
     assert.deepEqual(r.runs, ORACLE.runs, `each file must be evaluated exactly once\n${r.err.slice(-2000)}`);
     assert.deepEqual(sorted(r.files), ORACLE.files);

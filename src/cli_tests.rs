@@ -571,11 +571,6 @@ fn transient_score_and_fail_predicates() {
     assert_eq!(score(&Ok(report(2, 3))), 1997);
     assert_eq!(score(&Err("e".into())), i64::MIN);
     assert!(score(&Ok(report(0, 5))) > score(&Err("e".into())));
-
-    assert!(has_fail(&Ok(report(1, 1))));
-    assert!(has_fail(&Ok(report(0, 0))));
-    assert!(!has_fail(&Ok(report(1, 0))));
-    assert!(has_fail(&Err("e".into())));
 }
 
 #[test]
@@ -676,7 +671,7 @@ fn exec(s: &Script) -> FileOutcome {
 
 #[test]
 fn passing_file_runs_once() {
-    let s = Script::new(vec![Ok(report(2, 0))], vec![Ok(report(9, 0))], true);
+    let s = Script::new(vec![Ok(ran(2, &[]))], vec![Ok(report(9, 0))], true);
     assert_eq!(exec(&s).unwrap().passed, 2);
     assert_eq!(s.calls(), (1, 0));
 }
@@ -776,46 +771,129 @@ fn panic_recovery_with_the_real_registry_hook() {
 }
 
 #[test]
-fn reuse_failure_adopts_fresh_result() {
-    // reuse result fails partially → one fresh run, adopted
-    let s = Script::new(vec![Ok(report(2, 1))], vec![Ok(report(3, 0))], true);
+fn reuse_error_adopts_fresh_result() {
+    // a load error under reuse → one fresh run, adopted
+    let s = Script::new(vec![Err("load".into())], vec![Ok(report(3, 0))], true);
     assert_eq!(exec(&s).unwrap().passed, 3);
-    assert_eq!(s.calls(), (1, 1));
-    // fresh is authoritative even when worse
-    let s = Script::new(vec![Ok(report(5, 1))], vec![Ok(report(1, 2))], true);
+    assert_eq!(s.calls(), (3, 1));
+    // fresh is authoritative even when it fails
+    let s = Script::new(vec![Err("load".into())], vec![Ok(report(1, 2))], true);
     let r = exec(&s).unwrap();
     assert_eq!((r.passed, r.failed), (1, 2));
-    assert_eq!(s.calls(), (1, 1));
+    assert_eq!(s.calls(), (3, 1));
     // a transient fresh result is re-run up to twice more, keeping the best
     let s = Script::new(
-        vec![Ok(report(0, 1))],
+        vec![Err("load".into())],
         vec![Err("x".into()), Ok(report(0, 1)), Ok(report(0, 3))],
         true,
     );
     assert_eq!(exec(&s).unwrap().failed, 1);
     assert_eq!(s.calls(), (3, 3));
     let s = Script::new(
-        vec![Ok(report(1, 1))],
+        vec![Err("load".into())],
         vec![Err("x".into()), Ok(report(4, 0))],
         true,
     );
     assert_eq!(exec(&s).unwrap().passed, 4);
-    assert_eq!(s.calls(), (1, 2));
+    assert_eq!(s.calls(), (3, 2));
+}
+
+/// A report whose `passed` tests pass and whose `failed` tests fail with errors named `errors`
+/// (one name per failed test).
+fn ran(passed: u32, errors: &[&str]) -> TestReport {
+    let mut tests: Vec<TestCase> = (0..passed)
+        .map(|i| case(&format!("p{i}"), "passed", 1.0, ""))
+        .collect();
+    for (i, name) in errors.iter().enumerate() {
+        let mut t = case(&format!("f{i}"), "failed", 1.0, "boom");
+        t.errors = vec![crate::failure::ErrorInfo {
+            name: name.to_string(),
+            message: "boom".into(),
+            ..Default::default()
+        }];
+        tests.push(t);
+    }
+    TestReport {
+        passed,
+        failed: errors.len() as u32,
+        failures: errors.iter().map(|n| format!("f: {n}: boom")).collect(),
+        tests,
+        ..Default::default()
+    }
 }
 
 #[test]
-#[ignore = "turbo-test#126: fails until the fix"]
-fn reuse_keeps_a_report_and_retries_only_a_file_that_did_not_run() {
-    // vitest isolate:false runs a file once on the shared worker and reports that run: a report
-    // with failures (or with nothing passed) is adopted, with no fresh run (turbo-test#126)
-    for (passed, failed) in [(2, 1), (0, 0)] {
-        let s = Script::new(vec![Ok(report(passed, failed))], vec![Ok(report(3, 0))], true);
-        let r = exec(&s).unwrap();
-        assert_eq!((r.passed, r.failed), (passed, failed));
-        assert_eq!(s.calls(), (1, 0));
+fn reuse_result_finality() {
+    // final: the tests ran and every failure is an assertion failure (what vitest reports)
+    assert!(reuse_result_is_final(&Ok(ran(2, &[]))));
+    assert!(reuse_result_is_final(&Ok(ran(1, &["AssertionError"]))));
+    assert!(reuse_result_is_final(&Ok(ran(
+        0,
+        &["AssertionError", "AssertionError"]
+    ))));
+    let mut skipped = ran(0, &[]);
+    skipped.tests.push(case("s", "skipped", 0.0, ""));
+    assert!(reuse_result_is_final(&Ok(skipped)));
+    // not final: a non-assertion error, a failure without an error, a failed hook, no collected
+    // test, "no test suite", a load error / panic / out of memory
+    assert!(!reuse_result_is_final(&Ok(ran(
+        1,
+        &["AssertionError", "TypeError"]
+    ))));
+    let mut bare = ran(0, &["AssertionError"]);
+    bare.tests[0].errors.clear();
+    assert!(!reuse_result_is_final(&Ok(bare)));
+    let mut miscounted = ran(1, &["AssertionError"]);
+    miscounted.failed = 2;
+    assert!(!reuse_result_is_final(&Ok(miscounted)));
+    let mut hook = ran(1, &[]);
+    hook.suite_errors.push(Default::default());
+    assert!(!reuse_result_is_final(&Ok(hook)));
+    assert!(!reuse_result_is_final(&Ok(report(0, 0))));
+    let mut none = ran(1, &[]);
+    none.failures.push(format!("{NO_SUITE_FOUND}/p/a.test.ts"));
+    assert!(!reuse_result_is_final(&Ok(none)));
+    assert!(!reuse_result_is_final(&Err("load".into())));
+    assert!(!reuse_result_is_final(&Err(
+        crate::heap_guard::oom_message(256 << 20)
+    )));
+}
+
+#[test]
+fn reuse_keeps_a_final_report_and_retries_the_rest_fresh() {
+    // vitest isolate:false runs a file once on the shared worker and reports that run: a final
+    // report (assertion failures, all passing, all-failing included) is adopted with no other
+    // run, on the reused isolate or a fresh one (turbo-test#126)
+    for errors in [
+        &[][..],
+        &["AssertionError"][..],
+        &["AssertionError", "AssertionError"][..],
+    ] {
+        for passed in [0, 2] {
+            if passed == 0 && errors.is_empty() {
+                continue;
+            }
+            let s = Script::new(vec![Ok(ran(passed, errors))], vec![Ok(report(9, 0))], true);
+            let r = exec(&s).unwrap();
+            assert_eq!((r.passed, r.failed), (passed, errors.len() as u32));
+            assert_eq!(s.calls(), (1, 0));
+        }
     }
-    // a file that did not run its tests (load error, panic, out of memory) is re-run fresh
-    let s = Script::new(vec![Err("graph load failed".into())], vec![Ok(report(4, 0))], true);
+    // a test failing with a non-assertion error may be a reuse artifact: one fresh run, adopted,
+    // and never a second run on the reused isolate (its module is already evaluated there)
+    let s = Script::new(
+        vec![Ok(ran(0, &["TypeError"]))],
+        vec![Ok(report(1, 0))],
+        true,
+    );
+    assert_eq!(exec(&s).unwrap().passed, 1);
+    assert_eq!(s.calls(), (1, 1));
+    // a file that did not run its tests is re-run fresh (a load error after its transient retries)
+    let s = Script::new(
+        vec![Err("graph load failed".into())],
+        vec![Ok(report(4, 0))],
+        true,
+    );
     assert_eq!(exec(&s).unwrap().passed, 4);
     assert_eq!(s.calls(), (3, 1));
     let oom = crate::heap_guard::oom_message(256 << 20);
@@ -826,6 +904,10 @@ fn reuse_keeps_a_report_and_retries_only_a_file_that_did_not_run() {
     let s = Script::new(vec![Err(oom.clone())], vec![Err(oom.clone())], true);
     assert_eq!(exec(&s).unwrap_err(), oom);
     assert_eq!(s.calls(), (1, 1));
+    // without reuse nothing changes: a final-looking failing report is kept, run once
+    let s = Script::new(vec![Ok(ran(1, &["AssertionError"]))], vec![], false);
+    assert_eq!(exec(&s).unwrap().failed, 1);
+    assert_eq!(s.calls(), (1, 0));
 }
 
 // ---- file results / worker pool -----------------------------------------------------------

@@ -117,7 +117,8 @@ fn module_runner_reuse_with_setup_mocks_remocks_dom_and_fresh_retry() {
         "{}",
         r.all()
     );
-    // the passing files shared one context; a4 is re-run on a fresh isolate (logging 1 again)
+    // the passing files shared one context; a4 failed an assertion, which is final under reuse
+    // (turbo-test#126), and a6 (a TypeError) is re-run on a fresh isolate (logging 1 again)
     let s = seen(&r.stdout);
     assert!(s.iter().any(|&n| n >= 5), "{s:?}\n{}", r.all());
     assert!(s.iter().filter(|&&n| n == 1).count() >= 2, "{s:?}");
