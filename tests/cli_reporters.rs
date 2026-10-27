@@ -1007,7 +1007,6 @@ fn load_errors_are_vites() {
 /// stderr about the failed transforms or compiles. `tests/data/transform-errors` holds the
 /// project and vitest 4.1.12's json messages, on both loaders.
 #[test]
-#[ignore = "turbo-test#113: fails until the fix"]
 fn transform_errors_and_parse_failure_details_are_vites() {
     const FILES: [&str; 12] = [
         "badd.mjs",

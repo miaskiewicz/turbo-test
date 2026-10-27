@@ -1692,6 +1692,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rolldown-ariadne"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee296fe9ac0007f2c0eff04d55c980de537aa3d736e873d70c9c47d4c737ea44"
+dependencies = [
+ "unicode-width",
+ "yansi",
+]
+
+[[package]]
 name = "ropey"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2165,6 +2175,7 @@ dependencies = [
  "oxc_sourcemap",
  "oxc_span",
  "oxc_transformer",
+ "rolldown-ariadne",
  "serde_json",
  "turbo-dom-browser-env",
  "turbo-dom-v8",
@@ -2529,6 +2540,12 @@ dependencies = [
  "log",
  "markup5ever",
 ]
+
+[[package]]
+name = "yansi"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 
 [[package]]
 name = "yoke"

@@ -213,7 +213,6 @@ describe('native require', () => {
 }
 
 #[test]
-#[ignore = "turbo-test#113: fails until the fix"]
 fn cjs_loader_diagnostics_for_unreadable_unparsable_and_throwing_modules() {
     let p = esbuild_project("rb-mr-cjsdiag");
     std::fs::write(p.path("badutf.cjs"), b"exports.x = \"\xff\xfe\";\n").unwrap();

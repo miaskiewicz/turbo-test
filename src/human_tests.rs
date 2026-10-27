@@ -679,3 +679,49 @@ fn coloured_errors_are_printed_as_vitest() {
         .starts_with("\x1b[31m\x1b[1mError\x1b[22m\x1b[39m: mmm"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn print_error_writes_vites_details_under_the_message() {
+    use crate::failure::RollupDetails;
+    let dir = std::env::temp_dir();
+    // printErrorInner's `__vitest_rollup_error__` lines (turbo-test#113): plugin, file with its
+    // position, the frame indented, each only when vite gave it, before the diff
+    let e = ErrorInfo {
+        rollup: Some(RollupDetails {
+            plugin: "vite:import-analysis".into(),
+            id: "/p/a.js".into(),
+            loc: "2:19".into(),
+            frame: "1  |  a\r\n   |  ^".into(),
+        }),
+        diff: "d".into(),
+        ..error("m")
+    };
+    assert_eq!(
+        print_error(&e, &dir, true, false, "", &OFF),
+        "Error: m\n  Plugin: vite:import-analysis\n  File: /p/a.js:2:19\n  1  |  a\n     |  ^\n\nd\n\n"
+    );
+    let on = Colors { on: true };
+    assert_eq!(
+        print_error(&e, &dir, true, false, "", &on),
+        "\x1b[31m\x1b[1mError\x1b[22m: m\x1b[39m\n  Plugin: \x1b[35mvite:import-analysis\x1b[39m\n  File: \x1b[36m/p/a.js\x1b[39m:2:19\n\x1b[33m  1  |  a\n     |  ^\x1b[39m\n\nd\n\n"
+    );
+    let id_only = ErrorInfo {
+        rollup: Some(RollupDetails {
+            id: "/p/a.ts".into(),
+            ..Default::default()
+        }),
+        ..error("m")
+    };
+    assert_eq!(
+        print_error(&id_only, &dir, true, false, "", &OFF),
+        "Error: m\n  File: /p/a.ts\n"
+    );
+    let empty = ErrorInfo {
+        rollup: Some(RollupDetails::default()),
+        ..error("m")
+    };
+    assert_eq!(
+        print_error(&empty, &dir, true, false, "", &OFF),
+        "Error: m\n"
+    );
+}
