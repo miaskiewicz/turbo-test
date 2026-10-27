@@ -4411,9 +4411,9 @@ globalThis.expect.hasAssertions = function hasAssertions() {
 };
 // vitest's expect.poll(fn, { interval = 50, timeout = 1000, message }) (turbo-test#161): each
 // matcher re-runs fn until it passes or the timeout ran out, then throws the last error (its
-// cause `Matcher did not succeed in time.`). Its interval and timeout are internal timers, which
-// the test's fake timers do not see: on the virtual clock, or, while the timers are faked, each
-// retry comes at once and advances the fake clock by the interval, as vitest's real-time wait
+// cause `Matcher did not succeed in time.`). Its interval and timeout are internal timers on the
+// real (virtual) clock, which the test's fake timers do not see; while the timers are faked,
+// each retry then also advances the fake clock by the interval, as vitest's real-time wait
 // followed by vi.advanceTimersByTime(interval). A matcher that is not awaited never runs and
 // fails the test when it is done. As vitest's, a proxy over one chai Assertion (`expect(null)`)
 // whose matchers run on fn's value as the assertion's `object`.
@@ -4452,7 +4452,7 @@ globalThis.expect.poll = function poll(fn, options = {}) {
                 if (err && typeof err === 'object' && err.cause == null) err.cause = new Error('Matcher did not succeed in time.');
                 throw withStack(err);
               }
-              await new Promise((resolve) => __scheduleInternal(resolve, __loop.fake ? 0 : interval));
+              await new Promise((resolve) => __scheduleInternal(resolve, interval));
               if (__loop.fake) __loop.advance(interval);
             }
           }
