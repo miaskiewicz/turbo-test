@@ -1,5 +1,7 @@
-//! vitest 4.1.12's human reporters, as they print to a file or pipe without colours (`NO_COLOR`,
-//! or under an AI agent): `default`, `verbose` and `agent` (turbo-test#94).
+//! vitest 4.1.12's human reporters as they print to a file or pipe: `default`, `verbose` and
+//! `agent` (turbo-test#94), coloured as vitest colours them (tinyrainbow, `crate::colors`) unless
+//! `NO_COLOR` / `TERM=dumb` / an AI agent turns colours off; code frames are syntax-highlighted
+//! (`crate::highlight`).
 //!
 //! stdout: the ` RUN  v4.1.12 <root>` banner, each file's console output as
 //! `stdout | <file> > <task>` blocks, then the reporter's lines — `default`: a module line per
@@ -13,6 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::cli::FileResult;
+use crate::colors::{strip, Colors};
 use crate::failure::{ErrorInfo, Frame};
 use crate::runner::TestCase;
 
@@ -39,6 +42,8 @@ pub struct Run<'a> {
     pub tests: String,
     /// `-u` / `--update`: obsolete snapshots were removed.
     pub did_update: bool,
+    /// vitest's colours (off for the agent reporter).
+    pub colors: Colors,
 }
 
 /// vitest's default `slowTestThreshold`, ms: a slower passing test gets a line of its own.
@@ -46,8 +51,16 @@ const SLOW_MS: f64 = 300.0;
 
 /// `(stdout, stderr)` of `kind` for the run.
 pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
+    let c = &run.colors;
+    let sep = c.dim(" > ");
     let (mut out, mut err) = (String::new(), String::new());
-    out.push_str(&format!("\n RUN  v4.1.12 {}\n\n", run.root.display()));
+    // printBanner: withLabel('cyan', 'RUN', `v${version} `) + c.gray(root)
+    out.push_str(&format!(
+        "\n{} {}{}\n\n",
+        c.bold(&c.black(&c.bg_cyan(" RUN "))),
+        c.cyan("v4.1.12 "),
+        c.gray(&run.root.display().to_string())
+    ));
     for r in res {
         let name = run.names[r.idx].to_string_lossy().to_string();
         let logs: Vec<&(String, String, String)> = if kind == Kind::Agent {
@@ -56,12 +69,19 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
             r.logs.iter().collect()
         };
         for (stream, task, content) in logs {
+            // onUserConsoleLog: c.gray(type + c.dim(` | ${getFullName(task, separator)}\n`))
             let header = if task.is_empty() {
                 name.clone()
             } else {
-                format!("{name} > {task}")
+                format!(
+                    "{name}{sep}{}",
+                    task.split(" > ").collect::<Vec<_>>().join(&sep)
+                )
             };
-            let block = format!("{stream} | {header}\n{content}\n");
+            let block = format!(
+                "{}{content}\n",
+                c.gray(&format!("{stream}{}", c.dim(&format!(" | {header}\n"))))
+            );
             if stream == "stderr" {
                 err.push_str(&block);
             } else {
@@ -71,15 +91,16 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
         match kind {
             Kind::Verbose => {
                 for t in &r.tests {
+                    let path = test_path(t).split(" > ").collect::<Vec<_>>().join(&sep);
                     out.push_str(&format!(
-                        " {} {name} > {}{}\n",
-                        symbol(t),
-                        test_path(t),
-                        suffix(t)
+                        " {} {name}{sep}{path}{}\n",
+                        symbol(c, t),
+                        suffix(c, t)
                     ));
                     if t.status == "failed" {
                         for e in errors(t) {
-                            out.push_str(&format!("   → {}\n", e.message));
+                            out.push_str(&c.red(&format!("   → {}", e.message)));
+                            out.push('\n');
                         }
                     }
                 }
@@ -88,46 +109,57 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
                 if kind == Kind::Agent && !r.failed_file {
                     continue;
                 }
-                out.push_str(&module_line(r, &name));
+                out.push_str(&module_line(c, r, &name));
                 // DefaultReporter.printTestCase (the agent reporter prints only failed tests)
                 for t in &r.tests {
                     let pad = "  ".repeat(t.ancestors.len() + 1);
-                    let (title, suffix) = (&t.title, suffix(t));
+                    let (title, suffix) = (&t.title, suffix(c, t));
                     let line = if t.status == "failed" {
-                        format!(" {pad}× {title}{suffix}\n")
+                        c.red(&format!(" {pad}{} {title}", c.red("×"))) + &suffix
                     } else if kind == Kind::Agent {
                         continue;
                     } else if t.duration_ms > SLOW_MS {
-                        format!(" {pad}✓ {title} {suffix}\n")
+                        format!(" {pad}{} {title} {suffix}", c.yellow(&c.dim("✓")))
                     } else if r.failed_file {
-                        format!(" {pad}{} {title}{suffix}\n", symbol(t))
+                        format!(" {pad}{} {title}{suffix}", symbol(c, t))
                     } else {
                         continue;
                     };
                     out.push_str(&line);
+                    out.push('\n');
                 }
             }
         }
     }
     err.push_str(&errors_summary(res, run));
+    // reportTestSummary: padSummaryTitle(title) = c.dim(`${title.padStart(11)} `), then a space
+    let title = |t: &str| c.dim(&format!("{t:>11} "));
     out.push('\n');
-    for line in snapshot_lines(res, run) {
-        out.push_str(&line);
-        out.push('\n');
+    for (i, line) in snapshot_lines(res, run).iter().enumerate() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            let t = if i == 0 { "Snapshots" } else { "" };
+            out.push_str(&format!("{} {line}\n", title(t)));
+        }
     }
-    out.push_str(&format!(" Test Files  {}\n", run.test_files));
-    out.push_str(&format!("      Tests  {}\n", run.tests));
-    out.push_str(&format!("   Start at  {}\n", run.start));
+    out.push_str(&format!("{} {}\n", title("Test Files"), run.test_files));
+    out.push_str(&format!("{} {}\n", title("Tests"), run.tests));
+    out.push_str(&format!("{} {}\n", title("Start at"), run.start));
     let (tests, setup, files) = res.iter().fold((0.0, 0.0, 0.0), |(t, s, f), r| {
         let ran: f64 = r.tests.iter().map(|t| t.duration_ms).sum();
         (t + ran, s + r.setup_us / 1000.0, f + r.dur_ms + r.waited_ms)
     });
     out.push_str(&format!(
-        "   Duration  {} (transform 0ms, setup 0ms, import {}, tests {}, environment {})\n\n",
+        "{} {}{}\n\n",
+        title("Duration"),
         format_time(run.wall_ms),
-        format_time((files - tests - setup).max(0.0)),
-        format_time(tests),
-        format_time(setup),
+        c.dim(&format!(
+            " (transform 0ms, setup 0ms, import {}, tests {}, environment {})",
+            format_time((files - tests - setup).max(0.0)),
+            format_time(tests),
+            format_time(setup),
+        ))
     ));
     (out, err)
 }
@@ -191,26 +223,37 @@ fn test_path(t: &TestCase) -> String {
     parts.join(" > ")
 }
 
-/// vitest's state symbol for a test.
-fn symbol(t: &TestCase) -> &'static str {
+/// vitest's state symbol for a test (`getStateSymbol`).
+fn symbol(c: &Colors, t: &TestCase) -> String {
     match t.status.as_str() {
-        "passed" => "✓",
-        "failed" => "×",
-        "todo" => "□",
-        "skipped" => "↓",
-        _ => "·",
+        "passed" => c.green("✓"),
+        "failed" => c.red("×"),
+        "todo" => c.dim(&c.gray("□")),
+        "skipped" => c.dim(&c.gray("↓")),
+        _ => c.gray("·"),
     }
 }
 
-/// vitest's getTestCaseSuffix: ` 3ms` for a test that ran (the rounded duration of a test with
-/// a result), then ` (retry x2)` for a retried one.
-fn suffix(t: &TestCase) -> String {
+/// vitest's getDurationPrefix: ` 3ms`, yellow over the slow-test threshold, green otherwise.
+fn duration(c: &Colors, ms: f64) -> String {
+    let d = ms.round();
+    let text = format!(" {d}{}", c.dim("ms"));
+    if d > SLOW_MS {
+        c.yellow(&text)
+    } else {
+        c.green(&text)
+    }
+}
+
+/// vitest's getTestCaseSuffix: the duration of a test that ran, then ` (retry x2)` for a
+/// retried one.
+fn suffix(c: &Colors, t: &TestCase) -> String {
     let mut s = String::new();
     if (t.status == "passed" || t.status == "failed") && !t.not_run {
-        s.push_str(&format!(" {}ms", t.duration_ms.round()));
+        s.push_str(&duration(c, t.duration_ms));
     }
     if t.retry_count > 0 {
-        s.push_str(&format!(" (retry x{})", t.retry_count));
+        s.push_str(&c.yellow(&format!(" (retry x{})", t.retry_count)));
     }
     s
 }
@@ -228,18 +271,21 @@ fn errors(t: &TestCase) -> Vec<ErrorInfo> {
     }
 }
 
-/// ` ❯ a.test.ts (7 tests | 3 failed | 1 skipped | 1 todo) 118ms`.
-fn module_line(r: &FileResult, name: &str) -> String {
+/// ` ❯ a.test.ts (7 tests | 3 failed | 1 skipped | 1 todo) 118ms` (vitest's getModuleLog).
+fn module_line(c: &Colors, r: &FileResult, name: &str) -> String {
     let n = r.tests.len();
     let count = |s: &str| r.tests.iter().filter(|t| t.status == s).count();
-    let mut state = format!("{n} test{}", if n > 1 { "s" } else { "" });
-    for (k, label) in [
-        ("failed", "failed"),
-        ("skipped", "skipped"),
-        ("todo", "todo"),
-    ] {
+    let mut state = c.dim(&format!("{n} test{}", if n > 1 { "s" } else { "" }));
+    type Paint = fn(&Colors, &str) -> String;
+    let parts: [(&str, Paint); 3] = [
+        ("failed", Colors::red),
+        ("skipped", Colors::yellow),
+        ("todo", Colors::gray),
+    ];
+    for (k, color) in parts {
         if count(k) > 0 {
-            state.push_str(&format!(" | {} {label}", count(k)));
+            state.push_str(&c.dim(" | "));
+            state.push_str(&color(c, &format!("{} {k}", count(k))));
         }
     }
     let ran = r
@@ -247,25 +293,26 @@ fn module_line(r: &FileResult, name: &str) -> String {
         .iter()
         .any(|t| t.status == "passed" || t.status == "failed");
     let sym = if r.failed_file {
-        "❯"
+        c.red("❯")
     } else if !ran && n > 0 {
-        "↓"
+        c.dim(&c.gray("↓"))
     } else {
-        "✓"
+        c.green("✓")
     };
     let dur = if r.load_error {
         String::new()
     } else {
-        format!(" {}ms", (r.dur_ms + r.waited_ms).round())
+        duration(c, r.dur_ms + r.waited_ms)
     };
-    format!(" {sym} {name} ({state}){dur}\n")
+    format!(" {sym} {name} {}{state}{}{dur}\n", c.dim("("), c.dim(")"))
 }
 
 /// The footer's Snapshots lines (vitest's renderSnapshotSummary over the files' results added
 /// up): written, failed, updated, files removed / obsolete, then the obsolete (or, under `-u`,
-/// removed) snapshots with `↳ ./file` and `  · key` lines per file; a blank line after more
-/// than one line.
+/// removed) snapshots with `↳ ./file` and `  · key` lines per file; an empty line after more
+/// than one (the summary prints a blank line there).
 fn snapshot_lines(res: &[FileResult], run: &Run) -> Vec<String> {
+    let c = &run.colors;
     let (mut added, mut unmatched, mut updated, mut unchecked, mut files_removed) = (0, 0, 0, 0, 0);
     let mut keys = Vec::new();
     for r in res {
@@ -277,49 +324,75 @@ fn snapshot_lines(res: &[FileResult], run: &Run) -> Vec<String> {
         files_removed += u32::from(s.file_deleted);
         if !s.unchecked_keys.is_empty() {
             let name = run.names[r.idx].to_string_lossy().replace('\\', "/");
-            let dir = match Path::new(&name).parent() {
-                Some(d) if !d.as_os_str().is_empty() => d.to_string_lossy().to_string(),
-                _ => ".".to_string(),
-            };
-            let base = Path::new(&name)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
-            keys.push(format!("↳ {dir}/{base}"));
-            keys.extend(s.unchecked_keys.iter().map(|k| format!("  · {k}")));
+            keys.push(format!("{} {}", c.gray("↳"), test_file_path(c, &name)));
+            keys.extend(
+                s.unchecked_keys
+                    .iter()
+                    .map(|k| format!("  {} {k}", c.gray("·"))),
+            );
         }
     }
-    let gone = if run.did_update {
-        "removed"
-    } else {
-        "obsolete"
+    // `N files removed ` / `N obsolete` …: removed (green) under -u, obsolete (yellow) otherwise
+    let gone = |text: String| {
+        if run.did_update {
+            c.bold(&c.green(&text.replace("{}", "removed")))
+        } else {
+            c.bold(&c.yellow(&text.replace("{}", "obsolete")))
+        }
     };
     let mut items = Vec::new();
     if added > 0 {
-        items.push(format!("{added} written"));
+        items.push(c.bold(&c.green(&format!("{added} written"))));
     }
     if unmatched > 0 {
-        items.push(format!("{unmatched} failed"));
+        items.push(c.bold(&c.red(&format!("{unmatched} failed"))));
     }
     if updated > 0 {
-        items.push(format!("{updated} updated "));
+        items.push(c.bold(&c.green(&format!("{updated} updated "))));
     }
     if files_removed > 0 {
-        items.push(format!("{files_removed} files {gone} "));
+        items.push(gone(format!("{files_removed} files {{}} ")));
     }
     if unchecked > 0 {
-        items.push(format!("{unchecked} {gone}"));
+        items.push(gone(format!("{unchecked} {{}}")));
         items.extend(keys);
     }
-    let mut lines: Vec<String> = items
-        .iter()
-        .enumerate()
-        .map(|(i, s)| format!("{:>11}  {s}", if i == 0 { "Snapshots" } else { "" }))
-        .collect();
-    if lines.len() > 1 {
-        lines.push(String::new());
+    if items.len() > 1 {
+        items.push(String::new());
     }
-    lines
+    items
+}
+
+/// vitest's formatTestPath for a root-relative file: `dir/` dim, the base name bold, a
+/// `.test.ts` / `.spec.mjs` … extension dim.
+fn test_file_path(c: &Colors, name: &str) -> String {
+    let p = Path::new(name);
+    let dir = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_string_lossy().to_string(),
+        _ => ".".to_string(),
+    };
+    let file = p
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    // (\.(spec|test)\.[cm]?[tj]sx?)$
+    let ext = ["spec", "test"]
+        .iter()
+        .find_map(|kind| {
+            let at = file.rfind(&format!(".{kind}."))?;
+            let rest = &file[at + kind.len() + 2..];
+            let lang = rest.strip_prefix(['c', 'm']).unwrap_or(rest);
+            matches!(lang, "ts" | "js" | "tsx" | "jsx").then(|| file[at..].to_string())
+        })
+        .unwrap_or_default();
+    let base = &file[..file.len() - ext.len()];
+    format!(
+        "{}{}{}",
+        c.dim(&format!("{dir}/")),
+        c.bold(base),
+        c.dim(&ext)
+    )
 }
 
 /// The Failed Suites / Failed Tests sections (stderr), as vitest's printErrorsSummary: each
@@ -327,6 +400,14 @@ fn snapshot_lines(res: &[FileResult], run: &Run) -> Vec<String> {
 /// under every task's ` FAIL  <name>` line; the dividers number the printed errors out of all the
 /// tasks' errors (vitest's counter does not account for merged ones).
 fn errors_summary(res: &[FileResult], run: &Run) -> String {
+    let c = &run.colors;
+    let sep = c.dim(" > ");
+    let full = |name: &str, path: &str| {
+        format!(
+            "{name}{sep}{}",
+            path.split(" > ").collect::<Vec<_>>().join(&sep)
+        )
+    };
     // (task name, its errors) per section
     let mut suites: Vec<(String, Vec<ErrorInfo>)> = Vec::new();
     let mut tests: Vec<(String, Vec<ErrorInfo>)> = Vec::new();
@@ -338,13 +419,16 @@ fn errors_summary(res: &[FileResult], run: &Run) -> String {
                 message: crate::cli::file_message(&r.error_msg),
                 ..Default::default()
             });
-            suites.push((format!("{name} [ {name} ]"), vec![error]));
+            suites.push((
+                format!("{name}{}", c.dim(&format!(" [ {name} ]"))),
+                vec![error],
+            ));
         }
         for s in &r.suite_errors {
-            suites.push((format!("{name} > {}", s.name), s.errors.clone()));
+            suites.push((full(&name, &s.name), s.errors.clone()));
         }
         for t in r.tests.iter().filter(|t| t.status == "failed") {
-            tests.push((format!("{name} > {}", test_path(t)), errors(t)));
+            tests.push((full(&name, &test_path(t)), errors(t)));
         }
     }
     let total: usize = suites.iter().chain(&tests).map(|(_, e)| e.len()).sum();
@@ -354,10 +438,9 @@ fn errors_summary(res: &[FileResult], run: &Run) -> String {
         if tasks.is_empty() {
             continue;
         }
-        out.push_str(&format!(
-            "\n{}\n\n",
-            divider(&format!(" {title} {} ", tasks.len()), None)
-        ));
+        // errorBanner: divider(c.bold(c.bgRed(` ${title} `)), null, null, c.red)
+        let banner = c.bold(&c.bg_red(&format!(" {title} {} ", tasks.len())));
+        out.push_str(&format!("\n{}\n\n", divider(&banner, None, &|t| c.red(t))));
         let mut queue: Vec<(&ErrorInfo, Vec<&str>)> = Vec::new();
         for (name, errors) in tasks.iter() {
             for e in errors {
@@ -370,23 +453,26 @@ fn errors_summary(res: &[FileResult], run: &Run) -> String {
         for (error, names) in queue {
             n += 1;
             for name in names {
-                out.push_str(&format!(" FAIL  {name}\n"));
+                out.push_str(&format!("{} {name}\n", c.bg_red(&c.bold(" FAIL "))));
             }
-            out.push_str(&print_error(error, run.root, true, ""));
-            out.push_str(&format!(
-                "{}\n\n",
-                divider(&format!("[{n}/{total}]"), Some(1))
-            ));
+            out.push_str(&print_error(error, run.root, true, "", c));
+            let bar = divider(&format!("[{n}/{total}]"), Some(1), &|t| t.to_string());
+            out.push_str(&format!("{}\n\n", c.red(&c.dim(&bar))));
         }
     }
     out
 }
 
-/// vitest's `divider` in a 30-column non-terminal: the text centred in `⎯`, or with `right`
-/// `⎯` after it.
-fn divider(text: &str, right: Option<usize>) -> String {
+/// A string's length in UTF-16 code units (JavaScript's `length`).
+fn js_len(s: &str) -> usize {
+    s.chars().map(char::len_utf16).sum()
+}
+
+/// vitest's `divider` in a 30-column non-terminal: the text (measured without its colours)
+/// centred in `⎯`, or with `right` `⎯` after it; `color` paints the `⎯` runs.
+fn divider(text: &str, right: Option<usize>, color: &dyn Fn(&str) -> String) -> String {
     let cols = 30usize;
-    let len = text.chars().count();
+    let len = js_len(&strip(text));
     let (left, right) = match right {
         Some(r) => (cols.saturating_sub(len + r), r),
         None => {
@@ -394,14 +480,29 @@ fn divider(text: &str, right: Option<usize>) -> String {
             (left, cols.saturating_sub(len + left))
         }
     };
-    format!("{}{text}{}", "⎯".repeat(left), "⎯".repeat(right))
+    format!(
+        "{}{text}{}",
+        color(&"⎯".repeat(left)),
+        color(&"⎯".repeat(right))
+    )
 }
 
-/// vitest's `printErrorInner` into a string: `Name: message`, the diff, the frames outside
-/// node_modules with the code frame after the nearest one (`code_frame`), a blank line, the
-/// cause.
-pub fn print_error(e: &ErrorInfo, root: &Path, code_frame: bool, prefix: &str) -> String {
-    let mut out = format!("{prefix}{}: {}\n", e.name, e.message);
+/// vitest's `printErrorInner` into a string: `Name: message` (red, the name bold), the diff,
+/// the frames outside node_modules (the nearest cyan, the others gray) with the highlighted code
+/// frame after the nearest one (`code_frame`), a blank line, the cause.
+pub fn print_error(
+    e: &ErrorInfo,
+    root: &Path,
+    code_frame: bool,
+    prefix: &str,
+    c: &Colors,
+) -> String {
+    let name = format!("{prefix}{}", e.name);
+    let mut out = if js_len(&e.message) > 5000 {
+        format!("{}: {}\n", c.red(&c.bold(&name)), e.message)
+    } else {
+        c.red(&format!("{}: {}", c.bold(&name), e.message)) + "\n"
+    };
     if !e.diff.is_empty() {
         out.push_str(&format!("\n{}\n\n", e.diff));
     }
@@ -413,14 +514,31 @@ pub fn print_error(e: &ErrorInfo, root: &Path, code_frame: bool, prefix: &str) -
     let nearest = frames.iter().position(|f| f.file.is_file());
     for (i, f) in frames.iter().enumerate() {
         let path = f.file.strip_prefix(root).unwrap_or(&f.file);
-        let at = format!("{}:{}:{}", path.display(), f.line, f.col);
-        match f.method.as_str() {
-            "" => out.push_str(&format!(" ❯ {at}\n")),
-            m => out.push_str(&format!(" ❯ {m} {at}\n")),
-        }
+        let at = format!(
+            "{}:{}",
+            path.display(),
+            c.dim(&format!("{}:{}", f.line, f.col))
+        );
+        let pos = if f.method.is_empty() {
+            at
+        } else {
+            format!("{} {at}", f.method)
+        };
+        let line = format!(" {} {pos}", c.dim("❯"));
+        out.push_str(&if Some(i) == nearest {
+            c.cyan(&line)
+        } else {
+            c.gray(&line)
+        });
+        out.push('\n');
         if code_frame && Some(i) == nearest {
             if let Ok(source) = std::fs::read_to_string(&f.file) {
-                out.push_str(&code_frame_of(&source, f.line, f.col));
+                let shown = if js_len(&source) > 100_000 {
+                    source
+                } else {
+                    crate::highlight::highlight_code(c, &f.file, &source)
+                };
+                out.push_str(&code_frame_of(&shown, f.line, f.col, c));
                 out.push('\n');
             }
         }
@@ -429,50 +547,77 @@ pub fn print_error(e: &ErrorInfo, root: &Path, code_frame: bool, prefix: &str) -
         out.push('\n');
     }
     if let Some(cause) = &e.cause {
-        out.push_str(&print_error(cause, root, false, "Caused by: "));
+        out.push_str(&print_error(cause, root, false, "Caused by: ", c));
     }
     out
 }
 
-/// vitest's `generateCodeFrame(source, 4, { line, column })` for an 80-column output: two lines
-/// either side, each truncated to 71 characters with `…`, and a caret under the column.
-pub fn code_frame_of(source: &str, line: u32, column: u32) -> String {
+/// vitest's `generateCodeFrame(source, 4, { line, column })` for an 80-column output, over the
+/// (highlighted) source: the line `positionToOffset` lands on and two either side, each cut to 71
+/// characters with `…` (then without its colours), gray line numbers and a red caret under the
+/// column. A source-map comment line is left out; a line over 200 characters drops the frame.
+pub fn code_frame_of(source: &str, line: u32, column: u32, c: &Colors) -> String {
     let lines: Vec<&str> = source
         .split('\n')
         .map(|l| l.strip_suffix('\r').unwrap_or(l))
         .collect();
-    let i = (line as usize)
-        .saturating_sub(1)
-        .min(lines.len().saturating_sub(1));
-    let lo = i.saturating_sub(2);
-    let hi = (i + 2).min(lines.len() - 1);
-    let no = |n: Option<usize>| match n {
-        Some(n) => format!("{n:>3}|"),
-        None => "   |".to_string(),
+    let nl = if source.contains("\r\n") { 2 } else { 1 };
+    // positionToOffset
+    let start = if line as usize > lines.len() {
+        js_len(source)
+    } else {
+        lines[..(line as usize).saturating_sub(1)]
+            .iter()
+            .map(|l| js_len(l) + nl)
+            .sum::<usize>()
+            + column as usize
     };
+    let no = |n: Option<usize>| c.gray(&n.map_or("   |".to_string(), |n| format!("{n:>3}|")));
+    let mut count = 0;
     let mut out = Vec::new();
-    for (j, text) in lines.iter().enumerate().take(hi + 1).skip(lo) {
-        if text.starts_with("//# sourceMappingURL") {
+    for (i, l) in lines.iter().enumerate() {
+        count += js_len(l) + nl;
+        if count < start {
             continue;
         }
-        if text.chars().count() > 200 {
-            return String::new();
+        let lo = i.saturating_sub(2);
+        let hi = (i + 2).min(lines.len() - 1);
+        for (j, text) in lines.iter().enumerate().take(hi + 1).skip(lo) {
+            let plain = strip(text);
+            if plain.starts_with("//# sourceMappingURL") {
+                continue;
+            }
+            if js_len(&plain) > 200 {
+                return String::new();
+            }
+            let tabbed = text.replace('\t', " ");
+            let truncated = if js_len(&strip(&tabbed)) <= 71 {
+                tabbed
+            } else {
+                let mut units = 0;
+                let cut: String = strip(&tabbed)
+                    .chars()
+                    .take_while(|ch| {
+                        units += ch.len_utf16();
+                        units <= 70
+                    })
+                    .collect();
+                format!("{cut}…")
+            };
+            let truncated = truncated.trim_end();
+            out.push(if truncated.is_empty() {
+                no(Some(j + 1))
+            } else {
+                format!("{} {truncated}", no(Some(j + 1)))
+            });
+            if j == i {
+                // `start - (count - lineLength) + (nl - 1)`, repeated `pad + 1` times
+                let pad = start as i64 - (count - js_len(l)) as i64 + (nl as i64 - 1);
+                let spaces = " ".repeat((pad + 1).max(0) as usize);
+                out.push(format!("{}{spaces}{}", no(None), c.red("^")));
+            }
         }
-        let text = text.replace('\t', " ");
-        let truncated = if text.chars().count() <= 71 {
-            text
-        } else {
-            format!("{}…", text.chars().take(70).collect::<String>())
-        };
-        let truncated = truncated.trim_end();
-        out.push(if truncated.is_empty() {
-            no(Some(j + 1))
-        } else {
-            format!("{} {truncated}", no(Some(j + 1)))
-        });
-        if j == i {
-            out.push(format!("{}{}^", no(None), " ".repeat(column as usize)));
-        }
+        break;
     }
     out.iter()
         .map(|l| format!("    {l}"))

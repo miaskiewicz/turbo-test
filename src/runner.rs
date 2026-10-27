@@ -5545,6 +5545,11 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     if std::env::var("TURBO_CAPTURE_LOGS").is_ok() {
         prelude.push_str("globalThis.__TT_CAPTURE_LOGS=true;");
     }
+    // vitest's human reporters with colours on (turbo-test#94) → console values and diffs are
+    // coloured as vitest's worker colours them
+    if std::env::var("TURBO_COLORS").is_ok() {
+        prelude.push_str("globalThis.__TT_COLORS=true;");
+    }
     // --passWithNoTests (launcher) → a file with no tests at all passes instead of failing
     if std::env::var("TURBO_PASS_WITH_NO_TESTS").is_ok() {
         prelude.push_str("globalThis.__TT_PASS_WITH_NO_TESTS=true;");

@@ -1318,16 +1318,35 @@ pub fn format_duration(wall_ms: f64) -> String {
 /// (total)` from `[failed, passed, expected fail, skipped, todo]`, the zero parts left out, and
 /// `no tests` when the total is 0 (turbo-test#78).
 pub fn state_string(counts: [usize; 5], total: usize) -> String {
+    state_string_colored(counts, total, &crate::colors::Colors::default())
+}
+
+/// [`state_string`] in vitest's colours: failed bold red, passed bold green, expected fail cyan,
+/// skipped yellow, todo gray, the separators dim, the total gray (`no tests` dim).
+pub fn state_string_colored(counts: [usize; 5], total: usize, c: &crate::colors::Colors) -> String {
     if total == 0 {
-        return "no tests".to_string();
+        return c.dim("no tests");
     }
     let parts: Vec<String> = counts
         .iter()
         .zip(["failed", "passed", "expected fail", "skipped", "todo"])
         .filter(|(n, _)| **n > 0)
-        .map(|(n, label)| format!("{n} {label}"))
+        .map(|(n, label)| {
+            let text = format!("{n} {label}");
+            match label {
+                "failed" => c.bold(&c.red(&text)),
+                "passed" => c.bold(&c.green(&text)),
+                "expected fail" => c.cyan(&text),
+                "skipped" => c.yellow(&text),
+                _ => c.gray(&text),
+            }
+        })
         .collect();
-    format!("{} ({total})", parts.join(" | "))
+    format!(
+        "{}{}",
+        parts.join(&c.dim(" | ")),
+        c.gray(&format!(" ({total})"))
+    )
 }
 
 /// Vitest's summary footer (`Test Files` / `Tests` / `Duration`), both lines as its
@@ -1338,7 +1357,7 @@ pub fn state_string(counts: [usize; 5], total: usize) -> String {
 /// results, not `file_count` — under `--bail` some files never run, and those must NOT be
 /// reported as passed; the total stays the discovered file count.
 pub fn footer(file_count: usize, res: &[FileResult], wall_ms: f64) -> String {
-    let (files, tests) = footer_counts(file_count, res);
+    let (files, tests) = footer_counts(file_count, res, &crate::colors::Colors::default());
     format!(
         "\n Test Files  {files}\n      Tests  {tests}\n   Duration  {}",
         format_duration(wall_ms),
@@ -1346,7 +1365,11 @@ pub fn footer(file_count: usize, res: &[FileResult], wall_ms: f64) -> String {
 }
 
 /// The footer's `Test Files` and `Tests` values (vitest's `getStateString`).
-pub fn footer_counts(file_count: usize, res: &[FileResult]) -> (String, String) {
+pub fn footer_counts(
+    file_count: usize,
+    res: &[FileResult],
+    c: &crate::colors::Colors,
+) -> (String, String) {
     let mut files = [0usize; 5];
     for r in res {
         let ran = r
@@ -1376,8 +1399,8 @@ pub fn footer_counts(file_count: usize, res: &[FileResult]) -> (String, String) 
         tests[slot] += 1;
     }
     (
-        state_string(files, file_count),
-        state_string(tests, all.len()),
+        state_string_colored(files, file_count, c),
+        state_string_colored(tests, all.len(), c),
     )
 }
 
@@ -1462,6 +1485,19 @@ pub fn run(opts: Options) -> i32 {
     // They, and junit (vitest), print each task's console output with its task, and failure
     // frames named in the original source (the test file's transform map, location.rs)
     let human = human_kind(opts.reporter, opts.reporter_explicit);
+    // vitest colours its human reporters as tinyrainbow decides, never under an AI agent; the
+    // runtime colours console values and diffs to match
+    let colors = crate::colors::Colors {
+        on: human.is_some()
+            && !crate::agent::is_agent_env()
+            && crate::colors::supported(
+                |k| std::env::var(k).ok(),
+                &std::env::args().collect::<Vec<_>>(),
+            ),
+    };
+    if colors.on {
+        std::env::set_var("TURBO_COLORS", "1");
+    }
     if human.is_some() || opts.reporter == Reporter::Junit {
         std::env::set_var("TURBO_CAPTURE_LOGS", "1");
         std::env::set_var("TURBO_TASK_LOCATION", "1");
@@ -1490,7 +1526,7 @@ pub fn run(opts: Options) -> i32 {
     if let Some(kind) = human {
         save_durations(&hist_path, &update_history(hist, &files, &res));
         let root = junit_root();
-        let (test_files, tests) = footer_counts(files.len(), &res);
+        let (test_files, tests) = footer_counts(files.len(), &res, &colors);
         let run = crate::human::Run {
             root: &root,
             names: &names,
@@ -1499,6 +1535,7 @@ pub fn run(opts: Options) -> i32 {
             test_files,
             tests,
             did_update: opts.env.iter().any(|(k, _)| *k == "TURBO_UPDATE_SNAPSHOTS"),
+            colors,
         };
         let (out, err) = crate::human::render(kind, &res, &run);
         // vitest's human reporters write no --outputFile

@@ -1,0 +1,21 @@
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.12 [39m[90m<root>[39m
+
+ [31m×[39m a.test.ts[2m > [22maligned[32m <n>[2mms[22m[39m
+[31m   → expected 'hello world\nsecond line\nthird' to be 'hello there\nsecond line\nthird!' // Object.is equality[39m
+ [31m×[39m a.test.ts[2m > [22mlong[32m <n>[2mms[22m[39m
+[31m   → expected [ Array(30) ] to deeply equal [ Array(30) ][39m
+ [31m×[39m a.test.ts[2m > [22mjson[32m <n>[2mms[22m[39m
+[31m   → expected { toJSON: [Function toJSON], v: 1 } to deeply equal { toJSON: [Function toJSON], v: 2 }[39m
+ [31m×[39m a.test.ts[2m > [22mtypes[32m <n>[2mms[22m[39m
+[31m   → expected 1 to deeply equal '1'[39m
+ [31m×[39m a.test.ts[2m > [22mtrailing[32m <n>[2mms[22m[39m
+[31m   → expected 'a  ' to be 'b  ' // Object.is equality[39m
+ [31m×[39m a.test.ts[2m > [22mnothing common[32m <n>[2mms[22m[39m
+[31m   → expected 'abc' to be 'xyz' // Object.is equality[39m
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m6 failed[39m[22m[90m (6)[39m
+<start>
+<duration>
+

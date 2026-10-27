@@ -227,6 +227,16 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   console output. turbo-test printed its own `FAIL  a.test.ts  (0 passed, 1 failed)` lines and
   a `1 files | 0 passed | … | cache 67% hit` line; `TURBO_LEGACY_REPORTER=1` keeps them. A
   retried test keeps every attempt's error (json `failureMessages`, junit, the reporters).
+- The default and verbose reporters are coloured as vitest's (turbo-test#94): without
+  `NO_COLOR` (and with no AI agent; tinyrainbow's rules: `TERM=dumb`, `FORCE_TTY=false`,
+  `FORCE_COLOR`, `CI`, `--color` / `--no-color`) the labels, symbols, counts, durations, frames
+  and dividers carry vitest's ANSI colours, code frames are syntax-highlighted as vitest's
+  tinyhighlight does (a port of js-tokens, `src/highlight.rs`), console values are coloured as
+  Node's `util.inspect` colours them (RegExps highlighted by group depth), and diffs are
+  coloured with the changed part of a string inverse. Diffs now follow vitest's algorithm in
+  plain output too: jest's diff-sequences for lines, the cleaned-up character diff with aligned
+  lines for multi-line strings, and the `Compared values have no visual difference.` /
+  `serialize to the same structure` messages without a misplaced `- Expected` header.
 - A test's duration counts the time it waited on timers (turbo-test#95): the event loop jumps
   its clock to the next timer instead of sleeping, so `await new Promise(r => setTimeout(r,
   320))` took 0ms in every reporter; it is now ~320ms, as on Node.

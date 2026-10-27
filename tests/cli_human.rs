@@ -99,8 +99,9 @@ type Scenario = (
 
 /// More scenarios: a slow test (over vitest's 300ms slowTestThreshold) in a passing and in a
 /// failed file, retried tests, obsolete snapshots and, with `-u`, removed ones, identical errors
-/// merged, console output per task, diffs of strings and objects, console values.
-const MORE: [Scenario; 9] = [
+/// merged, console output per task, diffs of strings and objects, console values (s18 and s19
+/// below).
+const MORE: [Scenario; 11] = [
     (
         "s7",
         &[(
@@ -200,7 +201,32 @@ const MORE: [Scenario; 9] = [
         )],
         &[],
     ),
+    // more diffs: aligned multi-line strings, a long array (patch marks), values that serialize
+    // the same, different types, trailing spaces, strings with nothing in common
+    ("s18", &[("a.test.ts", S18)], &[]),
+    // more console values: highlighted RegExps, circular and boxed values, a pending promise,
+    // quoted and symbol keys, accessors, grouped arrays, multi-line strings, holes, a class
+    ("s19", &[("a.test.ts", S19)], &[]),
 ];
+
+const S18: &str = r#"import { expect, it } from 'vitest';
+it('aligned', () => { expect('hello world\nsecond line\nthird').toBe('hello there\nsecond line\nthird!'); });
+it('long', () => { const a = Array.from({ length: 30 }, (_, i) => i); const b = [...a]; b[15] = 'x'; expect(a).toEqual(b); });
+it('json', () => { expect({ toJSON: () => 1, v: 1 }).toEqual({ toJSON: () => 1, v: 2 }); });
+it('types', () => { expect(1).toEqual('1'); });
+it('trailing', () => { expect('a  ').toBe('b  '); });
+it('nothing common', () => { expect('abc').toBe('xyz'); });
+"#;
+
+const S19: &str = r#"import { it } from 'vitest';
+it('more values', () => {
+  console.log(/a(b|c)[^d-f]\d{2,3}?x*(?:y)(?=q)(?<n>z)\k<n>\u{41}\p{L}.^$|w{3,}/gu, /[\x41-\x5A]e{,2}(?<!x)(?!y)\1\x4/);
+  const circ = { name: 'c' }; circ.self = circ;
+  console.log(circ, new Uint8Array([1, 2]), new Number(3), new String('s'), new Promise(() => {}), new WeakMap());
+  console.log({ 'quoted-key': 1, [Symbol('sk')]: 'v', get g() { return 1; }, set s(v) {}, arr: Array.from({ length: 12 }, (_, i) => i * 100) });
+  console.log({ long: 'line one\nline two\nline three is a bit longer than the others to wrap' }, [ , 1, , ], class A {}, Symbol.iterator);
+});
+"#;
 
 /// vitest's reference output for `scenario` and `reporter` (`.out` or `.err`).
 fn reference(scenario: &str, reporter: &str, stream: &str) -> String {
@@ -393,7 +419,6 @@ fn normalize_colored(text: &str, root: &str) -> String {
 /// the diffs, the frames and the syntax-highlighted code frames (tinyhighlight). Every scenario
 /// with both reporters on both loaders, against `tests/data/human-color`.
 #[test]
-#[ignore = "turbo-test#94: fails until the fix"]
 fn coloured_output_is_vitests() {
     let all = SCENARIOS
         .iter()
