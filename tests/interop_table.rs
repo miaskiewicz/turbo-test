@@ -255,7 +255,7 @@ fn run_table(p: &Project, loader: &str) -> Vec<String> {
                     }
                 }
             }
-            assert_eq!(rows, 89, "{}", r.all());
+            assert_eq!(rows, 93, "{}", r.all());
         }
     }
     bad

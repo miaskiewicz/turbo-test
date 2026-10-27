@@ -55,6 +55,14 @@ export const expected: Record<string, string> = {
     "fn:Mocked",
   "mock|factory without default":
     "throws:[vitest] No \"default\" export is defined on the \"exp-default-noflag\" mock. Did you forget to return it from \"vi.mock\"?",
+  "mock|factory without default ===":
+    "throws:[vitest] No \"default\" export is defined on the \"exp-default-noflag\" mock. Did you forget to return it from \"vi.mock\"?",
+  "mock|factory without default shorthand":
+    "throws:[vitest] No \"default\" export is defined on the \"exp-default-noflag\" mock. Did you forget to return it from \"vi.mock\"?",
+  "mock|factory without default truthiness":
+    "throws:[vitest] No \"default\" export is defined on the \"exp-default-noflag\" mock. Did you forget to return it from \"vi.mock\"?",
+  "mock|factory without default typeof":
+    "throws:[vitest] No \"default\" export is defined on the \"exp-default-noflag\" mock. Did you forget to return it from \"vi.mock\"?",
   "mock|importActual spread default":
     "fn:TscComp",
   "mock|importOriginal spread default":

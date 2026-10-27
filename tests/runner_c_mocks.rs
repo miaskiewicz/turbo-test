@@ -854,7 +854,8 @@ fn import_meta_url_is_percent_encoded() {
 
 /// The ES-module graph loader (no esbuild): a `vi.mock` factory without `default` makes every
 /// use of the default import throw vitest's error — a property read, a call, `new`, its keys —
-/// while a `jest.mock` one is its own default (turbo-test#137).
+/// while a `jest.mock` one is its own default (turbo-test#137); so does every read of it —
+/// `typeof`, truthiness, `===`, in an app module importing it too (turbo-test#151).
 #[test]
 fn esm_graph_mock_without_default_throws_on_use() {
     let p = Project::new("rc-graph-mock-default");
@@ -867,6 +868,10 @@ fn esm_graph_mock_without_default_throws_on_use() {
         "export default function Real() {}\nexport const n = 'real';\n",
     );
     p.file(
+        "kind.js",
+        "import M from './m.js';\nexport const kind = () => typeof M;\n",
+    );
+    p.file(
         "j.js",
         "export default function Real() {}\nexport const n = 'real';\n",
     );
@@ -875,6 +880,7 @@ fn esm_graph_mock_without_default_throws_on_use() {
         &format!(
             r#"import M, {{ n }} from './m.js';
 import J from './j.js';
+import {{ kind }} from './kind.js';
 vi.mock('./m.js', () => ({{ n: 'only' }}));
 jest.mock('./j.js', () => ({{ n: 'jest' }}));
 const msg = {msg:?};
@@ -887,9 +893,16 @@ test('every use of the missing default throws', () => {{
   expect(() => new M()).toThrow(msg);
   expect(() => Object.keys(M)).toThrow(msg);
   expect(() => 'x' in M).toThrow(msg);
+  // every read, as vitest's (turbo-test#151), in an app module importing it too
+  expect(() => typeof M).toThrow(msg);
+  expect(() => (M ? 1 : 0)).toThrow(msg);
+  expect(() => M === undefined).toThrow(msg);
+  expect(() => ({{ M }})).toThrow(msg);
+  expect(kind).toThrow(msg);
 }});
 test('a jest.mock factory is its own default', () => {{
   expect(J.n).toBe('jest');
+  expect(typeof J).toBe('object');
   expect(Object.keys(J)).toEqual(['n']);
 }});
 "#,
