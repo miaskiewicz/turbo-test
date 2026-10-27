@@ -72,3 +72,23 @@ test('a file that runs out of memory fails alone and the run continues', () => {
     /JavaScript heap out of memory \(limit \d+ MB\): the file was aborted and its isolate discarded/,
   );
 });
+
+test('a finished file\'s spy history is released, so spies do not grow a reused isolate', { todo: 'turbo-test#124' }, () => {
+  // 12 files x ~60 MB of recorded call arguments under a 400 MB cap, and recycling disabled: only
+  // releasing each finished file's call history keeps the isolate under the cap. Within a file
+  // every spy still sees all of its calls (the fixtures assert mock.calls.length).
+  const r = run('heap-spies', { TURBO_MAX_HEAP_MB: '400', TURBO_HEAP_RECYCLE_MB: '100000' });
+  assert.equal(r.signal, null, `the process died:\n${r.err.slice(-2000)}`);
+  const expected = Object.fromEntries(
+    Array.from({ length: 12 }, (_, i) => [`p${String(i + 1).padStart(2, '0')}.test.ts`, 'passed']),
+  );
+  assert.deepEqual(statuses(r), expected, r.err.slice(-2000));
+  assert.equal(r.code, 0);
+  // One heap line per file, none recycled or out of memory (a file that ran out of heap would be
+  // re-run on a fresh isolate and pass, hiding the growth), and the live heap after each file
+  // holds that file's ~70 MB of history only: unreleased, it climbs by ~70 MB per file.
+  assert.doesNotMatch(r.err, /heap out of memory/);
+  const used = [...r.err.matchAll(/^\[heap\] .* used=(\d+)MB .* recycled=false /gm)].map((m) => Number(m[1]));
+  assert.equal(used.length, 12, r.err.slice(-2000));
+  assert.ok(Math.max(...used) < 120, `live heap after each file (MB): ${used.join(', ')}`);
+});
