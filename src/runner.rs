@@ -1558,9 +1558,9 @@ fn run_setup_file(
     }
     let target = esbuild_bundle_full(file, externals, rewrite_map, None)
         .unwrap_or_else(|| file.to_path_buf());
-    let err = match load_graph(scope, &target) {
-        None => Some("graph load failed".to_string()),
-        Some(module) => {
+    let err = match load_entry_graph(scope, &target) {
+        Err(e) => Some(e),
+        Ok(module) => {
             let tc = std::pin::pin!(v8::TryCatch::new(scope));
             let tc = &mut tc.init();
             if module.instantiate_module(tc, resolve_callback) == Some(true) {
@@ -3811,6 +3811,7 @@ fn load_cjs_inner<'s>(
         }
     };
     if let Some(e) = compile_exc {
+        COMPILE_EXC.with(|c| *c.borrow_mut() = Some((e.clone(), abs.to_path_buf())));
         let e = v8::Local::new(scope, &e);
         scope.throw_exception(e);
     }
@@ -4836,6 +4837,48 @@ fn load_graph<'s>(
         load_dep(scope, &dep)?;
     }
     Some(module)
+}
+
+thread_local! {
+    /// The last compile error a CommonJS load threw (the module runner's form of an import) and
+    /// the module it is of.
+    static COMPILE_EXC: RefCell<Option<(v8::Global<v8::Value>, PathBuf)>> =
+        const { RefCell::new(None) };
+}
+
+/// Load a file's entry module graph under a TryCatch: the error is the exception the load
+/// threw — a module of the graph that failed to compile gives V8's `SyntaxError: …`, as vitest
+/// reports it, where V8 printed an uncaught compile error to stdout (turbo-test#99) — else
+/// `graph load failed` (a specifier that does not resolve).
+fn load_entry_graph<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+) -> Result<v8::Local<'s, v8::Module>, String> {
+    let module = {
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let tc = &mut tc.init();
+        match load_graph(tc, abs) {
+            Some(m) => v8::Global::new(tc, m),
+            None => {
+                let exc = tc.exception();
+                note_load_error(tc, exc);
+                // the module the exception was thrown in (for a compile error, the one that
+                // did not compile)
+                let module = tc
+                    .message()
+                    .and_then(|m| m.get_script_resource_name(tc))
+                    .map(|n| PathBuf::from(n.to_rust_string_lossy(tc)));
+                LOAD_ERROR.with(|e| {
+                    if let Some(info) = e.borrow_mut().as_mut() {
+                        info.source = module;
+                    }
+                });
+                return Err(caught_message(tc, "graph load failed")
+                    .unwrap_or_else(|| "graph load failed".to_string()));
+            }
+        }
+    };
+    Ok(v8::Local::new(scope, &module))
 }
 
 /// Registry key for the built-in test-API module shim (named import surface).
@@ -6473,8 +6516,9 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
                 }
                 break 'work drive_tests(scope, global, &entry_abs);
             }
-            let Some(module) = load_graph(scope, &load_target) else {
-                break 'work Err("graph load failed".to_string());
+            let module = match load_entry_graph(scope, &load_target) {
+                Ok(m) => m,
+                Err(e) => break 'work Err(e),
             };
             {
                 let tc = std::pin::pin!(v8::TryCatch::new(scope));
@@ -6683,8 +6727,9 @@ fn run_test_file_reused(
                 }
                 break 'work drive_tests(scope, global, entry_abs);
             }
-            let Some(module) = load_graph(scope, load_target) else {
-                break 'work Err("graph load failed".to_string());
+            let module = match load_entry_graph(scope, load_target) {
+                Ok(m) => m,
+                Err(e) => break 'work Err(e),
             };
             {
                 let tc = std::pin::pin!(v8::TryCatch::new(scope));
@@ -7112,6 +7157,7 @@ fn error_info_of<'s>(
         diff,
         frames,
         cause,
+        source: None,
     }
 }
 
@@ -7166,7 +7212,17 @@ fn note_load_error(scope: &mut v8::PinScope, exc: Option<v8::Local<v8::Value>>) 
         })
         .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok());
     if let Some(info) = info {
-        let info = error_info_of(scope, info);
+        let mut info = error_info_of(scope, info);
+        // A module that failed to compile has no frame to show: vitest fails the import before
+        // the importer runs (its stack is the loader's own), where the module runner's require()
+        // of the module leaves the importer's frame (turbo-test#99).
+        let compile = COMPILE_EXC.with(|c| c.borrow_mut().take());
+        if let Some((c, module)) = compile {
+            if v8::Local::new(scope, &c).strict_equals(exc) {
+                info.frames.clear();
+                info.source = Some(module);
+            }
+        }
         LOAD_ERROR.with(|e| *e.borrow_mut() = Some(info));
     }
 }

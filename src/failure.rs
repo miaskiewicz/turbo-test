@@ -35,6 +35,10 @@ pub struct ErrorInfo {
     pub diff: String,
     pub frames: Vec<Frame>,
     pub cause: Option<Box<ErrorInfo>>,
+    /// The module whose compile the error is (turbo-test#99). Not printed: it tells apart two
+    /// otherwise identical compile errors as vitest's stacks do (the human reporters print one
+    /// module's error once, under every file whose import of it failed).
+    pub source: Option<std::path::PathBuf>,
 }
 
 /// The frames of a V8 `stack` (`    at fn (/abs/file.ts:3:9)` / `    at /abs/file.ts:3:9`) that

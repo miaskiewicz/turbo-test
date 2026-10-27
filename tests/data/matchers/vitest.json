@@ -46,6 +46,43 @@
    "message": "expected 1 to not strictly equal 1"
   },
   {
+   "label": "toStrictEqual class",
+   "name": "AssertionError",
+   "message": "expected Foo{ a: 1 } to strictly equal { a: 1 }"
+  },
+  {
+   "label": "toStrictEqual class rev",
+   "name": "AssertionError",
+   "message": "expected { a: 1 } to strictly equal Foo{ a: 1 }"
+  },
+  {
+   "label": "toStrictEqual nested class",
+   "name": "AssertionError",
+   "message": "expected { x: [ Foo{ a: 1 } ] } to strictly equal { x: [ { a: 1 } ] }"
+  },
+  {
+   "label": "toStrictEqual null proto",
+   "name": "AssertionError",
+   "message": "expected {} to strictly equal {}"
+  },
+  {
+   "label": "toStrictEqual same class",
+   "passed": true
+  },
+  {
+   "label": "toStrictEqual array subclass",
+   "name": "AssertionError",
+   "message": "expected [] to strictly equal []"
+  },
+  {
+   "label": "not.toStrictEqual class",
+   "passed": true
+  },
+  {
+   "label": "toEqual class",
+   "passed": true
+  },
+  {
    "label": "toBeTruthy",
    "name": "AssertionError",
    "message": "expected +0 to be truthy"
