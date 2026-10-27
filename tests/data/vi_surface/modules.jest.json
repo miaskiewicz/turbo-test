@@ -1,0 +1,42 @@
+[
+ [
+  "createMockFromModule",
+  "value",
+  "[\"fn:mock\",null,3,[],null,true]"
+ ],
+ [
+  "setMock",
+  "value",
+  "[true,{\"x\":1}]"
+ ],
+ [
+  "deepUnmock",
+  "value",
+  "true"
+ ],
+ [
+  "unstable_mockModule",
+  "value",
+  "true"
+ ],
+ [
+  "unstable_unmockModule",
+  "value",
+  "true"
+ ],
+ [
+  "getSeed",
+  "value",
+  "[true,true,true]"
+ ],
+ [
+  "isEnvironmentTornDown",
+  "value",
+  "false"
+ ],
+ [
+  "mock chain",
+  "value",
+  "[true,true,true]"
+ ]
+]
