@@ -80,6 +80,16 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   panic) is retried. The same test pins it with `--isolate` (vitest's report is identical).
 
 ### Fixed
+- Fake-timer runs are sinon's (turbo-test#177): `runOnlyPendingTimers` (and its async form)
+  advances to the last pending timer, so intervals and timers set on the way run (it fired a
+  snapshot of the pending timers once each), and a timer callback's error is thrown by the
+  advance call — `advanceTimersByTime` / `runOnlyPendingTimers` after running the rest of the
+  range, `runAllTimers` / `advanceTimersToNextTimer` at once, the async ones by rejecting —
+  instead of being logged as `uncaught`.
+- The real `performance.now()` and `process.hrtime()` / `hrtime.bigint()` move (turbo-test#178):
+  they were constant 0, so elapsed-time code measured nothing. They count the real clock (real
+  time plus the drive loop's jumps, as test durations do) since the runtime started
+  (`performance.timeOrigin`).
 - The fake-timer API is vitest 4.1.12's (turbo-test#171, #172). Without fake timers the advance /
   run functions and `getTimerCount` throw vitest's `A function to advance timers was called but
   the timers APIs are not mocked. …` (they silently did nothing, so a test that forgot
