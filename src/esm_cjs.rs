@@ -1098,7 +1098,17 @@ macro_rules! to_esm_helper {
         "var __toESM = (mod) => globalThis.__ttToESM(mod);\n"
     };
 }
-const TO_ESM_HELPER: &str = to_esm_helper!();
+pub(crate) const TO_ESM_HELPER: &str = to_esm_helper!();
+
+/// What `export * from` re-exports (the `__reExport` source): the module's namespace as an
+/// importer sees it (`__toESM`'s), so a package's CommonJS gives Node's names (with
+/// `'module.exports'`) and an ES module no `__esModule` (turbo-test#133). Part of `PREAMBLE`.
+macro_rules! star_helper {
+    () => {
+        "var __toESMStar = (mod) => __toESM(mod);\n"
+    };
+}
+pub(crate) const STAR_HELPER: &str = star_helper!();
 
 /// Runtime helper preamble (shared by app emit + the bundler — emitted ONCE per output). `__esm`
 /// and `__commonJS` are the lazy module-init wrappers the bundler uses so circular dependencies +
@@ -1111,10 +1121,11 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => { for (var name in all) __defProp(target, name, { get: all[name], enumerable: true, configurable: true }); };
 var __copyProps = (to, from, except, desc) => { if (from && typeof from === "object" || typeof from === "function") { for (let key of __getOwnPropNames(from)) if (!__hasOwnProp.call(to, key) && key !== except) __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable, configurable: true }); } return to; };
-var __reExport = (target, mod, secondTarget) => (__copyProps(target, mod, "default"), secondTarget && __copyProps(secondTarget, mod, "default"));
+var __reExport = (target, mod, secondTarget) => (mod = __toESMStar(mod), __copyProps(target, mod, "default"), secondTarget && __copyProps(secondTarget, mod, "default"));
 "#,
     to_esm_helper!(),
-    r#"var __toCommonJS = (mod) => __copyProps(__defProp(__defProp({}, "__esModule", { value: true }), Symbol.for("turbo-test.esm"), { value: true }), mod);
+    star_helper!(),
+    r#"var __toCommonJS = (mod) => __copyProps(__defProp(__defProp({}, "__esModule", { value: true, configurable: true }), Symbol.for("turbo-test.esm"), { value: true }), mod);
 var __commonJS = (cb) => { var mod; return () => (mod || (mod = { exports: {} }, cb(mod.exports, mod)), mod.exports); };
 var __esm = (fn) => { var done, res; return () => (done || (done = 1, res = fn()), res); };
 "#
@@ -1203,6 +1214,208 @@ fn member_js(obj: &str, prop: &str) -> String {
     } else {
         format!("{obj}[{}]", json_string(prop))
     }
+}
+
+/// The query suffix of an ES-module-graph request for the namespace (vitest's interop object)
+/// of a CommonJS module, `import * as ns` / `export * as ns` (turbo-test#133).
+pub(crate) const NS_QUERY: &str = "?__tt_ns";
+/// ... for what `export * from` a CommonJS module re-exports (that namespace's names).
+pub(crate) const STAR_QUERY: &str = "?__tt_star";
+/// ... for a CommonJS module imported as Node imports it (an ES module Node runs as one).
+pub(crate) const NODE_QUERY: &str = "?__tt_node";
+
+/// Rewrite an ES module's (plain JS) requests of CommonJS modules (`is_cjs(specifier)`) for the
+/// ES-module graph loader, whose CommonJS modules are synthetic modules: a V8 namespace object
+/// cannot be vitest's interop namespace (`__esModule` read but not listed, `'module.exports'`),
+/// so `import * as ns` / `export * as ns` read one as the default export of `spec?__tt_ns`,
+/// `export *` re-exports from `spec?__tt_star`; in an ES module Node runs as one (`node`), every
+/// request of a CommonJS module is `spec?__tt_node`, Node's namespace of it (turbo-test#133).
+/// Line breaks are kept. `None` when nothing is rewritten.
+pub(crate) fn graph_interop_rewrite(
+    src: &str,
+    is_cjs: &dyn Fn(&str) -> bool,
+    node: bool,
+) -> Option<String> {
+    if !src.contains("import") && !src.contains("export") {
+        return None;
+    }
+    if !node && !src.contains('*') {
+        return None;
+    }
+    let alloc = Allocator::default();
+    let ret = Parser::new(&alloc, src, SourceType::mjs()).parse();
+    if ret.panicked || !ret.errors.is_empty() {
+        return None;
+    }
+    let lit = |spec: &str, q: &str| json_string(&format!("{spec}{q}"));
+    // (start, end, replacement), in source order
+    let mut edits: Vec<(u32, u32, String)> = Vec::new();
+    let wanted = |spec: &str| !spec.contains('?') && is_cjs(spec);
+    for stmt in &ret.program.body {
+        match stmt {
+            Statement::ImportDeclaration(d) if d.with_clause.is_none() => {
+                let spec = d.source.value.as_str();
+                if !wanted(spec) {
+                    continue;
+                }
+                if node {
+                    edits.push((d.source.span.start, d.source.span.end, lit(spec, NODE_QUERY)));
+                    continue;
+                }
+                let Some(specs) = &d.specifiers else { continue };
+                let ns = specs.iter().find_map(|s| match s {
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(n) => {
+                        Some(n.local.name.to_string())
+                    }
+                    _ => None,
+                });
+                let Some(ns) = ns else { continue };
+                let default = specs.iter().find_map(|s| match s {
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(n) => {
+                        Some(n.local.name.to_string())
+                    }
+                    _ => None,
+                });
+                let mut text = String::new();
+                if let Some(def) = default {
+                    text.push_str(&format!("import {def} from {}; ", json_string(spec)));
+                }
+                text.push_str(&format!("import {ns} from {};", lit(spec, NS_QUERY)));
+                edits.push((d.span.start, d.span.end, text));
+            }
+            Statement::ExportAllDeclaration(d) if d.with_clause.is_none() => {
+                let spec = d.source.value.as_str();
+                if !wanted(spec) {
+                    continue;
+                }
+                if node {
+                    edits.push((d.source.span.start, d.source.span.end, lit(spec, NODE_QUERY)));
+                    continue;
+                }
+                match &d.exported {
+                    None => edits.push((d.source.span.start, d.source.span.end, lit(spec, STAR_QUERY))),
+                    Some(name) => {
+                        let name = module_export_name(name);
+                        let name = if is_plain_ident(&name) { name } else { json_string(&name) };
+                        edits.push((
+                            d.span.start,
+                            d.span.end,
+                            format!("export {{ default as {name} }} from {};", lit(spec, NS_QUERY)),
+                        ));
+                    }
+                }
+            }
+            Statement::ExportNamedDeclaration(d) if node && d.with_clause.is_none() => {
+                if let Some(source) = &d.source {
+                    let spec = source.value.as_str();
+                    if wanted(spec) {
+                        edits.push((source.span.start, source.span.end, lit(spec, NODE_QUERY)));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(src.len() + edits.len() * 16);
+    let mut at = 0usize;
+    for (start, end, text) in edits {
+        let (start, end) = (start as usize, end as usize);
+        out.push_str(&src[at..start]);
+        out.push_str(&text);
+        // keep the replaced text's line breaks, so later lines keep their numbers
+        out.extend(src[start..end].matches('\n').map(|_| '\n'));
+        at = end;
+    }
+    out.push_str(&src[at..]);
+    Some(out)
+}
+
+/// The export names Node's cjs-module-lexer detects in a CommonJS module whose one export form
+/// is `module.exports = { ... }` (turbo-test#133): the object literal's keys up to the first
+/// property whose value is not an identifier (`{ a, b: c, 'd': e, ...f }`; `{ a: 1 }` gives none).
+/// `None` for any other module, whose own enumerable names stand for the lexer's.
+pub(crate) fn cjs_literal_export_names(src: &str) -> Option<Vec<String>> {
+    if src.matches("module.exports").count() != 1
+        || src.contains("exports.")
+        || src.contains("exports[")
+        || src.contains("defineProperty(exports")
+        || src.contains("__export")
+    {
+        return None;
+    }
+    let at = src.find("module.exports")? + "module.exports".len();
+    let rest = src[at..].trim_start().strip_prefix('=')?;
+    if rest.starts_with('=') {
+        return None;
+    }
+    let b = rest.trim_start().strip_prefix('{')?.as_bytes();
+    let is_start = |c: u8| c.is_ascii_alphabetic() || c == b'_' || c == b'$';
+    let is_part = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    let ws = |i: &mut usize| {
+        while *i < b.len() && b[*i].is_ascii_whitespace() {
+            *i += 1;
+        }
+    };
+    let ident = |i: &mut usize| -> Option<String> {
+        if *i < b.len() && is_start(b[*i]) {
+            let s = *i;
+            while *i < b.len() && is_part(b[*i]) {
+                *i += 1;
+            }
+            Some(String::from_utf8_lossy(&b[s..*i]).into_owned())
+        } else {
+            None
+        }
+    };
+    let mut names = Vec::new();
+    let mut i = 0;
+    loop {
+        ws(&mut i);
+        if i >= b.len() || b[i] == b'}' {
+            break;
+        }
+        let key = if b[i..].starts_with(b"...") {
+            i += 3;
+            ws(&mut i);
+            ident(&mut i)?;
+            None
+        } else if b[i] == b'\'' || b[i] == b'"' {
+            let q = b[i];
+            let s = i + 1;
+            let len = b[s..].iter().position(|&c| c == q || c == b'\\')?;
+            if b[s + len] != q {
+                break;
+            }
+            i = s + len + 1;
+            Some(String::from_utf8_lossy(&b[s..s + len]).into_owned())
+        } else {
+            match ident(&mut i) {
+                Some(k) => Some(k),
+                None => break,
+            }
+        };
+        ws(&mut i);
+        if let Some(k) = key {
+            if i < b.len() && b[i] == b':' {
+                i += 1;
+                ws(&mut i);
+                if ident(&mut i).is_none() {
+                    break;
+                }
+                ws(&mut i);
+            }
+            names.push(k);
+        }
+        if i < b.len() && b[i] == b',' {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    Some(names)
 }
 
 #[cfg(test)]

@@ -1739,7 +1739,8 @@ const __fs = {
   },
 };
 const __module = {
-  createRequire: (url) => globalThis.__mkRequire(globalThis.__dirnameOf(String(url).startsWith('file:') ? globalThis.__fileURLToPath(url) : String(url))),
+  // a require(): the `require` export condition (turbo-test#134)
+  createRequire: (url) => globalThis.__mkRequire(globalThis.__dirnameOf(String(url).startsWith('file:') ? globalThis.__fileURLToPath(url) : String(url)), false),
   Module: function () {},
   builtinModules: [],
 };
@@ -2877,8 +2878,20 @@ const __requireCache = new Proxy({}, {
     return e && { value: e, writable: true, enumerable: true, configurable: true };
   },
 });
+// require() of an ES module from CommonJS (`isEsm` false) gives Node's require(esm) object: one
+// with a default export and no `__esModule` of its own reads an enumerable `__esModule: true`
+// (turbo-test#133).
+const __ttRequireEsm = (m) => {
+  if (m && typeof m === 'object' && m[Symbol.for('turbo-test.esm')] && 'default' in m) {
+    const d = Object.getOwnPropertyDescriptor(m, '__esModule');
+    if (d && d.configurable && !d.enumerable) Object.defineProperty(m, '__esModule', { value: true, enumerable: true, configurable: true });
+  }
+  return m;
+};
 globalThis.__mkRequire = (dir, isEsm, importer) => {
-  const req = (spec) => globalThis.__nativeRequire(dir, spec, isEsm, importer);
+  const req = isEsm === false
+    ? (spec) => __ttRequireEsm(globalThis.__nativeRequire(dir, spec, false, importer))
+    : (spec) => globalThis.__nativeRequire(dir, spec, isEsm, importer);
   // as Node: the resolved path (a builtin stays its name); MODULE_NOT_FOUND when nothing resolves
   req.resolve = (spec) => {
     const r = globalThis.__ttRequireResolve(dir, String(spec), isEsm === undefined ? true : !!isEsm);
@@ -3905,18 +3918,25 @@ If you need to partially mock a module, you can use "importOriginal" helper insi
   __ttStrictMocks.add(proxy);
   return proxy;
 }
-// The ES-module view of a required module: what `import X from` / `import * as ns from` read
-// once lowered to `__toESM(require(...))` (turbo-test#122), vitest's `interopModule` for a
-// CommonJS module. turbo-test's own ES modules (marked by `__toCommonJS`) and mocks are
-// themselves. A CommonJS `module.exports` marked `__esModule` (tsc / babel output) has its own
-// `default` (none: the whole object); so has an app file's (vitest inlines it). Any other's
-// default is the whole `module.exports` — added in place when it has no `default` (one object for
-// every importer, so `vi.spyOn` is seen by all), else, for a package's, read through a view (its
-// own `default` stays what CommonJS code reads).
+// The ES-module view of a required module: what `import X from` / `import * as ns from` /
+// `import()` / `vi.importActual` read once lowered to `__toESM(require(...))` (turbo-test#122,
+// #133), vitest's `interopModule`. Mocks are themselves. turbo-test's own ES modules (marked by
+// `__toCommonJS`) are their namespace: the exports object without its `__esModule` marker (an ES
+// namespace has none). A CommonJS `module.exports` marked `__esModule` (tsc / babel output) has
+// its own `default` (none: the whole object). A package's other CommonJS module is Node's
+// namespace of it: `default` and `'module.exports'` are the whole `module.exports`, every other
+// name reads it. An app CommonJS file (vitest inlines it) keeps its own `default`, else the whole
+// object is added as `default` in place.
 const __ttEsmMark = Symbol.for('turbo-test.esm');
-// packages' `module.exports` with an own `default` and no `__esModule` (the loader adds them)
+// packages' CommonJS `module.exports` without `__esModule` (the loader adds them)
 const __ttExternalCjs = new WeakSet();
 globalThis.__ttExternalCjs = __ttExternalCjs;
+// the export names Node's cjs-module-lexer finds in one, where they differ from its own names
+const __ttCjsNames = new WeakMap();
+globalThis.__ttMarkExternalCjs = (m, names) => {
+  __ttExternalCjs.add(m);
+  if (names) __ttCjsNames.set(m, names); else __ttCjsNames.delete(m);
+};
 const __ttCjsViews = new WeakMap();
 function __ttCjsView(m) {
   let v = __ttCjsViews.get(m);
@@ -3934,8 +3954,74 @@ function __ttCjsView(m) {
   }
   return v;
 }
+// An ES module's namespace: its exports object without `__esModule` (which CommonJS code
+// requiring it reads). Writes (vi.spyOn) go to the exports object, seen by every importer.
+const __ttEsmViews = new WeakMap();
+function __ttEsmNs(m) {
+  const d = Object.getOwnPropertyDescriptor(m, '__esModule');
+  if (!d || !d.configurable) return m;
+  let v = __ttEsmViews.get(m);
+  if (!v) {
+    v = new Proxy(m, {
+      get: (t, k) => (k === '__esModule' ? undefined : Reflect.get(t, k, t)),
+      has: (t, k) => k !== '__esModule' && k in t,
+      ownKeys: (t) => Reflect.ownKeys(t).filter((k) => k !== '__esModule'),
+      getOwnPropertyDescriptor: (t, k) => (k === '__esModule' ? undefined : Reflect.getOwnPropertyDescriptor(t, k)),
+    });
+    __ttEsmViews.set(m, v);
+  }
+  return v;
+}
+// Node's namespace of a CommonJS module (vitest imports a package through Node): `default` and
+// `'module.exports'` are `module.exports`, then its own enumerable names; any other name reads
+// `module.exports` too (vitest's interop). Writes go to `module.exports`.
+const __ttNodeViews = new WeakMap();
+function __ttNodeNs(m) {
+  let v = __ttNodeViews.get(m);
+  if (!v) {
+    const keys = () => {
+      const ks = new Set(['default', 'module.exports']);
+      for (const k of __ttCjsNames.get(m) || Object.keys(m)) ks.add(k);
+      return [...ks].sort();
+    };
+    const read = (k) => (k === 'default' || k === 'module.exports' ? m : m[k]);
+    v = new Proxy(Object.create(null), {
+      get: (t, k) => read(k),
+      has: (t, k) => k === 'default' || k === 'module.exports' || k in m,
+      ownKeys: () => keys(),
+      getOwnPropertyDescriptor: (t, k) => (typeof k === 'string' && keys().includes(k)
+        ? { value: read(k), writable: true, enumerable: true, configurable: true }
+        : undefined),
+      defineProperty: (t, k, d) => Reflect.defineProperty(m, k, d),
+      set: (t, k, val) => Reflect.set(m, k, val),
+      deleteProperty: (t, k) => Reflect.deleteProperty(m, k),
+    });
+    __ttNodeViews.set(m, v);
+  }
+  return v;
+}
+const __ttIsNs = (m) => Object.prototype.toString.call(m) === '[object Module]';
 globalThis.__ttToESM = (m) => {
-  if (!m || (typeof m !== 'object' && typeof m !== 'function') || __ttStrictMocks.has(m) || m[__ttEsmMark]) return m;
+  if (!m || (typeof m !== 'object' && typeof m !== 'function') || __ttStrictMocks.has(m) || __ttIsNs(m)) return m;
+  if (m[__ttEsmMark]) return __ttEsmNs(m);
+  if (m.__esModule || '__esModule' in m) return ('default' in m || m.default !== undefined) ? m : __ttCjsView(m);
+  if (__ttExternalCjs.has(m)) return __ttNodeNs(m);
+  if ('default' in m) return m;
+  try {
+    Object.defineProperty(m, 'default', { value: m, configurable: true });
+    return m;
+  } catch (e) {
+    return __ttCjsView(m);
+  }
+};
+// `__toESM` in a package's bundle: as Node imports in an ES module that Node runs as one
+// (`node`: a `.mjs` file or a `"type": "module"` package's) — CommonJS is Node's namespace of it
+// (its default the whole `module.exports`); else a bundler's interop, the exports object itself
+// with a `default` (a package's CommonJS with its own `default` and no `__esModule` read through
+// a view, its own `default` staying what CommonJS code reads).
+globalThis.__ttToESMDep = (m, node) => {
+  if (!m || (typeof m !== 'object' && typeof m !== 'function') || __ttStrictMocks.has(m) || __ttIsNs(m) || m[__ttEsmMark]) return m;
+  if (node) return __ttNodeNs(m);
   if (m.__esModule || '__esModule' in m) return ('default' in m || m.default !== undefined) ? m : __ttCjsView(m);
   if ('default' in m) return m.default === m || !__ttExternalCjs.has(m) ? m : __ttCjsView(m);
   try {
@@ -4018,7 +4104,7 @@ function __ttMock(spec, factory, vitest, isDoMock) {
   }
   // vitest passes `importOriginal` (a fn returning the real module, as a Promise) as the
   // factory's first arg — `vi.mock('x', async (importOriginal) => ({...await importOriginal(), y}))`.
-  const importOriginal = () => Promise.resolve(globalThis.__ttImportActual(dir, String(spec)));
+  const importOriginal = () => Promise.resolve(globalThis.__ttToESM(globalThis.__ttImportActual(dir, String(spec))));
   if (factory === undefined) {
     // AUTOMOCK: no factory -> auto-generate a mock from the real module (functions -> vi.fn()).
     // A real module that fails to load is left unmocked: importing it reports its own error.
@@ -4199,7 +4285,7 @@ globalThis.vi = {
     cache[i] = v;
     return v;
   },
-  importActual: (p) => { try { return Promise.resolve(globalThis.__ttImportActual(globalThis.__ttDir || globalThis.__ttEntryDir, String(p))); } catch (e) { return Promise.resolve({}); } },
+  importActual: (p) => { try { return Promise.resolve(globalThis.__ttToESM(globalThis.__ttImportActual(globalThis.__ttDir || globalThis.__ttEntryDir, String(p)))); } catch (e) { return Promise.resolve({}); } },
   importMock: (p) => { try { return Promise.resolve(globalThis.__nativeRequire(globalThis.__ttDir || globalThis.__ttEntryDir, String(p))); } catch (e) { return Promise.resolve({}); } },
   unstubAllEnvs: () => {
     const m = globalThis.__stubbedEnvs;

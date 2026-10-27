@@ -876,3 +876,57 @@ fn lower_registers_a_string_local_by_name() {
     let exports = lower_raw("const a = 1; export { \"a\" as b };", SourceType::mjs());
     assert_eq!(exports, Some(vec!["b=a".to_string()]));
 }
+
+#[test]
+fn cjs_literal_export_names_follow_the_lexer() {
+    let n = |s: &str| cjs_literal_export_names(s);
+    assert_eq!(n("module.exports = { a: 1, Comp: function Comp() {} };"), Some(vec![]));
+    assert_eq!(
+        n("module.exports = { a, 'b': b, c: c, ...d };"),
+        Some(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+    );
+    assert_eq!(
+        n("module.exports = { a, b: require('c'), c: d };"),
+        Some(vec!["a".to_string(), "b".to_string()])
+    );
+    assert_eq!(n("module.exports = {};"), Some(vec![]));
+    // any other export form: the object's own names stand
+    assert_eq!(n("module.exports = fn;"), None);
+    assert_eq!(n("module.exports = { a };\nexports.b = 1;"), None);
+    assert_eq!(n("module.exports = { a };\nmodule.exports.b = 1;"), None);
+    assert_eq!(n("module.exports == { a };"), None);
+    assert_eq!(n("exports.a = 1;"), None);
+}
+
+#[test]
+fn graph_interop_rewrite_requests_of_commonjs() {
+    let cjs = |s: &str| s.starts_with("cjs");
+    let r = |s: &str, node: bool| graph_interop_rewrite(s, &cjs, node);
+    assert_eq!(
+        r("import * as ns from 'cjs';", false).unwrap(),
+        "import ns from \"cjs?__tt_ns\";"
+    );
+    assert_eq!(
+        r("import D, * as ns from 'cjs';", false).unwrap(),
+        "import D from \"cjs\"; import ns from \"cjs?__tt_ns\";"
+    );
+    assert_eq!(
+        r("export * from 'cjs';\nexport * as x from 'cjs';", false).unwrap(),
+        "export * from \"cjs?__tt_star\";\nexport { default as x } from \"cjs?__tt_ns\";"
+    );
+    // line breaks inside a replaced declaration are kept
+    assert_eq!(
+        r("import * as ns\n  from 'cjs';\nx;", false).unwrap(),
+        "import ns from \"cjs?__tt_ns\";\n\nx;"
+    );
+    // ES modules, queried specifiers and other imports stay
+    assert_eq!(r("import * as ns from 'esm';", false), None);
+    assert_eq!(r("import * as ns from 'cjs?raw';", false), None);
+    assert_eq!(r("import D from 'cjs';", false), None);
+    // as Node: every request of CommonJS
+    assert_eq!(
+        r("import D from 'cjs';\nexport { default as E } from 'cjs2';\nexport * from 'cjs';\nimport 'esm';", true).unwrap(),
+        "import D from \"cjs?__tt_node\";\nexport { default as E } from \"cjs2?__tt_node\";\nexport * from \"cjs?__tt_node\";\nimport 'esm';"
+    );
+    assert_eq!(r("not js (", true), None);
+}
