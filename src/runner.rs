@@ -2010,6 +2010,7 @@ fn setup_dom(scope: &mut v8::PinScope, _entry: &Path) {
 /// `Object`) instead of naming an export that doesn't exist.
 /// Returns None if the project ships no `typescript` (caller falls back to oxc).
 fn tsc_transform_esm(file: &Path, root: &Path) -> Option<String> {
+    let src = read_app_source(file)?;
     let ts_dir = root.join("node_modules/typescript");
     if !ts_dir.join("package.json").is_file() {
         return None;
@@ -2020,7 +2021,7 @@ fn tsc_transform_esm(file: &Path, root: &Path) -> Option<String> {
 const ts = require(process.argv[1]);
 const fs = require('fs');
 const file = process.argv[2];
-const src = fs.readFileSync(file, 'utf8');
+const src = fs.readFileSync(0, 'utf8'); // the module's source (import.meta.glob expanded)
 const isTsx = file.endsWith('.tsx');
 // isolatedModules + emitDecoratorMetadata: a value import of a name used only as a type (an
 // interface) is kept for its `design:type` reference and then fails ESM linking (no such export).
@@ -2119,7 +2120,7 @@ const out = ts.transpileModule(input, {
 });
 process.stdout.write(out.outputText);
 "#;
-    let out = std::process::Command::new("node")
+    let mut child = std::process::Command::new("node")
         .current_dir(root)
         .args([
             "-e",
@@ -2127,9 +2128,16 @@ process.stdout.write(out.outputText);
             &ts_dir.to_string_lossy(),
             &file.to_string_lossy(),
         ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()
+        .spawn()
         .ok()?;
+    {
+        use std::io::Write;
+        child.stdin.take()?.write_all(src.as_bytes()).ok()?;
+    }
+    let out = child.wait_with_output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -4417,15 +4425,24 @@ fn factory_bindings(entry: &Path, src: &str, mr: bool) -> Vec<crate::mock_scope:
 /// `src` of the file `abs` as it loads: the test file gets the binder statement that hands its
 /// factories' bindings to the runtime, on a line of its own at the end (so no position moves).
 /// An app module's source as vite's transform sees it: `import.meta.glob` calls expanded against
-/// the file system (src/import_glob.rs, turbo-test#130), the vitest root (the working directory)
-/// the base of `/` patterns. node_modules are read as they are (vitest externalizes them).
+/// the file system (src/import_glob.rs, turbo-test#130, #145), the vitest root (the working
+/// directory) the base of `/` patterns, the config's `resolve.alias` (TURBO_ALIAS) its aliases. node_modules are read as they are (vitest externalizes them).
 fn read_app_source(file: &Path) -> Option<String> {
     let src = std::fs::read_to_string(file).ok()?;
     if file.components().any(|c| c.as_os_str() == "node_modules") {
         return Some(src);
     }
     let root = std::env::current_dir().ok()?;
-    Some(crate::import_glob::expand(file, &src, &root).unwrap_or(src))
+    let aliases: Vec<(String, String)> = std::env::var("TURBO_ALIAS")
+        .map(|raw| {
+            raw.split('\u{1e}')
+                .filter_map(|r| r.split_once('\u{1f}'))
+                .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(crate::import_glob::expand(file, &src, &root, &aliases).unwrap_or(src))
 }
 
 fn with_binder(abs: &Path, src: String, mr: bool) -> String {

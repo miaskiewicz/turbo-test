@@ -46,6 +46,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `export const` / `let` / `function` / `class`, renamed locals, `export default` (expression or
   anonymous declaration) and re-exports (forwarded to the source module); `mockRestore` puts the
   original back.
+- `import.meta.glob` options and order (turbo-test#145): `base`, `query` (string or object), the
+  deprecated `as` and `resolve.alias` patterns threw vitest's "statically replaced" error instead
+  of expanding, a module taking the decorator-metadata (tsc) transform was not expanded at all,
+  and eager glob imports ran after the module's own imports. They now expand as vite does, the
+  eager imports first (on the module's first line, so line numbers hold).
 - `import.meta.resolve` / `main` / `glob` / `vitest` (turbo-test#130): every module's
   `import.meta` was `url, filename, dirname, env` only. It now has vitest 4.1.12's members in its
   order: `resolve` (Node's, from the module: relative paths and URLs against it, builtins as

@@ -502,7 +502,6 @@ it('a static method of an exported class', () => {
 /// these, ran eager imports last, and did not expand on the tsc path. vitest on the same project:
 /// 5 passed.
 #[test]
-#[ignore = "turbo-test#145: fails until the fix"]
 fn import_meta_glob_options_aliases_order_and_the_tsc_path() {
     let files: [(&str, &str); 8] = [
         (
