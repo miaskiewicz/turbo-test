@@ -5,7 +5,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
-### Added — `expect.poll`, `expect.addSnapshotSerializer`, vitest's `this.utils` (K5, turbo-test#161–#163)
+### Added — `expect.poll`, snapshot serializers, vitest's `this.utils` (K5, turbo-test#161–#163, #167)
 - `expect.poll(fn, { interval = 50, timeout = 1000, message })` (turbo-test#161) was undefined.
   As in vitest 4.1.12, each matcher re-runs `fn` until it passes or the timeout ran out, then
   throws the last error with the cause `Matcher did not succeed in time.` at the matcher's call
@@ -18,7 +18,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   pretty-format took no plugins. A serializer (`{ test, serialize }` or the older
   `{ test, print }`) now applies to every later snapshot, the newest first, with pretty-format's
   config / indentation / depth / refs / printer, so snapshots of custom types match the ones
-  vitest wrote. The `snapshotSerializers` config key is still not read (turbo-test#167).
+  vitest wrote. The config's `snapshotSerializers` (turbo-test#167) were not read either: each
+  path (against the config's directory) is now loaded before the file runs and its default
+  export added, with vitest's errors for a module without a default object or one that cannot
+  print (they fail the file; vitest fails the whole run).
 - A custom matcher's `this.utils` (turbo-test#163) was JSON-based (`printReceived({ a: [1] })`
   printed `{"a":[1]}`, `matcherHint('.toK')` printed `.toK`), so matchers that format their own
   messages (@testing-library/jest-dom and the like) printed differently from vitest. It is now
