@@ -160,7 +160,9 @@ vi.mock('./e.mjs', () => ({ default: 'e-mock', n: 1 }));
 vi.mock('./d.cjs', () => { throw new Error('factory boom'); });
 vi.mock('./not-there.cjs', () => ({ v: 1 }));
 test('mocks', () => {
-  expect(a.v).toBe('a-mock');
+  // a vi.mock factory without `default`: reading the default import throws (vitest 4.1.12,
+  // turbo-test#137); jest.mock's factory is its own default
+  expect(() => a.v).toThrow('[vitest] No "default" export is defined on the "./a.cjs" mock.');
   expect(b.v).toBe('b-mock');
   expect(e).toBe('e-mock');
   expect(n).toBe(1);

@@ -63,16 +63,12 @@ const KNOWN: &[(&str, &str, &str, &str)] = &[
         "{default=fn:LessonPage,readerSiteName=fn:readerSiteName}!esm",
         "turbo-test#133",
     ),
-    (
-        "*",
-        "mock|automock default",
-        "{Comp=fn:fn,a=number:1}",
-        "turbo-test#136",
-    ),
+    // an automock's namespace has only Node's keys (`default`, `module.exports`, the names
+    // cjs-module-lexer finds): needs #133's namespace
     (
         "*",
         "mock|automock named",
-        "fn:fn",
+        "fn:Comp",
         "turbo-test#136",
     ),
     (
@@ -82,28 +78,10 @@ const KNOWN: &[(&str, &str, &str, &str)] = &[
         "turbo-test#133",
     ),
     (
-        "graph",
-        "mock|factory without default",
-        "{named=string:only}",
-        "turbo-test#137",
-    ),
-    (
         "*",
         "mock|mexp-fn",
         "fn:MexpFn",
         "turbo-test#133",
-    ),
-    (
-        "mr",
-        "mock|tsc-out",
-        "{default=fn:TscComp,named=string:n,viaDefault=fn:DefFlag,viaPlain={default=fn:Mocked},viaStar={default=obj}}!esm",
-        "turbo-test#135",
-    ),
-    (
-        "graph",
-        "mock|tsc-out",
-        "{default=fn:TscComp,named=string:n,viaDefault={default=fn:DefFlag,named=string:mocked},viaPlain={default=fn:Mocked},viaStar={default=obj}}!esm",
-        "turbo-test#135",
     ),
     (
         "graph",

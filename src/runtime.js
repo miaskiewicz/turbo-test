@@ -308,7 +308,7 @@ globalThis.__resolvePendingMocks = async () => {
   const list = globalThis.__pendingMocks || [];
   for (const m of list) {
     if (m.exports && typeof m.exports.then === 'function') {
-      try { m.exports = __ttStrictMock(await m.exports, m.key, m.spec); }
+      try { m.exports = __ttStrictMock(await m.exports, m.key, m.spec, m.vitest !== false); }
       catch (e) { m.exports = __ttFactoryErrorMock(e, m.vitest !== false); }
     }
   }
@@ -3976,6 +3976,8 @@ function __automock(mod, depth) {
   depth = depth || 0;
   if (typeof mod === 'function') {
     const m = __trackSpy(makeSpy());
+    // vitest's automocker keeps the function's own name (`Comp.name`, not the spy's) (turbo-test#136)
+    try { Object.defineProperty(m, 'name', { value: mod.name, configurable: true }); } catch (e) {}
     if (depth < 3) {
       // own statics (class static methods are non-enumerable), not the function's built-ins
       for (const k of Object.getOwnPropertyNames(mod)) {
@@ -4034,9 +4036,10 @@ const __ttMockErrorSpecs = new Set();
 // read undefined instead (jest semantics); checked on access, because the mock prepass registers
 // every factory via vi.mock and an isolate reuse keeps that first exports object.
 const __ttLenientMockKeys = new Set();
-// The strict mock proxies: their `default` is the factory's own (`__ttToESM` adds none).
-const __ttStrictMocks = new WeakSet();
-function __ttStrictMock(mod, key, spec) {
+// The strict mock proxies (to their key and whether vi.mock made them): their `default` is the factory's own (`__ttToESM` adds
+// none).
+const __ttStrictMocks = new WeakMap();
+function __ttStrictMock(mod, key, spec, vitest) {
   if (mod === null || typeof mod !== 'object' || __ttMockErrors.has(mod)) return mod;
   const proxy = new Proxy(mod, {
     get: (t, k, r) => {
@@ -4056,9 +4059,36 @@ If you need to partially mock a module, you can use "importOriginal" helper insi
       throw e;
     },
   });
-  __ttStrictMocks.add(proxy);
+  __ttStrictMocks.set(proxy, { key, vitest: vitest !== false });
   return proxy;
 }
+// The ES-graph loader's default export of a mock without its own `default` (synth_eval). A
+// synthetic module's export is a value, so it cannot throw when read as vitest's does; this
+// stand-in throws vitest's error on its first use instead — a property read, a call, its keys —
+// by reading the strict mock's `default` (turbo-test#137). A jest.mock one (lenient) is its own
+// default.
+function __ttMockDefault(m) {
+  const s = __ttStrictMocks.get(m);
+  if (!s || !s.vitest || __ttLenientMockKeys.has(s.key)) return m;
+  const d = () => m.default;
+  // a bound function: callable, constructible, no own non-configurable `prototype`
+  return new Proxy(function () {}.bind(null), {
+    get: (t, k) => Reflect.get(d(), k),
+    has: (t, k) => k in d(),
+    ownKeys: () => Reflect.ownKeys(d()),
+    getOwnPropertyDescriptor: (t, k) => {
+      const desc = Reflect.getOwnPropertyDescriptor(d(), k);
+      return desc && { ...desc, configurable: true };
+    },
+    getPrototypeOf: () => Reflect.getPrototypeOf(d()),
+    apply: (t, self, args) => Reflect.apply(d(), self, args),
+    construct: (t, args) => Reflect.construct(d(), args),
+    set: (t, k, v) => Reflect.set(d(), k, v),
+    defineProperty: (t, k, desc) => Reflect.defineProperty(d(), k, desc),
+    deleteProperty: (t, k) => Reflect.deleteProperty(d(), k),
+  });
+}
+globalThis.__ttMockDefault = __ttMockDefault;
 // The ES-module view of a required module: what `import X from` / `import * as ns from` read
 // once lowered to `__toESM(require(...))` (turbo-test#122), vitest's `interopModule` for a
 // CommonJS module. turbo-test's own ES modules (marked by `__toCommonJS`) and mocks are
@@ -4144,7 +4174,7 @@ function __ttAwaitDoMock(dir, spec, exports, key, vitest) {
   const k = dir && globalThis.__ttResolveSpec(dir, String(spec));
   if (!k) return false;
   const done = Promise.resolve(exports).then(
-    (v) => __ttStrictMock(v, key, String(spec)),
+    (v) => __ttStrictMock(v, key, String(spec), vitest),
     (e) => __ttFactoryErrorMock(e, vitest),
   ).then((v) => {
     if (__ttDoMockWaits.get(k) !== done) return;
@@ -4199,7 +4229,7 @@ function __ttMock(spec, factory, vitest, isDoMock) {
     (globalThis.__pendingMocks || (globalThis.__pendingMocks = [])).push({ spec: String(spec), exports, vitest, key });
     return;
   }
-  if (factory !== undefined) exports = __ttStrictMock(exports, key, String(spec));
+  if (factory !== undefined) exports = __ttStrictMock(exports, key, String(spec), vitest);
   if (globalThis.__ttRegisterMock && dir && __ttRegisterMockNow(dir, spec, exports, key)) return;
   (globalThis.__pendingMocks || (globalThis.__pendingMocks = [])).push({ spec: String(spec), exports, vitest, key });
 }
