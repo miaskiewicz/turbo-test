@@ -303,6 +303,16 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   Error expected was compared by message only and an object by `message` substring, so
   `toThrow(new Error('abc'))` passed for a `TypeError('abc')` and `toThrow({ message: 'ab' })`
   for `Error('abc')`.
+- `URLSearchParams` follows Node 26 across its surface (turbo-test#117): names and values are
+  converted with `String()` (a Symbol throws TypeError; lone surrogates become U+FFFD) in every
+  method, so `append(1, 'x')` is found by `get('1')` and keys are strings (they stayed numbers
+  and `get('1')` was `null`); the constructor takes a record (own enumerable keys), any iterable
+  of `[name, value]` pairs (a pair that is not an iterable of exactly two throws TypeError; it
+  was only arrays) or a primitive as a string (`null` is `null=`; was ignored); string input is
+  percent-decoded as UTF-8 with U+FFFD for invalid bytes (`%E2%82` stayed raw); `has` / `delete`
+  honour the value argument; missing arguments throw TypeError; `size` exists; `forEach` and the
+  `keys` / `values` / `entries` iterators are live (`[object URLSearchParams Iterator]`);
+  `toString()` escapes `!'()~` as form-urlencoding does.
 - `URLSearchParams.set` replaces the first pair of the name in place and removes the others, as
   Node's (turbo-test#116); it moved the pair to the end (`a=1&b=2&a=3` set `a` gave `b=2&a=9`,
   Node `a=9&b=2`), in `toString()`, iteration and a URL's `href`.

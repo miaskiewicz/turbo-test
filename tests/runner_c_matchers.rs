@@ -512,7 +512,6 @@ k=v"#;
 }
 
 #[test]
-#[ignore = "turbo-test#117: fails until the fix"]
 fn url_search_params_surface_is_nodes() {
     // turbo-test#117 and the rest of the URLSearchParams surface, table-driven: names and
     // values go through USVString conversion (String(), lone surrogates -> U+FFFD) in every
@@ -618,6 +617,7 @@ test('URLSearchParams', () => {
   t('iter shapes', () => { const p = new URLSearchParams('a=1&b=2'); return [[...p.entries()], [...p.keys()], [...p.values()], [...p], p[Symbol.iterator] === p.entries, p.entries().next(), new URLSearchParams().entries().next()] })
   t('iter tags', () => { const it = new URLSearchParams('a=1').entries(); return [Object.prototype.toString.call(it), typeof it[Symbol.iterator], it[Symbol.iterator]() === it, Object.prototype.toString.call(new URLSearchParams())] })
   t('iter done stays done', () => { const p = new URLSearchParams('a=1'); const it = p.keys(); it.next(); const d = it.next(); p.append('b', '2'); return [d, it.next()] })
+  t('iter result keys', () => { const it = new URLSearchParams('a=1').keys(); return [Reflect.ownKeys(it.next()), Reflect.ownKeys(it.next()), Object.getPrototypeOf(Object.getPrototypeOf(it)) === Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))] })
   t('entries fresh arrays', () => { const p = new URLSearchParams('a=1'); const e = p.entries().next().value; e[0] = 'z'; return L(p) })
   // toString encoding
   t('enc space plus', () => new URLSearchParams([['a b', 'c d'], ['+', '%']]).toString())
@@ -722,6 +722,7 @@ test('URLSearchParams', () => {
 ["iter shapes",[[["a","1"],["b","2"]],["a","b"],["1","2"],[["a","1"],["b","2"]],true,{"done":false,"value":["a","1"]},{"done":true}]]
 ["iter tags",["[object URLSearchParams Iterator]","function",true,"[object URLSearchParams]"]]
 ["iter done stays done",[{"done":true},{"done":false,"value":"b"}]]
+["iter result keys",[["done","value"],["done","value"],true]]
 ["entries fresh arrays",[["a","1"]]]
 ["enc space plus","a+b=c+d&%2B=%25"]
 ["enc ascii","%00%01%02%03%04%05%06%07%08%09%0A%0B%0C%0D%0E%0F%10%11%12%13%14%15%16%17%18%19%1A%1B%1C%1D%1E%1F+%21%22%23%24%25%26%27%28%29*%2B%2C-.%2F0123456789%3A%3B%3C%3D%3E%3F%40ABCDEFGHIJKLMNOPQRSTUVWXYZ%5B%5C%5D%5E_%60abcdefghijklmnopqrstuvwxyz%7B%7C%7D%7E%7F=v"]

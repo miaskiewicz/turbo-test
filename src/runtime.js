@@ -389,52 +389,145 @@ if (typeof globalThis.TextDecoder === 'undefined') {
 
 // ---- Web platform globals (bare V8 lacks these) ----
 if (typeof globalThis.URLSearchParams === 'undefined') {
-  globalThis.URLSearchParams = class URLSearchParams {
-    constructor(init) {
-      // list of [key, value] pairs — supports multiple values per key (append); not enumerable, as
-      // a real URLSearchParams has no own keys (pretty-format prints `URLSearchParams {}`)
-      Object.defineProperty(this, '_', { value: [], writable: true, enumerable: false, configurable: true });
-      if (typeof init === 'string') {
-        // application/x-www-form-urlencoded: '+' decodes to a space (decodeURIComponent alone leaves
-        // it). Matches Node/jsdom so `new URLSearchParams('a=John+Doe').get('a') === 'John Doe'`.
-        const dec = (s) => { try { return decodeURIComponent(s.replace(/\+/g, ' ')); } catch { return s; } };
-        init.replace(/^\?/, '').split('&').filter(Boolean).forEach((p) => {
-          const i = p.indexOf('='); const k = i < 0 ? p : p.slice(0, i); const v = i < 0 ? '' : p.slice(i + 1);
-          this._.push([dec(k), dec(v)]);
-        });
-      } else if (Array.isArray(init)) {
-        init.forEach(([k, v]) => this._.push([String(k), String(v)]));
-      } else if (init && typeof init.forEach === 'function') {
-        init.forEach((v, k) => this._.push([String(k), String(v)]));
-      } else if (init && typeof init === 'object') {
-        for (const k of Object.keys(init)) this._.push([k, String(init[k])]);
+  // WHATWG URLSearchParams, checked row by row against Node 26 (turbo-test#117). Names and values
+  // are USVStrings: String() (a Symbol throws TypeError), lone surrogates -> U+FFFD.
+  const usv = (v) => {
+    if (typeof v === 'symbol') throw new TypeError('Cannot convert a Symbol value to a string');
+    return String(v).toWellFormed();
+  };
+  const need = (n, got, what) => { if (got < n) throw new TypeError(`The ${what} must be specified`); };
+  // UTF-8 decode with U+FFFD for each maximal invalid subpart (WHATWG "UTF-8 decode without BOM")
+  const utf8 = (b) => {
+    let out = '';
+    for (let i = 0; i < b.length;) {
+      const c = b[i];
+      if (c < 0x80) { out += String.fromCharCode(c); i++; continue; }
+      let n; let cp; let lo = 0x80; let hi = 0xbf;
+      if (c >= 0xc2 && c <= 0xdf) { n = 1; cp = c & 0x1f; }
+      else if (c >= 0xe0 && c <= 0xef) { n = 2; cp = c & 0xf; if (c === 0xe0) lo = 0xa0; if (c === 0xed) hi = 0x9f; }
+      else if (c >= 0xf0 && c <= 0xf4) { n = 3; cp = c & 0x7; if (c === 0xf0) lo = 0x90; if (c === 0xf4) hi = 0x8f; }
+      else { out += '�'; i++; continue; }
+      let j = i + 1;
+      for (; j <= i + n; j++) {
+        if (j >= b.length || b[j] < lo || b[j] > hi) break;
+        cp = (cp << 6) | (b[j] & 0x3f); lo = 0x80; hi = 0xbf;
       }
+      out += j > i + n ? String.fromCodePoint(cp) : '�';
+      i = j;
     }
-    get(k) { const e = this._.find((p) => p[0] === k); return e ? e[1] : null; }
-    getAll(k) { return this._.filter((p) => p[0] === k).map((p) => p[1]); }
+    return out;
+  };
+  // percent-decode (a `%` not followed by two hex digits stays as written), then UTF-8 decode.
+  // Raw characters are whole UTF-8 sequences, so each run of %XX bytes decodes on its own.
+  const pctDecode = (s) => s.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    const b = [];
+    for (let i = 0; i < run.length; i += 3) b.push(parseInt(run.slice(i + 1, i + 3), 16));
+    return utf8(b);
+  });
+  // application/x-www-form-urlencoded parser: pairs split on '&' (empty ones dropped), name and
+  // value at the first '=', '+' is a space
+  const parse = (s) => s.split('&').filter(Boolean).map((p) => {
+    const i = p.indexOf('=');
+    const dec = (x) => pctDecode(x.replace(/\+/g, ' '));
+    return [dec(i < 0 ? p : p.slice(0, i)), dec(i < 0 ? '' : p.slice(i + 1))];
+  });
+  // form-urlencoded serializer: only ASCII alphanumerics and *-._ stay; space is '+'; everything
+  // else is its UTF-8 bytes as %XX (encodeURIComponent also leaves !'()~, so those are escaped)
+  const enc = (s) => encodeURIComponent(s)
+    .replace(/[!'()~]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase()).replace(/%20/g, '+');
+  const IterProto = Object.create(Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())));
+  // live, index-based iterator over the list (as Node's): pairs added later are still visited
+  Object.defineProperties(IterProto, {
+    next: {
+      value: function next() {
+        const list = this._p._;
+        if (this._i >= list.length) return { done: true, value: undefined };
+        const [k, v] = list[this._i++];
+        return { done: false, value: this._k === 'keys' ? k : this._k === 'values' ? v : [k, v] };
+      },
+      writable: true, configurable: true,
+    },
+    [Symbol.toStringTag]: { value: 'URLSearchParams Iterator', configurable: true },
+  });
+  const iter = (p, k) => Object.defineProperties(Object.create(IterProto), {
+    _p: { value: p }, _k: { value: k }, _i: { value: 0, writable: true },
+  });
+  globalThis.URLSearchParams = class URLSearchParams {
+    constructor(init = undefined) {
+      // list of [name, value] pairs; not enumerable, as a real URLSearchParams has no own keys
+      // (pretty-format prints `URLSearchParams {}`)
+      Object.defineProperty(this, '_', { value: [], writable: true, enumerable: false, configurable: true });
+      if (init === undefined) return;
+      if ((typeof init === 'object' && init !== null) || typeof init === 'function') {
+        const m = init[Symbol.iterator];
+        if (m !== undefined && m !== null) {
+          // sequence<sequence<USVString>>: every pair is an iterable of exactly two
+          if (typeof m !== 'function') throw new TypeError('Query pairs must be iterable');
+          for (const pair of { [Symbol.iterator]: () => m.call(init) }) {
+            if ((typeof pair !== 'object' || pair === null) && typeof pair !== 'function') {
+              throw new TypeError('Each query pair must be an iterable [name, value] tuple');
+            }
+            const kv = [...pair];
+            if (kv.length !== 2) throw new TypeError('Each query pair must be an iterable [name, value] tuple');
+            this._.push([usv(kv[0]), usv(kv[1])]);
+          }
+        } else {
+          // record<USVString, USVString>: own enumerable keys; a key repeated after conversion
+          // keeps its first position and takes the last value
+          const rec = new Map();
+          for (const key of Reflect.ownKeys(init)) {
+            const d = Reflect.getOwnPropertyDescriptor(init, key);
+            if (d && d.enumerable) rec.set(usv(key), usv(init[key]));
+          }
+          for (const kv of rec) this._.push(kv);
+        }
+        return;
+      }
+      const s = usv(init);
+      this._ = parse(s.startsWith('?') ? s.slice(1) : s);
+    }
+    get size() { return this._.length; }
+    get(name) { need(1, arguments.length, '"name" argument'); const n = usv(name); const e = this._.find((p) => p[0] === n); return e ? e[1] : null; }
+    getAll(name) { need(1, arguments.length, '"name" argument'); const n = usv(name); return this._.filter((p) => p[0] === n).map((p) => p[1]); }
+    has(name, value = undefined) {
+      need(1, arguments.length, '"name" argument');
+      const n = usv(name);
+      if (value === undefined) return this._.some((p) => p[0] === n);
+      const v = usv(value);
+      return this._.some((p) => p[0] === n && p[1] === v);
+    }
     // the first pair of the name takes the value in place and the others go; a new name is
     // appended (WHATWG; turbo-test#116)
-    set(k, v) {
-      const i = this._.findIndex((p) => p[0] === k);
-      if (i < 0) this._.push([k, String(v)]);
-      else { this._[i][1] = String(v); this._ = this._.filter((p, j) => j <= i || p[0] !== k); }
+    set(name, value) {
+      need(2, arguments.length, '"name" and "value" arguments');
+      const n = usv(name); const v = usv(value);
+      const i = this._.findIndex((p) => p[0] === n);
+      if (i < 0) this._.push([n, v]);
+      else { this._[i][1] = v; this._ = this._.filter((p, j) => j <= i || p[0] !== n); }
       this._update();
     }
-    append(k, v) { this._.push([k, String(v)]); this._update(); }
-    has(k) { return this._.some((p) => p[0] === k); }
-    delete(k) { this._ = this._.filter((p) => p[0] !== k); this._update(); }
-    forEach(f) { this._.slice().forEach(([k, v]) => f(v, k, this)); }
-    keys() { return this._.map((p) => p[0])[Symbol.iterator](); }
-    values() { return this._.map((p) => p[1])[Symbol.iterator](); }
-    entries() { return this._.map((p) => [p[0], p[1]])[Symbol.iterator](); }
+    append(name, value) { need(2, arguments.length, '"name" and "value" arguments'); this._.push([usv(name), usv(value)]); this._update(); }
+    delete(name, value = undefined) {
+      need(1, arguments.length, '"name" argument');
+      const n = usv(name);
+      if (value === undefined) this._ = this._.filter((p) => p[0] !== n);
+      else { const v = usv(value); this._ = this._.filter((p) => p[0] !== n || p[1] !== v); }
+      this._update();
+    }
+    // live: pairs appended during the walk are visited, a deleted one shifts the rest (Node)
+    forEach(callback, thisArg = undefined) {
+      if (typeof callback !== 'function') throw new TypeError('The "callback" argument must be of type function');
+      for (let i = 0; i < this._.length; i++) { const [k, v] = this._[i]; callback.call(thisArg, v, k, this); }
+    }
+    keys() { return iter(this, 'keys'); }
+    values() { return iter(this, 'values'); }
+    entries() { return iter(this, 'entries'); }
+    // stable, by UTF-16 code units (Array#sort is stable and `<` compares code units)
     sort() { this._.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); this._update(); }
     // a URL's searchParams writes its serialization back as the URL's query (WHATWG update steps:
     // an empty list leaves no query)
     _update() { if (this._url) { const q = this.toString(); this._url._query = q === '' ? null : q; } }
-    // form-urlencoded serialization: encode, then render space as '+' (Node/jsdom do; turbo-test
-    // previously emitted %20, diverging on `name=John+Doe`).
-    toString() { const enc = (s) => encodeURIComponent(s).replace(/%20/g, '+'); return this._.map(([k, v]) => `${enc(k)}=${enc(v)}`).join('&'); }
-    [Symbol.iterator]() { return this.entries(); }
+    toString() { return this._.map(([k, v]) => `${enc(k)}=${enc(v)}`).join('&'); }
     get [Symbol.toStringTag]() { return 'URLSearchParams'; }
     // Node's util.inspect rendering (vitest's loupe hands it the value): `URLSearchParams { 'a' => '1' }`,
     // one pair per line past `breakLength`.
@@ -449,6 +542,9 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
       return out.length ? `${name} { ${out.join(', ')} }` : `${name} {}`;
     }
   };
+  Object.defineProperty(globalThis.URLSearchParams.prototype, Symbol.iterator, {
+    value: globalThis.URLSearchParams.prototype.entries, writable: true, configurable: true,
+  });
 }
 if (typeof globalThis.URL === 'undefined') {
   globalThis.URL = class URL {
