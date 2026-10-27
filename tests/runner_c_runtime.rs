@@ -694,3 +694,34 @@ it('pathToFileURL', () => {
     );
     assert_passes(&turbo_test(&p.dir, &[], &[]), 2);
 }
+
+#[test]
+#[ignore = "turbo-test#192: fails until the fix"]
+fn an_imported_markdown_file_is_parsed_as_javascript() {
+    // `.md` is no vite asset type: vite parses it as JavaScript, so importing one fails the file
+    // with rolldown's parse failure (vitest 4.1.12's message for this project), on both loaders
+    for esbuild in [false, true] {
+        let p = Project::new(if esbuild { "rc-md-mr" } else { "rc-md-graph" });
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", r#"{"name":"rc-md","type":"module"}"#);
+        p.file("notes.md", "# Title\n\nSome *text*.\n");
+        p.file(
+            "a.test.js",
+            "import { test } from 'vitest';\nimport notes from './notes.md';\ntest('a', () => { notes; });\n",
+        );
+        let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+        let report = common::json_report(&r);
+        let file = &report["testResults"][0];
+        assert_eq!(common::file_status(file), "error", "esbuild={esbuild}\n{}", r.all());
+        if !esbuild {
+            assert_eq!(
+                file["message"],
+                "Parse failure: Parse failed with 1 error:\nInvalid Character ` `\n1: # Title\n    ^\n2: \n3: Some *text*.\nAt file: /notes.md:1:1",
+                "{}",
+                r.all()
+            );
+        }
+    }
+}
