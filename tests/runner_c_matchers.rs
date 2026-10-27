@@ -420,7 +420,6 @@ test('userinfo', () => {
 }
 
 #[test]
-#[ignore = "turbo-test#115: fails until the fix"]
 fn url_query_is_kept_as_parsed_like_nodes() {
     // turbo-test#115: the URL global re-serialized its query through URLSearchParams
     // (`?q` -> `?q=`, `%20` -> `+`, empty pairs dropped). WHATWG keeps the parsed query

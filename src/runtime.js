@@ -412,15 +412,18 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
     }
     get(k) { const e = this._.find((p) => p[0] === k); return e ? e[1] : null; }
     getAll(k) { return this._.filter((p) => p[0] === k).map((p) => p[1]); }
-    set(k, v) { this._ = this._.filter((p) => p[0] !== k); this._.push([k, String(v)]); }
-    append(k, v) { this._.push([k, String(v)]); }
+    set(k, v) { this._ = this._.filter((p) => p[0] !== k); this._.push([k, String(v)]); this._update(); }
+    append(k, v) { this._.push([k, String(v)]); this._update(); }
     has(k) { return this._.some((p) => p[0] === k); }
-    delete(k) { this._ = this._.filter((p) => p[0] !== k); }
+    delete(k) { this._ = this._.filter((p) => p[0] !== k); this._update(); }
     forEach(f) { this._.slice().forEach(([k, v]) => f(v, k, this)); }
     keys() { return this._.map((p) => p[0])[Symbol.iterator](); }
     values() { return this._.map((p) => p[1])[Symbol.iterator](); }
     entries() { return this._.map((p) => [p[0], p[1]])[Symbol.iterator](); }
-    sort() { this._.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); }
+    sort() { this._.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); this._update(); }
+    // a URL's searchParams writes its serialization back as the URL's query (WHATWG update steps:
+    // an empty list leaves no query)
+    _update() { if (this._url) { const q = this.toString(); this._url._query = q === '' ? null : q; } }
     // form-urlencoded serialization: encode, then render space as '+' (Node/jsdom do; turbo-test
     // previously emitted %20, diverging on `name=John+Doe`).
     toString() { const enc = (s) => encodeURIComponent(s).replace(/%20/g, '+'); return this._.map(([k, v]) => `${enc(k)}=${enc(v)}`).join('&'); }
@@ -491,10 +494,10 @@ if (typeof globalThis.URL === 'undefined') {
         const am = /^(\?[^#]*)?(#.*)?$/.exec(after) || [];
         searchStr = am[1] || ''; this.hash = am[2] || ''; this.origin = 'null';
       }
-      // searchParams is the SOURCE OF TRUTH for the query; `search`/`href`/`toString` derive from it
-      // so post-construction `searchParams.set()/append()` mutations are reflected (real URL semantics
-      // — previously href was frozen at construction and dropped them).
-      this._sp = new globalThis.URLSearchParams(searchStr);
+      // the query as parsed, percent-encoded with the query set (null: none); searchParams is
+      // parsed from it and writes back to it when changed (turbo-test#115)
+      this._query = searchStr ? URL._encode(searchStr.slice(1), URL._querySet(this.protocol)) : null;
+      this._sp = URL._params(this._query || '', this);
       // the parts live in non-enumerable slots: a real URL has no own enumerable keys
       for (const k of Object.keys(this)) Object.defineProperty(this, k, { enumerable: false });
     }
@@ -519,13 +522,26 @@ if (typeof globalThis.URL === 'undefined') {
       return out;
     }
     get searchParams() { return this._sp; }
-    get search() { const s = this._sp.toString(); return s ? '?' + s : ''; }
-    set search(v) { this._sp = new globalThis.URLSearchParams(String(v).replace(/^\?/, '')); }
+    get search() { return this._query ? '?' + this._query : ''; }
+    set search(v) {
+      v = String(v);
+      const input = v.startsWith('?') ? v.slice(1) : v;
+      this._query = v === '' ? null : URL._encode(input, URL._querySet(this.protocol));
+      this._sp._ = v === '' ? [] : new globalThis.URLSearchParams(input)._;
+    }
+    // a searchParams linked to its URL (the same object for the URL's lifetime)
+    static _params(query, url) {
+      const sp = new globalThis.URLSearchParams(query);
+      Object.defineProperty(sp, '_url', { value: url, writable: true, enumerable: false, configurable: true });
+      return sp;
+    }
+    // WHATWG's query percent-encode set; a special scheme's also encodes '
+    static _querySet(protocol) { return /^(https?|wss?|ftp|file):$/i.test(protocol) ? '\x7f "#<>\'' : '\x7f "#<>'; }
     get href() {
       const auth = this._hierarchical ? this.protocol + '//' + this._userinfo + this.host : this.protocol;
-      return auth + this._path + this.search + this._hash;
+      return auth + this._path + (this._query === null ? '' : '?' + this._query) + this._hash;
     }
-    set href(v) { const u = new globalThis.URL(v); this.protocol = u.protocol; this.username = u.username; this.password = u.password; this.host = u.host; this.hostname = u.hostname; this.port = u.port; this._path = u._path; this._hash = u._hash; this.origin = u.origin; this._hierarchical = u._hierarchical; this._sp = u._sp; }
+    set href(v) { const u = new globalThis.URL(v); this.protocol = u.protocol; this.username = u.username; this.password = u.password; this.host = u.host; this.hostname = u.hostname; this.port = u.port; this._path = u._path; this._hash = u._hash; this.origin = u.origin; this._hierarchical = u._hierarchical; this._query = u._query; this._sp._ = u._sp._; }
     toString() { return this.href; }
     // JSON.stringify and pretty-format (vitest's diffs) show the href, as Node's URL
     toJSON() { return this.href; }
