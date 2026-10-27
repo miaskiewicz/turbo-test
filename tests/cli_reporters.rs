@@ -40,7 +40,7 @@ const FOOTER: &str =
 fn default_text_reporter_and_unknown_fallback() {
     let p = fixture("rep-default");
     let lines = format!(
-        "FAIL  {}  (1 passed, 1 failed)\n        ✗ breaks: expected 'x' to be 'y' // Object.is equality\nPASS  {}  (1 passed, 0 failed)\nERROR {}  (module errored: Error: top <boom>)\n",
+        "FAIL  {}  (1 passed, 1 failed)\n        ✗ breaks: expected 'x' to be 'y' // Object.is equality\nPASS  {}  (1 passed, 0 failed)\nERROR {}  (Error: top <boom>)\n",
         String::from("a.test.ts"),
         String::from("b.test.ts"),
         String::from("c.test.ts")
@@ -216,7 +216,7 @@ fn file_without_tests_fails_the_run() {
     assert_eq!(
         r.stdout,
         format!(
-            "TAP version 13\n1..1\nnot ok 1 - empty.spec.js\n  ---\n  message: {msg}\n  ...\n\n"
+            "TAP version 13\n1..1\nnot ok 1 - empty.spec.js\n    ---\n    error:\n        name: \"Error\"\n        message: \"{msg}\"\n    ...\n\n"
         ),
         "{}",
         r.all()
@@ -326,8 +326,8 @@ fn tap_reporter() {
     assert_eq!(
         r.stdout,
         format!(
-            "TAP version 13\n1..5\nok 1 - adds <&>\nok 2 - later # SKIP\nnot ok 3 - breaks\n  ---\n  message: expected 'x' to be 'y' // Object.is equality\n  ...\nok 4 - ok\nnot ok 5 - {}\n  ---\n  message: module errored: Error: top <boom>\n  ...\n\n",
-            String::from("c.test.ts")
+            "TAP version 13\n1..5\nok 1 - adds <&>\nok 2 - later # SKIP\nnot ok 3 - breaks\n  ---\n  message: expected 'x' to be 'y' // Object.is equality\n  ...\nok 4 - ok\nnot ok 5 - c.test.ts\n    ---\n    error:\n        name: \"Error\"\n        message: \"top <boom>\"\n    at: \"{}:1:7\"\n    ...\n\n",
+            p.path("c.test.ts").display()
         ),
         "{}",
         r.all()
@@ -415,7 +415,7 @@ fn output_file_artifacts() {
     );
     assert!(
         txt.ends_with(&format!(
-            "ERROR {}  (module errored: Error: top <boom>)\n",
+            "ERROR {}  (Error: top <boom>)\n",
             String::from("c.test.ts")
         )),
         "{txt}"
@@ -1150,6 +1150,43 @@ fn transform_errors_and_parse_failure_details_are_vites() {
         }
         assert!(
             !r.stderr.contains("graph load failed"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+    }
+}
+
+/// turbo-test#166: a file that fails to load is vitest 4.1.12's TAP block (`--reporter tap`):
+/// an `error` map of its name and message (YAML-quoted, line breaks kept) and where it was
+/// thrown, indented four spaces, on both loaders. turbo-test printed `message: module errored:
+/// TypeError: …` (two spaces, the loader's prefix, line breaks flattened).
+#[test]
+fn tap_load_failure_block_is_vitests() {
+    for esbuild in [false, true] {
+        let p = Project::new(if esbuild {
+            "rep-tap-load"
+        } else {
+            "rep-tap-load-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file(
+            "package.json",
+            "{\"name\":\"rep-tap-load\",\"type\":\"module\"}\n",
+        );
+        p.file(
+            "a.test.ts",
+            "import { test } from 'vitest';\nthrow new TypeError('top \"boom\"\\nline2');\ntest('x', () => {});\n",
+        );
+        let r = turbo_test(&p.dir, &["--reporter", "tap"], &[]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert_eq!(
+            r.stdout,
+            format!(
+                "TAP version 13\n1..1\nnot ok 1 - a.test.ts\n    ---\n    error:\n        name: \"TypeError\"\n        message: \"top \\\"boom\\\"\nline2\"\n    at: \"{}:2:7\"\n    ...\n\n",
+                p.path("a.test.ts").display()
+            ),
             "esbuild={esbuild}\n{}",
             r.all()
         );

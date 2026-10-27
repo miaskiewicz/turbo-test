@@ -2995,9 +2995,6 @@ const __requireCache = new Proxy({}, {
     return e && { value: e, writable: true, enumerable: true, configurable: true };
   },
 });
-// ESM-graph namespaces' export setters (esm_spy.rs, turbo-test#131): a module registers one for
-// its own namespace; __ttNsSet(ns, name, value) sets that export (false: no setter / no export)
-const __ttNsSetters = new WeakMap();
 // an app ES module's namespace in vitest's order (turbo-test#141) -> the V8 namespace
 const __ttOrderedTargets = new WeakMap();
 const __ttOrderedViews = new WeakMap();
@@ -3023,10 +3020,61 @@ globalThis.__ttOrderedNs = (ns, order) => {
   return v;
 };
 const __ttNsTarget = (ns) => __ttOrderedTargets.get(ns) || ns;
-globalThis.__ttNsSetter = (ns, set) => { __ttNsSetters.set(__ttNsTarget(ns), set); };
+// Spy-able ESM-graph namespaces (esm_spy.rs, turbo-test#131, #146), as vitest's exports objects:
+// an app module registers its namespace (its own export names, its re-exports by name and its
+// `export *` sources); vi.spyOn sets an override (__ttNsSet) that importers' reads (__ttR) and
+// namespace views (__ttNs) see, while the module's own references keep the original binding.
+const __ttNsInfo = new WeakMap();
+const __ttNsViews = new WeakMap();
+const __ttNsRaw = new WeakMap();
+// keyed by the V8 namespace: a module reaches it through J5's ordered view (turbo-test#141) or
+// as V8's own (__ttNsTarget)
+globalThis.__ttNsRegister = (ns, own, re, stars) => {
+  const t = __ttNsTarget(ns);
+  if (!__ttNsInfo.has(t)) __ttNsInfo.set(t, { over: new Map(), own: new Set(own), re, stars });
+};
+const __ttNsLookup = (ns, k) => {
+  const info = __ttNsInfo.get(__ttNsTarget(ns));
+  if (info === undefined || typeof k !== 'string') return undefined;
+  if (info.over.has(k)) return { v: info.over.get(k) };
+  // a name the namespace does not list (a CommonJS source's `__esModule`) is not re-exported
+  if (!info.own.has(k) && k in ns) {
+    const r = Object.prototype.hasOwnProperty.call(info.re, k) ? info.re[k] : undefined;
+    if (r !== undefined) return { v: globalThis.__ttR(r[0], r[1]) };
+    if (k !== 'default') for (const s of info.stars) if (k in s) return { v: globalThis.__ttR(s, k) };
+  }
+  return undefined;
+};
+globalThis.__ttR = (ns, k) => {
+  const found = __ttNsLookup(ns, k);
+  return found === undefined ? ns[k] : found.v;
+};
+globalThis.__ttNs = (ns) => {
+  if (ns === null || typeof ns !== 'object' || !__ttNsInfo.has(__ttNsTarget(ns))) return ns;
+  let view = __ttNsViews.get(ns);
+  if (view === undefined) {
+    view = new Proxy(ns, {
+      get: (t, k) => globalThis.__ttR(t, k),
+      getOwnPropertyDescriptor: (t, k) => {
+        const d = Reflect.getOwnPropertyDescriptor(t, k);
+        if (d !== undefined && 'value' in d) d.value = globalThis.__ttR(t, k);
+        return d;
+      },
+    });
+    __ttNsViews.set(ns, view);
+    __ttNsRaw.set(view, ns);
+  }
+  return view;
+};
+// set export `k` of a registered namespace (or its view) to `v`; false when `ns` is not one or
+// has no such export. Setting the module's own value back drops the override.
 globalThis.__ttNsSet = (ns, k, v) => {
-  const set = ns !== null && typeof ns === 'object' ? __ttNsSetters.get(__ttNsTarget(ns)) : undefined;
-  return set !== undefined && set(k, v) === true;
+  const raw = (ns !== null && typeof ns === 'object' && __ttNsRaw.get(ns)) || ns;
+  const info = raw !== null && typeof raw === 'object' ? __ttNsInfo.get(__ttNsTarget(raw)) : undefined;
+  if (info === undefined || typeof k !== 'string' || !(k in raw)) return false;
+  info.over.delete(k);
+  if (globalThis.__ttR(raw, k) !== v) info.over.set(k, v);
+  return true;
 };
 // require() of an ES module from CommonJS (`isEsm` false) gives Node's require(esm) object: one
 // with a default export and no `__esModule` of its own reads an enumerable `__esModule: true`
@@ -3702,6 +3750,8 @@ function __snapFinish(skipped) {
 }
 
 // ---- expect ----
+// The jest-style matchers of one call on a chai Assertion (__attachMatcher): `actual`, `negated`,
+// `message` and `promise` are the assertion's object / negate / message / promise flags.
 function makeExpect(actual, negated = false, message = undefined, promise = '') {
   // `msg` is a thunk: the failure message (and the formatting of the operands in it) is built
   // only when the assertion fails, as vitest does — formatting can throw (a native class
@@ -3722,7 +3772,6 @@ function makeExpect(actual, negated = false, message = undefined, promise = '') 
   const argsEqual = (a, b) => a.length === b.length && a.every((x, i) => deepEqual(x, b[i]));
   const testers = __customTesters;
   const api = {
-    get not() { return makeExpect(actual, !negated, message); },
     toBeTypeOf(t) { c(typeof actual === t, 'expected #{this} to be type of #{exp}', 'expected #{this} not to be type of #{exp}', t, typeof actual); },
     toHaveBeenCalledExactlyOnceWith(...a) {
       const spy = spyOf();
@@ -3731,38 +3780,6 @@ function makeExpect(actual, negated = false, message = undefined, promise = '') 
       if (negated ? !pass : pass) return;
       const msg = __chaiMsg(negated ? `expected "${name}" to not be called once with arguments: #{exp}` : `expected "${name}" to be called once with arguments: #{exp}`, actual, a, actual);
       throw new __ChaiAssertionError(__formatCalls(spy, msg, a));
-    },
-    // async matchers: `await expect(promise).resolves.toX(...)`, `.rejects.toX(...)`, and
-    // `.resolves.not.toX(...)` / `.rejects.not.toX(...)`: as vitest's, a proxy over the assertion
-    // whose matchers run on the settled value; `.rejects` calls a function first. Anything but a
-    // thenable is vitest's TypeError, thrown when `.resolves` / `.rejects` is read.
-    get resolves() {
-      if (typeof actual?.then !== 'function') throw new TypeError(`You must provide a Promise to expect() when using .resolves, not '${typeof actual}'.`);
-      const mk = (neg) => new Proxy(makeExpect(actual, neg, message, 'resolves'), { get: (t, m) => {
-        if (m === 'not') return mk(!neg);
-        const f = Reflect.get(t, m);
-        if (typeof f !== 'function') return f;
-        return (...args) => Promise.resolve(actual).then(
-          (v) => makeExpect(v, neg, message, 'resolves')[m](...args),
-          (e) => { const err = new __ChaiAssertionError(`promise rejected "${__inspect(e)}" instead of resolving`, { showDiff: false }); err.cause = e; throw err; },
-        );
-      } });
-      return mk(negated);
-    },
-    get rejects() {
-      const wrapper = typeof actual === 'function' ? actual() : actual;
-      if (typeof wrapper?.then !== 'function') throw new TypeError(`You must provide a Promise to expect() when using .rejects, not '${typeof wrapper}'.`);
-      const mk = (neg) => new Proxy(makeExpect(wrapper, neg, message, 'rejects'), { get: (t, m) => {
-        if (m === 'not') return mk(!neg);
-        const f = Reflect.get(t, m);
-        if (typeof f !== 'function') return f;
-        return (...args) => Promise.resolve(wrapper).then(
-          (v) => { throw new __ChaiAssertionError(`promise resolved "${__inspect(v)}" instead of rejecting`, { actual: v, expected: new Error('rejected promise') }); },
-          // `.rejects.toThrow()` checks the rejection as a thrown error (vitest wraps it in a thrower)
-          (e) => (m === 'toThrow' || m === 'toThrowError' ? makeExpect(() => { throw e; }, neg, message, 'rejects') : makeExpect(e, neg, message, 'rejects'))[m](...args),
-        );
-      } });
-      return mk(negated);
     },
     toBe(e) {
       const pass = Object.is(actual, e);
@@ -4096,54 +4113,11 @@ function makeExpect(actual, negated = false, message = undefined, promise = '') 
       };
     }
   }
-  return __proxify(api);
+  return api;
 }
 // vitest's JestExtendError: a jest-style matcher's failure (name 'Error')
 class __JestExtendError extends Error {
   constructor(message, actual, expected) { super(message); this.actual = actual; this.expected = expected; }
-}
-// chai's proxify over the assertion (vitest's expect(x) is a chai Assertion): reading a member it
-// does not have throws `Invalid Chai property: x` (with the nearest member name within an edit
-// distance of 4, chai's suggestion); then / catch / inspect / toJSON and symbols read as is. A
-// matcher that returns nothing returns the assertion, as chai's methods return `this`.
-const __proxyExcludedKeys = ['then', 'catch', 'inspect', 'toJSON'];
-const __chaiBuiltins = ['__flags', '__methods', '_obj', 'assert'];
-function __proxify(api) {
-  const proxy = new Proxy(api, {
-    get(target, property) {
-      if (typeof property === 'string' && !__proxyExcludedKeys.includes(property) && !Reflect.has(target, property)) {
-        let suggestion = null, distance = 4;
-        const props = Object.getOwnPropertyNames(target);
-        for (let p = Object.getPrototypeOf(target); p !== null; p = Object.getPrototypeOf(p)) for (const k of Object.getOwnPropertyNames(p)) if (!props.includes(k)) props.push(k);
-        for (const prop of props) {
-          // eslint-disable-next-line no-prototype-builtins
-          if (Object.prototype.hasOwnProperty(prop) || __chaiBuiltins.includes(prop)) continue;
-          const d = __stringDistanceCapped(property, prop, distance);
-          if (d < distance) { suggestion = prop; distance = d; }
-        }
-        throw Error(suggestion !== null ? `Invalid Chai property: ${property}. Did you mean "${suggestion}"?` : `Invalid Chai property: ${property}`);
-      }
-      const v = Reflect.get(target, property);
-      if (typeof v !== 'function' || !Object.hasOwn(target, property)) return v;
-      return (...args) => { const r = v(...args); return r === undefined ? proxy : r; };
-    },
-  });
-  return proxy;
-}
-// chai's stringDistanceCapped, as is (its first memo row leaves the last column 0)
-function __stringDistanceCapped(strA, strB, cap) {
-  if (Math.abs(strA.length - strB.length) >= cap) return cap;
-  const memo = [];
-  for (let i = 0; i <= strA.length; i++) { memo[i] = Array(strB.length + 1).fill(0); memo[i][0] = i; }
-  for (let j = 0; j < strB.length; j++) memo[0][j] = j;
-  for (let i = 1; i <= strA.length; i++) {
-    const ch = strA.charCodeAt(i - 1);
-    for (let j = 1; j <= strB.length; j++) {
-      if (Math.abs(i - j) >= cap) { memo[i][j] = cap; continue; }
-      memo[i][j] = Math.min(memo[i - 1][j] + 1, memo[i][j - 1] + 1, memo[i - 1][j - 1] + (ch === strB.charCodeAt(j - 1) ? 0 : 1));
-    }
-  }
-  return memo[strA.length][strB.length];
 }
 // `message: ` before the message (and the stack's first line) of an assertion failure: chai's
 // AssertionError or a jest-style matcher's plain Error, once; any other error (a TypeError from
@@ -4226,22 +4200,110 @@ function __matcherState(isNot, promise) {
     poll: undefined,
   };
 }
-globalThis.expect = (actual, message) => { __snap.assertCount++; return makeExpect(actual, false, message); };
+// ---- chai: vitest's expect(x) is a chai Assertion (turbo-test#160) ----
+// The runner puts chai 6.3.0 (this package's dependency) into the snapshot as __ttLoadChai
+// (runner.rs chai_script), loaded here. As vitest's JestChaiExpect does, every jest-style matcher is a method of
+// chai's Assertion, run on the assertion's flags; chai brings its BDD chain (`to`, `be`, `deep`,
+// `equal`, `include`, ...), its proxy (`Invalid Chai property`), `assert` and `should`.
+const __chai = globalThis.__ttLoadChai && globalThis.__ttLoadChai();
+delete globalThis.__ttLoadChai;
+if (!__chai || typeof __chai.Assertion !== 'function') throw new Error('turbo-test: chai is not loaded');
+const __cu = __chai.util;
+// the `vitest` module's assert / chai / should exports (runner.rs vitest_exports)
+Object.defineProperty(globalThis, '__ttVitestChai', { value: __chai });
+Object.defineProperty(globalThis, '__ttVitestAssert', { value: __chai.assert });
+Object.defineProperty(globalThis, '__ttVitestShould', { value: __chai.should });
+function __attachMatcher(name) {
+  __cu.addMethod(__chai.Assertion.prototype, name, function (...args) {
+    const obj = __cu.flag(this, 'object');
+    const promise = __cu.flag(this, 'promise') || '';
+    // `.rejects.toThrow()` checks the rejection as a thrown error (vitest wraps it in a thrower)
+    const actual = promise === 'rejects' && (name === 'toThrow' || name === 'toThrowError') ? () => { throw obj; } : obj;
+    return makeExpect(actual, !!__cu.flag(this, 'negate'), __cu.flag(this, 'message'), promise)[name](...args);
+  });
+}
+for (const name of Object.keys(makeExpect(undefined))) __attachMatcher(name);
+// vitest's chai-style matchSnapshot and its sinon-chai-like members (ChaiStyleAssertions)
+__cu.addMethod(__chai.Assertion.prototype, 'matchSnapshot', function (...args) { return __chai.Assertion.prototype.toMatchSnapshot.call(this, ...args); });
+for (const [name, to, ...fixed] of [['called', 'toHaveBeenCalled'], ['calledOnce', 'toHaveBeenCalledOnce'], ['calledTwice', 'toHaveBeenCalledTimes', 2], ['calledThrice', 'toHaveBeenCalledTimes', 3]]) {
+  __cu.addProperty(__chai.Assertion.prototype, name, function () { return __chai.Assertion.prototype[to].call(this, ...fixed); });
+}
+for (const [name, to] of [
+  ['callCount', 'toHaveBeenCalledTimes'], ['calledWith', 'toHaveBeenCalledWith'], ['calledOnceWith', 'toHaveBeenCalledExactlyOnceWith'],
+  ['lastCalledWith', 'toHaveBeenLastCalledWith'], ['nthCalledWith', 'toHaveBeenNthCalledWith'], ['returned', 'toHaveReturned'],
+  ['returnedWith', 'toHaveReturnedWith'], ['returnedTimes', 'toHaveReturnedTimes'], ['lastReturnedWith', 'toHaveLastReturnedWith'],
+  ['nthReturnedWith', 'toHaveNthReturnedWith'], ['calledBefore', 'toHaveBeenCalledBefore'], ['calledAfter', 'toHaveBeenCalledAfter'],
+]) {
+  __cu.addMethod(__chai.Assertion.prototype, name, function (...args) { return __chai.Assertion.prototype[to].call(this, ...args); });
+}
+// vitest's internal withTest / withContext (flags)
+__cu.addMethod(__chai.Assertion.prototype, 'withTest', function (test) { __cu.flag(this, 'vitest-test', test); return this; });
+__cu.addMethod(__chai.Assertion.prototype, 'withContext', function (context) { for (const key in context) __cu.flag(this, key, context[key]); return this; });
+// vitest's chai throw / throws / Throw under .resolves / .rejects
+for (const m of ['throw', 'throws', 'Throw']) {
+  __cu.overwriteMethod(__chai.Assertion.prototype, m, (_super) => function (...args) {
+    const promise = __cu.flag(this, 'promise');
+    const object = __cu.flag(this, 'object');
+    const isNot = __cu.flag(this, 'negate');
+    if (promise === 'rejects') {
+      __cu.flag(this, 'object', () => { throw object; });
+    } else if (promise === 'resolves' && typeof object !== 'function') {
+      if (!isNot) throw new __chai.AssertionError(__cu.flag(this, 'message') || "expected promise to throw an error, but it didn't", { showDiff: false }, __cu.flag(this, 'ssfi'));
+      return;
+    }
+    _super.apply(this, args);
+  });
+}
+// async matchers: `await expect(promise).resolves.toX(...)` / `.rejects.toX(...)`, as vitest's: a
+// proxy over the assertion whose methods run on the settled value (`.rejects` calls a function
+// first); anything but a thenable is vitest's TypeError, thrown when the property is read. A
+// failure's stack is the one taken where `.resolves` / `.rejects` was read.
+function __asyncProperty(kind) {
+  __cu.addProperty(__chai.Assertion.prototype, kind, function () {
+    const error = new Error(kind);
+    __cu.flag(this, 'promise', kind);
+    __cu.flag(this, 'error', error);
+    const obj = __cu.flag(this, 'object');
+    const wrapper = kind === 'rejects' && typeof obj === 'function' ? obj() : obj;
+    if (typeof wrapper?.then !== 'function') throw new TypeError(`You must provide a Promise to expect() when using .${kind}, not '${typeof wrapper}'.`);
+    const proxy = new Proxy(this, { get: (target, key, receiver) => {
+      const result = Reflect.get(target, key, receiver);
+      if (typeof result !== 'function') return result instanceof __chai.Assertion ? proxy : result;
+      return (...args) => {
+        __cu.flag(this, '_name', key);
+        return Promise.resolve(wrapper).then(
+          kind === 'resolves'
+            ? (value) => { __cu.flag(this, 'object', value); return result.call(this, ...args); }
+            : (value) => { throw new __chai.AssertionError(`promise resolved "${__cu.inspect(value)}" instead of rejecting`, { showDiff: true, expected: new Error('rejected promise'), actual: value }); },
+          kind === 'resolves'
+            ? (err) => { const e = new __chai.AssertionError(`promise rejected "${__cu.inspect(err)}" instead of resolving`, { showDiff: false }); e.cause = err; throw e; }
+            : (err) => { __cu.flag(this, 'object', err); return result.call(this, ...args); },
+        ).catch((err) => {
+          if (err instanceof Error && error.stack) err.stack = error.stack.replace(error.message, err.message);
+          throw err;
+        });
+      };
+    } });
+    return proxy;
+  });
+}
+__asyncProperty('resolves');
+__asyncProperty('rejects');
+globalThis.expect = (actual, message) => { __snap.assertCount++; return __chai.expect(actual, message); };
+// chai.expect's own statics (vitest: Object.assign(expect, chai.expect)) — `fail`
+Object.assign(globalThis.expect, __chai.expect);
+globalThis.expect.assert = __chai.assert;
 // expect.extend: the matchers, and their asymmetric expect.<name> / expect.not.<name> (#153)
 globalThis.expect.extend = (matchers) => {
-  for (const [name, matcher] of Object.entries(matchers || {})) { __customMatchers[name] = matcher; __addAsymmetric(name, matcher); }
+  for (const [name, matcher] of Object.entries(matchers || {})) { __customMatchers[name] = matcher; __attachMatcher(name); __addAsymmetric(name, matcher); }
 };
 // expect.addEqualityTesters (turbo-test#155)
 globalThis.expect.addEqualityTesters = (testers) => {
   if (!Array.isArray(testers)) throw new TypeError(`expect.customEqualityTesters: Must be set to an array of Testers. Was given "${__getType(testers)}"`);
   __customTesters.push(...testers);
 };
-// chai's expect.fail and vitest's expect.unreachable: an AssertionError
-globalThis.expect.fail = function fail(actual, expected, msg, operator) {
-  if (arguments.length < 2) { msg = actual; actual = undefined; }
-  throw new __ChaiAssertionError(msg || 'expect.fail()', { actual, expected, operator });
-};
-globalThis.expect.unreachable = (msg) => { throw new __ChaiAssertionError(`expected${msg ? ` "${msg}" ` : ' '}not to be reached`); };
+// vitest's expect.unreachable: chai's assert.fail
+globalThis.expect.unreachable = (msg) => { __chai.assert.fail(`expected${msg ? ` "${msg}" ` : ' '}not to be reached`); };
 // vitest's matcher state (expect.getState / setState): the assertion counters of the running test
 // live in __snap; anything else set is kept as is
 const __extraState = {};
@@ -4280,19 +4342,21 @@ globalThis.expect.hasAssertions = function hasAssertions() {
 // the test's fake timers do not see: on the virtual clock, or, while the timers are faked, each
 // retry comes at once and advances the fake clock by the interval, as vitest's real-time wait
 // followed by vi.advanceTimersByTime(interval). A matcher that is not awaited never runs and
-// fails the test when it is done.
+// fails the test when it is done. As vitest's, a proxy over one chai Assertion (`expect(null)`)
+// whose matchers run on fn's value as the assertion's `object`.
 const __pollUnsupported = ['matchSnapshot', 'toMatchSnapshot', 'toMatchInlineSnapshot', 'toThrowErrorMatchingSnapshot', 'toThrowErrorMatchingInlineSnapshot', 'throws', 'Throw', 'throw', 'toThrow', 'toThrowError'];
 globalThis.expect.poll = function poll(fn, options = {}) {
   const { interval = 50, timeout = 1000, message } = options;
   __snap.assertCount++;
   const test = __snap.currentTest;
   if (!test) throw new Error('expect.poll() must be called inside a test');
-  fn = fn.bind(makeExpect(null, false, message));
-  const mk = (neg) => new Proxy(makeExpect(null, neg, message), { get(target, key) {
-    if (key === 'not') return mk(!neg);
+  const assertion = __chai.expect(null, message);
+  fn = fn.bind(assertion);
+  const proxy = new Proxy(assertion, { get(target, key, receiver) {
     if (key === 'resolves' || key === 'rejects') throw new SyntaxError(`expect.poll() is not supported in combination with .${key}`);
-    const matcher = Reflect.get(target, key);
-    if (typeof matcher !== 'function') return matcher;
+    const matcher = Reflect.get(target, key, receiver);
+    if (typeof matcher !== 'function') return matcher instanceof __chai.Assertion ? proxy : matcher;
+    if (key === 'assert') return matcher;
     if (typeof key === 'string' && __pollUnsupported.includes(key)) throw new SyntaxError(`expect.poll() is not supported in combination with .${key}(). Use vi.waitFor() if your assertion condition is unstable.`);
     return function __VITEST_POLL_CHAIN__(...args) {
       const STACK_TRACE_ERROR = new Error('STACK_TRACE_ERROR');
@@ -4308,7 +4372,8 @@ globalThis.expect.poll = function poll(fn, options = {}) {
             const last = timedOut;
             try {
               const obj = await fn();
-              return await makeExpect(obj, neg, message)[key](...args);
+              __cu.flag(assertion, 'object', obj);
+              return await matcher.call(assertion, ...args);
             } catch (err) {
               if (last) {
                 if (err && typeof err === 'object' && err.cause == null) err.cause = new Error('Matcher did not succeed in time.');
@@ -4326,8 +4391,8 @@ globalThis.expect.poll = function poll(fn, options = {}) {
       let result;
       test.onFinished.push(() => {
         if (awaited) return;
-        const assertion = `expect.poll(assertion).${neg ? 'not.' : ''}${String(key)}()`;
-        throw withStack(new Error(`${assertion} was not awaited. This assertion is asynchronous and must be awaited; otherwise, it is not executed to avoid unhandled rejections:\n\nawait ${assertion}\n`));
+        const shown = `expect.poll(assertion).${__cu.flag(assertion, 'negate') ? 'not.' : ''}${String(key)}()`;
+        throw withStack(new Error(`${shown} was not awaited. This assertion is asynchronous and must be awaited; otherwise, it is not executed to avoid unhandled rejections:\n\nawait ${shown}\n`));
       });
       return {
         then(onFulfilled, onRejected) { awaited = true; return (result ||= run()).then(onFulfilled, onRejected); },
@@ -4337,19 +4402,26 @@ globalThis.expect.poll = function poll(fn, options = {}) {
       };
     };
   } });
-  return mk(false);
+  return proxy;
 };
 // expect.addSnapshotSerializer: a pretty-format plugin every later snapshot uses (turbo-test#162)
 globalThis.expect.addSnapshotSerializer = (plugin) => { __snapSerializers.unshift(plugin); };
-globalThis.expect.soft = (actual, message) => { __snap.assertCount++; return makeExpect(actual, false, message); };
-globalThis.expect.anything = () => new __Anything();
-globalThis.expect.any = (expected) => new __Any(expected);
-globalThis.expect.stringContaining = (expected) => new __StringContaining(expected);
-globalThis.expect.objectContaining = (expected) => new __ObjectContaining(expected);
-globalThis.expect.arrayContaining = (expected) => new __ArrayContaining(expected);
-globalThis.expect.stringMatching = (expected) => new __StringMatching(expected);
-globalThis.expect.closeTo = (expected, precision) => new __CloseTo(expected, precision);
-globalThis.expect.schemaMatching = (expected) => new __SchemaMatching(expected);
+// expect.addSnapshotSerializer: a pretty-format plugin every later snapshot uses (turbo-test#162),
+// added with chai's addMethod as vitest adds it
+__cu.addMethod(globalThis.expect, 'addSnapshotSerializer', (plugin) => { __snapSerializers.unshift(plugin); });
+globalThis.expect.soft = (actual, message) => globalThis.expect(actual, message).withContext({ soft: true });
+// vitest adds these with chai's addMethod (on chai.expect, then copied): called on `expect`, they
+// leave chai's `__flags` on it
+for (const [name, make] of Object.entries({
+  anything: () => new __Anything(),
+  any: (expected) => new __Any(expected),
+  stringContaining: (expected) => new __StringContaining(expected),
+  objectContaining: (expected) => new __ObjectContaining(expected),
+  arrayContaining: (expected) => new __ArrayContaining(expected),
+  stringMatching: (expected) => new __StringMatching(expected),
+  closeTo: (expected, precision) => new __CloseTo(expected, precision),
+  schemaMatching: (expected) => new __SchemaMatching(expected),
+})) __cu.addMethod(globalThis.expect, name, make);
 globalThis.expect.not = {
   stringContaining: (expected) => new __StringContaining(expected, true),
   objectContaining: (expected) => new __ObjectContaining(expected, true),
@@ -4847,7 +4919,9 @@ async function __ttImportsSettled() {
 globalThis.vi = {
   fn: (impl) => __trackSpy(makeSpy(impl)),
   spyOn: (obj, key) => {
-    const orig = obj[key];
+    // a registered ESM-graph namespace: its current value (a spy already set on it included)
+    const nsRaw = obj !== null && typeof obj === 'object' ? __ttNsRaw.get(obj) || obj : obj;
+    const orig = __ttNsInfo.has(__ttNsTarget(nsRaw)) ? globalThis.__ttR(nsRaw, key) : obj[key];
     // Do NOT bind orig to obj — for a prototype-method spy (spyOn(Cls.prototype, 'm')) the
     // original must run with the CALL's `this` (the instance), not the prototype. makeSpy's
     // fn applies the call-time `this` to __impl, preserving it.
@@ -4856,13 +4930,22 @@ globalThis.vi = {
     s.__name = String(key);
     // Use defineProperty so it replaces a (configurable) live-export getter, not just a
     // writable data prop — module-runner exports are configurable getters.
-    // An ESM-graph module's namespace is V8's (read-only): its export is set through the
-    // module's setter (esm_spy.rs, turbo-test#131).
+    // An ESM-graph module's namespace is V8's (read-only): the spy is its override (esm_spy.rs,
+    // turbo-test#131, #146).
     const define = (v) => {
       if (globalThis.__ttNsSet(obj, key, v)) return;
       try { Object.defineProperty(obj, key, { configurable: true, enumerable: true, writable: true, value: v }); } catch (e) { try { obj[key] = v; } catch (e2) {} }
     };
-    s.mockRestore = () => define(orig);
+    // restore the original descriptor itself, as vitest: a live re-export getter stays live, a
+    // non-enumerable method stays non-enumerable (turbo-test#157)
+    let own;
+    try { own = Object.getOwnPropertyDescriptor(obj, key); } catch (e) { own = undefined; }
+    s.mockRestore = () => {
+      if (own !== undefined && own.configurable && !globalThis.__ttNsSet(obj, key, orig)) {
+        try { Object.defineProperty(obj, key, own); return; } catch (e) { /* fall back to the value */ }
+      }
+      define(orig);
+    };
     define(s);
     return __trackSpy(s);
   },
@@ -5274,10 +5357,10 @@ function __objDisplay(v) {
 // whose `#{this}` / `#{exp}` / `#{act}` show values as chai's `objDisplay` (loupe, 40 chars), and for
 // the spy matchers vitest's call / return listings with @vitest/utils' `diff` of pretty-format
 // output (no colours, as with NO_COLOR).
-class __ChaiAssertionError extends Error {
+// (chai's AssertionError itself, turbo-test#160: `instanceof chai.AssertionError` holds, as in vitest)
+class __ChaiAssertionError extends __chai.AssertionError {
   constructor(message, props) {
     super(message);
-    this.name = 'AssertionError';
     this.showDiff = !(props && props.showDiff === false);
     if (props && 'actual' in props) this.actual = props.actual;
     if (props && 'expected' in props) this.expected = props.expected;

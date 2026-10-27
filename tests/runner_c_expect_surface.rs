@@ -10,9 +10,8 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 /// Members vitest has and turbo-test does not, each tracked by its own issue (vitest.compat.md):
-/// chai's BDD chain (`expect(x).to.be.equal(...)`), chai's `assert` and chai's internal `__flags`.
-const KNOWN_MISSING: [(&str, &str); 2] =
-    [("expect", "__flags:object"), ("expect", "assert:function")];
+/// none since expect.poll (turbo-test#161) and expect.addSnapshotSerializer (#162).
+const KNOWN_MISSING: [(&str, &str); 0] = [];
 
 #[test]
 fn expect_members_are_vitests() {
@@ -20,7 +19,9 @@ fn expect_members_are_vitests() {
     // unreachable / getState / setState / toSatisfy were missing, expect.extend made no
     // asymmetric matchers, the asymmetric matchers had none of vitest's members, and 17
     // matchers (toBeCalled, toHaveReturnedTimes, toHaveResolved*, toHaveBeenCalledBefore, ...)
-    // were missing while a stray `toStrictEqual_alias` existed.
+    // were missing while a stray `toStrictEqual_alias` existed. turbo-test#160: chai's BDD chain
+    // (`to`, `be`, `deep`, `equal`, `include`, ...), its sinon-style members, `expect.assert`
+    // and chai's `__flags` were missing.
     let p = Project::new("rc-expect-members");
     p.file("package.json", r#"{ "type": "module" }"#);
     p.file(
@@ -40,33 +41,24 @@ fn expect_members_are_vitests() {
     };
     let mut missing = Vec::new();
     let mut extra = Vec::new();
-    let mut compare = |label: &str, w: &Value, g: &Value, keep: &dyn Fn(&str) -> bool| {
+    let mut compare = |label: &str, w: &Value, g: &Value| {
         let (w, g) = (set(w), set(g));
-        for m in w.difference(&g).filter(|m| keep(m)) {
+        for m in w.difference(&g) {
             missing.push(format!("{label} {m}"));
         }
         for m in g.difference(&w) {
             extra.push(format!("{label} {m}"));
         }
     };
-    let all = |_: &str| true;
-    compare("expect", &want["expect"], &got["expect"], &all);
-    compare("expect.not", &want["expectNot"], &got["expectNot"], &all);
+    compare("expect", &want["expect"], &got["expect"]);
+    compare("expect.not", &want["expectNot"], &got["expectNot"]);
     for (k, w) in want["asym"].as_object().unwrap() {
-        compare(&format!("asym.{k}"), w, &got["asym"][k], &all);
+        compare(&format!("asym.{k}"), w, &got["asym"][k]);
     }
-    // the chains: vitest's matchers and not / resolves / rejects (chai's BDD words are KNOWN)
-    let matcher = |m: &str| {
-        let name = m.split(':').next().unwrap();
-        (name.starts_with("to") && name != "to") || ["not", "resolves", "rejects"].contains(&name)
-    };
+    // the chains: every member of vitest's chai Assertion — its matchers, chai's BDD chain and
+    // the sinon-style members (turbo-test#160)
     for k in ["expect", "not", "resolves", "rejects", "soft"] {
-        compare(
-            &format!("chain.{k}"),
-            &want["chain"][k],
-            &got["chain"][k],
-            &matcher,
-        );
+        compare(&format!("chain.{k}"), &want["chain"][k], &got["chain"][k]);
     }
     let known: Vec<String> = KNOWN_MISSING
         .iter()
@@ -131,6 +123,59 @@ fn to_match_object_diff_is_vitests() {
     ] {
         assert!(r.all().contains(block), "missing {block:?} in\n{}", r.all());
     }
+}
+
+#[test]
+fn chai_chain_and_assert_are_vitests() {
+    // turbo-test#160: vitest's expect(x) is a chai Assertion. turbo-test had no BDD chain
+    // (`expect(1).to.equal(1)`: Invalid Chai property: to), no sinon-style members, no
+    // `assert` / `chai` / `should` exports of `vitest` and no expect.assert, and its matcher
+    // errors were not chai AssertionErrors. Rows recorded with vitest 4.1.12 (as
+    // expect_members_behave_as_vitests).
+    for esbuild in [false, true] {
+        let p = Project::new("rc-chai-chain");
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", r#"{ "type": "module" }"#);
+        p.file(
+            "chain.test.js",
+            include_str!("data/expect_surface/chain.test.js"),
+        );
+        let r = turbo_test(&p.dir, &["chain.test.js"], &[]);
+        assert_eq!(r.code, Some(0), "{}", r.all());
+        let got = std::fs::read_to_string(p.path("out.txt")).unwrap();
+        let want = include_str!("data/expect_surface/chain.vitest.txt");
+        for (g, w) in got.lines().zip(want.lines()) {
+            assert_eq!(g, w, "esbuild={esbuild}");
+        }
+        assert_eq!(got.lines().count(), want.lines().count());
+    }
+}
+
+#[test]
+fn a_missing_chai_fails_loudly() {
+    // turbo-test#160: the runtime is built on chai; without it (TURBO_CHAI unset or wrong — cli.js
+    // passes the chai this package depends on) the run stops with an error, never a fallback.
+    let p = Project::new("rc-no-chai");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "a.test.js",
+        "import { test, expect } from 'vitest'\ntest('a', () => { expect(1).to.equal(1) })\n",
+    );
+    let missing = p.path("no-such-chai/index.js");
+    let r = turbo_test(
+        &p.dir,
+        &["a.test.js"],
+        &[("TURBO_CHAI", missing.to_str().unwrap())],
+    );
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    let want = format!(
+        "turbo-test: cannot read chai at {}: No such file or directory (os error 2)\nturbo-test needs the `chai` package it depends on (vitest's expect is chai): run it through its npm launcher (cli.js), which passes TURBO_CHAI, or set TURBO_CHAI to chai's index.js.\n",
+        missing.display()
+    );
+    assert_eq!(r.stderr, want, "{}", r.all());
+    assert!(!r.stdout.contains("passed"), "{}", r.all());
 }
 
 /// Runs `file` (from `tests/data/expect_surface`) in a fresh project, with and without esbuild,

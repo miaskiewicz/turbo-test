@@ -495,6 +495,495 @@ it('a static method of an exported class', () => {
     }
 }
 
+/// turbo-test#145: the rest of vite's `import.meta.glob` (vitest 4.1.12): eager glob imports
+/// evaluate before the module's own imports; `base` (keys relative to it), `query` / `as` (added to
+/// each import), `resolve.alias` patterns (keys root-relative), and a module that takes the
+/// decorator-metadata (tsc) transform. turbo-test threw vitest's "statically replaced" error for
+/// these, ran eager imports last, and did not expand on the tsc path. vitest on the same project:
+/// 5 passed.
+#[test]
+fn import_meta_glob_options_aliases_order_and_the_tsc_path() {
+    let files: [(&str, &str); 8] = [
+        (
+            "package.json",
+            "{\"name\":\"rc-glob-opts\",\"type\":\"module\"}\n",
+        ),
+        (
+            "sub/a.ts",
+            r#"export default 'A'; export const n = 1;
+"#,
+        ),
+        (
+            "sub/deep/z.ts",
+            r#"export const n = 26;
+"#,
+        ),
+        (
+            "sub/order1.ts",
+            r#"(globalThis as any).__order = [...((globalThis as any).__order ?? []), 'order1'];
+export const o = 1;
+"#,
+        ),
+        (
+            "sub/order2.ts",
+            r#"(globalThis as any).__order = [...((globalThis as any).__order ?? []), 'order2'];
+export const o = 2;
+"#,
+        ),
+        (
+            "tsconfig.json",
+            r#"{ "compilerOptions": { "experimentalDecorators": true, "emitDecoratorMetadata": true, "target": "ES2021", "module": "ESNext", "moduleResolution": "bundler" } }
+"#,
+        ),
+        (
+            "src/model.ts",
+            r#"const tag = (): ClassDecorator => () => {};
+@tag()
+export class Model { name = 'm'; }
+export const found = (): string[] => Object.keys(import.meta.glob('../sub/*.ts', { eager: true }));
+"#,
+        ),
+        (
+            "vitest.config.ts",
+            r#"import path from 'node:path';
+export default { resolve: { alias: { '@sub': path.resolve(import.meta.dirname, 'sub') } } };
+"#,
+        ),
+    ];
+    let test = r#"import { expect, it } from 'vitest';
+import { o } from './sub/order2';
+import { found } from './src/model';
+const early = import.meta.glob('./sub/order1.ts', { eager: true });
+it('eager glob imports evaluate before the module imports', () => {
+  expect([(globalThis as any).__order, o, Object.keys(early)]).toEqual([['order1', 'order2'], 2, ['./sub/order1.ts']]);
+});
+it('base', () => {
+  expect(Object.keys(import.meta.glob('./*.ts', { base: './sub', eager: true }))).toEqual(['./a.ts', './order1.ts', './order2.ts']);
+  expect(Object.keys(import.meta.glob('./deep/*.ts', { base: './sub' }))).toEqual(['./deep/z.ts']);
+  expect(import.meta.glob('/sub/deep/*.ts', { base: '/sub', eager: true, import: 'n' })).toEqual({ './deep/z.ts': 26 });
+});
+it('query and as', async () => {
+  const q = import.meta.glob('./sub/a.ts', { query: { foo: 'bar' }, import: 'n' });
+  expect([Object.keys(q), await q['./sub/a.ts']()]).toEqual([['./sub/a.ts'], 1]);
+  const s = import.meta.glob('./sub/deep/*.ts', { query: '?x=1', eager: true, import: 'n' });
+  expect(s).toEqual({ './sub/deep/z.ts': 26 });
+});
+it('alias patterns', () => {
+  expect(import.meta.glob('@sub/*.ts', { eager: true, import: 'default' })).toEqual({ '/sub/a.ts': 'A', '/sub/order1.ts': undefined, '/sub/order2.ts': undefined });
+  expect(Object.keys(import.meta.glob(['@sub/**/*.ts', '!@sub/order*.ts']))).toEqual(['/sub/a.ts', '/sub/deep/z.ts']);
+});
+it('a decorator-metadata module', () => {
+  expect(found()).toEqual(['../sub/a.ts', '../sub/order1.ts', '../sub/order2.ts']);
+});
+"#;
+    for esbuild in [true, false] {
+        let p = Project::new(if esbuild {
+            "rc-glob-opts"
+        } else {
+            "rc-glob-opts-esm"
+        });
+        p.with_typescript();
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in files {
+            p.file(f, c);
+        }
+        p.file("a.test.ts", test);
+        // the launcher passes vitest.config's resolve.alias as TURBO_ALIAS
+        let alias = format!("@sub\u{1f}{}", p.path("sub").display());
+        let envs: Vec<Vec<(&str, &str)>> = if esbuild {
+            vec![
+                vec![],
+                vec![("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
+                vec![("TURBO_REUSE_ISOLATE", "1")],
+            ]
+        } else {
+            vec![vec![], vec![("TURBO_REUSE_ISOLATE", "1")]]
+        };
+        for mut env in envs {
+            env.push(("TURBO_ALIAS", &alias));
+            let r = turbo_test(&p.dir, &[], &env);
+            assert!(
+                r.stdout.contains("Tests  5 passed (5)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            assert_eq!(r.code, Some(0), "esbuild={esbuild} {env:?}\n{}", r.all());
+        }
+    }
+}
+
+/// turbo-test#146: a namespace spy reaches the importers only, as vitest 4.1.12's exports
+/// objects: the exporting module's own references keep the original, a spy on a re-export
+/// (`export { x } from`, an exported import, `export *`) stays on that namespace, a spy on the
+/// source shows through its re-exports, and a dynamically imported namespace is the same one. On
+/// the ESM graph the spy replaced the binding itself (`dep.greetTwice` called the spy). vitest on
+/// the same project: 9 passed.
+#[test]
+fn a_namespace_spy_leaves_the_modules_own_references_alone() {
+    let files: [(&str, &str); 5] = [
+        (
+            "package.json",
+            "{\"name\":\"rc-ns-own\",\"type\":\"module\"}\n",
+        ),
+        (
+            "src/dep.ts",
+            r#"export const greet = (n: string): string => 'hi ' + n;
+export const greetTwice = (n: string): string => greet(n) + ' ' + greet(n);
+export function fn(): string { return 'fn'; }
+export const callsFn = (): string => fn();
+export default function def(): string { return 'def'; }
+export const callsDef = (): string => def();
+"#,
+        ),
+        (
+            "src/star.ts",
+            r#"export const starred = (): string => 'star';
+export const callsStarred = (): string => starred();
+"#,
+        ),
+        (
+            "src/barrel.ts",
+            r#"import { fn } from './dep';
+export { greet as hello } from './dep';
+export { fn as viaImport };
+export * from './star';
+export const barrelOwn = (): string => 'own';
+"#,
+        ),
+        (
+            "src/svc.ts",
+            r#"import def, { greet, fn } from './dep';
+import { hello, starred, viaImport, barrelOwn } from './barrel';
+export const all = (): string[] => [greet('a'), fn(), def(), hello('b'), starred(), viaImport(), barrelOwn()];
+"#,
+        ),
+    ];
+    let test = r#"import { expect, it, vi, afterEach } from 'vitest';
+import * as dep from './src/dep';
+import * as barrel from './src/barrel';
+import * as star from './src/star';
+import { all } from './src/svc';
+afterEach(() => { vi.restoreAllMocks(); });
+const ORIG = ['hi a', 'fn', 'def', 'hi b', 'star', 'fn', 'own'];
+it.each([
+  ['dep.greet', () => vi.spyOn(dep, 'greet').mockReturnValue('S'), ['S', 'fn', 'def', 'S', 'star', 'fn', 'own'], () => [dep.greetTwice('x'), dep.greet('x')], ['hi x hi x', 'S']],
+  ['dep.fn', () => vi.spyOn(dep, 'fn').mockReturnValue('S'), ['hi a', 'S', 'def', 'hi b', 'star', 'S', 'own'], () => [dep.callsFn(), barrel.viaImport()], ['fn', 'S']],
+  ['dep.default', () => vi.spyOn(dep, 'default').mockReturnValue('S'), ['hi a', 'fn', 'S', 'hi b', 'star', 'fn', 'own'], () => [dep.callsDef(), dep.default()], ['def', 'S']],
+  ['barrel.hello', () => vi.spyOn(barrel, 'hello').mockReturnValue('S'), ['hi a', 'fn', 'def', 'S', 'star', 'fn', 'own'], () => [dep.greet('x'), barrel.hello('x')], ['hi x', 'S']],
+  ['barrel.viaImport', () => vi.spyOn(barrel, 'viaImport').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'star', 'S', 'own'], () => [dep.fn(), dep.callsFn()], ['fn', 'fn']],
+  ['barrel.starred', () => vi.spyOn(barrel, 'starred').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'S', 'fn', 'own'], () => [star.starred(), star.callsStarred()], ['star', 'star']],
+  ['star.starred', () => vi.spyOn(star, 'starred').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'S', 'fn', 'own'], () => [barrel.starred(), star.callsStarred()], ['S', 'star']],
+  ['barrel.barrelOwn', () => vi.spyOn(barrel, 'barrelOwn').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'star', 'fn', 'S'], () => [barrel.barrelOwn()], ['S']],
+])('vi.spyOn(%s)', (_name, spy, expected, more, moreExpected) => {
+  spy();
+  expect(all()).toEqual(expected);
+  expect((more as () => string[])()).toEqual(moreExpected);
+  vi.restoreAllMocks();
+  expect(all()).toEqual(ORIG);
+});
+it('a dynamically imported namespace', async () => {
+  const m = await import('./src/dep');
+  vi.spyOn(m, 'greet').mockReturnValue('D');
+  expect([m.greet('x'), dep.greet('x'), all()[0], m.greetTwice('x')]).toEqual(['D', 'D', 'D', 'hi x hi x']);
+});
+"#;
+    for esbuild in [false, true] {
+        let p = Project::new(if esbuild {
+            "rc-ns-own"
+        } else {
+            "rc-ns-own-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in files {
+            p.file(f, c);
+        }
+        p.file("own.test.ts", test);
+        for env in [&[][..], &[("TURBO_REUSE_ISOLATE", "1")][..]] {
+            let r = turbo_test(&p.dir, &[], env);
+            assert!(
+                r.stdout.contains("Tests  9 passed (9)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            assert_eq!(r.code, Some(0), "esbuild={esbuild} {env:?}\n{}", r.all());
+        }
+    }
+}
+
+/// turbo-test#157: `mockRestore` / `vi.restoreAllMocks` put the property's original descriptor
+/// back, as vitest 4.1.12: a spy on a re-export (`export *`, `export { x as y } from`) restores
+/// the live re-export (the module runner left a data property holding the original, so a later
+/// spy on the source no longer showed through), and a non-enumerable method stays non-enumerable.
+/// vitest on the same project: 2 passed.
+#[test]
+fn restoring_a_spy_puts_the_original_descriptor_back() {
+    let files: [(&str, &str); 4] = [
+        (
+            "package.json",
+            "{\"name\":\"rc-spy-restore\",\"type\":\"module\"}\n",
+        ),
+        (
+            "src/star.ts",
+            r#"export const starred = (): string => 'star';
+export const callsStarred = (): string => starred();
+"#,
+        ),
+        (
+            "src/barrel.ts",
+            r#"export * from './star';
+export { starred as aliased } from './star';
+"#,
+        ),
+        (
+            "src/use.ts",
+            r#"import { starred, aliased } from './barrel';
+export const use = (): string[] => [starred(), aliased()];
+"#,
+        ),
+    ];
+    let test = r#"import { expect, it, vi } from 'vitest';
+import * as barrel from './src/barrel';
+import * as star from './src/star';
+import { use } from './src/use';
+class C { m(): string { return 'm'; } }
+it('restoring a spy on a re-export puts the live re-export back', () => {
+  vi.spyOn(barrel, 'starred').mockReturnValue('B');
+  vi.spyOn(barrel, 'aliased').mockReturnValue('A');
+  expect(use()).toEqual(['B', 'A']);
+  vi.restoreAllMocks();
+  vi.spyOn(star, 'starred').mockReturnValue('S');
+  expect([barrel.starred(), barrel.aliased(), ...use()]).toEqual(['S', 'S', 'S', 'S']);
+  vi.restoreAllMocks();
+  expect(use()).toEqual(['star', 'star']);
+});
+it('restoring puts the original descriptor back', () => {
+  const before = Object.getOwnPropertyDescriptor(C.prototype, 'm');
+  const o = {} as { f: () => number };
+  Object.defineProperty(o, 'f', { value: () => 1, writable: true, enumerable: false, configurable: true });
+  const s1 = vi.spyOn(C.prototype, 'm').mockReturnValue('x');
+  const s2 = vi.spyOn(o, 'f').mockReturnValue(2);
+  expect([new C().m(), o.f()]).toEqual(['x', 2]);
+  s1.mockRestore();
+  s2.mockRestore();
+  expect(Object.getOwnPropertyDescriptor(C.prototype, 'm')).toEqual(before);
+  expect([Object.keys(o), o.f(), new C().m()]).toEqual([[], 1, 'm']);
+});
+"#;
+    for esbuild in [true, false] {
+        let p = Project::new(if esbuild {
+            "rc-spy-restore"
+        } else {
+            "rc-spy-restore-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in files {
+            p.file(f, c);
+        }
+        p.file("r.test.ts", test);
+        let envs: &[&[(&str, &str)]] = if esbuild {
+            &[
+                &[],
+                &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
+            ]
+        } else {
+            &[&[]]
+        };
+        for env in envs {
+            let r = turbo_test(&p.dir, &[], env);
+            assert!(
+                r.stdout.contains("Tests  2 passed (2)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            assert_eq!(r.code, Some(0), "esbuild={esbuild} {env:?}\n{}", r.all());
+        }
+    }
+}
+
+/// turbo-test#148: asset imports give vite's strings (vitest 4.1.12): `?raw` the file's text,
+/// `?url` and a known asset type (`.txt`, `.png`, a large `.svg`, …) its root-relative URL with
+/// the rest of the query, a small `.svg` vite's inline `data:` URL; `import.meta.glob`'s
+/// `query: '?raw'` / `as: 'raw'` with it. turbo-test gave `'default'` (module runner) or `{}`
+/// (ESM graph). vitest on the same project: 1 passed.
+#[test]
+fn asset_imports_are_vites_strings() {
+    let files: [(&str, &str); 8] = [
+        (
+            "package.json",
+            "{\"name\":\"rc-assets\",\"type\":\"module\"}\n",
+        ),
+        (
+            "assets/t.txt",
+            r##"hello raw
+"##,
+        ),
+        ("assets/i.svg", r##"<svg/>"##),
+        (
+            "assets/big.svg",
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/></svg>"##,
+        ),
+        (
+            "assets/q.svg",
+            r##"<svg a="it's">
+  <g  fill="#f00"> 50% </g>
+</svg>
+"##,
+        ),
+        ("assets/t2.svg", r##"<svg><text>x</text></svg>"##),
+        ("assets/p.png", r##"PNG"##),
+        (
+            "assets/m.ts",
+            r##"export const x = 1;
+"##,
+        ),
+    ];
+    let test = r##"import { expect, it } from 'vitest';
+import raw from './assets/t.txt?raw';
+import url from './assets/t.txt?url';
+import plain from './assets/t.txt';
+import svg from './assets/i.svg';
+import big from './assets/big.svg';
+import quoted from './assets/q.svg';
+import text from './assets/t2.svg';
+import png from './assets/p.png';
+import tsRaw from './assets/m.ts?raw';
+it('asset imports are vite strings', async () => {
+  expect([raw, url, plain, svg, big, png, tsRaw]).toEqual(['hello raw\n', '/assets/t.txt', '/assets/t.txt', 'data:image/svg+xml,%3csvg/%3e', '/assets/big.svg', '/assets/p.png', 'export const x = 1;\n']);
+  expect([quoted, text]).toEqual([`data:image/svg+xml;base64,${btoa(`<svg a="it's">\n  <g  fill="#f00"> 50% </g>\n</svg>\n`)}`, `data:image/svg+xml;base64,${btoa('<svg><text>x</text></svg>')}`]);
+  expect((await import('./assets/t.txt?raw')).default).toBe('hello raw\n');
+  expect((await import('./assets/t.txt?raw=true')).default).toBe('/assets/t.txt?raw=true');
+  expect((await import('./assets/p.png?url')).default).toBe('/assets/p.png');
+  expect((await import('./assets/p.png?v=1&url')).default).toBe('/assets/p.png?v=1');
+  expect(import.meta.glob('./assets/*.txt', { query: '?raw', import: 'default', eager: true })).toEqual({ './assets/t.txt': 'hello raw\n' });
+  expect(import.meta.glob('./assets/*.txt', { as: 'raw', eager: true })).toEqual({ './assets/t.txt': 'hello raw\n' });
+});
+"##;
+    for esbuild in [true, false] {
+        let p = Project::new(if esbuild {
+            "rc-assets"
+        } else {
+            "rc-assets-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in files {
+            p.file(f, c);
+        }
+        p.file("a.test.ts", test);
+        let envs: &[&[(&str, &str)]] = if esbuild {
+            &[
+                &[],
+                &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
+                &[("TURBO_REUSE_ISOLATE", "1")],
+            ]
+        } else {
+            &[&[], &[("TURBO_REUSE_ISOLATE", "1")]]
+        };
+        for env in envs {
+            let r = turbo_test(&p.dir, &[], env);
+            assert!(
+                r.stdout.contains("Tests  1 passed (1)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            assert_eq!(r.code, Some(0), "esbuild={esbuild} {env:?}\n{}", r.all());
+        }
+    }
+}
+
+/// turbo-test#149: an `import.meta.glob` pattern that is not relative, `/` or an alias fails its
+/// module at transform, as vite does in vitest 4.1.12 (the test file, or the test file importing
+/// the module), with vite's message (a negated pattern without its `!`). turbo-test left the call
+/// to throw only when it ran, so the file's other tests passed. vitest on the same project:
+/// `Test Files  2 failed | 1 passed (3)`, `Tests  1 passed (1)`.
+#[test]
+fn an_invalid_glob_pattern_fails_its_module() {
+    let files: [(&str, &str); 6] = [
+        (
+            "package.json",
+            "{\"name\":\"rc-glob-invalid\",\"type\":\"module\"}\n",
+        ),
+        (
+            "src/ok/k.ts",
+            r#"export const k = 1;
+"#,
+        ),
+        (
+            "src/g.ts",
+            r#"export const g = () => import.meta.glob(['./ok/*.ts', '!ok/x.ts']);
+"#,
+        ),
+        (
+            "a.test.ts",
+            r#"import { expect, it } from 'vitest';
+it('other test', () => { expect(1).toBe(1); });
+it('glob', () => { expect(import.meta.glob('sub/*.ts')).toEqual({}); });
+"#,
+        ),
+        (
+            "b.test.ts",
+            r#"import { expect, it } from 'vitest';
+import { g } from './src/g';
+it('imports a module with an invalid glob', () => { expect(g()).toBeDefined(); });
+"#,
+        ),
+        (
+            "c.test.ts",
+            r#"import { expect, it } from 'vitest';
+it('fine', () => { expect(Object.keys(import.meta.glob('./src/ok/*.ts'))).toEqual(['./src/ok/k.ts']); });
+"#,
+        ),
+    ];
+    for esbuild in [true, false] {
+        let p = Project::new(if esbuild {
+            "rc-glob-invalid"
+        } else {
+            "rc-glob-invalid-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in files {
+            p.file(f, c);
+        }
+        let envs: &[&[(&str, &str)]] = if esbuild {
+            &[
+                &[],
+                &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
+            ]
+        } else {
+            &[&[]]
+        };
+        for env in envs {
+            let r = turbo_test(&p.dir, &[], env);
+            assert_eq!(r.code, Some(1), "esbuild={esbuild} {env:?}\n{}", r.all());
+            assert!(
+                r.stdout.contains("Test Files  2 failed | 1 passed (3)")
+                    && r.stdout.contains("Tests  1 passed (1)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            for (file, pattern) in [("a.test.ts", "sub/*.ts"), ("b.test.ts", "ok/x.ts")] {
+                let want = format!(
+                    "(Error: Invalid glob: \"{pattern}\" (resolved: \"{pattern}\"). It must start with '/' or './')"
+                );
+                assert!(
+                    load_error_line(&r, file).ends_with(&want),
+                    "esbuild={esbuild} {env:?}\n{}",
+                    r.all()
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn import_meta_keeps_coverage_line_mapping() {
     let p = esbuild_project("rc-import-meta-cov");

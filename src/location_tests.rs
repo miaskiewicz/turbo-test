@@ -75,3 +75,22 @@ fn the_entry_needs_call_sites_for_locations_or_inline_snapshots() {
     ENTRY.with(|e| *e.borrow_mut() = None);
     assert!(!is_entry(f));
 }
+
+#[test]
+fn shifts_map_columns_back_to_before_the_edits() {
+    let p = "/tmp/tt-shift-module.js";
+    let s = |line, new, old| Shift { line, new, old };
+    set_shifts(
+        Path::new(p),
+        vec![s(1, (4, 10), (4, 5)), s(1, (12, 20), (7, 8))],
+    );
+    // 1-based in and out; line 2 is shift line 1
+    assert_eq!(
+        [1, 4, 5, 6, 10, 11, 12, 13, 15, 21, 30].map(|c| unshift(p, 2, c)),
+        [1, 4, 5, 5, 5, 6, 7, 8, 8, 9, 18]
+    );
+    assert_eq!(unshift(p, 1, 9), 9);
+    assert_eq!(unshift("/elsewhere.js", 2, 9), 9);
+    set_shifts(Path::new(p), Vec::new());
+    assert_eq!(unshift(p, 2, 9), 9);
+}

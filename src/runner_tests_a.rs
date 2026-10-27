@@ -1356,7 +1356,7 @@ fn postprocess_mr_cjs_rewrites_esbuild_helpers() {
     assert!(postprocess_mr_cjs(
         "var __reExport = (target, mod, secondTarget) => (x);".to_string()
     )
-    .contains("var __toESMStar = (m) => __toESM(m); var __reExport = (target, mod, secondTarget) => (mod = __toESMStar(mod), x);"));
+    .contains("var __toESMStar = (m) => globalThis.__ttToESM(m); var __reExport = (target, mod, secondTarget) => (mod = __toESMStar(mod), x);"));
     let dep = postprocess_mr_dep_cjs(
         "var __toESM = (a) => a;\nvar __reExport = (target, mod, secondTarget) => (x);".to_string(),
         true,

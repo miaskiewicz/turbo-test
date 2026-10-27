@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'cli.js');
@@ -175,4 +176,23 @@ test('circular decorated models (@Entity/@Field, User <-> Post) load — legacy 
   const j = parseJson(run(['--reporter', 'json', file('circular-decorators/circular-decorators.test.ts')]).out);
   assert.equal(j.numPassedTests, 2);
   assert.equal(j.numFailedTests, 0);
+});
+
+// turbo-test#160: cli.js passes the binary the chai this package depends on (TURBO_CHAI), so a
+// user's environment needs nothing: chai's BDD chain and vitest's assert export work.
+test('cli.js gives the runtime its chai: expect(x).to… and assert from vitest', () => {
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'tt-chai-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'package.json'), '{ "type": "module" }');
+    fs.writeFileSync(path.join(dir, 'c.test.js'), "import { test, expect, assert } from 'vitest'\ntest('chai', () => { expect([1, 2]).to.have.lengthOf(2).and.include(2); assert.strictEqual(1, 1) })\n");
+    const env = { ...ENV };
+    delete env.TURBO_CHAI;
+    const r = runIn(dir, ['c.test.js', '--reporter', 'json'], { env });
+    assert.equal(r.code, 0, r.out + r.err);
+    const j = parseJson(r.out);
+    assert.equal(j.numPassedTests, 1);
+    assert.equal(j.numTotalTests, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

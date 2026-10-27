@@ -214,7 +214,7 @@ fn esm_graph_reuse_reports_load_errors_and_retries_fresh() {
                 .to_string()
         };
         assert!(
-            line("e-inst.test.js").contains("(instantiate: SyntaxError: "),
+            line("e-inst.test.js").contains("(SyntaxError: "),
             "{}",
             r.all()
         );
@@ -225,7 +225,7 @@ fn esm_graph_reuse_reports_load_errors_and_retries_fresh() {
             r.all()
         );
         assert!(
-            line("e-eval.test.js").ends_with("(module errored: Error: reuse boom)"),
+            line("e-eval.test.js").ends_with("(Error: reuse boom)"),
             "{}",
             r.all()
         );

@@ -622,7 +622,7 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
         }
         Err(e) => FileResult {
             idx,
-            line: format!("ERROR {}  ({e})", file.display()),
+            line: format!("ERROR {}  ({})", file.display(), without_load_phase(&e)),
             passed: 0,
             failed: 0,
             load_error: true,
@@ -809,16 +809,19 @@ fn json_strs(items: &[String]) -> String {
     format!("[{}]", items.join(","))
 }
 
+/// A load error without turbo-test's load-phase prefix (`module errored: `, `evaluate threw: `,
+/// `instantiate: `, the ESM-graph loader's), as the module runner reports it (turbo-test#164).
+pub(crate) fn without_load_phase(error_msg: &str) -> &str {
+    ["module errored: ", "evaluate threw: ", "instantiate: "]
+        .iter()
+        .find_map(|p| error_msg.strip_prefix(p))
+        .unwrap_or(error_msg)
+}
+
 /// A load error's message as vitest's JSON `message` shows it: the error's own message, without
 /// turbo-test's load-phase prefix (`module errored: `, …) and the error's `<Name>: ` prefix.
 pub(crate) fn file_message(error_msg: &str) -> String {
-    let mut m = error_msg;
-    for p in ["module errored: ", "evaluate threw: ", "instantiate: "] {
-        if let Some(rest) = m.strip_prefix(p) {
-            m = rest;
-            break;
-        }
-    }
+    let mut m = without_load_phase(error_msg);
     if let Some((name, rest)) = m.split_once(": ") {
         if name.ends_with("Error") && name.chars().all(|c| c.is_ascii_alphanumeric()) {
             m = rest;
@@ -1128,13 +1131,7 @@ fn failure_element(e: &crate::failure::ErrorInfo, root: &Path) -> Vec<String> {
 /// A load error without the runner's error object (a setup file, a graph that did not load):
 /// its message as `Name: message` (the error name, else `Error`).
 fn load_error_info(error_msg: &str) -> crate::failure::ErrorInfo {
-    let mut m = error_msg;
-    for p in ["module errored: ", "evaluate threw: ", "instantiate: "] {
-        if let Some(rest) = m.strip_prefix(p) {
-            m = rest;
-            break;
-        }
-    }
+    let m = without_load_phase(error_msg);
     let (name, message) = match m.split_once(": ") {
         Some((name, rest))
             if name.ends_with("Error") && name.chars().all(|c| c.is_ascii_alphanumeric()) =>
@@ -1219,7 +1216,12 @@ pub fn render_tap(files: &[PathBuf], res: &[FileResult]) -> String {
         if r.load_error {
             n += 1;
             out.push_str(&format!("not ok {n} - {}\n", files[r.idx].display()));
-            diag(&mut out, &r.error_msg);
+            // vitest's block for the file's error (turbo-test#166)
+            let e = r
+                .load_error_info
+                .clone()
+                .unwrap_or_else(|| load_error_info(&r.error_msg));
+            out.push_str(&tap_error_block(&e));
             continue;
         }
         for t in &r.tests {
@@ -1232,6 +1234,34 @@ pub fn render_tap(files: &[PathBuf], res: &[FileResult]) -> String {
             }
         }
     }
+    out
+}
+
+/// vitest's TAP block of an error (its TapReporter, one level in): `error:` with its `name` and
+/// `message` YAML-quoted (line breaks kept) and `at:` its first frame.
+fn tap_error_block(e: &crate::failure::ErrorInfo) -> String {
+    let yaml = |s: &str| {
+        if s.is_empty() {
+            String::new()
+        } else {
+            format!("\"{}\"", s.replace('"', "\\\""))
+        }
+    };
+    let name = if e.name.is_empty() {
+        "Unknown Error"
+    } else {
+        &e.name
+    };
+    let mut out = format!(
+        "    ---\n    error:\n        name: {}\n        message: {}\n",
+        yaml(name),
+        yaml(&e.message)
+    );
+    if let Some(f) = e.frames.first() {
+        let at = format!("{}:{}:{}", f.file.display(), f.line, f.col);
+        out.push_str(&format!("    at: {}\n", yaml(&at)));
+    }
+    out.push_str("    ...\n");
     out
 }
 
@@ -1542,6 +1572,10 @@ pub fn run(opts: Options) -> i32 {
     }
     if human.is_some() || opts.reporter == Reporter::Junit {
         std::env::set_var("TURBO_CAPTURE_LOGS", "1");
+        std::env::set_var("TURBO_TASK_LOCATION", "1");
+        std::env::set_var("TURBO_ERROR_FRAMES", "1");
+    } else if opts.reporter == Reporter::Tap {
+        // a load failure's `at:` (turbo-test#166)
         std::env::set_var("TURBO_TASK_LOCATION", "1");
         std::env::set_var("TURBO_ERROR_FRAMES", "1");
     }

@@ -19,6 +19,11 @@ A release where these disagree is a bug. Bump both in the same commit.
 - `cli.js` prefers the prebuilt `bin/turbo-test-<platform>-<arch>` over `target/release`.
   After rebuilding, refresh it: `cp target/release/turbo-test bin/turbo-test-darwin-arm64`
   (or run `scripts/npm-build.sh`). Otherwise you'll test a stale binary.
+- The runtime is built on chai (vitest's expect is a chai 6.3.0 Assertion, turbo-test#160): the
+  binary loads the `chai` npm dependency into its snapshot from `TURBO_CHAI` (chai's `index.js`),
+  which `cli.js` sets. Running `target/release/turbo-test` directly needs
+  `TURBO_CHAI=$PWD/node_modules/chai/index.js` (after `npm ci`); without it the binary stops with
+  an error. The test harnesses (`tests/common`, unit tests) use the repo's `node_modules/chai`.
 - Coverage needs `node_modules/.bin/esbuild` in the project being tested (the module-runner
   CJS transform path emits the inline source map only via esbuild). A fixture without esbuild
   silently collects no coverage.

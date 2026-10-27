@@ -270,7 +270,7 @@ fn load_errors_name_the_failing_phase() {
     let o = &r.stdout;
     assert!(
         line_for(o, "inst.test.js").contains(
-            "inst.test.js  (instantiate: SyntaxError: The requested module './lib.mjs' does not provide an export named 'nope')"
+            "inst.test.js  (SyntaxError: The requested module './lib.mjs' does not provide an export named 'nope')"
         ),
         "{o}"
     );
@@ -284,8 +284,8 @@ fn load_errors_name_the_failing_phase() {
     assert!(line_for(o, "entrysyn.test.js")
         .ends_with("(Error: Failed to parse source for import analysis because the content contains invalid JS syntax. If you are using JSX, make sure to name the file with the .jsx or .tsx extension.)"));
     assert!(!o.contains("Uncaught"), "{o}");
-    assert!(line_for(o, "evalthrow.test.js").contains("(module errored: Error: top boom)"));
-    assert!(line_for(o, "tla.test.js").contains("(module errored: Error: tla boom)"));
+    assert!(line_for(o, "evalthrow.test.js").contains("(Error: top boom)"));
+    assert!(line_for(o, "tla.test.js").contains("(Error: tla boom)"));
     assert!(line_for(o, "ok.test.js").starts_with("PASS"));
     assert!(!r.stderr.contains("cannot resolve"), "{}", r.all());
 }

@@ -1,68 +1,89 @@
 use super::*;
 
 fn run(code: &str) -> Option<String> {
-    spyable(Path::new("/p/m.js"), code)
+    spyable(Path::new("/p/m.js"), code).map(|(c, _)| c)
 }
 
 #[test]
-fn every_export_form_gets_a_setter() {
-    let code = "import d, { a as b } from './x';\nimport * as all from './y';\n\
-                export const c = 1, { e } = o;\nexport function f() {}\nexport class K {}\n\
-                const g = 2;\nexport { g as h, b, d as i, all };\nexport let j = 3;\n\
-                export { k as l } from './z';\nexport * from './s';\nexport * as t from './t';\n\
-                export default () => 1;";
+fn edits_are_reported_as_column_shifts() {
+    use crate::location::Shift;
+    let code = "import { a } from './x';\nconst é = [a, a];\nimport('./y');\n";
+    let (out, shifts) = spyable(Path::new("/p/m.js"), code).unwrap();
+    let r = "(globalThis.__ttR(__tt_ns_0, \"a\"))".len() as u32;
+    assert!(out.starts_with(&format!(
+        "import {{ a }} from './x';\nconst é = [{0}, {0}];\n(import('./y')).then(globalThis.__ttNs);\n",
+        "(globalThis.__ttR(__tt_ns_0, \"a\"))"
+    )));
+    assert_eq!(
+        shifts,
+        vec![
+            Shift {
+                line: 1,
+                new: (11, 11 + r),
+                old: (11, 12)
+            },
+            Shift {
+                line: 1,
+                new: (13 + r, 13 + 2 * r),
+                old: (14, 15)
+            },
+            Shift {
+                line: 2,
+                new: (0, 1),
+                old: (0, 0)
+            },
+            Shift {
+                line: 2,
+                new: (14, 39),
+                old: (13, 13)
+            },
+        ]
+    );
+}
+
+#[test]
+fn importers_read_imports_through_the_overrides() {
+    let code = "import d, { a as b } from './x';\nimport * as ns from './y';\nimport { c } from './x';\n\
+                import { expect } from 'vitest';\nimport fs from 'node:fs';\nimport j from './j.json' with { type: 'json' };\n\
+                const o = { b, k: d, ns };\nnew b(c, ns.q, typeof d, expect, fs, j);\n\
+                function f(b) { return b; }\nimport('./z').then(f);\nexport { b, d as e };\n";
     assert_eq!(
         run(code).unwrap(),
-        "import d, { a as b } from './x';\nimport * as all from './y';\n\
-         export let   c = 1, { e } = o;\nexport function f() {}\nexport class K {}\n\
-         let   g = 2;\nexport { g as h, b, d as i, all };\nexport let j = 3;\n\
-         export { k as l } from './z';\nexport * from './s';\nexport * as t from './t';\n\
-         let __tt_default = ({ default: () => 1 }).default;\n\
-         import * as __tt_ns_0 from \"./x\";import * as __tt_ns_1 from \"./z\";import * as __tt_ns_2 from \"./s\";\
-         import * as __tt_self from \"./m.js\";export { __tt_default as default };\
-         globalThis.__ttNsSetter?.(__tt_self, (k, v) => { switch (k) { \
-         case \"c\": c = v; return true; case \"e\": e = v; return true; case \"f\": f = v; return true; \
-         case \"K\": K = v; return true; case \"h\": g = v; return true; \
-         case \"b\": return globalThis.__ttNsSet(__tt_ns_0, \"a\", v); \
-         case \"i\": return globalThis.__ttNsSet(__tt_ns_0, \"default\", v); case \"all\": all = v; return true; \
-         case \"j\": j = v; return true; case \"l\": return globalThis.__ttNsSet(__tt_ns_1, \"k\", v); \
-         case \"default\": __tt_default = v; return true; } \
-         if (k !== \"default\" && k in __tt_ns_2) return globalThis.__ttNsSet(__tt_ns_2, k, v); return false; });\n"
+        "import d, { a as b } from './x';\nimport * as ns from './y';\nimport { c } from './x';\n\
+         import { expect } from 'vitest';\nimport fs from 'node:fs';\nimport j from './j.json' with { type: 'json' };\n\
+         const o = { b: (globalThis.__ttR(__tt_ns_0, \"a\")), k: (globalThis.__ttR(__tt_ns_0, \"default\")), ns: (globalThis.__ttNs(ns)) };\n\
+         new (globalThis.__ttR(__tt_ns_0, \"a\"))((globalThis.__ttR(__tt_ns_0, \"c\")), (globalThis.__ttNs(ns)).q, typeof (globalThis.__ttR(__tt_ns_0, \"default\")), expect, fs, j);\n\
+         function f(b) { return b; }\n(import('./z')).then(globalThis.__ttNs).then(f);\nexport { b, d as e };\n\
+         import * as __tt_ns_0 from \"./x\";import * as __tt_self from \"./m.js\";\
+         globalThis.__ttNsRegister?.(__tt_self, [], {\"b\": [__tt_ns_0, \"a\"], \"e\": [__tt_ns_0, \"default\"]}, []);\n"
     );
 }
 
 #[test]
-fn anonymous_default_declarations_get_a_binding() {
+fn exporters_register_own_names_reexports_and_stars() {
+    let code = "export const a = 1, { b } = o;\nexport function f() {}\nexport class K {}\nconst g = 2;\n\
+                export { g as h };\nexport let j;\nexport { k as l } from './z';\nexport * from './s';\n\
+                export * as t from './t';\nexport default 1;";
     assert_eq!(
-        run("export default async function* (a) {}\n").unwrap(),
-        "export default async function*  __tt_default(a) {}\n\
-         import * as __tt_self from \"./m.js\";Object.defineProperty(__tt_default, \"name\", { value: \"default\" });\
-         globalThis.__ttNsSetter?.(__tt_self, (k, v) => { switch (k) { case \"default\": __tt_default = v; return true; } return false; });\n"
+        run(code).unwrap(),
+        format!(
+            "{code}\nimport * as __tt_ns_0 from \"./z\";import * as __tt_ns_1 from \"./s\";\
+             import * as __tt_self from \"./m.js\";globalThis.__ttNsRegister?.(__tt_self, \
+             [\"a\", \"b\", \"f\", \"K\", \"h\", \"j\", \"t\", \"default\"], {{\"l\": [__tt_ns_0, \"k\"]}}, [__tt_ns_1]);\n"
+        )
     );
-    assert_eq!(
-        run("export default class extends B {}").unwrap(),
-        "export default class __tt_default extends B {}\n\
-         import * as __tt_self from \"./m.js\";Object.defineProperty(__tt_default, \"name\", { value: \"default\", configurable: true });\
-         globalThis.__ttNsSetter?.(__tt_self, (k, v) => { switch (k) { case \"default\": __tt_default = v; return true; } return false; });\n"
-    );
-    assert!(run("export default function named() {}")
-        .unwrap()
-        .contains("case \"default\": named = v; return true;"));
-    assert!(run("export default class N {}")
-        .unwrap()
-        .contains("case \"default\": N = v; return true;"));
 }
 
 #[test]
-fn modules_without_reachable_exports_are_left_alone() {
+fn modules_with_nothing_to_rewrite_are_left_alone() {
     for code in [
         "const a = 1;",
-        "export {};",
-        "export * as t from './t';",
-        "export { a } from './j.json' with { type: 'json' };",
+        "import './side-effect';",
+        "import { it } from 'vitest'; it('x', () => {});",
+        "import j from './j.json' with { type: 'json' }; j;",
         "export using x = y;",
         "export const = ;",
-        "import './x'; // export",
+        "import { w } from './w'; w = 1;",
     ] {
         assert_eq!(run(code), None, "{code}");
     }
