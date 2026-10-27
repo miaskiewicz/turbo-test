@@ -253,3 +253,78 @@ fn matcher_utils_are_vitests() {
         include_str!("data/expect_surface/utils.vitest.txt"),
     );
 }
+
+#[test]
+#[ignore = "turbo-test#167: fails until the fix"]
+fn snapshot_serializers_config_is_vitests() {
+    // turbo-test#167: the config's `snapshotSerializers` (paths relative to the root, an ES
+    // module's or a CommonJS module's default export) were not read. vitest 4.1.12 adds each one
+    // before the file runs, so they apply like expect.addSnapshotSerializer's (one added in the
+    // test comes first). Expected: the inline snapshots and the .snap file vitest wrote.
+    let p = Project::new("rc-snapshot-serializers-config");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    for (name, src) in [
+        (
+            "vitest.config.mjs",
+            include_str!("data/expect_surface/serializer_config/vitest.config.mjs"),
+        ),
+        (
+            "money-serializer.js",
+            include_str!("data/expect_surface/serializer_config/money-serializer.js"),
+        ),
+        (
+            "tagged-serializer.cjs",
+            include_str!("data/expect_surface/serializer_config/tagged-serializer.cjs"),
+        ),
+        (
+            "cfg.test.js",
+            include_str!("data/expect_surface/serializer_config/cfg.test.js"),
+        ),
+    ] {
+        p.file(name, src);
+    }
+    for pass in ["write", "check"] {
+        let r = turbo_test(&p.dir, &["cfg.test.js"], &[("NO_COLOR", "1")]);
+        assert_eq!(r.code, Some(0), "{pass}: {}", r.all());
+        assert_eq!(
+            std::fs::read_to_string(p.path("cfg.test.js")).unwrap(),
+            include_str!("data/expect_surface/serializer_config/cfg.vitest.js"),
+            "{pass}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.path("__snapshots__/cfg.test.js.snap")).unwrap(),
+            include_str!("data/expect_surface/serializer_config/cfg.vitest.snap"),
+            "{pass}"
+        );
+    }
+    // a serializer module without a default object, or one that cannot print: vitest's errors
+    let bad = Project::new("rc-snapshot-serializers-config-bad");
+    bad.file("package.json", r#"{ "type": "module" }"#);
+    bad.file(
+        "vitest.config.mjs",
+        "export default { test: { snapshotSerializers: ['./bad.js'] } }\n",
+    );
+    bad.file(
+        "a.test.js",
+        "import { test, expect } from 'vitest'\ntest('a', () => { expect(1).toBe(1) })\n",
+    );
+    let bad_js = bad.path("bad.js");
+    for (src, want) in [
+        (
+            "export const x = 1\n",
+            format!(
+                "Error: invalid snapshot serializer file {}. Must export a default object",
+                bad_js.display()
+            ),
+        ),
+        (
+            "export default { test: () => true }\n",
+            format!("TypeError: invalid snapshot serializer in {}. Must have a 'test' method along with either a 'serialize' or 'print' method.", bad_js.display()),
+        ),
+    ] {
+        bad.file("bad.js", src);
+        let r = turbo_test(&bad.dir, &["a.test.js"], &[("NO_COLOR", "1")]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert!(r.all().contains(&want), "missing {want:?} in\n{}", r.all());
+    }
+}
