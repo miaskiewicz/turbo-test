@@ -6745,9 +6745,14 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     // Per-file native-DOM lifecycle: reset the thread-local DOM (fresh document per file) and, when
     // debugging (TURBO_RUST_DOM_LOG), dump the missing-member access log — on ANY exit incl. a load
     // failure (the surface React/testing-library touched is recorded during the failed load).
+    // A file on the reuse path keeps the worker's document: it is installed once per worker, as
+    // vitest `isolate: false` keeps one environment (turbo-test#150), and dropped with the worker.
     struct DomGuard;
     impl Drop for DomGuard {
         fn drop(&mut self) {
+            if on_reuse_path() && DOM_INSTALLED.with(|d| d.get()) {
+                return;
+            }
             if turbo_dom_browser_env::browser_env::enabled() {
                 turbo_dom_browser_env::browser_env::reset();
             }
@@ -7187,7 +7192,8 @@ fn run_test_file_reused(
 
         set_ssr_env(scope, entry_abs);
         let result: Result<TestReport, String> = 'work: {
-            // DOM: install once per worker; subsequent files reset it via env.reset() above.
+            // DOM: install once per worker and keep it across its files, as vitest `isolate: false`
+            // keeps one environment (turbo-test#150); a fresh-isolate run or a recycle reinstalls.
             if needs_dom(entry_abs) && !DOM_INSTALLED.with(|d| d.get()) {
                 setup_dom(scope, entry_abs);
                 DOM_INSTALLED.with(|d| d.set(true));
@@ -7342,6 +7348,10 @@ pub fn end_worker_reuse() {
     // Globals: drop them while the isolate is still alive (a recycled isolate is followed by more
     // files on this thread, so a handle outliving its isolate would not stay harmless).
     SETUP_MOCK_SNAPSHOT.with(|s| s.borrow_mut().clear());
+    // The worker's document (kept across its files, turbo-test#150) goes with its isolate.
+    if DOM_INSTALLED.with(|d| d.get()) && turbo_dom_browser_env::browser_env::enabled() {
+        turbo_dom_browser_env::browser_env::reset();
+    }
     REUSE_CTX.with(|c| {
         let _ = c.borrow_mut().take();
     });
@@ -7360,8 +7370,10 @@ pub fn is_reuse_enabled() -> bool {
 }
 
 /// Authoritative fresh-isolate retry: run `entry` on a FRESH per-file isolate even under reuse.
-/// A file that failed under reuse may have hit a cross-file leak artifact; re-running it in a
-/// clean isolate (which is 6189/0 territory) is the source of truth. The worker's reuse REGISTRY
+/// A file whose run under reuse is not final (`cli::reuse_result_is_final`, turbo-test#126: a
+/// test failing with something other than an assertion, a load error, a panic, an out-of-memory
+/// abort) may have hit the reused isolate's own state; re-running it in a clean isolate is the
+/// source of truth. The worker's reuse REGISTRY
 /// is swapped out for the duration so the fresh isolate's Globals don't clobber the persistent
 /// reuse module cache (the saved registry's Globals stay valid — the persistent isolate lives on).
 pub fn run_test_file_fresh(entry: &Path) -> Result<TestReport, String> {
@@ -7378,6 +7390,9 @@ fn run_fresh_with(
     // Panic-safe: a V8/loader panic must NOT lose the saved reuse registry or strand FORCE_FRESH.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(entry)));
     FORCE_FRESH.with(|f| f.set(false));
+    // The fresh run installed (and dropped) its own document in this thread's DOM slot, which
+    // the worker's document shares: the next reused file installs the worker's document again.
+    DOM_INSTALLED.with(|d| d.set(false));
     // On success the fresh path already cleared its registry; on panic it may hold handles to the
     // now-dead fresh isolate. Either way, swap the saved reuse registry back in and FORGET the
     // fresh one (don't drop — its isolate is gone, dropping would assert).

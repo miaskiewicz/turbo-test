@@ -482,19 +482,14 @@ pub fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "panic".into())
 }
 
-/// The shared turbo-dom .node addon stores a process-global env that a concurrent worker's DOM
-/// bootstrap can transiently clobber → "document is not defined" for a whole file. A whole file
-/// failing (0 passed, ≥1 failed), an explicit DOM-not-ready error, or a load error is the
-/// init-race signature worth re-running.
+/// Whether a file is worth re-running on the same kind of isolate: only a file that did not run
+/// its tests (a load error, a panic). A report — however many of its tests failed — is what
+/// vitest reports from its one run of the file (turbo-test#144); the old all-failing /
+/// "document is not defined" heuristic guarded a DOM init race in the shared turbo-dom `.node`
+/// addon, which the in-process turbo-dom-browser-env binding does not have.
 pub fn looks_transient(r: &FileOutcome) -> bool {
     match r {
-        Ok(rep) => {
-            (rep.passed == 0 && rep.failed > 0)
-                || rep.failures.iter().any(|f| {
-                    f.contains("is not defined")
-                        && (f.contains("document") || f.contains("window") || f.contains("DOM"))
-                })
-        }
+        Ok(_) => false,
         // A file the heap guard stopped: same-mode retries would only run out of memory again
         // (under reuse the fresh-isolate retry below still gives it a clean heap).
         Err(e) => !crate::heap_guard::is_oom(e),
@@ -509,17 +504,29 @@ pub fn score(r: &FileOutcome) -> i64 {
     }
 }
 
-/// Whether the outcome warrants the fresh-isolate retry (any failure, nothing passed, or error).
-pub fn has_fail(r: &FileOutcome) -> bool {
-    match r {
-        Ok(rep) => rep.failed > 0 || (rep.passed == 0),
-        Err(_) => true,
-    }
+/// Whether a file's run under isolate reuse is what vitest `isolate: false` reports
+/// (turbo-test#126): its tests were collected (no load error, no "no test suite" report, no
+/// failed hook) and each failed test failed an assertion. vitest runs each file once on the shared worker and
+/// reports that run — a test failing an `expect` is reported, even when state an earlier file
+/// left caused it. Anything else (a test throwing a TypeError, a load error, a panic, the heap
+/// guard's out-of-memory abort) may be the reused isolate's own state — a turbo-test reuse
+/// artifact vitest would not show — and gets one run on a fresh isolate.
+pub fn reuse_result_is_final(r: &FileOutcome) -> bool {
+    let Ok(rep) = r else { return false };
+    let failed: Vec<&TestCase> = rep.tests.iter().filter(|t| t.status == "failed").collect();
+    rep.suite_errors.is_empty()
+        && !rep.failures.iter().any(|f| f.starts_with(NO_SUITE_FOUND))
+        && !rep.tests.is_empty()
+        && failed.len() == rep.failed as usize
+        && failed
+            .iter()
+            .all(|t| !t.errors.is_empty() && t.errors.iter().all(|e| e.name == "AssertionError"))
 }
 
-/// Run one file: panic-guarded, re-run up to 2 more times while the result looks transient
-/// (keeping the best attempt), then — under isolate reuse, when it still fails — re-run on a fresh
-/// isolate whose (best-of-3) result is authoritative.
+/// Run one file: panic-guarded, re-run up to 2 more times while it did not run its tests
+/// ([`looks_transient`], keeping the best attempt), then — under isolate reuse, unless the result is final
+/// ([`reuse_result_is_final`]) — re-run on a fresh isolate whose (best-of-3) result is
+/// authoritative.
 pub fn execute_file(engine: &Engine, file: &Path) -> FileOutcome {
     // A panic in V8/loader must not abort the whole run: catch it, leak the dead isolate's
     // handles, and report this file as an error.
@@ -531,11 +538,12 @@ pub fn execute_file(engine: &Engine, file: &Path) -> FileOutcome {
                 Err(format!("panicked: {}", panic_message(&*p)))
             }
         };
-    // Re-run (up to 3x) and KEEP THE BEST attempt — a flaky file lands a clean pass on some
-    // attempt; a genuinely all-failing file stays the same (just slower). This keeps the suite
-    // deterministic across runs.
+    // A file that did not run its tests is re-run (up to 3x), keeping the best attempt. A report
+    // never is (turbo-test#144) — under reuse a second run on the reused isolate would also find
+    // the file's module already evaluated and collect no tests ("No test suite found").
     let mut r = run_once();
     let mut tries = 0;
+    let reuse = (engine.reuse_enabled)();
     while looks_transient(&r) && tries < 2 {
         tries += 1;
         let r2 = run_once();
@@ -543,11 +551,13 @@ pub fn execute_file(engine: &Engine, file: &Path) -> FileOutcome {
             r = r2;
         }
     }
-    // Fresh-isolate retry (idea #1): under reuse, a file that still has failures may be a
-    // cross-file leak ARTIFACT (it passes in a clean isolate). Re-run it on a fresh isolate — that
-    // result is authoritative (fresh mode is 6189/0). This pins reuse correctness to fresh while
-    // keeping reuse speed for the files that pass.
-    if (engine.reuse_enabled)() && has_fail(&r) {
+    // Fresh-isolate retry (turbo-test#126): reuse is vitest's `isolate: false` (the config or
+    // `--no-isolate`), which runs each file once and reports it, so a passing file or one whose
+    // failures are assertion failures is final — re-running it fresh doubled its cost and could
+    // only hide what vitest shows. Any other result may be a reuse artifact (a module left
+    // half-linked by an earlier file, a stale DOM wrapper, the accumulated heap): one run on a
+    // fresh isolate, whose result is authoritative.
+    if reuse && !reuse_result_is_final(&r) {
         let mut fr = (engine.run_fresh)(file);
         let mut ft = 0;
         while looks_transient(&fr) && ft < 2 {

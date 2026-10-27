@@ -5,6 +5,32 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Performance — a failing file runs once (K1, turbo-test#126, #144, #150)
+- Under isolate reuse (vitest `isolate: false`, or `--no-isolate`) every file with a failure —
+  or with nothing passed — was run a second time on a fresh isolate and that result reported,
+  doubling the cost of each failing file (a profiling hotspot in #79). vitest runs each file
+  once on the shared worker and reports that run, so a run whose tests were collected and whose
+  failures are all assertion failures (`expect` / `assert`) is now final, and a report is never
+  re-run on the reused isolate (its module is already evaluated there: a second run collected no
+  tests). A run that may be the reused isolate's own artifact — a test throwing something other
+  than an assertion error (a stale DOM wrapper's `Illegal invocation`), a failed hook, a load
+  error, a panic, the heap guard's out-of-memory abort — still gets one run on a fresh isolate
+  (an out-of-memory file is still not retried on the same kind of isolate, turbo-test#124). `test/compat-reuse-retry.test.mjs`
+  pins the outcome and the run count against vitest 4.1.12 on `fixtures/reuse-fail-once`
+  (`tests/data/reuse-fail-once-vitest-4.1.12.json`).
+- Isolate reuse keeps one document for the worker (turbo-test#150). The worker's DOM was
+  installed once but dropped after every file, so the next DOM file read a dead `document`
+  (`TypeError: Illegal invocation`) and passed only on its fresh-isolate re-run. As in vitest
+  `isolate: false`, the document now lives as long as the worker's isolate (a later file sees
+  the earlier file's document and body); a fresh-isolate run or a recycled isolate installs it
+  again. Pinned by `tests/runner_b_reuse.rs` against vitest 4.1.12 with happy-dom.
+- A file whose tests all fail runs once (turbo-test#144). Any report with 0 passed and ≥1 failed
+  (or a "document / window / DOM is not defined" failure) was re-run twice more on the same kind
+  of isolate, isolated or not, and the best attempt kept — a guard for a DOM init race in the old
+  shared turbo-dom `.node` addon, which the in-process turbo-dom-browser-env binding does not
+  have. vitest runs the file once; now only a file that did not run its tests (a load error, a
+  panic) is retried. The same test pins it with `--isolate` (vitest's report is identical).
+
 ### Fixed
 - runtime.js no longer defines `__ttRestoreFileApis` (turbo-test#147). It restored Blob / File /
   FileReader after the JS turbo-dom bootstrap replaced them; that bootstrap went in v0.3.0 and the
