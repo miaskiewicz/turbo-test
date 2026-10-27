@@ -7,7 +7,7 @@
 #![cfg(unix)]
 
 mod common;
-use common::{turbo_test, Project};
+use common::{repo_root, turbo_test, Project};
 
 /// The report's repro project with `files` (path, contents).
 fn dropin(name: &str, files: &[(&str, &str)]) -> Project {
@@ -327,6 +327,124 @@ fn a_mock_factory_that_cannot_compile_fails_the_file() {
             r.stdout.lines().any(|l| l
                 == "ERROR a.test.ts  (SyntaxError: new.target expression is not allowed here (in the file's vi.mock factories))"),
             "{config}\n{}",
+            r.all()
+        );
+    }
+}
+
+/// PR #80 (turbo-test#79): a project with no `node_modules/.bin/esbuild` — a pnpm install whose
+/// esbuild is only a transitive `node_modules/.pnpm/esbuild@…`, or a project with no esbuild at
+/// all — runs on turbo-test's own esbuild (`TURBO_ESBUILD`, set by cli.js), with the nearest
+/// directory that has `node_modules` as the root, like a project that links one. vitest (its own
+/// transform) on the same projects: typed and JSX `vi.mock` factories apply, a mock factory on a
+/// pnpm package applies, and `vi.spyOn` on a module's export is seen by the module importing it.
+#[test]
+#[ignore = "turbo-test#79: fails until the fix"]
+fn a_project_without_a_linked_esbuild_uses_turbo_tests_own() {
+    let files: [(&str, &str); 6] = [
+        ("dep.ts", "export const greet = (n: string): string => 'hi ' + n;\n"),
+        (
+            "svc.ts",
+            "import { greet } from './dep';\nexport const shout = (n: string): string => greet(n) + '!';\n",
+        ),
+        (
+            "b.test.tsx",
+            "import { expect, it, vi } from 'vitest';\n\
+             vi.mock('./dep', () => ({ greet: (n: string): string => `mocked ${n}` }));\n\
+             import { greet } from './dep';\n\
+             it('typed factory', () => { expect(greet('a')).toBe('mocked a'); });\n",
+        ),
+        (
+            "c.test.tsx",
+            "import { expect, it, vi } from 'vitest';\n\
+             vi.mock('./dep', () => ({ greet: () => <i data-x=\"y\" /> }));\n\
+             import { greet } from './dep';\n\
+             it('jsx factory', () => { expect((greet as any)('a').props).toEqual({ 'data-x': 'y' }); });\n",
+        ),
+        (
+            "d.test.ts",
+            "import { expect, it, vi } from 'vitest';\n\
+             vi.mock('cjsdep', async (orig) => ({ ...(await orig<typeof import('cjsdep')>()), val: (): string => 'mocked' }));\n\
+             import { val, other } from 'cjsdep';\n\
+             it('typed factory on a package', () => { expect([val(), other]).toEqual(['mocked', 1]); });\n",
+        ),
+        (
+            "e.test.ts",
+            "import { expect, it, vi } from 'vitest';\n\
+             import * as dep from './dep';\n\
+             import { shout } from './svc';\n\
+             it('spyOn an export reaches its importer', () => {\n\
+             \x20 vi.spyOn(dep, 'greet').mockReturnValue('spied');\n\
+             \x20 expect(shout('a')).toBe('spied!');\n\
+             });\n",
+        ),
+    ];
+    let esbuild = repo_root().join("node_modules/esbuild/bin/esbuild");
+    assert!(esbuild.exists(), "run `npm ci` in the repo first");
+    for pnpm in [true, false] {
+        let mut all: Vec<(&str, &str)> = files.to_vec();
+        // packages under node_modules/.pnpm, linked into node_modules (pnpm's layout); without
+        // pnpm, plain node_modules packages and no esbuild anywhere
+        let (react, cjsdep) = if pnpm {
+            (
+                "node_modules/.pnpm/react@19.0.0/node_modules/react",
+                "node_modules/.pnpm/cjsdep@1.0.0/node_modules/cjsdep",
+            )
+        } else {
+            ("node_modules/react", "node_modules/cjsdep")
+        };
+        let owned: Vec<(String, &str)> = REACT_STUB
+            .iter()
+            .map(|(f, c)| (f.replacen("node_modules/react", react, 1), *c))
+            .chain([
+                // vitest's JSX transform imports the dev runtime
+                (
+                    format!("{react}/jsx-dev-runtime.js"),
+                    "exports.jsxDEV = (type, props) => ({ type, props });\n",
+                ),
+                (
+                    format!("{cjsdep}/package.json"),
+                    "{\"name\":\"cjsdep\",\"main\":\"index.js\"}\n",
+                ),
+                (
+                    format!("{cjsdep}/index.js"),
+                    "exports.val = () => 'real';\nexports.other = 1;\n",
+                ),
+            ])
+            .collect();
+        all.extend(owned.iter().map(|(f, c)| (f.as_str(), *c)));
+        let p = dropin(
+            if pnpm {
+                "dropin-pnpm-esbuild"
+            } else {
+                "dropin-no-esbuild"
+            },
+            &all,
+        );
+        if pnpm {
+            for (link, target) in [
+                (
+                    "node_modules/react",
+                    ".pnpm/react@19.0.0/node_modules/react",
+                ),
+                (
+                    "node_modules/cjsdep",
+                    ".pnpm/cjsdep@1.0.0/node_modules/cjsdep",
+                ),
+            ] {
+                std::os::unix::fs::symlink(target, p.path(link)).unwrap();
+            }
+            let pkg = p.path("node_modules/.pnpm/esbuild@0.28.2/node_modules/esbuild");
+            std::fs::create_dir_all(pkg.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(repo_root().join("node_modules/esbuild"), &pkg).unwrap();
+        }
+        assert!(!p.path("node_modules/.bin/esbuild").exists());
+        let r = turbo_test(&p.dir, &[], &[("TURBO_ESBUILD", esbuild.to_str().unwrap())]);
+        assert_passes(&r, 4);
+        // the entry mocks' prepass ran through esbuild, written under the root's node_modules
+        assert!(
+            p.path("node_modules/.turbo-test-prepass").is_dir(),
+            "pnpm={pnpm}\n{}",
             r.all()
         );
     }
