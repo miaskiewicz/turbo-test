@@ -875,7 +875,88 @@
   },
   {
    "label": "urls",
-   "passed": true
+   "name": "AssertionError",
+   "message": "expected URL { href: 'http://a/', origin: 'http://a', protocol: 'http:', username: '', password: '', host: 'a', hostname: 'a', port: '', pathname: '/', search: '', searchParams: URLSearchParams {}, hash: '' } to deeply equal URL { href: 'http://b/', origin: 'http://b', protocol: 'http:', username: '', password: '', host: 'b', hostname: 'b', port: '', pathname: '/', search: '', searchParams: URLSearchParams {}, hash: '' }"
+  },
+  {
+   "label": "urls every part",
+   "name": "AssertionError",
+   "message": "expected URL { href: 'http://a.com:8080/p/q?x=1&y=2#h', origin: 'http://a.com:8080', protocol: 'http:', username: '', password: '', host: 'a.com:8080', hostname: 'a.com', port: '8080', pathname: '/p/q', search: '?x=1&y=2', searchParams: URLSearchParams { 'x' => '1', 'y' => '2' }, hash: '#h' } to deeply equal URL { href: 'http://b/', origin: 'http://b', protocol: 'http:', username: '', password: '', host: 'b', hostname: 'b', port: '', pathname: '/', search: '', searchParams: URLSearchParams {}, hash: '' }"
+  },
+  {
+   "label": "url vs string",
+   "name": "AssertionError",
+   "message": "expected URL { href: 'http://a/', origin: 'http://a', protocol: 'http:', username: '', password: '', host: 'a', hostname: 'a', port: '', pathname: '/', search: '', searchParams: URLSearchParams {}, hash: '' } to deeply equal 'http://a/'"
+  },
+  {
+   "label": "url toBe",
+   "name": "AssertionError",
+   "message": "expected URL { href: 'http://a/', origin: 'http://a', protocol: 'http:', username: '', password: '', host: 'a', hostname: 'a', port: '', pathname: '/', search: '', searchParams: URLSearchParams {}, hash: '' } to be URL { href: 'http://a/', origin: 'http://a', protocol: 'http:', username: '', password: '', host: 'a', hostname: 'a', port: '', pathname: '/', search: '', searchParams: URLSearchParams {}, hash: '' } // Object.is equality\n\nIf it should pass with deep equality, replace \"toBe\" with \"toStrictEqual\"\n\nExpected: URL { href: 'http://a/', origin: 'http://a', protocol: 'http:', username: '', password: '', host: 'a', hostname: 'a', port: '', pathname: '/', search: '', searchParams: URLSearchParams {}, hash: '' }\nReceived: serializes to the same string\n"
+  },
+  {
+   "label": "url nested",
+   "name": "AssertionError",
+   "message": "expected { …(1) } to deeply equal { …(1) }"
+  },
+  {
+   "label": "url search params",
+   "name": "AssertionError",
+   "message": "expected URLSearchParams { 'a' => '1', 'b' => '2' } to deeply equal URLSearchParams { 'a' => '1' }"
+  },
+  {
+   "label": "toThrow error props",
+   "name": "AssertionError",
+   "message": "expected a thrown error to be Error: abc"
+  },
+  {
+   "label": "toThrow error name",
+   "name": "AssertionError",
+   "message": "expected a thrown error to be Error: abc"
+  },
+  {
+   "label": "toThrow error subclass expected",
+   "name": "AssertionError",
+   "message": "expected a thrown error to be TypeError: abc"
+  },
+  {
+   "label": "toThrow error cause",
+   "name": "AssertionError",
+   "message": "expected a thrown error to be Error: abc"
+  },
+  {
+   "label": "toThrow object partial message",
+   "name": "AssertionError",
+   "message": "expected a thrown value to equal { message: 'ab' }"
+  },
+  {
+   "label": "toThrow object vs error",
+   "name": "AssertionError",
+   "message": "expected a thrown value to equal { message: 'abc' }"
+  },
+  {
+   "label": "toThrow object missing key",
+   "name": "AssertionError",
+   "message": "expected a thrown value to equal { message: 'ab' }"
+  },
+  {
+   "label": "toThrow string vs object",
+   "name": "AssertionError",
+   "message": "expected a thrown value to equal { message: 'str' }"
+  },
+  {
+   "label": "toThrow asymmetric in object",
+   "name": "AssertionError",
+   "message": "expected a thrown value to equal { message: StringContaining \"b\", …(1) }"
+  },
+  {
+   "label": "not.toThrow equal error",
+   "name": "AssertionError",
+   "message": "expected a thrown error not to be Error: abc"
+  },
+  {
+   "label": "not.toThrow equal object",
+   "name": "AssertionError",
+   "message": "expected a thrown value not to equal { message: 'ab', x: 1 }"
   },
   {
    "label": "circular differ",
@@ -1091,6 +1172,30 @@
   },
   {
    "label": "eq calledWith",
+   "passed": true
+  },
+  {
+   "label": "eq toThrow error",
+   "passed": true
+  },
+  {
+   "label": "eq toThrow error cause",
+   "passed": true
+  },
+  {
+   "label": "eq toThrow object",
+   "passed": true
+  },
+  {
+   "label": "eq toThrow array",
+   "passed": true
+  },
+  {
+   "label": "eq toThrow objectContaining",
+   "passed": true
+  },
+  {
+   "label": "eq not.toThrow other error",
    "passed": true
   }
  ]

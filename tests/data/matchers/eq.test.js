@@ -2,7 +2,8 @@ import { test, expect, vi } from 'vitest'
 import * as fs from 'node:fs'
 // turbo-test#103: toEqual / toStrictEqual and the matchers built on @vitest/expect's `equals`
 // (Dates, Maps, Sets, RegExps, boxed primitives, symbol keys, Errors, typed arrays, circular
-// structures), each with its matcher's testers.
+// structures), each with its matcher's testers; toThrow(error / object) on the same equals
+// (turbo-test#111); URLs printed in the messages as vitest prints them (turbo-test#112).
 test('equality', () => {
   const out = []
   class Foo { constructor() { this.a = 1 } get g() { return 1 } }
@@ -12,6 +13,8 @@ test('equality', () => {
   const circ = (x) => { const o = { x }; o.self = o; return o }
   const spy = vi.fn(); spy(new Date(1), new Map([[1, 2]]))
   const ret = vi.fn(() => new Error('a')); ret()
+  const throwAbc = () => { throw new Error('abc') }
+  const throwCode = () => { throw Object.assign(new Error('abc'), { code: 1 }) }
   for (const [label, fn] of [
     ['dates', () => expect(new Date(1)).toEqual(new Date(2))],
     ['maps', () => expect(new Map([[1, 2]])).toEqual(new Map([[1, 3]]))],
@@ -39,8 +42,25 @@ test('equality', () => {
     ['zero', () => expect(0).toEqual(-0)],
     ['object zero', () => expect({ a: 0 }).toEqual({ a: -0 })],
     ['functions', () => expect(() => 1).toEqual(() => 1)],
-    // URLs by href (the message is left out: it prints the URL)
-    ['urls', () => expect(() => expect(new URL('http://a/')).toEqual(new URL('http://b/'))).toThrow()],
+    // URLs by href; the message prints them as Node's inspect (turbo-test#112)
+    ['urls', () => expect(new URL('http://a/')).toEqual(new URL('http://b/'))],
+    ['urls every part', () => expect(new URL('http://a.com:8080/p/q?x=1&y=2#h')).toEqual(new URL('http://b/'))],
+    ['url vs string', () => expect(new URL('http://a/')).toEqual('http://a/')],
+    ['url toBe', () => expect(new URL('http://a/')).toBe(new URL('http://a/'))],
+    ['url nested', () => expect({ u: new URL('http://a/') }).toEqual({ u: new URL('http://b/') })],
+    ['url search params', () => expect(new URLSearchParams('a=1&b=2')).toEqual(new URLSearchParams('a=1'))],
+    // toThrow(error / object) compares the thrown value with equals + iterableEquality (turbo-test#111)
+    ['toThrow error props', () => expect(throwCode).toThrow(new Error('abc'))],
+    ['toThrow error name', () => expect(() => { throw new TypeError('abc') }).toThrow(new Error('abc'))],
+    ['toThrow error subclass expected', () => expect(throwAbc).toThrow(new TypeError('abc'))],
+    ['toThrow error cause', () => expect(() => { throw new Error('abc', { cause: 1 }) }).toThrow(new Error('abc', { cause: 2 }))],
+    ['toThrow object partial message', () => expect(throwCode).toThrow({ message: 'ab' })],
+    ['toThrow object vs error', () => expect(throwAbc).toThrow({ message: 'abc' })],
+    ['toThrow object missing key', () => expect(() => { throw { message: 'ab', x: 1 } }).toThrow({ message: 'ab' })],
+    ['toThrow string vs object', () => expect(() => { throw 'str' }).toThrow({ message: 'str' })],
+    ['toThrow asymmetric in object', () => expect(throwCode).toThrow({ message: expect.stringContaining('b'), code: 1 })],
+    ['not.toThrow equal error', () => expect(throwAbc).not.toThrow(new Error('abc'))],
+    ['not.toThrow equal object', () => expect(() => { throw { message: 'ab', x: 1 } }).not.toThrow({ message: 'ab', x: 1 })],
     ['circular differ', () => expect(circ(1)).toEqual(circ(2))],
     ['custom iterables differ', () => expect(iter(1)).toEqual(iter(2))],
     ['array vs array-like', () => expect([1]).toEqual({ 0: 1 })],
@@ -91,6 +111,12 @@ test('equality', () => {
     ['eq toHaveProperty set', () => expect({ s: new Set([1]) }).toHaveProperty('s', new Set([2]))],
     ['eq toMatchObject date', () => expect({ d: new Date(1), x: 1 }).toMatchObject({ d: new Date(1) })],
     ['eq calledWith', () => expect(spy).toHaveBeenCalledWith(new Date(1), new Map([[1, 2]]))],
+    ['eq toThrow error', () => expect(throwAbc).toThrow(new Error('abc'))],
+    ['eq toThrow error cause', () => expect(() => { throw new Error('abc', { cause: 1 }) }).toThrow(new Error('abc', { cause: 1 }))],
+    ['eq toThrow object', () => expect(() => { throw { message: 'ab', x: 1 } }).toThrow({ message: 'ab', x: 1 })],
+    ['eq toThrow array', () => expect(() => { throw [1, new Set([2])] }).toThrow([1, new Set([2])])],
+    ['eq toThrow objectContaining', () => expect(throwCode).toThrow(expect.objectContaining({ code: 1 }))],
+    ['eq not.toThrow other error', () => expect(throwAbc).not.toThrow(new Error('x'))],
   ]) {
     try { fn(); out.push({ label, passed: true }) } catch (e) { out.push({ label, name: e && e.name, message: e && e.message }) }
   }
