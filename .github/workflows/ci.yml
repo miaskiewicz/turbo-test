@@ -61,29 +61,42 @@ jobs:
           ext=""; [[ "${{ matrix.target }}" == *windows* ]] && ext=".exe"
           cp "target/${{ matrix.target }}/release/turbo-test$ext" "bin/${{ matrix.binname }}"
 
-      # Execute the freshly-built binary on natively-runnable legs so a binary that
-      # crashes at startup never ships again (v0.2.3 linux-x64 segfaulted in ld.so:
-      # a macOS-only `-export_dynamic` linker flag zeroed e_entry). The cross-compiled
-      # aarch64-linux leg can't run on the x64 host, so it's skipped.
-      - name: Smoke test (guard against startup crash)
-        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
-        shell: bash
-        run: |
-          set +e
-          "bin/${{ matrix.binname }}" </dev/null
-          rc=$?
-          echo "exit code = $rc"
-          # rc >= 128 means death by signal (139 = SIGSEGV). A clean run with no test
-          # files exits 0/1; either is fine. Anything signal-killed is a hard failure.
-          if [ "$rc" -ge 128 ]; then
-            echo "::error::bin/${{ matrix.binname }} crashed at startup (exit $rc)"; exit 1
-          fi
-
-      # Before the Rust tests: the CLI integration tests (tests/*.rs) link the repo's
-      # esbuild/typescript installs into their throwaway fixture projects.
+      # Before the smoke test (it runs the binary on the repo's chai) and the Rust tests (the CLI
+      # integration tests link the repo's esbuild/typescript/chai into their fixture projects).
       - name: Install test dependencies
         if: runner.os != 'Windows'
         run: npm ci
+
+      # Execute the freshly-built binary on natively-runnable legs so a binary that
+      # crashes at startup never ships again (v0.2.3 linux-x64 segfaulted in ld.so:
+      # a macOS-only `-export_dynamic` linker flag zeroed e_entry), and run one real test
+      # through it with the repo's chai (turbo-test#160: expect is chai, loaded into the
+      # runtime from TURBO_CHAI) so a broken chai load fails CI too. The cross-compiled
+      # aarch64-linux leg can't run on the x64 host, so it's skipped.
+      - name: Smoke test (startup + one real test file)
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          bin="$PWD/bin/${{ matrix.binname }}"
+          dir="$(mktemp -d)"
+          echo '{ "type": "module" }' > "$dir/package.json"
+          cat > "$dir/smoke.test.js" <<'EOF'
+          import { test, expect, assert } from 'vitest'
+          test('smoke', () => { expect([1, 2]).to.have.lengthOf(2).and.include(2); expect(1).toBe(1); assert.strictEqual(1, 1) })
+          EOF
+          set +e
+          out="$(cd "$dir" && TURBO_CHAI="$GITHUB_WORKSPACE/node_modules/chai/index.js" "$bin" smoke.test.js --reporter json </dev/null 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          echo "exit code = $rc"
+          # rc >= 128 means death by signal (139 = SIGSEGV)
+          if [ "$rc" -ge 128 ]; then
+            echo "::error::bin/${{ matrix.binname }} crashed at startup (exit $rc)"; exit 1
+          fi
+          if [ "$rc" -ne 0 ] || ! grep -q '"numPassedTests":1' <<<"$out"; then
+            echo "::error::bin/${{ matrix.binname }} did not pass the smoke test file (exit $rc)"; exit 1
+          fi
 
       - name: Rust tests
         run: cargo test --locked --target ${{ matrix.target }}
