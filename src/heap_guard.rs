@@ -95,6 +95,14 @@ pub fn oom_message(limit: usize) -> String {
     )
 }
 
+/// The error of a file that tripped the guard, `limit` the isolate's heap limit now: it names
+/// the limit the isolate had (`TURBO_MAX_HEAP_MB`, else V8's), without the headroom the guard
+/// granted it to unwind (turbo-test#188).
+pub fn oom_error(limit: usize) -> String {
+    let granted = GRANTS.with(|g| g.get()).min(MAX_GRANTS) as usize * GRANT_BYTES;
+    oom_message(limit.saturating_sub(granted))
+}
+
 /// Whether a file error is the heap guard's: not transient (re-running the file on the same
 /// kind of isolate would only run out of memory again).
 pub fn is_oom(err: &str) -> bool {

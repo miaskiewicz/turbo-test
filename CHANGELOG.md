@@ -17,6 +17,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `code: 'ERR_STRING_TOO_LONG'` ("Cannot create a string longer than 0x1fffffe8 characters") for
   every encoding; it was an `Error` without the code (legacy encodings) or a `RangeError`
   (UTF-8) (turbo-test#187).
+- A file that runs out of heap fails with the isolate's own limit in its error,
+  `JavaScript heap out of memory (limit 64 MB)` under `TURBO_MAX_HEAP_MB=64`; it named the limit
+  plus the 192 MB the heap guard grants the isolate to unwind (`limit 256 MB`) (turbo-test#188).
 
 ### Fixed — the `vi`, mock and `jest` surface is vitest 4.1.12's and jest 30.5.2's (K8, turbo-test#179–#183)
 - The members of `vi`, of a `vi.fn()` / `vi.spyOn()` mock and its `mock`, and of `jest` were

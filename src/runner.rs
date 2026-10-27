@@ -7783,7 +7783,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         // A file that ran into the isolate's heap limit was terminated by the heap guard: report
         // that, not whatever the half-unwound run happened to say.
         let result = if crate::heap_guard::tripped() {
-            Err(crate::heap_guard::oom_message(
+            Err(crate::heap_guard::oom_error(
                 scope.get_heap_statistics().heap_size_limit(),
             ))
         } else {
@@ -8055,7 +8055,7 @@ fn run_test_file_reused(
             }
         }
         let result = if tripped {
-            Err(crate::heap_guard::oom_message(limit))
+            Err(crate::heap_guard::oom_error(limit))
         } else {
             result
         };

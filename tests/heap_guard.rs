@@ -73,7 +73,6 @@ const OOM_64: &str =
     "JavaScript heap out of memory (limit 64 MB): the file was aborted and its isolate discarded";
 
 #[test]
-#[ignore = "turbo-test#188: fails until the fix"]
 fn a_file_past_the_heap_limit_fails_and_the_run_goes_on_with_a_fresh_isolate() {
     let p = heap_project("hg-fresh");
     let r = turbo_test(
@@ -105,7 +104,8 @@ fn a_file_past_the_heap_limit_fails_and_the_run_goes_on_with_a_fresh_isolate() {
             r.all()
         );
     }
-    assert_eq!(r.stdout.matches("SEEN=1").count(), 2, "{}", r.all());
+    // the files' console output, wherever the json reporter puts it
+    assert_eq!(r.all().matches("SEEN=1").count(), 2, "{}", r.all());
 }
 
 #[test]
@@ -123,7 +123,6 @@ fn without_the_log_switch_there_are_no_heap_lines() {
 }
 
 #[test]
-#[ignore = "turbo-test#188: fails until the fix"]
 fn a_reused_isolate_past_the_heap_limit_fails_its_file_and_is_replaced() {
     let p = heap_project("hg-reuse-oom");
     let r = turbo_test(
