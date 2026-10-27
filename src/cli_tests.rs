@@ -1257,14 +1257,39 @@ not ok 3 - suite > breaks <&>\n  ---\n  message: expected \"1\" to be '2'\n  ...
 ok 4 - todo\n\
 not ok 5 - silent fail\n\
 ok 6 - ok\n\
-not ok 7 - /p/c&<x>.test.ts\n  ---\n  message: module errored: Error: top <boom> & \"q\"\n  ...\n";
+not ok 7 - /p/c&<x>.test.ts\n    ---\n    error:\n        name: \"Error\"\n        message: \"top <boom> & \\\"q\\\"\"\n    ...\n";
     assert_eq!(render_tap(&files, &res), expected);
     assert_eq!(render_tap(&[], &[]), "TAP version 13\n1..0\n");
-    // a multi-line load error is flattened like a test failure message
+    // a load error is vitest's block (turbo-test#166): line breaks kept, `at:` its first frame,
+    // an empty message left empty
     let only_err = vec![file_result(0, &files[0], Err("a\nb".into()), 1.0)];
     assert_eq!(
         render_tap(&files, &only_err),
-        "TAP version 13\n1..1\nnot ok 1 - /p/a.test.ts\n  ---\n  message: a b\n  ...\n"
+        "TAP version 13\n1..1\nnot ok 1 - /p/a.test.ts\n    ---\n    error:\n        name: \"Error\"\n        message: \"a\nb\"\n    ...\n"
+    );
+    let mut framed = file_result(0, &files[0], Err("x".into()), 1.0);
+    framed.load_error_info = Some(crate::failure::ErrorInfo {
+        name: "Unknown Error".into(),
+        message: String::new(),
+        frames: vec![
+            crate::failure::Frame {
+                method: String::new(),
+                file: "/p/a.test.ts".into(),
+                line: 3,
+                col: 9,
+            },
+            crate::failure::Frame {
+                method: "f".into(),
+                file: "/p/b.ts".into(),
+                line: 1,
+                col: 1,
+            },
+        ],
+        ..Default::default()
+    });
+    assert_eq!(
+        render_tap(&files, &[framed]),
+        "TAP version 13\n1..1\nnot ok 1 - /p/a.test.ts\n    ---\n    error:\n        name: \"Unknown Error\"\n        message: \n    at: \"/p/a.test.ts:3:9\"\n    ...\n"
     );
 }
 
@@ -1562,4 +1587,26 @@ fn junit_norm(x: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// turbo-test#164: the summary line names a load error as the module runner does
+/// (`Error: boom`), without the ESM-graph loader's load-phase prefix; the error message kept
+/// for the reporters is unchanged.
+#[test]
+fn the_error_line_drops_the_load_phase_prefix() {
+    let f = Path::new("/p/a.test.ts");
+    for (e, shown) in [
+        ("module errored: Error: top boom", "Error: top boom"),
+        ("evaluate threw: TypeError: x", "TypeError: x"),
+        (
+            "instantiate: SyntaxError: The requested module './l.mjs' does not provide an export named 'n'",
+            "SyntaxError: The requested module './l.mjs' does not provide an export named 'n'",
+        ),
+        ("graph load failed", "graph load failed"),
+        ("Error: module errored: inside", "Error: module errored: inside"),
+    ] {
+        let r = file_result(0, f, Err(e.into()), 1.0);
+        assert_eq!(r.line, format!("ERROR /p/a.test.ts  ({shown})"));
+        assert_eq!(r.error_msg, e);
+    }
 }

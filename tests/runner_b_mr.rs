@@ -570,8 +570,8 @@ fn setup_file_mocks_reach_test_files_with_vitest_missing_export_semantics() {
          vi.mock('*.svg?url', () => ({ default: 'x' }));\n",
     );
     // `b` is imported but missing from the factory: the mock module still links; reading `b`
-    // throws on the module runner (a property access, as in vitest) and reads undefined on the
-    // legacy bundle (an ES import binding cannot throw)
+    // throws, as in vitest: on the module runner a property access, on the ESM graph a read
+    // through the namespace (esm_spy.rs reads imports through it, turbo-test#146)
     p.file(
         "s.test.ts",
         "import { a, b } from './src/svc';\n\
@@ -581,11 +581,39 @@ fn setup_file_mocks_reach_test_files_with_vitest_missing_export_semantics() {
     p.file(
         "legacy.test.ts",
         "import { a, b } from './src/svc';\n\
-         test('setup mock', () => { expect(a).toBe('setup-a'); expect(b).toBe(undefined); });\n",
+         test('setup mock', () => { expect(a).toBe('setup-a'); \
+         expect(() => b).toThrow('No \"b\" export is defined on the \"./src/svc\" mock'); });\n",
     );
     assert_passes(&turbo_test(&p.dir, &["s.test.ts"], &[]), 1);
     assert_passes(
         &turbo_test(&p.dir, &["legacy.test.ts"], &[("TURBO_NO_MR", "1")]),
         1,
     );
+}
+
+/// turbo-test#165: a module that only re-exports (`export * from`, `export { x } from`) loads
+/// through the esbuild transform: its `__reExport` called a `__toESM` helper esbuild emits only
+/// for modules that import (`ReferenceError: __toESM is not defined`). vitest 4.1.12: passes.
+#[test]
+fn a_reexport_only_module_loads_through_the_esbuild_transform() {
+    let p = esbuild_project("rb-mr-reexport-only");
+    p.file(
+        "src/star.ts",
+        "export const starred = (): string => 'star';\n",
+    );
+    p.file(
+        "src/barrel.ts",
+        "export * from './star';\nexport { starred as aliased } from './star';\n",
+    );
+    p.file(
+        "a.test.ts",
+        "import * as barrel from './src/barrel';\n\
+         test('re-exports', () => { expect([barrel.starred(), barrel.aliased(), Object.keys(barrel)]).toEqual(['star', 'star', ['aliased', 'starred']]); });\n",
+    );
+    for env in [
+        &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")][..],
+        &[][..],
+    ] {
+        assert_passes(&turbo_test(&p.dir, &[], env), 1);
+    }
 }

@@ -2995,9 +2995,6 @@ const __requireCache = new Proxy({}, {
     return e && { value: e, writable: true, enumerable: true, configurable: true };
   },
 });
-// ESM-graph namespaces' export setters (esm_spy.rs, turbo-test#131): a module registers one for
-// its own namespace; __ttNsSet(ns, name, value) sets that export (false: no setter / no export)
-const __ttNsSetters = new WeakMap();
 // an app ES module's namespace in vitest's order (turbo-test#141) -> the V8 namespace
 const __ttOrderedTargets = new WeakMap();
 const __ttOrderedViews = new WeakMap();
@@ -3023,10 +3020,61 @@ globalThis.__ttOrderedNs = (ns, order) => {
   return v;
 };
 const __ttNsTarget = (ns) => __ttOrderedTargets.get(ns) || ns;
-globalThis.__ttNsSetter = (ns, set) => { __ttNsSetters.set(__ttNsTarget(ns), set); };
+// Spy-able ESM-graph namespaces (esm_spy.rs, turbo-test#131, #146), as vitest's exports objects:
+// an app module registers its namespace (its own export names, its re-exports by name and its
+// `export *` sources); vi.spyOn sets an override (__ttNsSet) that importers' reads (__ttR) and
+// namespace views (__ttNs) see, while the module's own references keep the original binding.
+const __ttNsInfo = new WeakMap();
+const __ttNsViews = new WeakMap();
+const __ttNsRaw = new WeakMap();
+// keyed by the V8 namespace: a module reaches it through J5's ordered view (turbo-test#141) or
+// as V8's own (__ttNsTarget)
+globalThis.__ttNsRegister = (ns, own, re, stars) => {
+  const t = __ttNsTarget(ns);
+  if (!__ttNsInfo.has(t)) __ttNsInfo.set(t, { over: new Map(), own: new Set(own), re, stars });
+};
+const __ttNsLookup = (ns, k) => {
+  const info = __ttNsInfo.get(__ttNsTarget(ns));
+  if (info === undefined || typeof k !== 'string') return undefined;
+  if (info.over.has(k)) return { v: info.over.get(k) };
+  // a name the namespace does not list (a CommonJS source's `__esModule`) is not re-exported
+  if (!info.own.has(k) && k in ns) {
+    const r = Object.prototype.hasOwnProperty.call(info.re, k) ? info.re[k] : undefined;
+    if (r !== undefined) return { v: globalThis.__ttR(r[0], r[1]) };
+    if (k !== 'default') for (const s of info.stars) if (k in s) return { v: globalThis.__ttR(s, k) };
+  }
+  return undefined;
+};
+globalThis.__ttR = (ns, k) => {
+  const found = __ttNsLookup(ns, k);
+  return found === undefined ? ns[k] : found.v;
+};
+globalThis.__ttNs = (ns) => {
+  if (ns === null || typeof ns !== 'object' || !__ttNsInfo.has(__ttNsTarget(ns))) return ns;
+  let view = __ttNsViews.get(ns);
+  if (view === undefined) {
+    view = new Proxy(ns, {
+      get: (t, k) => globalThis.__ttR(t, k),
+      getOwnPropertyDescriptor: (t, k) => {
+        const d = Reflect.getOwnPropertyDescriptor(t, k);
+        if (d !== undefined && 'value' in d) d.value = globalThis.__ttR(t, k);
+        return d;
+      },
+    });
+    __ttNsViews.set(ns, view);
+    __ttNsRaw.set(view, ns);
+  }
+  return view;
+};
+// set export `k` of a registered namespace (or its view) to `v`; false when `ns` is not one or
+// has no such export. Setting the module's own value back drops the override.
 globalThis.__ttNsSet = (ns, k, v) => {
-  const set = ns !== null && typeof ns === 'object' ? __ttNsSetters.get(__ttNsTarget(ns)) : undefined;
-  return set !== undefined && set(k, v) === true;
+  const raw = (ns !== null && typeof ns === 'object' && __ttNsRaw.get(ns)) || ns;
+  const info = raw !== null && typeof raw === 'object' ? __ttNsInfo.get(__ttNsTarget(raw)) : undefined;
+  if (info === undefined || typeof k !== 'string' || !(k in raw)) return false;
+  info.over.delete(k);
+  if (globalThis.__ttR(raw, k) !== v) info.over.set(k, v);
+  return true;
 };
 // require() of an ES module from CommonJS (`isEsm` false) gives Node's require(esm) object: one
 // with a default export and no `__esModule` of its own reads an enumerable `__esModule: true`
@@ -4751,7 +4799,9 @@ async function __ttImportsSettled() {
 globalThis.vi = {
   fn: (impl) => __trackSpy(makeSpy(impl)),
   spyOn: (obj, key) => {
-    const orig = obj[key];
+    // a registered ESM-graph namespace: its current value (a spy already set on it included)
+    const nsRaw = obj !== null && typeof obj === 'object' ? __ttNsRaw.get(obj) || obj : obj;
+    const orig = __ttNsInfo.has(__ttNsTarget(nsRaw)) ? globalThis.__ttR(nsRaw, key) : obj[key];
     // Do NOT bind orig to obj — for a prototype-method spy (spyOn(Cls.prototype, 'm')) the
     // original must run with the CALL's `this` (the instance), not the prototype. makeSpy's
     // fn applies the call-time `this` to __impl, preserving it.
@@ -4760,13 +4810,22 @@ globalThis.vi = {
     s.__name = String(key);
     // Use defineProperty so it replaces a (configurable) live-export getter, not just a
     // writable data prop — module-runner exports are configurable getters.
-    // An ESM-graph module's namespace is V8's (read-only): its export is set through the
-    // module's setter (esm_spy.rs, turbo-test#131).
+    // An ESM-graph module's namespace is V8's (read-only): the spy is its override (esm_spy.rs,
+    // turbo-test#131, #146).
     const define = (v) => {
       if (globalThis.__ttNsSet(obj, key, v)) return;
       try { Object.defineProperty(obj, key, { configurable: true, enumerable: true, writable: true, value: v }); } catch (e) { try { obj[key] = v; } catch (e2) {} }
     };
-    s.mockRestore = () => define(orig);
+    // restore the original descriptor itself, as vitest: a live re-export getter stays live, a
+    // non-enumerable method stays non-enumerable (turbo-test#157)
+    let own;
+    try { own = Object.getOwnPropertyDescriptor(obj, key); } catch (e) { own = undefined; }
+    s.mockRestore = () => {
+      if (own !== undefined && own.configurable && !globalThis.__ttNsSet(obj, key, orig)) {
+        try { Object.defineProperty(obj, key, own); return; } catch (e) { /* fall back to the value */ }
+      }
+      define(orig);
+    };
     define(s);
     return __trackSpy(s);
   },

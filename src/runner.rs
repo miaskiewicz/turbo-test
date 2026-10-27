@@ -2076,6 +2076,7 @@ fn setup_dom(scope: &mut v8::PinScope, _entry: &Path) {
 /// `Object`) instead of naming an export that doesn't exist.
 /// Returns None if the project ships no `typescript` (caller falls back to oxc).
 fn tsc_transform_esm(file: &Path, root: &Path) -> Option<String> {
+    let src = read_app_source(file)?;
     let ts_dir = root.join("node_modules/typescript");
     if !ts_dir.join("package.json").is_file() {
         return None;
@@ -2086,7 +2087,7 @@ fn tsc_transform_esm(file: &Path, root: &Path) -> Option<String> {
 const ts = require(process.argv[1]);
 const fs = require('fs');
 const file = process.argv[2];
-const src = fs.readFileSync(file, 'utf8');
+const src = fs.readFileSync(0, 'utf8'); // the module's source (import.meta.glob expanded)
 const isTsx = file.endsWith('.tsx');
 // isolatedModules + emitDecoratorMetadata: a value import of a name used only as a type (an
 // interface) is kept for its `design:type` reference and then fails ESM linking (no such export).
@@ -2185,7 +2186,7 @@ const out = ts.transpileModule(input, {
 });
 process.stdout.write(out.outputText);
 "#;
-    let out = std::process::Command::new("node")
+    let mut child = std::process::Command::new("node")
         .current_dir(root)
         .args([
             "-e",
@@ -2193,9 +2194,16 @@ process.stdout.write(out.outputText);
             &ts_dir.to_string_lossy(),
             &file.to_string_lossy(),
         ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()
+        .spawn()
         .ok()?;
+    {
+        use std::io::Write;
+        child.stdin.take()?.write_all(src.as_bytes()).ok()?;
+    }
+    let out = child.wait_with_output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -2410,7 +2418,8 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     // v6: `__toESM` is runtime.js's `__ttToESM`, `__toCommonJS` marks the module (turbo-test#122)
     // v7: `export *` re-exports the importer's namespace (turbo-test#133); exports in source
     // order (turbo-test#141)
-    "mr-cjs-v7".hash(&mut h);
+    // v8: __reExport's __toESMStar calls globalThis.__ttToESM (turbo-test#165)
+    "mr-cjs-v8".hash(&mut h);
     // esbuild can't emit decorator metadata. By default we DON'T pay that cost — only when a
     // decorator file actually threw at load (Mongoose @Prop / Sequelize @Column read design:type
     // at class-definition) does the loader retry with `prefer_metadata`, routing it through the
@@ -3203,7 +3212,8 @@ fn postprocess_mr_cjs(code: String) -> String {
     postprocess_esbuild_cjs(
         code,
         "var __toESM = (m) => globalThis.__ttToESM(m);",
-        "__toESM(m)",
+        // not `__toESM`: esbuild emits no such helper in a module that only re-exports
+        "globalThis.__ttToESM(m)",
     )
 }
 
@@ -4647,15 +4657,24 @@ fn factory_bindings(entry: &Path, src: &str, mr: bool) -> Vec<crate::mock_scope:
 /// `src` of the file `abs` as it loads: the test file gets the binder statement that hands its
 /// factories' bindings to the runtime, on a line of its own at the end (so no position moves).
 /// An app module's source as vite's transform sees it: `import.meta.glob` calls expanded against
-/// the file system (src/import_glob.rs, turbo-test#130), the vitest root (the working directory)
-/// the base of `/` patterns. node_modules are read as they are (vitest externalizes them).
+/// the file system (src/import_glob.rs, turbo-test#130, #145), the vitest root (the working
+/// directory) the base of `/` patterns, the config's `resolve.alias` (TURBO_ALIAS) its aliases. node_modules are read as they are (vitest externalizes them).
 fn read_app_source(file: &Path) -> Option<String> {
     let src = std::fs::read_to_string(file).ok()?;
     if file.components().any(|c| c.as_os_str() == "node_modules") {
         return Some(src);
     }
     let root = std::env::current_dir().ok()?;
-    Some(crate::import_glob::expand(file, &src, &root).unwrap_or(src))
+    let aliases: Vec<(String, String)> = std::env::var("TURBO_ALIAS")
+        .map(|raw| {
+            raw.split('\u{1e}')
+                .filter_map(|r| r.split_once('\u{1f}'))
+                .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(crate::import_glob::expand(file, &src, &root, &aliases).unwrap_or(src))
 }
 
 fn with_binder(abs: &Path, src: String, mr: bool) -> String {
@@ -4772,8 +4791,12 @@ fn native_require(
         }
         return;
     }
-    // CSS/asset/JSON imports -> stub via load_dep (CSS-module proxy / parsed JSON value)
-    if is_asset(&abs) || abs.extension().and_then(|e| e.to_str()) == Some("json") {
+    // CSS/asset/JSON imports -> stub via load_dep (CSS-module proxy / vite's asset string / parsed
+    // JSON value)
+    if is_asset(&abs)
+        || crate::vite_asset::is_asset_id(&abs)
+        || abs.extension().and_then(|e| e.to_str()) == Some("json")
+    {
         load_dep(scope, &abs);
         if let Some(g) = REGISTRY.with(|r| r.borrow().cjs_exports.get(&abs).cloned()) {
             rv.set(v8::Local::new(scope, &g));
@@ -4949,7 +4972,10 @@ fn query_mock_variant(spec: &str, abs: PathBuf) -> PathBuf {
         return abs;
     };
     let key = PathBuf::from(format!("{}?{query}", abs.display()));
-    if REGISTRY.with(|r| r.borrow().mocks.contains_key(&key)) {
+    // vite's `?raw` / `?url` / asset-with-query ids are modules of their own (turbo-test#148)
+    if REGISTRY.with(|r| r.borrow().mocks.contains_key(&key))
+        || crate::vite_asset::is_asset_id(&key)
+    {
         key
     } else {
         abs
@@ -5394,17 +5420,24 @@ fn load_graph<'s>(
         }
         return None;
     };
-    // CJS gets __dirname/__filename via the wrapper params; a real ES module has neither in scope.
-    // App code authored for the CJS world (NestJS seed runners, country-config loaders) reads them
-    // at top level, so inject Node-CJS-equivalent module-local bindings when referenced.
-    let raw = inject_dirname_esm(abs, &raw).unwrap_or(raw);
-    // vi.spyOn on an app module's namespace sets its export (turbo-test#131)
-    let raw = if abs.components().any(|c| c.as_os_str() == "node_modules") {
-        raw
-    } else {
-        crate::esm_spy::spyable(abs, &raw).unwrap_or(raw)
-    };
+    // reads of a no-default mock's default throw (turbo-test#151); first, so the spy rewrite
+    // below reads the guarded value through the overrides
     let raw = guard_mock_default_reads(scope, abs, &raw).unwrap_or(raw);
+    // vi.spyOn on an app module's namespace reaches its importers (turbo-test#131, #146); test
+    // locations / failure frames map V8's columns back through the in-line edits
+    let raw = match abs.components().any(|c| c.as_os_str() == "node_modules") {
+        true => raw,
+        false => match crate::esm_spy::spyable(abs, &raw) {
+            Some((code, shifts)) => {
+                crate::location::set_shifts(abs, shifts);
+                code
+            }
+            None => {
+                crate::location::set_shifts(abs, Vec::new());
+                raw
+            }
+        },
+    };
     // A generated bundle in the cache dir has no node_modules beside it; resolve its externalized
     // bare imports relative to the recorded source dir (set by esbuild_bundle_full).
     let dir = REGISTRY
@@ -5412,6 +5445,10 @@ fn load_graph<'s>(
         .or_else(|| abs.parent().map(|p| p.to_path_buf()))
         .unwrap();
     let raw = graph_interop(abs, &dir, &raw).unwrap_or(raw);
+    // CJS gets __dirname/__filename via the wrapper params; a real ES module has neither in scope.
+    // App code authored for the CJS world (NestJS seed runners, country-config loaders) reads them
+    // at top level, so inject Node-CJS-equivalent module-local bindings when referenced.
+    let raw = inject_dirname_esm(abs, &raw).unwrap_or(raw);
     let code = v8::String::new(scope, &raw)?;
     let name = v8::String::new(scope, &abs.to_string_lossy())?;
     let origin = module_origin(scope, name);
@@ -5774,6 +5811,17 @@ fn load_dep<'s>(scope: &mut v8::PinScope<'s, '_>, dep: &Path) -> Option<()> {
     });
     if mocked {
         return Some(());
+    }
+    // vite's asset imports (turbo-test#148): `default` is the `?raw` text / the URL / the inline
+    // svg; any other name reads as itself, as the asset stub below
+    let root = std::env::current_dir().unwrap_or_default();
+    if let Some(v) = crate::vite_asset::value(dep, &root) {
+        let v = serde_json::to_string(&v).ok()?;
+        return register_mock(
+            scope,
+            dep,
+            &format!("() => new Proxy({{ default: {v} }}, {{ get: (t, p) => p in t ? t[p] : typeof p === 'string' ? p : undefined }})"),
+        );
     }
     // CSS/asset imports -> stub (CSS-module proxy: any class name -> its own string). Assets and
     // JSON are registered via register_mock, i.e. recorded in `mocks`, so an already-loaded one

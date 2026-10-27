@@ -142,14 +142,49 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `url` / `filename` / `dirname` plus vitest's `env` (live `process.env`, `DEV` / `PROD` / `SSR`
   booleans), and `process.env` carries vite's `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` (`SSR`
   off under a `jsdom` / `happy-dom` environment), as vitest sets them.
+- An `import.meta.glob` pattern that is not relative, `/` or an alias fails its module, as vite
+  does at transform (turbo-test#149), with vite's `Invalid glob: "<pattern>" (resolved: …). It
+  must start with '/' or './'`; the call used to throw only when it ran, so the file's other
+  tests passed.
+- Asset imports give vite's strings (turbo-test#148): `import t from './t.txt?raw'`, `?url` and
+  plain imports of images / fonts / media / `.txt` gave `'default'` on the module runner and `{}`
+  on the ESM graph. Now `?raw` is the file's text, `?url` and known asset types the root-relative
+  URL (the rest of the query kept), a small `.svg` vite's inline `data:` URL
+  (`src/vite_asset.rs`), so `import.meta.glob(..., { query: '?raw' })` / `as: 'raw'` work too.
+- `mockRestore` / `vi.restoreAllMocks` put the spied property's original descriptor back
+  (turbo-test#157), as vitest does: they redefined it as an enumerable data property holding the
+  original, so on the module runner a restored re-export (`export *`, `export { x } from`) was no
+  longer live (a later spy on the source module did not show through it) and a restored class
+  method became enumerable.
+- `--reporter tap`: a file that fails to load gets vitest's block (turbo-test#166): `error:` with
+  its `name` and `message` (YAML-quoted, line breaks kept) and `at: "<file>:<line>:<col>"`,
+  indented four spaces. It printed `message: module errored: …` with the loader's prefix and the
+  line breaks flattened.
+- The summary line of a file that failed to load reads `ERROR a.test.ts  (Error: boom)` on the
+  ESM-graph loader too (turbo-test#164); it carried the loader's internal load-phase prefix
+  (`module errored: ` / `evaluate threw: ` / `instantiate: `), unlike the module runner.
+- A module that only re-exports (`export * from`, `export { x } from`) loaded through the
+  esbuild transform threw `ReferenceError: __toESM is not defined` (turbo-test#165): its
+  `__reExport` called a helper esbuild had not emitted. It calls runtime.js `__ttToESM` now.
+- A namespace spy on the ESM-graph loader reaches the importers only, as in vitest (turbo-test#146):
+  it replaced the export's binding, so the exporting module's own calls (`greetTwice()` calling
+  `greet`) and other modules' re-exports saw the spy too. Importers now read imported bindings
+  through the spy overrides (`__ttR` / `__ttNs`, also for an `import()` namespace) and modules
+  register their own names, re-exports and `export *` sources (`src/esm_spy.rs`); the module's
+  own references keep the original, as vitest's exports objects do. Reading a name a `vi.mock`
+  factory did not return now throws vitest's error on this loader too.
 - `vi.spyOn` on a module's export on the ESM-graph loader (turbo-test#131, the binary run without
   `TURBO_ESBUILD` in a project without esbuild): V8's namespace objects are read-only, so the spy
   was dropped and the importing module kept calling the original (`expected 'hi a!' to be
   'spied!'`). Each app module now registers a setter for its own namespace (`src/esm_spy.rs`):
   `export const` / `let` / `function` / `class`, renamed locals, `export default` (expression or
   anonymous declaration) and re-exports (forwarded to the source module); `mockRestore` puts the
-  original back. On this loader the spy replaces the binding itself, so the module's own uses
-  see it too.
+  original back.
+- `import.meta.glob` options and order (turbo-test#145): `base`, `query` (string or object), the
+  deprecated `as` and `resolve.alias` patterns threw vitest's "statically replaced" error instead
+  of expanding, a module taking the decorator-metadata (tsc) transform was not expanded at all,
+  and eager glob imports ran after the module's own imports. They now expand as vite does, the
+  eager imports first (on the module's first line, so line numbers hold).
 - `import.meta.resolve` / `main` / `glob` / `vitest` (turbo-test#130): every module's
   `import.meta` was `url, filename, dirname, env` only. It now has vitest 4.1.12's members in its
   order: `resolve` (Node's, from the module: relative paths and URLs against it, builtins as

@@ -50,6 +50,51 @@ thread_local! {
     /// too (turbo-test#81). Per worker thread; a module's map does not depend on the test file.
     static MODULES: RefCell<std::collections::HashMap<PathBuf, (Segments, usize)>> =
         RefCell::new(std::collections::HashMap::new());
+    /// Column edits the ESM-graph loader made after the transform (esm_spy.rs), by module.
+    static SHIFTS: RefCell<std::collections::HashMap<PathBuf, Vec<Shift>>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// One in-line edit of a module's code after its transform: on generated `line` (0-based), the
+/// columns `new` (UTF-16, `[start, end)`) of the code V8 runs were `old` before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shift {
+    pub line: u32,
+    pub new: (u32, u32),
+    pub old: (u32, u32),
+}
+
+/// `path`'s code was edited in-line after its transform (sorted shifts; empty: not edited).
+pub fn set_shifts(path: &Path, shifts: Vec<Shift>) {
+    SHIFTS.with(|s| {
+        let mut s = s.borrow_mut();
+        if shifts.is_empty() {
+            s.remove(path);
+        } else {
+            s.insert(path.to_path_buf(), shifts);
+        }
+    });
+}
+
+/// Generated column `col` (1-based) of `line` (1-based, after the loader's offset) before the
+/// in-line edits of `script`: a column inside an edit is its start.
+fn unshift(script: &str, line: usize, col: usize) -> usize {
+    SHIFTS.with(|s| {
+        let s = s.borrow();
+        let Some(shifts) = s.get(Path::new(script)) else {
+            return col;
+        };
+        let c = col.saturating_sub(1) as u32;
+        let last = shifts
+            .iter()
+            .rev()
+            .find(|x| x.line as usize + 1 == line && x.new.0 <= c);
+        match last {
+            None => col,
+            Some(x) if c < x.new.1 => x.old.0 as usize + 1,
+            Some(x) => (c - x.new.1 + x.old.1) as usize + 1,
+        }
+    })
 }
 
 /// Whether failure frames are printed (`--reporter junit` sets `TURBO_ERROR_FRAMES`): the
@@ -121,6 +166,7 @@ fn with_entry(path: &Path, f: impl FnOnce(&mut Entry)) {
 pub fn resolve_frame(script: &str, line: usize, column: usize) -> Option<(u32, u32)> {
     let mapped = |map: &Segments, offset: usize| {
         let line = line.checked_sub(offset).filter(|l| *l > 0)?;
+        let column = unshift(script, line, column);
         let (l, c, _) = lookup(map, line - 1, column.saturating_sub(1) as u32)?;
         Some((l + 1, c + 1))
     };
@@ -129,9 +175,11 @@ pub fn resolve_frame(script: &str, line: usize, column: usize) -> Option<(u32, u
         let e = e.as_ref().filter(|e| e.path.as_os_str() == script)?;
         Some(match &e.map {
             Some(map) => mapped(map, e.line_offset),
-            None => e
-                .identity
-                .then_some((line.checked_sub(e.line_offset)? as u32, column as u32)),
+            None => {
+                let line = line.checked_sub(e.line_offset)?;
+                let column = unshift(script, line, column);
+                e.identity.then_some((line as u32, column as u32))
+            }
         })
     });
     match entry {
@@ -151,6 +199,7 @@ pub fn resolve(script: &str, line: usize, column: usize) -> Option<(u32, u32)> {
         let e = e.borrow();
         let e = e.as_ref().filter(|e| e.path.as_os_str() == script)?;
         let line = line.checked_sub(e.line_offset).filter(|l| *l > 0)?;
+        let column = unshift(script, line, column);
         let Some(map) = &e.map else {
             return e.identity.then_some((line as u32, column as u32));
         };
