@@ -2,7 +2,10 @@
 //! where its tests pass): the advance / run functions throw without fake timers
 //! (turbo-test#171); `performance` / `process.hrtime` faking and the `toFake`, `now`,
 //! `shouldAdvanceTime` / `advanceTimeDelta` and `loopLimit` options (turbo-test#172);
-//! `vi.waitFor` / `vi.waitUntil` results, timeouts, their messages and locations (turbo-test#174).
+//! `vi.waitFor` / `vi.waitUntil` results, timeouts, their messages and locations (turbo-test#174);
+//! `runOnlyPendingTimers` runs to the last pending timer and a timer callback's error is
+//! rethrown by the advance call (turbo-test#177); the real `performance.now()` /
+//! `process.hrtime()` move with real time (turbo-test#178).
 #![cfg(unix)]
 
 mod common;
@@ -152,6 +155,62 @@ test('waitFor timeout', async () => {
 })
 "#;
 
+const RUN_177: &str = r#"import { test, expect, vi, afterEach } from 'vitest'
+afterEach(() => { vi.useRealTimers() })
+test('runOnlyPendingTimers runs every timer due up to the last pending one', async () => {
+  vi.useFakeTimers()
+  const log = []
+  setInterval(() => log.push('i'), 10)
+  setTimeout(() => { log.push('t'); setTimeout(() => log.push('in-range'), 5); setTimeout(() => log.push('late'), 100) }, 30)
+  setTimeout(() => log.push('last'), 50)
+  vi.runOnlyPendingTimers()
+  expect([log.join(','), vi.getTimerCount(), Date.now() % 1000 >= 0]).toEqual(['i,i,i,t,in-range,i,i,last', 2, true])
+  vi.clearAllTimers()
+  setInterval(() => log.push('j'), 10)
+  setTimeout(() => log.push('end'), 25)
+  log.length = 0
+  await vi.runOnlyPendingTimersAsync()
+  expect(log.join(',')).toBe('j,j,end')
+})
+test('a timer callback error is rethrown after the tick', async () => {
+  vi.useFakeTimers()
+  const log = []
+  setTimeout(() => { log.push(1); throw new Error('first') }, 1)
+  setTimeout(() => { log.push(2); throw new Error('second') }, 2)
+  setTimeout(() => log.push(3), 3)
+  expect(() => vi.advanceTimersByTime(5)).toThrow('first')
+  expect([log, vi.getTimerCount()]).toEqual([[1, 2, 3], 0])
+  setTimeout(() => { log.push(4); throw new Error('ra') }, 1)
+  setTimeout(() => log.push(5), 2)
+  expect(() => vi.runAllTimers()).toThrow('ra')
+  expect([log, vi.getTimerCount()]).toEqual([[1, 2, 3, 4], 1])
+  vi.clearAllTimers()
+  setTimeout(() => { log.push(6); throw new Error('nx') }, 1)
+  expect(() => vi.advanceTimersToNextTimer()).toThrow('nx')
+  setTimeout(() => { log.push(7); throw new Error('rop') }, 1)
+  setTimeout(() => log.push(8), 2)
+  expect(() => vi.runOnlyPendingTimers()).toThrow('rop')
+  expect(log).toEqual([1, 2, 3, 4, 6, 7, 8])
+  setTimeout(() => { log.push(9); throw new Error('async') }, 1)
+  setTimeout(() => log.push(10), 2)
+  await expect(vi.advanceTimersByTimeAsync(5)).rejects.toThrow('async')
+  setTimeout(() => { log.push(11); throw new Error('raa') }, 1)
+  setTimeout(() => log.push(12), 2)
+  await expect(vi.runAllTimersAsync()).rejects.toThrow('raa')
+  expect([log, vi.getTimerCount()]).toEqual([[1, 2, 3, 4, 6, 7, 8, 9, 10, 11], 1])
+})
+"#;
+
+const PERF_178: &str = r#"import { test, expect } from 'vitest'
+test('real performance.now and process.hrtime advance with real time', async () => {
+  const p = performance.now(), h = process.hrtime(), b = process.hrtime.bigint()
+  await new Promise((r) => setTimeout(r, 40))
+  const dp = performance.now() - p, dh = process.hrtime(h), db = process.hrtime.bigint() - b
+  expect([dp >= 39 && dp < 1000, dh[0], dh[1] >= 39e6 && dh[1] < 1e9, db >= 39000000n && db < 1000000000n, p > 0, typeof performance.timeOrigin, performance.timeOrigin + performance.now() - Date.now() < 1000])
+    .toEqual([true, 0, true, true, true, 'number', true])
+})
+"#;
+
 /// vitest's stderr for the two timeouts (`NO_COLOR=1`)
 const WAIT_174_HUMAN: &str = r#" FAIL  wait.test.js > waitUntil timeout
 Error: Timed out in waitUntil!
@@ -218,4 +277,16 @@ fn wait_for_and_wait_until_are_vitests() {
     {
         assert!(r.stderr.contains(block), "missing:\n{block}\n{}", r.all());
     }
+}
+
+#[test]
+#[ignore = "turbo-test#177: fails until the fix"]
+fn run_only_pending_runs_to_the_last_timer_and_timer_errors_are_rethrown() {
+    passes("rc-ft-177", "run177.test.js", RUN_177, 2);
+}
+
+#[test]
+#[ignore = "turbo-test#178: fails until the fix"]
+fn real_performance_now_and_hrtime_move() {
+    passes("rc-ft-178", "perf178.test.js", PERF_178, 1);
 }
