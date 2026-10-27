@@ -235,6 +235,17 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `Map(n) {…}`, `[class X]`, grouped long arrays, multi-line objects, `util.inspect.custom`);
   it was `JSON.stringify`, `util.format` ignored `%s %d …` and `console.log('a', {})` printed
   `a [object Object]`.
+- Every test function gets vitest's TestContext (turbo-test#96); it was called with no argument,
+  so any test using it failed with a TypeError. `ctx.task` (name, ids, `fullName`, its suite
+  and file tasks, `result` while it runs), `ctx.skip(note?)` / `ctx.skip(condition, note?)`
+  (the test is reported skipped at run time, with its duration and the `[note]` the human
+  reporters print), `onTestFinished` (after afterEach, the last registered first) and
+  `onTestFailed` handlers (a throw fails the test), `ctx.signal` (aborted when the test times
+  out), `ctx.expect`, `ctx.annotate(message, type?)` (junit `<properties>`, the verbose
+  reporter and the Failed Tests section print them). beforeEach / afterEach hooks get the
+  context, `it.for` rows and `it.extend` fixtures see the same one (fixture functions get it
+  too); `it.each` handlers get the row only, as in vitest (under `it.extend` they also got the
+  fixtures). Each hook / handler call's console output is an entry of its own, as vitest's.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain

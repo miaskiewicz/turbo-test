@@ -336,7 +336,6 @@ const CONTEXT: &[(&str, &str)] = &[(
 )];
 
 #[test]
-#[ignore = "turbo-test#96: fails until the fix"]
 fn skip_notes_and_annotations_print_what_vitest_prints() {
     for (reporter, esbuild) in [
         ("default", false),

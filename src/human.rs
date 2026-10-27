@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::FileResult;
 use crate::failure::{ErrorInfo, Frame};
-use crate::runner::TestCase;
+use crate::runner::{Annotation, TestCase};
 
 /// Which human reporter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -81,6 +81,11 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
                         for e in errors(t) {
                             out.push_str(&format!("   → {}\n", e.message));
                         }
+                    }
+                    if !t.annotations.is_empty() {
+                        out.push('\n');
+                        out.push_str(&annotation_lines(&t.annotations, &name, 3));
+                        out.push('\n');
                     }
                 }
             }
@@ -203,16 +208,48 @@ fn symbol(t: &TestCase) -> &'static str {
 }
 
 /// vitest's getTestCaseSuffix: ` 3ms` for a test that ran (the rounded duration of a test with
-/// a result), then ` (retry x2)` for a retried one.
+/// a result: one skipped at run time has a start, turbo-test#96), then ` (retry x2)` for a
+/// retried one and ` [note]` for one skipped with a note.
 fn suffix(t: &TestCase) -> String {
     let mut s = String::new();
-    if (t.status == "passed" || t.status == "failed") && !t.not_run {
+    let ran = t.status == "passed" || t.status == "failed" || t.start_ms > 0.0;
+    if ran && !t.not_run {
         s.push_str(&format!(" {}ms", t.duration_ms.round()));
     }
     if t.retry_count > 0 {
         s.push_str(&format!(" (retry x{})", t.retry_count));
     }
+    if t.status == "skipped" && !t.note.is_empty() {
+        s.push_str(&format!(" [{}]", t.note));
+    }
     s
+}
+
+/// vitest's printAnnotations (turbo-test#96): the annotations grouped by where they were made
+/// and their type (` ❯ a.test.ts:3:9 notice`), each message under its group (`  ↳ message`),
+/// every line indented by `pad` spaces; `file` is the test file's name.
+fn annotation_lines(annotations: &[Annotation], file: &str, pad: usize) -> String {
+    let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
+    for a in annotations {
+        let group = if a.line > 0 {
+            format!("{file}:{}:{} {}", a.line, a.col, a.kind)
+        } else {
+            a.kind.clone()
+        };
+        match groups.iter_mut().find(|(g, _)| *g == group) {
+            Some((_, messages)) => messages.push(&a.message),
+            None => groups.push((group, vec![&a.message])),
+        }
+    }
+    let pad = " ".repeat(pad);
+    let mut out = String::new();
+    for (group, messages) in groups {
+        out.push_str(&format!("{pad}❯ {group}\n"));
+        for m in messages {
+            out.push_str(&format!("{pad}  ↳ {m}\n"));
+        }
+    }
+    out
 }
 
 /// A failed test's errors (one from its message when the runtime recorded no error object).
@@ -328,8 +365,9 @@ fn snapshot_lines(res: &[FileResult], run: &Run) -> Vec<String> {
 /// tasks' errors (vitest's counter does not account for merged ones).
 fn errors_summary(res: &[FileResult], run: &Run) -> String {
     // (task name, its errors) per section
-    let mut suites: Vec<(String, Vec<ErrorInfo>)> = Vec::new();
-    let mut tests: Vec<(String, Vec<ErrorInfo>)> = Vec::new();
+    // (task name, its errors, its annotations and the file's name) per section
+    let mut suites: Vec<(String, Vec<ErrorInfo>, &[Annotation], String)> = Vec::new();
+    let mut tests: Vec<(String, Vec<ErrorInfo>, &[Annotation], String)> = Vec::new();
     for r in res {
         let name = run.names[r.idx].to_string_lossy().to_string();
         if r.failed_file && r.tests.is_empty() && r.suite_errors.is_empty() {
@@ -338,16 +376,18 @@ fn errors_summary(res: &[FileResult], run: &Run) -> String {
                 message: crate::cli::file_message(&r.error_msg),
                 ..Default::default()
             });
-            suites.push((format!("{name} [ {name} ]"), vec![error]));
+            suites.push((format!("{name} [ {name} ]"), vec![error], &[], name.clone()));
         }
         for s in &r.suite_errors {
-            suites.push((format!("{name} > {}", s.name), s.errors.clone()));
+            let task = format!("{name} > {}", s.name);
+            suites.push((task, s.errors.clone(), &[], name.clone()));
         }
         for t in r.tests.iter().filter(|t| t.status == "failed") {
-            tests.push((format!("{name} > {}", test_path(t)), errors(t)));
+            let task = format!("{name} > {}", test_path(t));
+            tests.push((task, errors(t), &t.annotations, name.clone()));
         }
     }
-    let total: usize = suites.iter().chain(&tests).map(|(_, e)| e.len()).sum();
+    let total: usize = suites.iter().chain(&tests).map(|t| t.1.len()).sum();
     let mut out = String::new();
     let mut n = 0;
     for (title, tasks) in [("Failed Suites", &suites), ("Failed Tests", &tests)] {
@@ -358,21 +398,27 @@ fn errors_summary(res: &[FileResult], run: &Run) -> String {
             "\n{}\n\n",
             divider(&format!(" {title} {} ", tasks.len()), None)
         ));
-        let mut queue: Vec<(&ErrorInfo, Vec<&str>)> = Vec::new();
-        for (name, errors) in tasks.iter() {
+        // an error merges with an identical one of a task with the same annotations
+        type Queued<'q> = (&'q ErrorInfo, Vec<&'q str>, &'q [Annotation], &'q str);
+        let mut queue: Vec<Queued> = Vec::new();
+        for (name, errors, notes, file) in tasks.iter() {
             for e in errors {
-                match queue.iter_mut().find(|(q, _)| *q == e) {
-                    Some((_, names)) => names.push(name),
-                    None => queue.push((e, vec![name])),
+                match queue.iter_mut().find(|q| q.0 == e && q.2 == *notes) {
+                    Some(q) => q.1.push(name),
+                    None => queue.push((e, vec![name], notes, file)),
                 }
             }
         }
-        for (error, names) in queue {
+        for (error, names, notes, file) in queue {
             n += 1;
             for name in names {
                 out.push_str(&format!(" FAIL  {name}\n"));
             }
             out.push_str(&print_error(error, run.root, true, ""));
+            if !notes.is_empty() {
+                out.push_str(&annotation_lines(notes, file, 1));
+                out.push('\n');
+            }
             out.push_str(&format!(
                 "{}\n\n",
                 divider(&format!("[{n}/{total}]"), Some(1))

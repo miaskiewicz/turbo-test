@@ -595,7 +595,6 @@ fn junit_is_vitests_report() {
 /// not. `tests/data/junit-context-vitest-4.1.12.xml` is vitest 4.1.12's report (the tests log
 /// what they see), on both loaders.
 #[test]
-#[ignore = "turbo-test#96: fails until the fix"]
 fn test_functions_get_vitests_test_context() {
     for esbuild in [false, true] {
         let p = Project::new("rep-junit-context");

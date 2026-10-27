@@ -995,6 +995,19 @@ pub fn render_junit(names: &[PathBuf], res: &[FileResult], root: &Path) -> Strin
                 skipped += 1;
                 body.push("            <skipped/>".to_string());
             }
+            // its annotations, one property each (turbo-test#96)
+            if !t.annotations.is_empty() {
+                body.push("            <properties>".to_string());
+                for a in &t.annotations {
+                    body.push(format!(
+                        "                <property name=\"{}\" value=\"{}\">",
+                        xml_esc(&a.kind),
+                        xml_esc(&a.message)
+                    ));
+                    body.push("                </property>".to_string());
+                }
+                body.push("            </properties>".to_string());
+            }
             if t.status == "failed" {
                 failed += 1;
                 // a failure the runtime recorded no error object for (a forbidden `.only`)

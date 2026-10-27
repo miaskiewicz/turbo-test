@@ -196,6 +196,52 @@ fn test_suffixes_and_symbols() {
     );
 }
 
+/// turbo-test#96: a test skipped at run time (it has a start) shows its duration and its note;
+/// a statically skipped one neither, an empty note no brackets, a note only on a skipped test.
+#[test]
+fn skipped_at_run_time_suffixes() {
+    let mut t = test("a", "skipped", 1.6);
+    t.start_ms = 1000.0;
+    assert_eq!(suffix(&t), " 2ms");
+    t.note = "not today".into();
+    assert_eq!(suffix(&t), " 2ms [not today]");
+    let mut s = test("a", "skipped", 0.0);
+    s.note = "n".into();
+    assert_eq!(suffix(&s), " [n]");
+    let mut p = test("a", "passed", 0.4);
+    p.note = "n".into();
+    assert_eq!(suffix(&p), " 0ms");
+}
+
+/// vitest's printAnnotations: grouped by location and type in first-seen order (one made at the
+/// same place with the same type joins its group), a group without a location is the type alone.
+#[test]
+fn annotations_group_by_place_and_type() {
+    let a = |kind: &str, message: &str, line: u32, col: u32| Annotation {
+        kind: kind.into(),
+        message: message.into(),
+        line,
+        col,
+    };
+    let notes = [
+        a("notice", "one", 3, 9),
+        a("warning", "two", 3, 9),
+        a("notice", "three", 3, 9),
+        a("notice", "four", 0, 0),
+        a("notice", "five", 4, 1),
+    ];
+    assert_eq!(
+        annotation_lines(&notes, "a.test.ts", 1),
+        " ❯ a.test.ts:3:9 notice\n   ↳ one\n   ↳ three\n ❯ a.test.ts:3:9 warning\n   ↳ two\n \
+         ❯ notice\n   ↳ four\n ❯ a.test.ts:4:1 notice\n   ↳ five\n"
+    );
+    assert_eq!(
+        annotation_lines(&notes[..1], "b.ts", 3),
+        "   ❯ b.ts:3:9 notice\n     ↳ one\n"
+    );
+    assert_eq!(annotation_lines(&[], "b.ts", 3), "");
+}
+
 #[test]
 fn snapshot_lines_are_render_snapshot_summary() {
     let names = [PathBuf::from("a.test.ts"), PathBuf::from("src/b.test.ts")];

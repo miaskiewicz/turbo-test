@@ -19,7 +19,8 @@ const __emit = (tag) => (...a) => {
 // [type, content, tick, task] entries of the file (the human reporters; `task` is the test's or
 // suite's name path, '' for the file itself). vitest buffers each stream of each task and
 // flushes it once no write came for a macrotask, so writes with no macrotask between them form
-// one entry.
+// one entry; each beforeEach / afterEach hook, test function and onTestFinished / onTestFailed
+// handler call starts one too (runSuite bumps the tick before each).
 let __ttTestLogs = null;
 let __ttFileLogs = [];
 let __ttLogTask = '';
@@ -4201,19 +4202,23 @@ function __each(register, cases, targs) {
     const handler = fnFirst ? a : b;
     const opts = fnFirst ? b : a;
     const spread = cases.every(Array.isArray);
+    // its tests are `each` tasks (vitest's `task.each`)
+    const outer = __inEach;
+    __inEach = true;
     cases.forEach((row, idx) => {
       const items = Array.isArray(row) ? row : [row];
       const args = spread ? items : [row];
-      // `ctx` is only defined for an it.extend test (its resolved fixtures, passed last)
-      const fn = (ctx) => (typeof handler === 'function' ? (ctx === undefined ? handler(...args) : handler(...args, ctx)) : undefined);
+      // the handler gets the row only, never the test context (vitest)
+      const fn = () => (typeof handler === 'function' ? handler(...args) : undefined);
       register(__formatTitle(title, items, idx), fn, opts);
     });
+    __inEach = outer;
   };
 }
 
 // `.for` (turbo-test#68): like `.each`, but the row is passed as ONE argument (never spread),
-// followed by the test context for a test (its fixtures under it.extend; otherwise a minimal
-// context carrying `expect`). A `describe.for` body gets the row only.
+// followed by the test context for a test (with its fixtures under it.extend, turbo-test#96). A
+// `describe.for` body gets the row only.
 function __for(register, cases, targs, isSuite) {
   cases = __eachCases(cases, targs);
   return (name, a, b) => {
@@ -4222,8 +4227,7 @@ function __for(register, cases, targs, isSuite) {
     const handler = fnFirst ? a : b;
     const opts = fnFirst ? b : a;
     cases.forEach((item, idx) => {
-      const ctxOf = (ctx) => (ctx === undefined ? { expect: globalThis.expect } : ctx);
-      const fn = (ctx) => (typeof handler !== 'function' ? undefined : isSuite ? handler(item) : handler(item, ctxOf(ctx)));
+      const fn = (ctx) => (typeof handler !== 'function' ? undefined : isSuite ? handler(item) : handler(item, ctx));
       register(__formatTitle(title, item == null ? [] : Array.isArray(item) ? item : [item], idx), fn, opts);
     });
   };
@@ -4301,8 +4305,10 @@ function __defaultTimeout() {
 }
 // Collect a test into the current suite. Under `includeTaskLocation` it records where it was
 // registered from (`[line, column]` in the test file, native `__ttCallSite`, #63).
+let __inEach = false;
 function __addTest(t) {
   if (globalThis.__TT_TASK_LOCATION) t.location = globalThis.__ttCallSite();
+  if (__inEach) t.each = true;
   current.tasks.push(t);
 }
 function it(name, a, b) {
@@ -4323,8 +4329,8 @@ it.fails = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ nam
 // the test fn's first arg; fixtures defined as plain values or `async ({}, use) => use(value)`
 // functions are resolved here and provided. Returns a new test fn with these fixtures baked in.
 it.extend = (fixtures) => {
-  const resolveCtx = async () => {
-    const ctx = {};
+  // the fixtures are set on the test's context (turbo-test#96), which the fixture functions get
+  const resolveCtx = async (ctx) => {
     for (const k of Object.keys(fixtures || {})) {
       const f = fixtures[k];
       if (typeof f === 'function') {
@@ -4340,7 +4346,7 @@ it.extend = (fixtures) => {
     }
     return ctx;
   };
-  const wrap = (userFn) => async () => { const ctx = await resolveCtx(); return userFn(ctx); };
+  const wrap = (userFn) => async (ctx) => userFn(await resolveCtx(ctx));
   const ext = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: false, retry: o.retry || 0 }); };
   ext.skip = (name, a, b) => __addTest({ name, fn: wrap(__normTest(a, b).fn), skip: true });
   ext.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: true, retry: o.retry || 0 }); };
@@ -4352,6 +4358,7 @@ it.extend = (fixtures) => {
 globalThis.describe = describe;
 globalThis.it = it;
 globalThis.test = it;
+// beforeEach / afterEach hooks get the test's context (turbo-test#96)
 globalThis.beforeEach = (fn) => current.hooks.be.push(fn);
 globalThis.afterEach = (fn) => current.hooks.ae.push(fn);
 globalThis.beforeAll = (fn) => current.hooks.ba.push(fn);
@@ -4396,8 +4403,114 @@ function __testRecord(t, chain, status, extra) {
     status,
     duration_ms: 0,
     location: t.location,
+    // its ctx.annotate() calls: [type, message, line, column] (turbo-test#96)
+    annotations: t.task ? t.task.annotations.map((a) => [String(a.type), String(a.message), String(a.location ? a.location.line : 0), String(a.location ? a.location.column : 0)]) : [],
     ...extra,
   };
+}
+
+// ---- the test context (turbo-test#96): what vitest 4.1.12 passes every test function, and its
+// beforeEach / afterEach hooks (@vitest/runner `createTestContext` + the runner's `expect`).
+// What `ctx.skip()` throws: the test is reported skipped (with the note) at run time.
+class __PendingError extends Error {
+  constructor(note) {
+    super('test is skipped; abort execution');
+    this.code = 'VITEST_PENDING';
+    this.note = note;
+  }
+}
+// @vitest/runner `generateHash`: the file task's id (child ids append `_<index>`)
+function __taskHash(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) { h = (h << 5) - h + s.charCodeAt(i); h &= h; }
+  return `${h}`;
+}
+// The file's task (`ctx.task.file`): named relative to the run's root (native `__ttFileName`).
+let __fileTask = null;
+function __fileTaskOf() {
+  if (__fileTask && __fileTask.filepath === globalThis.__ttFile) return __fileTask;
+  const name = globalThis.__ttFileName || '';
+  const file = { type: 'suite', name, fullName: name, filepath: globalThis.__ttFile, id: __taskHash(name), mode: 'run', meta: Object.create(null), projectName: '', tags: [], result: undefined };
+  file.file = file;
+  Object.defineProperty(file, 'tasks', { enumerable: true, get: () => root.tasks.map((c) => (c.suite ? __suiteTaskOf(c, [root]) : __testTaskOf(c, [root]))) });
+  __fileTask = file;
+  return file;
+}
+// A describe block's task (`ctx.task.suite`); `chain` is the suites enclosing it, root first.
+function __suiteTaskOf(s, chain) {
+  if (s.task) return s.task;
+  const file = __fileTaskOf();
+  const parent = chain[chain.length - 1];
+  const names = chain.slice(1).map((x) => x.name).concat(s.name);
+  const up = chain.length > 1 ? __suiteTaskOf(parent, chain.slice(0, -1)) : undefined;
+  const task = { type: 'suite', name: s.name, id: `${(up || file).id}_${parent.tasks.indexOf(s)}`, mode: s.mode || 'run', file, suite: up, fullName: [file.name, ...names].join(' > '), fullTestName: names.join(' > '), meta: Object.create(null), each: undefined, concurrent: undefined, shuffle: undefined, tags: [], result: undefined };
+  Object.defineProperty(task, 'tasks', { enumerable: true, get: () => s.tasks.map((c) => (c.suite ? __suiteTaskOf(c, [...chain, s]) : __testTaskOf(c, [...chain, s]))) });
+  s.task = task;
+  return task;
+}
+// A test's task (`ctx.task`), created once (it outlives retries).
+function __testTaskOf(t, chain) {
+  if (t.task) return t.task;
+  const file = __fileTaskOf();
+  const parent = chain[chain.length - 1];
+  const up = chain.length > 1 ? __suiteTaskOf(parent, chain.slice(0, -1)) : undefined;
+  const names = chain.slice(1).map((x) => x.name).concat(t.name);
+  t.task = {
+    type: 'test', name: t.name, id: `${(up || file).id}_${parent.tasks.indexOf(t)}`, mode: 'run', file, suite: up,
+    fullName: [file.name, ...names].join(' > '), fullTestName: names.join(' > '), meta: Object.create(null),
+    each: t.each || undefined, fails: t.fails || undefined, retry: t.retry || undefined, repeats: undefined,
+    timeout: (typeof t.timeout === 'number' && t.timeout > 0) ? t.timeout : __defaultTimeout(), shuffle: undefined,
+    tags: [], annotations: [], artifacts: [], result: undefined,
+  };
+  return t.task;
+}
+// The context itself: a function (calling it is the deprecated `done` callback), created with
+// the task; `expect` is a lazily made expect of its own (non-enumerable, as vitest's).
+function __contextOf(t, chain) {
+  if (t.context) return t.context;
+  const task = __testTaskOf(t, chain);
+  const context = function () { throw new Error('done() callback is deprecated, use promise instead'); };
+  const abort = new AbortController();
+  context.signal = abort.signal;
+  context.task = task;
+  context.skip = (condition, note) => {
+    if (condition === false) return undefined;
+    task.result.pending = true;
+    throw new __PendingError(typeof condition === 'string' ? condition : note);
+  };
+  context.annotate = (message, type, attachment) => {
+    if (task.result && task.result.state !== 'run') {
+      throw new Error(`Cannot annotate tests outside of the test run. The test "${task.name}" finished running with the "${task.result.state}" state already.`);
+    }
+    const annotation = { message, type: typeof type === 'object' || type === undefined ? 'notice' : type };
+    const att = typeof type === 'object' ? type : attachment;
+    if (att) annotation.attachment = att;
+    const site = globalThis.__ttCallSite();
+    if (site) annotation.location = { file: globalThis.__ttFile, line: site[0], column: site[1] };
+    task.annotations.push(annotation);
+    return Promise.resolve(annotation);
+  };
+  context.onTestFailed = (fn) => { t.onFailed.push(fn); };
+  context.onTestFinished = (fn) => { t.onFinished.push(fn); };
+  let ownExpect;
+  Object.defineProperty(context, 'expect', { get: () => (ownExpect ||= new Proxy(globalThis.expect, {})) });
+  Object.defineProperty(task, 'context', { value: context, configurable: true });
+  t.abort = abort;
+  t.context = context;
+  return context;
+}
+// onTestFinished (last registered first) / onTestFailed handlers: each gets the context and a
+// throw fails the test; registering another inside one throws, as vitest's `callTestHooks`.
+async function __callTestHooks(t, hooks, fail) {
+  const ctx = t.context;
+  const keep = [ctx.onTestFailed, ctx.onTestFinished];
+  ctx.onTestFailed = () => { throw new Error('Cannot call "onTestFailed" inside a test hook.'); };
+  ctx.onTestFinished = () => { throw new Error('Cannot call "onTestFinished" inside a test hook.'); };
+  for (const fn of hooks.slice().reverse()) {
+    __loop.ticks++;
+    try { await fn(ctx); } catch (e) { fail(e); }
+  }
+  [ctx.onTestFailed, ctx.onTestFinished] = keep;
 }
 
 // Whether a test of `suite` (or of a nested suite) will run: not skip / todo / filtered by -t /
@@ -4517,8 +4630,26 @@ async function runSuite(suite, ancestors, summary, mode = '') {
     const __start = __loop.realNow();
     __ttTestLogs = [];
     __ttLogTask = chain.slice(1).map((s) => s.name).concat(t.name).join(' > ');
+    // its context (turbo-test#96): `task.result` while it runs, as vitest's
+    const ctx = __contextOf(t, chain);
+    const task = t.task;
+    task.result = { state: 'run', startTime: __start, retryCount: 0, repeatCount: 0 };
+    // a failing onTestFinished / onTestFailed handler fails the test (not a skipped one)
+    const failWith = (e) => {
+      if (task.result.pending) return;
+      ok = false;
+      lastErr = e;
+      attemptErrors.push(e);
+      task.result.state = 'fail';
+      task.result.errors = attemptErrors;
+    };
     for (let a = 0; a < attempts && !ok; a++) {
       tries++;
+      task.result.retryCount = a;
+      task.result.state = 'run';
+      t.onFinished = [];
+      t.onFailed = [];
+      lastErr = undefined;
       // Reset per-test snapshot + assertion-count state (snapshot counter is keyed by test name,
       // so distinct multi-snapshot tests don't collide; assertion enforcement resets each attempt).
       __snap.testName = label;
@@ -4527,19 +4658,25 @@ async function runSuite(suite, ancestors, summary, mode = '') {
       __snap.expectedAssertions = null;
       __snap.hasAssertions = false;
       try {
-        for (const s of chain) for (const h of s.hooks.be) await h();
+        for (const s of chain) for (const h of s.hooks.be) { __loop.ticks++; await h(ctx); }
         // Race t.fn() against a timeout. The timeout is an INTERNAL one-shot timer (separate
         // from the user/fake-timer queue), so the Rust drive loop advances the virtual clock to
         // it and rejects even a test that never resolves (e.g. `await new Promise(() => {})`) —
         // otherwise that hangs the whole worker — while staying invisible to vi.runAllTimers etc.
         let timer;
         const timed = new Promise((_, rej) => {
-          timer = __scheduleInternal(() => rej(new Error(`test timed out in ${timeoutMs}ms`)), timeoutMs);
+          timer = __scheduleInternal(() => {
+            const err = new Error(`test timed out in ${timeoutMs}ms`);
+            // the context's signal aborts with the timeout error (vitest's `withTimeout`)
+            t.abort.abort(err);
+            rej(err);
+          }, timeoutMs);
         });
         try {
           // called as a plain function, as vitest calls it (its stack frame has no method name)
           const fn = t.fn;
-          await Promise.race([Promise.resolve().then(() => fn()), timed]);
+          __loop.ticks++;
+          await Promise.race([Promise.resolve().then(() => fn(ctx)), timed]);
         } finally {
           __clearInternal(timer);
         }
@@ -4552,25 +4689,48 @@ async function runSuite(suite, ancestors, summary, mode = '') {
         }
         ok = true;
       } catch (e) {
-        lastErr = e;
+        // ctx.skip(): the test is skipped, with its note (a caught one skips it, without a note)
+        if (e instanceof __PendingError) {
+          task.result.pending = true;
+          task.result.note = e.note;
+          task.result.state = 'skip';
+        } else lastErr = e;
       }
+      if (task.result.state === 'run') task.result.state = ok ? 'pass' : 'fail';
+      if (!ok && !task.result.pending) task.result.errors = attemptErrors.concat([lastErr]);
       // it.fails: invert the outcome — a thrown error is the success condition, a clean pass fails.
-      if (t.fails) {
+      if (t.fails && !task.result.pending) {
         if (lastErr) { ok = true; lastErr = undefined; }
         else { ok = false; lastErr = new Error('expected test to fail, but it passed'); }
       }
-      if (!ok) attemptErrors.push(lastErr);
+      if (!ok && !task.result.pending) attemptErrors.push(lastErr);
       // afterEach (incl. @testing-library cleanup) runs even when the test failed — otherwise a
       // failed test's mounted DOM leaks into the next test. Hook errors here don't fail a test
       // that already passed (matches the prior behavior; avoids mass cleanup-throw failures).
       for (const s of [...chain].reverse()) for (const h of s.hooks.ae) {
-        try { await h(); } catch (e) {}
+        __loop.ticks++;
+        try { await h(ctx); } catch (e) {}
       }
+      // then its onTestFinished handlers, and onTestFailed ones when it failed (vitest's order)
+      await __callTestHooks(t, t.onFinished, failWith);
+      if (task.result.state === 'fail') await __callTestHooks(t, t.onFailed, failWith);
+      if (task.result.pending) break;
     }
     const __dur = __loop.elapsed() - __t0;
     const timing = { duration_ms: __dur, start_ms: __start, retry_count: tries - 1, logs: __ttTestLogs.map((l) => [l[0], l[1]]) };
     __ttTestLogs = null;
     __ttLogTask = suiteTask;
+    // skipped at run time (ctx.skip): its duration and note (turbo-test#96); its snapshots
+    // count as checked, as a skipped test's
+    if (task.result.pending) {
+      task.mode = 'skip';
+      task.result = { state: 'skip', note: task.result.note, pending: true, duration: __dur };
+      summary.skipped++;
+      summary.skippedNames.push(label);
+      summary.tests.push(__testRecord(t, chain, 'skipped', { ...timing, note: task.result.note === undefined ? '' : String(task.result.note) }));
+      continue;
+    }
+    task.result.duration = __dur;
     // a passing it.fails is vitest's `expected fail` in the summary footer (#78)
     if (ok) { summary.passed++; summary.tests.push(__testRecord(t, chain, 'passed', t.fails ? { ...timing, expected_fail: true } : timing)); }
     else {
