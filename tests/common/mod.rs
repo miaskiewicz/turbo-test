@@ -140,6 +140,17 @@ impl Run {
 /// `TURBO_JOBS=2`, `TURBO_LEGACY_REPORTER=1` and `TURBO_CHAI` (the repo's `node_modules/chai`)
 /// unless `env` overrides them, and `env` applied last.
 pub fn run_exe(exe: &str, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Run {
+    run_exe_unset(exe, cwd, args, env, &[])
+}
+
+/// `run_exe` with the variables `unset` removed after the others are set (`TURBO_CHAI` too).
+pub fn run_exe_unset(
+    exe: &str,
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    unset: &[&str],
+) -> Run {
     let tmp = cwd.join(".tt-tmp");
     std::fs::create_dir_all(&tmp).unwrap();
     let mut cmd = Command::new(exe);
@@ -180,6 +191,9 @@ pub fn run_exe(exe: &str, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Ru
         .env("TURBO_LEGACY_REPORTER", "1");
     for (k, v) in env {
         cmd.env(k, v);
+    }
+    for k in unset {
+        cmd.env_remove(k);
     }
     let out = cmd.output().unwrap_or_else(|e| panic!("spawn {exe}: {e}"));
     Run {

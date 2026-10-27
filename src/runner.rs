@@ -1518,9 +1518,8 @@ fn vitest_setup_files_uncached(entry: &Path) -> Vec<PathBuf> {
 /// resolved against its directory (vitest resolves them against the root), memoized by the
 /// test file's directory as the setup files are.
 fn vitest_snapshot_serializers(entry: &Path) -> Vec<PathBuf> {
-    let Some(dir) = entry.parent() else {
-        return Vec::new();
-    };
+    // (a test file's path always has a directory)
+    let dir = entry.parent().unwrap_or(entry);
     thread_local! {
         static SERIALIZERS_MEMO: RefCell<HashMap<PathBuf, Vec<PathBuf>>> = RefCell::new(HashMap::new());
     }
@@ -4447,28 +4446,18 @@ fn mark_external_cjs<'s>(
     global: v8::Local<'s, v8::Object>,
     abs: &Path,
     exports: v8::Local<'s, v8::Value>,
-) {
+) -> Option<()> {
     if !abs.components().any(|c| c.as_os_str() == "node_modules") {
-        return;
+        return None;
     }
-    let Ok(obj) = v8::Local::<v8::Object>::try_from(exports) else {
-        return;
-    };
-    let (Some(ekey), Some(mkey)) = (
-        v8::String::new(scope, "__esModule"),
-        v8::String::new(scope, "__ttMarkExternalCjs"),
-    ) else {
-        return;
-    };
+    // an object (a primitive `module.exports` has no names to mark) without `__esModule`
+    let obj = v8::Local::<v8::Object>::try_from(exports).ok()?;
+    let ekey = v8::String::new(scope, "__esModule")?;
     if obj.has(scope, ekey.into()).unwrap_or(true) {
-        return;
+        return None;
     }
-    let Some(mark) = global
-        .get(scope, mkey.into())
-        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok())
-    else {
-        return;
-    };
+    let mkey = v8::String::new(scope, "__ttMarkExternalCjs")?;
+    let mark = v8::Local::<v8::Function>::try_from(global.get(scope, mkey.into())?).ok()?;
     // the names Node's cjs-module-lexer finds where they differ from the object's own
     let names = std::fs::read_to_string(abs)
         .ok()
@@ -4485,6 +4474,7 @@ fn mark_external_cjs<'s>(
     };
     let undefined = v8::undefined(scope).into();
     mark.call(scope, undefined, &[exports, names]);
+    Some(())
 }
 
 fn object_keys(
@@ -5403,21 +5393,6 @@ fn native_require_cache(
     }
 }
 
-/// The file URL of an absolute `path` as Node's `pathToFileURL(path).href` spells it: controls,
-/// space, `"#%<>?[\\]^{|}~`, the backtick, DEL and every non-ASCII UTF-8 byte percent-encoded
-/// (turbo-test#87).
-fn file_url(path: &Path) -> String {
-    let mut out = String::from("file://");
-    for b in path.to_string_lossy().bytes() {
-        if b <= 0x20 || b >= 0x7f || b"\"#%<>?[\\]^`{|}~".contains(&b) {
-            out.push_str(&format!("%{b:02X}"));
-        } else {
-            out.push(b as char);
-        }
-    }
-    out
-}
-
 fn throw(scope: &mut v8::PinScope, msg: &str) {
     let m = v8::String::new(scope, msg).unwrap();
     let exc = v8::Exception::error(scope, m);
@@ -5425,17 +5400,14 @@ fn throw(scope: &mut v8::PinScope, msg: &str) {
 }
 
 /// Throw an `Error` with `msg` and a `code` property.
-fn throw_with_code(scope: &mut v8::PinScope, msg: &str, code: &str) {
-    let (Some(m), Some(k), Some(c)) = (
-        v8::String::new(scope, msg),
-        v8::String::new(scope, "code"),
-        v8::String::new(scope, code),
-    ) else {
-        return;
-    };
+fn throw_with_code(scope: &mut v8::PinScope, msg: &str, code: &str) -> Option<()> {
+    let m = v8::String::new(scope, msg)?;
+    let k = v8::String::new(scope, "code")?;
+    let c = v8::String::new(scope, code)?;
     let exc = v8::Exception::error(scope, m);
     exc.cast::<v8::Object>().set(scope, k.into(), c.into());
     scope.throw_exception(exc);
+    Some(())
 }
 
 /// The error a module `abs` that V8 did not compile (`exc`) fails with: vite's for a module that
@@ -5468,14 +5440,16 @@ fn vite_error_value<'s>(
     let message = v8::String::new(scope, &vite.message)?;
     let e = v8::Exception::error(scope, message);
     let o = e.cast::<v8::Object>();
-    let set = |scope: &mut v8::PinScope<'s, '_>,
-               o: v8::Local<'s, v8::Object>,
-               k: &str,
-               v: v8::Local<'s, v8::Value>| {
+    fn set<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        o: v8::Local<'s, v8::Object>,
+        k: &str,
+        v: v8::Local<'s, v8::Value>,
+    ) {
         if let Some(k) = v8::String::new(scope, k) {
             o.set(scope, k.into(), v);
         }
-    };
+    }
     if vite.name != "Error" {
         let name = v8::String::new(scope, vite.name)?;
         set(scope, o, "name", name.into());
@@ -6089,21 +6063,12 @@ extern "C" fn import_meta_callback(
     let fill = global
         .get(scope, name.into())
         .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok());
-    match (path, fill) {
-        (Some(p), Some(fill)) => {
-            let file = v8::String::new(scope, &p.to_string_lossy()).unwrap();
-            let undefined = v8::undefined(scope).into();
-            fill.call(scope, undefined, &[meta.into(), file.into()]);
-        }
-        (p, _) => {
-            let url = p
-                .as_ref()
-                .map(|p| file_url(p))
-                .unwrap_or_else(|| "file:///<unknown>".to_string());
-            let k = v8::String::new(scope, "url").unwrap();
-            let v = v8::String::new(scope, &url).unwrap();
-            meta.create_data_property(scope, k.into(), v.into());
-        }
+    // every module is registered by path when it is compiled (load_esm), before its code can
+    // reach import.meta, and runtime.js defines __ttFillImportMeta
+    if let (Some(p), Some(fill)) = (path, fill) {
+        let file = v8::String::new(scope, &p.to_string_lossy()).unwrap();
+        let undefined = v8::undefined(scope).into();
+        fill.call(scope, undefined, &[meta.into(), file.into()]);
     }
 }
 
@@ -6505,9 +6470,6 @@ fn chai_missing(why: &str) -> ! {
         "turbo-test: {why}\nturbo-test needs the `chai` package it depends on (vitest's expect is chai): \
          run it through its npm launcher (cli.js), which passes TURBO_CHAI, or set TURBO_CHAI to chai's index.js."
     );
-    if cfg!(test) {
-        panic!("{msg}");
-    }
     eprintln!("{msg}");
     std::process::exit(1);
 }
@@ -6786,13 +6748,13 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
 fn install_host_env(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let host = v8::Object::new(scope);
     for (k, v) in std::env::vars_os() {
-        let (Some(k), Some(v)) = (
+        // (a variable is far below V8's string limit: the environment is ARG_MAX-bounded)
+        if let (Some(k), Some(v)) = (
             v8::String::new(scope, &k.to_string_lossy()),
             v8::String::new(scope, &v.to_string_lossy()),
-        ) else {
-            continue;
-        };
-        host.set(scope, k.into(), v.into());
+        ) {
+            host.set(scope, k.into(), v.into());
+        }
     }
     let key = v8::String::new(scope, "__ttHostEnv").unwrap();
     global.set(scope, key.into(), host.into());

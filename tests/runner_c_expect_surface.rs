@@ -176,6 +176,35 @@ fn a_missing_chai_fails_loudly() {
     );
     assert_eq!(r.stderr, want, "{}", r.all());
     assert!(!r.stdout.contains("passed"), "{}", r.all());
+    let advice = "turbo-test needs the `chai` package it depends on (vitest's expect is chai): run it through its npm launcher (cli.js), which passes TURBO_CHAI, or set TURBO_CHAI to chai's index.js.\n";
+    // TURBO_CHAI unset
+    let r = common::run_exe_unset(
+        env!("CARGO_BIN_EXE_turbo-test"),
+        &p.dir,
+        &["a.test.js"],
+        &[],
+        &["TURBO_CHAI"],
+    );
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    assert_eq!(
+        r.stderr,
+        format!("turbo-test: TURBO_CHAI is not set\n{advice}"),
+        "{}",
+        r.all()
+    );
+    // a file that is not an ES module the emitter can lower
+    let bad = p.file("bad-chai/index.js", "export const = ;\n");
+    let r = turbo_test(&p.dir, &["a.test.js"], &[("TURBO_CHAI", bad.to_str().unwrap())]);
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    assert_eq!(
+        r.stderr,
+        format!(
+            "turbo-test: cannot lower chai at {} to CommonJS\n{advice}",
+            bad.display()
+        ),
+        "{}",
+        r.all()
+    );
 }
 
 /// Runs `file` (from `tests/data/expect_surface`) in a fresh project, with and without esbuild,

@@ -1588,23 +1588,6 @@ fn ci_detection_is_std_env_is_ci() {
 }
 
 #[test]
-fn file_urls_are_spelled_like_node_path_to_file_url() {
-    // expected: Node 26 `pathToFileURL(p).href` (turbo-test#87)
-    let ascii: String = (0x20u8..0x7f)
-        .filter(|&c| c != b'/')
-        .map(char::from)
-        .collect();
-    assert_eq!(
-        file_url(Path::new(&format!("/{ascii}"))),
-        "file:///%20!%22%23$%25&'()*+,-.0123456789:;%3C=%3E%3F@ABCDEFGHIJKLMNOPQRSTUVWXYZ%5B%5C%5D%5E_%60abcdefghijklmnopqrstuvwxyz%7B%7C%7D%7E"
-    );
-    assert_eq!(
-        file_url(Path::new("/a\u{1}\u{1f}\u{7f}b/€ x")),
-        "file:///a%01%1F%7Fb/%E2%82%AC%20x"
-    );
-}
-
-#[test]
 fn source_order_exports_reorders_esbuilds_registration() {
     let code = "var x_exports = {};\n__export(x_exports, {\n  a: () => a,\n  \"b-c\": () => bc,\n  default: () => x_default,\n  z: () => z\n});\nrest\n});".to_string();
     let order = ["default", "b-c", "a"].map(String::from);
@@ -1616,4 +1599,20 @@ fn source_order_exports_reorders_esbuilds_registration() {
     assert_eq!(source_order_exports("plain".to_string(), &order), "plain");
     let other = "f(x_exports, {\n  a: () => a\n});".to_string();
     assert_eq!(source_order_exports(other.clone(), &order), other);
+    // a registration that does not close: unchanged
+    let open = "__export(x_exports, {\n  b: () => b,\n  a: () => a".to_string();
+    assert_eq!(source_order_exports(open.clone(), &order), open);
+}
+
+#[test]
+fn config_string_lists_are_the_literal_strings_of_the_key() {
+    let list = |s: &str| config_string_list(s, "snapshotSerializers");
+    assert_eq!(
+        list("test: { snapshotSerializers: ['./a.js', \"./b.js\", `./c.js`, ] }"),
+        ["./a.js", "./b.js", "./c.js"]
+    );
+    // absent, not a literal list, or a list that does not close: none
+    assert!(list("test: { setupFiles: ['./a.js'] }").is_empty());
+    assert!(list("test: { snapshotSerializers: serializers }").is_empty());
+    assert!(list("test: { snapshotSerializers: ['./a.js'").is_empty());
 }
