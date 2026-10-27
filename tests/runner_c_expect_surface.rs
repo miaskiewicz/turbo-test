@@ -11,10 +11,9 @@ use std::collections::BTreeSet;
 
 /// Members vitest has and turbo-test does not, each tracked by its own issue (vitest.compat.md):
 /// chai's BDD chain (`expect(x).to.be.equal(...)`), chai's `assert` and chai's internal `__flags`,
-/// `expect.poll`, `expect.addSnapshotSerializer`.
-const KNOWN_MISSING: [(&str, &str); 4] = [
+/// `expect.poll`.
+const KNOWN_MISSING: [(&str, &str); 3] = [
     ("expect", "__flags:object"),
-    ("expect", "addSnapshotSerializer:function"),
     ("expect", "assert:function"),
     ("expect", "poll:function"),
 ];
@@ -207,7 +206,6 @@ fn expect_poll_not_awaited_fails_the_test() {
 }
 
 #[test]
-#[ignore = "turbo-test#162: fails until the fix"]
 fn snapshot_serializers_are_vitests() {
     // turbo-test#162: expect.addSnapshotSerializer was undefined. A serializer (`serialize`, or
     // the old `print` API) applies to every snapshot from then on, the newest first, inside

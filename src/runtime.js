@@ -3476,9 +3476,11 @@ function __snapFile() {
 // vitest's snapshot serializer (turbo-test#73): pretty-format with vitest's snapshotFormat
 // (printBasicPrototype false, escapeString false), printFunctionName false, escapeRegex true and
 // the mock-function serializer; CRLF normalized.
+// expect.addSnapshotSerializer's serializers come first, the newest first (turbo-test#162).
 function __serialize(v) {
-  return __pf(v, { indent: 2, basic: false, escape: false, fnName: false, escapeRegex: true, mocks: true }).replace(/\r\n|\r/g, '\n');
+  return __pf(v, { indent: 2, basic: false, escape: false, fnName: false, escapeRegex: true, mocks: true, plugins: __snapSerializers }).replace(/\r\n|\r/g, '\n');
 }
+const __snapSerializers = [];
 // Read a .snap file (vitest's or turbo-test's older one: both are `exports[...] = ...;` JS).
 function __parseSnapFile(text) {
   const out = Object.create(null);
@@ -4257,6 +4259,8 @@ globalThis.expect.hasAssertions = function hasAssertions() {
   if (Error.captureStackTrace) Error.captureStackTrace(error, hasAssertions);
   __snap.hasAssertions = error;
 };
+// expect.addSnapshotSerializer: a pretty-format plugin every later snapshot uses (turbo-test#162)
+globalThis.expect.addSnapshotSerializer = (plugin) => { __snapSerializers.unshift(plugin); };
 globalThis.expect.soft = (actual, message) => { __snap.assertCount++; return makeExpect(actual, false, message); };
 globalThis.expect.anything = () => new __Anything();
 globalThis.expect.any = (expected) => new __Any(expected);
@@ -5226,8 +5230,77 @@ function __pf(val, o) {
     fnName: o.fnName !== false,
     escapeRegex: !!o.escapeRegex,
     mocks: !!o.mocks,
+    plugins: o.plugins || [],
   };
   return __pfPrint(val, cfg, '', 0, [], false);
+}
+// pretty-format plugins (expect.addSnapshotSerializer, turbo-test#162): a plugin is
+// `{ test, serialize }` or the older `{ test, print }`, tried before any built-in printing.
+// A plugin sees pretty-format's config; `__pfStubs` stand for vitest's 7 built-in snapshot
+// plugins in its `plugins` (printed natively here: the mock function and asymmetric matchers).
+const __PrettyFormatPluginError = class PrettyFormatPluginError extends Error {
+  constructor(message, stack) { super(message); this.stack = stack; this.name = this.constructor.name; }
+};
+const __pfStubs = Array.from({ length: 7 }, () => ({ test: () => false, serialize: () => '' }));
+const __pfCfgOf = new WeakMap();
+function __pfConfig(cfg) {
+  if (cfg.pretty) return cfg.pretty;
+  const none = () => ({ close: '', open: '' });
+  const pretty = {
+    callToJSON: cfg.toJSON,
+    colors: { comment: none(), content: none(), prop: none(), tag: none(), value: none() },
+    compareKeys: undefined,
+    escapeRegex: cfg.escapeRegex,
+    escapeString: cfg.escape,
+    indent: cfg.indent,
+    maxDepth: cfg.maxDepth,
+    maxWidth: Infinity,
+    min: cfg.min,
+    plugins: cfg.mocks ? [...cfg.plugins, ...__pfStubs] : cfg.plugins.slice(),
+    printBasicPrototype: cfg.basic,
+    printFunctionName: cfg.fnName,
+    printShadowRoot: true,
+    spacingInner: cfg.inner,
+    spacingOuter: cfg.outer,
+    maxOutputLength: 1e6,
+    _outputLengthPerDepth: [],
+  };
+  cfg.pretty = pretty;
+  __pfCfgOf.set(pretty, cfg);
+  return pretty;
+}
+// pretty-format's `printer` as a plugin calls it: with the config it was given, or its own copy
+function __pfPrinter(val, config, indentation, depth, refs, hasCalledToJSON) {
+  let cfg = __pfCfgOf.get(config);
+  if (!cfg) {
+    const plugins = config.plugins || [];
+    cfg = {
+      indent: config.indent, outer: config.spacingOuter, inner: config.spacingInner, min: !!config.min,
+      basic: config.printBasicPrototype !== false, maxDepth: config.maxDepth, escape: config.escapeString !== false,
+      toJSON: config.callToJSON !== false, errors: false, fnName: config.printFunctionName !== false,
+      escapeRegex: !!config.escapeRegex, mocks: plugins.some((p) => __pfStubs.includes(p)),
+      plugins: plugins.filter((p) => !__pfStubs.includes(p)),
+    };
+    cfg.pretty = config;
+    __pfCfgOf.set(config, cfg);
+  }
+  return __pfPrint(val, cfg, indentation, depth, refs, !!hasCalledToJSON);
+}
+function __pfPlugin(plugin, val, cfg, indentation, depth, refs) {
+  const config = __pfConfig(cfg);
+  let printed;
+  try {
+    printed = plugin.serialize != null
+      ? plugin.serialize(val, config, indentation, depth, refs, __pfPrinter)
+      : plugin.print(val, (valChild) => __pfPrinter(valChild, config, indentation, depth, refs), (str) => {
+        const indentationNext = indentation + config.indent;
+        return indentationNext + str.replaceAll(/\n/g, `\n${indentationNext}`);
+      }, { edgeSpacing: config.spacingOuter, min: config.min, spacing: config.spacingInner }, config.colors);
+  } catch (error) {
+    throw new __PrettyFormatPluginError(error.message, error.stack);
+  }
+  if (typeof printed !== 'string') throw new TypeError(`pretty-format: Plugin must return type "string" but instead returned "${typeof printed}".`);
+  return printed;
 }
 function __pfCtorName(v) {
   return (typeof v.constructor === 'function' && v.constructor.name) || 'Object';
@@ -5244,6 +5317,11 @@ function __pfItems(items, cfg, ind, depth, refs, print) {
   return out + cfg.outer + ind;
 }
 function __pfPrint(v, cfg, ind, depth, refs, calledToJSON) {
+  for (const plugin of cfg.plugins) {
+    let hit;
+    try { hit = plugin.test(v); } catch (error) { throw new __PrettyFormatPluginError(error.message, error.stack); }
+    if (hit) return __pfPlugin(plugin, v, cfg, ind, depth, refs);
+  }
   const p = (x, i) => __pfPrint(x, cfg, i, depth, refs, false);
   // @vitest/pretty-format's AsymmetricMatcher plugin: anything with vitest's `$$typeof`, printed by
   // its toString name (containing / matching samples) or its toAsymmetricMatcher()
