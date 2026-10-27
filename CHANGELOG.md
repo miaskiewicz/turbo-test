@@ -19,6 +19,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `[vitest] No "default" export is defined on the "x" mock. Did you forget to return it from
   "vi.mock"?` on access instead of giving the factory object (the missing-name message is
   vitest 4.1.12's too). Remaining differences are tracked in turbo-test#133–#137.
+- ESM graph loader: every read of the default import of a `vi.mock` factory without `default`
+  throws vitest's `[vitest] No "default" export is defined on the "x" mock…` — `typeof X`,
+  `if (X)`, `X === y` too (turbo-test#151), where #137's stand-in threw only once used. An app
+  module importing such a default is compiled with each read of the binding wrapped in a check
+  (`src/mock_read.rs`); every other module's source is unchanged. Four interop-table rows.
 - Mocks and packages (turbo-test#135, #136, #137; rows of the #122 interop table): a `vi.mock`
   no longer reaches a package's own `require()` — vitest loads an external through Node, so
   `require('x')` inside `node_modules` gets the real `x` (a tsc package's `__importDefault`

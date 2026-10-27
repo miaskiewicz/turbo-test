@@ -274,7 +274,6 @@ fn interop_table_matches_vitest_on_the_module_runner() {
 }
 
 #[test]
-#[ignore = "turbo-test#151: fails until the fix"]
 fn interop_table_matches_vitest_on_the_esm_graph_loader() {
     let p = project("interop-table-graph", false);
     let bad = run_table(&p, "graph");
