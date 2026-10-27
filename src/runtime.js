@@ -59,10 +59,12 @@ globalThis.console = {
 // its isMusl() reads process.report().header.glibcVersionRuntime to pick gnu vs musl.
 // Hardcoding 'darwin'/'arm64' made every non-mac host load the macOS .node -> dlopen fails.
 globalThis.process = {
-  // vitest's own variables: NODE_ENV (when the host has none), VITEST and vite's MODE / DEV / PROD
-  // / SSR / BASE_URL (SSR '' under a DOM environment: the runner sets it per file, turbo-test#123).
-  // The runner puts the host environment underneath (install_host_env, turbo-test#143).
-  env: { NODE_ENV: 'test', VITEST: 'true', MODE: 'test', DEV: '1', PROD: '', SSR: '1', BASE_URL: '/' },
+  // vitest's own variables, in its order: TEST, VITEST, NODE_ENV (when the host has none), vite's
+  // PROD / DEV / BASE_URL / MODE, VITEST_MODE, FORCE_TTY, VITEST_POOL_ID / VITEST_WORKER_ID and
+  // SSR ('' under a DOM environment). The runner puts the host environment underneath
+  // (install_host_env, turbo-test#143), sets PROD / DEV from NODE_ENV and FORCE_TTY, and the
+  // per-file SSR / VITEST_POOL_ID / VITEST_WORKER_ID (set_file_env, turbo-test#123, #156).
+  env: { TEST: 'true', VITEST: 'true', NODE_ENV: 'test', PROD: '', DEV: '1', BASE_URL: '/', MODE: 'test', VITEST_MODE: 'RUN', FORCE_TTY: '', VITEST_POOL_ID: '1', VITEST_WORKER_ID: '0', SSR: '1' },
   platform: globalThis.__ttPlatform || 'darwin',
   arch: globalThis.__ttArch || 'arm64',
   // glibcVersionRuntime truthy => glibc (gnu); falsy => musl. __ttGlibc is the glibc
@@ -3014,56 +3016,206 @@ globalThis.__mkRequire = (dir, isEsm, importer) => {
   return req;
 };
 
-// ---- asymmetric matchers (expect.objectContaining et al) ----
+// ---- asymmetric matchers: @vitest/expect's classes (turbo-test#140, #153, #154, #155) ----
+// The members are vitest 4.1.12's: `$$typeof` (Symbol.for('jest.asymmetricMatcher')), `sample`,
+// `inverse`, getMatcherContext, asymmetricMatch(other, customTesters), toString (the printed
+// name), getExpectedType (the diff's expected type) and, where vitest has it, toAsymmetricMatcher.
+// `equals` takes any object with an asymmetricMatch method as one (vitest's isAsymmetric).
 class Asymmetric {
-  constructor(kind, sample, negate) { this.__asymmetric = kind; this.sample = sample; this.__negate = !!negate; }
-  // `testers`: the custom testers of the `equals` this match is part of (vitest's
-  // asymmetricMatch(other, customTesters)); objectContaining / arrayContaining compare with them.
-  matches(actual, testers) { return this.__negate ? !this.__matchesInner(actual, testers) : this.__matchesInner(actual, testers); }
-  __matchesInner(actual, testers) {
-    switch (this.__asymmetric) {
-      case 'any':
-        if (this.sample === String) return typeof actual === 'string';
-        if (this.sample === Number) return typeof actual === 'number';
-        if (this.sample === Boolean) return typeof actual === 'boolean';
-        if (this.sample === Function) return typeof actual === 'function';
-        if (this.sample === Object) return typeof actual === 'object' && actual !== null;
-        if (this.sample === Array) return Array.isArray(actual);
-        return actual instanceof this.sample;
-      case 'anything': return actual !== null && actual !== undefined;
-      case 'objectContaining': {
-        // vitest ObjectContaining: every enumerable own key (symbols too) of the sample is a
-        // property of `actual` (own or inherited) whose value equals the sample's.
-        const has = (o, k) => o != null && (__hasKey(o, k) || has(Object.getPrototypeOf(o), k));
-        return __eqKeys(this.sample, __hasKey).every((k) => has(actual, k) && __equals(this.sample[k], actual[k], testers));
-      }
-      case 'arrayContaining':
-        return this.sample.length === 0 || (Array.isArray(actual) && this.sample.every((s) => actual.some((a) => __equals(s, a, testers))));
-      case 'stringContaining': return typeof actual === 'string' && actual.includes(this.sample);
-      case 'toBeOneOf': return __oneOf(actual, this.sample);
-      case 'stringMatching': {
-        const r = this.sample instanceof RegExp ? this.sample : new RegExp(this.sample);
-        return typeof actual === 'string' && r.test(actual);
-      }
-      default: return false;
-    }
+  constructor(sample, inverse = false) {
+    this.$$typeof = Symbol.for('jest.asymmetricMatcher');
+    this.sample = sample;
+    this.inverse = inverse;
+  }
+  getMatcherContext() {
+    return { ...globalThis.expect.getState(), equals: __equals, isNot: this.inverse, customTesters: __customTesters, utils: __matcherUtilsFull() };
   }
 }
+class __StringContaining extends Asymmetric {
+  constructor(sample, inverse = false) {
+    if (!__isA('String', sample)) throw new Error('Expected is not a string');
+    super(sample, inverse);
+  }
+  asymmetricMatch(other) { const r = __isA('String', other) && other.includes(this.sample); return this.inverse ? !r : r; }
+  toString() { return `String${this.inverse ? 'Not' : ''}Containing`; }
+  getExpectedType() { return 'string'; }
+}
+class __Anything extends Asymmetric {
+  asymmetricMatch(other) { return other != null; }
+  toString() { return 'Anything'; }
+  toAsymmetricMatcher() { return 'Anything'; }
+}
+class __ObjectContaining extends Asymmetric {
+  constructor(sample, inverse = false) { super(sample, inverse); }
+  getPrototype(obj) {
+    if (Object.getPrototypeOf) return Object.getPrototypeOf(obj);
+    if (obj.constructor.prototype === obj) return null;
+    return obj.constructor.prototype;
+  }
+  hasProperty(obj, property) {
+    if (!obj) return false;
+    if (Object.hasOwn(obj, property)) return true;
+    return this.hasProperty(this.getPrototype(obj), property);
+  }
+  getProperties(obj) {
+    return [...Object.keys(obj), ...Object.getOwnPropertySymbols(obj).filter((s) => Object.getOwnPropertyDescriptor(obj, s)?.enumerable)];
+  }
+  asymmetricMatch(other, customTesters) {
+    if (typeof this.sample !== 'object') throw new TypeError(`You must provide an object to ${this.toString()}, not '${typeof this.sample}'.`);
+    let result = true;
+    for (const property of this.getProperties(this.sample)) {
+      if (!this.hasProperty(other, property) || !__equals(this.sample[property], other[property], customTesters)) { result = false; break; }
+    }
+    return this.inverse ? !result : result;
+  }
+  toString() { return `Object${this.inverse ? 'Not' : ''}Containing`; }
+  getExpectedType() { return 'object'; }
+}
+class __ArrayContaining extends Asymmetric {
+  constructor(sample, inverse = false) { super(sample, inverse); }
+  asymmetricMatch(other, customTesters) {
+    if (!Array.isArray(this.sample)) throw new TypeError(`You must provide an array to ${this.toString()}, not '${typeof this.sample}'.`);
+    const r = this.sample.length === 0 || (Array.isArray(other) && this.sample.every((item) => other.some((another) => __equals(item, another, customTesters))));
+    return this.inverse ? !r : r;
+  }
+  toString() { return `Array${this.inverse ? 'Not' : ''}Containing`; }
+  getExpectedType() { return 'array'; }
+}
+class __Any extends Asymmetric {
+  constructor(sample) {
+    if (typeof sample === 'undefined') throw new TypeError('any() expects to be passed a constructor function. Please pass one or use anything() to match any object.');
+    super(sample);
+  }
+  fnNameFor(func) {
+    if (func.name) return func.name;
+    const m = Function.prototype.toString.call(func).match(/^(?:async)?\s*function\s*(?:\*\s*)?([\w$]+)\s*\(/);
+    return m ? m[1] : '<anonymous>';
+  }
+  asymmetricMatch(other) {
+    const s = this.sample;
+    if (s === String) return typeof other == 'string' || other instanceof String;
+    if (s === Number) return typeof other == 'number' || other instanceof Number;
+    if (s === Function) return typeof other == 'function';
+    if (s === Boolean) return typeof other == 'boolean' || other instanceof Boolean;
+    if (s === BigInt) return typeof other == 'bigint' || other instanceof BigInt;
+    if (s === Symbol) return typeof other == 'symbol' || other instanceof Symbol;
+    if (s === Object) return typeof other == 'object';
+    return other instanceof s;
+  }
+  toString() { return 'Any'; }
+  getExpectedType() {
+    const s = this.sample;
+    if (s === String) return 'string';
+    if (s === Number) return 'number';
+    if (s === Function) return 'function';
+    if (s === Object) return 'object';
+    if (s === Boolean) return 'boolean';
+    return this.fnNameFor(s);
+  }
+  toAsymmetricMatcher() { return `Any<${this.fnNameFor(this.sample)}>`; }
+}
+class __StringMatching extends Asymmetric {
+  constructor(sample, inverse = false) {
+    if (!__isA('String', sample) && !__isA('RegExp', sample)) throw new Error('Expected is not a String or a RegExp');
+    super(new RegExp(sample), inverse);
+  }
+  asymmetricMatch(other) { const r = __isA('String', other) && this.sample.test(other); return this.inverse ? !r : r; }
+  toString() { return `String${this.inverse ? 'Not' : ''}Matching`; }
+  getExpectedType() { return 'string'; }
+}
+class __CloseTo extends Asymmetric {
+  constructor(sample, precision = 2, inverse = false) {
+    if (!__isA('Number', sample)) throw new Error('Expected is not a Number');
+    if (!__isA('Number', precision)) throw new Error('Precision is not a Number');
+    super(sample);
+    this.precision = undefined;
+    this.inverse = inverse;
+    this.precision = precision;
+  }
+  asymmetricMatch(other) {
+    if (!__isA('Number', other)) return false;
+    let r = false;
+    if (other === Infinity && this.sample === Infinity) r = true;
+    else if (other === -Infinity && this.sample === -Infinity) r = true;
+    else r = Math.abs(this.sample - other) < 10 ** -this.precision / 2;
+    return this.inverse ? !r : r;
+  }
+  toString() { return `Number${this.inverse ? 'Not' : ''}CloseTo`; }
+  getExpectedType() { return 'number'; }
+  toAsymmetricMatcher() { return [this.toString(), this.sample, `(${this.precision} digit${this.precision === 1 ? '' : 's'})`].join(' '); }
+}
+// a Standard Schema (`~standard.validate`), synchronous only, as vitest's schemaMatching
+const __isStandardSchema = (o) => !!o && (typeof o === 'object' || typeof o === 'function') && o['~standard'] && typeof o['~standard'].validate === 'function';
+class __SchemaMatching extends Asymmetric {
+  constructor(sample, inverse = false) {
+    if (!__isStandardSchema(sample)) throw new TypeError('SchemaMatching expected to receive a Standard Schema.');
+    super(sample, inverse);
+    this.result = undefined;
+  }
+  asymmetricMatch(other) {
+    const result = this.sample['~standard'].validate(other);
+    if (result instanceof Promise) throw new TypeError('Async schema validation is not supported in asymmetric matchers.');
+    this.result = result;
+    const pass = !this.result.issues || this.result.issues.length === 0;
+    return this.inverse ? !pass : pass;
+  }
+  toString() { return `Schema${this.inverse ? 'Not' : ''}Matching`; }
+  getExpectedType() { return 'object'; }
+  toAsymmetricMatcher() {
+    const issues = (this.result && this.result.issues) || [];
+    return issues.length > 0 ? `${this.toString()} ${__pf(this.result, { maxDepth: 10, escape: false, basic: false })}` : this.toString();
+  }
+}
+// The asymmetric form vitest gives every jest-style matcher (expect.extend's and the built-in
+// toSatisfy / toBeOneOf): expect.<name>(...sample) / expect.not.<name>(...sample) run the matcher
+// against the other value with its matcher context.
+function __customAsymmetric(name, matcher) {
+  return class CustomMatcher extends Asymmetric {
+    constructor(inverse = false, ...sample) { super(sample, inverse); }
+    asymmetricMatch(other) {
+      const { pass } = matcher.call(this.getMatcherContext(), other, ...this.sample);
+      return this.inverse ? !pass : pass;
+    }
+    toString() { return `${this.inverse ? 'not.' : ''}${name}`; }
+    getExpectedType() { return 'any'; }
+    toAsymmetricMatcher() { return `${this.toString()}<${this.sample.map((item) => __stringify(item)).join(', ')}>`; }
+  };
+}
+// vitest's isAsymmetric: any object with an asymmetricMatch method
+function __isAsym(o) { return !!o && typeof o === 'object' && 'asymmetricMatch' in o && typeof o.asymmetricMatch === 'function'; }
+// @vitest/utils getType: the Object.prototype.toString class name
+function __getType(v) { return Object.prototype.toString.apply(v).slice(8, -1); }
+// @vitest/expect isA: the Object.prototype.toString class
+function __isA(type, v) { return Object.prototype.toString.apply(v) === `[object ${type}]`; }
 
-// expect.toBeOneOf / expect.not.toBeOneOf: vitest makes them (as every expect.extend matcher)
-// with asymmetricMatch, toString (`[not.]toBeOneOf`) and `$$typeof` (turbo-test#140).
-class __OneOfMatcher extends Asymmetric {
-  constructor(sample, negate) { super('toBeOneOf', sample, negate); this.$$typeof = Symbol.for('jest.asymmetricMatcher'); }
-  asymmetricMatch(other) { return this.matches(other); }
-  toString() { return __asymName(this); }
-}
-// vitest's toBeOneOf (turbo-test#140): `actual` equals one of an array's / Set's items (a Set by
-// `has` first) with `equals` and no testers; an empty array / Set always passes.
-function __oneOf(actual, expected) {
-  if (Array.isArray(expected)) return expected.length === 0 || expected.some((item) => __equals(item, actual));
-  if (expected instanceof Set) return expected.size === 0 || expected.has(actual) || [...expected].some((item) => __equals(item, actual));
-  throw new TypeError(`You must provide an array or set to expect(received).toBeOneOf(expected), not '${typeof expected}'.`);
-}
+// vitest's jest-style built-in matchers (selectively ported from jest-extended): called with the
+// matcher state as `this`, they return { pass, message } as an expect.extend matcher does.
+const __jestMatchers = {
+  toSatisfy(actual, expected, message) {
+    const pass = expected(actual);
+    return {
+      pass,
+      message: () => (pass
+        ? `expect(received).not.toSatisfy()\n\nExpected value to not satisfy:\n${message || __stringify(expected)}\nReceived:\n${__stringify(actual)}`
+        : `expect(received).toSatisfy()\n\nExpected value to satisfy:\n${message || __stringify(expected)}\n\nReceived:\n${__stringify(actual)}`),
+    };
+  },
+  // vitest's toBeOneOf (turbo-test#140): `actual` equals one of an array's / Set's items (a Set by
+  // `has` first) with `equals` and the custom testers; an empty array / Set always passes.
+  toBeOneOf(actual, expected) {
+    const { equals, customTesters } = this;
+    let pass;
+    if (Array.isArray(expected)) pass = expected.length === 0 || expected.some((item) => equals(item, actual, customTesters));
+    else if (expected instanceof Set) pass = expected.size === 0 || expected.has(actual) || [...expected].some((item) => equals(item, actual, customTesters));
+    else throw new TypeError(`You must provide an array or set to expect(received).toBeOneOf(expected), not '${typeof expected}'.`);
+    return {
+      pass,
+      message: () => (pass
+        ? `expect(received).not.toBeOneOf()\n\nExpected value to not be one of:\n${__stringify(expected)}\nReceived:\n${__stringify(actual)}`
+        : `expect(received).toBeOneOf()\n\nExpected value to be one of:\n${__stringify(expected)}\n\nReceived:\n${__stringify(actual)}`),
+    };
+  },
+};
 
 // ---- deep equality: @vitest/expect's `equals` and its testers (turbo-test#103) ----
 // `equals(a, b, testers, strictCheck)` is jasmine's `eq` as vitest runs it: asymmetric matchers,
@@ -3097,9 +3249,9 @@ function __equals(a, b, testers, strictCheck) {
   return __eq(a, b, [], [], testers || [], strictCheck ? __hasKey : __hasDefinedKey);
 }
 function __eq(a, b, aStack, bStack, testers, hasKey) {
-  const asymA = a instanceof Asymmetric, asymB = b instanceof Asymmetric;
-  if (asymA && !asymB) return a.matches(b, testers);
-  if (asymB && !asymA) return b.matches(a, testers);
+  const asymA = __isAsym(a), asymB = __isAsym(b);
+  if (asymA && !asymB) return a.asymmetricMatch(b, testers);
+  if (asymB && !asymA) return b.asymmetricMatch(a, testers);
   const ctx = { equals: __equals };
   for (const t of testers) {
     const r = t.call(ctx, a, b, testers);
@@ -3247,11 +3399,15 @@ function __subsetEquality(object, subset, testers = []) {
   return withSeen()(object, subset);
 }
 // toEqual (strict=false) / toStrictEqual (strict=true) with vitest's testers for each.
+// toEqual / toStrictEqual's testers: expect.addEqualityTesters' first (vitest's customTesters)
 function deepEqual(a, b, strict = false) {
   return strict
-    ? __equals(a, b, [__iterableEquality, __typeEquality, __sparseArrayEquality, __arrayBufferEquality], true)
-    : __equals(a, b, [__iterableEquality]);
+    ? __equals(a, b, [...__customTesters, __iterableEquality, __typeEquality, __sparseArrayEquality, __arrayBufferEquality], true)
+    : __equals(a, b, [...__customTesters, __iterableEquality]);
 }
+// expect.addEqualityTesters (turbo-test#155): every equality matcher and asymmetric matcher tries
+// them first, as vitest's getCustomEqualityTesters()
+const __customTesters = [];
 
 function fmt(v) {
   try { return typeof v === 'string' ? JSON.stringify(v) : (Array.isArray(v) || (v && typeof v === 'object')) ? JSON.stringify(v) : String(v); }
@@ -3329,7 +3485,7 @@ function __serializeSnapFile(map) {
 function __snapBody(serialized) { return serialized.includes('\n') ? `\n${serialized}\n` : serialized; }
 // vitest deepMergeSnapshot: the property matchers replace the received values they name
 function __snapMerge(target, source) {
-  const isObj = (x) => x != null && typeof x === 'object' && !Array.isArray(x) && !(x instanceof Asymmetric);
+  const isObj = (x) => x != null && typeof x === 'object' && !Array.isArray(x) && !__isAsym(x);
   if (Array.isArray(target) && Array.isArray(source)) {
     const out = Array.from(target);
     source.forEach((s, i) => { out[i] = isObj(s) && isObj(out[i]) ? __snapMerge(out[i], s) : Array.isArray(s) ? __snapMerge(out[i], s) : s; });
@@ -3495,7 +3651,7 @@ function __snapFinish(skipped) {
 }
 
 // ---- expect ----
-function makeExpect(actual, negated = false, message = undefined) {
+function makeExpect(actual, negated = false, message = undefined, promise = '') {
   // `msg` is a thunk: the failure message (and the formatting of the operands in it) is built
   // only when the assertion fails, as vitest does — formatting can throw (a native class
   // prototype whose members check their receiver) and must not fail a passing assertion.
@@ -3513,26 +3669,10 @@ function makeExpect(actual, negated = false, message = undefined) {
     if (typeof x !== 'number' && typeof x !== 'bigint') throw new TypeError(`${label} value must be number or bigint, received "${typeof x}"`);
   };
   const argsEqual = (a, b) => a.length === b.length && a.every((x, i) => deepEqual(x, b[i]));
+  const testers = __customTesters;
   const api = {
     get not() { return makeExpect(actual, !negated, message); },
     toBeTypeOf(t) { c(typeof actual === t, 'expected #{this} to be type of #{exp}', 'expected #{this} not to be type of #{exp}', t, typeof actual); },
-    // a jest-style matcher in vitest: a plain Error with its matcher hint
-    toSatisfy(fn, message) {
-      const pass = !!fn(actual);
-      if (negated ? !pass : pass) return;
-      const shown = message || __stringify(fn);
-      throw new Error(negated
-        ? `expect(received).not.toSatisfy()\n\nExpected value to not satisfy:\n${shown}\nReceived:\n${__stringify(actual)}`
-        : `expect(received).toSatisfy()\n\nExpected value to satisfy:\n${shown}\n\nReceived:\n${__stringify(actual)}`);
-    },
-    // vitest's jest-style toBeOneOf: a plain Error with its matcher hint (turbo-test#140)
-    toBeOneOf(expected) {
-      const pass = __oneOf(actual, expected);
-      if (negated ? !pass : pass) return;
-      throw new Error(negated
-        ? `expect(received).not.toBeOneOf()\n\nExpected value to not be one of:\n${__stringify(expected)}\nReceived:\n${__stringify(actual)}`
-        : `expect(received).toBeOneOf()\n\nExpected value to be one of:\n${__stringify(expected)}\n\nReceived:\n${__stringify(actual)}`);
-    },
     toHaveBeenCalledExactlyOnceWith(...a) {
       const spy = spyOf();
       const name = spy.getMockName();
@@ -3542,24 +3682,33 @@ function makeExpect(actual, negated = false, message = undefined) {
       throw new __ChaiAssertionError(__formatCalls(spy, msg, a));
     },
     // async matchers: `await expect(promise).resolves.toX(...)`, `.rejects.toX(...)`, and
-    // `.resolves.not.toX(...)` / `.rejects.not.toX(...)` (the `.not` returns a negated proxy).
+    // `.resolves.not.toX(...)` / `.rejects.not.toX(...)`: as vitest's, a proxy over the assertion
+    // whose matchers run on the settled value; `.rejects` calls a function first. Anything but a
+    // thenable is vitest's TypeError, thrown when `.resolves` / `.rejects` is read.
     get resolves() {
-      const mk = (neg) => new Proxy({}, { get: (_, m) => {
+      if (typeof actual?.then !== 'function') throw new TypeError(`You must provide a Promise to expect() when using .resolves, not '${typeof actual}'.`);
+      const mk = (neg) => new Proxy(makeExpect(actual, neg, message, 'resolves'), { get: (t, m) => {
         if (m === 'not') return mk(!neg);
+        const f = Reflect.get(t, m);
+        if (typeof f !== 'function') return f;
         return (...args) => Promise.resolve(actual).then(
-          (v) => makeExpect(v, neg, message)[m](...args),
+          (v) => makeExpect(v, neg, message, 'resolves')[m](...args),
           (e) => { const err = new __ChaiAssertionError(`promise rejected "${__inspect(e)}" instead of resolving`, { showDiff: false }); err.cause = e; throw err; },
         );
       } });
       return mk(negated);
     },
     get rejects() {
-      const mk = (neg) => new Proxy({}, { get: (_, m) => {
+      const wrapper = typeof actual === 'function' ? actual() : actual;
+      if (typeof wrapper?.then !== 'function') throw new TypeError(`You must provide a Promise to expect() when using .rejects, not '${typeof wrapper}'.`);
+      const mk = (neg) => new Proxy(makeExpect(wrapper, neg, message, 'rejects'), { get: (t, m) => {
         if (m === 'not') return mk(!neg);
-        return (...args) => Promise.resolve(actual).then(
+        const f = Reflect.get(t, m);
+        if (typeof f !== 'function') return f;
+        return (...args) => Promise.resolve(wrapper).then(
           (v) => { throw new __ChaiAssertionError(`promise resolved "${__inspect(v)}" instead of rejecting`, { actual: v, expected: new Error('rejected promise') }); },
           // `.rejects.toThrow()` checks the rejection as a thrown error (vitest wraps it in a thrower)
-          (e) => (m === 'toThrow' || m === 'toThrowError' ? makeExpect(() => { throw e; }, neg, message) : makeExpect(e, neg, message))[m](...args),
+          (e) => (m === 'toThrow' || m === 'toThrowError' ? makeExpect(() => { throw e; }, neg, message, 'rejects') : makeExpect(e, neg, message, 'rejects'))[m](...args),
         );
       } });
       return mk(negated);
@@ -3602,7 +3751,7 @@ function makeExpect(actual, negated = false, message = undefined) {
       const pass = list != null && list.includes(x);
       __chaiAssert(negated, pass, 'expected #{this} to include #{exp}', 'expected #{this} to not include #{exp}', list, x, list);
     },
-    toContainEqual(x) { c(actual != null && Array.from(actual).some((a) => __equals(a, x)), 'expected #{this} to deep equally contain #{exp}', 'expected #{this} to not deep equally contain #{exp}', x); },
+    toContainEqual(x) { c(actual != null && Array.from(actual).some((a) => __equals(a, x, testers)), 'expected #{this} to deep equally contain #{exp}', 'expected #{this} to not deep equally contain #{exp}', x); },
     toBeInstanceOf(ctor) {
       if (typeof ctor !== 'function') {
         const t = ctor === null ? 'null' : Object.prototype.toString.call(ctor).slice(8, -1);
@@ -3613,9 +3762,11 @@ function makeExpect(actual, negated = false, message = undefined) {
     toMatchObject(obj) {
       const pass = __subsetMatches(actual, obj);
       if (negated ? !pass : pass) return;
-      const msg = __chaiMsg(negated ? 'expected #{this} to not match object #{exp}' : 'expected #{this} to match object #{exp}', actual, obj, actual);
-      const n = __strippedCount(actual, obj);
-      throw new __ChaiAssertionError(n === 0 ? msg : `${msg}\n(${n} matching ${n === 1 ? 'property' : 'properties'} omitted from actual)`, { expected: obj });
+      // the diff's actual is vitest's getObjectSubset: the received value cut down to what the
+      // expected object names (turbo-test#152)
+      const { subset, stripped: n } = __objectSubset(actual, obj);
+      const msg = __chaiMsg(negated ? 'expected #{this} to not match object #{exp}' : 'expected #{this} to match object #{exp}', actual, obj, subset);
+      throw new __ChaiAssertionError(n === 0 ? msg : `${msg}\n(${n} matching ${n === 1 ? 'property' : 'properties'} omitted from actual)`, { showDiff: true, expected: obj, actual: subset });
     },
     toThrowError(e) { return api.toThrow(e); },
     // File snapshot: serialize `actual`, key by `<full test name> <counter>` under
@@ -3706,7 +3857,6 @@ function makeExpect(actual, negated = false, message = undefined) {
       else thrown = actual;
       makeExpect(thrown).toMatchInlineSnapshot(expected, undefined, undefined, 'toThrowErrorMatchingInlineSnapshot');
     },
-    toStrictEqual_alias() {},
     toHaveLength(n) {
       if (actual == null || actual.length === undefined) throw new __ChaiAssertionError(__chaiMsg("expected #{this} to have property 'length'", actual));
       c(actual.length === n, 'expected #{this} to have a length of #{exp} but got #{act}', 'expected #{this} to not have a length of #{exp}', n, actual.length);
@@ -3724,7 +3874,7 @@ function makeExpect(actual, negated = false, message = undefined) {
           if (cur != null && (k in Object(cur))) cur = cur[k]; else { present = false; break; }
         }
       }
-      const pass = arguments.length < 2 ? present : (present && __equals(value, cur));
+      const pass = arguments.length < 2 ? present : (present && __equals(value, cur, testers));
       const name = Array.isArray(path) ? path.map((k) => String(k).replace(/([.[\]])/g, '\\$1')).join('.') : path;
       const withValue = arguments.length < 2 ? '' : ` with value ${__objDisplay(value)}`;
       c(pass, `expected #{this} to have property "${name}"${withValue}`, `expected #{this} to not have property "${name}"${withValue}`, value, present ? cur : undefined);
@@ -3762,12 +3912,12 @@ function makeExpect(actual, negated = false, message = undefined) {
       // an Error or any other value: vitest's `equals(thrown, expected, [iterableEquality])`
       // (Errors by name / message / cause / own props; a plain object never equals an Error)
       if (__isError(expected)) {
-        return c(threw && __equals(err, expected, [__iterableEquality]), 'expected a thrown error to be #{exp}', 'expected a thrown error not to be #{exp}', expected, err);
+        return c(threw && __equals(err, expected, [...testers, __iterableEquality]), 'expected a thrown error to be #{exp}', 'expected a thrown error not to be #{exp}', expected, err);
       }
-      if (expected instanceof Asymmetric) {
-        return c(threw && expected.matches(err), 'expected error to match asymmetric matcher', 'expected error not to match asymmetric matcher', expected, err);
+      if (__isAsym(expected)) {
+        return c(threw && expected.asymmetricMatch(err), 'expected error to match asymmetric matcher', 'expected error not to match asymmetric matcher', expected, err);
       }
-      c(threw && __equals(err, expected, [__iterableEquality]), 'expected a thrown value to equal #{exp}', 'expected a thrown value not to equal #{exp}', expected, err);
+      c(threw && __equals(err, expected, [...testers, __iterableEquality]), 'expected a thrown value to equal #{exp}', 'expected a thrown value not to equal #{exp}', expected, err);
     },
     toHaveBeenCalled() {
       const spy = spyOf();
@@ -3806,42 +3956,79 @@ function makeExpect(actual, negated = false, message = undefined) {
       const n = spy.mock.calls.length;
       c(!!nth && argsEqual(nth, a), `expected ${__ordinal(times)} "${spy.getMockName()}" call to have been called with #{exp}${times <= n ? '' : `, but called only ${n} times`}`, `expected ${__ordinal(times)} "${spy.getMockName()}" call to not have been called with #{exp}`, a, nth);
     },
-    toHaveReturned() {
-      const spy = spyOf();
-      const pass = spy.mock.calls.length > 0 && spy.mock.results.some((r) => r.type !== 'throw');
-      cn(pass, `expected "${spy.getMockName()}" to be successfully called at least once`, `expected "${spy.getMockName()}" to not be successfully called`, pass, !pass);
-    },
-    toHaveReturnedWith(v) {
-      const spy = spyOf();
-      const pass = spy.mock.results.some((r) => r.type === 'return' && __equals(v, r.value));
-      if (negated ? !pass : pass) return;
-      const name = spy.getMockName();
-      const msg = __chaiMsg(negated ? `expected "${name}" to not return with: #{exp}` : `expected "${name}" to return with: #{exp} at least once`, actual, v, actual);
-      throw new __ChaiAssertionError(__formatReturns(spy, msg, v));
-    },
+    // vitest's return / resolve families (turbo-test#155 surface): `results` for return,
+    // `settledResults` for resolve
+    toHaveReturned() { returnedOnce(spyOf().mock.results, (r) => r.type !== 'throw', 'called'); },
+    toHaveResolved() { returnedOnce(spyOf().mock.settledResults, (r) => r.type === 'fulfilled', 'resolved', true); },
+    toHaveReturnedTimes(times) { returnedTimes(spyOf().mock.results.reduce((n, r) => (r.type === 'throw' ? n : n + 1), 0), times, 'called'); },
+    toHaveResolvedTimes(times) { returnedTimes(spyOf().mock.settledResults.reduce((n, r) => (r.type === 'fulfilled' ? n + 1 : n), 0), times, 'resolved'); },
+    toHaveReturnedWith(v) { returnedWith(spyOf(), v, 'return', 'return'); },
+    toHaveResolvedWith(v) { returnedWith(spyOf(), v, 'resolve', 'fulfilled'); },
+    toHaveLastReturnedWith(v) { lastReturned(spyOf().mock.results, v, 'return', 'return'); },
+    toHaveLastResolvedWith(v) { lastReturned(spyOf().mock.settledResults, v, 'resolve', 'fulfilled'); },
+    toHaveNthReturnedWith(nth, v) { nthReturned(spyOf().mock.results, nth, v, 'return', 'return'); },
+    toHaveNthResolvedWith(nth, v) { nthReturned(spyOf().mock.settledResults, nth, v, 'resolve', 'fulfilled'); },
+    toHaveBeenCalledBefore(other, failIfNoFirstInvocation = true) { calledOrder(other, failIfNoFirstInvocation, 'before'); },
+    toHaveBeenCalledAfter(other, failIfNoFirstInvocation = true) { calledOrder(other, failIfNoFirstInvocation, 'after'); },
+    toBeNullable() { c(actual == null, 'expected #{this} to be nullish', 'expected #{this} not to be nullish', null); },
   };
-  // custom matchers registered via expect.extend (e.g. @testing-library/jest-dom)
-  for (const name of Object.keys(__customMatchers)) {
-    api[name] = (...args) => {
-      const ctx = {
-        isNot: negated,
-        promise: '',
-        equals: __equals,
-        utils: __matcherUtils,
-      };
-      let res;
-      try { res = __customMatchers[name].call(ctx, actual, ...args); }
-      catch (e) { throw e; }
-      const pass = res && res.pass;
-      if (negated ? pass : !pass) {
-        // vitest calls the matcher's `message` function (anything else is a TypeError)
-        const m = res && res.message;
-        if (typeof m !== 'function') throw new TypeError('message is not a function');
-        throw new Error(m());
-      }
-      return api;
-    };
+  function returnedOnce(results, ok, action, settled) {
+    const spy = actual;
+    const pass = settled ? results.some(ok) : spy.mock.calls.length > 0 && results.some(ok);
+    cn(pass, `expected "${spy.getMockName()}" to be successfully ${action} at least once`, `expected "${spy.getMockName()}" to not be successfully ${action}`, pass, !pass);
   }
+  function returnedTimes(n, times, action) {
+    const name = actual.getMockName();
+    const pass = n === times;
+    cn(pass, `expected "${name}" to be successfully ${action} ${times} times`, `expected "${name}" to not be successfully ${action} ${times} times`, `expected resolved times: ${times}`, `received resolved times: ${pass}`);
+  }
+  function returnedWith(spy, v, action, type) {
+    const results = type === 'return' ? spy.mock.results : spy.mock.settledResults;
+    const pass = results.some((r) => r.type === type && __equals(v, r.value));
+    if (negated ? !pass : pass) return;
+    const name = spy.getMockName();
+    const msg = __chaiMsg(negated ? `expected "${name}" to not ${action} with: #{exp}` : `expected "${name}" to ${action} with: #{exp} at least once`, actual, v, actual);
+    throw new __ChaiAssertionError(__formatReturns(spy, msg, v, results));
+  }
+  function lastReturned(results, v, action, type) {
+    const r = results.at(-1);
+    const name = actual.getMockName();
+    c(Boolean(r && r.type === type && __equals(r.value, v)), `expected last "${name}" call to ${action} #{exp}`, `expected last "${name}" call to not ${action} #{exp}`, v, r?.value);
+  }
+  function nthReturned(results, nth, v, action, type) {
+    const r = results[nth - 1];
+    const name = actual.getMockName();
+    const call = `${__ordinal(nth)} call`;
+    c(!!(r && r.type === type && __equals(r.value, v)), `expected ${call} "${name}" call to ${action} #{exp}`, `expected ${call} "${name}" call to not ${action} #{exp}`, v, r?.value);
+  }
+  function calledOrder(other, failIfNoFirstInvocation, which) {
+    const spy = spyOf();
+    if (!(typeof other === 'function' && other._isMockFunction === true)) throw new TypeError(`${__inspect(other)} is not a spy or a call to a spy`);
+    const [before, after] = which === 'before' ? [spy, other] : [other, spy];
+    const b = before.mock.invocationCallOrder, a = after.mock.invocationCallOrder;
+    const pass = b.length === 0 ? !failIfNoFirstInvocation : a.length === 0 ? false : b[0] < a[0];
+    c(pass, `expected "${spy.getMockName()}" to have been called ${which} "${other.getMockName()}"`, `expected "${spy.getMockName()}" to not have been called ${which} "${other.getMockName()}"`, other, spy);
+  }
+  // vitest's aliases
+  api.toBeCalled = api.toHaveBeenCalled;
+  api.toBeCalledTimes = api.toHaveBeenCalledTimes;
+  api.toBeCalledWith = api.toHaveBeenCalledWith;
+  api.toReturn = api.toHaveReturned;
+  api.toReturnTimes = api.toHaveReturnedTimes;
+  api.toReturnWith = api.toHaveReturnedWith;
+  // jest-style matchers — vitest's built-in toSatisfy / toBeOneOf and expect.extend's (e.g.
+  // @testing-library/jest-dom) — run with vitest's matcher state as `this` and fail with its
+  // JestExtendError (`message: ` already prefixed); an async result is awaited
+  const jestMatcher = (matcher) => (...args) => {
+    const result = matcher.call(__matcherState(negated || undefined, promise), actual, ...args);
+    const check = ({ pass, message: m, actual: a, expected: e }) => {
+      if ((pass && negated) || (!pass && !negated)) throw new __JestExtendError((message ? `${message}: ` : '') + m(), a, e);
+    };
+    if (result && typeof result === 'object' && typeof result.then === 'function') return result.then(check);
+    check(result);
+  };
+  for (const name of Object.keys(__jestMatchers)) api[name] = jestMatcher(__jestMatchers[name]);
+  for (const name of Object.keys(__customMatchers)) api[name] = jestMatcher(__customMatchers[name]);
   // expect(value, message): vitest prefixes `message: ` to a matcher's failure (turbo-test#138)
   if (message) {
     for (const name of Object.keys(api)) {
@@ -3855,7 +4042,54 @@ function makeExpect(actual, negated = false, message = undefined) {
       };
     }
   }
-  return api;
+  return __proxify(api);
+}
+// vitest's JestExtendError: a jest-style matcher's failure (name 'Error')
+class __JestExtendError extends Error {
+  constructor(message, actual, expected) { super(message); this.actual = actual; this.expected = expected; }
+}
+// chai's proxify over the assertion (vitest's expect(x) is a chai Assertion): reading a member it
+// does not have throws `Invalid Chai property: x` (with the nearest member name within an edit
+// distance of 4, chai's suggestion); then / catch / inspect / toJSON and symbols read as is. A
+// matcher that returns nothing returns the assertion, as chai's methods return `this`.
+const __proxyExcludedKeys = ['then', 'catch', 'inspect', 'toJSON'];
+const __chaiBuiltins = ['__flags', '__methods', '_obj', 'assert'];
+function __proxify(api) {
+  const proxy = new Proxy(api, {
+    get(target, property) {
+      if (typeof property === 'string' && !__proxyExcludedKeys.includes(property) && !Reflect.has(target, property)) {
+        let suggestion = null, distance = 4;
+        const props = Object.getOwnPropertyNames(target);
+        for (let p = Object.getPrototypeOf(target); p !== null; p = Object.getPrototypeOf(p)) for (const k of Object.getOwnPropertyNames(p)) if (!props.includes(k)) props.push(k);
+        for (const prop of props) {
+          // eslint-disable-next-line no-prototype-builtins
+          if (Object.prototype.hasOwnProperty(prop) || __chaiBuiltins.includes(prop)) continue;
+          const d = __stringDistanceCapped(property, prop, distance);
+          if (d < distance) { suggestion = prop; distance = d; }
+        }
+        throw Error(suggestion !== null ? `Invalid Chai property: ${property}. Did you mean "${suggestion}"?` : `Invalid Chai property: ${property}`);
+      }
+      const v = Reflect.get(target, property);
+      if (typeof v !== 'function' || !Object.hasOwn(target, property)) return v;
+      return (...args) => { const r = v(...args); return r === undefined ? proxy : r; };
+    },
+  });
+  return proxy;
+}
+// chai's stringDistanceCapped, as is (its first memo row leaves the last column 0)
+function __stringDistanceCapped(strA, strB, cap) {
+  if (Math.abs(strA.length - strB.length) >= cap) return cap;
+  const memo = [];
+  for (let i = 0; i <= strA.length; i++) { memo[i] = Array(strB.length + 1).fill(0); memo[i][0] = i; }
+  for (let j = 0; j < strB.length; j++) memo[0][j] = j;
+  for (let i = 1; i <= strA.length; i++) {
+    const ch = strA.charCodeAt(i - 1);
+    for (let j = 1; j <= strB.length; j++) {
+      if (Math.abs(i - j) >= cap) { memo[i][j] = cap; continue; }
+      memo[i][j] = Math.min(memo[i - 1][j] + 1, memo[i][j - 1] + 1, memo[i - 1][j - 1] + (ch === strB.charCodeAt(j - 1) ? 0 : 1));
+    }
+  }
+  return memo[strA.length][strB.length];
 }
 // `message: ` before the message (and the stack's first line) of an assertion failure: chai's
 // AssertionError or a jest-style matcher's plain Error, once; any other error (a TypeError from
@@ -3885,8 +4119,64 @@ const __matcherUtils = {
   highlightTrailingWhitespace: (s) => s,
 };
 const __customMatchers = {};
+// the `this` of a jest-style matcher (vitest's getMatcherState) and of an asymmetric matcher
+// (getMatcherContext)
+function __matcherUtilsFull() {
+  return { ...__matcherUtils, iterableEquality: __iterableEquality, subsetEquality: __subsetEquality };
+}
+function __matcherState(isNot, promise) {
+  return {
+    ...globalThis.expect.getState(),
+    currentTestName: __snap.testName,
+    customTesters: __customTesters,
+    isNot,
+    utils: __matcherUtilsFull(),
+    promise,
+    equals: __equals,
+    suppressedErrors: [],
+    soft: undefined,
+    poll: undefined,
+  };
+}
 globalThis.expect = (actual, message) => { __snap.assertCount++; return makeExpect(actual, false, message); };
-globalThis.expect.extend = (matchers) => { Object.assign(__customMatchers, matchers || {}); };
+// expect.extend: the matchers, and their asymmetric expect.<name> / expect.not.<name> (#153)
+globalThis.expect.extend = (matchers) => {
+  for (const [name, matcher] of Object.entries(matchers || {})) { __customMatchers[name] = matcher; __addAsymmetric(name, matcher); }
+};
+// expect.addEqualityTesters (turbo-test#155)
+globalThis.expect.addEqualityTesters = (testers) => {
+  if (!Array.isArray(testers)) throw new TypeError(`expect.customEqualityTesters: Must be set to an array of Testers. Was given "${__getType(testers)}"`);
+  __customTesters.push(...testers);
+};
+// chai's expect.fail and vitest's expect.unreachable: an AssertionError
+globalThis.expect.fail = function fail(actual, expected, msg, operator) {
+  if (arguments.length < 2) { msg = actual; actual = undefined; }
+  throw new __ChaiAssertionError(msg || 'expect.fail()', { actual, expected, operator });
+};
+globalThis.expect.unreachable = (msg) => { throw new __ChaiAssertionError(`expected${msg ? ` "${msg}" ` : ' '}not to be reached`); };
+// vitest's matcher state (expect.getState / setState): the assertion counters of the running test
+// live in __snap; anything else set is kept as is
+const __extraState = {};
+globalThis.expect.getState = () => ({
+  assertionCalls: __snap.assertCount,
+  isExpectingAssertions: !!__snap.hasAssertions,
+  isExpectingAssertionsError: __snap.hasAssertions || null,
+  expectedAssertionsNumber: __snap.expectedAssertions,
+  expectedAssertionsNumberErrorGen: __snap.expectedAssertions == null ? null : () => new Error(`expected number of assertions to be ${__snap.expectedAssertions}, but got ${__snap.assertCount}`),
+  currentTestName: __snap.testName,
+  testPath: globalThis.__ttFile,
+  environment: globalThis.__ttEnvName || 'node',
+  snapshotState: __snapState,
+  ...__extraState,
+});
+globalThis.expect.setState = (state) => {
+  for (const [k, v] of Object.entries(state || {})) {
+    if (k === 'assertionCalls') __snap.assertCount = v;
+    else if (k === 'expectedAssertionsNumber') __snap.expectedAssertions = v;
+    else if (k === 'isExpectingAssertionsError') __snap.hasAssertions = v || false;
+    else __extraState[k] = v;
+  }
+};
 // expect.assertions(n) / expect.hasAssertions(): record the expectation; runSuite verifies the
 // count at test end (see __snap.assertCount, reset per test). These calls do NOT count themselves.
 globalThis.expect.assertions = (n) => { __snap.expectedAssertions = n; };
@@ -3897,20 +4187,29 @@ globalThis.expect.hasAssertions = function hasAssertions() {
   __snap.hasAssertions = error;
 };
 globalThis.expect.soft = (actual, message) => { __snap.assertCount++; return makeExpect(actual, false, message); };
-globalThis.expect.any = (ctor) => new Asymmetric('any', ctor);
-globalThis.expect.anything = () => new Asymmetric('anything');
-globalThis.expect.objectContaining = (s) => new Asymmetric('objectContaining', s);
-globalThis.expect.arrayContaining = (s) => new Asymmetric('arrayContaining', s);
-globalThis.expect.toBeOneOf = (s) => new __OneOfMatcher(s);
+globalThis.expect.anything = () => new __Anything();
+globalThis.expect.any = (expected) => new __Any(expected);
+globalThis.expect.stringContaining = (expected) => new __StringContaining(expected);
+globalThis.expect.objectContaining = (expected) => new __ObjectContaining(expected);
+globalThis.expect.arrayContaining = (expected) => new __ArrayContaining(expected);
+globalThis.expect.stringMatching = (expected) => new __StringMatching(expected);
+globalThis.expect.closeTo = (expected, precision) => new __CloseTo(expected, precision);
+globalThis.expect.schemaMatching = (expected) => new __SchemaMatching(expected);
 globalThis.expect.not = {
-  arrayContaining: (s) => new Asymmetric('arrayContaining', s, true),
-  objectContaining: (s) => new Asymmetric('objectContaining', s, true),
-  stringContaining: (s) => new Asymmetric('stringContaining', s, true),
-  stringMatching: (s) => new Asymmetric('stringMatching', s, true),
-  toBeOneOf: (s) => new __OneOfMatcher(s, true),
+  stringContaining: (expected) => new __StringContaining(expected, true),
+  objectContaining: (expected) => new __ObjectContaining(expected, true),
+  arrayContaining: (expected) => new __ArrayContaining(expected, true),
+  stringMatching: (expected) => new __StringMatching(expected, true),
+  closeTo: (expected, precision) => new __CloseTo(expected, precision, true),
+  schemaMatching: (expected) => new __SchemaMatching(expected, true),
 };
-globalThis.expect.stringContaining = (s) => new Asymmetric('stringContaining', s);
-globalThis.expect.stringMatching = (s) => new Asymmetric('stringMatching', s);
+// every jest-style matcher (built-in and expect.extend) gets expect.<name> / expect.not.<name>
+function __addAsymmetric(name, matcher) {
+  const CustomMatcher = __customAsymmetric(name, matcher);
+  Object.defineProperty(globalThis.expect, name, { configurable: true, enumerable: true, writable: true, value: (...sample) => new CustomMatcher(false, ...sample) });
+  Object.defineProperty(globalThis.expect.not, name, { configurable: true, enumerable: true, writable: true, value: (...sample) => new CustomMatcher(true, ...sample) });
+}
+for (const name of Object.keys(__jestMatchers)) __addAsymmetric(name, __jestMatchers[name]);
 
 // ---- expectTypeOf / assertType (type-level assertions) ----
 // Type assertions are checked by tsc and erased at compile time — they have no runtime behavior in
@@ -3933,12 +4232,18 @@ globalThis.expectTypeOf = () => __typeChain;
 globalThis.assertType = () => undefined;
 
 // ---- vi (mocks/spies) ----
+// vitest's invocationCallOrder: one counter for every mock in the worker, from 1
+let __mockCallOrder = 0;
 function makeSpy(impl) {
   const onceQueue = [];
   const fn = function (...args) {
     fn.mock.calls.push(args);
     fn.mock.instances.push(this);
     fn.mock.lastCall = args;
+    fn.mock.invocationCallOrder.push(++__mockCallOrder);
+    // vitest's settledResults: 'incomplete' until the returned promise settles
+    const settled = { type: 'incomplete', value: undefined };
+    fn.mock.settledResults.push(settled);
     let ret;
     // a throwing call is recorded as vitest records it (`{ type: 'throw', value }`)
     try {
@@ -3951,12 +4256,20 @@ function makeSpy(impl) {
       else if (fn.__impl) ret = fn.__impl.apply(this, args);
     } catch (e) {
       fn.mock.results.push({ type: 'throw', value: e });
+      settled.type = 'rejected';
+      settled.value = e;
       throw e;
     }
     fn.mock.results.push({ type: 'return', value: ret });
+    if (ret instanceof Promise) {
+      ret.then((v) => { settled.type = 'fulfilled'; settled.value = v; }, (e) => { settled.type = 'rejected'; settled.value = e; });
+    } else {
+      settled.type = 'fulfilled';
+      settled.value = ret;
+    }
     return ret;
   };
-  fn.mock = { calls: [], results: [], instances: [], lastCall: undefined };
+  fn.mock = { calls: [], results: [], instances: [], lastCall: undefined, invocationCallOrder: [], settledResults: [] };
   fn._isMockFunction = true;
   fn.__impl = impl;
   fn.mockReturnValue = (v) => { fn.__returnValue = v; return fn; };
@@ -3968,7 +4281,7 @@ function makeSpy(impl) {
   fn.mockImplementationOnce = (f) => { onceQueue.push(typeof f === 'function' ? f : () => f); return fn; };
   fn.mockResolvedValueOnce = (v) => { onceQueue.push(() => Promise.resolve(v)); return fn; };
   fn.mockRejectedValueOnce = (v) => { onceQueue.push(() => Promise.reject(v)); return fn; };
-  fn.mockClear = () => { fn.mock.calls = []; fn.mock.results = []; fn.mock.instances = []; fn.mock.lastCall = undefined; return fn; };
+  fn.mockClear = () => { fn.mock.calls = []; fn.mock.results = []; fn.mock.instances = []; fn.mock.lastCall = undefined; fn.mock.invocationCallOrder = []; fn.mock.settledResults = []; return fn; };
   fn.mockReset = () => { fn.mockClear(); fn.__impl = undefined; fn.__returnValue = undefined; onceQueue.length = 0; return fn; };
   fn.mockRestore = () => {};
   fn.getMockName = () => fn.__name || 'vi.fn()';
@@ -4665,7 +4978,7 @@ function __inspect(v, o = { truncate: Infinity, seen: [] }) {
   // vitest's asymmetric matchers inspect as their minimal pretty-format (`Any<Number>`, …)
   if (v instanceof Asymmetric) {
     const r = __pf(v, { min: true });
-    return r.length <= o.truncate ? r : `${__asymName(v)}{…}`;
+    return r.length <= o.truncate ? r : `${v.toString()}{…}`;
   }
   const chai = v[Symbol.for('chai/inspect')];
   if (typeof chai === 'function') return String(chai.call(v, o));
@@ -4719,20 +5032,6 @@ function __chaiAssert(negated, pass, msg, notMsg, obj, exp, act, showDiff = true
   if (negated ? !pass : pass) return;
   throw new __ChaiAssertionError(__chaiMsg(negated ? notMsg : msg, obj, exp, act), { actual: act, expected: exp, showDiff: showDiff && !(exp === undefined && act === undefined) });
 }
-// The asymmetric matchers' vitest names and samples.
-function __asymName(m) {
-  const not = m.__negate;
-  switch (m.__asymmetric) {
-    case 'any': return 'Any';
-    case 'anything': return 'Anything';
-    case 'objectContaining': return not ? 'ObjectNotContaining' : 'ObjectContaining';
-    case 'arrayContaining': return not ? 'ArrayNotContaining' : 'ArrayContaining';
-    case 'stringContaining': return not ? 'StringNotContaining' : 'StringContaining';
-    case 'stringMatching': return not ? 'StringNotMatching' : 'StringMatching';
-    case 'toBeOneOf': return not ? 'not.toBeOneOf' : 'toBeOneOf';
-    default: return String(m.__asymmetric);
-  }
-}
 // @vitest/pretty-format: `o` = { indent, min, basic (printBasicPrototype), maxDepth, escape
 // (escapeString), toJSON (callToJSON), errors (the Error plugin) }.
 function __pf(val, o) {
@@ -4768,19 +5067,17 @@ function __pfItems(items, cfg, ind, depth, refs, print) {
 }
 function __pfPrint(v, cfg, ind, depth, refs, calledToJSON) {
   const p = (x, i) => __pfPrint(x, cfg, i, depth, refs, false);
-  if (v instanceof Asymmetric) {
-    const name = __asymName(v);
+  // @vitest/pretty-format's AsymmetricMatcher plugin: anything with vitest's `$$typeof`, printed by
+  // its toString name (containing / matching samples) or its toAsymmetricMatcher()
+  if (v && v.$$typeof === Symbol.for('jest.asymmetricMatcher')) {
+    const name = v.toString();
     const d = depth + 1;
     const pp = (x, i) => __pfPrint(x, cfg, i, d, refs, false);
-    switch (v.__asymmetric) {
-      case 'any': return `Any<${v.sample && v.sample.name}>`;
-      case 'anything': return 'Anything';
-      case 'arrayContaining': return d > cfg.maxDepth ? `[${name}]` : `${name} [${__pfItems(Array.from(v.sample), cfg, ind, d, refs, pp)}]`;
-      case 'objectContaining': return d > cfg.maxDepth ? `[${name}]` : `${name} {${__pfProps(v.sample, cfg, ind, d, refs)}}`;
-      // vitest's toAsymmetricMatcher: the sample stringified on its own (not re-indented)
-      case 'toBeOneOf': return `${name}<${__stringify(v.sample)}>`;
-      default: return `${name} ${p(v.sample, ind)}`;
-    }
+    if (name === 'ArrayContaining' || name === 'ArrayNotContaining') return d > cfg.maxDepth ? `[${name}]` : `${name} [${__pfItems(Array.from(v.sample), cfg, ind, d, refs, pp)}]`;
+    if (name === 'ObjectContaining' || name === 'ObjectNotContaining') return d > cfg.maxDepth ? `[${name}]` : `${name} {${__pfProps(v.sample, cfg, ind, d, refs)}}`;
+    if (name === 'StringMatching' || name === 'StringNotMatching' || name === 'StringContaining' || name === 'StringNotContaining') return `${name} ${p(v.sample, ind)}`;
+    if (typeof v.toAsymmetricMatcher !== 'function') throw new TypeError(`Asymmetric matcher ${v.constructor.name} does not implement toAsymmetricMatcher()`);
+    return v.toAsymmetricMatcher();
   }
   // vitest's snapshot serializer for mock functions: `[MockFunction name] { calls, results }`
   if (cfg.mocks && typeof v === 'function' && v._isMockFunction) {
@@ -5488,17 +5785,21 @@ const __NO_DIFF = 'Compared values have no visual difference.';
 function __vdiff(a, b, annotate = false) {
   if (Object.is(a, b)) return '';
   let type = __diffType(a);
-  if (a instanceof Asymmetric) {
-    const t = { any: a.sample === String ? 'string' : a.sample === Number ? 'number' : a.sample === Boolean ? 'boolean' : undefined, stringContaining: 'string', stringMatching: 'string', objectContaining: 'object', arrayContaining: 'array' }[a.__asymmetric];
-    if (!t) return undefined;
-    if (t === 'string') return undefined;
-    type = t;
+  let omitDifference = false;
+  // an asymmetric matcher diffs as its expected type (vitest); a user-defined one (no vitest
+  // `$$typeof`) or one without getExpectedType (expect.anything) has no diff
+  if (type === 'object' && typeof a.asymmetricMatch === 'function') {
+    if (a.$$typeof !== Symbol.for('jest.asymmetricMatcher')) return undefined;
+    if (typeof a.getExpectedType !== 'function') return undefined;
+    type = a.getExpectedType();
+    omitDifference = type === 'string';
   }
   const fmt = { indent: 2, basic: false, maxDepth: 20, errors: true };
   const fallback = { ...fmt, maxDepth: 8, toJSON: false };
   if (type !== __diffType(b)) {
     return `${__dcol.green('- Expected:')}\n${__pf(a, fallback)}\n\n${__dcol.red('+ Received:')}\n${__pf(b, fallback)}`;
   }
+  if (omitDifference) return undefined;
   const noDiff = __dcol.dim(__NO_DIFF);
   const objects = (opts) => {
     const ac = __pf(a, { ...opts, indent: 0 });
@@ -5548,8 +5849,7 @@ function __formatCalls(spy, msg, shown) {
   }
   return `${msg}\n\nNumber of calls: ${calls.length}\n`;
 }
-function __formatReturns(spy, msg, shown) {
-  const results = spy.mock.results;
+function __formatReturns(spy, msg, shown, results = spy.mock.results) {
   if (results.length) {
     msg += `\n\nReceived:\n\n${results.map((r, i) => {
       let s = `  ${__ordinal(i + 1)} ${spy.getMockName()} call return:\n\n`;
@@ -5559,31 +5859,43 @@ function __formatReturns(spy, msg, shown) {
   }
   return `${msg}\n\nNumber of calls: ${spy.mock.calls.length}\n`;
 }
-// vitest's `getObjectSubset` count: the properties of `actual` that `subset` does not name.
-function __strippedCount(actual, subset, seen = new WeakSet()) {
+// @vitest/expect getObjectSubset: `object` cut down to the keys `subset` names (the expected
+// subset itself where they match), keeping the constructor; `stripped` counts what was cut.
+function __objectSubset(object, subset) {
+  let stripped = 0;
   const isObj = (x) => x != null && typeof x === 'object' && !Array.isArray(x);
-  const keys = (x) => [...Object.keys(x), ...Object.getOwnPropertySymbols(x).filter((s) => Object.getOwnPropertyDescriptor(x, s).enumerable)];
-  if (Array.isArray(actual)) {
-    if (Array.isArray(subset) && subset.length === actual.length) return actual.reduce((n, x, i) => n + __strippedCount(x, subset[i], seen), 0);
-    return 0;
-  }
-  if (actual instanceof Date || !isObj(actual) || !isObj(subset)) return 0;
-  if (__subsetMatches(actual, subset)) return 0;
-  seen.add(actual);
-  let n = 0;
-  for (const k of keys(actual)) {
-    if (k in subset) {
-      if (!seen.has(actual[k])) n += __strippedCount(actual[k], subset[k], seen);
-    } else if (!seen.has(actual[k])) {
-      n += 1;
-      if (isObj(actual[k])) n += keys(actual[k]).length;
+  const keys = (x) => [...Object.keys(x), ...Object.getOwnPropertySymbols(x).filter((k) => Object.getOwnPropertyDescriptor(x, k)?.enumerable)];
+  const inObj = (o, k) => !(!o || typeof o !== 'object' || o === Object.prototype) && (Object.hasOwn(o, k) || inObj(Object.getPrototypeOf(o), k));
+  const withContext = (seen = new WeakMap()) => (object, subset) => {
+    if (Array.isArray(object)) {
+      if (Array.isArray(subset) && subset.length === object.length) return subset.map((sub, i) => withContext(seen)(object[i], sub));
+    } else if (object instanceof Date) {
+      return object;
+    } else if (isObj(object) && isObj(subset)) {
+      if (__subsetMatches(object, subset)) return subset;
+      const trimmed = {};
+      seen.set(object, trimmed);
+      if (typeof object.constructor === 'function' && typeof object.constructor.name === 'string') {
+        Object.defineProperty(trimmed, 'constructor', { enumerable: false, value: object.constructor });
+      }
+      for (const key of keys(object)) {
+        if (inObj(subset, key)) {
+          trimmed[key] = seen.has(object[key]) ? seen.get(object[key]) : withContext(seen)(object[key], subset[key]);
+        } else if (!seen.has(object[key])) {
+          stripped += 1;
+          if (isObj(object[key])) stripped += keys(object[key]).length;
+          withContext(seen)(object[key], subset[key]);
+        }
+      }
+      if (keys(trimmed).length > 0) return trimmed;
     }
-  }
-  return n;
+    return object;
+  };
+  return { subset: withContext()(object, subset), stripped };
 }
 // vitest's toMatchObject comparison: equals with [iterableEquality, subsetEquality].
 function __subsetMatches(a, e) {
-  return __equals(a, e, [__iterableEquality, __subsetEquality]);
+  return __equals(a, e, [...__customTesters, __iterableEquality, __subsetEquality]);
 }
 
 // @vitest/utils `format(spec, item)` for one placeholder.

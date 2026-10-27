@@ -648,8 +648,10 @@ pub fn run_files(
     let failed_total = AtomicUsize::new(0);
     std::thread::scope(|s| {
         let handles: Vec<_> = (0..jobs)
-            .map(|_| {
-                s.spawn(|| {
+            .map(|pool| {
+                let (cursor, order, files, names, results, failed_total) =
+                    (&cursor, order, files, names, &results, &failed_total);
+                s.spawn(move || {
                     loop {
                         if bail > 0 && failed_total.load(Ordering::Relaxed) >= bail {
                             break;
@@ -660,6 +662,7 @@ pub fn run_files(
                         }
                         let idx = order[i];
                         let file = &files[idx];
+                        runner::set_worker_slot(pool, i);
                         let t = Instant::now();
                         let r = execute_file(engine, file);
                         let fr =

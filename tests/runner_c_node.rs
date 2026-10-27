@@ -502,7 +502,6 @@ test('env', () => {
 }
 
 #[test]
-#[ignore = "turbo-test#156: fails until the fix"]
 fn process_env_has_vitests_worker_variables() {
     // turbo-test#156: vitest 4.1.12 also sets TEST, VITEST_MODE, FORCE_TTY ('' unless stdout is a
     // terminal), VITEST_POOL_ID (the worker, from 1) and VITEST_WORKER_ID (a fresh worker per

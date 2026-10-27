@@ -20,7 +20,6 @@ const KNOWN_MISSING: [(&str, &str); 4] = [
 ];
 
 #[test]
-#[ignore = "turbo-test#152-#155: fails until the fix"]
 fn expect_members_are_vitests() {
     // turbo-test#153 / #154 / #155: expect.closeTo / schemaMatching / addEqualityTesters / fail /
     // unreachable / getState / setState / toSatisfy were missing, expect.extend made no
@@ -84,7 +83,6 @@ fn expect_members_are_vitests() {
 }
 
 #[test]
-#[ignore = "turbo-test#152-#155: fails until the fix"]
 fn expect_members_behave_as_vitests() {
     // Each row is [case, result] as vitest 4.1.12 records it: 'assertion' when a matcher passes
     // (it returns the assertion), [name, message] when it throws, ['value', json] otherwise.
@@ -116,7 +114,6 @@ fn expect_members_behave_as_vitests() {
 }
 
 #[test]
-#[ignore = "turbo-test#152: fails until the fix"]
 fn to_match_object_diff_is_vitests() {
     // turbo-test#152: a failed toMatchObject printed `+ Received:` / `undefined` instead of the
     // diff against vitest's getObjectSubset of the received value; an asymmetric closeTo diffs
