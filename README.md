@@ -92,8 +92,10 @@ all-Rust DOM). Two takeaways:
 
 By default turbo-test isolates every file (like vitest's `isolate: true`). If your vitest config
 sets `isolate: false`, turbo-test honors it and **reuses one V8 isolate per worker** — node_modules
-barrels evaluate once instead of per file. Any file that fails under reuse is automatically re-run
-on a clean isolate, so correctness always matches isolated mode (still 6189/0). How much it buys
+barrels evaluate once instead of per file. As in vitest, files share the worker's state and each
+file runs once: an assertion failure is reported as it happened. A file whose run may be an
+artifact of the reused isolate (a test throwing something other than an assertion error, a load
+error, a crash, running out of heap) is re-run once on a clean isolate, whose result is reported. How much it buys
 depends on how barrel-heavy your imports are and how loaded the machine is — on a quiet box it can
 beat fresh isolation handily; under heavy contention it converges with it.
 

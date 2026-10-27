@@ -181,8 +181,8 @@ export interface Assertion {
 
 export interface ExpectStatic {
   (actual: any, message?: string): Assertion;
-  // forward-compat: vitest exposes more statics (poll, unreachable, assertType,
-  // addSnapshotSerializer, getState/setState, …). Permit any `expect.X` rather than error.
+  // forward-compat: vitest exposes more statics (poll, addSnapshotSerializer, assert, and an
+  // expect.extend matcher's asymmetric form). Permit any `expect.X` rather than error.
   [key: string]: any;
   extend(matchers: Record<string, (...args: any[]) => any>): void;
   assertions(count: number): void;
@@ -196,11 +196,23 @@ export interface ExpectStatic {
   stringContaining(expected: string): any;
   stringMatching(expected: string | RegExp): any;
   closeTo(expected: number, precision?: number): any;
+  schemaMatching(schema: any): any;
+  toBeOneOf(expected: any[] | Set<any>): any;
+  toSatisfy(predicate: (value: any) => boolean, message?: string): any;
+  addEqualityTesters(testers: Array<(this: { equals: (...args: any[]) => boolean }, a: any, b: any, customTesters: any[]) => boolean | undefined>): void;
+  unreachable(message?: string): never;
+  getState(): Record<string, any>;
+  setState(state: Record<string, any>): void;
   not: {
+    [key: string]: any;
     objectContaining(expected: any): any;
     arrayContaining(expected: any[]): any;
     stringContaining(expected: string): any;
     stringMatching(expected: string | RegExp): any;
+    closeTo(expected: number, precision?: number): any;
+    schemaMatching(schema: any): any;
+    toBeOneOf(expected: any[] | Set<any>): any;
+    toSatisfy(predicate: (value: any) => boolean, message?: string): any;
   };
 }
 

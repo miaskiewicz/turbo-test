@@ -458,3 +458,128 @@ it('console.log', () => { console.log('two', { a: 1 }, [1, 'b']); });
         r.all()
     );
 }
+
+#[test]
+fn process_env_is_the_host_environment() {
+    // turbo-test#143: process.env was a fixed stub, so a variable the user exported was
+    // undefined in tests. As in vitest 4.1.12: the host environment (values as is: `=`, empty,
+    // non-ASCII), the host's NODE_ENV and TZ win, vitest's own MODE / VITEST / BASE_URL / SSR
+    // override the host's, and nothing turbo-test-specific is added. Same in every file of a
+    // worker (two files, one worker).
+    let p = Project::new("rc-host-env");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    let body = r#"import { test, expect } from 'vitest'
+import { env } from 'node:process'
+test('env', () => {
+  const e = process.env
+  expect([env === e, e.K4_PROBE, e.K4_EQ, e.K4_EMPTY, e.K4_UNI, e.NODE_ENV, e.MODE, e.VITEST, e.BASE_URL, e.SSR, e.TZ, e.HOME, e.TURBO_DOM_PARSER, 'K4_PROBE' in e, Object.keys(e).includes('K4_EMPTY')])
+    .toEqual([true, 'host-value', 'a=b=c', '', 'zażółć', 'production', 'test', 'true', '/', '1', 'Asia/Tokyo', __HOME__, undefined, true, true])
+})
+"#;
+    let home = std::env::var("HOME").unwrap();
+    let body = body.replace("__HOME__", &format!("{home:?}"));
+    p.file("a.test.js", &body);
+    p.file("b.test.js", &body);
+    let r = turbo_test(
+        &p.dir,
+        &["a.test.js", "b.test.js"],
+        &[
+            ("TURBO_JOBS", "1"),
+            ("K4_PROBE", "host-value"),
+            ("K4_EQ", "a=b=c"),
+            ("K4_EMPTY", ""),
+            ("K4_UNI", "zażółć"),
+            ("NODE_ENV", "production"),
+            ("MODE", "host-mode"),
+            ("VITEST", "host"),
+            ("BASE_URL", "/x/"),
+            ("SSR", "host"),
+            ("TZ", "Asia/Tokyo"),
+        ],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(r.all().contains("2 passed"), "{}", r.all());
+}
+
+#[test]
+fn process_env_has_vitests_worker_variables() {
+    // turbo-test#156: vitest 4.1.12 also sets TEST, VITEST_MODE, FORCE_TTY ('' unless stdout is a
+    // terminal), VITEST_POOL_ID (the worker, from 1) and VITEST_WORKER_ID (a fresh worker per
+    // file from 0; one worker's under isolate: false), in its key order after the host's, and
+    // PROD '1' / DEV '' when NODE_ENV is production (any other NODE_ENV: DEV '1', PROD '').
+    let p = Project::new("rc-env-worker");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    for f in ["a", "b"] {
+        p.file(
+            &format!("{f}.test.js"),
+            &format!(
+                r#"import {{ test }} from 'vitest'
+import * as fs from 'node:fs'
+test('env', () => {{
+  const e = process.env
+  fs.writeFileSync('{f}.json', JSON.stringify([e.TEST, e.VITEST_MODE, e.FORCE_TTY, e.VITEST_POOL_ID, e.VITEST_WORKER_ID, e.DEV, e.PROD, import.meta.env.DEV, import.meta.env.PROD, Object.keys(e).slice(-12).join()]))
+}})
+"#
+            ),
+        );
+    }
+    let keys = "TEST,VITEST,NODE_ENV,PROD,DEV,BASE_URL,MODE,VITEST_MODE,FORCE_TTY,VITEST_POOL_ID,VITEST_WORKER_ID,SSR";
+    let host_keys = "TEST,VITEST,PROD,DEV,BASE_URL,MODE,VITEST_MODE,FORCE_TTY,VITEST_POOL_ID,VITEST_WORKER_ID,SSR";
+    let read = |f: &str| std::fs::read_to_string(p.path(&format!("{f}.json"))).unwrap();
+    for (reuse, node_env, ids) in [
+        ("0", None, ["0", "1"]),
+        ("1", Some("production"), ["0", "0"]),
+        ("1", Some("staging"), ["0", "0"]),
+    ] {
+        let mut env = vec![("TURBO_JOBS", "1")];
+        if reuse == "1" {
+            env.push(("TURBO_REUSE_ISOLATE", "1"));
+        }
+        if let Some(v) = node_env {
+            env.push(("NODE_ENV", v));
+        }
+        let r = turbo_test(&p.dir, &["a.test.js", "b.test.js"], &env);
+        assert_eq!(r.code, Some(0), "{}", r.all());
+        let prod = node_env == Some("production");
+        let (dev, prod_s, dev_b, prod_b) = if prod {
+            ("", "1", "false", "true")
+        } else {
+            ("1", "", "true", "false")
+        };
+        // with a host NODE_ENV it is a host key, so vitest's own keys follow it
+        let tail = if node_env.is_some() {
+            format!("…,{host_keys}")
+        } else {
+            keys.to_string()
+        };
+        let mut workers: Vec<String> = Vec::new();
+        for f in ["a", "b"] {
+            let v: serde_json::Value = serde_json::from_str(&read(f)).unwrap();
+            let a = v.as_array().unwrap();
+            let s = |i: usize| a[i].to_string();
+            assert_eq!(
+                [s(0), s(1), s(2), s(3), s(5), s(6), s(7), s(8)],
+                [
+                    "\"true\"".into(),
+                    "\"RUN\"".into(),
+                    "\"\"".into(),
+                    "\"1\"".into(),
+                    format!("\"{dev}\""),
+                    format!("\"{prod_s}\""),
+                    dev_b.to_string(),
+                    prod_b.to_string(),
+                ],
+                "{f} NODE_ENV={node_env:?}"
+            );
+            let last = a[9].as_str().unwrap();
+            if node_env.is_some() {
+                assert!(last.ends_with(host_keys), "{last} / {tail}");
+            } else {
+                assert_eq!(last, keys);
+            }
+            workers.push(a[4].as_str().unwrap().to_string());
+        }
+        workers.sort();
+        assert_eq!(workers, ids, "reuse={reuse}");
+    }
+}

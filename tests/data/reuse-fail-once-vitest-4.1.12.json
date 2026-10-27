@@ -1,0 +1,56 @@
+{
+  "vitest": "4.1.12",
+  "command": "vitest run --reporter=json (fixtures/reuse-fail-once with isolate: false, and with --isolate: identical; runs.log present)",
+  "exitCode": 1,
+  "numTotalTests": 5,
+  "numPassedTests": 3,
+  "numFailedTests": 2,
+  "files": {
+    "a-pass.test.ts": {
+      "status": "passed",
+      "tests": [
+        [
+          "passes",
+          "passed"
+        ]
+      ]
+    },
+    "b-fail.test.ts": {
+      "status": "failed",
+      "tests": [
+        [
+          "passes",
+          "passed"
+        ],
+        [
+          "fails",
+          "failed"
+        ]
+      ]
+    },
+    "c-pass.test.ts": {
+      "status": "passed",
+      "tests": [
+        [
+          "passes",
+          "passed"
+        ]
+      ]
+    },
+    "d-all-fail.test.ts": {
+      "status": "failed",
+      "tests": [
+        [
+          "fails",
+          "failed"
+        ]
+      ]
+    }
+  },
+  "runs": {
+    "a-pass": 1,
+    "b-fail": 1,
+    "c-pass": 1,
+    "d-all-fail": 1
+  }
+}

@@ -5,7 +5,67 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Performance — a failing file runs once (K1, turbo-test#126, #144, #150)
+- Under isolate reuse (vitest `isolate: false`, or `--no-isolate`) every file with a failure —
+  or with nothing passed — was run a second time on a fresh isolate and that result reported,
+  doubling the cost of each failing file (a profiling hotspot in #79). vitest runs each file
+  once on the shared worker and reports that run, so a run whose tests were collected and whose
+  failures are all assertion failures (`expect` / `assert`) is now final, and a report is never
+  re-run on the reused isolate (its module is already evaluated there: a second run collected no
+  tests). A run that may be the reused isolate's own artifact — a test throwing something other
+  than an assertion error (a stale DOM wrapper's `Illegal invocation`), a failed hook, a load
+  error, a panic, the heap guard's out-of-memory abort — still gets one run on a fresh isolate
+  (an out-of-memory file is still not retried on the same kind of isolate, turbo-test#124). `test/compat-reuse-retry.test.mjs`
+  pins the outcome and the run count against vitest 4.1.12 on `fixtures/reuse-fail-once`
+  (`tests/data/reuse-fail-once-vitest-4.1.12.json`).
+- Isolate reuse keeps one document for the worker (turbo-test#150). The worker's DOM was
+  installed once but dropped after every file, so the next DOM file read a dead `document`
+  (`TypeError: Illegal invocation`) and passed only on its fresh-isolate re-run. As in vitest
+  `isolate: false`, the document now lives as long as the worker's isolate (a later file sees
+  the earlier file's document and body); a fresh-isolate run or a recycled isolate installs it
+  again. Pinned by `tests/runner_b_reuse.rs` against vitest 4.1.12 with happy-dom.
+- A file whose tests all fail runs once (turbo-test#144). Any report with 0 passed and ≥1 failed
+  (or a "document / window / DOM is not defined" failure) was re-run twice more on the same kind
+  of isolate, isolated or not, and the best attempt kept — a guard for a DOM init race in the old
+  shared turbo-dom `.node` addon, which the in-process turbo-dom-browser-env binding does not
+  have. vitest runs the file once; now only a file that did not run its tests (a load error, a
+  panic) is retried. The same test pins it with `--isolate` (vitest's report is identical).
+
 ### Fixed
+- The `expect` surface is now vitest 4.1.12's, checked member by member against vitest
+  (`tests/runner_c_expect_surface.rs`, turbo-test#152–#155). The asymmetric matchers are
+  vitest's classes, with `$$typeof`, `asymmetricMatch`, `toString`, `getExpectedType` and
+  `toAsymmetricMatcher`; `equals` and the printers also accept a user-defined matcher. Added
+  `expect.closeTo`, `schemaMatching`, `toSatisfy`, `addEqualityTesters`, `fail`, `unreachable`,
+  `getState` / `setState`, and `expect.<name>` / `expect.not.<name>` for every `expect.extend`
+  matcher. Added 17 missing matchers (the `toBeCalled*` / `toReturn*` aliases, the
+  returned-times and nth / last returned family, the resolved family, called-before / after,
+  `toBeNullable`); for these, vi.fn now records `invocationCallOrder` and `settledResults`.
+  An unknown matcher throws chai's `Invalid Chai property` (it used to be `undefined`, so
+  `is not a function`), and a passing matcher returns the assertion. `.resolves` / `.rejects`
+  on a non-promise throw vitest's TypeError. A failed toMatchObject diffs against the received
+  subset (it printed `Received: undefined`). Still missing: chai's BDD chain and `assert`
+  (#160), `expect.poll` (#161), `addSnapshotSerializer` (#162), and vitest's `this.utils`
+  printers (#163).
+- `process.env` has vitest's `TEST`, `VITEST_MODE`, `FORCE_TTY`, `VITEST_POOL_ID` (the worker)
+  and `VITEST_WORKER_ID` (per file, or per worker on a reused isolate), in vitest's key order
+  (turbo-test#156). `PROD` / `DEV` follow `NODE_ENV` as in vite (`'1'` / `''` under
+  `production`), so `import.meta.env.DEV` is false in a production build.
+- runtime.js no longer defines `__ttRestoreFileApis` (turbo-test#147). It restored Blob / File /
+  FileReader after the JS turbo-dom bootstrap replaced them; that bootstrap went in v0.3.0 and the
+  native DOM (`turbo-dom-browser-env`) never replaces them, so nothing called it. Wiring it
+  between files would also diverge from vitest, whose `isolate: false` keeps a file's global
+  changes for the next file.
+- `process.env` is the host environment (turbo-test#143): it was a fixed stub, so a variable
+  the user exported (`K=v turbo-test`) was `undefined` in tests. As in vitest 4.1.12 it now holds
+  the environment turbo-test was started with, the host's `NODE_ENV` wins (`'test'` only when
+  unset), vitest's `VITEST` / `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` replace the host's, and
+  the stub's `TZ: 'UTC'` (not the real time zone) and `TURBO_DOM_PARSER` are gone.
+- `toBeOneOf` and the asymmetric `expect.toBeOneOf` / `expect.not.toBeOneOf` (turbo-test#140)
+  were missing (`expect(...).toBeOneOf is not a function`). They now compare as vitest 4.1.12's
+  (`equals` per item, a Set by `has` first, an empty array / Set passes, anything else throws
+  vitest's TypeError), fail with its `expect(received).toBeOneOf()` message, and print as
+  `toBeOneOf<…>` / `not.toBeOneOf` in messages and diffs.
 - Default-export interop with CommonJS (turbo-test#122), checked by an 89-row table against
   vitest 4.1.12 (`tests/interop_table.rs`, happy-dom / node, isolate on and off, both loaders).
   On the ESM graph loader (a project without esbuild, as a vite 8 install) `import X from` tsc /
@@ -19,6 +79,45 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `[vitest] No "default" export is defined on the "x" mock. Did you forget to return it from
   "vi.mock"?` on access instead of giving the factory object (the missing-name message is
   vitest 4.1.12's too). Remaining differences are tracked in turbo-test#133–#137.
+- Module namespaces as vitest gives them (turbo-test#133, #141; the last KNOWN rows of the #122
+  interop table, both loaders). An ES module's namespace (`import * as`, `import()`,
+  `vi.importActual`) no longer reads `__esModule`, lists its names in source order and is tagged
+  `[object Module]` (esbuild's sorted export registration is put in source order; the ESM graph
+  loader reads an app module's namespace through a view, V8 sorts it). A package's CommonJS
+  module is Node's namespace of it: `default` and `'module.exports'` are `module.exports` (an
+  `import * as` of `module.exports = fn` gave the function itself), `export *` re-exports Node's
+  names (cjs-module-lexer's for a `module.exports = { … }` literal); a CommonJS module marked
+  `__esModule` reads it on the ESM graph loader too; a package's ES module that Node runs as one
+  (`.mjs`, `"type": "module"`) imports CommonJS as Node does (its default is `module.exports`);
+  `require()` of an ES module from CommonJS has Node's enumerable `__esModule: true`; an
+  automock of a package's CommonJS module mocks Node's namespace (`import { Comp }` reads
+  `undefined`, #136).
+- A package's ES module's namespace lists Node's sorted names on the module runner too, as
+  vitest imports a package through Node (turbo-test#159; app modules keep source order, #141).
+  On the ESM graph loader `import()` of a `vi.mock` factory's module without `default` gives the
+  mock, whose `default` throws vitest's `No "default" export…` on every read, as `import * as`
+  does (turbo-test#158; it gave #137's stand-in function).
+- `require()` (and `createRequire`) resolves a dual package's `require` build and reads `main`
+  before `module`, an import reads `main` before `module` too, as Node does for vitest
+  (turbo-test#134): a CommonJS consumer requiring a dual package got its ES build's exports
+  object (`Element type is invalid … got: object`). A require() of an import-only package still
+  resolves it as an import.
+- ESM graph loader: every read of the default import of a `vi.mock` factory without `default`
+  throws vitest's `[vitest] No "default" export is defined on the "x" mock…` — `typeof X`,
+  `if (X)`, `X === y` too (turbo-test#151), where #137's stand-in threw only once used. An app
+  module importing such a default is compiled with each read of the binding wrapped in a check
+  (`src/mock_read.rs`); every other module's source is unchanged. Four interop-table rows.
+- Mocks and packages (turbo-test#135, #136, #137; rows of the #122 interop table): a `vi.mock`
+  no longer reaches a package's own `require()` — vitest loads an external through Node, so
+  `require('x')` inside `node_modules` gets the real `x` (a tsc package's `__importDefault`
+  wrapped the mock into `{ default: { default: Mocked } }`, an object where a component was
+  expected). An automocked function keeps its name (`Comp.name`, was `fn`). On the ESM graph
+  loader a `vi.mock` factory without `default` makes the default import throw vitest's
+  `[vitest] No "default" export is defined on the "x" mock…` when it is used (read, called,
+  constructed, its keys listed — a synthetic module's binding cannot throw on the read itself),
+  instead of giving the factory object; a `jest.mock` factory stays its own default there.
+  Still differs: a named import of an automocked CommonJS module reads the mock where vitest
+  reads `undefined` (needs #133's namespace).
 - A project with no `node_modules/.bin/esbuild` — pnpm, whose transitive esbuild lives only under
   `node_modules/.pnpm`, or one that does not depend on esbuild — now runs on turbo-test's own
   esbuild (PR #80 by alphajew420, turbo-test#79): `cli.js` passes it as `TURBO_ESBUILD`, every
@@ -47,12 +146,16 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   original, so on the module runner a restored re-export (`export *`, `export { x } from`) was no
   longer live (a later spy on the source module did not show through it) and a restored class
   method became enumerable.
+- A module that only re-exports (`export * from`, `export { x } from`) loaded through the
+  esbuild transform threw `ReferenceError: __toESM is not defined` (turbo-test#165): its
+  `__reExport` called a helper esbuild had not emitted. It calls runtime.js `__ttToESM` now.
 - A namespace spy on the ESM-graph loader reaches the importers only, as in vitest (turbo-test#146):
   it replaced the export's binding, so the exporting module's own calls (`greetTwice()` calling
   `greet`) and other modules' re-exports saw the spy too. Importers now read imported bindings
   through the spy overrides (`__ttR` / `__ttNs`, also for an `import()` namespace) and modules
   register their own names, re-exports and `export *` sources (`src/esm_spy.rs`); the module's
-  own references keep the original, as vitest's exports objects do.
+  own references keep the original, as vitest's exports objects do. Reading a name a `vi.mock`
+  factory did not return now throws vitest's error on this loader too.
 - `vi.spyOn` on a module's export on the ESM-graph loader (turbo-test#131, the binary run without
   `TURBO_ESBUILD` in a project without esbuild): V8's namespace objects are read-only, so the spy
   was dropped and the importing module kept calling the original (`expected 'hi a!' to be
