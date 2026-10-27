@@ -220,6 +220,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `Map(n) {…}`, `[class X]`, grouped long arrays, multi-line objects, `util.inspect.custom`);
   it was `JSON.stringify`, `util.format` ignored `%s %d …` and `console.log('a', {})` printed
   `a [object Object]`.
+- `toStrictEqual` checks the types as vitest does (turbo-test#98): both sides must have the same
+  `constructor`, so a class instance never strictly equals a plain object with the same
+  properties (nor a null-prototype object `{}`, an `Array` subclass `[]`); it passed.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain

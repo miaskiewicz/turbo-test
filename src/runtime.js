@@ -2405,11 +2405,14 @@ class Asymmetric {
 // property whose value is `undefined` as ABSENT ({a:1,b:undefined} equals {a:1}); toStrictEqual
 // (strict=true) keeps undefined-valued keys significant. Array indices are NEVER stripped in
 // either mode — a hole/undefined element changes length, so [1,undefined] != [1].
+// toStrictEqual also checks the types as vitest's typeEquality does: both sides' `constructor`
+// must be the same (a class instance never strictly equals a plain object; turbo-test#98).
 function deepEqual(a, b, strict = false) {
   if (b instanceof Asymmetric) return b.matches(a);
   if (a instanceof Asymmetric) return a.matches(b);
   if (Object.is(a, b)) return true;
   if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (strict && a.constructor !== b.constructor) return false;
   if (Array.isArray(a) !== Array.isArray(b)) return false;
   if (Array.isArray(a)) {
     if (a.length !== b.length) return false;
