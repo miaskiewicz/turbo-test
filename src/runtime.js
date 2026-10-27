@@ -59,9 +59,10 @@ globalThis.console = {
 // its isMusl() reads process.report().header.glibcVersionRuntime to pick gnu vs musl.
 // Hardcoding 'darwin'/'arm64' made every non-mac host load the macOS .node -> dlopen fails.
 globalThis.process = {
-  // vitest also sets vite's MODE / DEV / PROD / SSR / BASE_URL (SSR '' under a DOM environment:
-  // the runner sets it per file, turbo-test#123)
-  env: { NODE_ENV: 'test', VITEST: 'true', TZ: 'UTC', TURBO_DOM_PARSER: 'native', MODE: 'test', DEV: '1', PROD: '', SSR: '1', BASE_URL: '/' },
+  // vitest's own variables: NODE_ENV (when the host has none), VITEST and vite's MODE / DEV / PROD
+  // / SSR / BASE_URL (SSR '' under a DOM environment: the runner sets it per file, turbo-test#123).
+  // The runner puts the host environment underneath (install_host_env, turbo-test#143).
+  env: { NODE_ENV: 'test', VITEST: 'true', MODE: 'test', DEV: '1', PROD: '', SSR: '1', BASE_URL: '/' },
   platform: globalThis.__ttPlatform || 'darwin',
   arch: globalThis.__ttArch || 'arm64',
   // glibcVersionRuntime truthy => glibc (gnu); falsy => musl. __ttGlibc is the glibc

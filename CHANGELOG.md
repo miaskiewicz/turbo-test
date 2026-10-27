@@ -6,6 +6,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 ## [Unreleased]
 
 ### Fixed
+- `process.env` is the host environment (turbo-test#143): it was a fixed stub, so a variable
+  the user exported (`K=v turbo-test`) was `undefined` in tests. As in vitest 4.1.12 it now holds
+  the environment turbo-test was started with, the host's `NODE_ENV` wins (`'test'` only when
+  unset), vitest's `VITEST` / `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` replace the host's, and
+  the stub's `TZ: 'UTC'` (not the real time zone) and `TURBO_DOM_PARSER` are gone.
 - `toBeOneOf` and the asymmetric `expect.toBeOneOf` / `expect.not.toBeOneOf` (turbo-test#140)
   were missing (`expect(...).toBeOneOf is not a function`). They now compare as vitest 4.1.12's
   (`equals` per item, a Set by `has` first, an empty array / Set passes, anything else throws

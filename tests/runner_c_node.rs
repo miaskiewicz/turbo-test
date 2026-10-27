@@ -460,7 +460,6 @@ it('console.log', () => { console.log('two', { a: 1 }, [1, 'b']); });
 }
 
 #[test]
-#[ignore = "turbo-test#143: fails until the fix"]
 fn process_env_is_the_host_environment() {
     // turbo-test#143: process.env was a fixed stub, so a variable the user exported was
     // undefined in tests. As in vitest 4.1.12: the host environment (values as is: `=`, empty,

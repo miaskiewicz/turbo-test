@@ -5979,6 +5979,33 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
             }
         }
     }
+    install_host_env(scope, global);
+}
+
+/// process.env as vitest's (turbo-test#143): the environment turbo-test was started with, in its
+/// order (a non-UTF-8 name / value lossily decoded), then vitest's own variables. The host's
+/// NODE_ENV wins (vitest only defaults it to 'test'); runtime.js's MODE / DEV / PROD / SSR /
+/// BASE_URL / VITEST replace the host's. The object is filled in place: `node:process`'s `env`
+/// and `import.meta.env` read this same object.
+fn install_host_env(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+    let host = v8::Object::new(scope);
+    for (k, v) in std::env::vars_os() {
+        let (Some(k), Some(v)) = (
+            v8::String::new(scope, &k.to_string_lossy()),
+            v8::String::new(scope, &v.to_string_lossy()),
+        ) else {
+            continue;
+        };
+        host.set(scope, k.into(), v.into());
+    }
+    let key = v8::String::new(scope, "__ttHostEnv").unwrap();
+    global.set(scope, key.into(), host.into());
+    run_js(
+        scope,
+        "(() => { const e = globalThis.process.env, h = globalThis.__ttHostEnv; delete globalThis.__ttHostEnv; \
+         const own = { ...e }; for (const k of Object.keys(e)) delete e[k]; Object.assign(e, h); \
+         e.NODE_ENV = h.NODE_ENV ?? own.NODE_ENV; delete own.NODE_ENV; Object.assign(e, own); })();",
+    );
 }
 
 /// Minimal JSON string encoder for embedding a Rust string as a JS string literal.
