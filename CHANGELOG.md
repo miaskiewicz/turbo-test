@@ -214,12 +214,46 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   footer. turbo-test wrote its own `<testsuites name="turbo-test">` format without skipped
   cases, failure bodies or output. vitest's comparison and call-count matchers
   (`toBeGreaterThan`, `toBeCloseTo`, `toHaveBeenCalledTimes`, …) now raise errors without a diff,
-  as vitest's do. The verbose / default reporters keep turbo-test's format (turbo-test#94).
+  as vitest's do.
+- The default and verbose reporters print what vitest 4.1.12 prints without colours
+  (turbo-test#94): the ` RUN  v4.1.12 <root>` banner, `stdout | file > task` console blocks,
+  vitest's module lines (` ❯ a.test.ts (3 tests | 1 failed) 12ms`, a failed file's tests under
+  it, a test over the 300ms slowTestThreshold even in a passing file) or verbose test lines with
+  each failure's messages, `(retry xN)`, the Failed Suites / Failed Tests sections on stderr with
+  code frames, numbered dividers and identical errors merged, and the footer with the Snapshots
+  lines (obsolete / removed keys per file), `Start at` and the duration breakdown. Without
+  `--reporter`, under an AI agent (std-env's `isAgent`: `AI_AGENT`, `CLAUDECODE`, `CODEX_*`, …),
+  the default is vitest's agent reporter: failed files and tests only, and only failed tasks'
+  console output. turbo-test printed its own `FAIL  a.test.ts  (0 passed, 1 failed)` lines and
+  a `1 files | 0 passed | … | cache 67% hit` line; `TURBO_LEGACY_REPORTER=1` keeps them. A
+  retried test keeps every attempt's error (json `failureMessages`, junit, the reporters).
+- A test's duration counts the time it waited on timers (turbo-test#95): the event loop jumps
+  its clock to the next timer instead of sleeping, so `await new Promise(r => setTimeout(r,
+  320))` took 0ms in every reporter; it is now ~320ms, as on Node.
 - `console.*`, `util.inspect` and `util.format` format as Node's (turbo-test#93): `util.inspect`
   is a port of Node's (depth 2, breakLength 80, compact 3: quoting, `[Object]`, `<ref *1>`,
   `Map(n) {…}`, `[class X]`, grouped long arrays, multi-line objects, `util.inspect.custom`);
   it was `JSON.stringify`, `util.format` ignored `%s %d …` and `console.log('a', {})` printed
   `a [object Object]`.
+- Every test function gets vitest's TestContext (turbo-test#96); it was called with no argument,
+  so any test using it failed with a TypeError. `ctx.task` (name, ids, `fullName`, its suite
+  and file tasks, `result` while it runs), `ctx.skip(note?)` / `ctx.skip(condition, note?)`
+  (the test is reported skipped at run time, with its duration and the `[note]` the human
+  reporters print), `onTestFinished` (after afterEach, the last registered first) and
+  `onTestFailed` handlers (a throw fails the test), `ctx.signal` (aborted when the test times
+  out), `ctx.expect`, `ctx.annotate(message, type?)` (junit `<properties>`, the verbose
+  reporter and the Failed Tests section print them). beforeEach / afterEach hooks get the
+  context, `it.for` rows and `it.extend` fixtures see the same one (fixture functions get it
+  too); `it.each` handlers get the row only, as in vitest (under `it.extend` they also got the
+  fixtures). Each hook / handler call's console output is an entry of its own, as vitest's.
+- Thrown values that are not `Error`s with a message, and error properties, print as vitest's
+  (turbo-test#97): a thrown primitive is `Unknown Error: <value>` (junit `<failure
+  message="…">` with no `type`; it printed `: plain string` with `type=""`), a value without a
+  message its serialized form (`{ a: 1, stacks: [] }`, junit `<failure>`; it printed `Unknown
+  Error: `), and the serialized error's own properties follow its frames as `Serialized Error:
+  { code: 'E_CODE' }` in junit and the verbose reporter (a cause's in every reporter). The JSON
+  reporter's `failureMessages` hold `null` for an error with no stack and no message (it held
+  `[object Object]`), the verbose reporter `→ undefined`.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain

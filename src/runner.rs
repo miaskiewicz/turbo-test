@@ -5966,6 +5966,10 @@ pub struct TestReport {
     pub setup_us: f64,
     /// The suites whose hooks failed, in vitest's suite order.
     pub suite_errors: Vec<SuiteError>,
+    /// The file's console output while captured: (stream, task name path, content).
+    pub logs: Vec<(String, String, String)>,
+    /// ms the drive loop's clock jumped while the tests ran (turbo-test#95).
+    pub waited_ms: f64,
 }
 
 /// A test file's snapshot outcome, as @vitest/snapshot's `SnapshotResult` (turbo-test#73).
@@ -5998,18 +6002,35 @@ pub struct TestCase {
     pub start_ms: f64,
     /// Failure message (empty unless status == "failed").
     pub message: String,
-    /// The failure's error `stack` (else its `message`), as vitest's JSON `failureMessages`.
-    pub failure_messages: Vec<String>,
+    /// The failure's error `stack` (else its `message`, else none: JSON `null`), as vitest's JSON
+    /// `failureMessages` (turbo-test#97).
+    pub failure_messages: Vec<Option<String>>,
     /// Where the test was registered (`includeTaskLocation`): 1-based line and column.
     pub location: Option<(u32, u32)>,
     /// A failed test that never ran (a forbidden `.only`, turbo-test#76): no `duration`.
     pub not_run: bool,
     /// A passing `it.fails` test: vitest's `expected fail` in the summary footer (turbo-test#78).
     pub expected_fail: bool,
+    /// How many times it was retried (vitest's `retryCount`, `(retry x1)`).
+    pub retry_count: u32,
     /// Its console output (`stdout` / `stderr`, content) while logs are captured (junit).
     pub logs: Vec<(String, String)>,
     /// The error it failed with (junit's `<failure>`, turbo-test#81).
     pub errors: Vec<crate::failure::ErrorInfo>,
+    /// The note of a test skipped at run time (`ctx.skip(note)`, turbo-test#96); empty for none.
+    pub note: String,
+    /// Its `ctx.annotate()` calls, in order (turbo-test#96).
+    pub annotations: Vec<Annotation>,
+}
+
+/// A test annotation (`ctx.annotate(message, type)`): where it was made in the test file
+/// (1-based line and column, 0 when unknown).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Annotation {
+    pub kind: String,
+    pub message: String,
+    pub line: u32,
+    pub col: u32,
 }
 
 /// A `describe` whose `beforeAll` / `afterAll` failed: a failed suite, reported by junit as a
@@ -6766,6 +6787,17 @@ fn drive_tests(
     drive_tests_bounded(scope, global, entry_abs, 2_000_000)
 }
 
+/// vitest's `task.file.name` (turbo-test#96): the test file relative to the run's root (both
+/// canonical), as the reports name it; its canonical path for a file outside the root.
+pub fn task_file_name(entry: &Path, root: &Path) -> String {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let entry = canon(entry);
+    match entry.strip_prefix(canon(root)) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => entry.to_string_lossy().into_owned(),
+    }
+}
+
 /// `drive_tests` with the event-loop turn budget injected (unit tests use a tiny one).
 fn drive_tests_bounded(
     scope: &mut v8::PinScope,
@@ -6776,7 +6808,15 @@ fn drive_tests_bounded(
     // Expose the test file's absolute path to the runtime so toMatchSnapshot() can locate the
     // `__snapshots__/<basename>.snap` sibling (mirrors vitest's per-file snapshot resolution).
     {
-        let js = format!("globalThis.__ttFile = {:?};", entry_abs.to_string_lossy());
+        let root = std::env::var_os("TURBO_ROOT")
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        let js = format!(
+            "globalThis.__ttFile = {:?}; globalThis.__ttFileName = {};",
+            entry_abs.to_string_lossy(),
+            json_string(&task_file_name(entry_abs, &root))
+        );
         if let Some(code) = v8::String::new(scope, &js) {
             if let Some(s) = v8::Script::compile(scope, code, None) {
                 s.run(scope);
@@ -6895,18 +6935,42 @@ fn drive_tests_bounded(
                     duration_ms: num(scope, "duration_ms"),
                     start_ms: num(scope, "start_ms"),
                     message: text(scope, "message"),
-                    failure_messages: string_array(scope, o, "failure_messages"),
+                    failure_messages: js_array(scope, o, "failure_messages")
+                        .into_iter()
+                        .map(|v| (!v.is_null()).then(|| v.to_rust_string_lossy(scope)))
+                        .collect(),
                     location: location_of(scope, o),
                     not_run: flag(scope, "not_run"),
                     expected_fail: flag(scope, "expected_fail"),
+                    retry_count: num(scope, "retry_count") as u32,
                     logs: pairs_of(scope, o, "logs"),
                     errors: errors_of(scope, o),
+                    note: text(scope, "note"),
+                    annotations: string_tuples(scope, o, "annotations")
+                        .into_iter()
+                        .map(|a| {
+                            let at = |i: usize| a.get(i).cloned().unwrap_or_default();
+                            Annotation {
+                                kind: at(0),
+                                message: at(1),
+                                line: at(2).parse().unwrap_or(0),
+                                col: at(3).parse().unwrap_or(0),
+                            }
+                        })
+                        .collect(),
                 });
             }
         }
     }
     let snapshot = snapshot_of(scope, summary);
     let suite_errors = suite_errors_of(scope, summary);
+    let logs = string_tuples(scope, summary, "logs")
+        .into_iter()
+        .map(|mut l| {
+            l.resize(3, String::new());
+            (l.remove(0), l.remove(0), l.remove(0))
+        })
+        .collect();
     Ok(TestReport {
         passed,
         failed,
@@ -6916,7 +6980,49 @@ fn drive_tests_bounded(
         snapshot,
         setup_us: 0.0,
         suite_errors,
+        logs,
+        waited_ms: f64::from(get_num(scope, "waited_ms")),
     })
+}
+
+/// The items of the array `obj[key]` (none when it is not an array).
+fn js_array<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+    key: &str,
+) -> Vec<v8::Local<'s, v8::Value>> {
+    let k = v8::String::new(scope, key).unwrap();
+    let arr = obj
+        .get(scope, k.into())
+        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok());
+    arr.map(|a| {
+        (0..a.length())
+            .filter_map(|i| a.get_index(scope, i))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// The string items of the arrays in `obj[key]` (a test's `logs` pairs).
+fn string_tuples<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+    key: &str,
+) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for v in js_array(scope, obj, key) {
+        if let Ok(item) = v8::Local::<v8::Array>::try_from(v) {
+            let fields = (0..item.length())
+                .map(|i| {
+                    item.get_index(scope, i)
+                        .map(|v| v.to_rust_string_lossy(scope))
+                        .unwrap_or_default()
+                })
+                .collect();
+            out.push(fields);
+        }
+    }
+    out
 }
 
 /// `[a, b]` string pairs of the array `obj[key]` (a test's `logs`).
@@ -6925,23 +7031,11 @@ fn pairs_of<'s>(
     obj: v8::Local<'s, v8::Object>,
     key: &str,
 ) -> Vec<(String, String)> {
-    let k = v8::String::new(scope, key).unwrap();
-    let Some(arr) = obj
-        .get(scope, k.into())
-        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())
-    else {
-        return Vec::new();
-    };
-    (0..arr.length())
-        .filter_map(|i| arr.get_index(scope, i))
-        .filter_map(|v| v8::Local::<v8::Array>::try_from(v).ok())
-        .map(|pair| {
-            let at = |i| {
-                pair.get_index(scope, i)
-                    .map(|v| v.to_rust_string_lossy(scope))
-                    .unwrap_or_default()
-            };
-            (at(0), at(1))
+    string_tuples(scope, obj, key)
+        .into_iter()
+        .map(|mut p| {
+            p.resize(2, String::new());
+            (p.remove(0), p.remove(0))
         })
         .collect()
 }
@@ -6951,19 +7045,9 @@ fn errors_of<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     obj: v8::Local<'s, v8::Object>,
 ) -> Vec<crate::failure::ErrorInfo> {
-    let k = v8::String::new(scope, "errors").unwrap();
-    let Some(arr) = obj
-        .get(scope, k.into())
-        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())
-    else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
-    for i in 0..arr.length() {
-        if let Some(o) = arr
-            .get_index(scope, i)
-            .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
-        {
+    for v in js_array(scope, obj, "errors") {
+        if let Ok(o) = v8::Local::<v8::Object>::try_from(v) {
             out.push(error_info_of(scope, o));
         }
     }
@@ -6984,6 +7068,18 @@ fn error_info_of<'s>(
             .unwrap_or_default()
     };
     let (name, message, diff, stack) = (text("name"), text("message"), text("diff"), text("stack"));
+    let flag = |scope: &mut v8::PinScope<'s, '_>, key: &str| {
+        let k = v8::String::new(scope, key).unwrap();
+        o.get(scope, k.into()).is_some_and(|v| v.is_true())
+    };
+    let (no_name, no_message) = (flag(scope, "no_name"), flag(scope, "no_message"));
+    let optional = |scope: &mut v8::PinScope<'s, '_>, key: &str| {
+        let k = v8::String::new(scope, key).unwrap();
+        o.get(scope, k.into())
+            .filter(|v| v.is_string())
+            .map(|v| v.to_rust_string_lossy(scope))
+    };
+    let (inspected, properties) = (optional(scope, "inspected"), optional(scope, "properties"));
     let frames = crate::failure::parse_stack(&stack)
         .into_iter()
         .map(|mut f| {
@@ -7004,6 +7100,10 @@ fn error_info_of<'s>(
     crate::failure::ErrorInfo {
         name,
         message,
+        no_name,
+        no_message,
+        inspected,
+        properties,
         diff,
         frames,
         cause,
@@ -7016,22 +7116,9 @@ fn suite_errors_of<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     summary: v8::Local<'s, v8::Object>,
 ) -> Vec<SuiteError> {
-    let k = v8::String::new(scope, "suite_errors").unwrap();
-    let Some(arr) = summary
-        .get(scope, k.into())
-        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())
-    else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
-    for i in 0..arr.length() {
-        let Some(o) = arr
-            .get_index(scope, i)
-            .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
-        else {
-            continue;
-        };
-        out.push({
+    for v in js_array(scope, summary, "suite_errors") {
+        if let Ok(o) = v8::Local::<v8::Object>::try_from(v) {
             let k = v8::String::new(scope, "name").unwrap();
             let name = o
                 .get(scope, k.into())
@@ -7042,12 +7129,12 @@ fn suite_errors_of<'s>(
                 .get(scope, k.into())
                 .and_then(|v| v.number_value(scope))
                 .unwrap_or(0.0);
-            SuiteError {
+            out.push(SuiteError {
                 name,
                 duration_ms,
                 errors: errors_of(scope, o),
-            }
-        });
+            });
+        }
     }
     out
 }

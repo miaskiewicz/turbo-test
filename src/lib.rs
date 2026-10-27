@@ -3,6 +3,7 @@
 //! Shared substrate used by the milestone spikes and (eventually) the consolidated
 //! ModuleRunner. Public surface is deliberately small: plumbing, not framework.
 
+pub mod agent;
 pub mod bundler;
 pub mod ci;
 pub mod cli;
@@ -11,6 +12,7 @@ pub mod coverage_branch;
 pub mod esm_cjs;
 pub mod failure;
 pub mod graph;
+pub mod human;
 pub mod launcher;
 pub mod location;
 pub mod mock_scope;
