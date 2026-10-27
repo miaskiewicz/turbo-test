@@ -1564,7 +1564,6 @@ await t('text utf8', () => read('readAsText', new Blob(['€é'])))
 }
 
 #[test]
-#[ignore = "turbo-test#139: fails until the fix"]
 fn file_reader_events_encoding_and_abort_are_jsdoms() {
     // turbo-test#139: FileReader as jsdom's (vitest's jsdom environment; Node 26 has none):
     // readyState LOADING during a read, loadstart / progress / load / loadend with their
