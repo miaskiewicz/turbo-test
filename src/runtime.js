@@ -821,14 +821,24 @@ if (typeof globalThis.Blob === 'undefined') {
         return n;
       }, 0);
     }
+    // the bytes of every part, concatenated: strings as UTF-8, buffers and views as their bytes,
+    // nested Blobs as theirs, anything else stringified
+    _bytes() {
+      const chunks = this._parts.map((p) => {
+        if (p instanceof ArrayBuffer) return new Uint8Array(p);
+        if (ArrayBuffer.isView(p)) return new Uint8Array(p.buffer, p.byteOffset, p.byteLength);
+        if (p && typeof p._bytes === 'function') return p._bytes(); // nested Blob / File
+        return new globalThis.TextEncoder().encode(typeof p === 'string' ? p : String(p));
+      });
+      const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+      let at = 0;
+      for (const c of chunks) { out.set(c, at); at += c.length; }
+      return out;
+    }
+    // WHATWG "UTF-8 decode" of all the bytes at once (turbo-test#120): a sequence split across
+    // parts is one character and one leading BOM is stripped, as Node's
     text() {
-      return Promise.resolve(this._parts.map((p) => {
-        if (typeof p === 'string') return p;
-        if (p instanceof ArrayBuffer) return new globalThis.TextDecoder('utf-8', { ignoreBOM: true }).decode(new Uint8Array(p));
-        if (p && p.buffer instanceof ArrayBuffer) return new globalThis.TextDecoder('utf-8', { ignoreBOM: true }).decode(p); // TypedArray
-        if (p && typeof p._parts !== 'undefined') return p._parts.join(''); // nested Blob
-        return String(p);
-      }).join(''));
+      return Promise.resolve(new globalThis.TextDecoder().decode(this._bytes()));
     }
     arrayBuffer() { return Promise.resolve(new ArrayBuffer(this.size)); }
     slice() { return new globalThis.Blob(); }

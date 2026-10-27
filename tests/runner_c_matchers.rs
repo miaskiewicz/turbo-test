@@ -1038,7 +1038,6 @@ test('TextEncoder/TextDecoder', () => {
 }
 
 #[test]
-#[ignore = "turbo-test#120: fails until the fix"]
 fn blob_text_decodes_the_concatenated_bytes_like_nodes() {
     // turbo-test#120: Blob#text UTF-8-decodes the bytes of all parts at once (a sequence split
     // across parts is one character, one leading BOM is stripped), whatever the part types

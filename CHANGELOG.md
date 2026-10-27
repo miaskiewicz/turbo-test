@@ -324,6 +324,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `encoding` / `fatal` / `ignoreBOM` are prototype getters; the label is trimmed and
   case-folded, accepting only the UTF-8 labels, and any other label throws RangeError
   `ERR_ENCODING_NOT_SUPPORTED`. `Buffer#toString` keeps a BOM, as Node.
+- `Blob#text()` UTF-8-decodes the concatenated bytes of all parts once, as Node 26
+  (turbo-test#120): a sequence split across parts is one character (`[E2 82] + [AC]` gave two
+  U+FFFD, now `€`), one leading BOM is stripped (it was kept), and a nested Blob contributes its
+  bytes (its parts were joined as strings).
 - `URLSearchParams.set` replaces the first pair of the name in place and removes the others, as
   Node's (turbo-test#116); it moved the pair to the end (`a=1&b=2&a=3` set `a` gave `b=2&a=9`,
   Node `a=9&b=2`), in `toString()`, iteration and a URL's `href`.
