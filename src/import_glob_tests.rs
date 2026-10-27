@@ -92,6 +92,16 @@ fn calls_it_cannot_replace_are_left_alone() {
         "const g = import.meta.glob; g('./*.ts')",
         "other.glob('./*.ts'); import.meta.url",
         "import.meta.glob('./*.ts'",
+        // options it does not read as literals: a spread, a computed key (vite evaluates these;
+        // with unknown names vite fails the module)
+        "import.meta.glob('./*.ts', { ...opts })",
+        "import.meta.glob('./*.ts', { [k]: true })",
+        "import.meta.glob('./*.ts', { query: { ...q } })",
+        "import.meta.glob('./*.ts', { query: { [k]: 1 } })",
+        // what vite rejects at transform (turbo-test#190: it fails at run time here): a base that
+        // is not anchored, options that are not an object literal
+        "import.meta.glob('./*.ts', { base: 'lib' })",
+        "import.meta.glob('./*.ts', 5)",
     ] {
         assert_eq!(expand(&file, src, &d.0, &[]), None, "{src}");
     }
@@ -194,4 +204,28 @@ fn relative_specs() {
         relative_spec(Path::new("/a/b/../b"), Path::new("/c.ts")),
         "../../c.ts"
     );
+}
+
+#[test]
+fn a_cast_import_meta_and_overlapping_patterns() {
+    // vitest 4.1.12: `(import.meta satisfies any).glob`, `import.meta!.glob` and
+    // `(<any>import.meta).glob` expand as `import.meta.glob`; a module two patterns match is
+    // listed once
+    let d = project(&["m/a.ts", "m/b.ts", "t.ts"]);
+    let file = d.0.join("t.ts");
+    let lazy = "({\"./m/a.ts\": () => import(\"./m/a.ts\"), \"./m/b.ts\": () => import(\"./m/b.ts\")})";
+    for src in [
+        "(import.meta satisfies any).glob('./m/*.ts')",
+        "import.meta!.glob('./m/*.ts')",
+        "(<any>import.meta).glob('./m/*.ts')",
+        "import.meta.glob(['./m/b.ts', './m/*.ts'])",
+    ] {
+        assert_eq!(expand(&file, src, &d.0, &[]).unwrap(), lazy, "{src}");
+    }
+}
+
+#[test]
+fn normal_folds_dot_segments() {
+    assert_eq!(normal(Path::new("./a/./b/../c")), Path::new("a/c"));
+    assert_eq!(normal(Path::new("/a/../../b")), Path::new("/b"));
 }

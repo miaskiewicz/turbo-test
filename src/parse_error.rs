@@ -80,11 +80,10 @@ fn vite_parse_error(
     let code = rewrite_imports(src, &lexed.imports, root, resolve);
     let allocator = Allocator::default();
     let reparsed = Parser::new(&allocator, &code, SourceType::mjs()).parse();
-    let (code, errors) = if reparsed.errors.is_empty() {
-        (src, &parsed.errors)
-    } else {
-        (code.as_str(), &reparsed.errors)
-    };
+    // only plain string literals were replaced, so it fails as the module does: the errors and
+    // frames are the rewritten code's
+    let code = code.as_str();
+    let errors = &reparsed.errors;
     let n = errors.len();
     let mut message = format!(
         "Parse failed with {n} error{}:\n",
@@ -113,10 +112,11 @@ fn vite_parse_error(
     }
     let url = module_url(path, root);
     let loc = pos.map(|at| locate(code, at));
-    let at = match loc {
-        Some((line, column)) => format!("At file: {url}:{line}:{column}"),
-        None => format!("At file: {url}"),
-    };
+    // (every oxc parse error has a label but "source too long", past 4 GiB)
+    let mut at = format!("At file: {url}");
+    if let Some((line, column)) = loc {
+        at.push_str(&format!(":{line}:{column}"));
+    }
     Some(ViteError {
         name: "RolldownError",
         message: format!("Parse failure: {message}\n{at}"),
@@ -208,7 +208,8 @@ fn rolldown_diagnostic(
     }
     report.with_helps(help);
     let mut out = Vec::new();
-    let written = report
+    // (only the writer's errors come back, and writing to a Vec cannot fail)
+    let _ = report
         .with_message(&title)
         .with_config(
             Config::default()
@@ -218,10 +219,7 @@ fn rolldown_diagnostic(
         )
         .finish()
         .write_for_stdout(ariadne::sources([(file.to_string(), src)]), &mut out);
-    match written {
-        Ok(()) => String::from_utf8_lossy(&out).into_owned(),
-        Err(_) => format!("[PARSE_ERROR] {title}"),
-    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// rolldown's `is_context_too_long`: in a source of 600 bytes or more, whether the span

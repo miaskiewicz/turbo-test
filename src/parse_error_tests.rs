@@ -108,6 +108,9 @@ fn messages_are_vitests() {
         ("let x = 4 / 2 / 1; const = 1;\n", "Parse failure: Parse failed with 1 error:\nUnexpected token\n1: let x = 4 / 2 / 1; const = 1;\n                            ^\nAt file: /m.mjs:1:25"),
         ("const t = `)${ ({}) }}`; const = 1;\n", "Parse failure: Parse failed with 1 error:\nUnexpected token\n1: const t = `)${ ({}) }}`; const = 1;\n                                  ^\nAt file: /m.mjs:1:31"),
         ("const a = (1 + ;\n", IMPORT_ANALYSIS),
+        // a template's escaped backtick, a regular expression at the very start
+        ("const t = `\\`)`; const = 1;\n", "Parse failure: Parse failed with 1 error:\nUnexpected token\n1: const t = `\\`)`; const = 1;\n                          ^\nAt file: /m.mjs:1:23"),
+        ("/)/.test(x); const = 1;\n", "Parse failure: Parse failed with 1 error:\nUnexpected token\n1: /)/.test(x); const = 1;\n                      ^\nAt file: /m.mjs:1:19"),
     ] {
         assert_eq!(err("m.mjs", src).map(|e| e.1).as_deref(), Some(want), "{src:?}");
     }
@@ -332,5 +335,27 @@ fn a_label_without_context_is_named_in_the_title() {
     assert_eq!(
         relative(Path::new("/p/a/b.ts"), Path::new("/p/c/d")),
         "../../a/b.ts"
+    );
+}
+
+#[test]
+fn at_most_five_parse_errors_are_listed() {
+    // vitest 4.1.12 for many.js = six top-level `return`s
+    let src = "return 1;\nreturn 2;\nreturn 3;\nreturn 4;\nreturn 5;\nreturn 6;\nexport const x = 1;\n";
+    let e = "A 'return' statement can only be used within a function body.";
+    assert_eq!(
+        err("many.js", src).unwrap(),
+        (
+            "RolldownError",
+            format!(
+                "Parse failure: Parse failed with 6 errors:\n\
+                 {e}\n1: return 1;\n   ^\n2: return 2;\n3: return 3;\
+                 {e}\n1: return 1;\n2: return 2;\n   ^\n3: return 3;\n4: return 4;\
+                 {e}\n1: return 1;\n2: return 2;\n3: return 3;\n   ^\n4: return 4;\n5: return 5;\
+                 {e}\n2: return 2;\n3: return 3;\n4: return 4;\n   ^\n5: return 5;\n6: return 6;\
+                 {e}\n3: return 3;\n4: return 4;\n5: return 5;\n   ^\n6: return 6;\n7: export const x = 1;\
+                 \n...\nAt file: /many.js:1:0"
+            )
+        )
     );
 }
