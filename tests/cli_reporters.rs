@@ -684,7 +684,6 @@ fn thrown_values_and_error_properties_print_as_vitest_prints_them() {
 /// hooks after it; a throwing afterAll stops the afterAll hooks after it and the cleanups.
 /// `tests/data/junit-hooks-vitest-4.1.12.xml` is vitest 4.1.12's report, on both loaders.
 #[test]
-#[ignore = "turbo-test#101: fails until the fix"]
 fn hooks_run_in_vitests_order_with_its_cleanups_and_failures() {
     for esbuild in [false, true] {
         let p = Project::new("rep-junit-hooks");

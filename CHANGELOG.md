@@ -264,6 +264,12 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   file whose import of it failed (a different module's apart), as vitest. turbo-test
   said `graph load failed` and V8 printed `Uncaught SyntaxError` to stdout three times, with a
   line number of the transformed code.
+- Hooks run in vitest's default `sequence.hooks: 'stack'` order (turbo-test#101): `afterEach` /
+  `afterAll` last registered first (a suite's own before its parent's), and the functions
+  `beforeEach` / `beforeAll` return run after the `afterEach` / `afterAll` hooks, last returned
+  first (they were ignored). A throwing `afterEach`, cleanup or `afterAll` fails the test / suite
+  and stops the hooks after it (a throwing `afterEach` was swallowed: the test passed); `it.fails`
+  flips the outcome after the test's hooks, as vitest.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain
