@@ -322,13 +322,11 @@ fn junit_reporter() {
 fn tap_reporter() {
     let p = fixture("rep-tap");
     let r = run(&p, &["--reporter", "tap"]);
-    // the load-error file is a `not ok` point too (turbo-test#32 item 4), never dropped
+    // vitest's TapReporter (turbo-test#170): each file a subtest; the load-error file is a
+    // `not ok` point too (turbo-test#32 item 4), never dropped
     assert_eq!(
-        r.stdout,
-        format!(
-            "TAP version 13\n1..5\nok 1 - adds <&>\nok 2 - later # SKIP\nnot ok 3 - breaks\n  ---\n  message: expected 'x' to be 'y' // Object.is equality\n  ...\nok 4 - ok\nnot ok 5 - c.test.ts\n    ---\n    error:\n        name: \"Error\"\n        message: \"top <boom>\"\n    at: \"{}:1:7\"\n    ...\n\n",
-            p.path("c.test.ts").display()
-        ),
+        normalize_tap(&r.stdout, &p.dir),
+        "TAP version 13\n1..3\nnot ok 1 - a.test.ts # time=Tms {\n    1..3\n    ok 1 - adds <&> # time=Tms\n    ok 2 - later # SKIP\n    not ok 3 - breaks # time=Tms\n        ---\n        error:\n            name: \"AssertionError\"\n            message: \"expected 'x' to be 'y' // Object.is equality\"\n        at: \"<ROOT>/a.test.ts:3:36\"\n        actual: \"x\"\n        expected: \"y\"\n        ...\n}\nok 2 - b.test.ts # time=Tms {\n    1..1\n    ok 1 - ok # time=Tms\n}\nnot ok 3 - c.test.ts\n    ---\n    error:\n        name: \"Error\"\n        message: \"top <boom>\"\n    at: \"<ROOT>/c.test.ts:1:7\"\n    ...",
         "{}",
         r.all()
     );
@@ -392,7 +390,7 @@ fn output_file_artifacts() {
     run(&p, &["--reporter", "tap", "--output-file", "r.tap"]);
     assert!(std::fs::read_to_string(p.path("r.tap"))
         .unwrap()
-        .starts_with("TAP version 13\n1..5\n"));
+        .starts_with("TAP version 13\n1..3\nnot ok 1 - a.test.ts # time="));
 
     let r = run(&p, &["--reporter", "json", "--outputFile", "r.json"]);
     assert_eq!(
@@ -1190,5 +1188,63 @@ fn tap_load_failure_block_is_vitests() {
             "esbuild={esbuild}\n{}",
             r.all()
         );
+    }
+}
+
+/// `# time=<ms>` with the number normalised, and the project's path as `<ROOT>`.
+fn normalize_tap(out: &str, root: &std::path::Path) -> String {
+    let mut s = out.replace(&root.display().to_string(), "<ROOT>");
+    let mut res = String::new();
+    while let Some(i) = s.find("# time=") {
+        res.push_str(&s[..i + "# time=".len()]);
+        s = s[i + "# time=".len()..].to_string();
+        let n = s.find("ms").unwrap_or(0);
+        res.push('T');
+        s = s[n..].to_string();
+    }
+    res.push_str(&s);
+    res.trim_end().to_string()
+}
+
+/// turbo-test#170: `--reporter tap` / `tap-flat` are vitest 4.1.12's TapReporter /
+/// TapFlatReporter byte for byte (times normalised): files nested as subtests with `# time=`,
+/// describes nested within them (`# SKIP` / `# TODO` for one that never ran), each failure's
+/// `error:` / `at:` / `actual:` / `expected:` block, annotations as `# <type>: <message>`, TAP
+/// escapes in names; tap-flat a flat plan of `file > describe > test` names. The expected
+/// outputs are vitest's on the same project (`tests/data/tap`), on both loaders.
+#[test]
+fn tap_and_tap_flat_are_vitests() {
+    let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/tap");
+    for esbuild in [false, true] {
+        let p = Project::new(if esbuild {
+            "rep-tap-vitest"
+        } else {
+            "rep-tap-vitest-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", "{\"name\":\"tapo\",\"type\":\"module\"}\n");
+        for f in ["a", "b", "c", "d", "e"] {
+            let name = format!("{f}.test.ts");
+            p.file(
+                &name,
+                &std::fs::read_to_string(data.join("project").join(&name)).unwrap(),
+            );
+        }
+        for (reporter, want) in [
+            ("tap", "tap-vitest-4.1.12.txt"),
+            ("tap-flat", "flat-vitest-4.1.12.txt"),
+        ] {
+            let r = turbo_test(&p.dir, &["--reporter", reporter], &[]);
+            assert_eq!(r.code, Some(1), "{}", r.all());
+            let want = std::fs::read_to_string(data.join(want)).unwrap();
+            assert_eq!(
+                normalize_tap(&r.stdout, &p.dir),
+                want.trim_end(),
+                "esbuild={esbuild} {reporter}\n{}",
+                r.all()
+            );
+        }
     }
 }

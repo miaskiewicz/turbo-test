@@ -53,6 +53,8 @@ pub struct FileResult {
     pub dur_ms: f64,
     /// The suites whose hooks failed (junit test cases of their own).
     pub suite_errors: Vec<runner::SuiteError>,
+    /// The describes without tasks (runner `TestReport::empty_suites`, TAP).
+    pub empty_suites: Vec<String>,
     /// The error a file failed to load with, when the runner saw one (junit's `<failure>`).
     pub load_error_info: Option<crate::failure::ErrorInfo>,
     /// Its console output: (`stdout` / `stderr`, the test's or suite's name path or `""` for
@@ -72,6 +74,7 @@ pub enum Reporter {
     Json,
     Junit,
     Tap,
+    TapFlat,
     Verbose,
 }
 
@@ -82,6 +85,7 @@ impl Reporter {
             Some("json") => Reporter::Json,
             Some("junit") => Reporter::Junit,
             Some("tap") => Reporter::Tap,
+            Some("tap-flat") => Reporter::TapFlat,
             Some("verbose") => Reporter::Verbose,
             Some("dot") => Reporter::Dot,
             _ => Reporter::Default,
@@ -91,7 +95,10 @@ impl Reporter {
     /// `json/junit/tap` are machine artifacts — stdout carries only the artifact (the human
     /// summary line goes to stderr). `default/dot/verbose` are human reporters (stdout).
     pub fn is_artifact(self) -> bool {
-        matches!(self, Reporter::Json | Reporter::Junit | Reporter::Tap)
+        matches!(
+            self,
+            Reporter::Json | Reporter::Junit | Reporter::Tap | Reporter::TapFlat
+        )
     }
 }
 
@@ -615,6 +622,7 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
                 setup_us: rep.setup_us,
                 dur_ms,
                 suite_errors: rep.suite_errors,
+                empty_suites: rep.empty_suites,
                 load_error_info: None,
                 logs: rep.logs,
                 waited_ms: rep.waited_ms,
@@ -634,6 +642,7 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
             setup_us: 0.0,
             dur_ms,
             suite_errors: Vec::new(),
+            empty_suites: Vec::new(),
             load_error_info: runner::take_load_error(),
             logs: Vec::new(),
             waited_ms: 0.0,
@@ -1196,73 +1205,280 @@ fn hostname() -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
-/// TAP v13: a flat numbered plan over every test across all files. A file that failed to LOAD has
-/// no per-test list: it is one `not ok N - <file>` point carrying the load error (the TAP twin of
-/// JUnit's failing case for the file), so the failure is never silently dropped from the plan.
-pub fn render_tap(files: &[PathBuf], res: &[FileResult]) -> String {
-    let total: usize = res
-        .iter()
-        .map(|r| if r.load_error { 1 } else { r.tests.len() })
-        .sum();
-    let mut out = String::from("TAP version 13\n");
-    out.push_str(&format!("1..{total}\n"));
-    let diag = |out: &mut String, message: &str| {
-        out.push_str("  ---\n");
-        out.push_str(&format!("  message: {}\n", message.replace('\n', " ")));
-        out.push_str("  ...\n");
-    };
-    let mut n = 0usize;
+/// vitest 4.1.12's TapReporter (`--reporter tap`) and TapFlatReporter (`tap-flat`), turbo-test#170.
+/// `tap`: every file a subtest (`ok N - a.test.ts # time=…ms {` … `}`) holding its tests and
+/// describes in declaration order, a describe that ran nested the same way, one that never ran
+/// `# SKIP`; `tap-flat`: one plan over every test, named `file > describe > test`. A failed test
+/// carries vitest's `error:` / `at:` / `actual:` / `expected:` block, an annotated one its
+/// `# <type>: <message>` lines; a file that failed to load is a leaf with its error's block.
+pub fn render_tap(files: &[PathBuf], res: &[FileResult], flat: bool) -> String {
+    let mut nodes = Vec::new();
     for r in res {
+        let name = files[r.idx].display().to_string();
         if r.load_error {
-            n += 1;
-            out.push_str(&format!("not ok {n} - {}\n", files[r.idx].display()));
-            // vitest's block for the file's error (turbo-test#166)
             let e = r
                 .load_error_info
                 .clone()
                 .unwrap_or_else(|| load_error_info(&r.error_msg));
-            out.push_str(&tap_error_block(&e));
+            nodes.push(TapNode::Failed(name, Box::new(e)));
             continue;
         }
-        for t in &r.tests {
-            n += 1;
-            let ok = if t.status == "failed" { "not ok" } else { "ok" };
-            let dir = if t.status == "skipped" { " # SKIP" } else { "" };
-            out.push_str(&format!("{ok} {n} - {}{dir}\n", t.name));
-            if t.status == "failed" && !t.message.is_empty() {
-                diag(&mut out, &t.message);
+        let mut children: Vec<TapNode> = Vec::new();
+        let empty: Vec<(usize, Vec<String>, String)> = r
+            .empty_suites
+            .iter()
+            .filter_map(|e| {
+                let mut parts = e.split('\u{1f}');
+                let at = parts.next()?.parse().ok()?;
+                let mode = parts.next()?.to_string();
+                Some((at, parts.map(str::to_string).collect(), mode))
+            })
+            .collect();
+        for i in 0..=r.tests.len() {
+            for (_, path, mode) in empty.iter().filter(|(at, ..)| *at == i) {
+                if let Some((name, above)) = path.split_last() {
+                    tap_insert_node(
+                        &mut children,
+                        above,
+                        TapNode::Empty(name.clone(), mode.clone(), name.clone()),
+                    );
+                }
+            }
+            if let Some(t) = r.tests.get(i) {
+                tap_insert(&mut children, &t.ancestors, t);
             }
         }
+        let errored = r.suite_errors.iter().map(|e| e.name.clone()).collect();
+        if flat {
+            tap_flatten(&children, &name, &mut nodes);
+        } else {
+            nodes.push(TapNode::Suite {
+                name,
+                children,
+                file: Some((!r.failed_file, r.dur_ms, errored)),
+            });
+        }
     }
+    let mut out = String::from("TAP version 13\n");
+    tap_tasks(&mut out, &nodes, 0, "", &[]);
     out
 }
 
-/// vitest's TAP block of an error (its TapReporter, one level in): `error:` with its `name` and
-/// `message` YAML-quoted (line breaks kept) and `at:` its first frame.
-fn tap_error_block(e: &crate::failure::ErrorInfo) -> String {
-    let yaml = |s: &str| {
-        if s.is_empty() {
-            String::new()
-        } else {
-            format!("\"{}\"", s.replace('"', "\\\""))
-        }
+/// A task of the TAP tree: a test, a describe (or a file), or a leaf that failed with an error
+/// and has no tests (a file that did not load).
+enum TapNode<'a> {
+    Test(String, &'a runner::TestCase),
+    Suite {
+        name: String,
+        children: Vec<TapNode<'a>>,
+        /// a file: (it passed, its duration, the `describe > …` paths whose hooks failed)
+        file: Option<(bool, f64, Vec<String>)>,
+    },
+    Failed(String, Box<crate::failure::ErrorInfo>),
+    /// A describe without tasks (its TAP name, its mode: `run` (it fails: "No test found in
+    /// suite <its own name>"), `skip`, `todo`; its own name).
+    Empty(String, String, String),
+}
+
+/// Put `t` under its describes (`ancestors`): a describe is the last child of that name.
+fn tap_insert<'a>(nodes: &mut Vec<TapNode<'a>>, ancestors: &[String], t: &'a runner::TestCase) {
+    tap_insert_node(nodes, ancestors, TapNode::Test(t.title.clone(), t));
+}
+
+fn tap_insert_node<'a>(nodes: &mut Vec<TapNode<'a>>, ancestors: &[String], node: TapNode<'a>) {
+    let Some((first, rest)) = ancestors.split_first() else {
+        nodes.push(node);
+        return;
     };
-    let name = if e.name.is_empty() {
-        "Unknown Error"
-    } else {
-        &e.name
-    };
-    let mut out = format!(
-        "    ---\n    error:\n        name: {}\n        message: {}\n",
-        yaml(name),
-        yaml(&e.message)
-    );
-    if let Some(f) = e.frames.first() {
-        let at = format!("{}:{}:{}", f.file.display(), f.line, f.col);
-        out.push_str(&format!("    at: {}\n", yaml(&at)));
+    if !matches!(nodes.last(), Some(TapNode::Suite { name, .. }) if name == first) {
+        nodes.push(TapNode::Suite {
+            name: first.clone(),
+            children: Vec::new(),
+            file: None,
+        });
     }
-    out.push_str("    ...\n");
-    out
+    if let Some(TapNode::Suite { children, .. }) = nodes.last_mut() {
+        tap_insert_node(children, rest, node);
+    }
+}
+
+/// vitest's flattenTasks: each test named by its describes' path under `base`.
+fn tap_flatten<'a>(nodes: &[TapNode<'a>], base: &str, out: &mut Vec<TapNode<'a>>) {
+    for n in nodes {
+        match n {
+            TapNode::Test(name, t) => out.push(TapNode::Test(format!("{base} > {name}"), t)),
+            TapNode::Suite { name, children, .. } => {
+                tap_flatten(children, &format!("{base} > {name}"), out)
+            }
+            TapNode::Empty(name, mode, own) => out.push(TapNode::Empty(
+                format!("{base} > {name}"),
+                mode.clone(),
+                own.clone(),
+            )),
+            TapNode::Failed(..) => {}
+        }
+    }
+}
+
+/// The tests below a node.
+fn tap_tests<'a>(n: &TapNode<'a>, out: &mut Vec<&'a runner::TestCase>) {
+    match n {
+        TapNode::Test(_, t) => out.push(t),
+        TapNode::Suite { children, .. } => children.iter().for_each(|c| tap_tests(c, out)),
+        TapNode::Failed(..) | TapNode::Empty(..) => {}
+    }
+}
+
+/// A describe without tests (a failing one) below a node.
+fn tap_has_empty_failure(n: &TapNode) -> bool {
+    match n {
+        TapNode::Empty(_, mode, _) => mode == "run",
+        TapNode::Suite { children, .. } => children.iter().any(tap_has_empty_failure),
+        _ => false,
+    }
+}
+
+/// A test that never ran (vitest: its mode is skip / todo).
+fn tap_not_run(t: &runner::TestCase) -> bool {
+    matches!(t.status.as_str(), "skipped" | "todo" | "pending")
+}
+
+/// vitest's tapString: `\` and `#` escaped, line breaks as spaces.
+fn tap_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('#', "\\#")
+        .replace('\n', " ")
+}
+
+/// vitest's yamlString: double-quoted with `"` escaped, empty for an empty string.
+fn yaml_string(s: &str) -> String {
+    if s.is_empty() {
+        String::new()
+    } else {
+        format!("\"{}\"", s.replace('"', "\\\""))
+    }
+}
+
+/// TapReporter.logTasks at `depth` (four spaces a level); `prefix` names the describes above,
+/// `errored` the file's describes whose hooks failed (by that path).
+fn tap_tasks(out: &mut String, nodes: &[TapNode], depth: usize, prefix: &str, errored: &[String]) {
+    let ind = "    ".repeat(depth);
+    out.push_str(&format!("{ind}1..{}\n", nodes.len()));
+    for (i, n) in nodes.iter().enumerate() {
+        let id = i + 1;
+        match n {
+            TapNode::Failed(name, e) => {
+                out.push_str(&format!("{ind}not ok {id} - {}\n", tap_string(name)));
+                tap_errors(out, std::slice::from_ref(e), depth + 1);
+            }
+            TapNode::Empty(name, mode, raw) => {
+                let name = tap_string(name);
+                match mode.as_str() {
+                    "todo" => out.push_str(&format!("{ind}ok {id} - {name} # TODO\n")),
+                    "skip" => out.push_str(&format!("{ind}ok {id} - {name} # SKIP\n")),
+                    _ => {
+                        out.push_str(&format!("{ind}not ok {id} - {name} # time=0.00ms\n"));
+                        let e = crate::failure::ErrorInfo {
+                            name: "Error".into(),
+                            message: format!("No test found in suite {raw}"),
+                            ..Default::default()
+                        };
+                        tap_errors(out, &[e], depth + 1);
+                    }
+                }
+            }
+            TapNode::Test(name, t) => {
+                let comment = match t.status.as_str() {
+                    "skipped" | "pending" => " # SKIP".to_string(),
+                    "todo" => " # TODO".to_string(),
+                    _ if t.not_run => String::new(),
+                    _ => format!(" # time={:.2}ms", t.duration_ms),
+                };
+                let ok = if t.status == "failed" { "not ok" } else { "ok" };
+                out.push_str(&format!("{ind}{ok} {id} - {}{comment}\n", tap_string(name)));
+                for a in &t.annotations {
+                    out.push_str(&format!("{ind}    # {}: {}\n", a.kind, a.message));
+                }
+                if t.status == "failed" {
+                    let errors = if t.errors.is_empty() && !t.message.is_empty() {
+                        vec![load_error_info(&t.message)]
+                    } else {
+                        t.errors.clone()
+                    };
+                    tap_errors(out, &errors, depth + 1);
+                }
+            }
+            TapNode::Suite {
+                name,
+                children,
+                file,
+            } => {
+                let path = if file.is_some() || prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix} > {name}")
+                };
+                let mut tests = Vec::new();
+                tap_tests(n, &mut tests);
+                let (ok, comment) = match file {
+                    Some((passed, ms, _)) => (*passed, format!(" # time={ms:.2}ms")),
+                    None => {
+                        let below = format!("{path} > ");
+                        let failed = tests.iter().any(|t| t.status == "failed")
+                            || tap_has_empty_failure(n)
+                            || errored.iter().any(|e| *e == path || e.starts_with(&below));
+                        if !failed && !tests.is_empty() && tests.iter().all(|t| tap_not_run(t)) {
+                            (true, " # SKIP".to_string())
+                        } else {
+                            let ms: f64 = tests.iter().map(|t| t.duration_ms).sum();
+                            (!failed, format!(" # time={ms:.2}ms"))
+                        }
+                    }
+                };
+                let ok = if ok { "ok" } else { "not ok" };
+                out.push_str(&format!(
+                    "{ind}{ok} {id} - {}{comment} {{\n",
+                    tap_string(name)
+                ));
+                match file {
+                    Some((_, _, errored)) => tap_tasks(out, children, depth + 1, "", errored),
+                    None => tap_tasks(out, children, depth + 1, &path, errored),
+                }
+                out.push_str(&format!("{ind}}}\n"));
+            }
+        }
+    }
+}
+
+/// vitest's failure block at `depth`: per error `---`, `error:` (`name`, `message`), `at:` its
+/// first frame, `actual:` / `expected:` when it shows a diff; then `...`.
+fn tap_errors(out: &mut String, errors: &[crate::failure::ErrorInfo], depth: usize) {
+    let ind = "    ".repeat(depth);
+    for e in errors {
+        let name = if e.name.is_empty() {
+            "Unknown Error"
+        } else {
+            &e.name
+        };
+        out.push_str(&format!("{ind}---\n{ind}error:\n"));
+        out.push_str(&format!("{ind}    name: {}\n", yaml_string(name)));
+        out.push_str(&format!("{ind}    message: {}\n", yaml_string(&e.message)));
+        if let Some(f) = e.frames.first() {
+            let at = format!("{}:{}:{}", f.file.display(), f.line, f.col);
+            out.push_str(&format!("{ind}at: {}\n", yaml_string(&at)));
+        }
+        if e.show_diff {
+            out.push_str(&format!(
+                "{ind}actual: {}\n",
+                yaml_string(e.actual.as_deref().unwrap_or(""))
+            ));
+            out.push_str(&format!(
+                "{ind}expected: {}\n",
+                yaml_string(e.expected.as_deref().unwrap_or(""))
+            ));
+        }
+    }
+    out.push_str(&format!("{ind}...\n"));
 }
 
 /// The active artifact reporter's output (json/junit/tap); `None` for the human reporters.
@@ -1279,7 +1495,8 @@ pub fn render_artifact(
     match reporter {
         Reporter::Json => Some(render_json(files, res, start_ms, did_update)),
         Reporter::Junit => Some(render_junit(names, res, &junit_root())),
-        Reporter::Tap => Some(render_tap(names, res)),
+        Reporter::Tap => Some(render_tap(names, res, false)),
+        Reporter::TapFlat => Some(render_tap(names, res, true)),
         _ => None,
     }
 }
@@ -1574,7 +1791,7 @@ pub fn run(opts: Options) -> i32 {
         std::env::set_var("TURBO_CAPTURE_LOGS", "1");
         std::env::set_var("TURBO_TASK_LOCATION", "1");
         std::env::set_var("TURBO_ERROR_FRAMES", "1");
-    } else if opts.reporter == Reporter::Tap {
+    } else if matches!(opts.reporter, Reporter::Tap | Reporter::TapFlat) {
         // a load failure's `at:` (turbo-test#166)
         std::env::set_var("TURBO_TASK_LOCATION", "1");
         std::env::set_var("TURBO_ERROR_FRAMES", "1");

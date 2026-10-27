@@ -7070,6 +7070,9 @@ pub struct TestReport {
     pub setup_us: f64,
     /// The suites whose hooks failed, in vitest's suite order.
     pub suite_errors: Vec<SuiteError>,
+    /// The describes without tasks (TAP tasks of their own, turbo-test#170): `index of the next
+    /// test`, mode (`run` / `skip` / `todo`), then the describe path, joined by U+001F.
+    pub empty_suites: Vec<String>,
     /// The file's console output while captured: (stream, task name path, content).
     pub logs: Vec<(String, String, String)>,
     /// ms the drive loop's clock jumped while the tests ran (turbo-test#95).
@@ -8163,6 +8166,7 @@ fn drive_tests_bounded(
     }
     let snapshot = snapshot_of(scope, summary);
     let suite_errors = suite_errors_of(scope, summary);
+    let empty_suites = string_array(scope, summary, "empty_suites");
     let logs = string_tuples(scope, summary, "logs")
         .into_iter()
         .map(|mut l| {
@@ -8179,6 +8183,7 @@ fn drive_tests_bounded(
         snapshot,
         setup_us: 0.0,
         suite_errors,
+        empty_suites,
         logs,
         waited_ms: f64::from(get_num(scope, "waited_ms")),
     })
@@ -8279,6 +8284,8 @@ fn error_info_of<'s>(
             .map(|v| v.to_rust_string_lossy(scope))
     };
     let (inspected, properties) = (optional(scope, "inspected"), optional(scope, "properties"));
+    let (actual, expected) = (optional(scope, "actual"), optional(scope, "expected"));
+    let show_diff = flag(scope, "show_diff");
     let frames = crate::failure::parse_stack(&stack)
         .into_iter()
         .map(|mut f| {
@@ -8326,6 +8333,9 @@ fn error_info_of<'s>(
         cause,
         source: None,
         rollup,
+        show_diff,
+        actual,
+        expected,
     }
 }
 

@@ -20,6 +20,7 @@ fn file(idx: usize, tests: Vec<TestCase>) -> FileResult {
         setup_us: 0.0,
         dur_ms: 12.4,
         suite_errors: Vec::new(),
+        empty_suites: Vec::new(),
         load_error_info: None,
         logs: Vec::new(),
         waited_ms: 0.0,
