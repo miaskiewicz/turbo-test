@@ -1,15 +1,15 @@
 
  RUN  v4.1.12 <root>
 
- ❯ a.test.ts (5 tests | 1 failed | 3 skipped) <ms>
-   ↓ noted <ms> [not today]
-   ↓ quiet <ms>
-   ↓ static
-     ✓ annotated <ms>
-     × fails <ms>
+ ❯ a.test.ts (5 tests | 5 failed) <ms>
+   × short strings <ms>
+   × lines <ms>
+   × arrays <ms>
+   × nested <ms>
+   × numbers <ms>
 
  Test Files  1 failed (1)
-      Tests  1 failed | 1 passed | 3 skipped (5)
+      Tests  5 failed (5)
    Start at  <time>
    Duration  <duration>
 

@@ -2168,6 +2168,7 @@ dependencies = [
  "serde_json",
  "turbo-dom-browser-env",
  "turbo-dom-v8",
+ "unicode-id-start",
 ]
 
 [[package]]

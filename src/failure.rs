@@ -78,7 +78,7 @@ pub fn parse_stack(stack: &str) -> Vec<Frame> {
 /// `capturePrintError(error).output.trim()` (junit's `<failure>` body): vitest's printErrorInner
 /// without a code frame, with the error's properties ([`crate::human::print_error`]).
 pub fn print_error(e: &ErrorInfo, root: &Path) -> String {
-    crate::human::print_error(e, root, false, true, "")
+    crate::human::print_error(e, root, false, true, "", &crate::colors::Colors::default())
         .trim()
         .to_string()
 }

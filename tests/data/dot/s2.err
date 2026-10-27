@@ -1,0 +1,62 @@
+stderr | a.test.ts > top <&> "q"
+err line
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  a.test.ts > outer > inner > fails
+AssertionError: expected 1 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 1
+
+ ❯ a.test.ts:5:35
+      3|   it('passes', () => { expect(1).toBe(1); });
+      4|   describe('inner', () => {
+      5|     it('fails', () => { expect(1).toBe(2); });
+       |                                   ^
+      6|     it.skip('skipped', () => {});
+      7|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  a.test.ts > objects
+AssertionError: expected { a: 1, b: [ 1, 2 ] } to deeply equal { a: 2, b: [ 1, 2 ] }
+
+- Expected
++ Received
+
+  {
+-   "a": 2,
++   "a": 1,
+    "b": [
+      1,
+      2,
+    ],
+  }
+
+ ❯ a.test.ts:10:51
+      8|   it.todo('todo');
+      9| });
+     10| it('objects', () => { expect({ a: 1, b: [1, 2] }).toEqual({ a: 2, b: […
+       |                                                   ^
+     11| it('throws', () => { throw new TypeError('bad <thing> & "x"'); });
+     12| it('top <&> "q"', () => { console.log('out line'); console.error('err …
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  a.test.ts > throws
+TypeError: bad <thing> & "x"
+ ❯ a.test.ts:11:28
+      9| });
+     10| it('objects', () => { expect({ a: 1, b: [1, 2] }).toEqual({ a: 2, b: […
+     11| it('throws', () => { throw new TypeError('bad <thing> & "x"'); });
+       |                            ^
+     12| it('top <&> "q"', () => { console.log('out line'); console.error('err …
+     13|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+

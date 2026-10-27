@@ -1034,17 +1034,16 @@ fn vitests_human_reporter_kinds() {
         kind(Reporter::Verbose, false, false, true),
         Some(Kind::Verbose)
     );
-    for r in [
-        Reporter::Dot,
-        Reporter::Json,
-        Reporter::Junit,
-        Reporter::Tap,
-    ] {
+    // vitest's DotReporter (turbo-test#100), with or without an agent
+    assert_eq!(kind(Reporter::Dot, true, false, false), Some(Kind::Dot));
+    assert_eq!(kind(Reporter::Dot, true, false, true), Some(Kind::Dot));
+    for r in [Reporter::Json, Reporter::Junit, Reporter::Tap] {
         assert_eq!(kind(r, true, false, false), None, "{r:?}");
     }
     // TURBO_LEGACY_REPORTER: turbo-test's own lines for every reporter
     assert_eq!(kind(Reporter::Default, false, true, true), None);
     assert_eq!(kind(Reporter::Verbose, true, true, false), None);
+    assert_eq!(kind(Reporter::Dot, true, true, false), None);
 }
 
 #[test]
@@ -1276,6 +1275,17 @@ fn footer_summary_and_exit_code() {
     );
     assert_eq!(state_string([0, 0, 0, 0, 0], 2), " (2)");
     assert_eq!(state_string([0, 0, 0, 0, 0], 0), "no tests");
+    // vitest's colours: failed / passed bold red / green, expected fail cyan, skipped yellow,
+    // todo and the total gray, the separators dim; `no tests` dim
+    let c = crate::colors::Colors { on: true };
+    assert_eq!(
+        state_string_colored([1, 2, 3, 4, 5], 15, &c),
+        "\x1b[1m\x1b[31m1 failed\x1b[39m\x1b[22m\x1b[2m | \x1b[22m\x1b[1m\x1b[32m2 passed\x1b[39m\x1b[22m\x1b[2m | \x1b[22m\x1b[36m3 expected fail\x1b[39m\x1b[2m | \x1b[22m\x1b[33m4 skipped\x1b[39m\x1b[2m | \x1b[22m\x1b[90m5 todo\x1b[39m\x1b[90m (15)\x1b[39m"
+    );
+    assert_eq!(
+        state_string_colored([0; 5], 0, &c),
+        "\x1b[2mno tests\x1b[22m"
+    );
 
     let (_, res) = sample();
     let t = tally(&res);
