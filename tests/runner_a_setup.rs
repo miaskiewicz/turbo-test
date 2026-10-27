@@ -320,20 +320,24 @@ fn a_bundled_setup_file_shares_the_test_files_package_instances() {
         r#"{"name":"pk2","main":"i.js"}"#,
     );
     p.file("node_modules/pk2/i.js", "exports.obj2 = { id: 'pk2' };\n");
+    // a workspace package: node_modules/ws links to packages/ws, outside node_modules
+    p.file("packages/ws/package.json", r#"{"name":"ws","main":"i.js"}"#);
+    p.file("packages/ws/i.js", "exports.wsObj = { id: 'ws' };\n");
+    std::os::unix::fs::symlink(p.path("packages/ws"), p.path("node_modules/ws")).unwrap();
     p.file(
         "vitest.config.ts",
         "export default { test: { setupFiles: ['./setup.ts'] } };\n",
     );
     p.file(
         "setup.ts",
-        "import { obj } from 'pk';\nimport * as ns2 from 'pk2';\nawait Promise.resolve();\n\
-         (globalThis as any).__setup = { obj, ns2keys: Object.keys(ns2), obj2: ns2.obj2 };\n",
+        "import { obj } from 'pk';\nimport * as ns2 from 'pk2';\nimport { wsObj } from 'ws';\nawait Promise.resolve();\n\
+         (globalThis as any).__setup = { obj, ns2keys: Object.keys(ns2), obj2: ns2.obj2, wsObj };\n",
     );
     p.file(
         "a.test.ts",
-        "import { test, expect } from 'vitest';\nimport { obj } from 'pk';\nimport { obj2 } from 'pk2';\n\
+        "import { test, expect } from 'vitest';\nimport { obj } from 'pk';\nimport { obj2 } from 'pk2';\nimport { wsObj } from 'ws';\n\
          test('shared', () => {\n  const s = (globalThis as any).__setup;\n  \
-         expect([s.obj === obj, s.obj2 === obj2, s.ns2keys]).toEqual([true, true, ['default', 'module.exports', 'obj2']]);\n});\n",
+         expect([s.obj === obj, s.obj2 === obj2, s.ns2keys, s.wsObj === wsObj]).toEqual([true, true, ['default', 'module.exports', 'obj2'], true]);\n});\n",
     );
     let r = turbo_test(&p.dir, &[], &[]);
     assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());

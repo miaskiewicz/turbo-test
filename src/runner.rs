@@ -4544,13 +4544,7 @@ fn synth_eval<'s>(
     // A module whose exports were dropped (a reused isolate's reset) fails its importer's
     // evaluation: evaluation steps that return nothing without an exception abort V8
     // (`Check failed: has_exception()`, turbo-test#79).
-    let Some((exports_g, names, is_mock, app_cjs)) = entry else {
-        throw(
-            scope,
-            "turbo-test: an imported module was unloaded before it was evaluated",
-        );
-        return None;
-    };
+    let (exports_g, names, is_mock, app_cjs) = entry.or_else(|| throw_none(scope, UNLOADED))?;
     let exports = v8::Local::new(scope, &exports_g);
     let dkey = v8::String::new(scope, "default")?;
     // A mock's (factory result's / automock's) own `default` key IS its default export (vitest,
@@ -5729,12 +5723,10 @@ fn variant_module<'s>(
             _ => (reg.cjs_exports.get(abs).cloned(), false),
         }
     });
-    if !esm && exports.is_none() {
-        return None;
-    }
+    // (no CommonJS exports and no ES module: not loaded yet, None)
     let exports = match exports {
         Some(e) => v8::Local::new(scope, &e),
-        None => v8::undefined(scope).into(),
+        None => esm.then(|| v8::undefined(scope).into())?,
     };
     let names = match kind {
         Variant::Ns => vec!["default".to_string()],
@@ -5742,10 +5734,9 @@ fn variant_module<'s>(
             let view = variant_view(scope, exports, kind)?;
             let global = scope.get_current_context().global(scope);
             let mut names = object_keys(scope, global, view);
+            // (Node's view names `default` for every CommonJS module, turbo-test#193)
             if kind == Variant::Star {
                 names.retain(|n| n != "default");
-            } else if !names.iter().any(|n| n == "default") {
-                names.push("default".to_string());
             }
             names
         }
@@ -5782,8 +5773,8 @@ fn variant_eval<'s>(
         let exports = reg.cjs_exports.get(&path)?.clone();
         Some((Ok(exports), kind, names))
     });
-    // (a variant is linked and evaluated within one file's run: the registry is pruned between
-    // files only, so its entry is there)
+    // a module whose exports were dropped (a reused isolate's reset) fails its importer, as in
+    // synth_eval
     let (exports, kind, names) = entry.or_else(|| throw_none(scope, UNLOADED))?;
     let view = match exports {
         Ok(exports) => {
