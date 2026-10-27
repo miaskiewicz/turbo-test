@@ -20,8 +20,7 @@ use std::path::Path;
 /// Rows turbo-test still answers differently from vitest, with the issue that tracks each and
 /// turbo-test's description: `(loader, row, turbo-test's value, issue)`. `loader` is `"mr"`,
 /// `"graph"` or `"*"` (both).
-const KNOWN: &[(&str, &str, &str, &str)] = &[
-];
+const KNOWN: &[(&str, &str, &str, &str)] = &[];
 
 fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
@@ -110,7 +109,6 @@ fn run_table(p: &Project, loader: &str) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "turbo-test#136: fails until the fix"]
 fn interop_table_matches_vitest_on_the_module_runner() {
     let p = project("interop-table-mr", true);
     let bad = run_table(&p, "mr");
@@ -123,7 +121,6 @@ fn interop_table_matches_vitest_on_the_module_runner() {
 }
 
 #[test]
-#[ignore = "turbo-test#136: fails until the fix"]
 fn interop_table_matches_vitest_on_the_esm_graph_loader() {
     let p = project("interop-table-graph", false);
     let bad = run_table(&p, "graph");

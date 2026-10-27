@@ -4010,6 +4010,10 @@ function __automockProtoMethods(target, proto) {
     }
   }
 }
+// A mock's names an ES import may name although the mock lacks them (the ESM graph's synthetic
+// module exports them, undefined): an automock's of a package's CommonJS module.
+const __ttMockNames = new WeakMap();
+globalThis.__ttMockNames = (m) => (m && (typeof m === 'object' || typeof m === 'function') ? __ttMockNames.get(m) : undefined);
 function __automock(mod, depth) {
   depth = depth || 0;
   if (typeof mod === 'function') {
@@ -4318,7 +4322,14 @@ function __ttMock(spec, factory, vitest, isDoMock) {
   if (factory === undefined) {
     // AUTOMOCK: no factory -> auto-generate a mock from the real module (functions -> vi.fn()).
     // A real module that fails to load is left unmocked: importing it reports its own error.
-    try { exports = __automock(globalThis.__ttImportActual(dir, String(spec))); }
+    // vitest automocks the module's namespace: a package's CommonJS one is Node's (`default`,
+    // `module.exports` and the names cjs-module-lexer finds; turbo-test#136, #133)
+    try {
+      const actual = globalThis.__ttImportActual(dir, String(spec));
+      exports = __automock(globalThis.__ttToESM(actual));
+      // its own names stay importable on the ESM graph (reading undefined, as vitest's)
+      if (__ttExternalCjs.has(actual)) __ttMockNames.set(exports, Object.keys(actual));
+    }
     catch (e) { return; }
   } else {
     try { exports = typeof factory === 'function' ? factory(importOriginal) : factory; }

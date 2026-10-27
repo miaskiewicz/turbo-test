@@ -3704,6 +3704,25 @@ fn register_mock_value<'s>(
 ) -> Option<()> {
     let global = scope.get_current_context().global(scope);
     let mut names = object_keys(scope, global, exports_val);
+    // names an import may name although the mock lacks them (runtime.js __ttMockNames)
+    let extra = v8::String::new(scope, "__ttMockNames")
+        .and_then(|k| global.get(scope, k.into()))
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok())
+        .and_then(|f| {
+            let undefined = v8::undefined(scope).into();
+            f.call(scope, undefined, &[exports_val])
+        });
+    if let Some(extra) = extra.filter(|v| v.is_array()) {
+        let arr = v8::Local::<v8::Array>::try_from(extra).ok();
+        for i in 0..arr.map_or(0, |a| a.length()) {
+            if let Some(n) = arr.and_then(|a| a.get_index(scope, i)) {
+                let n = n.to_rust_string_lossy(scope);
+                if !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+        }
+    }
     // Isolate-reuse: if this path was ALREADY loaded (e.g. a setup mock, or a real module a
     // cached importer holds a reference to), a test file re-mocking it must NOT swap in a new
     // exports object — cached CJS importers hold the old object and read its props live, so they
@@ -3721,6 +3740,10 @@ fn register_mock_value<'s>(
                 {
                     for n in &names {
                         if let Some(k) = v8::String::new(scope, n) {
+                            // (a __ttMockNames name the mock lacks is not copied)
+                            if !src.has(scope, k.into()).unwrap_or(false) {
+                                continue;
+                            }
                             if let Some(val) = src.get(scope, k.into()) {
                                 dst.set(scope, k.into(), val);
                             }
