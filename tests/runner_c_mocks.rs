@@ -974,9 +974,8 @@ it('fine', () => { expect(Object.keys(import.meta.glob('./src/ok/*.ts'))).toEqua
                 let want = format!(
                     "(Error: Invalid glob: \"{pattern}\" (resolved: \"{pattern}\"). It must start with '/' or './')"
                 );
-                // the ESM graph's summary line names the cause `module errored: Error: …`
                 assert!(
-                    load_error_line(&r, file).contains(&want[1..want.len() - 1]),
+                    load_error_line(&r, file).ends_with(&want),
                     "esbuild={esbuild} {env:?}\n{}",
                     r.all()
                 );

@@ -1568,7 +1568,6 @@ fn junit_norm(x: &str) -> String {
 /// (`Error: boom`), without the ESM-graph loader's load-phase prefix; the error message kept
 /// for the reporters is unchanged.
 #[test]
-#[ignore = "turbo-test#164: fails until the fix"]
 fn the_error_line_drops_the_load_phase_prefix() {
     let f = Path::new("/p/a.test.ts");
     for (e, shown) in [

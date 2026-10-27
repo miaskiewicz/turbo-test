@@ -622,7 +622,7 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
         }
         Err(e) => FileResult {
             idx,
-            line: format!("ERROR {}  ({e})", file.display()),
+            line: format!("ERROR {}  ({})", file.display(), without_load_phase(&e)),
             passed: 0,
             failed: 0,
             load_error: true,
@@ -809,16 +809,19 @@ fn json_strs(items: &[String]) -> String {
     format!("[{}]", items.join(","))
 }
 
+/// A load error without turbo-test's load-phase prefix (`module errored: `, `evaluate threw: `,
+/// `instantiate: `, the ESM-graph loader's), as the module runner reports it (turbo-test#164).
+pub(crate) fn without_load_phase(error_msg: &str) -> &str {
+    ["module errored: ", "evaluate threw: ", "instantiate: "]
+        .iter()
+        .find_map(|p| error_msg.strip_prefix(p))
+        .unwrap_or(error_msg)
+}
+
 /// A load error's message as vitest's JSON `message` shows it: the error's own message, without
 /// turbo-test's load-phase prefix (`module errored: `, …) and the error's `<Name>: ` prefix.
 pub(crate) fn file_message(error_msg: &str) -> String {
-    let mut m = error_msg;
-    for p in ["module errored: ", "evaluate threw: ", "instantiate: "] {
-        if let Some(rest) = m.strip_prefix(p) {
-            m = rest;
-            break;
-        }
-    }
+    let mut m = without_load_phase(error_msg);
     if let Some((name, rest)) = m.split_once(": ") {
         if name.ends_with("Error") && name.chars().all(|c| c.is_ascii_alphanumeric()) {
             m = rest;
@@ -1128,13 +1131,7 @@ fn failure_element(e: &crate::failure::ErrorInfo, root: &Path) -> Vec<String> {
 /// A load error without the runner's error object (a setup file, a graph that did not load):
 /// its message as `Name: message` (the error name, else `Error`).
 fn load_error_info(error_msg: &str) -> crate::failure::ErrorInfo {
-    let mut m = error_msg;
-    for p in ["module errored: ", "evaluate threw: ", "instantiate: "] {
-        if let Some(rest) = m.strip_prefix(p) {
-            m = rest;
-            break;
-        }
-    }
+    let m = without_load_phase(error_msg);
     let (name, message) = match m.split_once(": ") {
         Some((name, rest))
             if name.ends_with("Error") && name.chars().all(|c| c.is_ascii_alphanumeric()) =>

@@ -146,6 +146,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   original, so on the module runner a restored re-export (`export *`, `export { x } from`) was no
   longer live (a later spy on the source module did not show through it) and a restored class
   method became enumerable.
+- The summary line of a file that failed to load reads `ERROR a.test.ts  (Error: boom)` on the
+  ESM-graph loader too (turbo-test#164); it carried the loader's internal load-phase prefix
+  (`module errored: ` / `evaluate threw: ` / `instantiate: `), unlike the module runner.
 - A module that only re-exports (`export * from`, `export { x } from`) loaded through the
   esbuild transform threw `ReferenceError: __toESM is not defined` (turbo-test#165): its
   `__reExport` called a helper esbuild had not emitted. It calls runtime.js `__ttToESM` now.

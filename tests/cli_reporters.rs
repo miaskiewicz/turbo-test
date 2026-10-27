@@ -40,7 +40,7 @@ const FOOTER: &str =
 fn default_text_reporter_and_unknown_fallback() {
     let p = fixture("rep-default");
     let lines = format!(
-        "FAIL  {}  (1 passed, 1 failed)\n        ✗ breaks: expected 'x' to be 'y' // Object.is equality\nPASS  {}  (1 passed, 0 failed)\nERROR {}  (module errored: Error: top <boom>)\n",
+        "FAIL  {}  (1 passed, 1 failed)\n        ✗ breaks: expected 'x' to be 'y' // Object.is equality\nPASS  {}  (1 passed, 0 failed)\nERROR {}  (Error: top <boom>)\n",
         String::from("a.test.ts"),
         String::from("b.test.ts"),
         String::from("c.test.ts")
@@ -415,7 +415,7 @@ fn output_file_artifacts() {
     );
     assert!(
         txt.ends_with(&format!(
-            "ERROR {}  (module errored: Error: top <boom>)\n",
+            "ERROR {}  (Error: top <boom>)\n",
             String::from("c.test.ts")
         )),
         "{txt}"
