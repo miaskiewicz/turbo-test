@@ -154,7 +154,6 @@ fn esm_graph_import_meta_has_filename_and_dirname() {
 /// 4.1.12 on the same project: all 7 pass (its `import.meta.env` reads and writes
 /// `process.env`, with `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` set there).
 #[test]
-#[ignore = "turbo-test#123: fails until the fix"]
 fn import_meta_works_on_every_loader_path() {
     let files: [(&str, &str); 10] = [
         ("package.json", "{\"name\":\"rc-meta-paths\",\"type\":\"module\"}\n"),

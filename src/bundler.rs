@@ -204,6 +204,8 @@ fn bundle_capped(entry: &Path, max_modules: usize) -> Option<String> {
                 let ctx = LowerCtx {
                     exports_obj: "__tt_exports".to_string(),
                     resolve: Some(&resolve),
+                    // the bundle runs in the entry's wrapper: each module names its own path
+                    module_path: Some(order[idx].to_string_lossy().into_owned()),
                 };
                 let parts = esm_cjs::transform_to_parts(js, &ctx)?;
                 if parts.has_module_syntax {

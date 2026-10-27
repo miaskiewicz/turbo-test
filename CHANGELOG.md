@@ -6,6 +6,20 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 ## [Unreleased]
 
 ### Fixed
+- A project with no `node_modules/.bin/esbuild` — pnpm, whose transitive esbuild lives only under
+  `node_modules/.pnpm`, or one that does not depend on esbuild — now runs on turbo-test's own
+  esbuild (PR #80 by alphajew420, turbo-test#79): `cli.js` passes it as `TURBO_ESBUILD`, every
+  esbuild call site goes through one `esbuild_bin(root)` (the project's own first), and the
+  project root falls back to the nearest directory with `node_modules`. Such projects took the
+  ESM-graph loader, where `vi.spyOn` on a module's export was not seen by the module importing
+  it (vitest: it is).
+- `import.meta` on every loader path (turbo-test#123): the native CJS emitter and dep bundler
+  left `import.meta` in CommonJS output (`Cannot use 'import.meta' outside a module` when the
+  esbuild retry was unavailable or failed; an empty object when it ran), esbuild dep bundles
+  gave an empty object, and no path had `import.meta.env`. Each module now gets its own
+  `url` / `filename` / `dirname` plus vitest's `env` (live `process.env`, `DEV` / `PROD` / `SSR`
+  booleans), and `process.env` carries vite's `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` (`SSR`
+  off under a `jsdom` / `happy-dom` environment), as vitest sets them.
 - Config discovery (turbo-test#43 item 1): `setupFiles` are read from every config file vitest
   resolves, in its order (`vitest.config` then `vite.config`, each `.ts .mts .cts .js .mjs
   .cjs`); `vitest.config.{cts,mjs,cjs}` and `vite.config.{mts,cts,js,mjs,cjs}` were ignored and
