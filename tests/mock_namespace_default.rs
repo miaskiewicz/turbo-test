@@ -57,7 +57,6 @@ fn mock_namespace_default_throws_on_the_module_runner() {
 }
 
 #[test]
-#[ignore = "turbo-test#158: fails until the fix"]
 fn mock_namespace_default_throws_on_the_esm_graph_loader() {
     assert_passes(&project("mock-ns-default-graph", false));
 }

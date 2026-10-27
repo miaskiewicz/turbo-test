@@ -6096,7 +6096,20 @@ fn dynamic_import<'s>(
                 let reg = r.borrow();
                 !reg.mocks.contains_key(&abs) && reg.esm_by_path.contains_key(&abs)
             });
+        // a vi.mock factory's without `default`: the mock itself, whose `default` throws
+        // vitest's error on every read (turbo-test#158)
+        let guarded = REGISTRY
+            .with(|r| {
+                let reg = r.borrow();
+                reg.mocks
+                    .contains_key(&abs)
+                    .then(|| reg.cjs_exports.get(&abs).cloned())
+                    .flatten()
+            })
+            .map(|g| v8::Local::new(scope, &g))
+            .filter(|m| mock_guarded(scope, *m));
         let ns = match cjs {
+            _ if guarded.is_some() => guarded?,
             Some(g) => {
                 let exports = v8::Local::new(scope, &g);
                 variant_view(scope, exports, Variant::Ns)?
@@ -6131,6 +6144,19 @@ fn dynamic_import<'s>(
         }
     }
     Some(promise)
+}
+
+/// Whether the registered mock `m` is a vi.mock factory's without `default` (runtime.js
+/// `__ttMockGuarded`).
+fn mock_guarded(scope: &mut v8::PinScope, m: v8::Local<v8::Value>) -> bool {
+    let global = scope.get_current_context().global(scope);
+    let f = v8::String::new(scope, "__ttMockGuarded")
+        .and_then(|k| global.get(scope, k.into()))
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok());
+    let Some(f) = f else { return false };
+    let undefined = v8::undefined(scope).into();
+    f.call(scope, undefined, &[m])
+        .is_some_and(|v| v.boolean_value(scope))
 }
 
 /// A function returning its data value (the namespace a dynamic import settles with).
