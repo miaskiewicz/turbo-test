@@ -720,6 +720,51 @@ fn junit_failures_print_as_vitest_prints_them() {
     }
 }
 
+/// turbo-test#110: a frame at a call of an imported function that does not start its statement
+/// (`const v = boom()`, an arrow's body, an object value, an array element, inside another app
+/// module) points at the callee as in vitest 4.1.12, on both loaders; the native ESM->CJS emitter
+/// rewrote the callee to `import_h.boom` without a source position, so the frame mapped to an
+/// earlier token. `tests/data/junit-call-frames-vitest-4.1.12.xml` is vitest's report.
+#[test]
+#[ignore = "turbo-test#110: fails until the fix"]
+fn junit_frames_at_imported_calls_are_vitests() {
+    for esbuild in [false, true] {
+        let p = Project::new("rep-junit-call-frames");
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", "{\"type\":\"module\"}\n");
+        p.file(
+            "h.ts",
+            "export function boom() { throw new Error('helper boom'); }\n",
+        );
+        p.file(
+            "h2.ts",
+            "import { boom } from './h';\n\
+             export function viaHelper() { const r = boom(); return r; }\n",
+        );
+        p.file(
+            "a.test.ts",
+            "import { it } from 'vitest';\n\
+             import { boom } from './h';\n\
+             import { viaHelper } from './h2';\n\
+             it('x', () => { const v = boom(); return v; });\n\
+             it('y', () => { [1].map(() => boom()); });\n\
+             it('z', () => { const o = { k: boom() }; return o; });\n\
+             it('w', () => { return [1, boom()]; });\n\
+             it('v', () => { const r = viaHelper(); return r; });\n",
+        );
+        let r = turbo_test(&p.dir, &["--reporter", "junit"], &[]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert_eq!(
+            normalize_junit(&r.stdout),
+            include_str!("data/junit-call-frames-vitest-4.1.12.xml"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+    }
+}
+
 /// turbo-test#99: a test file that fails to compile (itself, or a module it imports) fails with
 /// V8's SyntaxError as vitest 4.1.12 reports it (`Failed Suites`, the json `message`, the junit
 /// failing case); turbo-test said `graph load failed` and V8 printed `Uncaught SyntaxError` to
