@@ -172,7 +172,7 @@ fn esm_graph_reuse_reports_load_errors_and_retries_fresh() {
             r.all()
         );
         assert!(
-            line("e-graph.test.js").ends_with("(graph load failed)"),
+            line("e-graph.test.js").ends_with("(SyntaxError: Unexpected token ')')"),
             "{}",
             r.all()
         );
