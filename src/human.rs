@@ -1,5 +1,5 @@
-//! vitest 4.1.12's human reporters as they print to a file or pipe: `default`, `verbose` and
-//! `agent` (turbo-test#94), coloured as vitest colours them (tinyrainbow, `crate::colors`) unless
+//! vitest 4.1.12's human reporters as they print to a file or pipe: `default`, `verbose`,
+//! `agent` (turbo-test#94) and `dot` (turbo-test#100), coloured as vitest colours them (tinyrainbow, `crate::colors`) unless
 //! `NO_COLOR` / `TERM=dumb` / an AI agent turns colours off; code frames are syntax-highlighted
 //! (`crate::highlight`).
 //!
@@ -8,7 +8,8 @@
 //! file (` ✓ a.test.ts (2 tests) 3ms`) and, for a failed file, a line per test indented by its
 //! `describe` depth; `verbose`: a line per test (` ✓ a.test.ts > d > t 1ms`, a failure's messages
 //! under it); `agent`: only failed files and their failed tests, and only failed tasks' console
-//! output — and the footer (Snapshots, Test Files, Tests, Start at, Duration with its breakdown).
+//! output; `dot`: one character per test (`·` passed, `x` failed, `-` skipped or todo) and an
+//! empty line — and the footer (Snapshots, Test Files, Tests, Start at, Duration with its breakdown).
 //! stderr: the `stderr | …` blocks and the Failed Suites / Failed Tests sections, each error
 //! printed with the code frame of its nearest frame and numbered dividers.
 
@@ -25,6 +26,7 @@ pub enum Kind {
     Default,
     Verbose,
     Agent,
+    Dot,
 }
 
 /// The run as the footer reports it.
@@ -89,6 +91,18 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
             }
         }
         match kind {
+            // DotReporter.onTestCaseResult off a TTY: formatTests([state]) for each test, an
+            // empty yellow (pending) run before its icon
+            Kind::Dot => {
+                for t in &r.tests {
+                    out.push_str(&c.yellow(""));
+                    out.push_str(&match t.status.as_str() {
+                        "passed" => c.green("·"),
+                        "failed" => c.red("x"),
+                        _ => c.dim(&c.gray("-")),
+                    });
+                }
+            }
             Kind::Verbose => {
                 for t in &r.tests {
                     let path = test_path(t).split(" > ").collect::<Vec<_>>().join(&sep);
@@ -132,6 +146,10 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
         }
     }
     err.push_str(&errors_summary(res, run));
+    if kind == Kind::Dot {
+        // DotReporter.onTestRunEnd off a TTY: logger.log()
+        out.push('\n');
+    }
     // reportTestSummary: padSummaryTitle(title) = c.dim(`${title.padStart(11)} `), then a space
     let title = |t: &str| c.dim(&format!("{t:>11} "));
     out.push('\n');

@@ -468,7 +468,6 @@ fn coloured_output_is_vitests() {
 /// the default reporter's Failed Suites / Failed Tests sections on stderr. Every scenario, plain
 /// (`NO_COLOR`, `tests/data/dot`) and coloured (`tests/data/dot-color`), on both loaders.
 #[test]
-#[ignore = "turbo-test#100: fails until the fix"]
 fn dot_reporter_prints_what_vitest_prints() {
     let all = SCENARIOS
         .iter()

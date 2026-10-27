@@ -1034,17 +1034,16 @@ fn vitests_human_reporter_kinds() {
         kind(Reporter::Verbose, false, false, true),
         Some(Kind::Verbose)
     );
-    for r in [
-        Reporter::Dot,
-        Reporter::Json,
-        Reporter::Junit,
-        Reporter::Tap,
-    ] {
+    // vitest's DotReporter (turbo-test#100), with or without an agent
+    assert_eq!(kind(Reporter::Dot, true, false, false), Some(Kind::Dot));
+    assert_eq!(kind(Reporter::Dot, true, false, true), Some(Kind::Dot));
+    for r in [Reporter::Json, Reporter::Junit, Reporter::Tap] {
         assert_eq!(kind(r, true, false, false), None, "{r:?}");
     }
     // TURBO_LEGACY_REPORTER: turbo-test's own lines for every reporter
     assert_eq!(kind(Reporter::Default, false, true, true), None);
     assert_eq!(kind(Reporter::Verbose, true, true, false), None);
+    assert_eq!(kind(Reporter::Dot, true, true, false), None);
 }
 
 #[test]

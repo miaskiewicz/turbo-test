@@ -711,7 +711,7 @@ pub fn tally(res: &[FileResult]) -> Totals {
     t
 }
 
-/// The human reporters' per-file stdout (default: PASS/FAIL lines; dot: one char per file + a
+/// The legacy human reporters' (`TURBO_LEGACY_REPORTER=1`) per-file stdout (default: PASS/FAIL lines; dot: one char per file + a
 /// newline; verbose: PASS/FAIL line + one `✓/✗/- name (Nms)` line per test). Empty for artifacts.
 pub fn render_human(reporter: Reporter, res: &[FileResult]) -> String {
     let mut out = String::new();
@@ -1213,7 +1213,7 @@ pub fn render_artifact(
     }
 }
 
-/// The vitest human reporter for this run (`None`: an artifact reporter, `dot`, or
+/// The vitest human reporter for this run (`None`: an artifact reporter, or
 /// `TURBO_LEGACY_REPORTER` set to anything but `0` — turbo-test's own PASS / FAIL lines).
 pub fn human_kind(reporter: Reporter, explicit: bool) -> Option<crate::human::Kind> {
     let legacy = std::env::var("TURBO_LEGACY_REPORTER").is_ok_and(|v| !v.is_empty() && v != "0");
@@ -1232,6 +1232,7 @@ pub fn human_kind_for(
     match reporter {
         _ if legacy => None,
         Reporter::Verbose => Some(Kind::Verbose),
+        Reporter::Dot => Some(Kind::Dot),
         Reporter::Default if agent && !explicit => Some(Kind::Agent),
         Reporter::Default => Some(Kind::Default),
         _ => None,
