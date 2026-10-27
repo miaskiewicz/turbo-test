@@ -976,41 +976,117 @@ if (typeof globalThis.btoa === 'undefined') {
   globalThis.btoa = (s) => { const str = String(s); const b = new Array(str.length); for (let i = 0; i < str.length; i++) b[i] = str.charCodeAt(i) & 255; return globalThis.__b64encodeBytes(b); };
   globalThis.atob = (s) => String.fromCharCode.apply(null, globalThis.__b64decodeToBytes(s));
 }
+// FileReader as jsdom's (turbo-test#132, #139): a read reads the Blob's bytes, sets readyState
+// LOADING at once, then (asynchronously) fires loadstart, progress (a non-empty Blob), load and
+// loadend; abort() while LOADING fires abort and loadend instead. Listeners are kept in order
+// (addEventListener deduplicated, on<type> handlers holding the slot of their first set).
 if (typeof globalThis.FileReader === 'undefined') {
+  const EVENTS = ['loadstart', 'progress', 'load', 'abort', 'error', 'loadend'];
+  const invalidState = () => {
+    const e = new globalThis.DOMException('The object is in an invalid state.', 'InvalidStateError');
+    Object.defineProperty(e, 'code', { value: 11, configurable: true });
+    return e;
+  };
+  // the encoding readAsText decodes with: a UTF-8 / UTF-16 BOM wins, then the label, then UTF-8
+  const textOf = (b, label) => {
+    let enc = 'utf-8';
+    if (b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf) enc = 'utf-8';
+    else if (b[0] === 0xff && b[1] === 0xfe) enc = 'utf-16le';
+    else if (b[0] === 0xfe && b[1] === 0xff) enc = 'utf-16be';
+    else if (label !== undefined) { try { enc = new globalThis.TextDecoder(String(label)).encoding; } catch {} }
+    return new globalThis.TextDecoder(enc).decode(b);
+  };
   globalThis.FileReader = class FileReader {
-    constructor() { this.result = null; this.error = null; this.readyState = 0; this.onload = null; this.onerror = null; this.onloadend = null; this.onabort = null; }
-    _emit(name, ev) { if (typeof this['on' + name] === 'function') this['on' + name](ev); }
-    _read(blob, kind) {
+    #listeners = Object.create(null); // type -> [{ fn }] (an on<type> handler's entry has `on: true`)
+    #gen = 0;                          // bumped by every read and abort; a stale read stops
+    constructor() { this.result = null; this.error = null; this.readyState = 0; }
+    addEventListener(type, fn) {
+      if (fn == null) return;
+      const list = this.#listeners[type] || (this.#listeners[type] = []);
+      if (!list.some((l) => !l.on && l.fn === fn)) list.push({ fn });
+    }
+    removeEventListener(type, fn) {
+      const list = this.#listeners[type];
+      if (list) this.#listeners[type] = list.filter((l) => l.on || l.fn !== fn);
+    }
+    dispatchEvent(ev) {
+      for (const l of (this.#listeners[ev.type] || []).slice()) {
+        try {
+          if (typeof l.fn === 'function') l.fn.call(this, ev);
+          else if (l.fn && typeof l.fn.handleEvent === 'function') l.fn.handleEvent(ev);
+        } catch (e) { console.error(e); } // reported, as jsdom's virtual console does
+      }
+      return !ev.defaultPrevented;
+    }
+    #handler(type) { const l = (this.#listeners[type] || []).find((x) => x.on); return l ? l.fn : null; }
+    #setHandler(type, fn) {
+      const list = this.#listeners[type] || (this.#listeners[type] = []);
+      const at = list.findIndex((x) => x.on);
+      if (typeof fn !== 'function' && (fn === null || typeof fn !== 'object')) { if (at >= 0) list.splice(at, 1); return; }
+      if (at >= 0) list[at].fn = fn; else list.push({ fn, on: true });
+    }
+    #fire(type, loaded = 0, total = 0, lengthComputable = false) {
+      const ev = new globalThis.Event(type);
+      for (const [k, v] of [['target', this], ['currentTarget', this], ['loaded', loaded], ['total', total], ['lengthComputable', lengthComputable]])
+        Object.defineProperty(ev, k, { value: v, configurable: true, enumerable: true });
+      this.dispatchEvent(ev);
+    }
+    #read(blob, kind, label) {
+      if (blob === null || typeof blob !== 'object' || typeof blob.arrayBuffer !== 'function')
+        throw new TypeError(`Failed to execute '${kind}' on 'FileReader': parameter 1 is not of type 'Blob'.`);
+      if (this.readyState === 1) throw invalidState();
+      const gen = ++this.#gen;
+      this.readyState = 1;
+      this.result = null;
+      this.error = null;
       Promise.resolve().then(async () => {
+        let bytes;
         try {
           // the Blob's bytes, not char codes of its decoded text (turbo-test#132)
-          const bytes = async () => {
-            if (blob && typeof blob.bytes === 'function') return blob.bytes();
-            if (blob && typeof blob.arrayBuffer === 'function') return new Uint8Array(await blob.arrayBuffer());
-            return new globalThis.TextEncoder().encode(blob && blob.text ? await blob.text() : '');
-          };
-          if (kind === 'data') this.result = 'data:' + ((blob && blob.type) || 'application/octet-stream') + ';base64,' + globalThis.__b64encodeBytes(await bytes());
-          else if (kind === 'buffer') this.result = (await bytes()).slice().buffer;
-          else if (kind === 'binary') { const b = await bytes(); let s = ''; for (let i = 0; i < b.length; i += 8192) s += String.fromCharCode.apply(null, b.subarray(i, i + 8192)); this.result = s; }
-          else this.result = blob && blob.text ? await blob.text() : '';
-          this.readyState = 2;
-          const ev = { target: this };
-          this._emit('load', ev); this._emit('loadend', ev);
+          bytes = typeof blob.bytes === 'function' ? await blob.bytes() : new Uint8Array(await blob.arrayBuffer());
         } catch (e) {
-          this.error = e; this.readyState = 2;
-          const ev = { target: this };
-          this._emit('error', ev); this._emit('loadend', ev);
+          if (gen !== this.#gen) return;
+          this.readyState = 2; this.error = e;
+          this.#fire('loadstart'); this.#fire('error'); this.#fire('loadend');
+          return;
         }
+        if (gen !== this.#gen) return;
+        this.#fire('loadstart');
+        if (gen !== this.#gen) return;
+        if (bytes.length) { this.#fire('progress', bytes.length, bytes.length, true); if (gen !== this.#gen) return; }
+        if (kind === 'readAsDataURL') this.result = 'data:' + (blob.type || 'application/octet-stream') + ';base64,' + globalThis.__b64encodeBytes(bytes);
+        else if (kind === 'readAsArrayBuffer') this.result = bytes.slice().buffer;
+        else if (kind === 'readAsBinaryString') { let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)); this.result = s; }
+        else this.result = textOf(bytes, label);
+        this.readyState = 2;
+        this.#fire('load');
+        this.#fire('loadend');
       });
     }
-    readAsDataURL(b) { this._read(b, 'data'); }
-    readAsText(b) { this._read(b, 'text'); }
-    readAsArrayBuffer(b) { this._read(b, 'buffer'); }
-    readAsBinaryString(b) { this._read(b, 'binary'); }
-    addEventListener(n, f) { this['on' + n] = f; }
-    removeEventListener(n) { this['on' + n] = null; }
-    abort() { this._emit('abort', { target: this }); }
+    readAsArrayBuffer(blob) { this.#read(blob, 'readAsArrayBuffer'); }
+    readAsBinaryString(blob) { this.#read(blob, 'readAsBinaryString'); }
+    readAsDataURL(blob) { this.#read(blob, 'readAsDataURL'); }
+    readAsText(blob, encoding = undefined) { this.#read(blob, 'readAsText', encoding); }
+    abort() {
+      if (this.readyState === 0 || this.readyState === 2) { this.result = null; return; }
+      this.#gen++;
+      this.readyState = 2;
+      this.result = null;
+      this.#fire('abort');
+      this.#fire('loadend');
+    }
+    static #accessors = (() => {
+      for (const type of EVENTS) Object.defineProperty(FileReader.prototype, 'on' + type, {
+        get() { return this.#handler(type); },
+        set(fn) { this.#setHandler(type, fn); },
+        configurable: true, enumerable: true,
+      });
+    })();
   };
+  ['EMPTY', 'LOADING', 'DONE'].forEach((k, i) => {
+    Object.defineProperty(globalThis.FileReader, k, { value: i, enumerable: true });
+    Object.defineProperty(globalThis.FileReader.prototype, k, { value: i, enumerable: true });
+  });
 }
 // turbo-dom's installGlobals replaces Blob/File with SoA-backed versions whose .text()/byte
 // reads return zero-filled content. Capture our working implementations so the DOM bootstrap
@@ -1526,6 +1602,11 @@ if (typeof globalThis.EventTarget === 'undefined') {
       return !ev.defaultPrevented;
     }
   };
+}
+// FileReader is defined above EventTarget; make it one (turbo-test#139)
+if (globalThis.FileReader && !(globalThis.FileReader.prototype instanceof globalThis.EventTarget)) {
+  Object.setPrototypeOf(globalThis.FileReader.prototype, globalThis.EventTarget.prototype);
+  Object.setPrototypeOf(globalThis.FileReader, globalThis.EventTarget);
 }
 if (typeof globalThis.Event === 'undefined') {
   globalThis.Event = class Event {
@@ -3356,7 +3437,7 @@ function __snapFinish(skipped) {
 }
 
 // ---- expect ----
-function makeExpect(actual, negated = false) {
+function makeExpect(actual, negated = false, message = undefined) {
   // `msg` is a thunk: the failure message (and the formatting of the operands in it) is built
   // only when the assertion fails, as vitest does — formatting can throw (a native class
   // prototype whose members check their receiver) and must not fail a passing assertion.
@@ -3375,7 +3456,7 @@ function makeExpect(actual, negated = false) {
   };
   const argsEqual = (a, b) => a.length === b.length && a.every((x, i) => deepEqual(x, b[i]));
   const api = {
-    get not() { return makeExpect(actual, !negated); },
+    get not() { return makeExpect(actual, !negated, message); },
     toBeTypeOf(t) { c(typeof actual === t, 'expected #{this} to be type of #{exp}', 'expected #{this} not to be type of #{exp}', t, typeof actual); },
     // a jest-style matcher in vitest: a plain Error with its matcher hint
     toSatisfy(fn, message) {
@@ -3400,7 +3481,7 @@ function makeExpect(actual, negated = false) {
       const mk = (neg) => new Proxy({}, { get: (_, m) => {
         if (m === 'not') return mk(!neg);
         return (...args) => Promise.resolve(actual).then(
-          (v) => makeExpect(v, neg)[m](...args),
+          (v) => makeExpect(v, neg, message)[m](...args),
           (e) => { const err = new __ChaiAssertionError(`promise rejected "${__inspect(e)}" instead of resolving`, { showDiff: false }); err.cause = e; throw err; },
         );
       } });
@@ -3412,7 +3493,7 @@ function makeExpect(actual, negated = false) {
         return (...args) => Promise.resolve(actual).then(
           (v) => { throw new __ChaiAssertionError(`promise resolved "${__inspect(v)}" instead of rejecting`, { actual: v, expected: new Error('rejected promise') }); },
           // `.rejects.toThrow()` checks the rejection as a thrown error (vitest wraps it in a thrower)
-          (e) => (m === 'toThrow' || m === 'toThrowError' ? makeExpect(() => { throw e; }, neg) : makeExpect(e, neg))[m](...args),
+          (e) => (m === 'toThrow' || m === 'toThrowError' ? makeExpect(() => { throw e; }, neg, message) : makeExpect(e, neg, message))[m](...args),
         );
       } });
       return mk(negated);
@@ -3695,7 +3776,32 @@ function makeExpect(actual, negated = false) {
       return api;
     };
   }
+  // expect(value, message): vitest prefixes `message: ` to a matcher's failure (turbo-test#138)
+  if (message) {
+    for (const name of Object.keys(api)) {
+      const d = Object.getOwnPropertyDescriptor(api, name);
+      if (typeof d.value !== 'function') continue;
+      const matcher = d.value;
+      api[name] = (...args) => {
+        let r;
+        try { r = matcher(...args); } catch (e) { throw __withExpectMessage(e, message); }
+        return r && typeof r.then === 'function' ? r.then(undefined, (e) => { throw __withExpectMessage(e, message); }) : r;
+      };
+    }
+  }
   return api;
+}
+// `message: ` before the message (and the stack's first line) of an assertion failure: chai's
+// AssertionError or a jest-style matcher's plain Error, once; any other error (a TypeError from
+// a non-spy, ...) passes through
+const __prefixedErrors = new WeakSet();
+function __withExpectMessage(e, message) {
+  if (!(e instanceof __ChaiAssertionError || (e instanceof Error && e.constructor === Error)) || __prefixedErrors.has(e)) return e;
+  __prefixedErrors.add(e);
+  const before = `${e.name}: ${e.message}`;
+  e.message = `${message}: ${e.message}`;
+  if (typeof e.stack === 'string' && e.stack.startsWith(before)) e.stack = `${e.name}: ${e.message}` + e.stack.slice(before.length);
+  return e;
 }
 const __matcherUtils = {
   printReceived: (x) => fmt(x),
@@ -3713,7 +3819,7 @@ const __matcherUtils = {
   highlightTrailingWhitespace: (s) => s,
 };
 const __customMatchers = {};
-globalThis.expect = (actual) => { __snap.assertCount++; return makeExpect(actual); };
+globalThis.expect = (actual, message) => { __snap.assertCount++; return makeExpect(actual, false, message); };
 globalThis.expect.extend = (matchers) => { Object.assign(__customMatchers, matchers || {}); };
 // expect.assertions(n) / expect.hasAssertions(): record the expectation; runSuite verifies the
 // count at test end (see __snap.assertCount, reset per test). These calls do NOT count themselves.
@@ -3724,7 +3830,7 @@ globalThis.expect.hasAssertions = function hasAssertions() {
   if (Error.captureStackTrace) Error.captureStackTrace(error, hasAssertions);
   __snap.hasAssertions = error;
 };
-globalThis.expect.soft = (actual) => { __snap.assertCount++; return makeExpect(actual); };
+globalThis.expect.soft = (actual, message) => { __snap.assertCount++; return makeExpect(actual, false, message); };
 globalThis.expect.any = (ctor) => new Asymmetric('any', ctor);
 globalThis.expect.anything = () => new Asymmetric('anything');
 globalThis.expect.objectContaining = (s) => new Asymmetric('objectContaining', s);

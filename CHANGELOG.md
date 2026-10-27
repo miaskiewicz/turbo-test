@@ -360,6 +360,19 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   Every other label threw RangeError `ERR_ENCODING_NOT_SUPPORTED`. Node's ICU big5 / euc-jp /
   euc-kr / shift_jis decoders differ from the Encoding Standard on some bytes; turbo-test follows
   the standard there (vitest.compat.md).
+- `expect(value, message)` keeps its message (turbo-test#138): a failing matcher's error (chai
+  AssertionError or a jest-style / `expect.extend` matcher's Error, also through `.not`,
+  `.resolves` / `.rejects` and `expect.soft`) starts with `message: `, as vitest's
+  (`GOT<x>: expected 1 to be 2 // Object.is equality`); it was dropped from the error, the
+  default reporter and the json reporter's `failureMessages`.
+- `FileReader` behaves as jsdom's (turbo-test#139): a read sets `readyState` LOADING at once and
+  fires `loadstart`, `progress` (with `loaded` / `total`), `load` and `loadend` (only `load` /
+  `loadend` fired); `addEventListener` keeps every listener (it replaced `on<type>`) and
+  `removeEventListener` removes the given one; `on<type>` handlers hold their slot;
+  `readAsText(blob, encoding)` decodes with the label after BOM sniffing (it always used UTF-8);
+  `abort()` while LOADING cancels the read and fires `abort` / `loadend`; a read while LOADING
+  throws `InvalidStateError`, a non-Blob argument TypeError; `EMPTY` / `LOADING` / `DONE` exist
+  and a FileReader is an `EventTarget`.
 - `FileReader` reads the Blob's bytes (turbo-test#132): `readAsArrayBuffer` and `readAsDataURL`
   took char codes of the decoded text (`'€'` read as `[0xAC]`, now `[0xE2, 0x82, 0xAC]`; binary
   that is not UTF-8 was mangled), and `readAsBinaryString` exists, as in jsdom / happy-dom.
