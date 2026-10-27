@@ -741,5 +741,357 @@
    "name": "TypeError",
    "message": "message is not a function"
   }
+ ],
+ "eq": [
+  {
+   "label": "dates",
+   "name": "AssertionError",
+   "message": "expected 1970-01-01T00:00:00.001Z to deeply equal 1970-01-01T00:00:00.002Z"
+  },
+  {
+   "label": "maps",
+   "name": "AssertionError",
+   "message": "expected Map{ 1 => 2 } to deeply equal Map{ 1 => 3 }"
+  },
+  {
+   "label": "sets",
+   "name": "AssertionError",
+   "message": "expected Set{ 1 } to deeply equal Set{ 2 }"
+  },
+  {
+   "label": "regex",
+   "name": "AssertionError",
+   "message": "expected /a/ to deeply equal /b/"
+  },
+  {
+   "label": "regex flags",
+   "name": "AssertionError",
+   "message": "expected /a/g to deeply equal /a/i"
+  },
+  {
+   "label": "boxed",
+   "name": "AssertionError",
+   "message": "expected 1 to deeply equal 2"
+  },
+  {
+   "label": "boxed string",
+   "name": "AssertionError",
+   "message": "expected 'a' to deeply equal 'b'"
+  },
+  {
+   "label": "boxed vs primitive",
+   "name": "AssertionError",
+   "message": "expected 1 to deeply equal 1"
+  },
+  {
+   "label": "array extra props",
+   "name": "AssertionError",
+   "message": "expected [ 1, x: 1 ] to deeply equal [ 1 ]"
+  },
+  {
+   "label": "symbol keys",
+   "name": "AssertionError",
+   "message": "expected { [Symbol(s)]: 1 } to deeply equal { [Symbol(s)]: 2 }"
+  },
+  {
+   "label": "symbol key missing",
+   "name": "AssertionError",
+   "message": "expected { [Symbol(s)]: 1 } to deeply equal {}"
+  },
+  {
+   "label": "symbol key undefined",
+   "name": "AssertionError",
+   "message": "expected { [Symbol(s)]: undefined } to deeply equal {}"
+  },
+  {
+   "label": "errors",
+   "name": "AssertionError",
+   "message": "expected Error: a to deeply equal Error: b"
+  },
+  {
+   "label": "errors name",
+   "name": "AssertionError",
+   "message": "expected TypeError: a to deeply equal Error: a"
+  },
+  {
+   "label": "errors cause",
+   "name": "AssertionError",
+   "message": "expected Error: a to deeply equal Error: a"
+  },
+  {
+   "label": "errors props",
+   "name": "AssertionError",
+   "message": "expected Error: a { code: 1 } to deeply equal Error: a"
+  },
+  {
+   "label": "error vs object",
+   "name": "AssertionError",
+   "message": "expected Error: a to deeply equal { message: 'a' }"
+  },
+  {
+   "label": "date vs object",
+   "name": "AssertionError",
+   "message": "expected 1970-01-01T00:00:00.001Z to deeply equal {}"
+  },
+  {
+   "label": "map size",
+   "name": "AssertionError",
+   "message": "expected Map{ 1 => 2 } to deeply equal Map{}"
+  },
+  {
+   "label": "set vs array",
+   "name": "AssertionError",
+   "message": "expected Set{ 1 } to deeply equal [ 1 ]"
+  },
+  {
+   "label": "map vs object",
+   "name": "AssertionError",
+   "message": "expected Map{} to deeply equal {}"
+  },
+  {
+   "label": "typed arrays",
+   "name": "AssertionError",
+   "message": "expected Uint8Array[ 1 ] to deeply equal Uint8Array[ 2 ]"
+  },
+  {
+   "label": "typed array kinds",
+   "name": "AssertionError",
+   "message": "expected Uint8Array[ 1 ] to deeply equal Int8Array[ 1 ]"
+  },
+  {
+   "label": "zero",
+   "name": "AssertionError",
+   "message": "expected +0 to deeply equal -0"
+  },
+  {
+   "label": "object zero",
+   "name": "AssertionError",
+   "message": "expected { a: +0 } to deeply equal { a: -0 }"
+  },
+  {
+   "label": "functions",
+   "name": "AssertionError",
+   "message": "expected [Function] to deeply equal [Function]"
+  },
+  {
+   "label": "urls",
+   "passed": true
+  },
+  {
+   "label": "circular differ",
+   "name": "AssertionError",
+   "message": "expected { x: 1, self: [Circular] } to deeply equal { x: 2, self: [Circular] }"
+  },
+  {
+   "label": "custom iterables differ",
+   "name": "AssertionError",
+   "message": "expected { …(1) } to deeply equal { …(1) }"
+  },
+  {
+   "label": "array vs array-like",
+   "name": "AssertionError",
+   "message": "expected [ 1 ] to deeply equal { '0': 1 }"
+  },
+  {
+   "label": "sparse strict",
+   "name": "AssertionError",
+   "message": "expected [ undefined, 1 ] to strictly equal [ undefined, 1 ]"
+  },
+  {
+   "label": "null prototype strict",
+   "name": "AssertionError",
+   "message": "expected { a: 1 } to strictly equal { a: 1 }"
+  },
+  {
+   "label": "error subclass strict",
+   "name": "AssertionError",
+   "message": "expected Error: a to strictly equal Error: a"
+  },
+  {
+   "label": "typed array kinds strict",
+   "name": "AssertionError",
+   "message": "expected Uint8Array[ 1 ] to strictly equal Int8Array[ 1 ]"
+  },
+  {
+   "label": "zero strict",
+   "name": "AssertionError",
+   "message": "expected +0 to strictly equal -0"
+  },
+  {
+   "label": "not.toEqual dates",
+   "name": "AssertionError",
+   "message": "expected 1970-01-01T00:00:00.001Z to not deeply equal 1970-01-01T00:00:00.001Z"
+  },
+  {
+   "label": "not.toStrictEqual maps",
+   "name": "AssertionError",
+   "message": "expected Map{ 1 => 2 } to not strictly equal Map{ 1 => 2 }"
+  },
+  {
+   "label": "calledWith date",
+   "name": "AssertionError",
+   "message": "expected \"vi.fn()\" to be called with arguments: [ 1970-01-01T00:00:00.002Z, …(1) ]\n\nReceived:\n\n  1st vi.fn() call:\n\n  [\n-   1970-01-01T00:00:00.002Z,\n+   1970-01-01T00:00:00.001Z,\n    Map {\n      1 => 2,\n    },\n  ]\n\n\nNumber of calls: 1\n"
+  },
+  {
+   "label": "calledWith map",
+   "name": "AssertionError",
+   "message": "expected \"vi.fn()\" to be called with arguments: [ 1970-01-01T00:00:00.001Z, …(1) ]\n\nReceived:\n\n  1st vi.fn() call:\n\n  [\n    1970-01-01T00:00:00.001Z,\n    Map {\n-     1 => 3,\n+     1 => 2,\n    },\n  ]\n\n\nNumber of calls: 1\n"
+  },
+  {
+   "label": "returnedWith error",
+   "name": "AssertionError",
+   "message": "expected \"vi.fn()\" to return with: Error: b at least once\n\nReceived:\n\n  1st vi.fn() call return:\n\n  Error {\n-   \"message\": \"b\",\n+   \"message\": \"a\",\n  }\n\n\nNumber of calls: 1\n"
+  },
+  {
+   "label": "objectContaining date",
+   "name": "AssertionError",
+   "message": "expected { d: 1970-01-01T00:00:00.001Z } to deeply equal ObjectContaining{…}"
+  },
+  {
+   "label": "objectContaining symbol",
+   "name": "AssertionError",
+   "message": "expected { [Symbol(s)]: 1 } to deeply equal ObjectContaining {Symbol(s): 2}"
+  },
+  {
+   "label": "arrayContaining regex",
+   "name": "AssertionError",
+   "message": "expected [ /a/ ] to deeply equal ArrayContaining [/b/]"
+  },
+  {
+   "label": "toMatchObject date",
+   "name": "AssertionError",
+   "message": "expected { d: 1970-01-01T00:00:00.001Z } to match object { d: 1970-01-01T00:00:00.002Z }"
+  },
+  {
+   "label": "toMatchObject set",
+   "name": "AssertionError",
+   "message": "expected { s: Set{ 1 } } to match object { s: Set{ 2 } }"
+  },
+  {
+   "label": "toContainEqual date",
+   "name": "AssertionError",
+   "message": "expected [ 1970-01-01T00:00:00.001Z ] to deep equally contain 1970-01-01T00:00:00.002Z"
+  },
+  {
+   "label": "toHaveProperty regex",
+   "name": "AssertionError",
+   "message": "expected { r: /a/ } to have property \"r\" with value /b/"
+  },
+  {
+   "label": "eq invalid dates",
+   "passed": true
+  },
+  {
+   "label": "eq dates",
+   "passed": true
+  },
+  {
+   "label": "eq maps order",
+   "passed": true
+  },
+  {
+   "label": "eq maps object keys",
+   "passed": true
+  },
+  {
+   "label": "eq sets objects",
+   "passed": true
+  },
+  {
+   "label": "eq nested",
+   "passed": true
+  },
+  {
+   "label": "eq regex",
+   "passed": true
+  },
+  {
+   "label": "eq boxed",
+   "passed": true
+  },
+  {
+   "label": "eq errors",
+   "passed": true
+  },
+  {
+   "label": "eq error subclass",
+   "passed": true
+  },
+  {
+   "label": "eq symbol keys",
+   "passed": true
+  },
+  {
+   "label": "eq sparse",
+   "passed": true
+  },
+  {
+   "label": "eq undefined key",
+   "passed": true
+  },
+  {
+   "label": "eq asymmetric in map",
+   "passed": true
+  },
+  {
+   "label": "eq asymmetric in set",
+   "passed": true
+  },
+  {
+   "label": "eq circular",
+   "passed": true
+  },
+  {
+   "label": "eq non-enumerable",
+   "passed": true
+  },
+  {
+   "label": "eq class vs object",
+   "passed": true
+  },
+  {
+   "label": "eq typed arrays",
+   "passed": true
+  },
+  {
+   "label": "eq array buffers",
+   "passed": true
+  },
+  {
+   "label": "eq null prototype",
+   "passed": true
+  },
+  {
+   "label": "eq custom iterables",
+   "passed": true
+  },
+  {
+   "label": "eq urls",
+   "passed": true
+  },
+  {
+   "label": "eq NaN",
+   "passed": true
+  },
+  {
+   "label": "eq maps strict",
+   "passed": true
+  },
+  {
+   "label": "eq toContainEqual map",
+   "passed": true
+  },
+  {
+   "label": "eq toHaveProperty set",
+   "passed": true
+  },
+  {
+   "label": "eq toMatchObject date",
+   "passed": true
+  },
+  {
+   "label": "eq calledWith",
+   "passed": true
+  }
  ]
 }

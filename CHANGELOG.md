@@ -286,6 +286,28 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   vitest's does, on the esbuild loader too (turbo-test#110): the native ESM→CJS emitter's
   `import_h.boom` rewrite had no source position, so the frame mapped to an earlier token
   (`a.test.ts:3:23` for vitest's `3:27`).
+- `toEqual` / `toStrictEqual` compare as vitest's `equals` (turbo-test#103): Dates by time,
+  RegExps by source and flags, boxed primitives by value (never equal to the primitive), URLs
+  by href, Sets / Maps by members in any order, other iterables in order, symbol keys, the
+  extra properties of an array, Errors by name / message / cause / properties, DOM nodes by
+  `isEqualNode`, typed arrays by kind, circular structures; `toStrictEqual` also tells a hole
+  from `undefined` and ArrayBuffers by bytes. The matchers on the same comparison use vitest's
+  testers each: the spy matchers as `toEqual`, `toMatchObject` (and snapshot property matchers)
+  with `subsetEquality`, `toContainEqual` / `toHaveProperty` / `toHaveReturnedWith` /
+  `objectContaining` / `arrayContaining` without `iterableEquality`. Only own enumerable string
+  keys were compared, so `new Date(1)` equalled `new Date(2)`, `new Map([[1, 2]])` equalled
+  `new Map([[1, 3]])`, `new Error('a')` equalled `new Error('b')`.
+- A test file whose static import does not resolve, or whose JavaScript does not parse, fails
+  with vitest's error (turbo-test#108): `Cannot find module './x.mjs' imported from <importer>`
+  (`Cannot find package 'p' imported from …` for a bare specifier, `No such built-in module`
+  for an unknown `node:` one) on both loader paths — a `require()` the source wrote keeps
+  Node's `MODULE_NOT_FOUND` with the require stack —, and for a `.js` / `.mjs` / `.cjs` module
+  vite's parse errors: its import analysis's (`Failed to parse source for import analysis …`)
+  when es-module-lexer rejects the source, else rolldown's `RolldownError: Parse failure: Parse
+  failed with 1 error: …` with the code frame and `At file: /syn.mjs:1:13`; a `require()`d
+  module and a node_modules dependency keep V8's SyntaxError, as Node gives it to vitest.
+  turbo-test said `graph load failed` (printing `cannot resolve …` to stderr three times) and
+  V8's SyntaxError.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain
