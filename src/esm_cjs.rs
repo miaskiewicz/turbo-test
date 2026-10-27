@@ -32,7 +32,7 @@ use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder, SymbolId};
-use oxc_span::{SourceType, SPAN};
+use oxc_span::{SourceType, Span, SPAN};
 use oxc_transformer::{HelperLoaderMode, TransformOptions, Transformer};
 
 /// Whether the native ESM→CJS emitter is enabled for app files. **Default ON** (P2a cutover): the
@@ -176,24 +176,26 @@ impl<'a> EmitState<'a, '_> {
     }
 
     /// `var.prop`, or `var["prop"]` when `prop` (a string-named import such as `"a-b"`) is not an
-    /// identifier name.
-    fn build_member(&self, access: &Access) -> Expression<'a> {
+    /// identifier name. Every node carries `span`, the replaced identifier's: the source map then
+    /// maps the rewritten reference — and V8's position of a call of it, the property — back to
+    /// the identifier (turbo-test#110).
+    fn build_member(&self, access: &Access, span: Span) -> Expression<'a> {
         let obj = self
             .ast
-            .expression_identifier(SPAN, self.ast.ident(&access.var));
+            .expression_identifier(span, self.ast.ident(&access.var));
         if !is_plain_ident(&access.prop) {
             let key = self
                 .ast
-                .expression_string_literal(SPAN, self.ast.str(&access.prop), None);
+                .expression_string_literal(span, self.ast.str(&access.prop), None);
             return Expression::ComputedMemberExpression(
                 self.ast
-                    .alloc_computed_member_expression(SPAN, obj, key, false),
+                    .alloc_computed_member_expression(span, obj, key, false),
             );
         }
         Expression::StaticMemberExpression(self.ast.alloc_static_member_expression(
-            SPAN,
+            span,
             obj,
-            self.ast.identifier_name(SPAN, self.ast.ident(&access.prop)),
+            self.ast.identifier_name(span, self.ast.ident(&access.prop)),
             false,
         ))
     }
@@ -335,7 +337,7 @@ impl<'a> VisitMut<'a> for EmitState<'a, '_> {
     fn visit_expression(&mut self, expr: &mut Expression<'a>) {
         if let Expression::Identifier(id) = expr {
             if let Some(access) = self.access_for_ref(id).cloned() {
-                *expr = self.build_member(&access);
+                *expr = self.build_member(&access, id.span);
                 return;
             }
         }

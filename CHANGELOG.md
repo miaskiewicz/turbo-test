@@ -281,6 +281,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   file whose import of it failed (a different module's apart), as vitest. turbo-test
   said `graph load failed` and V8 printed `Uncaught SyntaxError` to stdout three times, with a
   line number of the transformed code.
+- A failure frame at a call of an imported function that does not start its statement
+  (`const v = boom()`, `() => boom()`, `{ k: boom() }`, `[1, boom()]`) points at the callee, as
+  vitest's does, on the esbuild loader too (turbo-test#110): the native ESM→CJS emitter's
+  `import_h.boom` rewrite had no source position, so the frame mapped to an earlier token
+  (`a.test.ts:3:23` for vitest's `3:27`).
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain

@@ -726,7 +726,6 @@ fn junit_failures_print_as_vitest_prints_them() {
 /// rewrote the callee to `import_h.boom` without a source position, so the frame mapped to an
 /// earlier token. `tests/data/junit-call-frames-vitest-4.1.12.xml` is vitest's report.
 #[test]
-#[ignore = "turbo-test#110: fails until the fix"]
 fn junit_frames_at_imported_calls_are_vitests() {
     for esbuild in [false, true] {
         let p = Project::new("rep-junit-call-frames");
