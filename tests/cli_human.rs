@@ -376,7 +376,6 @@ fn skip_notes_and_annotations_print_what_vitest_prints() {
 /// serialized form) and error properties (`Serialized Error: { … }`, verbose only, a cause's in
 /// every reporter) in the Failed Tests section; s15 is the issue's repro, s17 more values.
 #[test]
-#[ignore = "turbo-test#97: fails until the fix"]
 fn thrown_values_and_error_properties_print_what_vitest_prints() {
     for (scenario, file) in [
         ("s15", include_str!("data/errors/a.test.ts")),

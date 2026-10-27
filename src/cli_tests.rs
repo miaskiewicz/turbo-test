@@ -39,7 +39,7 @@ fn case(name: &str, status: &str, ms: f64, message: &str) -> TestCase {
         failure_messages: if message.is_empty() {
             vec![]
         } else {
-            vec![format!("Error: {message}\n    at x")]
+            vec![Some(format!("Error: {message}\n    at x"))]
         },
         location: None,
         not_run: false,

@@ -622,7 +622,6 @@ fn test_functions_get_vitests_test_context() {
 /// report, on both loaders. The JSON reporter's `failureMessages` are the serialized error's
 /// stack, else its message, else null.
 #[test]
-#[ignore = "turbo-test#97: fails until the fix"]
 fn thrown_values_and_error_properties_print_as_vitest_prints_them() {
     for esbuild in [false, true] {
         let p = Project::new("rep-junit-errors");

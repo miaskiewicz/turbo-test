@@ -4371,18 +4371,112 @@ globalThis.afterAll = (fn) => current.hooks.aa.push(fn);
 // duration (ms) and its failure messages (each error's `stack`, else its `message`, as vitest's
 // JSON reporter) (#63).
 // A failure as vitest's reporters print it (@vitest/utils processError + printErrorInner):
-// name, message, the diff of expected / actual, the stack and the cause (turbo-test#81).
+// name, message, the diff of expected / actual, the stack and the cause (turbo-test#81), and for
+// what is not an Error with a message (turbo-test#97): a thrown primitive is `{ message }`
+// (printed `Unknown Error: <value>`), a value with no message prints as its serialized form
+// (`inspected`), and the serialized error's own properties are vitest's `Serialized Error`
+// (`properties`). `no_name` / `no_message`: the serialized error has no `name` / `message`
+// (junit leaves the `type` / `message` attribute out).
 function __errorInfo(e) {
-  if (e === null || (typeof e !== 'object' && typeof e !== 'function')) {
-    const s = String(e);
-    return { name: '', message: s.split('\n')[0], diff: '', stack: s, cause: null };
-  }
+  const ser = __serializeError(e);
   let diff = '';
-  if (e.showDiff || (e.showDiff === undefined && e.expected !== undefined && e.actual !== undefined)) {
+  if (e !== null && typeof e === 'object' && (e.showDiff || (e.showDiff === undefined && e.expected !== undefined && e.actual !== undefined))) {
     try { diff = __printDiffOrStringify(e.actual, e.expected); } catch (err) { diff = ''; }
   }
-  const cause = e.cause && typeof e.cause === 'object' && 'name' in e.cause ? __errorInfo(e.cause) : null;
-  return { name: String(e.name || 'Unknown Error'), message: e.message === undefined ? '' : String(e.message), diff: diff || '', stack: String(e.stack || ''), cause };
+  const cause = e !== null && typeof e === 'object' && e.cause && typeof e.cause === 'object' && 'name' in e.cause ? __errorInfo(e.cause) : null;
+  // an Error with an empty message keeps the `Name: ` line (vitest prints its serialized form
+  // with its parsed frames, not modelled)
+  const inspected = !ser.message && !(e instanceof Error) ? __nodeInspect(__plainOf({ ...ser, stacks: [] })) : null;
+  const props = __errorProperties(ser);
+  return {
+    name: ser.name ? String(ser.name) : 'Unknown Error',
+    message: ser.message === undefined ? '' : String(ser.message),
+    no_name: ser.name === undefined,
+    no_message: ser.message === undefined,
+    diff: diff || '',
+    stack: typeof ser.stack === 'string' ? ser.stack : '',
+    cause,
+    inspected,
+    properties: props === null ? null : __inspect(props),
+  };
+}
+// @vitest/utils processError's serialization: a primitive (or any falsy value) is `{ message }`,
+// anything else serializeValue's clone.
+function __serializeError(e) {
+  if (!e || typeof e !== 'object') return { message: String(e) };
+  try { return __serializeValue(e); } catch (err) { return __serializeValue(new Error(`Failed to fully serialize error: ${err && err.message}\nInner error message: ${e && e.message}`)); }
+}
+// vitest's JSON `failureMessages` entry: the serialized error's stack, else its message, else null
+function __failureMessage(e) {
+  const s = __serializeError(e);
+  const m = s.stack || s.message;
+  return m === undefined || m === null ? null : String(m);
+}
+const __unserializable = (err) => (err instanceof Error ? `<unserializable>: ${err.message}` : typeof err === 'string' ? `<unserializable>: ${err}` : '<unserializable>');
+// @vitest/utils serializeValue: functions as `Function<name>`, objects as null-prototype clones
+// of their own and inherited (up to Object.prototype) properties.
+function __serializeValue(val, seen = new WeakMap()) {
+  if (!val || typeof val === 'string') return val;
+  if (val instanceof Error && 'toJSON' in val && typeof val.toJSON === 'function') {
+    const j = val.toJSON();
+    if (j && j !== val && typeof j === 'object') {
+      try { if (typeof val.message === 'string') j.message ??= val.message; } catch {}
+      try { if (typeof val.stack === 'string') j.stack ??= val.stack; } catch {}
+      try { if (typeof val.name === 'string') j.name ??= val.name; } catch {}
+      try { if (val.cause != null) j.cause ??= __serializeValue(val.cause, seen); } catch {}
+    }
+    return __serializeValue(j, seen);
+  }
+  if (typeof val === 'function') return `Function<${val.name || 'anonymous'}>`;
+  if (typeof val === 'symbol') return val.toString();
+  if (typeof val !== 'object') return val;
+  if (typeof Buffer !== 'undefined' && val instanceof Buffer) return `<Buffer(${val.length}) ...>`;
+  if (val instanceof Uint8Array) return `<Uint8Array(${val.length}) ...>`;
+  if (val instanceof Promise) return 'Promise';
+  if (typeof Element !== 'undefined' && val instanceof Element) return val.tagName;
+  if (typeof val.toJSON === 'function') return __serializeValue(val.toJSON(), seen);
+  if (seen.has(val)) return seen.get(val);
+  if (Array.isArray(val)) {
+    const clone = new Array(val.length);
+    seen.set(val, clone);
+    val.forEach((x, i) => { try { clone[i] = __serializeValue(x, seen); } catch (err) { clone[i] = __unserializable(err); } });
+    return clone;
+  }
+  const clone = Object.create(null);
+  seen.set(val, clone);
+  for (let obj = val; obj && obj !== Object.prototype; obj = Object.getPrototypeOf(obj)) {
+    for (const key of Object.getOwnPropertyNames(obj)) {
+      if (key in clone) continue;
+      try { clone[key] = __serializeValue(val[key], seen); } catch (err) { delete clone[key]; clone[key] = __unserializable(err); }
+    }
+  }
+  if (val instanceof Error) { try { clone.message = val.message; } catch {} }
+  return clone;
+}
+// The serialized error as the reporters see it (structured-cloned to the main process): plain
+// objects and arrays.
+function __plainOf(v, seen = new Map()) {
+  if (v === null || typeof v !== 'object') return v;
+  if (seen.has(v)) return seen.get(v);
+  const out = Array.isArray(v) ? [] : {};
+  seen.set(v, out);
+  for (const k of Object.keys(v)) out[k] = __plainOf(v[k], seen);
+  return out;
+}
+// vitest's getErrorProperties: the serialized error's own properties but its stack, the runner's
+// keys and Error.prototype / Object.prototype names; none for an AssertionError. null for none.
+const __skipErrorProperties = new Set(['cause', 'stacks', 'type', 'showDiff', 'ok', 'operator', 'diff', 'codeFrame', 'actual', 'expected', 'diffOptions', 'runnerError', 'sourceURL', 'column', 'line', 'fileName', 'lineNumber', 'columnNumber', 'VITEST_TEST_NAME', 'VITEST_TEST_PATH', '__vitest_rollup_error__', '__vitest_error_context__', ...Object.getOwnPropertyNames(Error.prototype), ...Object.getOwnPropertyNames(Object.prototype)]);
+function __errorProperties(ser) {
+  if (ser.name === 'AssertionError') return null;
+  const out = {};
+  let any = false;
+  for (const key of Object.getOwnPropertyNames(ser)) {
+    if (key === 'stack' ? ser[key] != null && typeof ser[key] !== 'string' : !__skipErrorProperties.has(key)) {
+      out[key] = __plainOf(ser[key]);
+      any = true;
+    }
+  }
+  return any ? out : null;
 }
 globalThis.__ttErrorInfo = (e) => __errorInfo(e);
 // @vitest/utils printDiffOrStringify(received, expected)
@@ -4748,8 +4842,7 @@ async function runSuite(suite, ancestors, summary, mode = '') {
         if (e0 && e0.stack) msg += '\n          @ ' + String(e0.stack).split('\n').slice(0, 5).join('\n          @ ');
       }
       summary.failures.push(`${label}: ${msg}`);
-      const failure = (e) => String((e && (e.stack || e.message)) || String(e));
-      summary.tests.push(__testRecord(t, chain, 'failed', { ...timing, message: msg, failure_messages: attemptErrors.map(failure), errors: attemptErrors.map(__errorInfo) }));
+      summary.tests.push(__testRecord(t, chain, 'failed', { ...timing, message: msg, failure_messages: attemptErrors.map(__failureMessage), errors: attemptErrors.map(__errorInfo) }));
     }
   }
   if (!skipAll && !idle && !forbidden) {

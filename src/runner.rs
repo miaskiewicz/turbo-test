@@ -6002,8 +6002,9 @@ pub struct TestCase {
     pub start_ms: f64,
     /// Failure message (empty unless status == "failed").
     pub message: String,
-    /// The failure's error `stack` (else its `message`), as vitest's JSON `failureMessages`.
-    pub failure_messages: Vec<String>,
+    /// The failure's error `stack` (else its `message`, else none: JSON `null`), as vitest's JSON
+    /// `failureMessages` (turbo-test#97).
+    pub failure_messages: Vec<Option<String>>,
     /// Where the test was registered (`includeTaskLocation`): 1-based line and column.
     pub location: Option<(u32, u32)>,
     /// A failed test that never ran (a forbidden `.only`, turbo-test#76): no `duration`.
@@ -6934,7 +6935,10 @@ fn drive_tests_bounded(
                     duration_ms: num(scope, "duration_ms"),
                     start_ms: num(scope, "start_ms"),
                     message: text(scope, "message"),
-                    failure_messages: string_array(scope, o, "failure_messages"),
+                    failure_messages: js_array(scope, o, "failure_messages")
+                        .into_iter()
+                        .map(|v| (!v.is_null()).then(|| v.to_rust_string_lossy(scope)))
+                        .collect(),
                     location: location_of(scope, o),
                     not_run: flag(scope, "not_run"),
                     expected_fail: flag(scope, "expected_fail"),
@@ -7064,6 +7068,18 @@ fn error_info_of<'s>(
             .unwrap_or_default()
     };
     let (name, message, diff, stack) = (text("name"), text("message"), text("diff"), text("stack"));
+    let flag = |scope: &mut v8::PinScope<'s, '_>, key: &str| {
+        let k = v8::String::new(scope, key).unwrap();
+        o.get(scope, k.into()).is_some_and(|v| v.is_true())
+    };
+    let (no_name, no_message) = (flag(scope, "no_name"), flag(scope, "no_message"));
+    let optional = |scope: &mut v8::PinScope<'s, '_>, key: &str| {
+        let k = v8::String::new(scope, key).unwrap();
+        o.get(scope, k.into())
+            .filter(|v| v.is_string())
+            .map(|v| v.to_rust_string_lossy(scope))
+    };
+    let (inspected, properties) = (optional(scope, "inspected"), optional(scope, "properties"));
     let frames = crate::failure::parse_stack(&stack)
         .into_iter()
         .map(|mut f| {
@@ -7084,6 +7100,10 @@ fn error_info_of<'s>(
     crate::failure::ErrorInfo {
         name,
         message,
+        no_name,
+        no_message,
+        inspected,
+        properties,
         diff,
         frames,
         cause,

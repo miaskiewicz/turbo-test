@@ -79,7 +79,12 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
                     ));
                     if t.status == "failed" {
                         for e in errors(t) {
-                            out.push_str(&format!("   → {}\n", e.message));
+                            let message = if e.no_message {
+                                "undefined"
+                            } else {
+                                &e.message
+                            };
+                            out.push_str(&format!("   → {message}\n"));
                         }
                     }
                     if !t.annotations.is_empty() {
@@ -114,7 +119,7 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
             }
         }
     }
-    err.push_str(&errors_summary(res, run));
+    err.push_str(&errors_summary(res, run, kind == Kind::Verbose));
     out.push('\n');
     for line in snapshot_lines(res, run) {
         out.push_str(&line);
@@ -362,8 +367,9 @@ fn snapshot_lines(res: &[FileResult], run: &Run) -> Vec<String> {
 /// The Failed Suites / Failed Tests sections (stderr), as vitest's printErrorsSummary: each
 /// section counts its tasks; identical errors (vitest: the same stack and diff) are printed once
 /// under every task's ` FAIL  <name>` line; the dividers number the printed errors out of all the
-/// tasks' errors (vitest's counter does not account for merged ones).
-fn errors_summary(res: &[FileResult], run: &Run) -> String {
+/// tasks' errors (vitest's counter does not account for merged ones); `verbose` adds each error's
+/// properties (vitest's `printProperties: verbose`, turbo-test#97).
+fn errors_summary(res: &[FileResult], run: &Run, verbose: bool) -> String {
     // (task name, its errors) per section
     // (task name, its errors, its annotations and the file's name) per section
     let mut suites: Vec<(String, Vec<ErrorInfo>, &[Annotation], String)> = Vec::new();
@@ -414,7 +420,7 @@ fn errors_summary(res: &[FileResult], run: &Run) -> String {
             for name in names {
                 out.push_str(&format!(" FAIL  {name}\n"));
             }
-            out.push_str(&print_error(error, run.root, true, ""));
+            out.push_str(&print_error(error, run.root, true, verbose, ""));
             if !notes.is_empty() {
                 out.push_str(&annotation_lines(notes, file, 1));
                 out.push('\n');
@@ -443,11 +449,22 @@ fn divider(text: &str, right: Option<usize>) -> String {
     format!("{}{text}{}", "⎯".repeat(left), "⎯".repeat(right))
 }
 
-/// vitest's `printErrorInner` into a string: `Name: message`, the diff, the frames outside
-/// node_modules with the code frame after the nearest one (`code_frame`), a blank line, the
-/// cause.
-pub fn print_error(e: &ErrorInfo, root: &Path, code_frame: bool, prefix: &str) -> String {
-    let mut out = format!("{prefix}{}: {}\n", e.name, e.message);
+/// vitest's `printErrorInner` into a string: `Name: message` (a value without a message as its
+/// serialized form, turbo-test#97), the diff, the frames outside node_modules with the code frame
+/// after the nearest one (`code_frame`), a blank line, the error's properties as `Serialized
+/// Error` under a divider (`properties`: vitest's `printProperties`, the verbose reporter's and
+/// junit's), the cause (its properties always: vitest prints the cause with the default).
+pub fn print_error(
+    e: &ErrorInfo,
+    root: &Path,
+    code_frame: bool,
+    properties: bool,
+    prefix: &str,
+) -> String {
+    let mut out = match &e.inspected {
+        Some(shown) => format!("{shown}\n"),
+        None => format!("{prefix}{}: {}\n", e.name, e.message),
+    };
     if !e.diff.is_empty() {
         out.push_str(&format!("\n{}\n\n", e.diff));
     }
@@ -474,8 +491,14 @@ pub fn print_error(e: &ErrorInfo, root: &Path, code_frame: bool, prefix: &str) -
     if !frames.is_empty() {
         out.push('\n');
     }
+    if let (true, Some(props)) = (properties, &e.properties) {
+        out.push_str(&format!(
+            "{}\nSerialized Error: {props}\n",
+            divider("", None)
+        ));
+    }
     if let Some(cause) = &e.cause {
-        out.push_str(&print_error(cause, root, false, "Caused by: "));
+        out.push_str(&print_error(cause, root, false, true, "Caused by: "));
     }
     out
 }

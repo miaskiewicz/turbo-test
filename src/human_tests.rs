@@ -323,15 +323,52 @@ fn print_error_writes_frames_code_frame_and_cause() {
             frames: vec![frame(&src, "")],
             ..error("inner")
         })),
+        ..Default::default()
     };
     // node_modules frames are left out; the code frame follows the first frame of a file that
     // exists; the cause has no code frame
     assert_eq!(
-        print_error(&e, &dir, true, ""),
+        print_error(&e, &dir, true, false, ""),
         "TypeError: bad\n\n- Expected\n+ Received\n\n ❯ gone.ts:2:1\n ❯ helper a.test.ts:2:1\n      1| x\n      2| throw 1\n       | ^\n      3|\n ❯ a.test.ts:2:1\n\nCaused by: Error: inner\n ❯ a.test.ts:2:1\n\n"
     );
     // without frames: no blank line after the message
-    assert_eq!(print_error(&error("m"), &dir, true, "P: "), "P: Error: m\n");
+    assert_eq!(
+        print_error(&error("m"), &dir, true, false, "P: "),
+        "P: Error: m\n"
+    );
+    // turbo-test#97: the serialized form replaces `Name: message`; the properties follow the
+    // frames under a divider when asked for, a cause's always
+    let shown = ErrorInfo {
+        inspected: Some("{ a: 1, stacks: [] }".into()),
+        properties: Some("{ a: 1 }".into()),
+        ..error("")
+    };
+    let line = "⎯".repeat(30);
+    assert_eq!(
+        print_error(&shown, &dir, true, true, "P: "),
+        format!("{{ a: 1, stacks: [] }}\n{line}\nSerialized Error: {{ a: 1 }}\n")
+    );
+    assert_eq!(
+        print_error(&shown, &dir, true, false, ""),
+        "{ a: 1, stacks: [] }\n"
+    );
+    let with_cause = ErrorInfo {
+        frames: vec![frame(&dir.join("gone.ts"), "")],
+        properties: Some("{ code: 1 }".into()),
+        cause: Some(Box::new(ErrorInfo {
+            properties: Some("{ code: 'C' }".into()),
+            ..error("inner")
+        })),
+        ..error("outer")
+    };
+    assert_eq!(
+        print_error(&with_cause, &dir, false, false, ""),
+        format!("Error: outer\n ❯ gone.ts:2:1\n\nCaused by: Error: inner\n{line}\nSerialized Error: {{ code: 'C' }}\n")
+    );
+    assert_eq!(
+        print_error(&with_cause, &dir, false, true, ""),
+        format!("Error: outer\n ❯ gone.ts:2:1\n\n{line}\nSerialized Error: {{ code: 1 }}\nCaused by: Error: inner\n{line}\nSerialized Error: {{ code: 'C' }}\n")
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -356,7 +393,7 @@ fn errors_summary_counts_tasks_and_merges_identical_errors() {
     b.failed_file = true;
     b.load_error = true;
     b.error_msg = "evaluate threw: Error: load boom".into();
-    let out = errors_summary(&[a, b], &run(root, &names));
+    let out = errors_summary(&[a, b], &run(root, &names), false);
     let bar = |n: &str| format!("{}{n}⎯", "⎯".repeat(29 - n.chars().count()));
     let expected = [
         format!("\n{}\n\n", divider(" Failed Suites 2 ", None)),
@@ -375,7 +412,10 @@ fn errors_summary_counts_tasks_and_merges_identical_errors() {
     .concat();
     assert_eq!(out, expected);
     // nothing failed: no section
-    assert_eq!(errors_summary(&[file(0, vec![])], &run(root, &names)), "");
+    assert_eq!(
+        errors_summary(&[file(0, vec![])], &run(root, &names), false),
+        ""
+    );
 }
 
 #[test]

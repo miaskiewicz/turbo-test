@@ -870,7 +870,14 @@ fn assertion_result(t: &TestCase) -> String {
         json_str(&full.join(" ")),
         json_str(&t.status),
         json_str(&t.title),
-        json_strs(&t.failure_messages),
+        {
+            let items: Vec<String> = t
+                .failure_messages
+                .iter()
+                .map(|m| m.as_deref().map_or("null".to_string(), json_str))
+                .collect();
+            format!("[{}]", items.join(","))
+        },
     )
 }
 
@@ -1085,13 +1092,19 @@ fn testcase(classname: &str, name: &str, ms: f64, body: Vec<String>) -> String {
 }
 
 /// A `<failure>` element's lines for `e`.
+/// Its `message` / `type` attributes are the error's message and name, each left out when the
+/// error has none (turbo-test#97: a thrown primitive has no name, an object maybe neither).
 fn failure_element(e: &crate::failure::ErrorInfo, root: &Path) -> Vec<String> {
+    let mut open = "            <failure".to_string();
+    if !e.no_message {
+        open.push_str(&format!(" message=\"{}\"", xml_esc(&e.message)));
+    }
+    if !e.no_name {
+        open.push_str(&format!(" type=\"{}\"", xml_esc(&e.name)));
+    }
+    open.push('>');
     vec![
-        format!(
-            "            <failure message=\"{}\" type=\"{}\">",
-            xml_esc(&e.message),
-            xml_esc(&e.name)
-        ),
+        open,
         xml_esc(&crate::failure::print_error(e, root)),
         "            </failure>".to_string(),
     ]

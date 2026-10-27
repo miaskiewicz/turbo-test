@@ -49,6 +49,7 @@ fn errors_print_as_vitest_print_error() {
             frames: vec![frame("", "/p/a.test.ts", 6, 1)],
             ..Default::default()
         })),
+        ..Default::default()
     };
     assert_eq!(
         print_error(&e, root),
