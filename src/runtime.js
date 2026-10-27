@@ -1089,13 +1089,6 @@ if (typeof globalThis.FileReader === 'undefined') {
     Object.defineProperty(globalThis.FileReader.prototype, k, { value: i, enumerable: true });
   });
 }
-// turbo-dom's installGlobals replaces Blob/File with SoA-backed versions whose .text()/byte
-// reads return zero-filled content. Capture our working implementations so the DOM bootstrap
-// can restore them (FileReader/fileToBase64/CSV parsing need real bytes).
-globalThis.__ttRestoreFileApis = (() => {
-  const B = globalThis.Blob, F = globalThis.File, FR = globalThis.FileReader;
-  return () => { globalThis.Blob = B; globalThis.File = F; globalThis.FileReader = FR; };
-})();
 if (typeof globalThis.fetch === 'undefined') {
   globalThis.fetch = () => Promise.reject(new Error('fetch is not supported in turbo-test env'));
   globalThis.Headers = class Headers {

@@ -6,6 +6,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 ## [Unreleased]
 
 ### Fixed
+- runtime.js no longer defines `__ttRestoreFileApis` (turbo-test#147). It restored Blob / File /
+  FileReader after the JS turbo-dom bootstrap replaced them; that bootstrap went in v0.3.0 and the
+  native DOM (`turbo-dom-browser-env`) never replaces them, so nothing called it. Wiring it
+  between files would also diverge from vitest, whose `isolate: false` keeps a file's global
+  changes for the next file.
 - `process.env` is the host environment (turbo-test#143): it was a fixed stub, so a variable
   the user exported (`K=v turbo-test`) was `undefined` in tests. As in vitest 4.1.12 it now holds
   the environment turbo-test was started with, the host's `NODE_ENV` wins (`'test'` only when
