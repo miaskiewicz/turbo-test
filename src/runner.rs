@@ -78,8 +78,9 @@ thread_local! {
     /// CommonJS-first module resolution (jest/node backend projects). Set once per run from the
     /// entry's project: a jest config with a node test environment resolves the `require` export
     /// condition (the build Node uses), so sequelize/tslib/lexical/etc. get their working CJS
-    /// build instead of an ESM build that breaks once bundled to CJS. Off (ESM-first) for
-    /// vitest/React projects so shared singletons (react/emotion/MUI) stay one instance.
+    /// build instead of an ESM build that breaks once bundled to CJS (imports too). Off (ESM-first:
+    /// Node's conditions, `import` for an import and `require` for a require(), turbo-test#134)
+    /// for vitest/React projects.
     static CJS_FIRST_RESOLUTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Set while resolve+drain of pending vi.mock factories is in progress. An async factory's
     /// `await import('<self>')` re-enters load_cjs(drain_mocks=true) for the real module; without
