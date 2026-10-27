@@ -1513,7 +1513,6 @@ await t('File name is accessor', () => typeof Object.getOwnPropertyDescriptor(Fi
 }
 
 #[test]
-#[ignore = "turbo-test#132: fails until the fix"]
 fn file_reader_reads_the_blob_bytes() {
     // turbo-test#132: FileReader's readAsArrayBuffer / readAsDataURL / readAsBinaryString read the
     // Blob's bytes (UTF-8 text and non-UTF-8 binary alike), not char codes of its decoded text.

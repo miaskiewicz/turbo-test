@@ -981,10 +981,16 @@ if (typeof globalThis.FileReader === 'undefined') {
     _read(blob, kind) {
       Promise.resolve().then(async () => {
         try {
-          const text = blob && blob.text ? await blob.text() : '';
-          if (kind === 'data') { const bytes = []; for (let i = 0; i < text.length; i++) bytes.push(text.charCodeAt(i) & 255); this.result = 'data:' + ((blob && blob.type) || 'application/octet-stream') + ';base64,' + globalThis.__b64encodeBytes(bytes); }
-          else if (kind === 'buffer') { const u = new Uint8Array((text || '').length); for (let i = 0; i < u.length; i++) u[i] = text.charCodeAt(i) & 255; this.result = u.buffer; }
-          else this.result = text;
+          // the Blob's bytes, not char codes of its decoded text (turbo-test#132)
+          const bytes = async () => {
+            if (blob && typeof blob.bytes === 'function') return blob.bytes();
+            if (blob && typeof blob.arrayBuffer === 'function') return new Uint8Array(await blob.arrayBuffer());
+            return new globalThis.TextEncoder().encode(blob && blob.text ? await blob.text() : '');
+          };
+          if (kind === 'data') this.result = 'data:' + ((blob && blob.type) || 'application/octet-stream') + ';base64,' + globalThis.__b64encodeBytes(await bytes());
+          else if (kind === 'buffer') this.result = (await bytes()).slice().buffer;
+          else if (kind === 'binary') { const b = await bytes(); let s = ''; for (let i = 0; i < b.length; i += 8192) s += String.fromCharCode.apply(null, b.subarray(i, i + 8192)); this.result = s; }
+          else this.result = blob && blob.text ? await blob.text() : '';
           this.readyState = 2;
           const ev = { target: this };
           this._emit('load', ev); this._emit('loadend', ev);
@@ -998,6 +1004,7 @@ if (typeof globalThis.FileReader === 'undefined') {
     readAsDataURL(b) { this._read(b, 'data'); }
     readAsText(b) { this._read(b, 'text'); }
     readAsArrayBuffer(b) { this._read(b, 'buffer'); }
+    readAsBinaryString(b) { this._read(b, 'binary'); }
     addEventListener(n, f) { this['on' + n] = f; }
     removeEventListener(n) { this['on' + n] = null; }
     abort() { this._emit('abort', { target: this }); }

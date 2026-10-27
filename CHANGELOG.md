@@ -333,6 +333,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   Every other label threw RangeError `ERR_ENCODING_NOT_SUPPORTED`. Node's ICU big5 / euc-jp /
   euc-kr / shift_jis decoders differ from the Encoding Standard on some bytes; turbo-test follows
   the standard there (vitest.compat.md).
+- `FileReader` reads the Blob's bytes (turbo-test#132): `readAsArrayBuffer` and `readAsDataURL`
+  took char codes of the decoded text (`'€'` read as `[0xAC]`, now `[0xE2, 0x82, 0xAC]`; binary
+  that is not UTF-8 was mangled), and `readAsBinaryString` exists, as in jsdom / happy-dom.
 - `Blob` / `File` match Node 26 (turbo-test#128): `size` counts UTF-8 bytes (`['€']` was 1, now
   3), `type` is lower-cased (or `''` with a character outside U+0020..U+007E), `arrayBuffer()`
   returns the bytes (it was zero-filled), `slice(start, end, type)` honours its arguments
