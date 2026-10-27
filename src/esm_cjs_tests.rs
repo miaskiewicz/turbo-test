@@ -973,16 +973,34 @@ fn cjs_literal_export_names_decode_string_keys_as_the_lexer() {
     // formed string is left out; a computed key ends the names.
     let n = |s: &str| cjs_literal_export_names(s).unwrap();
     let v = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    assert_eq!(n(r"module.exports = { a, 'b\nc': d, e };"), v(&["a", "b\nc", "e"]));
-    assert_eq!(n(r"module.exports = { a, 'bA': d, e };"), v(&["a", "bA", "e"]));
-    assert_eq!(n(r#"module.exports = { a, "q\"r": d, e };"#), v(&["a", "q\"r", "e"]));
-    assert_eq!(n(r"module.exports = { a, 'b\c': d, e };"), v(&["a", "bc", "e"]));
+    assert_eq!(
+        n(r"module.exports = { a, 'b\nc': d, e };"),
+        v(&["a", "b\nc", "e"])
+    );
+    assert_eq!(
+        n(r"module.exports = { a, 'b\u0041': d, e };"),
+        v(&["a", "bA", "e"])
+    );
+    assert_eq!(
+        n(r#"module.exports = { a, "q\"r": d, e };"#),
+        v(&["a", "q\"r", "e"])
+    );
+    assert_eq!(
+        n(r"module.exports = { a, 'b\c': d, e };"),
+        v(&["a", "bc", "e"])
+    );
     assert_eq!(
         n("module.exports = { a, '\\x41\\u{1F600}\\0\\t\\v\\f\\b\\r\\'': d, 'l\\\nm': d, e };"),
         v(&["a", "A😀\0\t\u{b}\u{c}\u{8}\r'", "l\nm", "e"])
     );
-    assert_eq!(n(r"module.exports = { a, 'x\ud83d': d, e };"), v(&["a", "e"]));
-    assert_eq!(n(r"module.exports = { a, '😀': d };"), v(&["a", "😀"]));
+    assert_eq!(
+        n(r"module.exports = { a, 'x\ud83d': d, e };"),
+        v(&["a", "e"])
+    );
+    assert_eq!(
+        n(r"module.exports = { a, '\ud83d\ude00': d };"),
+        v(&["a", "😀"])
+    );
     assert_eq!(n("module.exports = { a, [k]: d, e };"), v(&["a"]));
     // an unterminated key: not the lexer's form
     assert_eq!(cjs_literal_export_names(r"module.exports = { a, 'b\"), None);
