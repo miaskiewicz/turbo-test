@@ -86,3 +86,48 @@ fn anonymous_async_frames_keep_their_location() {
         ]
     );
 }
+
+#[test]
+#[ignore = "turbo-test#173: fails until the fix"]
+fn stacks_drop_only_vitests_ignored_frames() {
+    // turbo-test#173: vitest's parseStacktrace leaves out the frames its `stackIgnorePatterns`
+    // match (its own packages, chai, tinyspy, node internals) and keeps a dependency's
+    let at = |file: &str| format!("    at f ({file}:1:1)");
+    let ignored = [
+        "/p/node_modules/chai/index.js",
+        "/p/node_modules/tinyspy/dist/index.js",
+        "/p/node_modules/@vitest/runner/dist/index.js",
+        "/p/node_modules/vitest/dist/chunks/x.js",
+        "/p/vitest/src/x.js",
+        "/p/packages/runner/dist/index.js",
+        "/p/node_modules/vite/dist/node/module-runner.js",
+        "/p/node_modules/rolldown-vite/dist/node/module-runner.js",
+        "/p/node_modules/.vite/deps/chunk-AB.js",
+        "/p/node_modules/.vite/deps/@vitest_x.js",
+        "/p/node_modules/.vite/deps/loupe.js",
+        "/p/node_modules/.vite/deps/chai.js",
+        "/p/node_modules/.vite/deps/vitest_x.js",
+        "/p/node_modules/@vitest/browser-playwright/dist/locators.js",
+        "/p/node_modules/@vitest/browser-webdriverio/dist/locators.js",
+        "/p/node_modules/@vitest/browser-preview/dist/locators.js",
+        "/p/x/node:internal/x.js",
+        "/p/node:fs/x.js",
+        "/p/__vitest_test__/x.js",
+        "/p/__vitest_browser__/x.js",
+        "/p/@id/__x00__vitest/browser.js",
+    ];
+    let kept = [
+        "/p/node_modules/k6dep/index.js",
+        "/p/node_modules/chai-x/index.js",
+        "/p/packages/dist/index.js",
+        "/p/packages/a-b/dist/index.js",
+        "/p/node_modules/@vitest/x/lib/index.js",
+        "/p/node:/x.js",
+        "/p/a.test.js",
+    ];
+    let stack: Vec<String> = ignored.iter().chain(&kept).map(|f| at(f)).collect();
+    assert_eq!(
+        parse_stack(&stack.join("\n")),
+        kept.iter().map(|f| frame("f", f, 1, 1)).collect::<Vec<_>>()
+    );
+}

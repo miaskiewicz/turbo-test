@@ -725,3 +725,53 @@ fn print_error_writes_vites_details_under_the_message() {
         "Error: m\n"
     );
 }
+
+#[test]
+#[ignore = "turbo-test#173: fails until the fix"]
+fn print_error_keeps_node_modules_frames() {
+    // turbo-test#173: a dependency's frame is printed (vitest's parser leaves out only its
+    // `stackIgnorePatterns`), gray, and the code frame follows the first frame of a file vitest
+    // transformed (not an external node_modules one)
+    let dir = std::env::temp_dir().join(format!("tt-human-nm-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("node_modules/k6dep")).unwrap();
+    let dep = dir.join("node_modules/k6dep/index.js");
+    std::fs::write(
+        &dep,
+        "export async function late() {\n  await null\n  throw new Error(\"late\")\n}\n",
+    )
+    .unwrap();
+    let src = dir.join("afail.test.js");
+    std::fs::write(
+        &src,
+        "import { test } from 'vitest'\nimport { late } from 'k6dep'\ntest('after await', async () => {\n  await late()\n})\n",
+    )
+    .unwrap();
+    let at = |file: PathBuf, method: &str, line: u32, col: u32| Frame {
+        method: method.into(),
+        file,
+        line,
+        col,
+    };
+    let e = ErrorInfo {
+        frames: vec![at(dep.clone(), "late", 3, 9), at(src.clone(), "", 4, 3)],
+        ..error("late")
+    };
+    assert_eq!(
+        print_error(&e, &dir, true, false, "", &OFF),
+        "Error: late\n ❯ late node_modules/k6dep/index.js:3:9\n ❯ afail.test.js:4:3\n      2| import { late } from 'k6dep'\n      3| test('after await', async () => {\n      4|   await late()\n       |   ^\n      5| })\n      6|\n\n"
+    );
+    // coloured: the dependency's frame gray, the nearest (the test file's) cyan
+    assert_eq!(
+        print_error(&e, &dir, false, false, "", &C),
+        format!(
+            "{}\n{}\n{}\n\n",
+            C.red(&format!("{}: late", C.bold("Error"))),
+            C.gray(&format!(
+                " {} late node_modules/k6dep/index.js:{}",
+                C.dim("❯"),
+                C.dim("3:9")
+            )),
+            C.cyan(&format!(" {} afail.test.js:{}", C.dim("❯"), C.dim("4:3")))
+        )
+    );
+}
