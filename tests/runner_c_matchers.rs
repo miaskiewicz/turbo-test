@@ -1760,3 +1760,96 @@ test('reported', () => { expect(1, 'GOT<x>').toBe(2) })
     }
     assert_eq!(got.lines().count(), want.lines().count());
 }
+
+#[test]
+#[ignore = "turbo-test#140: fails until the fix"]
+fn to_be_one_of_is_vitests() {
+    // turbo-test#140: `toBeOneOf` and the asymmetric `expect.toBeOneOf` / `expect.not.toBeOneOf`
+    // were missing (`expect(...).toBeOneOf is not a function`). vitest compares each candidate
+    // with `equals` (asymmetric matchers inside, an own undefined key ignored), a Set by `has`
+    // first, an empty array / Set always passes, anything else throws a TypeError. Expected:
+    // vitest 4.1.12 (each row is [case, [name, message]]).
+    let p = Project::new("rc-to-be-one-of");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "t.test.js",
+        r##"import { test, expect, vi } from 'vitest'
+import * as fs from 'node:fs'
+test('oneof', async () => {
+const rows = []
+const t = async (name, f) => { let r; try { await f(); r = 'passed' } catch (e) { r = [e.name, e.message] } rows.push(JSON.stringify([name, r])) }
+await t('fail', () => expect(1).toBeOneOf([2, 3]))
+await t('pass', () => expect(3).toBeOneOf([2, 3]))
+await t('deep', () => expect({ a: 1 }).toBeOneOf([{ a: 1 }]))
+await t('deep undefined key', () => expect({ a: 1, b: undefined }).toBeOneOf([{ a: 1 }]))
+await t('nested asym', () => expect('abc').toBeOneOf([expect.stringContaining('b')]))
+await t('empty', () => expect(1).toBeOneOf([]))
+await t('empty set', () => expect(1).toBeOneOf(new Set()))
+await t('set pass', () => expect(2).toBeOneOf(new Set([1, 2])))
+await t('set deep', () => expect([1]).toBeOneOf(new Set([[1]])))
+await t('set fail', () => expect(5).toBeOneOf(new Set([1, 'x'])))
+await t('not fail', () => expect(2).not.toBeOneOf([1, 2]))
+await t('not pass', () => expect(5).not.toBeOneOf([1, 2]))
+await t('obj fail', () => expect({ a: 1 }).toBeOneOf([{ a: 2 }, null, 'x']))
+await t('string arg', () => expect(1).toBeOneOf('12'))
+await t('undefined arg', () => expect(1).toBeOneOf())
+await t('object arg', () => expect(1).toBeOneOf({ 0: 1 }))
+await t('message', () => expect(1, 'M').toBeOneOf([2]))
+await t('asym pass', () => expect({ x: 2 }).toEqual({ x: expect.toBeOneOf([1, 2]) }))
+await t('asym fail', () => expect({ x: 3 }).toEqual({ x: expect.toBeOneOf([1, 2]) }))
+await t('asym not pass', () => expect({ x: 3 }).toEqual({ x: expect.not.toBeOneOf([1, 2]) }))
+await t('asym not fail', () => expect({ x: 2 }).toEqual({ x: expect.not.toBeOneOf([1, 2]) }))
+await t('asym deep', () => expect([{ a: 1 }]).toEqual([expect.toBeOneOf([{ a: 1 }])]))
+await t('asym called', () => { const s = vi.fn(); s(2); expect(s).toHaveBeenCalledWith(expect.toBeOneOf([2])) })
+await t('asym string', () => { rows.push(JSON.stringify(['str', String(expect.toBeOneOf([1, 2])), expect.toBeOneOf([1]).toString(), expect.not.toBeOneOf([1]).toString(), expect.toBeOneOf([1]).asymmetricMatch(1), expect.toBeOneOf([1]).asymmetricMatch(2)])) })
+await t('asym bad arg', () => expect({ x: 3 }).toEqual({ x: expect.toBeOneOf(5) }))
+fs.writeFileSync('out.txt', rows.join('\n'))
+})
+test('reported', () => { expect({ x: 3 }).toMatchObject({ x: expect.toBeOneOf([1, 2]) }) })
+"##,
+    );
+    let r = turbo_test(
+        &p.dir,
+        &["t.test.js", "--reporter", "default"],
+        &[("NO_COLOR", "1"), ("TURBO_LEGACY_REPORTER", "0")],
+    );
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    // the diff prints the matcher as vitest's toAsymmetricMatcher: its sample pretty-formatted
+    for line in [
+        "AssertionError: expected { x: 3 } to match object { x: toBeOneOf<Array [",
+        "-   \"x\": toBeOneOf<Array [\n-   1,\n-   2,\n- ]>,\n+   \"x\": 3,",
+    ] {
+        assert!(r.all().contains(line), "missing {line:?} in\n{}", r.all());
+    }
+    let got = std::fs::read_to_string(p.path("out.txt")).unwrap();
+    let want = r##"["fail",["Error","expect(received).toBeOneOf()\n\nExpected value to be one of:\nArray [\n  2,\n  3,\n]\n\nReceived:\n1"]]
+["pass","passed"]
+["deep","passed"]
+["deep undefined key","passed"]
+["nested asym","passed"]
+["empty","passed"]
+["empty set","passed"]
+["set pass","passed"]
+["set deep","passed"]
+["set fail",["Error","expect(received).toBeOneOf()\n\nExpected value to be one of:\nSet {\n  1,\n  \"x\",\n}\n\nReceived:\n5"]]
+["not fail",["Error","expect(received).not.toBeOneOf()\n\nExpected value to not be one of:\nArray [\n  1,\n  2,\n]\nReceived:\n2"]]
+["not pass","passed"]
+["obj fail",["Error","expect(received).toBeOneOf()\n\nExpected value to be one of:\nArray [\n  Object {\n    \"a\": 2,\n  },\n  null,\n  \"x\",\n]\n\nReceived:\nObject {\n  \"a\": 1,\n}"]]
+["string arg",["TypeError","You must provide an array or set to expect(received).toBeOneOf(expected), not 'string'."]]
+["undefined arg",["TypeError","You must provide an array or set to expect(received).toBeOneOf(expected), not 'undefined'."]]
+["object arg",["TypeError","You must provide an array or set to expect(received).toBeOneOf(expected), not 'object'."]]
+["message",["Error","M: expect(received).toBeOneOf()\n\nExpected value to be one of:\nArray [\n  2,\n]\n\nReceived:\n1"]]
+["asym pass","passed"]
+["asym fail",["AssertionError","expected { x: 3 } to deeply equal { x: toBeOneOf<Array [\n  1,\n  2,\n]> }"]]
+["asym not pass","passed"]
+["asym not fail",["AssertionError","expected { x: 2 } to deeply equal { x: not.toBeOneOf{…} }"]]
+["asym deep","passed"]
+["asym called","passed"]
+["str","toBeOneOf","toBeOneOf","not.toBeOneOf",true,false]
+["asym string","passed"]
+["asym bad arg",["TypeError","You must provide an array or set to expect(received).toBeOneOf(expected), not 'number'."]]"##;
+    for (g, w) in got.lines().zip(want.lines()) {
+        assert_eq!(g, w);
+    }
+    assert_eq!(got.lines().count(), want.lines().count());
+}
