@@ -30,6 +30,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - A failure inside a `vi.defineHelper` helper is located at the helper's call (turbo-test#182).
 - `clearMocks` / `mockReset` / `restoreMocks` / `unstubEnvs` / `unstubGlobals` in the config run
   before each test, before its `beforeEach` hooks (turbo-test#183); they were ignored.
+
 ### Fixed — frames at imported calls in `.js` files (turbo-test#176)
 - On the ESM-graph loader (the binary without `TURBO_ESBUILD`), a frame at a call of an imported
   function in a `.js` file pointed at the call's `(` (`a.test.js:5:7`, vitest `5:3`): the spy
