@@ -59,7 +59,9 @@ globalThis.console = {
 // its isMusl() reads process.report().header.glibcVersionRuntime to pick gnu vs musl.
 // Hardcoding 'darwin'/'arm64' made every non-mac host load the macOS .node -> dlopen fails.
 globalThis.process = {
-  env: { NODE_ENV: 'test', VITEST: 'true', TZ: 'UTC', TURBO_DOM_PARSER: 'native' },
+  // vitest also sets vite's MODE / DEV / PROD / SSR / BASE_URL (SSR '' under a DOM environment:
+  // the runner sets it per file, turbo-test#123)
+  env: { NODE_ENV: 'test', VITEST: 'true', TZ: 'UTC', TURBO_DOM_PARSER: 'native', MODE: 'test', DEV: '1', PROD: '', SSR: '1', BASE_URL: '/' },
   platform: globalThis.__ttPlatform || 'darwin',
   arch: globalThis.__ttArch || 'arm64',
   // glibcVersionRuntime truthy => glibc (gnu); falsy => musl. __ttGlibc is the glibc
@@ -1479,6 +1481,35 @@ globalThis.__pathToFileURL = (p) => {
   return url;
 };
 globalThis.__dirnameOf = (p) => { const s = String(p).replace(/\/+$/, ''); const i = s.lastIndexOf('/'); return i <= 0 ? '/' : s.slice(0, i); };
+// import.meta (turbo-test#123): the module runner's CJS output (native emit + dep bundler, esbuild
+// transforms) calls __ttImportMeta(<module path>) where the source said `import.meta` — one object
+// per module path, like vitest's (url / filename / dirname / env); the ESM graph's host callback
+// adds the same `env`. vitest's import.meta.env: process.env, read and written live, DEV / PROD /
+// SSR as booleans (vitest module-evaluator createImportMetaEnvProxy).
+const __ttMetaBool = ['DEV', 'PROD', 'SSR'];
+globalThis.__ttImportMetaEnv = new Proxy({}, {
+  get: (_, k) => (typeof k !== 'string' ? undefined : __ttMetaBool.includes(k) ? !!globalThis.process.env[k] : globalThis.process.env[k]),
+  set: (_, k, v) => {
+    if (typeof k === 'string') globalThis.process.env[k] = __ttMetaBool.includes(k) ? (v ? '1' : '') : v;
+    return true;
+  },
+  has: (_, k) => k in globalThis.process.env,
+  deleteProperty: (_, k) => delete globalThis.process.env[k],
+  ownKeys: () => Reflect.ownKeys(globalThis.process.env),
+  getOwnPropertyDescriptor: (_, k) => {
+    if (!Object.prototype.hasOwnProperty.call(globalThis.process.env, k)) return undefined;
+    return { value: globalThis.__ttImportMetaEnv[k], writable: true, enumerable: true, configurable: true };
+  },
+});
+const __ttMetas = new Map();
+globalThis.__ttImportMeta = (filename) => {
+  let m = __ttMetas.get(filename);
+  if (!m) {
+    m = { url: globalThis.__pathToFileURL(filename).href, filename, dirname: globalThis.__dirnameOf(filename), env: globalThis.__ttImportMetaEnv };
+    __ttMetas.set(filename, m);
+  }
+  return m;
+};
 const __os = {
   platform: () => globalThis.__ttPlatform || 'darwin', arch: () => globalThis.__ttArch || 'arm64', type: () => globalThis.__ttOsType || 'Darwin', release: () => '23.0.0',
   version: () => 'Darwin Kernel', EOL: '\n', tmpdir: () => globalThis.__ttTmpdir || '/tmp', homedir: () => globalThis.__ttHomedir || '/', hostname: () => 'localhost',

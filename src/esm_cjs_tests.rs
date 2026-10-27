@@ -619,6 +619,7 @@ fn parts(js: &str) -> ModuleParts {
     let ctx = LowerCtx {
         exports_obj: "m9_exports".into(),
         resolve: Some(&resolve),
+        module_path: None,
     };
     transform_to_parts(js, &ctx).expect("transform_to_parts should succeed")
 }
@@ -788,6 +789,7 @@ fn transform_to_parts_in_app_mode_keeps_everything_external() {
     let ctx = LowerCtx {
         exports_obj: "__tt_exports".into(),
         resolve: None,
+        module_path: None,
     };
     let p = transform_to_parts(
         "import x from \"./esm\"; const y = require(\"./cjs\"); x(y);",
@@ -810,6 +812,7 @@ fn transform_to_parts_bails_on_parse_and_semantic_errors() {
     let ctx = LowerCtx {
         exports_obj: "__tt_exports".into(),
         resolve: None,
+        module_path: None,
     };
     assert!(transform_to_parts("x(", &ctx).is_none(), "parse error");
     assert!(
@@ -836,6 +839,7 @@ fn lower_raw(src: &str, stype: SourceType) -> Option<Vec<String>> {
     let ctx = LowerCtx {
         exports_obj: "__tt_exports".into(),
         resolve: None,
+        module_path: None,
     };
     let (parts, _) = lower(AstBuilder::new(&alloc), scoping, &ctx, &mut program, None)?;
     Some(
