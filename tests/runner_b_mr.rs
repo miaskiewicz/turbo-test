@@ -590,3 +590,30 @@ fn setup_file_mocks_reach_test_files_with_vitest_missing_export_semantics() {
         1,
     );
 }
+
+/// turbo-test#165: a module that only re-exports (`export * from`, `export { x } from`) loads
+/// through the esbuild transform: its `__reExport` called a `__toESM` helper esbuild emits only
+/// for modules that import (`ReferenceError: __toESM is not defined`). vitest 4.1.12: passes.
+#[test]
+fn a_reexport_only_module_loads_through_the_esbuild_transform() {
+    let p = esbuild_project("rb-mr-reexport-only");
+    p.file(
+        "src/star.ts",
+        "export const starred = (): string => 'star';\n",
+    );
+    p.file(
+        "src/barrel.ts",
+        "export * from './star';\nexport { starred as aliased } from './star';\n",
+    );
+    p.file(
+        "a.test.ts",
+        "import * as barrel from './src/barrel';\n\
+         test('re-exports', () => { expect([barrel.starred(), barrel.aliased(), Object.keys(barrel)]).toEqual(['star', 'star', ['aliased', 'starred']]); });\n",
+    );
+    for env in [
+        &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")][..],
+        &[][..],
+    ] {
+        assert_passes(&turbo_test(&p.dir, &[], env), 1);
+    }
+}
