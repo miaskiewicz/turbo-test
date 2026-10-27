@@ -409,11 +409,12 @@ fn is_asset_extensions() {
     for f in [
         "a.css", "a.scss", "a.sass", "a.less", "a.styl", "a.svg", "a.png", "a.jpg", "a.jpeg",
         "a.gif", "a.webp", "a.avif", "a.ico", "a.woff", "a.woff2", "a.ttf", "a.eot", "a.otf",
-        "a.mp4", "a.webm", "a.wav", "a.mp3", "a.txt", "a.md",
+        "a.mp4", "a.webm", "a.wav", "a.mp3", "a.txt",
     ] {
         assert!(is_asset(Path::new(f)), "{f}");
     }
-    for f in ["a.js", "a.ts", "a.json", "a.node", "noext"] {
+    // .md is no vite asset: it is parsed as JavaScript (turbo-test#192)
+    for f in ["a.js", "a.ts", "a.json", "a.node", "a.md", "noext"] {
         assert!(!is_asset(Path::new(f)), "{f}");
     }
 }
