@@ -270,6 +270,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   first (they were ignored). A throwing `afterEach`, cleanup or `afterAll` fails the test / suite
   and stops the hooks after it (a throwing `afterEach` was swallowed: the test passed); `it.fails`
   flips the outcome after the test's hooks, as vitest.
+- `expect.assertions(n)`, `expect.hasAssertions()` and a test timeout fail with vitest's errors
+  (turbo-test#102): `expected number of assertions to be 2, but got 1`, `expected any number of
+  assertion, but got none` (framed where `hasAssertions` was called) and `Test timed out in 30ms.`
+  + vitest's `If this is a long-running test, …` hint (framed at the `it(` call); they carried
+  turbo-test's own messages and no frame.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain

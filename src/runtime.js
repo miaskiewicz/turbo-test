@@ -3049,7 +3049,12 @@ globalThis.expect.extend = (matchers) => { Object.assign(__customMatchers, match
 // expect.assertions(n) / expect.hasAssertions(): record the expectation; runSuite verifies the
 // count at test end (see __snap.assertCount, reset per test). These calls do NOT count themselves.
 globalThis.expect.assertions = (n) => { __snap.expectedAssertions = n; };
-globalThis.expect.hasAssertions = () => { __snap.hasAssertions = true; };
+// hasAssertions keeps vitest's error, made where it is called (its frame is that call site).
+globalThis.expect.hasAssertions = function hasAssertions() {
+  const error = new Error('expected any number of assertion, but got none');
+  if (Error.captureStackTrace) Error.captureStackTrace(error, hasAssertions);
+  __snap.hasAssertions = error;
+};
 globalThis.expect.soft = (actual) => { __snap.assertCount++; return makeExpect(actual); };
 globalThis.expect.any = (ctor) => new Asymmetric('any', ctor);
 globalThis.expect.anything = () => new Asymmetric('anything');
@@ -4311,6 +4316,8 @@ function __defaultTimeout() {
 let __inEach = false;
 function __addTest(t) {
   if (globalThis.__TT_TASK_LOCATION) t.location = globalThis.__ttCallSite();
+  // where it was registered: a timeout's stack (vitest's `STACK_TRACE_ERROR`, turbo-test#102)
+  t.stackTrace = new Error('STACK_TRACE_ERROR');
   if (__inEach) t.each = true;
   current.tasks.push(t);
 }
@@ -4774,7 +4781,13 @@ async function runSuite(suite, ancestors, summary, mode = '') {
         let timer;
         const timed = new Promise((_, rej) => {
           timer = __scheduleInternal(() => {
-            const err = new Error(`test timed out in ${timeoutMs}ms`);
+            // vitest's message; its stack is the test's registration (`it(`), as vitest's
+            const err = new Error(`Test timed out in ${timeoutMs}ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".`);
+            // up to its frame in the test file (vitest collects a describe's tests after the
+            // describe( call returned: no enclosing describe( frames)
+            const frames = String(t.stackTrace.stack).split('\n');
+            const own = frames.findIndex((l, i) => i > 0 && !!globalThis.__ttFile && l.includes(globalThis.__ttFile));
+            err.stack = (own < 0 ? frames : frames.slice(0, own + 1)).join('\n');
             // the context's signal aborts with the timeout error (vitest's `withTimeout`)
             t.abort.abort(err);
             rej(err);
@@ -4790,11 +4803,9 @@ async function runSuite(suite, ancestors, summary, mode = '') {
         }
         // expect.assertions(n) / hasAssertions() enforcement (vitest: checked after the test body).
         if (__snap.expectedAssertions != null && __snap.assertCount !== __snap.expectedAssertions) {
-          throw new Error(`expected ${__snap.expectedAssertions} assertion(s) but got ${__snap.assertCount}`);
+          throw new Error(`expected number of assertions to be ${__snap.expectedAssertions}, but got ${__snap.assertCount}`);
         }
-        if (__snap.hasAssertions && __snap.assertCount === 0) {
-          throw new Error('expected at least one assertion but got none');
-        }
+        if (__snap.hasAssertions && __snap.assertCount === 0) throw __snap.hasAssertions;
         ok = true;
       } catch (e) {
         // ctx.skip(): the test is skipped, with its note (a caught one skips it, without a note)
