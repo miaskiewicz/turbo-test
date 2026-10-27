@@ -380,6 +380,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   + vitest's `If this is a long-running test, …` hint (framed at the `it(` call); they carried
   turbo-test's own messages and no frame.
 
+### Changed
+- `src/runtime.js` has one WHATWG UTF-8 decoder (turbo-test#121): `TextDecoder`, `URLSearchParams`
+  percent-decoding, `querystring.unescape` and `StringDecoder` share `__utf8Run` instead of three
+  copies of the maximal-subpart decoder. No behaviour change.
+
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain
   1.98.0). The 28 clippy findings are fixed and the crate is rustfmt-clean (turbo-test#62).
