@@ -726,7 +726,6 @@ fn junit_failures_print_as_vitest_prints_them() {
 /// stdout three times, with a line of the transformed code. vitest prints the error once for the
 /// files whose import of one module failed (b, c), and apart for a's own.
 #[test]
-#[ignore = "turbo-test#99: fails until the fix"]
 fn a_compile_error_is_the_files_syntax_error() {
     const MSG: &str = "Invalid regular expression: /e{,2}/u: Incomplete quantifier";
     let case = |f: &str| {

@@ -3811,7 +3811,7 @@ fn load_cjs_inner<'s>(
         }
     };
     if let Some(e) = compile_exc {
-        COMPILE_EXC.with(|c| *c.borrow_mut() = Some(e.clone()));
+        COMPILE_EXC.with(|c| *c.borrow_mut() = Some((e.clone(), abs.to_path_buf())));
         let e = v8::Local::new(scope, &e);
         scope.throw_exception(e);
     }
@@ -4840,8 +4840,10 @@ fn load_graph<'s>(
 }
 
 thread_local! {
-    /// The last compile error a CommonJS load threw (the module runner's form of an import).
-    static COMPILE_EXC: RefCell<Option<v8::Global<v8::Value>>> = const { RefCell::new(None) };
+    /// The last compile error a CommonJS load threw (the module runner's form of an import) and
+    /// the module it is of.
+    static COMPILE_EXC: RefCell<Option<(v8::Global<v8::Value>, PathBuf)>> =
+        const { RefCell::new(None) };
 }
 
 /// Load a file's entry module graph under a TryCatch: the error is the exception the load
@@ -4860,6 +4862,17 @@ fn load_entry_graph<'s>(
             None => {
                 let exc = tc.exception();
                 note_load_error(tc, exc);
+                // the module the exception was thrown in (for a compile error, the one that
+                // did not compile)
+                let module = tc
+                    .message()
+                    .and_then(|m| m.get_script_resource_name(tc))
+                    .map(|n| PathBuf::from(n.to_rust_string_lossy(tc)));
+                LOAD_ERROR.with(|e| {
+                    if let Some(info) = e.borrow_mut().as_mut() {
+                        info.source = module;
+                    }
+                });
                 return Err(caught_message(tc, "graph load failed")
                     .unwrap_or_else(|| "graph load failed".to_string()));
             }
@@ -7139,6 +7152,7 @@ fn error_info_of<'s>(
         diff,
         frames,
         cause,
+        source: None,
     }
 }
 
@@ -7198,8 +7212,11 @@ fn note_load_error(scope: &mut v8::PinScope, exc: Option<v8::Local<v8::Value>>) 
         // the importer runs (its stack is the loader's own), where the module runner's require()
         // of the module leaves the importer's frame (turbo-test#99).
         let compile = COMPILE_EXC.with(|c| c.borrow_mut().take());
-        if compile.is_some_and(|c| v8::Local::new(scope, &c).strict_equals(exc)) {
-            info.frames.clear();
+        if let Some((c, module)) = compile {
+            if v8::Local::new(scope, &c).strict_equals(exc) {
+                info.frames.clear();
+                info.source = Some(module);
+            }
         }
         LOAD_ERROR.with(|e| *e.borrow_mut() = Some(info));
     }

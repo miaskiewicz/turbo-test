@@ -259,7 +259,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   properties (nor a null-prototype object `{}`, an `Array` subclass `[]`); it passed.
 - A test file that fails to compile — itself or a module it imports — fails with V8's
   `SyntaxError` as vitest reports it (turbo-test#99): the file's load error, the json
-  `message` and the junit failing case (`type="SyntaxError"`, no frames) carry it. turbo-test
+  `message` and the junit failing case (`type="SyntaxError"`, no frames) carry it, and the
+  default / verbose reporters' Failed Suites print one module's compile error once, under every
+  file whose import of it failed (a different module's apart), as vitest. turbo-test
   said `graph load failed` and V8 printed `Uncaught SyntaxError` to stdout three times, with a
   line number of the transformed code.
 
