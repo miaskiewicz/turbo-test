@@ -898,6 +898,93 @@ it('asset imports are vite strings', async () => {
     }
 }
 
+/// turbo-test#149: an `import.meta.glob` pattern that is not relative, `/` or an alias fails its
+/// module at transform, as vite does in vitest 4.1.12 (the test file, or the test file importing
+/// the module), with vite's message (a negated pattern without its `!`). turbo-test left the call
+/// to throw only when it ran, so the file's other tests passed. vitest on the same project:
+/// `Test Files  2 failed | 1 passed (3)`, `Tests  1 passed (1)`.
+#[test]
+#[ignore = "turbo-test#149: fails until the fix"]
+fn an_invalid_glob_pattern_fails_its_module() {
+    let files: [(&str, &str); 6] = [
+        (
+            "package.json",
+            "{\"name\":\"rc-glob-invalid\",\"type\":\"module\"}\n",
+        ),
+        (
+            "src/ok/k.ts",
+            r#"export const k = 1;
+"#,
+        ),
+        (
+            "src/g.ts",
+            r#"export const g = () => import.meta.glob(['./ok/*.ts', '!ok/x.ts']);
+"#,
+        ),
+        (
+            "a.test.ts",
+            r#"import { expect, it } from 'vitest';
+it('other test', () => { expect(1).toBe(1); });
+it('glob', () => { expect(import.meta.glob('sub/*.ts')).toEqual({}); });
+"#,
+        ),
+        (
+            "b.test.ts",
+            r#"import { expect, it } from 'vitest';
+import { g } from './src/g';
+it('imports a module with an invalid glob', () => { expect(g()).toBeDefined(); });
+"#,
+        ),
+        (
+            "c.test.ts",
+            r#"import { expect, it } from 'vitest';
+it('fine', () => { expect(Object.keys(import.meta.glob('./src/ok/*.ts'))).toEqual(['./src/ok/k.ts']); });
+"#,
+        ),
+    ];
+    for esbuild in [true, false] {
+        let p = Project::new(if esbuild {
+            "rc-glob-invalid"
+        } else {
+            "rc-glob-invalid-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in files {
+            p.file(f, c);
+        }
+        let envs: &[&[(&str, &str)]] = if esbuild {
+            &[
+                &[],
+                &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
+            ]
+        } else {
+            &[&[]]
+        };
+        for env in envs {
+            let r = turbo_test(&p.dir, &[], env);
+            assert_eq!(r.code, Some(1), "esbuild={esbuild} {env:?}\n{}", r.all());
+            assert!(
+                r.stdout.contains("Test Files  2 failed | 1 passed (3)")
+                    && r.stdout.contains("Tests  1 passed (1)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            for (file, pattern) in [("a.test.ts", "sub/*.ts"), ("b.test.ts", "ok/x.ts")] {
+                let want = format!(
+                    "(Error: Invalid glob: \"{pattern}\" (resolved: \"{pattern}\"). It must start with '/' or './')"
+                );
+                assert!(
+                    load_error_line(&r, file).ends_with(&want),
+                    "esbuild={esbuild} {env:?}\n{}",
+                    r.all()
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn import_meta_keeps_coverage_line_mapping() {
     let p = esbuild_project("rc-import-meta-cov");
