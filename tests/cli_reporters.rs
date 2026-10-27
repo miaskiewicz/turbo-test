@@ -1155,3 +1155,41 @@ fn transform_errors_and_parse_failure_details_are_vites() {
         );
     }
 }
+
+/// turbo-test#166: a file that fails to load is vitest 4.1.12's TAP block (`--reporter tap`):
+/// an `error` map of its name and message (YAML-quoted, line breaks kept) and where it was
+/// thrown, indented four spaces, on both loaders. turbo-test printed `message: module errored:
+/// TypeError: …` (two spaces, the loader's prefix, line breaks flattened).
+#[test]
+#[ignore = "turbo-test#166: fails until the fix"]
+fn tap_load_failure_block_is_vitests() {
+    for esbuild in [false, true] {
+        let p = Project::new(if esbuild {
+            "rep-tap-load"
+        } else {
+            "rep-tap-load-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file(
+            "package.json",
+            "{\"name\":\"rep-tap-load\",\"type\":\"module\"}\n",
+        );
+        p.file(
+            "a.test.ts",
+            "import { test } from 'vitest';\nthrow new TypeError('top \"boom\"\\nline2');\ntest('x', () => {});\n",
+        );
+        let r = turbo_test(&p.dir, &["--reporter", "tap"], &[]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert_eq!(
+            r.stdout,
+            format!(
+                "TAP version 13\n1..1\nnot ok 1 - a.test.ts\n    ---\n    error:\n        name: \"TypeError\"\n        message: \"top \\\"boom\\\"\nline2\"\n    at: \"{}:2:7\"\n    ...\n\n",
+                p.path("a.test.ts").display()
+            ),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+    }
+}
