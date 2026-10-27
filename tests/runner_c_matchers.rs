@@ -510,3 +510,239 @@ http://h/?x=z&y=2
 k=v"#;
     assert_eq!(std::fs::read_to_string(p.path("out.txt")).unwrap(), want);
 }
+
+#[test]
+#[ignore = "turbo-test#117: fails until the fix"]
+fn url_search_params_surface_is_nodes() {
+    // turbo-test#117 and the rest of the URLSearchParams surface, table-driven: names and
+    // values go through USVString conversion (String(), lone surrogates -> U+FFFD) in every
+    // method; constructor from string / record / sequence of pairs (bad pairs throw TypeError)
+    // / another URLSearchParams; has/delete value arg; stable code-unit sort; size; live
+    // forEach and iterators; form-urlencoded toString; write-back to the owning URL.
+    // Expected: Node 26 (each row is [case, result] or [case, ["throws", error name]]).
+    let p = Project::new("rc-usp-surface");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "u.test.js",
+        r##"import { test } from 'vitest'
+import * as fs from 'node:fs'
+test('URLSearchParams', () => {
+  const rows = []
+  const t = (name, f) => { let r; try { r = f() } catch (e) { r = ['throws', e.name] } rows.push(JSON.stringify([name, r])) }
+  const L = (p) => [...p]
+  // constructor
+  t('str', () => L(new URLSearchParams('a=1&b=2&a=3')))
+  t('str?', () => L(new URLSearchParams('?a=1')))
+  t('str??', () => L(new URLSearchParams('??a=1')))
+  t('str empty parts', () => L(new URLSearchParams('&&a&=&=x&b==c&')))
+  t('str plus pct', () => L(new URLSearchParams('a+b=c%20d+e&%2B=%2b')))
+  t('str bad pct', () => L(new URLSearchParams('a=%zz&b=%&c=%4&d=%E2%82&e=%E2%82%AC&f=%C3%28&g=%FF')))
+  t('str surrogate', () => L(new URLSearchParams('a=\uD800&\uDC00=b')))
+  t('str non-ascii', () => L(new URLSearchParams('€=ü&😀=x')))
+  t('undefined', () => L(new URLSearchParams(undefined)))
+  t('null', () => L(new URLSearchParams(null)))
+  t('number', () => L(new URLSearchParams(12)))
+  t('bool', () => L(new URLSearchParams(true)))
+  t('record', () => L(new URLSearchParams({ a: 1, b: 'x y', c: null, d: undefined, 2: 'n' })))
+  t('record surrogate', () => L(new URLSearchParams({ '\uD800': 'v\uDC00' })))
+  t('record dup after usv', () => L(new URLSearchParams({ '\uD800': '1', '\uDC00': '2', '�': '3' })))
+  t('record symbol key', () => L(new URLSearchParams({ [Symbol('s')]: 1, a: 2 })))
+  t('record non-enum', () => L(new URLSearchParams(Object.defineProperty({ a: 1 }, 'h', { value: 2, enumerable: false }))))
+  t('record inherited', () => L(new URLSearchParams(Object.create({ inh: 1 }, { own: { value: 2, enumerable: true } }))))
+  t('record symbol value', () => L(new URLSearchParams({ a: Symbol('s') })))
+  t('record toString', () => L(new URLSearchParams({ a: { toString() { return 'T' } } })))
+  t('seq', () => L(new URLSearchParams([['a', 1], ['b', null], [2, undefined]])))
+  t('seq empty', () => L(new URLSearchParams([])))
+  t('seq iterable pairs', () => L(new URLSearchParams(new Map([['a', '1'], ['b', '2']]))))
+  t('seq set of pairs', () => L(new URLSearchParams(new Set([['x', 'y']]))))
+  t('seq generator', () => L(new URLSearchParams((function* () { yield ['g', 'h']; yield new Set(['i', 'j']) })())))
+  t('seq pair too short', () => L(new URLSearchParams([['a']])))
+  t('seq pair too long', () => L(new URLSearchParams([['a', 'b', 'c']])))
+  t('seq pair string', () => L(new URLSearchParams(['ab'])))
+  t('seq pair number', () => L(new URLSearchParams([1])))
+  t('seq pair null', () => L(new URLSearchParams([null])))
+  t('seq pair empty', () => L(new URLSearchParams([[]])))
+  t('seq pair symbol', () => L(new URLSearchParams([[Symbol('s'), 'v']])))
+  t('seq surrogate', () => L(new URLSearchParams([['\uD800x', 'y\uDFFF']])))
+  t('iterator not callable', () => L(new URLSearchParams({ [Symbol.iterator]: 1, a: 2 })))
+  t('iterator null', () => L(new URLSearchParams({ [Symbol.iterator]: null, a: 2 })))
+  t('copy', () => { const a = new URLSearchParams('a=1&b=2'); const b = new URLSearchParams(a); b.append('c', 3); return [L(a), L(b)] })
+  t('copy url sp', () => { const u = new URL('http://h/?x=1'); const b = new URLSearchParams(u.searchParams); b.set('x', 2); return [u.href, L(b)] })
+  t('symbol init', () => L(new URLSearchParams(Symbol('s'))))
+  t('obj toString init', () => L(new URLSearchParams(Object.assign(() => {}, { a: 1 }))))
+  // ToString names and values (issue #117)
+  t('issue117', () => { const p = new URLSearchParams(); p.append(1, 'x'); p.set(2, 'y'); return [p.get('1'), p.has(1), p.getAll(1), p.get('2'), [...p.keys()].map((k) => typeof k)] })
+  t('tostring all', () => {
+    const p = new URLSearchParams()
+    p.append(null, undefined); p.append(undefined, null); p.append(true, 1.5); p.set({ toString: () => 'o' }, [1, 2])
+    return [L(p), p.get(null), p.get('null'), p.get(undefined), p.getAll(true), p.has(1.5), p.has('true'), p.get({ toString: () => 'o' })]
+  })
+  t('delete tostring', () => { const p = new URLSearchParams('1=a&2=b&null=c'); p.delete(1); p.delete(null); return L(p) })
+  t('append symbol name', () => new URLSearchParams().append(Symbol('s'), 'v'))
+  t('append symbol value', () => new URLSearchParams().append('n', Symbol('s')))
+  t('get symbol', () => new URLSearchParams().get(Symbol('s')))
+  t('surrogate methods', () => { const p = new URLSearchParams(); p.append('\uD800', '\uDC00'); p.set('a\uDBFF', 'b'); return [L(p), p.get('�'), p.has('\uD800'), p.get('a�'), p.toString()] })
+  // missing args
+  t('append 1 arg', () => new URLSearchParams().append('a'))
+  t('append 0 arg', () => new URLSearchParams().append())
+  t('set 1 arg', () => new URLSearchParams().set('a'))
+  t('get 0 arg', () => new URLSearchParams().get())
+  t('getAll 0 arg', () => new URLSearchParams().getAll())
+  t('has 0 arg', () => new URLSearchParams().has())
+  t('delete 0 arg', () => new URLSearchParams().delete())
+  t('append undefined value', () => { const p = new URLSearchParams(); p.append('a', undefined); return L(p) })
+  // get/getAll/has/delete
+  t('get first', () => { const p = new URLSearchParams('a=1&a=2&b='); return [p.get('a'), p.get('b'), p.get('c'), p.getAll('a'), p.getAll('c'), p.getAll('b')] })
+  t('has value', () => { const p = new URLSearchParams('a=1&a=2&b=3'); return [p.has('a', '2'), p.has('a', '3'), p.has('a', 2), p.has('a', undefined), p.has('c', undefined), p.has('a', null), p.has('b', '3')] })
+  t('has value null match', () => { const p = new URLSearchParams('a=null'); return [p.has('a', null), p.has('a', 'null')] })
+  t('delete value', () => { const p = new URLSearchParams('a=1&b=2&a=2&a=3'); p.delete('a', '2'); const r1 = p.toString(); p.delete('a', 3); const r2 = p.toString(); p.delete('a', undefined); return [r1, r2, p.toString()] })
+  t('delete value null', () => { const p = new URLSearchParams('a=null&a=x'); p.delete('a', null); return p.toString() })
+  t('delete missing', () => { const p = new URLSearchParams('a=1'); p.delete('z'); return p.toString() })
+  // append/set
+  t('append dup', () => { const p = new URLSearchParams('a=1'); p.append('a', '1'); p.append('', ''); return [L(p), p.toString()] })
+  t('set new / existing', () => { const p = new URLSearchParams('a=1&b=2&a=3'); p.set('a', 'x'); p.set('c', 'y'); p.set('b', ''); return p.toString() })
+  // sort
+  t('sort stable', () => { const p = new URLSearchParams('z=1&a=1&z=2&a=2&b=0&a=3'); p.sort(); return p.toString() })
+  t('sort code units', () => { const p = new URLSearchParams([['�', '1'], ['😀', '2'], ['', '3'], ['a', '4'], ['A', '5'], ['', '6'], ['ab', '7'], ['aa', '8']]); p.sort(); return [...p.keys()] })
+  t('sort empty', () => { const p = new URLSearchParams(); p.sort(); return p.toString() })
+  // size
+  t('size', () => { const p = new URLSearchParams('a=1&a=2&b=3'); const s0 = p.size; p.delete('a'); return [s0, p.size, new URLSearchParams().size, Object.getOwnPropertyDescriptor(URLSearchParams.prototype, 'size') && typeof Object.getOwnPropertyDescriptor(URLSearchParams.prototype, 'size').get] })
+  // forEach / iteration
+  t('forEach', () => { const p = new URLSearchParams('a=1&b=2'); const out = []; const self = { s: 1 }; p.forEach(function (v, k, o) { out.push([v, k, o === p, this === self]) }, self); return out })
+  t('forEach live append', () => { const p = new URLSearchParams('a=1&b=2'); const out = []; p.forEach((v, k) => { out.push(k); if (k === 'a') p.append('c', '3') }); return out })
+  t('forEach live delete', () => { const p = new URLSearchParams('a=1&b=2&c=3'); const out = []; p.forEach((v, k) => { out.push(k); if (k === 'a') p.delete('a') }); return out })
+  t('forEach no fn', () => new URLSearchParams('a=1').forEach())
+  t('forEach not fn', () => new URLSearchParams('a=1').forEach(1))
+  t('iter live', () => { const p = new URLSearchParams('a=1&b=2'); const it = p.keys(); const first = it.next(); p.append('c', '3'); return [first, [...it]] })
+  t('iter live delete', () => { const p = new URLSearchParams('a=1&b=2&c=3'); const it = p.values(); const first = it.next().value; p.delete('a'); return [first, [...it]] })
+  t('iter shapes', () => { const p = new URLSearchParams('a=1&b=2'); return [[...p.entries()], [...p.keys()], [...p.values()], [...p], p[Symbol.iterator] === p.entries, p.entries().next(), new URLSearchParams().entries().next()] })
+  t('iter tags', () => { const it = new URLSearchParams('a=1').entries(); return [Object.prototype.toString.call(it), typeof it[Symbol.iterator], it[Symbol.iterator]() === it, Object.prototype.toString.call(new URLSearchParams())] })
+  t('iter done stays done', () => { const p = new URLSearchParams('a=1'); const it = p.keys(); it.next(); const d = it.next(); p.append('b', '2'); return [d, it.next()] })
+  t('entries fresh arrays', () => { const p = new URLSearchParams('a=1'); const e = p.entries().next().value; e[0] = 'z'; return L(p) })
+  // toString encoding
+  t('enc space plus', () => new URLSearchParams([['a b', 'c d'], ['+', '%']]).toString())
+  t('enc ascii', () => { let s = ''; for (let i = 0; i < 128; i++) s += String.fromCharCode(i); return new URLSearchParams([[s, 'v']]).toString() })
+  t('enc non-ascii', () => new URLSearchParams([['€', 'ü'], ['😀', '\u0080']]).toString())
+  t('enc surrogates', () => new URLSearchParams([['\uD800', '\uDC00'], ['a\uD83Db', '\uDE00\uD83D']]).toString())
+  t('enc roundtrip', () => { const s = new URLSearchParams([['a=b&c', '?#/ ~!\'()*']]).toString(); return [s, L(new URLSearchParams(s))] })
+  t('enc empty', () => [new URLSearchParams().toString(), new URLSearchParams('a').toString(), new URLSearchParams('=').toString(), new URLSearchParams('=x').toString()])
+  t('String()', () => [String(new URLSearchParams('a=1')), `${new URLSearchParams('b=2')}`])
+  // write back to the URL
+  t('url append', () => { const u = new URL('http://h/p?a=1#f'); u.searchParams.append('b', 'x y'); return [u.href, u.search] })
+  t('url set', () => { const u = new URL('http://h/?a=1&a=2'); u.searchParams.set(1, 2); return u.href })
+  t('url delete all', () => { const u = new URL('http://h/?a=1#f'); u.searchParams.delete('a'); return [u.href, u.search] })
+  t('url delete value', () => { const u = new URL('http://h/?a=1&a=2'); u.searchParams.delete('a', 1); return u.href })
+  t('url delete none', () => { const u = new URL('http://h/?a%20b=c'); u.searchParams.delete('zz'); return u.href })
+  t('url sort', () => { const u = new URL('http://h/?b=1&a=2'); u.searchParams.sort(); return u.href })
+  t('url sort empty', () => { const u = new URL('http://h/?'); u.searchParams.sort(); return u.href })
+  t('url reads after search set', () => { const u = new URL('http://h/?a=1'); const sp = u.searchParams; u.search = 'b=2&b=3'; return [sp.getAll('b'), sp.size, sp.has('a')] })
+  t('url encoding', () => { const u = new URL('http://h/'); u.searchParams.append('\uD800€', "'~*"); return u.href })
+  t('url opaque', () => { const u = new URL('mailto:x?a=1'); u.searchParams.append('b', '2'); return u.href })
+  t('url get/has', () => { const u = new URL('http://h/?1=a&null=b'); return [u.searchParams.get(1), u.searchParams.has(null), u.searchParams.getAll(1)] })
+  fs.writeFileSync('out.txt', rows.join('\n'))
+})
+"##,
+    );
+    let r = turbo_test(&p.dir, &["u.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let got = std::fs::read_to_string(p.path("out.txt")).unwrap();
+    let want = r##"["str",[["a","1"],["b","2"],["a","3"]]]
+["str?",[["a","1"]]]
+["str??",[["?a","1"]]]
+["str empty parts",[["a",""],["",""],["","x"],["b","=c"]]]
+["str plus pct",[["a b","c d e"],["+","+"]]]
+["str bad pct",[["a","%zz"],["b","%"],["c","%4"],["d","�"],["e","€"],["f","�("],["g","�"]]]
+["str surrogate",[["a","�"],["�","b"]]]
+["str non-ascii",[["€","ü"],["😀","x"]]]
+["undefined",[]]
+["null",[["null",""]]]
+["number",[["12",""]]]
+["bool",[["true",""]]]
+["record",[["2","n"],["a","1"],["b","x y"],["c","null"],["d","undefined"]]]
+["record surrogate",[["�","v�"]]]
+["record dup after usv",[["�","3"]]]
+["record symbol key",["throws","TypeError"]]
+["record non-enum",[["a","1"]]]
+["record inherited",[["own","2"]]]
+["record symbol value",["throws","TypeError"]]
+["record toString",[["a","T"]]]
+["seq",[["a","1"],["b","null"],["2","undefined"]]]
+["seq empty",[]]
+["seq iterable pairs",[["a","1"],["b","2"]]]
+["seq set of pairs",[["x","y"]]]
+["seq generator",[["g","h"],["i","j"]]]
+["seq pair too short",["throws","TypeError"]]
+["seq pair too long",["throws","TypeError"]]
+["seq pair string",["throws","TypeError"]]
+["seq pair number",["throws","TypeError"]]
+["seq pair null",["throws","TypeError"]]
+["seq pair empty",["throws","TypeError"]]
+["seq pair symbol",["throws","TypeError"]]
+["seq surrogate",[["�x","y�"]]]
+["iterator not callable",["throws","TypeError"]]
+["iterator null",["throws","TypeError"]]
+["copy",[[["a","1"],["b","2"]],[["a","1"],["b","2"],["c","3"]]]]
+["copy url sp",["http://h/?x=1",[["x","2"]]]]
+["symbol init",["throws","TypeError"]]
+["obj toString init",[["a","1"]]]
+["issue117",["x",true,["x"],"y",["string","string"]]]
+["tostring all",[[["null","undefined"],["undefined","null"],["true","1.5"],["o","1,2"]],"undefined","undefined","null",["1.5"],false,true,"1,2"]]
+["delete tostring",[["2","b"]]]
+["append symbol name",["throws","TypeError"]]
+["append symbol value",["throws","TypeError"]]
+["get symbol",["throws","TypeError"]]
+["surrogate methods",[[["�","�"],["a�","b"]],"�",true,"b","%EF%BF%BD=%EF%BF%BD&a%EF%BF%BD=b"]]
+["append 1 arg",["throws","TypeError"]]
+["append 0 arg",["throws","TypeError"]]
+["set 1 arg",["throws","TypeError"]]
+["get 0 arg",["throws","TypeError"]]
+["getAll 0 arg",["throws","TypeError"]]
+["has 0 arg",["throws","TypeError"]]
+["delete 0 arg",["throws","TypeError"]]
+["append undefined value",[["a","undefined"]]]
+["get first",["1","",null,["1","2"],[],[""]]]
+["has value",[true,false,true,true,false,false,true]]
+["has value null match",[true,true]]
+["delete value",["a=1&b=2&a=3","a=1&b=2","b=2"]]
+["delete value null","a=x"]
+["delete missing","a=1"]
+["append dup",[[["a","1"],["a","1"],["",""]],"a=1&a=1&="]]
+["set new / existing","a=x&b=&c=y"]
+["sort stable","a=1&a=2&a=3&b=0&z=1&z=2"]
+["sort code units",["","A","a","aa","ab","😀","","�"]]
+["sort empty",""]
+["size",[3,1,0,"function"]]
+["forEach",[["1","a",true,true],["2","b",true,true]]]
+["forEach live append",["a","b","c"]]
+["forEach live delete",["a","c"]]
+["forEach no fn",["throws","TypeError"]]
+["forEach not fn",["throws","TypeError"]]
+["iter live",[{"done":false,"value":"a"},["b","c"]]]
+["iter live delete",["1",["3"]]]
+["iter shapes",[[["a","1"],["b","2"]],["a","b"],["1","2"],[["a","1"],["b","2"]],true,{"done":false,"value":["a","1"]},{"done":true}]]
+["iter tags",["[object URLSearchParams Iterator]","function",true,"[object URLSearchParams]"]]
+["iter done stays done",[{"done":true},{"done":false,"value":"b"}]]
+["entries fresh arrays",[["a","1"]]]
+["enc space plus","a+b=c+d&%2B=%25"]
+["enc ascii","%00%01%02%03%04%05%06%07%08%09%0A%0B%0C%0D%0E%0F%10%11%12%13%14%15%16%17%18%19%1A%1B%1C%1D%1E%1F+%21%22%23%24%25%26%27%28%29*%2B%2C-.%2F0123456789%3A%3B%3C%3D%3E%3F%40ABCDEFGHIJKLMNOPQRSTUVWXYZ%5B%5C%5D%5E_%60abcdefghijklmnopqrstuvwxyz%7B%7C%7D%7E%7F=v"]
+["enc non-ascii","%E2%82%AC=%C3%BC&%F0%9F%98%80=%C2%80"]
+["enc surrogates","%EF%BF%BD=%EF%BF%BD&a%EF%BF%BDb=%EF%BF%BD%EF%BF%BD"]
+["enc roundtrip",["a%3Db%26c=%3F%23%2F+%7E%21%27%28%29*",[["a=b&c","?#/ ~!'()*"]]]]
+["enc empty",["","a=","=","=x"]]
+["String()",["a=1","b=2"]]
+["url append",["http://h/p?a=1&b=x+y#f","?a=1&b=x+y"]]
+["url set","http://h/?a=1&a=2&1=2"]
+["url delete all",["http://h/#f",""]]
+["url delete value","http://h/?a=2"]
+["url delete none","http://h/?a+b=c"]
+["url sort","http://h/?a=2&b=1"]
+["url sort empty","http://h/"]
+["url reads after search set",[["2","3"],2,false]]
+["url encoding","http://h/?%EF%BF%BD%E2%82%AC=%27%7E*"]
+["url opaque","mailto:x?a=1&b=2"]
+["url get/has",["a",true,["a"]]]"##;
+    for (g, w) in got.lines().zip(want.lines()) {
+        assert_eq!(g, w);
+    }
+    assert_eq!(got.lines().count(), want.lines().count());
+}
