@@ -513,3 +513,102 @@ fn dot_reporter_prints_what_vitest_prints() {
         }
     }
 }
+
+/// turbo-test#96: a test skipped at run time (`ctx.skip(note?)`) shows its duration and note, and
+/// `ctx.annotate()` calls print under the verbose test line and the failed test's error.
+const CONTEXT: &[(&str, &str)] = &[(
+    "a.test.ts",
+    "import { describe, expect, it } from 'vitest';\n\
+     it('noted', (ctx) => { ctx.skip('not today'); });\n\
+     it('quiet', (ctx) => { ctx.skip(); });\n\
+     it.skip('static', () => {});\n\
+     describe('d', () => {\n\
+     \x20 it('annotated', async ({ annotate }) => { await annotate('note one'); await annotate('note two'); await annotate('careful', 'warning'); });\n\
+     \x20 it('fails', async ({ annotate }) => { await annotate('before failing'); expect(1).toBe(2); });\n\
+     });\n",
+)];
+
+#[test]
+fn skip_notes_and_annotations_print_what_vitest_prints() {
+    for (reporter, esbuild) in [
+        ("default", false),
+        ("default", true),
+        ("verbose", false),
+        ("verbose", true),
+        ("agent", false),
+    ] {
+        let p = project(&format!("hr-s20-{reporter}"), CONTEXT, esbuild);
+        let root = p.dir.display().to_string();
+        let (argv, env): (&[&str], _) = if reporter == "agent" {
+            (
+                &[],
+                vec![("TURBO_LEGACY_REPORTER", "0"), ("AI_AGENT", "claude-code")],
+            )
+        } else {
+            (
+                &["--reporter", reporter],
+                vec![("TURBO_LEGACY_REPORTER", "0"), ("NO_COLOR", "1")],
+            )
+        };
+        let r = turbo_test(&p.dir, argv, &env);
+        let ctx = format!("s20 {reporter} esbuild={esbuild}\n{}", r.all());
+        assert_eq!(
+            normalize(&r.stdout, &root),
+            reference("s20", reporter, "out"),
+            "{ctx}"
+        );
+        assert_eq!(
+            normalize(&r.stderr, &root),
+            reference("s20", reporter, "err"),
+            "{ctx}"
+        );
+    }
+}
+
+/// turbo-test#97: thrown primitives (`Unknown Error: <value>`), values without a message (their
+/// serialized form) and error properties (`Serialized Error: { … }`, verbose only, a cause's in
+/// every reporter) in the Failed Tests section; s15 is the issue's repro, s21 more values.
+#[test]
+fn thrown_values_and_error_properties_print_what_vitest_prints() {
+    for (scenario, file) in [
+        ("s15", include_str!("data/errors/a.test.ts")),
+        ("s21", include_str!("data/errors/b.test.ts")),
+    ] {
+        for (reporter, esbuild) in [
+            ("default", false),
+            ("verbose", false),
+            ("verbose", true),
+            ("agent", false),
+        ] {
+            let p = project(
+                &format!("hr-{scenario}-{reporter}"),
+                &[("a.test.ts", file)],
+                esbuild,
+            );
+            let root = p.dir.display().to_string();
+            let (argv, env): (&[&str], _) = if reporter == "agent" {
+                (
+                    &[],
+                    vec![("TURBO_LEGACY_REPORTER", "0"), ("AI_AGENT", "claude-code")],
+                )
+            } else {
+                (
+                    &["--reporter", reporter],
+                    vec![("TURBO_LEGACY_REPORTER", "0"), ("NO_COLOR", "1")],
+                )
+            };
+            let r = turbo_test(&p.dir, argv, &env);
+            let ctx = format!("{scenario} {reporter} esbuild={esbuild}\n{}", r.all());
+            assert_eq!(
+                normalize(&r.stdout, &root),
+                reference(scenario, reporter, "out"),
+                "{ctx}"
+            );
+            assert_eq!(
+                normalize(&r.stderr, &root),
+                reference(scenario, reporter, "err"),
+                "{ctx}"
+            );
+        }
+    }
+}

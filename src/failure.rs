@@ -15,11 +15,22 @@ pub struct Frame {
     pub col: u32,
 }
 
-/// An error a test (or a hook, or the file's load) failed with.
+/// An error a test (or a hook, or the file's load) failed with: @vitest/utils' serialized error
+/// (a thrown primitive is `{ message }`, turbo-test#97).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ErrorInfo {
+    /// Its name, `Unknown Error` for one without.
     pub name: String,
     pub message: String,
+    /// It has no `name` / `message` (junit leaves the `type` / `message` attribute out; the
+    /// verbose reporter prints the message as `undefined`).
+    pub no_name: bool,
+    pub no_message: bool,
+    /// What vitest prints instead of `Name: message` for a value without a message: the
+    /// serialized error as Node's console shows it (`{ a: 1, stacks: [] }`).
+    pub inspected: Option<String>,
+    /// vitest's `Serialized Error`: the error's own properties (loupe), `None` for none.
+    pub properties: Option<String>,
     /// `- Expected` / `+ Received` diff (or `Expected:` / `Received:` lines); empty for none.
     pub diff: String,
     pub frames: Vec<Frame>,
@@ -60,39 +71,12 @@ pub fn parse_stack(stack: &str) -> Vec<Frame> {
         .collect()
 }
 
-/// `capturePrintError(error).output.trim()`: `Name: message`, the diff between blank lines, one
-/// ` ❯ [method ]path:line:col` per frame outside node_modules (paths relative to `root`) and a
-/// blank line after them, then the cause as `Caused by: Name: message` and its frames.
+/// `capturePrintError(error).output.trim()` (junit's `<failure>` body): vitest's printErrorInner
+/// without a code frame, with the error's properties ([`crate::human::print_error`]).
 pub fn print_error(e: &ErrorInfo, root: &Path) -> String {
-    let mut out = String::new();
-    write_error(&mut out, e, root, "");
-    out.trim().to_string()
-}
-
-fn write_error(out: &mut String, e: &ErrorInfo, root: &Path, prefix: &str) {
-    out.push_str(&format!("{prefix}{}: {}\n", e.name, e.message));
-    if !e.diff.is_empty() {
-        out.push_str(&format!("\n{}\n\n", e.diff));
-    }
-    let frames: Vec<&Frame> = e
-        .frames
-        .iter()
-        .filter(|f| !f.file.components().any(|c| c.as_os_str() == "node_modules"))
-        .collect();
-    for f in &frames {
-        let path = f.file.strip_prefix(root).unwrap_or(&f.file);
-        let at = format!("{}:{}:{}", path.display(), f.line, f.col);
-        match f.method.as_str() {
-            "" => out.push_str(&format!(" ❯ {at}\n")),
-            m => out.push_str(&format!(" ❯ {m} {at}\n")),
-        }
-    }
-    if !frames.is_empty() {
-        out.push('\n');
-    }
-    if let Some(cause) = &e.cause {
-        write_error(out, cause, root, "Caused by: ");
-    }
+    crate::human::print_error(e, root, false, true, "", &crate::colors::Colors::default())
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]

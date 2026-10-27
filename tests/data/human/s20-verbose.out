@@ -1,0 +1,27 @@
+
+ RUN  v4.1.12 <root>
+
+ ↓ a.test.ts > noted <ms> [not today]
+ ↓ a.test.ts > quiet <ms>
+ ↓ a.test.ts > static
+ ✓ a.test.ts > d > annotated <ms>
+
+   ❯ a.test.ts:6:51 notice
+     ↳ note one
+   ❯ a.test.ts:6:79 notice
+     ↳ note two
+   ❯ a.test.ts:6:107 warning
+     ↳ careful
+
+ × a.test.ts > d > fails <ms>
+   → expected 1 to be 2 // Object.is equality
+
+   ❯ a.test.ts:7:47 notice
+     ↳ before failing
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 1 passed | 3 skipped (5)
+   Start at  <time>
+   Duration  <duration>
+

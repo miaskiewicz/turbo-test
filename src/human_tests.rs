@@ -206,6 +206,63 @@ fn test_suffixes_and_symbols() {
     );
 }
 
+/// turbo-test#96: a test skipped at run time (it has a start) shows its duration and its note;
+/// a statically skipped one neither, an empty note no brackets, a note only on a skipped test.
+#[test]
+fn skipped_at_run_time_suffixes() {
+    let mut t = test("a", "skipped", 1.6);
+    t.start_ms = 1000.0;
+    assert_eq!(suffix(&OFF, &t), " 2ms");
+    t.note = "not today".into();
+    assert_eq!(suffix(&OFF, &t), " 2ms [not today]");
+    let mut s = test("a", "skipped", 0.0);
+    s.note = "n".into();
+    assert_eq!(suffix(&OFF, &s), " [n]");
+    let mut p = test("a", "passed", 0.4);
+    p.note = "n".into();
+    assert_eq!(suffix(&OFF, &p), " 0ms");
+    // coloured: the note c.dim(c.gray(` [note]`)) after the green duration
+    assert_eq!(
+        suffix(&C, &t),
+        "\x1b[32m 2\x1b[2mms\x1b[22m\x1b[39m\x1b[2m\x1b[90m [not today]\x1b[39m\x1b[22m"
+    );
+}
+
+/// vitest's printAnnotations: grouped by location and type in first-seen order (one made at the
+/// same place with the same type joins its group), a group without a location is the type alone.
+#[test]
+fn annotations_group_by_place_and_type() {
+    let a = |kind: &str, message: &str, line: u32, col: u32| Annotation {
+        kind: kind.into(),
+        message: message.into(),
+        line,
+        col,
+    };
+    let notes = [
+        a("notice", "one", 3, 9),
+        a("warning", "two", 3, 9),
+        a("notice", "three", 3, 9),
+        a("notice", "four", 0, 0),
+        a("notice", "five", 4, 1),
+    ];
+    assert_eq!(
+        annotation_lines(&OFF, &notes, "a.test.ts", 1),
+        " ❯ a.test.ts:3:9 notice\n   ↳ one\n   ↳ three\n ❯ a.test.ts:3:9 warning\n   ↳ two\n \
+         ❯ notice\n   ↳ four\n ❯ a.test.ts:4:1 notice\n   ↳ five\n"
+    );
+    assert_eq!(
+        annotation_lines(&OFF, &notes[..1], "b.ts", 3),
+        "   ❯ b.ts:3:9 notice\n     ↳ one\n"
+    );
+    assert_eq!(annotation_lines(&OFF, &[], "b.ts", 3), "");
+    // coloured: a blue pointer, the place gray and the type bold, a blue arrow per message
+    assert_eq!(
+        annotation_lines(&C, &notes[3..5], "b.ts", 1),
+        " \x1b[34m❯\x1b[39m \x1b[1mnotice\x1b[22m\n   \x1b[34m↳\x1b[39m four\n \x1b[34m❯\x1b[39m \
+         \x1b[90mb.ts:4:1\x1b[39m \x1b[1mnotice\x1b[22m\n   \x1b[34m↳\x1b[39m five\n"
+    );
+}
+
 #[test]
 fn snapshot_lines_are_render_snapshot_summary() {
     let names = [PathBuf::from("a.test.ts"), PathBuf::from("src/b.test.ts")];
@@ -287,17 +344,59 @@ fn print_error_writes_frames_code_frame_and_cause() {
             frames: vec![frame(&src, "")],
             ..error("inner")
         })),
+        ..Default::default()
     };
     // node_modules frames are left out; the code frame follows the first frame of a file that
     // exists; the cause has no code frame
     assert_eq!(
-        print_error(&e, &dir, true, "", &OFF),
+        print_error(&e, &dir, true, false, "", &OFF),
         "TypeError: bad\n\n- Expected\n+ Received\n\n ❯ gone.ts:2:1\n ❯ helper a.test.ts:2:1\n      1| x\n      2| throw 1\n       | ^\n      3|\n ❯ a.test.ts:2:1\n\nCaused by: Error: inner\n ❯ a.test.ts:2:1\n\n"
     );
     // without frames: no blank line after the message
     assert_eq!(
-        print_error(&error("m"), &dir, true, "P: ", &OFF),
+        print_error(&error("m"), &dir, true, false, "P: ", &OFF),
         "P: Error: m\n"
+    );
+    // turbo-test#97: the serialized form replaces `Name: message`; the properties follow the
+    // frames under a divider when asked for, a cause's always
+    let shown = ErrorInfo {
+        inspected: Some("{ a: 1, stacks: [] }".into()),
+        properties: Some("{ a: 1 }".into()),
+        ..error("")
+    };
+    let line = "⎯".repeat(30);
+    assert_eq!(
+        print_error(&shown, &dir, true, true, "P: ", &OFF),
+        format!("{{ a: 1, stacks: [] }}\n{line}\nSerialized Error: {{ a: 1 }}\n")
+    );
+    assert_eq!(
+        print_error(&shown, &dir, true, false, "", &OFF),
+        "{ a: 1, stacks: [] }\n"
+    );
+    // coloured (printStack): a red dim divider, a red bold label, the properties gray
+    assert_eq!(
+        print_error(&shown, &dir, true, true, "", &C),
+        format!(
+            "{{ a: 1, stacks: [] }}\n\x1b[31m\x1b[2m{line}\x1b[22m\x1b[39m\n\
+             \x1b[31m\x1b[1mSerialized Error:\x1b[22m\x1b[39m \x1b[90m{{ a: 1 }}\x1b[39m\n"
+        )
+    );
+    let with_cause = ErrorInfo {
+        frames: vec![frame(&dir.join("gone.ts"), "")],
+        properties: Some("{ code: 1 }".into()),
+        cause: Some(Box::new(ErrorInfo {
+            properties: Some("{ code: 'C' }".into()),
+            ..error("inner")
+        })),
+        ..error("outer")
+    };
+    assert_eq!(
+        print_error(&with_cause, &dir, false, false, "", &OFF),
+        format!("Error: outer\n ❯ gone.ts:2:1\n\nCaused by: Error: inner\n{line}\nSerialized Error: {{ code: 'C' }}\n")
+    );
+    assert_eq!(
+        print_error(&with_cause, &dir, false, true, "", &OFF),
+        format!("Error: outer\n ❯ gone.ts:2:1\n\n{line}\nSerialized Error: {{ code: 1 }}\nCaused by: Error: inner\n{line}\nSerialized Error: {{ code: 'C' }}\n")
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -323,7 +422,7 @@ fn errors_summary_counts_tasks_and_merges_identical_errors() {
     b.failed_file = true;
     b.load_error = true;
     b.error_msg = "evaluate threw: Error: load boom".into();
-    let out = errors_summary(&[a, b], &run(root, &names));
+    let out = errors_summary(&[a, b], &run(root, &names), false);
     let bar = |n: &str| format!("{}{n}⎯", "⎯".repeat(29 - n.chars().count()));
     let expected = [
         format!(
@@ -348,7 +447,10 @@ fn errors_summary_counts_tasks_and_merges_identical_errors() {
     .concat();
     assert_eq!(out, expected);
     // nothing failed: no section
-    assert_eq!(errors_summary(&[file(0, vec![])], &run(root, &names)), "");
+    assert_eq!(
+        errors_summary(&[file(0, vec![])], &run(root, &names), false),
+        ""
+    );
 }
 
 #[test]
@@ -555,7 +657,7 @@ fn coloured_errors_are_printed_as_vitest() {
     // the name bold inside the red message, the nearest frame cyan (the code frame highlighted
     // after it), the others gray
     assert_eq!(
-        print_error(&e, &dir, true, "", &C),
+        print_error(&e, &dir, true, false, "", &C),
         "\x1b[31m\x1b[1mError\x1b[22m: bad\x1b[39m\n\x1b[90m \x1b[2m❯\x1b[22m f gone.ts:\x1b[2m1:1\x1b[22m\x1b[39m\n\x1b[36m \x1b[2m❯\x1b[22m a.test.ts:\x1b[2m1:1\x1b[22m\x1b[39m\n    \x1b[90m  1|\x1b[39m \x1b[35mthrow\x1b[39m \x1b[34m1\x1b[39m\x1b[33m;\x1b[39m\n    \x1b[90m   |\x1b[39m \x1b[31m^\x1b[39m\n    \x1b[90m  2|\x1b[39m\n\n"
     );
     // a source over 100 000 characters is framed without highlighting
@@ -566,14 +668,14 @@ fn coloured_errors_are_printed_as_vitest() {
         frames: vec![frame(&big, "")],
         ..error("bad")
     };
-    let printed = print_error(&e, &dir, true, "", &C);
+    let printed = print_error(&e, &dir, true, false, "", &C);
     assert!(
         printed.contains("\x1b[90m  1|\x1b[39m throw 1;\n"),
         "{printed}"
     );
     // a message over 5000 characters: only the name is red
     let long = error(&"m".repeat(5001));
-    assert!(print_error(&long, &dir, false, "", &C)
+    assert!(print_error(&long, &dir, false, false, "", &C)
         .starts_with("\x1b[31m\x1b[1mError\x1b[22m\x1b[39m: mmm"));
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -870,7 +870,14 @@ fn assertion_result(t: &TestCase) -> String {
         json_str(&full.join(" ")),
         json_str(&t.status),
         json_str(&t.title),
-        json_strs(&t.failure_messages),
+        {
+            let items: Vec<String> = t
+                .failure_messages
+                .iter()
+                .map(|m| m.as_deref().map_or("null".to_string(), json_str))
+                .collect();
+            format!("[{}]", items.join(","))
+        },
     )
 }
 
@@ -995,6 +1002,19 @@ pub fn render_junit(names: &[PathBuf], res: &[FileResult], root: &Path) -> Strin
                 skipped += 1;
                 body.push("            <skipped/>".to_string());
             }
+            // its annotations, one property each (turbo-test#96)
+            if !t.annotations.is_empty() {
+                body.push("            <properties>".to_string());
+                for a in &t.annotations {
+                    body.push(format!(
+                        "                <property name=\"{}\" value=\"{}\">",
+                        xml_esc(&a.kind),
+                        xml_esc(&a.message)
+                    ));
+                    body.push("                </property>".to_string());
+                }
+                body.push("            </properties>".to_string());
+            }
             if t.status == "failed" {
                 failed += 1;
                 // a failure the runtime recorded no error object for (a forbidden `.only`)
@@ -1072,13 +1092,19 @@ fn testcase(classname: &str, name: &str, ms: f64, body: Vec<String>) -> String {
 }
 
 /// A `<failure>` element's lines for `e`.
+/// Its `message` / `type` attributes are the error's message and name, each left out when the
+/// error has none (turbo-test#97: a thrown primitive has no name, an object maybe neither).
 fn failure_element(e: &crate::failure::ErrorInfo, root: &Path) -> Vec<String> {
+    let mut open = "            <failure".to_string();
+    if !e.no_message {
+        open.push_str(&format!(" message=\"{}\"", xml_esc(&e.message)));
+    }
+    if !e.no_name {
+        open.push_str(&format!(" type=\"{}\"", xml_esc(&e.name)));
+    }
+    open.push('>');
     vec![
-        format!(
-            "            <failure message=\"{}\" type=\"{}\">",
-            xml_esc(&e.message),
-            xml_esc(&e.name)
-        ),
+        open,
         xml_esc(&crate::failure::print_error(e, root)),
         "            </failure>".to_string(),
     ]

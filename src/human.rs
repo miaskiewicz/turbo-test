@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::FileResult;
 use crate::colors::{strip, Colors};
 use crate::failure::{ErrorInfo, Frame};
-use crate::runner::TestCase;
+use crate::runner::{Annotation, TestCase};
 
 /// Which human reporter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -113,9 +113,19 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
                     ));
                     if t.status == "failed" {
                         for e in errors(t) {
-                            out.push_str(&c.red(&format!("   → {}", e.message)));
+                            let message = if e.no_message {
+                                "undefined"
+                            } else {
+                                &e.message
+                            };
+                            out.push_str(&c.red(&format!("   → {message}")));
                             out.push('\n');
                         }
+                    }
+                    if !t.annotations.is_empty() {
+                        out.push('\n');
+                        out.push_str(&annotation_lines(c, &t.annotations, &name, 3));
+                        out.push('\n');
                     }
                 }
             }
@@ -145,7 +155,7 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
             }
         }
     }
-    err.push_str(&errors_summary(res, run));
+    err.push_str(&errors_summary(res, run, kind == Kind::Verbose));
     if kind == Kind::Dot {
         // DotReporter.onTestRunEnd off a TTY: logger.log()
         out.push('\n');
@@ -263,17 +273,54 @@ fn duration(c: &Colors, ms: f64) -> String {
     }
 }
 
-/// vitest's getTestCaseSuffix: the duration of a test that ran, then ` (retry x2)` for a
-/// retried one.
+/// vitest's getTestCaseSuffix: the duration of a test that ran (one with a result: a test
+/// skipped at run time has a start, turbo-test#96), then ` (retry x2)` for a retried one and
+/// ` [note]` for one skipped with a note.
 fn suffix(c: &Colors, t: &TestCase) -> String {
     let mut s = String::new();
-    if (t.status == "passed" || t.status == "failed") && !t.not_run {
+    let ran = t.status == "passed" || t.status == "failed" || t.start_ms > 0.0;
+    if ran && !t.not_run {
         s.push_str(&duration(c, t.duration_ms));
     }
     if t.retry_count > 0 {
         s.push_str(&c.yellow(&format!(" (retry x{})", t.retry_count)));
     }
+    if t.status == "skipped" && !t.note.is_empty() {
+        s.push_str(&c.dim(&c.gray(&format!(" [{}]", t.note))));
+    }
     s
+}
+
+/// vitest's printAnnotations (turbo-test#96): the annotations grouped by where they were made
+/// and their type (` ❯ a.test.ts:3:9 notice`), each message under its group (`  ↳ message`),
+/// every line indented by `pad` spaces; `file` is the test file's name.
+fn annotation_lines(c: &Colors, annotations: &[Annotation], file: &str, pad: usize) -> String {
+    let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
+    for a in annotations {
+        // `${c.gray(`${file}:${line}:${column}`)} ${c.bold(type)}`, or c.bold(type)
+        let group = if a.line > 0 {
+            format!(
+                "{} {}",
+                c.gray(&format!("{file}:{}:{}", a.line, a.col)),
+                c.bold(&a.kind)
+            )
+        } else {
+            c.bold(&a.kind)
+        };
+        match groups.iter_mut().find(|(g, _)| *g == group) {
+            Some((_, messages)) => messages.push(&a.message),
+            None => groups.push((group, vec![&a.message])),
+        }
+    }
+    let pad = " ".repeat(pad);
+    let mut out = String::new();
+    for (group, messages) in groups {
+        out.push_str(&format!("{pad}{} {group}\n", c.blue("❯")));
+        for m in messages {
+            out.push_str(&format!("{pad}  {} {m}\n", c.blue("↳")));
+        }
+    }
+    out
 }
 
 /// A failed test's errors (one from its message when the runtime recorded no error object).
@@ -416,8 +463,9 @@ fn test_file_path(c: &Colors, name: &str) -> String {
 /// The Failed Suites / Failed Tests sections (stderr), as vitest's printErrorsSummary: each
 /// section counts its tasks; identical errors (vitest: the same stack and diff) are printed once
 /// under every task's ` FAIL  <name>` line; the dividers number the printed errors out of all the
-/// tasks' errors (vitest's counter does not account for merged ones).
-fn errors_summary(res: &[FileResult], run: &Run) -> String {
+/// tasks' errors (vitest's counter does not account for merged ones); `verbose` adds each error's
+/// properties (vitest's `printProperties: verbose`, turbo-test#97).
+fn errors_summary(res: &[FileResult], run: &Run, verbose: bool) -> String {
     let c = &run.colors;
     let sep = c.dim(" > ");
     let full = |name: &str, path: &str| {
@@ -427,8 +475,9 @@ fn errors_summary(res: &[FileResult], run: &Run) -> String {
         )
     };
     // (task name, its errors) per section
-    let mut suites: Vec<(String, Vec<ErrorInfo>)> = Vec::new();
-    let mut tests: Vec<(String, Vec<ErrorInfo>)> = Vec::new();
+    // (task name, its errors, its annotations and the file's name) per section
+    let mut suites: Vec<(String, Vec<ErrorInfo>, &[Annotation], String)> = Vec::new();
+    let mut tests: Vec<(String, Vec<ErrorInfo>, &[Annotation], String)> = Vec::new();
     for r in res {
         let name = run.names[r.idx].to_string_lossy().to_string();
         if r.failed_file && r.tests.is_empty() && r.suite_errors.is_empty() {
@@ -440,16 +489,19 @@ fn errors_summary(res: &[FileResult], run: &Run) -> String {
             suites.push((
                 format!("{name}{}", c.dim(&format!(" [ {name} ]"))),
                 vec![error],
+                &[],
+                name.clone(),
             ));
         }
         for s in &r.suite_errors {
-            suites.push((full(&name, &s.name), s.errors.clone()));
+            suites.push((full(&name, &s.name), s.errors.clone(), &[], name.clone()));
         }
         for t in r.tests.iter().filter(|t| t.status == "failed") {
-            tests.push((full(&name, &test_path(t)), errors(t)));
+            let task = full(&name, &test_path(t));
+            tests.push((task, errors(t), &t.annotations, name.clone()));
         }
     }
-    let total: usize = suites.iter().chain(&tests).map(|(_, e)| e.len()).sum();
+    let total: usize = suites.iter().chain(&tests).map(|t| t.1.len()).sum();
     let mut out = String::new();
     let mut n = 0;
     for (title, tasks) in [("Failed Suites", &suites), ("Failed Tests", &tests)] {
@@ -459,21 +511,27 @@ fn errors_summary(res: &[FileResult], run: &Run) -> String {
         // errorBanner: divider(c.bold(c.bgRed(` ${title} `)), null, null, c.red)
         let banner = c.bold(&c.bg_red(&format!(" {title} {} ", tasks.len())));
         out.push_str(&format!("\n{}\n\n", divider(&banner, None, &|t| c.red(t))));
-        let mut queue: Vec<(&ErrorInfo, Vec<&str>)> = Vec::new();
-        for (name, errors) in tasks.iter() {
+        // an error merges with an identical one of a task with the same annotations
+        type Queued<'q> = (&'q ErrorInfo, Vec<&'q str>, &'q [Annotation], &'q str);
+        let mut queue: Vec<Queued> = Vec::new();
+        for (name, errors, notes, file) in tasks.iter() {
             for e in errors {
-                match queue.iter_mut().find(|(q, _)| *q == e) {
-                    Some((_, names)) => names.push(name),
-                    None => queue.push((e, vec![name])),
+                match queue.iter_mut().find(|q| q.0 == e && q.2 == *notes) {
+                    Some(q) => q.1.push(name),
+                    None => queue.push((e, vec![name], notes, file)),
                 }
             }
         }
-        for (error, names) in queue {
+        for (error, names, notes, file) in queue {
             n += 1;
             for name in names {
                 out.push_str(&format!("{} {name}\n", c.bg_red(&c.bold(" FAIL "))));
             }
-            out.push_str(&print_error(error, run.root, true, "", c));
+            out.push_str(&print_error(error, run.root, true, verbose, "", c));
+            if !notes.is_empty() {
+                out.push_str(&annotation_lines(c, notes, file, 1));
+                out.push('\n');
+            }
             let bar = divider(&format!("[{n}/{total}]"), Some(1), &|t| t.to_string());
             out.push_str(&format!("{}\n\n", c.red(&c.dim(&bar))));
         }
@@ -505,18 +563,24 @@ fn divider(text: &str, right: Option<usize>, color: &dyn Fn(&str) -> String) -> 
     )
 }
 
-/// vitest's `printErrorInner` into a string: `Name: message` (red, the name bold), the diff,
-/// the frames outside node_modules (the nearest cyan, the others gray) with the highlighted code
-/// frame after the nearest one (`code_frame`), a blank line, the cause.
+/// vitest's `printErrorInner` into a string: `Name: message` (red, the name bold; a value
+/// without a message as its serialized form, turbo-test#97), the diff, the frames outside
+/// node_modules (the nearest cyan, the others gray) with the highlighted code frame after the
+/// nearest one (`code_frame`), a blank line, the error's properties as `Serialized Error` under a
+/// divider (`properties`: vitest's `printProperties`, the verbose reporter's and junit's), the
+/// cause (its properties always: vitest prints the cause with the default).
 pub fn print_error(
     e: &ErrorInfo,
     root: &Path,
     code_frame: bool,
+    properties: bool,
     prefix: &str,
     c: &Colors,
 ) -> String {
     let name = format!("{prefix}{}", e.name);
-    let mut out = if js_len(&e.message) > 5000 {
+    let mut out = if let Some(shown) = &e.inspected {
+        format!("{shown}\n")
+    } else if js_len(&e.message) > 5000 {
         format!("{}: {}\n", c.red(&c.bold(&name)), e.message)
     } else {
         c.red(&format!("{}: {}", c.bold(&name), e.message)) + "\n"
@@ -564,8 +628,17 @@ pub fn print_error(
     if !frames.is_empty() {
         out.push('\n');
     }
+    if let (true, Some(props)) = (properties, &e.properties) {
+        // printStack: c.red(c.dim(divider())), then c.red(c.bold('Serialized Error:')), c.gray(…)
+        out.push_str(&format!(
+            "{}\n{} {}\n",
+            c.red(&c.dim(&divider("", None, &|t| t.to_string()))),
+            c.red(&c.bold("Serialized Error:")),
+            c.gray(props)
+        ));
+    }
     if let Some(cause) = &e.cause {
-        out.push_str(&print_error(cause, root, false, "Caused by: ", c));
+        out.push_str(&print_error(cause, root, false, true, "Caused by: ", c));
     }
     out
 }

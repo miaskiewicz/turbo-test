@@ -6007,8 +6007,9 @@ pub struct TestCase {
     pub start_ms: f64,
     /// Failure message (empty unless status == "failed").
     pub message: String,
-    /// The failure's error `stack` (else its `message`), as vitest's JSON `failureMessages`.
-    pub failure_messages: Vec<String>,
+    /// The failure's error `stack` (else its `message`, else none: JSON `null`), as vitest's JSON
+    /// `failureMessages` (turbo-test#97).
+    pub failure_messages: Vec<Option<String>>,
     /// Where the test was registered (`includeTaskLocation`): 1-based line and column.
     pub location: Option<(u32, u32)>,
     /// A failed test that never ran (a forbidden `.only`, turbo-test#76): no `duration`.
@@ -6021,6 +6022,20 @@ pub struct TestCase {
     pub logs: Vec<(String, String)>,
     /// The error it failed with (junit's `<failure>`, turbo-test#81).
     pub errors: Vec<crate::failure::ErrorInfo>,
+    /// The note of a test skipped at run time (`ctx.skip(note)`, turbo-test#96); empty for none.
+    pub note: String,
+    /// Its `ctx.annotate()` calls, in order (turbo-test#96).
+    pub annotations: Vec<Annotation>,
+}
+
+/// A test annotation (`ctx.annotate(message, type)`): where it was made in the test file
+/// (1-based line and column, 0 when unknown).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Annotation {
+    pub kind: String,
+    pub message: String,
+    pub line: u32,
+    pub col: u32,
 }
 
 /// A `describe` whose `beforeAll` / `afterAll` failed: a failed suite, reported by junit as a
@@ -6777,6 +6792,17 @@ fn drive_tests(
     drive_tests_bounded(scope, global, entry_abs, 2_000_000)
 }
 
+/// vitest's `task.file.name` (turbo-test#96): the test file relative to the run's root (both
+/// canonical), as the reports name it; its canonical path for a file outside the root.
+pub fn task_file_name(entry: &Path, root: &Path) -> String {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let entry = canon(entry);
+    match entry.strip_prefix(canon(root)) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => entry.to_string_lossy().into_owned(),
+    }
+}
+
 /// `drive_tests` with the event-loop turn budget injected (unit tests use a tiny one).
 fn drive_tests_bounded(
     scope: &mut v8::PinScope,
@@ -6787,7 +6813,15 @@ fn drive_tests_bounded(
     // Expose the test file's absolute path to the runtime so toMatchSnapshot() can locate the
     // `__snapshots__/<basename>.snap` sibling (mirrors vitest's per-file snapshot resolution).
     {
-        let js = format!("globalThis.__ttFile = {:?};", entry_abs.to_string_lossy());
+        let root = std::env::var_os("TURBO_ROOT")
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        let js = format!(
+            "globalThis.__ttFile = {:?}; globalThis.__ttFileName = {};",
+            entry_abs.to_string_lossy(),
+            json_string(&task_file_name(entry_abs, &root))
+        );
         if let Some(code) = v8::String::new(scope, &js) {
             if let Some(s) = v8::Script::compile(scope, code, None) {
                 s.run(scope);
@@ -6906,13 +6940,29 @@ fn drive_tests_bounded(
                     duration_ms: num(scope, "duration_ms"),
                     start_ms: num(scope, "start_ms"),
                     message: text(scope, "message"),
-                    failure_messages: string_array(scope, o, "failure_messages"),
+                    failure_messages: js_array(scope, o, "failure_messages")
+                        .into_iter()
+                        .map(|v| (!v.is_null()).then(|| v.to_rust_string_lossy(scope)))
+                        .collect(),
                     location: location_of(scope, o),
                     not_run: flag(scope, "not_run"),
                     expected_fail: flag(scope, "expected_fail"),
                     retry_count: num(scope, "retry_count") as u32,
                     logs: pairs_of(scope, o, "logs"),
                     errors: errors_of(scope, o),
+                    note: text(scope, "note"),
+                    annotations: string_tuples(scope, o, "annotations")
+                        .into_iter()
+                        .map(|a| {
+                            let at = |i: usize| a.get(i).cloned().unwrap_or_default();
+                            Annotation {
+                                kind: at(0),
+                                message: at(1),
+                                line: at(2).parse().unwrap_or(0),
+                                col: at(3).parse().unwrap_or(0),
+                            }
+                        })
+                        .collect(),
                 });
             }
         }
@@ -7023,6 +7073,18 @@ fn error_info_of<'s>(
             .unwrap_or_default()
     };
     let (name, message, diff, stack) = (text("name"), text("message"), text("diff"), text("stack"));
+    let flag = |scope: &mut v8::PinScope<'s, '_>, key: &str| {
+        let k = v8::String::new(scope, key).unwrap();
+        o.get(scope, k.into()).is_some_and(|v| v.is_true())
+    };
+    let (no_name, no_message) = (flag(scope, "no_name"), flag(scope, "no_message"));
+    let optional = |scope: &mut v8::PinScope<'s, '_>, key: &str| {
+        let k = v8::String::new(scope, key).unwrap();
+        o.get(scope, k.into())
+            .filter(|v| v.is_string())
+            .map(|v| v.to_rust_string_lossy(scope))
+    };
+    let (inspected, properties) = (optional(scope, "inspected"), optional(scope, "properties"));
     let frames = crate::failure::parse_stack(&stack)
         .into_iter()
         .map(|mut f| {
@@ -7043,6 +7105,10 @@ fn error_info_of<'s>(
     crate::failure::ErrorInfo {
         name,
         message,
+        no_name,
+        no_message,
+        inspected,
+        properties,
         diff,
         frames,
         cause,
