@@ -103,8 +103,11 @@ function __streamWrite(fd, args) {
 //   - process.nextTick: own queue, drained BEFORE microtasks each turn (Node priority)
 //   - macrotasks (setTimeout/Interval/Immediate): virtual-clock queue
 // Real mode: Rust drive loop interleaves the three (no actual sleeping; the clock jumps
-// to the next due timer — deterministic, order-preserving). Fake mode: vi.* drives the
-// clock synchronously from test code. Foundation for binding real @sinonjs/fake-timers.
+// to the next due timer — deterministic, order-preserving). Fake mode (turbo-test#168): a timer
+// set while fake timers are on goes on the FAKE clock (`fmacro` / `fnow`), which only vi.*
+// moves; the drive loop never fires it. Timers set before useFakeTimers and the internal ones
+// (test timeout) stay on the real clock, which advancing the fake clock does not move — as
+// @sinonjs/fake-timers under vitest (shouldAdvanceTime off).
 // ===========================================================================
 function __reportUncaught(e) {
   try { globalThis.console.error('uncaught', (e && e.message) || e); } catch {}
@@ -113,7 +116,8 @@ function __reportUncaught(e) {
 // reports through the same path
 globalThis.__reportUncaught = __reportUncaught;
 const __loop = {
-  macro: [],       // {id, due, cb, interval, gen}
+  macro: [],       // real-clock user timers {id, due, cb, interval, gen}
+  fmacro: [],      // fake-clock user timers (set while `fake`), due on `fnow`
   // Internal one-shot timers (test-timeout enforcement). Kept SEPARATE from `macro` so they are
   // invisible to the fake-timer API (getTimerCount / runAllTimers / advance / clearAllTimers) —
   // otherwise a test's `vi.runAllTimers()` would fire the timeout reject. Driven only by the
@@ -121,10 +125,11 @@ const __loop = {
   internal: [],    // {id, due, cb, gen}
   nextTicks: [],
   seq: 1,
-  now: 0,          // logical clock (ms)
+  now: 0,          // logical (real) clock (ms)
+  fnow: 0,         // fake clock (ms): only vi.advanceTimersByTime / runAllTimers / ... move it
   gen: 0,          // file generation (isolate-reuse): timers from a prior file are dropped, unrun
   fake: false,
-  systemTime: 0,   // wall-clock base used by Date when faking
+  systemTime: 0,   // wall-clock base used by Date when faking (Date.now() = systemTime + fnow)
   RealDate: Date,
   realNow: Date.now.bind(Date),
   // ms the real-mode drive loop jumped its clock instead of sleeping: a duration is the real
@@ -132,9 +137,10 @@ const __loop = {
   waited: 0,
   elapsed() { return __loop.realNow() + __loop.waited; },
 };
-function __schedule(cb, delay, interval) {
+function __schedule(cb, delay, interval, fake) {
   const id = __loop.seq++;
-  __loop.macro.push({ id, due: __loop.now + Math.max(0, delay | 0), cb, interval, gen: __loop.gen });
+  if (fake) __loop.fmacro.push({ id, due: __loop.fnow + Math.max(0, delay | 0), cb, interval, gen: __loop.gen });
+  else __loop.macro.push({ id, due: __loop.now + Math.max(0, delay | 0), cb, interval, gen: __loop.gen });
   return id;
 }
 // Isolate-reuse: drop timers left over from a PRIOR file (gen < current) WITHOUT running them.
@@ -146,11 +152,17 @@ function __dropStaleTimers() {
   if (__loop.macro.length && __loop.macro.some((t) => t.gen < __loop.gen)) {
     __loop.macro = __loop.macro.filter((t) => t.gen >= __loop.gen);
   }
+  if (__loop.fmacro.length && __loop.fmacro.some((t) => t.gen < __loop.gen)) {
+    __loop.fmacro = __loop.fmacro.filter((t) => t.gen >= __loop.gen);
+  }
   if (__loop.internal.length && __loop.internal.some((t) => t.gen < __loop.gen)) {
     __loop.internal = __loop.internal.filter((t) => t.gen >= __loop.gen);
   }
 }
-function __clearTimer(id) { __loop.macro = __loop.macro.filter((t) => t.id !== id); }
+function __clearTimer(id) {
+  __loop.macro = __loop.macro.filter((t) => t.id !== id);
+  __loop.fmacro = __loop.fmacro.filter((t) => t.id !== id);
+}
 // Internal one-shot timer (test-timeout). Separate queue → invisible to the fake-timer API.
 function __scheduleInternal(cb, delay) {
   const id = __loop.seq++;
@@ -159,7 +171,18 @@ function __scheduleInternal(cb, delay) {
 }
 function __clearInternal(id) { __loop.internal = __loop.internal.filter((t) => t.id !== id); }
 function __dueSorted(upto) {
-  return __loop.macro.filter((t) => t.due <= upto).sort((a, b) => a.due - b.due || a.id - b.id);
+  return __loop.fmacro.filter((t) => t.due <= upto).sort((a, b) => a.due - b.due || a.id - b.id);
+}
+const __byDue = (a, b) => a.due - b.due || a.id - b.id;
+// one real-clock macrotask (sinon's `originalSetTimeout(…, 0)`): what the *Async fake-timer
+// functions yield between timers so promise callbacks run and can set more timers
+const __realTick = () => new Promise((resolve) => __scheduleInternal(resolve, 0));
+// fire one fake timer at its due time (the fake clock moves there)
+function __fireFake(t) {
+  __loop.fnow = Math.max(__loop.fnow, t.due);
+  if (t.interval == null) __clearTimer(t.id);
+  else t.due = __loop.fnow + t.interval;
+  try { t.cb(); } catch (e) { __reportUncaught(e); }
 }
 __loop.drainNextTicks = function () {
   let ran = false;
@@ -197,54 +220,106 @@ __loop.stepMacro = function () {
   try { m.cb(); } catch (e) { __reportUncaught(e); }
   return true;
 };
-// Fake mode: advance the virtual clock, firing timers in order (synchronous).
+// Fake mode: advance the fake clock, firing the fake timers in order (synchronous).
 __loop.advance = function (ms) {
   __dropStaleTimers();
-  const target = __loop.now + Math.max(0, ms | 0);
+  const target = __loop.fnow + Math.max(0, ms | 0);
   let guard = 0;
   while (guard++ < 1e6) {
     const next = __dueSorted(target)[0];
     if (!next) break;
-    __loop.now = next.due;
-    if (next.interval == null) __clearTimer(next.id);
-    else next.due = __loop.now + next.interval;
-    try { next.cb(); } catch (e) { __reportUncaught(e); }
+    __fireFake(next);
     __loop.drainNextTicks();
   }
-  __loop.now = target;
+  __loop.fnow = target;
+};
+// sinon's tickAsync: a real macrotask before the first timer and after each one, so the
+// promise callbacks a timer starts run (and may set timers due within the range)
+__loop.advanceAsync = async function (ms) {
+  await __realTick();
+  __dropStaleTimers();
+  const target = __loop.fnow + Math.max(0, ms | 0);
+  let guard = 0;
+  while (guard++ < 1e6) {
+    const next = __dueSorted(target)[0];
+    if (!next) break;
+    __fireFake(next);
+    await __realTick();
+  }
+  __loop.fnow = Math.max(__loop.fnow, target);
 };
 __loop.runAll = function () {
   let guard = 0;
-  while (__loop.macro.length && guard++ < 1e6) {
-    __loop.macro.sort((a, b) => a.due - b.due || a.id - b.id);
-    const t = __loop.macro[0];
-    __loop.now = Math.max(__loop.now, t.due);
-    if (t.interval == null) __clearTimer(t.id);
-    else t.due = __loop.now + t.interval; // intervals would loop forever; guard caps it
-    try { t.cb(); } catch (e) { __reportUncaught(e); }
+  while (__loop.fmacro.length && guard++ < 1e6) {
+    const t = __loop.fmacro.sort(__byDue)[0];
+    __fireFake(t); // intervals would loop forever; guard caps it
     __loop.drainNextTicks();
     if (t.interval != null) break; // don't spin a periodic timer in runAll
   }
 };
+__loop.runAllAsync = async function () {
+  let guard = 0;
+  while (guard++ < 1e6) {
+    await __realTick();
+    if (!__loop.fmacro.length) break;
+    const t = __loop.fmacro.sort(__byDue)[0];
+    __fireFake(t);
+    if (t.interval != null) break; // as runAll
+  }
+};
 __loop.runOnlyPending = function () {
-  const snapshot = __loop.macro.slice().sort((a, b) => a.due - b.due || a.id - b.id);
+  const snapshot = __loop.fmacro.slice().sort(__byDue);
   for (const t of snapshot) {
-    if (!__loop.macro.includes(t)) continue;
-    __loop.now = Math.max(__loop.now, t.due);
-    if (t.interval == null) __clearTimer(t.id);
-    else t.due = __loop.now + t.interval;
-    try { t.cb(); } catch (e) { __reportUncaught(e); }
+    if (!__loop.fmacro.includes(t)) continue;
+    __fireFake(t);
     __loop.drainNextTicks();
   }
 };
+// sinon's runToLastAsync: tickAsync to the latest timer pending now
+__loop.runOnlyPendingAsync = async function () {
+  const last = __loop.fmacro.slice().sort(__byDue).pop();
+  if (last) await __loop.advanceAsync(last.due - __loop.fnow);
+};
+// sinon's next() (+ vitest's tick(0)): the fake clock moves to the earliest fake timer and
+// fires every timer due then
+__loop.toNext = function () {
+  const n = __loop.fmacro.slice().sort(__byDue)[0];
+  if (n) __loop.advance(n.due - __loop.fnow);
+};
+__loop.toNextAsync = async function () {
+  await __realTick();
+  const n = __loop.fmacro.slice().sort(__byDue)[0];
+  if (!n) return;
+  __fireFake(n);
+  await __realTick();
+  __loop.advance(0);
+};
+// drop the fake clock's timers (useRealTimers / a fresh useFakeTimers: sinon's uninstall)
+__loop.dropFake = function () { __loop.fmacro = []; };
 
-// timer globals (bare V8 has none)
-globalThis.setTimeout = (cb, d, ...a) => __schedule(() => cb(...a), d, null);
-globalThis.setInterval = (cb, d, ...a) => __schedule(() => cb(...a), d, Math.max(1, d | 0));
-globalThis.setImmediate = (cb, ...a) => __schedule(() => cb(...a), 0, null);
-globalThis.clearTimeout = (id) => __clearTimer(id);
-globalThis.clearInterval = (id) => __clearTimer(id);
-globalThis.clearImmediate = (id) => __clearTimer(id);
+// timer globals (bare V8 has none). `fake` picks the clock: vi.useFakeTimers swaps the globals
+// for the fake-clock set and useRealTimers puts the real ones back (sinon's hijack /
+// uninstall), so a reference taken before (node:timers, a library's captured setImmediate)
+// stays on the real clock, as in vitest (turbo-test#168).
+function __timerFns(fake) {
+  return {
+    setTimeout: (cb, d, ...a) => __schedule(() => cb(...a), d, null, fake),
+    setInterval: (cb, d, ...a) => __schedule(() => cb(...a), d, Math.max(1, d | 0), fake),
+    setImmediate: (cb, ...a) => __schedule(() => cb(...a), 0, null, fake),
+    clearTimeout: (id) => __clearTimer(id),
+    clearInterval: (id) => __clearTimer(id),
+    clearImmediate: (id) => __clearTimer(id),
+  };
+}
+const __realTimers = __timerFns(false);
+const __fakeTimers = __timerFns(true);
+// @testing-library's jestFakeTimersAreEnabled() checks `setTimeout.clock` (sinon sets it on
+// every faked function)
+for (const k of Object.keys(__fakeTimers)) __fakeTimers[k].clock = __loop;
+function __installTimers(set) {
+  for (const k of Object.keys(set)) globalThis[k] = set[k];
+}
+__installTimers(__realTimers);
 if (typeof globalThis.queueMicrotask !== 'function') {
   globalThis.queueMicrotask = (cb) => Promise.resolve().then(cb);
 }
@@ -253,12 +328,12 @@ if (typeof globalThis.queueMicrotask !== 'function') {
 function __installFakeDate() {
   const Real = __loop.RealDate;
   function FakeDate(...args) {
-    if (!(this instanceof FakeDate)) return new Real(__loop.systemTime + __loop.now).toString();
-    if (args.length === 0) return new Real(__loop.systemTime + __loop.now);
+    if (!(this instanceof FakeDate)) return new Real(__loop.systemTime + __loop.fnow).toString();
+    if (args.length === 0) return new Real(__loop.systemTime + __loop.fnow);
     return new Real(...args);
   }
   FakeDate.prototype = Real.prototype;
-  FakeDate.now = () => __loop.systemTime + __loop.now;
+  FakeDate.now = () => __loop.systemTime + __loop.fnow;
   FakeDate.UTC = Real.UTC;
   FakeDate.parse = Real.parse;
   globalThis.Date = FakeDate;
@@ -1561,7 +1636,8 @@ if (typeof globalThis.MessageChannel === 'undefined') {
         _other: null,
         postMessage(data) {
           const o = this._other;
-          if (o) globalThis.setTimeout(() => {
+          // a real-clock task: Node's MessagePort is not a faked timer
+          if (o) __realTimers.setTimeout(() => {
             const ev = { data };
             if (typeof o.onmessage === 'function') o.onmessage(ev);
             (o._listeners || []).forEach((f) => f(ev));
@@ -2793,15 +2869,16 @@ const __timerPromise = (schedule, clear, value, options) => new Promise((resolve
   if (signal) signal.addEventListener('abort', onAbort);
 });
 const __timersPromises = {
-  setTimeout: (delay, value, options) => __timerPromise((cb) => globalThis.setTimeout(cb, delay), (id) => globalThis.clearTimeout(id), value, options),
-  setImmediate: (value, options) => __timerPromise((cb) => globalThis.setImmediate(cb), (id) => globalThis.clearImmediate(id), value, options),
+  // on the real clock: node:timers/promises is never faked (turbo-test#168)
+  setTimeout: (delay, value, options) => __timerPromise((cb) => __realTimers.setTimeout(cb, delay), (id) => __realTimers.clearTimeout(id), value, options),
+  setImmediate: (value, options) => __timerPromise((cb) => __realTimers.setImmediate(cb), (id) => __realTimers.clearImmediate(id), value, options),
   // async iterator yielding `value` once per tick (ticks the consumer hasn't taken yet queue up)
   setInterval: (delay, value, options) => {
     const signal = options && options.signal;
     let ticks = 0, wake = null, done = false, error = null;
     const notify = () => { if (wake) { const w = wake; wake = null; w(); } };
-    const id = globalThis.setInterval(() => { ticks++; notify(); }, delay);
-    const finish = () => { done = true; globalThis.clearInterval(id); if (signal) signal.removeEventListener('abort', onAbort); };
+    const id = __realTimers.setInterval(() => { ticks++; notify(); }, delay);
+    const finish = () => { done = true; __realTimers.clearInterval(id); if (signal) signal.removeEventListener('abort', onAbort); };
     const onAbort = () => { error = __abortError(signal); finish(); notify(); };
     if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort); }
     return {
@@ -2822,12 +2899,8 @@ const __timersPromises = {
   },
 };
 const __timers = {
-  get setTimeout() { return globalThis.setTimeout; },
-  get clearTimeout() { return globalThis.clearTimeout; },
-  get setInterval() { return globalThis.setInterval; },
-  get clearInterval() { return globalThis.clearInterval; },
-  get setImmediate() { return globalThis.setImmediate; },
-  get clearImmediate() { return globalThis.clearImmediate; },
+  // node:timers is never faked (vitest fakes the globals only)
+  ...__realTimers,
   promises: __timersPromises,
 };
 // ---- vm / worker_threads / inspector: what one V8 context in one thread can truthfully offer;
@@ -4979,40 +5052,47 @@ globalThis.vi = {
   isMockFunction: (f) => typeof f === 'function' && f._isMockFunction === true,
   // fake timers
   useFakeTimers: () => {
+    // a fresh fake clock at the current Date (vitest installs a new sinon clock with
+    // `now: Date.now()`; the previous fake clock's timers are dropped with it)
+    const start = globalThis.Date.now();
+    __loop.dropFake();
     __loop.fake = true;
-    if (__loop.systemTime === 0) __loop.systemTime = __loop.realNow();
+    __loop.systemTime = start - __loop.fnow;
     __installFakeDate();
-    // Mark the global timer fns so @testing-library's jestFakeTimersAreEnabled() (checks
-    // `setTimeout.clock` / `_isMockFunction`) detects fake timers — otherwise waitFor polls with the
-    // frozen real clock and hangs. testing-library then drives jest.advanceTimersByTime() to advance.
-    try { globalThis.setTimeout.clock = __loop; globalThis.setInterval.clock = __loop; } catch (e) {}
+    // the fake set carries `.clock`, so @testing-library's jestFakeTimersAreEnabled() detects
+    // fake timers and drives jest.advanceTimersByTime() instead of polling a frozen clock
+    __installTimers(__fakeTimers);
     return globalThis.vi;
   },
   useRealTimers: () => {
-    __loop.fake = false; __restoreDate();
-    try { delete globalThis.setTimeout.clock; delete globalThis.setInterval.clock; } catch (e) {}
+    // the fake clock's pending timers never fire (sinon's uninstall)
+    __loop.fake = false; __loop.dropFake(); __restoreDate();
+    __installTimers(__realTimers);
     return globalThis.vi;
   },
   isFakeTimers: () => __loop.fake,
   setSystemTime: (t) => {
     const ms = t instanceof __loop.RealDate ? t.getTime()
       : typeof t === 'number' ? t : new __loop.RealDate(t).getTime();
-    __loop.systemTime = ms;
-    __loop.now = 0;
+    // the fake clock keeps its time: timers stay due relative to it (sinon's setSystemTime)
+    __loop.systemTime = ms - __loop.fnow;
     // vitest fakes Date on setSystemTime even without useFakeTimers — install the fake Date so
     // `new Date()` / Date.now() reflect the set time (timer faking stays separate).
     __installFakeDate();
     return globalThis.vi;
   },
-  getMockedSystemTime: () => (__loop.fake ? new __loop.RealDate(__loop.systemTime + __loop.now) : null),
+  getMockedSystemTime: () => (__loop.fake ? new __loop.RealDate(__loop.systemTime + __loop.fnow) : null),
   waitFor: async (fn, opts) => {
     const timeout = (opts && opts.timeout) || 1000;
     const interval = (opts && opts.interval) || 50;
     let last;
     for (let elapsed = 0; elapsed <= timeout; elapsed += interval) {
+      // vitest's waitFor waits on the real clock and advances fake timers by the interval
+      // before each check (turbo-test#168)
+      if (__loop.fake) __loop.advance(interval);
       try { const r = await fn(); if (r !== false && r !== null && r !== undefined) return r; if (r === undefined) return r; }
       catch (e) { last = e; }
-      await new Promise((res) => setTimeout(res, interval));
+      await new Promise((res) => __scheduleInternal(res, interval));
     }
     throw last || new Error('vi.waitFor timed out');
   },
@@ -5020,25 +5100,22 @@ globalThis.vi = {
     const timeout = (opts && opts.timeout) || 1000;
     const interval = (opts && opts.interval) || 50;
     for (let elapsed = 0; elapsed <= timeout; elapsed += interval) {
+      if (__loop.fake) __loop.advance(interval); // as waitFor
       try { const r = await fn(); if (r) return r; } catch (e) {}
-      await new Promise((res) => setTimeout(res, interval));
+      await new Promise((res) => __scheduleInternal(res, interval));
     }
     throw new Error('vi.waitUntil timed out');
   },
   advanceTimersByTime: (ms) => { __loop.advance(ms); return globalThis.vi; },
-  advanceTimersByTimeAsync: async (ms) => { __loop.advance(ms); return globalThis.vi; },
-  advanceTimersToNextTimer: () => {
-    const n = __loop.macro.slice().sort((a, b) => a.due - b.due || a.id - b.id)[0];
-    if (n) __loop.advance(n.due - __loop.now);
-    return globalThis.vi;
-  },
+  advanceTimersByTimeAsync: async (ms) => { await __loop.advanceAsync(ms); return globalThis.vi; },
+  advanceTimersToNextTimer: () => { __loop.toNext(); return globalThis.vi; },
   runAllTimers: () => { __loop.runAll(); return globalThis.vi; },
-  runAllTimersAsync: async () => { __loop.runAll(); return globalThis.vi; },
+  runAllTimersAsync: async () => { await __loop.runAllAsync(); return globalThis.vi; },
   runOnlyPendingTimers: () => { __loop.runOnlyPending(); return globalThis.vi; },
-  runOnlyPendingTimersAsync: async () => { __loop.runOnlyPending(); return globalThis.vi; },
-  advanceTimersToNextTimerAsync: async () => { const n = __loop.macro.slice().sort((a, b) => a.due - b.due || a.id - b.id)[0]; if (n) __loop.advance(n.due - __loop.now); return globalThis.vi; },
-  getTimerCount: () => __loop.macro.length,
-  clearAllTimers: () => { __loop.macro = []; return globalThis.vi; },
+  runOnlyPendingTimersAsync: async () => { await __loop.runOnlyPendingAsync(); return globalThis.vi; },
+  advanceTimersToNextTimerAsync: async () => { await __loop.toNextAsync(); return globalThis.vi; },
+  getTimerCount: () => __loop.fmacro.length,
+  clearAllTimers: () => { __loop.dropFake(); return globalThis.vi; },
   mocked: (f) => {
     if (typeof f === 'function' && !f.mock) {
       f.mock = { calls: [], results: [] };
@@ -7234,6 +7311,11 @@ globalThis.__ttResetForNextFile = () => {
   // file's own pending one-shots. Do NOT clear macro/nextTicks or reset the clock here (that
   // broke ~40 async tests).
   __loop.gen++;
+  // each file starts on real timers (vitest's fresh environment per file): fake timers a file
+  // left on would otherwise hold every timer of the next one (turbo-test#168)
+  if (__loop.fake) {
+    __loop.fake = false; __loop.dropFake(); __restoreDate(); __installTimers(__realTimers);
+  }
   try { globalThis.vi && globalThis.vi.resetConfig && globalThis.vi.resetConfig(); } catch (e) {}
   // NOTE: we do NOT call restoreAllMocks() here. A spyOn spy's mockRestore() redefines a
   // (possibly shared, cached) module export back to the `orig` captured at spy time. This

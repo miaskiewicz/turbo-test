@@ -70,6 +70,22 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   panic) is retried. The same test pins it with `--isolate` (vitest's report is identical).
 
 ### Fixed
+- Fake timers fire only when the test moves the fake clock (turbo-test#168). The drive loop fired
+  the earliest timer whenever the test was pending, fake or not, so a faked `setTimeout` ran as
+  soon as the test awaited anything — a test vitest times out passed. Fake timers now live on
+  their own clock as with vitest's @sinonjs/fake-timers (`shouldAdvanceTime` off):
+  `useFakeTimers` swaps the global timer functions and `Date`, timers set before it, captured
+  timer functions, `node:timers` / `node:timers/promises` and the test timeout stay real (and
+  advancing the fake clock no longer brings the timeout closer), `useRealTimers` drops the fake
+  clock's pending timers, `setSystemTime` no longer resets the real clock, the `*Async` advance
+  functions yield a real macrotask around each timer (sinon's `tickAsync` & co.), `vi.waitFor` /
+  `vi.waitUntil` advance fake timers by their interval, and each file starts on real timers.
+  Pinned against vitest 4.1.12 by `tests/runner_c_fake_clock.rs`.
+- A stack frame `at async /abs/file.js:L:C` (an anonymous function suspended at an await) kept
+  its location (turbo-test#169): only a method name lost its `async ` prefix, so this frame was
+  dropped and an error made after an await — `expect.poll`'s `Matcher did not succeed in time.`,
+  a helper's error awaited by the test — lost its test-file frame and code frame
+  (`tests/runner_c_async_frame.rs`, against vitest 4.1.12).
 - The `expect` surface is now vitest 4.1.12's, checked member by member against vitest
   (`tests/runner_c_expect_surface.rs`, turbo-test#152–#155). The asymmetric matchers are
   vitest's classes, with `$$typeof`, `asymmetricMatch`, `toString`, `getExpectedType` and
