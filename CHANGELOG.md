@@ -320,7 +320,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   under such an error (vitest's `__vitest_rollup_error__`); and the loaders print nothing to
   stderr about the files they could not read, transform or compile (`transform …: parse
   errors`, `cjs read/transform failed`, `cjs compile failed`, up to three times per file) unless
-  `TURBO_CJS_DEBUG` is set.
+  `TURBO_CJS_DEBUG` (or the native emitter's `TURBO_NATIVE_CJS_STRICT` measurement) is set.
 - Hooks run in vitest's default `sequence.hooks: 'stack'` order (turbo-test#101): `afterEach` /
   `afterAll` last registered first (a suite's own before its parent's), and the functions
   `beforeEach` / `beforeAll` return run after the `afterEach` / `afterAll` hooks, last returned

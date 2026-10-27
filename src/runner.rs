@@ -4916,10 +4916,11 @@ fn vite_error_value<'s>(
 }
 
 /// TURBO_CJS_DEBUG: print the loaders' diagnostics (failed reads, transforms, compiles, module
-/// bodies that threw) to stderr. Off, stderr carries none of them (vitest prints none,
+/// bodies that threw) to stderr; TURBO_NATIVE_CJS_STRICT (the native emitter's conformity
+/// measurement) prints them too. Otherwise stderr carries none of them (vitest prints none,
 /// turbo-test#113).
 fn loader_debug() -> bool {
-    std::env::var("TURBO_CJS_DEBUG").is_ok()
+    std::env::var("TURBO_CJS_DEBUG").is_ok() || crate::esm_cjs::strict()
 }
 
 // ---- ESM graph ------------------------------------------------------------

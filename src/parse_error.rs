@@ -353,9 +353,10 @@ fn vite_code_frame(src: &str, at: usize) -> String {
         .collect();
     let i = line - 1;
     let mut out = Vec::new();
-    for j in i.saturating_sub(2)..=(i + 2).min(lines.len() - 1) {
-        let chars: Vec<char> = lines[j].chars().collect();
-        let mut shown = lines[j].to_string();
+    let first = i.saturating_sub(2);
+    for (j, text) in lines.iter().enumerate().take(i + 3).skip(first) {
+        let chars: Vec<char> = text.chars().collect();
+        let mut shown = text.to_string();
         let mut under = column;
         if chars.len() > MAX {
             let from = if j == i {

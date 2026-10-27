@@ -281,7 +281,8 @@ fn a_setup_file_that_fails_to_bundle_fails_the_test_file() {
         text.stdout.lines().any(|l| l.starts_with("ERROR")
             && l.contains("setup file")
             && l.contains("broken.ts")
-            && l.contains("graph load failed")),
+            // vite's oxc report for the file that does not transform (turbo-test#113)
+            && l.contains("Error: Transform failed with 1 error:")),
         "{}",
         text.all()
     );
