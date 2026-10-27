@@ -1,7 +1,8 @@
 //! Isolate reuse (vitest `isolate: false`, `--no-isolate`, TURBO_REUSE_ISOLATE): one persistent
 //! isolate per worker with setup files run once, setup mocks restored between files, a test-file
-//! re-mock patched into the shared exports, load errors on the reused path, and the authoritative
-//! fresh-isolate retry for failing files. Also the `--coverage` per-file collector.
+//! re-mock patched into the shared exports, one document per worker, load errors on the reused
+//! path, and the authoritative fresh-isolate retry for a file that did not run its tests. Also the
+//! `--coverage` per-file collector.
 #![cfg(unix)]
 
 mod common;
@@ -117,11 +118,11 @@ fn module_runner_reuse_with_setup_mocks_remocks_dom_and_fresh_retry() {
         "{}",
         r.all()
     );
-    // the passing files shared one context; a4 failed an assertion, which is final under reuse
-    // (turbo-test#126), and a6 (a TypeError) is re-run on a fresh isolate (logging 1 again)
+    // every file ran once in the one shared context (logging 1..=6): a4's assertion failure is
+    // final under reuse (turbo-test#126) and a6 reuses the worker's document (turbo-test#150);
+    // only a7's load error gets a fresh-isolate run (which logs nothing)
     let s = seen(&r.stdout);
-    assert!(s.iter().any(|&n| n >= 5), "{s:?}\n{}", r.all());
-    assert!(s.iter().filter(|&&n| n == 1).count() >= 2, "{s:?}");
+    assert_eq!(s, [1, 2, 3, 4, 5, 6], "{}", r.all());
 }
 
 /// turbo-test#150: under reuse the worker's DOM was installed once but dropped after every file,
@@ -129,7 +130,6 @@ fn module_runner_reuse_with_setup_mocks_remocks_dom_and_fresh_retry() {
 /// fresh-isolate re-run. vitest 4.1.12 (`isolate: false`, happy-dom) keeps one document for the
 /// worker: the second file sees the first file's document and body, and each file runs once.
 #[test]
-#[ignore = "turbo-test#150: fails until the fix"]
 fn reuse_keeps_one_document_for_the_worker() {
     let p = reuse_project("rb-reuse-dom", false);
     p.file(
