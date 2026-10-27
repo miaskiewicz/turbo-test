@@ -475,3 +475,39 @@ test('query', () => {
 0"#;
     assert_eq!(std::fs::read_to_string(p.path("out.txt")).unwrap(), want);
 }
+
+#[test]
+#[ignore = "turbo-test#116: fails until the fix"]
+fn url_search_params_set_replaces_in_place_like_nodes() {
+    // turbo-test#116: URLSearchParams.set removed every pair of the name and appended one, so
+    // the pair moved to the end. WHATWG: the first pair's value is replaced in place and the
+    // others removed; a new name is appended. Expected: Node 26.
+    let p = Project::new("rc-usp-set");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "u.test.js",
+        r#"import { test } from 'vitest'
+import * as fs from 'node:fs'
+test('set', () => {
+  const rows = []
+  const p = new URLSearchParams('a=1&b=2&a=3&c=4&a=5')
+  p.set('a', '9'); rows.push(p.toString())
+  p.set('d', 'x'); rows.push(p.toString())
+  p.set('b', 7); rows.push(JSON.stringify([...p]))
+  const u = new URL('http://h/?x=1&y=2&x=3')
+  u.searchParams.set('x', 'z'); rows.push(u.href)
+  const q = new URLSearchParams('k=1')
+  q.set('k', 'v'); rows.push(q.toString())
+  fs.writeFileSync('out.txt', rows.join('\n'))
+})
+"#,
+    );
+    let r = turbo_test(&p.dir, &["u.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let want = r#"a=9&b=2&c=4
+a=9&b=2&c=4&d=x
+[["a","9"],["b","7"],["c","4"],["d","x"]]
+http://h/?x=z&y=2
+k=v"#;
+    assert_eq!(std::fs::read_to_string(p.path("out.txt")).unwrap(), want);
+}
