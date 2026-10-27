@@ -1852,3 +1852,28 @@ test('reported', () => { expect({ x: 3 }).toEqual({ x: expect.toBeOneOf([1, 2]) 
     }
     assert_eq!(got.lines().count(), want.lines().count());
 }
+
+#[test]
+#[ignore = "turbo-test#187: fails until the fix"]
+fn text_decoder_output_past_v8s_string_limit_is_nodes_err_string_too_long() {
+    // A decode whose text is longer than V8's string limit (0x1fffffe8 characters) throws Node's
+    // ERR_STRING_TOO_LONG, on the native legacy-encoding path as on the UTF-8 one (turbo-test#187).
+    // Expected: Node 26 (`[name, code, message]` of the error each decode throws).
+    let p = Project::new("rc-text-decoder-too-long");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "t.test.js",
+        r#"import { test, expect } from 'vitest'
+const thrown = (label) => {
+  try { new TextDecoder(label).decode(new Uint8Array(0x1fffffe9).fill(65)) } catch (e) { return [e.name, e.code, e.message] }
+  return 'no error'
+}
+const want = ['Error', 'ERR_STRING_TOO_LONG', 'Cannot create a string longer than 0x1fffffe8 characters']
+test('windows-1252', () => { expect(thrown('windows-1252')).toEqual(want) })
+test('utf-8', () => { expect(thrown('utf-8')).toEqual(want) })
+"#,
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert!(r.stdout.contains("Tests  2 passed (2)"), "{}", r.all());
+    assert_eq!(r.code, Some(0), "{}", r.all());
+}
