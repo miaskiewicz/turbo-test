@@ -39,11 +39,18 @@ fn rows_diff(want: &Value, got: &Value) -> Vec<String> {
     for w in want.as_array().unwrap() {
         let g = got.iter().find(|g| g[0] == w[0]);
         if g != Some(&w) {
-            out.push(format!("want {w}\n got {}", g.map_or("null".into(), |g| g.to_string())));
+            out.push(format!(
+                "want {w}\n got {}",
+                g.map_or("null".into(), |g| g.to_string())
+            ));
         }
     }
     if got.len() != want.as_array().unwrap().len() {
-        out.push(format!("{} rows, vitest has {}", got.len(), want.as_array().unwrap().len()));
+        out.push(format!(
+            "{} rows, vitest has {}",
+            got.len(),
+            want.as_array().unwrap().len()
+        ));
     }
     out
 }
@@ -102,10 +109,7 @@ fn vi_and_mock_members_behave_as_vitests() {
     assert_eq!(r.code, Some(0), "{}", r.all());
     let want: Value =
         serde_json::from_str(include_str!("data/vi_surface/surface.vitest.json")).unwrap();
-    assert_eq!(
-        rows_diff(&want, &read(&p, "tt.json")),
-        Vec::<String>::new()
-    );
+    assert_eq!(rows_diff(&want, &read(&p, "tt.json")), Vec::<String>::new());
 }
 
 #[test]
@@ -144,10 +148,7 @@ test('vitest default', () => {
     assert_eq!(r.code, Some(0), "{}", r.all());
     let want: Value =
         serde_json::from_str(include_str!("data/vi_surface/config.vitest.json")).unwrap();
-    assert_eq!(
-        rows_diff(&want, &read(&p, "tt.json")),
-        Vec::<String>::new()
-    );
+    assert_eq!(rows_diff(&want, &read(&p, "tt.json")), Vec::<String>::new());
     let sub = p.path("sub");
     let r = turbo_test(&sub, &["default.test.js"], &[]);
     assert_eq!(r.code, Some(0), "{}", r.all());
@@ -216,10 +217,7 @@ fn jest_fake_timers_are_jests() {
     assert_eq!(r.code, Some(0), "{}", r.all());
     let want: Value =
         serde_json::from_str(include_str!("data/vi_surface/timers.jest.json")).unwrap();
-    assert_eq!(
-        rows_diff(&want, &read(&p, "tt.json")),
-        Vec::<String>::new()
-    );
+    assert_eq!(rows_diff(&want, &read(&p, "tt.json")), Vec::<String>::new());
 }
 
 #[test]
@@ -238,8 +236,78 @@ fn jest_module_members_are_jests() {
     assert_eq!(r.code, Some(0), "{}", r.all());
     let want: Value =
         serde_json::from_str(include_str!("data/vi_surface/modules.jest.json")).unwrap();
-    assert_eq!(
-        rows_diff(&want, &read(&p, "tt.json")),
-        Vec::<String>::new()
+    assert_eq!(rows_diff(&want, &read(&p, "tt.json")), Vec::<String>::new());
+}
+
+/// The `Failed Tests` block of a human report (through the last error's `[n/n]` separator).
+fn failed_block(out: &str) -> String {
+    let start = out.find("⎯⎯⎯⎯⎯⎯⎯ Failed Tests").unwrap_or(0);
+    let rest = &out[start..];
+    let end = rest.rfind("/2]⎯").map_or(rest.len(), |e| {
+        e + rest[e..].find('\n').unwrap_or(rest.len() - e) + 1
+    });
+    rest[..end].to_string()
+}
+
+#[test]
+#[ignore = "turbo-test#182: fails until the fix"]
+fn define_helper_errors_are_located_at_the_call() {
+    // turbo-test#182: vitest drops the stack frames up to the last `__VITEST_HELPER__` one, so a
+    // failure inside a vi.defineHelper helper (sync or async) is located at the helper's call;
+    // turbo-test located it inside the helper, then listed the call.
+    let p = Project::new("rc-vi-define-helper");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "helper.test.js",
+        include_str!("data/vi_surface/helper.test.js"),
     );
+    let r = turbo_test(
+        &p.dir,
+        &["helper.test.js", "--reporter", "default"],
+        &[("NO_COLOR", "1"), ("TURBO_LEGACY_REPORTER", "0")],
+    );
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    assert_eq!(
+        failed_block(&r.all()),
+        include_str!("data/vi_surface/helper.vitest.txt"),
+        "{}",
+        r.all()
+    );
+}
+
+#[test]
+#[ignore = "turbo-test#183: fails until the fix"]
+fn config_clears_restores_and_unstubs_before_each_test() {
+    // turbo-test#183: test.clearMocks / mockReset / restoreMocks / unstubEnvs / unstubGlobals run
+    // vi.clearAllMocks / resetAllMocks / restoreAllMocks / unstubAllEnvs / unstubAllGlobals
+    // before each test, before its beforeEach hooks (vitest's onBeforeTryTask), and
+    // vi.setConfig turns them on for the later tests. Each fixture passes on vitest 4.1.12;
+    // turbo-test ignored the options.
+    for (name, file, conf, test) in [
+        (
+            "restore",
+            "restore.test.js",
+            include_str!("data/vi_surface/mock_config/restore/vitest.config.js"),
+            include_str!("data/vi_surface/mock_config/restore/restore.test.js"),
+        ),
+        (
+            "reset",
+            "reset.test.js",
+            include_str!("data/vi_surface/mock_config/reset/vitest.config.js"),
+            include_str!("data/vi_surface/mock_config/reset/reset.test.js"),
+        ),
+        (
+            "none",
+            "setconfig.test.js",
+            include_str!("data/vi_surface/mock_config/none/vitest.config.js"),
+            include_str!("data/vi_surface/mock_config/none/setconfig.test.js"),
+        ),
+    ] {
+        let p = Project::new(&format!("rc-vi-mock-config-{name}"));
+        p.file("package.json", r#"{ "type": "module" }"#);
+        p.file("vitest.config.js", conf);
+        p.file(file, test);
+        let r = turbo_test(&p.dir, &[file], &[]);
+        assert_eq!(r.code, Some(0), "{name}: {}", r.all());
+    }
 }
