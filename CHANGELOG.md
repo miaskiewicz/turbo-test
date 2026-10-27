@@ -292,6 +292,18 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `objectContaining` / `arrayContaining` without `iterableEquality`. Only own enumerable string
   keys were compared, so `new Date(1)` equalled `new Date(2)`, `new Map([[1, 2]])` equalled
   `new Map([[1, 3]])`, `new Error('a')` equalled `new Error('b')`.
+- `toThrow(error)` / `toThrow(object)` compare the thrown value as vitest's
+  `equals(thrown, expected, [iterableEquality])` (turbo-test#111): an Error by name, message,
+  cause and own properties, an object by its keys (a plain object never equals an Error). An
+  Error expected was compared by message only and an object by `message` substring, so
+  `toThrow(new Error('abc'))` passed for a `TypeError('abc')` and `toThrow({ message: 'ab' })`
+  for `Error('abc')`.
+- A URL / URLSearchParams prints as Node's (turbo-test#112): `URL { href: 'http://a/', origin: …,
+  searchParams: URLSearchParams {}, hash: '' }` / `URLSearchParams { 'a' => '1' }` in matcher
+  messages (vitest's loupe hands them to Node's inspect) and `util.inspect` / `console.log`;
+  `JSON.stringify` and vitest's diffs show a URL's href, a URLSearchParams has no own keys, and
+  `Object.prototype.toString` gives `[object URL]` / `[object URLSearchParams]`. They printed the
+  polyfill's internals (`URL{ protocol: 'http:', …(8) }`, `_hierarchical`, `_sp`).
 - A test file whose static import does not resolve, or whose JavaScript does not parse, fails
   with vitest's error (turbo-test#108): `Cannot find module './x.mjs' imported from <importer>`
   (`Cannot find package 'p' imported from …` for a bare specifier, `No such built-in module`

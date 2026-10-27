@@ -391,7 +391,9 @@ if (typeof globalThis.TextDecoder === 'undefined') {
 if (typeof globalThis.URLSearchParams === 'undefined') {
   globalThis.URLSearchParams = class URLSearchParams {
     constructor(init) {
-      this._ = []; // list of [key, value] pairs — supports multiple values per key (append)
+      // list of [key, value] pairs — supports multiple values per key (append); not enumerable, as
+      // a real URLSearchParams has no own keys (pretty-format prints `URLSearchParams {}`)
+      Object.defineProperty(this, '_', { value: [], writable: true, enumerable: false, configurable: true });
       if (typeof init === 'string') {
         // application/x-www-form-urlencoded: '+' decodes to a space (decodeURIComponent alone leaves
         // it). Matches Node/jsdom so `new URLSearchParams('a=John+Doe').get('a') === 'John Doe'`.
@@ -423,6 +425,19 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
     // previously emitted %20, diverging on `name=John+Doe`).
     toString() { const enc = (s) => encodeURIComponent(s).replace(/%20/g, '+'); return this._.map(([k, v]) => `${enc(k)}=${enc(v)}`).join('&'); }
     [Symbol.iterator]() { return this.entries(); }
+    get [Symbol.toStringTag]() { return 'URLSearchParams'; }
+    // Node's util.inspect rendering (vitest's loupe hands it the value): `URLSearchParams { 'a' => '1' }`,
+    // one pair per line past `breakLength`.
+    [Symbol.for('nodejs.util.inspect.custom')](depth, opts) {
+      const o = __inspectCustomOpts(opts);
+      if (typeof depth === 'number' && depth < 0) return __sty(o, '[Object]', 'special');
+      if (typeof depth === 'number') o.depth = depth - 1;
+      const out = this._.map(([k, v]) => `${__nodeInspect(k, o)} => ${__nodeInspect(v, o)}`);
+      const len = out.reduce((n, x) => n + __stripAnsi(x).length + 2, -2);
+      const name = (this.constructor && this.constructor.name) || 'URLSearchParams';
+      if (len > o.breakLength) return `${name} {\n  ${out.join(',\n  ')} }`;
+      return out.length ? `${name} { ${out.join(', ')} }` : `${name} {}`;
+    }
   };
 }
 if (typeof globalThis.URL === 'undefined') {
@@ -500,6 +515,24 @@ if (typeof globalThis.URL === 'undefined') {
     }
     set href(v) { const u = new globalThis.URL(v); this.protocol = u.protocol; this.host = u.host; this.hostname = u.hostname; this.port = u.port; this._path = u._path; this._hash = u._hash; this.origin = u.origin; this._hierarchical = u._hierarchical; this._sp = u._sp; }
     toString() { return this.href; }
+    // JSON.stringify and pretty-format (vitest's diffs) show the href, as Node's URL
+    toJSON() { return this.href; }
+    // `[object URL]`, as Node's: chai's objDisplay keeps the rendering instead of summarising it
+    get [Symbol.toStringTag]() { return 'URL'; }
+    // Node's util.inspect rendering (vitest's loupe hands it the value, turbo-test#112):
+    // `URL { href: …, origin: …, …, searchParams: URLSearchParams {…}, hash: … }`.
+    [Symbol.for('nodejs.util.inspect.custom')](depth, opts) {
+      const name = (this.constructor && this.constructor.name) || 'URL';
+      if (typeof depth === 'number' && depth < 0) return `${name} {}`;
+      const obj = {
+        href: this.href, origin: this.origin, protocol: this.protocol, username: this.username || '', password: this.password || '',
+        host: this.host, hostname: this.hostname, port: this.port, pathname: this.pathname, search: this.search,
+        searchParams: this.searchParams, hash: this.hash,
+      };
+      const o = __inspectCustomOpts(opts);
+      delete o.depth;
+      return `${name} ${__nodeInspect(obj, o)}`;
+    }
     // WHATWG relative-reference resolution against a parsed base (Node's `new URL(rel, base)`):
     // scheme-relative `//h/p`, absolute path `/p`, query-only `?q`, fragment-only `#f`, empty,
     // and a relative path merged with the base path's directory. Dot segments are removed by
@@ -1666,8 +1699,9 @@ function __formatValue(ctx, value, recurseTimes, typedArray) {
   // a [util.inspect.custom](depth, options, inspect) method formats its own value
   const custom = value[Symbol.for('nodejs.util.inspect.custom')];
   if (typeof custom === 'function' && custom !== __util.inspect) {
-    const r = custom.call(value, ctx.depth - recurseTimes, { depth: ctx.depth - recurseTimes }, __util.inspect);
-    if (r !== value) return typeof r === 'string' ? r : __formatValue(ctx, r, recurseTimes);
+    const r = custom.call(value, ctx.depth - recurseTimes, { depth: ctx.depth - recurseTimes, breakLength: ctx.breakLength, compact: ctx.compact, colors: ctx.colors }, __util.inspect);
+    // a multi-line result is indented to where it is printed, as Node does
+    if (r !== value) return typeof r === 'string' ? r.replace(/\n/g, `\n${' '.repeat(ctx.indentationLvl)}`) : __formatValue(ctx, r, recurseTimes);
   }
   if (ctx.seen.includes(value)) {
     let index = 1;
@@ -1914,6 +1948,16 @@ function __formatRaw(ctx, value, recurseTimes, typedArray) {
   }
   void noIterator;
   return res;
+}
+// The options a [util.inspect.custom] method passes on to its inner inspect calls (Node's
+// `breakLength` 80 when the caller gives none).
+function __inspectCustomOpts(opts) {
+  const o = { breakLength: 80, colors: false };
+  if (opts && typeof opts.breakLength === 'number') o.breakLength = opts.breakLength;
+  if (opts && opts.compact !== undefined) o.compact = opts.compact;
+  if (opts && opts.colors) o.colors = true;
+  if (opts && (typeof opts.depth === 'number' || opts.depth === null)) o.depth = opts.depth;
+  return o;
 }
 function __nodeInspect(value, opts) {
   const ctx = { seen: [], indentationLvl: 0, currentDepth: 0, depth: 2, breakLength: 80, compact: 3, maxArrayLength: 100, circular: undefined, colors: false };
@@ -3252,14 +3296,15 @@ function makeExpect(actual, negated = false) {
         const name = expected.name || expected.prototype.constructor.name;
         return c(threw && err instanceof expected, `expected error to be instance of ${name}`, `expected error not to be instance of ${name}`, expected, err);
       }
-      if (expected instanceof Error) {
-        return c(threw && err instanceof Error && err.message === expected.message, 'expected a thrown error to be #{exp}', 'expected a thrown error not to be #{exp}', expected, err);
+      // an Error or any other value: vitest's `equals(thrown, expected, [iterableEquality])`
+      // (Errors by name / message / cause / own props; a plain object never equals an Error)
+      if (__isError(expected)) {
+        return c(threw && __equals(err, expected, [__iterableEquality]), 'expected a thrown error to be #{exp}', 'expected a thrown error not to be #{exp}', expected, err);
       }
       if (expected instanceof Asymmetric) {
         return c(threw && expected.matches(err), 'expected error to match asymmetric matcher', 'expected error not to match asymmetric matcher', expected, err);
       }
-      const matches = threw && err && (expected.message == null || String(err.message || '').includes(expected.message));
-      c(matches, 'expected a thrown value to equal #{exp}', 'expected a thrown value not to equal #{exp}', expected, err);
+      c(threw && __equals(err, expected, [__iterableEquality]), 'expected a thrown value to equal #{exp}', 'expected a thrown value not to equal #{exp}', expected, err);
     },
     toHaveBeenCalled() {
       const spy = spyOf();
@@ -4019,7 +4064,8 @@ function __inspect(v, o = { truncate: Infinity, seen: [] }) {
   const chai = v[Symbol.for('chai/inspect')];
   if (typeof chai === 'function') return String(chai.call(v, o));
   const custom = v[Symbol.for('nodejs.util.inspect.custom')];
-  if (typeof custom === 'function') { const r = custom.call(v, 2, o, __inspect); return typeof r === 'string' ? r : __inspect(r, o); }
+  // loupe hands the method its normalised options (depth 2, breakLength Infinity, no colours)
+  if (typeof custom === 'function') { const r = custom.call(v, 2, Object.assign({ depth: 2, breakLength: Infinity, colors: false, showHidden: false }, o), __inspect); return typeof r === 'string' ? r : __inspect(r, o); }
   if (typeof v.inspect === 'function') { const r = v.inspect(2, o); return typeof r === 'string' ? r : __inspect(r, o); }
   const proto = Object.getPrototypeOf(v);
   if (proto === Object.prototype || proto === null) return __inspectObject(v, o);

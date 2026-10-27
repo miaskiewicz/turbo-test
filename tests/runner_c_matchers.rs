@@ -38,7 +38,6 @@ fn rows(v: &Value) -> Vec<(String, String, String)> {
 }
 
 #[test]
-#[ignore = "turbo-test#111/#112: fails until the fix"]
 fn failed_matchers_throw_what_vitest_throws() {
     // turbo-test#71: a failed matcher threw a plain `Error` with turbo-test's own wording
     // (`expected 1 to be 2`, `expected {"a":1} to equal {"a":2}`, `expected spy called 3x, got 2`).
@@ -303,7 +302,6 @@ fn snapshot_ci_mode_follows_std_env_is_ci() {
 }
 
 #[test]
-#[ignore = "turbo-test#112: fails until the fix"]
 fn urls_inspect_serialize_and_diff_like_node_and_vitest() {
     // turbo-test#112: the URL / URLSearchParams globals printed their internals
     // (`URL{ protocol: 'http:', …(8) }`, `URLSearchParams{ _: [ … ] }`) in util.inspect, JSON and
@@ -329,7 +327,11 @@ test('url diff', () => { expect(new URL('http://a/')).toStrictEqual(new URL('htt
 test('params diff', () => { expect({ s: new URLSearchParams('a=1'), n: 1 }).toEqual({ s: new URLSearchParams('a=2'), n: 2 }) })
 "#,
     );
-    let r = turbo_test(&p.dir, &["u.test.js"], &[("NO_COLOR", "1")]);
+    let r = turbo_test(
+        &p.dir,
+        &["u.test.js", "--reporter", "default"],
+        &[("NO_COLOR", "1"), ("TURBO_LEGACY_REPORTER", "0")],
+    );
     assert_eq!(r.code, Some(1), "{}", r.all());
     let url = "URL {
   href: 'http://a.com:8080/p/q?x=1&y=2#h',
