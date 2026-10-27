@@ -146,6 +146,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   original, so on the module runner a restored re-export (`export *`, `export { x } from`) was no
   longer live (a later spy on the source module did not show through it) and a restored class
   method became enumerable.
+- `--reporter tap`: a file that fails to load gets vitest's block (turbo-test#166): `error:` with
+  its `name` and `message` (YAML-quoted, line breaks kept) and `at: "<file>:<line>:<col>"`,
+  indented four spaces. It printed `message: module errored: …` with the loader's prefix and the
+  line breaks flattened.
 - The summary line of a file that failed to load reads `ERROR a.test.ts  (Error: boom)` on the
   ESM-graph loader too (turbo-test#164); it carried the loader's internal load-phase prefix
   (`module errored: ` / `evaluate threw: ` / `instantiate: `), unlike the module runner.

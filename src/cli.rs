@@ -1216,7 +1216,12 @@ pub fn render_tap(files: &[PathBuf], res: &[FileResult]) -> String {
         if r.load_error {
             n += 1;
             out.push_str(&format!("not ok {n} - {}\n", files[r.idx].display()));
-            diag(&mut out, &r.error_msg);
+            // vitest's block for the file's error (turbo-test#166)
+            let e = r
+                .load_error_info
+                .clone()
+                .unwrap_or_else(|| load_error_info(&r.error_msg));
+            out.push_str(&tap_error_block(&e));
             continue;
         }
         for t in &r.tests {
@@ -1229,6 +1234,34 @@ pub fn render_tap(files: &[PathBuf], res: &[FileResult]) -> String {
             }
         }
     }
+    out
+}
+
+/// vitest's TAP block of an error (its TapReporter, one level in): `error:` with its `name` and
+/// `message` YAML-quoted (line breaks kept) and `at:` its first frame.
+fn tap_error_block(e: &crate::failure::ErrorInfo) -> String {
+    let yaml = |s: &str| {
+        if s.is_empty() {
+            String::new()
+        } else {
+            format!("\"{}\"", s.replace('"', "\\\""))
+        }
+    };
+    let name = if e.name.is_empty() {
+        "Unknown Error"
+    } else {
+        &e.name
+    };
+    let mut out = format!(
+        "    ---\n    error:\n        name: {}\n        message: {}\n",
+        yaml(name),
+        yaml(&e.message)
+    );
+    if let Some(f) = e.frames.first() {
+        let at = format!("{}:{}:{}", f.file.display(), f.line, f.col);
+        out.push_str(&format!("    at: {}\n", yaml(&at)));
+    }
+    out.push_str("    ...\n");
     out
 }
 
@@ -1539,6 +1572,10 @@ pub fn run(opts: Options) -> i32 {
     }
     if human.is_some() || opts.reporter == Reporter::Junit {
         std::env::set_var("TURBO_CAPTURE_LOGS", "1");
+        std::env::set_var("TURBO_TASK_LOCATION", "1");
+        std::env::set_var("TURBO_ERROR_FRAMES", "1");
+    } else if opts.reporter == Reporter::Tap {
+        // a load failure's `at:` (turbo-test#166)
         std::env::set_var("TURBO_TASK_LOCATION", "1");
         std::env::set_var("TURBO_ERROR_FRAMES", "1");
     }

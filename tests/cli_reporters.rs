@@ -216,7 +216,7 @@ fn file_without_tests_fails_the_run() {
     assert_eq!(
         r.stdout,
         format!(
-            "TAP version 13\n1..1\nnot ok 1 - empty.spec.js\n  ---\n  message: {msg}\n  ...\n\n"
+            "TAP version 13\n1..1\nnot ok 1 - empty.spec.js\n    ---\n    error:\n        name: \"Error\"\n        message: \"{msg}\"\n    ...\n\n"
         ),
         "{}",
         r.all()
@@ -326,8 +326,8 @@ fn tap_reporter() {
     assert_eq!(
         r.stdout,
         format!(
-            "TAP version 13\n1..5\nok 1 - adds <&>\nok 2 - later # SKIP\nnot ok 3 - breaks\n  ---\n  message: expected 'x' to be 'y' // Object.is equality\n  ...\nok 4 - ok\nnot ok 5 - {}\n  ---\n  message: module errored: Error: top <boom>\n  ...\n\n",
-            String::from("c.test.ts")
+            "TAP version 13\n1..5\nok 1 - adds <&>\nok 2 - later # SKIP\nnot ok 3 - breaks\n  ---\n  message: expected 'x' to be 'y' // Object.is equality\n  ...\nok 4 - ok\nnot ok 5 - c.test.ts\n    ---\n    error:\n        name: \"Error\"\n        message: \"top <boom>\"\n    at: \"{}:1:7\"\n    ...\n\n",
+            p.path("c.test.ts").display()
         ),
         "{}",
         r.all()
@@ -1161,7 +1161,6 @@ fn transform_errors_and_parse_failure_details_are_vites() {
 /// thrown, indented four spaces, on both loaders. turbo-test printed `message: module errored:
 /// TypeError: …` (two spaces, the loader's prefix, line breaks flattened).
 #[test]
-#[ignore = "turbo-test#166: fails until the fix"]
 fn tap_load_failure_block_is_vitests() {
     for esbuild in [false, true] {
         let p = Project::new(if esbuild {
