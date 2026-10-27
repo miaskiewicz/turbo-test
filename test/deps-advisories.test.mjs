@@ -43,3 +43,17 @@ test('esbuild dependency is outside GHSA-67mh-4wv8-2f99 (declared, locked, insta
     assert.equal(v, locked, 'installed esbuild matches the lock (run `npm ci`)');
   }
 });
+
+// chai (turbo-test#160): vitest 4.1.12's expect is chai 6.3.0 and the binary loads this package's
+// chai into its runtime, so the version is pinned exactly — declared, locked and installed.
+test('chai dependency is pinned to vitest 4.1.12\'s chai 6.3.0 (declared, locked, installed)', { todo: 'turbo-test#160' }, () => {
+  assert.equal(readJson('package.json').dependencies.chai, '6.3.0', 'chai is declared as exactly 6.3.0');
+  const lock = readJson('package-lock.json');
+  assert.equal(lock.packages[''].dependencies.chai, '6.3.0', 'the lock root declares chai 6.3.0');
+  assert.equal(lock.packages['node_modules/chai'].version, '6.3.0', 'package-lock.json pins chai 6.3.0');
+  assert.deepEqual(Object.keys(lock.packages['node_modules/chai'].dependencies || {}), [], 'chai 6 has no dependencies of its own');
+  const installed = path.join(ROOT, 'node_modules', 'chai', 'package.json');
+  if (fs.existsSync(installed)) {
+    assert.equal(JSON.parse(fs.readFileSync(installed, 'utf8')).version, '6.3.0', 'installed chai matches the lock (run `npm ci`)');
+  }
+});
