@@ -294,3 +294,36 @@ fn a_setup_file_that_fails_to_bundle_fails_the_test_file() {
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
+
+#[test]
+fn a_bundled_setup_file_shares_the_test_files_package_instances() {
+    // A setup file the CommonJS transform cannot take (top-level await) is bundled with its
+    // packages external; each package it imports is loaded on demand by the module runner's
+    // loaders, so the setup and the test file see one instance (and Node's namespace of a
+    // CommonJS package). Expected: vitest 4.1.12 on the same project.
+    let p = Project::new("ra-setup-bundle-externals");
+    p.with_esbuild();
+    p.file("package.json", r#"{"name":"ra-setup-bundle-externals","type":"module"}"#);
+    p.file("node_modules/pk/package.json", r#"{"name":"pk","main":"i.js"}"#);
+    p.file("node_modules/pk/i.js", "exports.obj = { id: 'pk' }; exports.n = 1;\n");
+    p.file("node_modules/pk2/package.json", r#"{"name":"pk2","main":"i.js"}"#);
+    p.file("node_modules/pk2/i.js", "exports.obj2 = { id: 'pk2' };\n");
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { setupFiles: ['./setup.ts'] } };\n",
+    );
+    p.file(
+        "setup.ts",
+        "import { obj } from 'pk';\nimport * as ns2 from 'pk2';\nawait Promise.resolve();\n\
+         (globalThis as any).__setup = { obj, ns2keys: Object.keys(ns2), obj2: ns2.obj2 };\n",
+    );
+    p.file(
+        "a.test.ts",
+        "import { test, expect } from 'vitest';\nimport { obj } from 'pk';\nimport { obj2 } from 'pk2';\n\
+         test('shared', () => {\n  const s = (globalThis as any).__setup;\n  \
+         expect([s.obj === obj, s.obj2 === obj2, s.ns2keys]).toEqual([true, true, ['default', 'module.exports', 'obj2']]);\n});\n",
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
+    assert_eq!(r.code, Some(0), "{}", r.all());
+}
