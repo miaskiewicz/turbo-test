@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="6" failures="5" errors="0" time="T">
+    <testsuite name="a.test.ts" timestamp="S" hostname="H" tests="6" failures="5" errors="0" skipped="0" time="T">
+        <testcase classname="a.test.ts" name="assertions" time="T">
+            <failure message="expected number of assertions to be 2, but got 1" type="Error">
+Error: expected number of assertions to be 2, but got 1
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="has assertions" time="T">
+            <failure message="expected any number of assertion, but got none" type="Error">
+Error: expected any number of assertion, but got none
+ ❯ a.test.ts:5:37
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="timeout" time="T">
+            <failure message="Test timed out in 30ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with &quot;testTimeout&quot;." type="Error">
+Error: Test timed out in 30ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with &quot;testTimeout&quot;.
+ ❯ a.test.ts:6:1
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="timeout as the last argument" time="T">
+            <failure message="Test timed out in 20ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with &quot;testTimeout&quot;." type="Error">
+Error: Test timed out in 20ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with &quot;testTimeout&quot;.
+ ❯ a.test.ts:7:1
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="d &gt; nested timeout" time="T">
+            <failure message="Test timed out in 10ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with &quot;testTimeout&quot;." type="Error">
+Error: Test timed out in 10ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with &quot;testTimeout&quot;.
+ ❯ a.test.ts:9:3
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="assertions met" time="T">
+        </testcase>
+    </testsuite>
+</testsuites>

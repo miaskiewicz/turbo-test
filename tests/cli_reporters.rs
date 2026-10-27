@@ -677,6 +677,64 @@ fn thrown_values_and_error_properties_print_as_vitest_prints_them() {
     }
 }
 
+/// turbo-test#101: hooks run in vitest's default `sequence.hooks: 'stack'` order — afterEach /
+/// afterAll last registered first (a suite's own before its parent's), functions returned by
+/// beforeEach / beforeAll run (last returned first) after the afterEach / afterAll hooks; a
+/// throwing afterEach or cleanup fails the test (next to the body's own error) and stops the
+/// hooks after it; a throwing afterAll stops the afterAll hooks after it and the cleanups.
+/// `tests/data/junit-hooks-vitest-4.1.12.xml` is vitest 4.1.12's report, on both loaders.
+#[test]
+fn hooks_run_in_vitests_order_with_its_cleanups_and_failures() {
+    for esbuild in [false, true] {
+        let p = Project::new("rep-junit-hooks");
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", "{\"type\":\"module\"}\n");
+        p.file("order.test.ts", include_str!("data/hooks/order.test.ts"));
+        p.file(
+            "after-each.test.ts",
+            include_str!("data/hooks/after-each.test.ts"),
+        );
+        p.file(
+            "after-all.test.ts",
+            include_str!("data/hooks/after-all.test.ts"),
+        );
+        let r = turbo_test(&p.dir, &["--reporter", "junit"], &[]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert_eq!(
+            normalize_junit(&r.stdout),
+            include_str!("data/junit-hooks-vitest-4.1.12.xml"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+    }
+}
+
+/// turbo-test#102: `expect.assertions(n)`, `expect.hasAssertions()` and a test timeout fail with
+/// vitest's messages and frames (hasAssertions: where it was called; a timeout: the `it(` call);
+/// `tests/data/junit-assertions-vitest-4.1.12.xml` is vitest 4.1.12's report, on both loaders.
+#[test]
+fn assertion_count_and_timeout_errors_are_vitests() {
+    for esbuild in [false, true] {
+        let p = Project::new("rep-junit-assertions");
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", "{\"type\":\"module\"}\n");
+        p.file("a.test.ts", include_str!("data/assertions/a.test.ts"));
+        let r = turbo_test(&p.dir, &["--reporter", "junit"], &[]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        let expected = include_str!("data/junit-assertions-vitest-4.1.12.xml");
+        assert_eq!(
+            normalize_junit(&r.stdout),
+            expected,
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+    }
+}
+
 /// turbo-test#81, the failure bodies: string / multi-line / type-mismatch / empty diffs, no diff
 /// for the comparison matchers (vitest passes showDiff false), a helper module's frame with its
 /// function name (mapped back through that module's transform), an error's cause, and console
@@ -714,6 +772,50 @@ fn junit_failures_print_as_vitest_prints_them() {
         assert_eq!(
             normalize_junit(&r.stdout),
             include_str!("data/junit-frames-vitest-4.1.12.xml"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+    }
+}
+
+/// turbo-test#110: a frame at a call of an imported function that does not start its statement
+/// (`const v = boom()`, an arrow's body, an object value, an array element, inside another app
+/// module) points at the callee as in vitest 4.1.12, on both loaders; the native ESM->CJS emitter
+/// rewrote the callee to `import_h.boom` without a source position, so the frame mapped to an
+/// earlier token. `tests/data/junit-call-frames-vitest-4.1.12.xml` is vitest's report.
+#[test]
+fn junit_frames_at_imported_calls_are_vitests() {
+    for esbuild in [false, true] {
+        let p = Project::new("rep-junit-call-frames");
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", "{\"type\":\"module\"}\n");
+        p.file(
+            "h.ts",
+            "export function boom() { throw new Error('helper boom'); }\n",
+        );
+        p.file(
+            "h2.ts",
+            "import { boom } from './h';\n\
+             export function viaHelper() { const r = boom(); return r; }\n",
+        );
+        p.file(
+            "a.test.ts",
+            "import { it } from 'vitest';\n\
+             import { boom } from './h';\n\
+             import { viaHelper } from './h2';\n\
+             it('x', () => { const v = boom(); return v; });\n\
+             it('y', () => { [1].map(() => boom()); });\n\
+             it('z', () => { const o = { k: boom() }; return o; });\n\
+             it('w', () => { return [1, boom()]; });\n\
+             it('v', () => { const r = viaHelper(); return r; });\n",
+        );
+        let r = turbo_test(&p.dir, &["--reporter", "junit"], &[]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert_eq!(
+            normalize_junit(&r.stdout),
+            include_str!("data/junit-call-frames-vitest-4.1.12.xml"),
             "esbuild={esbuild}\n{}",
             r.all()
         );

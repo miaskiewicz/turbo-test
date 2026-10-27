@@ -281,6 +281,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   file whose import of it failed (a different module's apart), as vitest. turbo-test
   said `graph load failed` and V8 printed `Uncaught SyntaxError` to stdout three times, with a
   line number of the transformed code.
+- A failure frame at a call of an imported function that does not start its statement
+  (`const v = boom()`, `() => boom()`, `{ k: boom() }`, `[1, boom()]`) points at the callee, as
+  vitest's does, on the esbuild loader too (turbo-test#110): the native ESM→CJS emitter's
+  `import_h.boom` rewrite had no source position, so the frame mapped to an earlier token
+  (`a.test.ts:3:23` for vitest's `3:27`).
 - `toEqual` / `toStrictEqual` compare as vitest's `equals` (turbo-test#103): Dates by time,
   RegExps by source and flags, boxed primitives by value (never equal to the primitive), URLs
   by href, Sets / Maps by members in any order, other iterables in order, symbol keys, the
@@ -315,6 +320,17 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   module and a node_modules dependency keep V8's SyntaxError, as Node gives it to vitest.
   turbo-test said `graph load failed` (printing `cannot resolve …` to stderr three times) and
   V8's SyntaxError.
+- Hooks run in vitest's default `sequence.hooks: 'stack'` order (turbo-test#101): `afterEach` /
+  `afterAll` last registered first (a suite's own before its parent's), and the functions
+  `beforeEach` / `beforeAll` return run after the `afterEach` / `afterAll` hooks, last returned
+  first (they were ignored). A throwing `afterEach`, cleanup or `afterAll` fails the test / suite
+  and stops the hooks after it (a throwing `afterEach` was swallowed: the test passed); `it.fails`
+  flips the outcome after the test's hooks, as vitest.
+- `expect.assertions(n)`, `expect.hasAssertions()` and a test timeout fail with vitest's errors
+  (turbo-test#102): `expected number of assertions to be 2, but got 1`, `expected any number of
+  assertion, but got none` (framed where `hasAssertions` was called) and `Test timed out in 30ms.`
+  + vitest's `If this is a long-running test, …` hint (framed at the `it(` call); they carried
+  turbo-test's own messages and no frame.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain
@@ -324,6 +340,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - Node-API fixtures `api.c`, `async.c`, `cleanup.c`, `apiversion.c`, `refs.c`, `selfreg.c`,
   `fatal.c` and `unknown.c` with their specs; every spec also passes against Node 26.11 with the
   same compiled addon (but its host-only cases).
+- `coloured_output_is_vitests` no longer flakes under load (turbo-test#109): a file or test over
+  vitest's 300ms slowTestThreshold turns its duration yellow where vitest's reference is green.
+  The coloured normalizer now checks each duration's colour against its measured value, then
+  spells it the same whatever the colour.
 
 ## [0.6.0] - 2026-10-26 — turbo-dom consolidation
 

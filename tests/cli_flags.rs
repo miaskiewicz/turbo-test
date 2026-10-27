@@ -119,7 +119,8 @@ fn test_timeout_flag_and_config() {
     let r = tt(&p, &["--testTimeout", "50"]);
     assert_eq!(r.code, Some(1), "{}", r.all());
     assert!(
-        r.stdout.contains("✗ slow: test timed out in 50ms"),
+        r.stdout
+            .contains("✗ slow: Test timed out in 50ms.\nIf this is a long-running test"),
         "{}",
         r.all()
     );
