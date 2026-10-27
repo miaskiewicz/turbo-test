@@ -4283,7 +4283,16 @@ globalThis.vi = {
       if (globalThis.__ttNsSet(obj, key, v)) return;
       try { Object.defineProperty(obj, key, { configurable: true, enumerable: true, writable: true, value: v }); } catch (e) { try { obj[key] = v; } catch (e2) {} }
     };
-    s.mockRestore = () => define(orig);
+    // restore the original descriptor itself, as vitest: a live re-export getter stays live, a
+    // non-enumerable method stays non-enumerable (turbo-test#157)
+    let own;
+    try { own = Object.getOwnPropertyDescriptor(obj, key); } catch (e) { own = undefined; }
+    s.mockRestore = () => {
+      if (own !== undefined && own.configurable && !globalThis.__ttNsSet(obj, key, orig)) {
+        try { Object.defineProperty(obj, key, own); return; } catch (e) { /* fall back to the value */ }
+      }
+      define(orig);
+    };
     define(s);
     return __trackSpy(s);
   },

@@ -673,8 +673,8 @@ it.each([
   ['dep.default', () => vi.spyOn(dep, 'default').mockReturnValue('S'), ['hi a', 'fn', 'S', 'hi b', 'star', 'fn', 'own'], () => [dep.callsDef(), dep.default()], ['def', 'S']],
   ['barrel.hello', () => vi.spyOn(barrel, 'hello').mockReturnValue('S'), ['hi a', 'fn', 'def', 'S', 'star', 'fn', 'own'], () => [dep.greet('x'), barrel.hello('x')], ['hi x', 'S']],
   ['barrel.viaImport', () => vi.spyOn(barrel, 'viaImport').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'star', 'S', 'own'], () => [dep.fn(), dep.callsFn()], ['fn', 'fn']],
-  ['star.starred', () => vi.spyOn(star, 'starred').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'S', 'fn', 'own'], () => [barrel.starred(), star.callsStarred()], ['S', 'star']],
   ['barrel.starred', () => vi.spyOn(barrel, 'starred').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'S', 'fn', 'own'], () => [star.starred(), star.callsStarred()], ['star', 'star']],
+  ['star.starred', () => vi.spyOn(star, 'starred').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'S', 'fn', 'own'], () => [barrel.starred(), star.callsStarred()], ['S', 'star']],
   ['barrel.barrelOwn', () => vi.spyOn(barrel, 'barrelOwn').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'star', 'fn', 'S'], () => [barrel.barrelOwn()], ['S']],
 ])('vi.spyOn(%s)', (_name, spy, expected, more, moreExpected) => {
   spy();
@@ -720,7 +720,6 @@ it('a dynamically imported namespace', async () => {
 /// spy on the source no longer showed through), and a non-enumerable method stays non-enumerable.
 /// vitest on the same project: 2 passed.
 #[test]
-#[ignore = "turbo-test#157: fails until the fix"]
 fn restoring_a_spy_puts_the_original_descriptor_back() {
     let files: [(&str, &str); 4] = [
         (

@@ -33,6 +33,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `url` / `filename` / `dirname` plus vitest's `env` (live `process.env`, `DEV` / `PROD` / `SSR`
   booleans), and `process.env` carries vite's `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` (`SSR`
   off under a `jsdom` / `happy-dom` environment), as vitest sets them.
+- `mockRestore` / `vi.restoreAllMocks` put the spied property's original descriptor back
+  (turbo-test#157), as vitest does: they redefined it as an enumerable data property holding the
+  original, so on the module runner a restored re-export (`export *`, `export { x } from`) was no
+  longer live (a later spy on the source module did not show through it) and a restored class
+  method became enumerable.
 - A namespace spy on the ESM-graph loader reaches the importers only, as in vitest (turbo-test#146):
   it replaced the export's binding, so the exporting module's own calls (`greetTwice()` calling
   `greet`) and other modules' re-exports saw the spy too. Importers now read imported bindings
