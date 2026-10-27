@@ -59,9 +59,13 @@ fn base_resolve_options_esm_first_and_cjs_first() {
         o.condition_names,
         vec!["import", "module", "browser", "default", "require"]
     );
-    assert_eq!(o.main_fields, vec!["module", "browser", "main"]);
+    assert_eq!(o.main_fields, vec!["browser", "main", "module"]);
     assert!(o.tsconfig.is_none());
     assert!(o.extensions.contains(&".tsx".to_string()));
+    // a require(): the `require` condition, `main` before `module` (turbo-test#134)
+    let o = base_resolve_options(None, false);
+    assert_eq!(o.condition_names, vec!["require", "browser", "default"]);
+    assert_eq!(o.main_fields, vec!["browser", "main", "module"]);
 
     CJS_FIRST_RESOLUTION.with(|c| c.set(true));
     let o = base_resolve_options(Some(PathBuf::from("/p/tsconfig.json")), false);
@@ -352,7 +356,32 @@ fn resolve_spec_bare_package_conditions_follow_cjs_first() {
         r#"{ "name": "plain" }"#,
     );
     CJS_FIRST_RESOLUTION.with(|c| c.set(false));
-    assert_eq!(resolve_spec_as_uncached("dual", &d, true), Some(esm));
+    assert_eq!(
+        resolve_spec_as_uncached("dual", &d, true),
+        Some(esm.clone())
+    );
+    // a require() takes the `require` build (turbo-test#134) ...
+    assert_eq!(
+        resolve_spec_as_uncached("dual", &d, false),
+        Some(cjs.clone())
+    );
+    // ... and an import-only package as an import
+    put(
+        &d,
+        "node_modules/esm-only/package.json",
+        r#"{ "name": "esm-only", "exports": { "import": "./i.mjs" } }"#,
+    );
+    let only = put(&d, "node_modules/esm-only/i.mjs", "export default 1;");
+    assert_eq!(resolve_spec_as_uncached("esm-only", &d, false), Some(only));
+    // `main` before `module`
+    put(
+        &d,
+        "node_modules/modfield/package.json",
+        r#"{ "name": "modfield", "main": "./c.js", "module": "./e.mjs" }"#,
+    );
+    let main = put(&d, "node_modules/modfield/c.js", "module.exports = 1;");
+    put(&d, "node_modules/modfield/e.mjs", "export default 1;");
+    assert_eq!(resolve_spec_as_uncached("modfield", &d, true), Some(main));
     CJS_FIRST_RESOLUTION.with(|c| c.set(true));
     let got = resolve_spec_as_uncached("dual", &d, false);
     CJS_FIRST_RESOLUTION.with(|c| c.set(false));
@@ -1324,6 +1353,39 @@ fn rewrite_shared_lets_routes_through_global() {
 fn postprocess_mr_cjs_rewrites_esbuild_helpers() {
     let src = "var __defProp = Object.defineProperty;\nvar __toESM = (mod) => mod;\nvar __toCommonJS = (mod) => __copyProps(__defProp({}, \"__esModule\", { value: true }), mod);\nrest";
     let out = postprocess_mr_cjs(src.to_string());
+    assert!(postprocess_mr_cjs(
+        "var __reExport = (target, mod, secondTarget) => (x);".to_string()
+    )
+    .contains("var __toESMStar = (m) => __toESM(m); var __reExport = (target, mod, secondTarget) => (mod = __toESMStar(mod), x);"));
+    let dep = postprocess_mr_dep_cjs(
+        "var __toESM = (a) => a;\nvar __reExport = (target, mod, secondTarget) => (x);".to_string(),
+        true,
+    );
+    assert!(dep
+        .contains("var __toESM = (m, n) => globalThis.__ttToESMDep(m, n); var __toESM_unused = "));
+    assert!(dep.contains("var __toESMStar = (m) => globalThis.__ttToESMDep(m, 1);"));
+    let dep = postprocess_mr_dep_cjs(
+        "var __reExport = (target, mod, secondTarget) => (x);".to_string(),
+        false,
+    );
+    assert!(dep.contains("var __toESMStar = (m) => m;"));
+    let native = dep_interop(crate::esm_cjs::PREAMBLE.to_string(), true);
+    assert!(native.contains("var __toESM = (mod) => globalThis.__ttToESMDep(mod, 1);\n"));
+    assert!(native.contains("var __toESMStar = (mod) => globalThis.__ttToESMDep(mod, 1);\n"));
+    // a package's ES modules are marked "pkg" (turbo-test#159)
+    assert!(native.contains("Symbol.for(\"turbo-test.esm\"), { value: \"pkg\" })"));
+    assert!(postprocess_mr_dep_cjs(
+        "var __toCommonJS = (mod) => __copyProps(__defProp({}, \"__esModule\", { value: true }), mod);".to_string(),
+        false
+    )
+    .contains("Symbol.for(\"turbo-test.esm\"), { value: \"pkg\" })"));
+    assert!(!postprocess_mr_cjs(
+        "var __toCommonJS = (mod) => __copyProps(__defProp({}, \"__esModule\", { value: true }), mod);".to_string()
+    )
+    .contains("\"pkg\""));
+    let native = dep_interop(crate::esm_cjs::PREAMBLE.to_string(), false);
+    assert!(native.contains("var __toESM = (mod) => globalThis.__ttToESMDep(mod, 0);\n"));
+    assert!(native.contains("var __toESMStar = (mod) => mod;\n"));
     assert!(out.contains(
         "var __defProp = (o, k, d) => Object.defineProperty(o, k, Object.assign({ configurable: true }, d));"
     ));
@@ -1513,4 +1575,18 @@ fn file_urls_are_spelled_like_node_path_to_file_url() {
         file_url(Path::new("/a\u{1}\u{1f}\u{7f}b/€ x")),
         "file:///a%01%1F%7Fb/%E2%82%AC%20x"
     );
+}
+
+#[test]
+fn source_order_exports_reorders_esbuilds_registration() {
+    let code = "var x_exports = {};\n__export(x_exports, {\n  a: () => a,\n  \"b-c\": () => bc,\n  default: () => x_default,\n  z: () => z\n});\nrest\n});".to_string();
+    let order = ["default", "b-c", "a"].map(String::from);
+    assert_eq!(
+        source_order_exports(code, &order),
+        "var x_exports = {};\n__export(x_exports, {\n  default: () => x_default,\n  \"b-c\": () => bc,\n  a: () => a,\n  z: () => z\n});\nrest\n});"
+    );
+    // no registration, or not esbuild's: unchanged
+    assert_eq!(source_order_exports("plain".to_string(), &order), "plain");
+    let other = "f(x_exports, {\n  a: () => a\n});".to_string();
+    assert_eq!(source_order_exports(other.clone(), &order), other);
 }

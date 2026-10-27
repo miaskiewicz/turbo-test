@@ -876,3 +876,84 @@ fn lower_registers_a_string_local_by_name() {
     let exports = lower_raw("const a = 1; export { \"a\" as b };", SourceType::mjs());
     assert_eq!(exports, Some(vec!["b=a".to_string()]));
 }
+
+#[test]
+fn cjs_literal_export_names_follow_the_lexer() {
+    let n = |s: &str| cjs_literal_export_names(s);
+    assert_eq!(
+        n("module.exports = { a: 1, Comp: function Comp() {} };"),
+        Some(vec![])
+    );
+    assert_eq!(
+        n("module.exports = { a, 'b': b, c: c, ...d };"),
+        Some(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+    );
+    assert_eq!(
+        n("module.exports = { a, b: require('c'), c: d };"),
+        Some(vec!["a".to_string(), "b".to_string()])
+    );
+    assert_eq!(n("module.exports = {};"), Some(vec![]));
+    // any other export form: the object's own names stand
+    assert_eq!(n("module.exports = fn;"), None);
+    assert_eq!(n("module.exports = { a };\nexports.b = 1;"), None);
+    assert_eq!(n("module.exports = { a };\nmodule.exports.b = 1;"), None);
+    assert_eq!(n("module.exports == { a };"), None);
+    assert_eq!(n("exports.a = 1;"), None);
+}
+
+#[test]
+fn graph_interop_rewrite_requests_of_commonjs() {
+    let target = |s: &str| {
+        if s.starts_with("cjs") {
+            Target::Cjs
+        } else if s.starts_with("./") {
+            Target::AppEsm
+        } else {
+            Target::Other
+        }
+    };
+    let r = |s: &str, node: bool| graph_interop_rewrite(s, &target, node);
+    assert_eq!(
+        r("import * as ns from 'cjs';", false).unwrap(),
+        "import ns from \"cjs?__tt_ns\";"
+    );
+    assert_eq!(
+        r("import D, * as ns from 'cjs';", false).unwrap(),
+        "import D from \"cjs\"; import ns from \"cjs?__tt_ns\";"
+    );
+    assert_eq!(
+        r("export * from 'cjs';\nexport * as x from 'cjs';", false).unwrap(),
+        "export * from \"cjs?__tt_star\";\nexport { default as x } from \"cjs?__tt_ns\";"
+    );
+    // line breaks inside a replaced declaration are kept
+    assert_eq!(
+        r("import * as ns\n  from 'cjs';\nx;", false).unwrap(),
+        "import ns from \"cjs?__tt_ns\";\n\nx;"
+    );
+    // an app ES module's namespace: after a plain import of it (turbo-test#141)
+    assert_eq!(
+        r("import * as ns from './m';\nimport D, * as n2 from './m';\nexport * as x from './m';\nexport * from './m';", false).unwrap(),
+        "import \"./m\"; import ns from \"./m?__tt_ns\";\nimport D from \"./m\"; import n2 from \"./m?__tt_ns\";\nimport \"./m\"; export { default as x } from \"./m?__tt_ns\";\nexport * from './m';"
+    );
+    // as Node, an ES module's requests stay
+    assert_eq!(r("import * as ns from './m';", true), None);
+    // other modules, queried specifiers and other imports stay
+    assert_eq!(r("import * as ns from 'esm';", false), None);
+    assert_eq!(r("import * as ns from 'cjs?raw';", false), None);
+    assert_eq!(r("import D from 'cjs';", false), None);
+    // as Node: every request of CommonJS
+    assert_eq!(
+        r("import D from 'cjs';\nexport { default as E } from 'cjs2';\nexport * from 'cjs';\nimport 'esm';", true).unwrap(),
+        "import D from \"cjs?__tt_node\";\nexport { default as E } from \"cjs2?__tt_node\";\nexport * from \"cjs?__tt_node\";\nimport 'esm';"
+    );
+    assert_eq!(r("not js (", true), None);
+}
+
+#[test]
+fn export_order_is_source_order() {
+    assert_eq!(
+        export_order("export const b = 1, [z] = [];\nexport const a = 2;\nexport default 3;\nexport function c() {}\nconst d = 1; export { d as e, b as b2 };\nexport * as f from './x';\nexport * from './y';").unwrap(),
+        ["b", "z", "a", "default", "c", "e", "b2", "f"]
+    );
+    assert_eq!(export_order("not js ("), None);
+}

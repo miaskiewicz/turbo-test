@@ -60,6 +60,29 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `[vitest] No "default" export is defined on the "x" mock. Did you forget to return it from
   "vi.mock"?` on access instead of giving the factory object (the missing-name message is
   vitest 4.1.12's too). Remaining differences are tracked in turbo-test#133–#137.
+- Module namespaces as vitest gives them (turbo-test#133, #141; the last KNOWN rows of the #122
+  interop table, both loaders). An ES module's namespace (`import * as`, `import()`,
+  `vi.importActual`) no longer reads `__esModule`, lists its names in source order and is tagged
+  `[object Module]` (esbuild's sorted export registration is put in source order; the ESM graph
+  loader reads an app module's namespace through a view, V8 sorts it). A package's CommonJS
+  module is Node's namespace of it: `default` and `'module.exports'` are `module.exports` (an
+  `import * as` of `module.exports = fn` gave the function itself), `export *` re-exports Node's
+  names (cjs-module-lexer's for a `module.exports = { … }` literal); a CommonJS module marked
+  `__esModule` reads it on the ESM graph loader too; a package's ES module that Node runs as one
+  (`.mjs`, `"type": "module"`) imports CommonJS as Node does (its default is `module.exports`);
+  `require()` of an ES module from CommonJS has Node's enumerable `__esModule: true`; an
+  automock of a package's CommonJS module mocks Node's namespace (`import { Comp }` reads
+  `undefined`, #136).
+- A package's ES module's namespace lists Node's sorted names on the module runner too, as
+  vitest imports a package through Node (turbo-test#159; app modules keep source order, #141).
+  On the ESM graph loader `import()` of a `vi.mock` factory's module without `default` gives the
+  mock, whose `default` throws vitest's `No "default" export…` on every read, as `import * as`
+  does (turbo-test#158; it gave #137's stand-in function).
+- `require()` (and `createRequire`) resolves a dual package's `require` build and reads `main`
+  before `module`, an import reads `main` before `module` too, as Node does for vitest
+  (turbo-test#134): a CommonJS consumer requiring a dual package got its ES build's exports
+  object (`Element type is invalid … got: object`). A require() of an import-only package still
+  resolves it as an import.
 - ESM graph loader: every read of the default import of a `vi.mock` factory without `default`
   throws vitest's `[vitest] No "default" export is defined on the "x" mock…` — `typeof X`,
   `if (X)`, `X === y` too (turbo-test#151), where #137's stand-in threw only once used. An app
