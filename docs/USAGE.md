@@ -65,7 +65,7 @@ Full matrix + quirks: `vitest.compat.md`. Summary:
   `toHaveBeenCalledOnce`/`toHaveBeenNthCalledWith`/…
 - `expect(...).toMatchSnapshot()` → `__snapshots__/<file>.snap`, `-u` to update.
 - `vi.fn`/`spyOn`/`mock`/`unmock`/`doMock`/`mocked`/`hoisted`/`waitFor`/`waitUntil`,
-  full fake-timers (`useFakeTimers` + advance/run/clear + `setSystemTime`), `stubGlobal`/`stubEnv`.
+  full fake-timers (`useFakeTimers` + advance/run/clear + `setSystemTime`; a fake timer fires only when the test moves the fake clock), `stubGlobal`/`stubEnv`.
 - `jest.*` alias shim.
 
 **Coverage** ✅ native V8 line/function + derived statement/branch coverage; lcov / json-summary /
