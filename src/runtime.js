@@ -3002,9 +3002,34 @@ const __requireCache = new Proxy({}, {
 // ESM-graph namespaces' export setters (esm_spy.rs, turbo-test#131): a module registers one for
 // its own namespace; __ttNsSet(ns, name, value) sets that export (false: no setter / no export)
 const __ttNsSetters = new WeakMap();
-globalThis.__ttNsSetter = (ns, set) => { __ttNsSetters.set(ns, set); };
+// an app ES module's namespace in vitest's order (turbo-test#141) -> the V8 namespace
+const __ttOrderedTargets = new WeakMap();
+const __ttOrderedViews = new WeakMap();
+// The ESM graph's view of an app ES module's namespace: its names in `order` (source order),
+// then the others (`export *`'s) as V8 sorts them. Reads and writes are the namespace's.
+globalThis.__ttOrderedNs = (ns, order) => {
+  let v = __ttOrderedViews.get(ns);
+  if (!v) {
+    const at = new Map(order.map((k, i) => [k, i]));
+    const rank = (k) => (at.has(k) ? at.get(k) : order.length);
+    v = new Proxy(ns, {
+      ownKeys: (t) => {
+        const keys = Reflect.ownKeys(t);
+        const names = keys.filter((k) => typeof k === 'string');
+        // a stable sort keeps V8's order among the names `order` does not know
+        names.sort((a, b) => rank(a) - rank(b));
+        return [...names, ...keys.filter((k) => typeof k !== 'string')];
+      },
+    });
+    __ttOrderedViews.set(ns, v);
+    __ttOrderedTargets.set(v, ns);
+  }
+  return v;
+};
+const __ttNsTarget = (ns) => __ttOrderedTargets.get(ns) || ns;
+globalThis.__ttNsSetter = (ns, set) => { __ttNsSetters.set(__ttNsTarget(ns), set); };
 globalThis.__ttNsSet = (ns, k, v) => {
-  const set = ns !== null && typeof ns === 'object' ? __ttNsSetters.get(ns) : undefined;
+  const set = ns !== null && typeof ns === 'object' ? __ttNsSetters.get(__ttNsTarget(ns)) : undefined;
   return set !== undefined && set(k, v) === true;
 };
 // require() of an ES module from CommonJS (`isEsm` false) gives Node's require(esm) object: one
@@ -4109,7 +4134,8 @@ function __ttCjsView(m) {
   return v;
 }
 // An ES module's namespace: its exports object without `__esModule` (which CommonJS code
-// requiring it reads). Writes (vi.spyOn) go to the exports object, seen by every importer.
+// requiring it reads), tagged `Module` (turbo-test#141). Writes (vi.spyOn) go to the exports
+// object, seen by every importer.
 const __ttEsmViews = new WeakMap();
 function __ttEsmNs(m) {
   const d = Object.getOwnPropertyDescriptor(m, '__esModule');
@@ -4117,7 +4143,7 @@ function __ttEsmNs(m) {
   let v = __ttEsmViews.get(m);
   if (!v) {
     v = new Proxy(m, {
-      get: (t, k) => (k === '__esModule' ? undefined : Reflect.get(t, k, t)),
+      get: (t, k) => (k === '__esModule' ? undefined : k === Symbol.toStringTag ? 'Module' : Reflect.get(t, k, t)),
       has: (t, k) => k !== '__esModule' && k in t,
       ownKeys: (t) => Reflect.ownKeys(t).filter((k) => k !== '__esModule'),
       getOwnPropertyDescriptor: (t, k) => (k === '__esModule' ? undefined : Reflect.getOwnPropertyDescriptor(t, k)),

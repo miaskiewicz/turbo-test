@@ -356,9 +356,15 @@ fn resolve_spec_bare_package_conditions_follow_cjs_first() {
         r#"{ "name": "plain" }"#,
     );
     CJS_FIRST_RESOLUTION.with(|c| c.set(false));
-    assert_eq!(resolve_spec_as_uncached("dual", &d, true), Some(esm.clone()));
+    assert_eq!(
+        resolve_spec_as_uncached("dual", &d, true),
+        Some(esm.clone())
+    );
     // a require() takes the `require` build (turbo-test#134) ...
-    assert_eq!(resolve_spec_as_uncached("dual", &d, false), Some(cjs.clone()));
+    assert_eq!(
+        resolve_spec_as_uncached("dual", &d, false),
+        Some(cjs.clone())
+    );
     // ... and an import-only package as an import
     put(
         &d,
@@ -1355,9 +1361,13 @@ fn postprocess_mr_cjs_rewrites_esbuild_helpers() {
         "var __toESM = (a) => a;\nvar __reExport = (target, mod, secondTarget) => (x);".to_string(),
         true,
     );
-    assert!(dep.contains("var __toESM = (m, n) => globalThis.__ttToESMDep(m, n); var __toESM_unused = "));
+    assert!(dep
+        .contains("var __toESM = (m, n) => globalThis.__ttToESMDep(m, n); var __toESM_unused = "));
     assert!(dep.contains("var __toESMStar = (m) => globalThis.__ttToESMDep(m, 1);"));
-    let dep = postprocess_mr_dep_cjs("var __reExport = (target, mod, secondTarget) => (x);".to_string(), false);
+    let dep = postprocess_mr_dep_cjs(
+        "var __reExport = (target, mod, secondTarget) => (x);".to_string(),
+        false,
+    );
     assert!(dep.contains("var __toESMStar = (m) => m;"));
     let native = dep_interop(crate::esm_cjs::PREAMBLE.to_string(), true);
     assert!(native.contains("var __toESM = (mod) => globalThis.__ttToESMDep(mod, 1);\n"));
@@ -1554,4 +1564,18 @@ fn file_urls_are_spelled_like_node_path_to_file_url() {
         file_url(Path::new("/a\u{1}\u{1f}\u{7f}b/€ x")),
         "file:///a%01%1F%7Fb/%E2%82%AC%20x"
     );
+}
+
+#[test]
+fn source_order_exports_reorders_esbuilds_registration() {
+    let code = "var x_exports = {};\n__export(x_exports, {\n  a: () => a,\n  \"b-c\": () => bc,\n  default: () => x_default,\n  z: () => z\n});\nrest\n});".to_string();
+    let order = ["default", "b-c", "a"].map(String::from);
+    assert_eq!(
+        source_order_exports(code, &order),
+        "var x_exports = {};\n__export(x_exports, {\n  default: () => x_default,\n  \"b-c\": () => bc,\n  a: () => a,\n  z: () => z\n});\nrest\n});"
+    );
+    // no registration, or not esbuild's: unchanged
+    assert_eq!(source_order_exports("plain".to_string(), &order), "plain");
+    let other = "f(x_exports, {\n  a: () => a\n});".to_string();
+    assert_eq!(source_order_exports(other.clone(), &order), other);
 }

@@ -1216,6 +1216,37 @@ fn member_js(obj: &str, prop: &str) -> String {
     }
 }
 
+/// An ES module's (plain JS) export names in source order, as vitest's namespace lists them
+/// (turbo-test#141); `export *` names are not known here. `None` when it does not parse.
+pub(crate) fn export_order(src: &str) -> Option<Vec<String>> {
+    let alloc = Allocator::default();
+    let ret = Parser::new(&alloc, src, SourceType::mjs().with_jsx(true)).parse();
+    if ret.panicked || !ret.errors.is_empty() {
+        return None;
+    }
+    let mut names: Vec<String> = Vec::new();
+    for stmt in &ret.program.body {
+        match stmt {
+            Statement::ExportNamedDeclaration(d) => {
+                if let Some(decl) = &d.declaration {
+                    names.extend(declaration_binding_names(decl));
+                }
+                names.extend(d.specifiers.iter().map(|s| module_export_name(&s.exported)));
+            }
+            Statement::ExportDefaultDeclaration(_) => names.push("default".to_string()),
+            Statement::ExportAllDeclaration(d) => {
+                if let Some(n) = &d.exported {
+                    names.push(module_export_name(n));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    names.retain(|n| seen.insert(n.clone()));
+    Some(names)
+}
+
 /// The query suffix of an ES-module-graph request for the namespace (vitest's interop object)
 /// of a CommonJS module, `import * as ns` / `export * as ns` (turbo-test#133).
 pub(crate) const NS_QUERY: &str = "?__tt_ns";
@@ -1224,16 +1255,29 @@ pub(crate) const STAR_QUERY: &str = "?__tt_star";
 /// ... for a CommonJS module imported as Node imports it (an ES module Node runs as one).
 pub(crate) const NODE_QUERY: &str = "?__tt_node";
 
-/// Rewrite an ES module's (plain JS) requests of CommonJS modules (`is_cjs(specifier)`) for the
+/// What a graph module's request reaches (`graph_interop_rewrite`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Target {
+    /// a CommonJS module
+    Cjs,
+    /// an app's ES module (vitest lists its namespace's names in source order)
+    AppEsm,
+    /// anything else (left as it is)
+    Other,
+}
+
+/// Rewrite an ES module's (plain JS) requests of CommonJS modules (`target(specifier)`) for the
 /// ES-module graph loader, whose CommonJS modules are synthetic modules: a V8 namespace object
 /// cannot be vitest's interop namespace (`__esModule` read but not listed, `'module.exports'`),
 /// so `import * as ns` / `export * as ns` read one as the default export of `spec?__tt_ns`,
 /// `export *` re-exports from `spec?__tt_star`; in an ES module Node runs as one (`node`), every
 /// request of a CommonJS module is `spec?__tt_node`, Node's namespace of it (turbo-test#133).
-/// Line breaks are kept. `None` when nothing is rewritten.
+/// An app ES module's namespace (`import * as` / `export * as`) is read the same way, after a
+/// plain import of the module (which evaluates it first): vitest's lists the names in source
+/// order (turbo-test#141). Line breaks are kept. `None` when nothing is rewritten.
 pub(crate) fn graph_interop_rewrite(
     src: &str,
-    is_cjs: &dyn Fn(&str) -> bool,
+    target: &dyn Fn(&str) -> Target,
     node: bool,
 ) -> Option<String> {
     if !src.contains("import") && !src.contains("export") {
@@ -1250,16 +1294,27 @@ pub(crate) fn graph_interop_rewrite(
     let lit = |spec: &str, q: &str| json_string(&format!("{spec}{q}"));
     // (start, end, replacement), in source order
     let mut edits: Vec<(u32, u32, String)> = Vec::new();
-    let wanted = |spec: &str| !spec.contains('?') && is_cjs(spec);
+    let kind = |spec: &str| {
+        if spec.contains('?') {
+            Target::Other
+        } else {
+            target(spec)
+        }
+    };
     for stmt in &ret.program.body {
         match stmt {
             Statement::ImportDeclaration(d) if d.with_clause.is_none() => {
                 let spec = d.source.value.as_str();
-                if !wanted(spec) {
+                let k = kind(spec);
+                if k == Target::Other || (node && k != Target::Cjs) {
                     continue;
                 }
                 if node {
-                    edits.push((d.source.span.start, d.source.span.end, lit(spec, NODE_QUERY)));
+                    edits.push((
+                        d.source.span.start,
+                        d.source.span.end,
+                        lit(spec, NODE_QUERY),
+                    ));
                     continue;
                 }
                 let Some(specs) = &d.specifiers else { continue };
@@ -1279,28 +1334,52 @@ pub(crate) fn graph_interop_rewrite(
                 let mut text = String::new();
                 if let Some(def) = default {
                     text.push_str(&format!("import {def} from {}; ", json_string(spec)));
+                } else if k == Target::AppEsm {
+                    text.push_str(&format!("import {}; ", json_string(spec)));
                 }
                 text.push_str(&format!("import {ns} from {};", lit(spec, NS_QUERY)));
                 edits.push((d.span.start, d.span.end, text));
             }
             Statement::ExportAllDeclaration(d) if d.with_clause.is_none() => {
                 let spec = d.source.value.as_str();
-                if !wanted(spec) {
+                let k = kind(spec);
+                if k == Target::Other || (node && k != Target::Cjs) {
                     continue;
                 }
                 if node {
-                    edits.push((d.source.span.start, d.source.span.end, lit(spec, NODE_QUERY)));
+                    edits.push((
+                        d.source.span.start,
+                        d.source.span.end,
+                        lit(spec, NODE_QUERY),
+                    ));
                     continue;
                 }
                 match &d.exported {
-                    None => edits.push((d.source.span.start, d.source.span.end, lit(spec, STAR_QUERY))),
+                    None if k == Target::Cjs => edits.push((
+                        d.source.span.start,
+                        d.source.span.end,
+                        lit(spec, STAR_QUERY),
+                    )),
+                    None => {}
                     Some(name) => {
                         let name = module_export_name(name);
-                        let name = if is_plain_ident(&name) { name } else { json_string(&name) };
+                        let name = if is_plain_ident(&name) {
+                            name
+                        } else {
+                            json_string(&name)
+                        };
+                        let first = if k == Target::AppEsm {
+                            format!("import {}; ", json_string(spec))
+                        } else {
+                            String::new()
+                        };
                         edits.push((
                             d.span.start,
                             d.span.end,
-                            format!("export {{ default as {name} }} from {};", lit(spec, NS_QUERY)),
+                            format!(
+                                "{first}export {{ default as {name} }} from {};",
+                                lit(spec, NS_QUERY)
+                            ),
                         ));
                     }
                 }
@@ -1308,7 +1387,7 @@ pub(crate) fn graph_interop_rewrite(
             Statement::ExportNamedDeclaration(d) if node && d.with_clause.is_none() => {
                 if let Some(source) = &d.source {
                     let spec = source.value.as_str();
-                    if wanted(spec) {
+                    if kind(spec) == Target::Cjs {
                         edits.push((source.span.start, source.span.end, lit(spec, NODE_QUERY)));
                     }
                 }

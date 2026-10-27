@@ -2374,7 +2374,8 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     // v4: import.meta.url is the percent-encoded file URL (turbo-test#87);
     // v5: import.meta is runtime.js __ttImportMeta (env, one object per module; turbo-test#123)
     // v6: `__toESM` is runtime.js's `__ttToESM`, `__toCommonJS` marks the module (turbo-test#122)
-    // v7: `export *` re-exports the importer's namespace (turbo-test#133)
+    // v7: `export *` re-exports the importer's namespace (turbo-test#133); exports in source
+    // order (turbo-test#141)
     "mr-cjs-v7".hash(&mut h);
     // esbuild can't emit decorator metadata. By default we DON'T pay that cost — only when a
     // decorator file actually threw at load (Mongoose @Prop / Sequelize @Column read design:type
@@ -2486,6 +2487,14 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
         return None;
     }
     let code = postprocess_mr_cjs(String::from_utf8(out.stdout).ok()?);
+    // esbuild sorts the exports; vitest's namespace lists them in source order (turbo-test#141)
+    let order = crate::transform::transform(file, &raw)
+        .ok()
+        .and_then(|js| crate::esm_cjs::export_order(&js));
+    let code = match order {
+        Some(order) => source_order_exports(code, &order),
+        None => code,
+    };
     let mut code = await_do_mocks_on_import(fill_import_meta(code, None));
     // vitest-style vi.mock hoisting: move consumer requires below the vi.mock setup so the mock
     // is registered (immediately, in this module's scope) before the mocked module loads.
@@ -3157,7 +3166,11 @@ fn rewrite_shared_lets(code: &str, names: &[String]) -> String {
 ///   semantics) — and `__toCommonJS` with one that marks the module;
 /// - `export * from` re-exports that namespace's names (turbo-test#133).
 fn postprocess_mr_cjs(code: String) -> String {
-    postprocess_esbuild_cjs(code, "var __toESM = (m) => globalThis.__ttToESM(m);", "__toESM(m)")
+    postprocess_esbuild_cjs(
+        code,
+        "var __toESM = (m) => globalThis.__ttToESM(m);",
+        "__toESM(m)",
+    )
 }
 
 /// `postprocess_mr_cjs` for a package's bundle: its `__toESM` is runtime.js's `__ttToESMDep`
@@ -3167,7 +3180,11 @@ fn postprocess_mr_dep_cjs(code: String, node: bool) -> String {
     postprocess_esbuild_cjs(
         code,
         "var __toESM = (m, n) => globalThis.__ttToESMDep(m, n);",
-        if node { "globalThis.__ttToESMDep(m, 1)" } else { "m" },
+        if node {
+            "globalThis.__ttToESMDep(m, 1)"
+        } else {
+            "m"
+        },
     )
 }
 
@@ -3187,6 +3204,45 @@ fn postprocess_esbuild_cjs(mut code: String, to_esm: &str, star: &str) -> String
         &format!(
             "var __toESMStar = (m) => {star}; var __reExport = (target, mod, secondTarget) => (mod = __toESMStar(mod), "
         ),
+    )
+}
+
+/// esbuild's export registration (`__export(x_exports, {\n  b: () => b,\n  a: () => a\n});`,
+/// sorted by name) with its entries in `order` (the module's source order); names `order` does
+/// not know keep their place after them.
+fn source_order_exports(code: String, order: &[String]) -> String {
+    let Some(start) = code
+        .find("_exports, {\n")
+        .map(|i| i + "_exports, {\n".len())
+    else {
+        return code;
+    };
+    if !code[..start]
+        .lines()
+        .last()
+        .is_some_and(|l| l.starts_with("__export("))
+    {
+        return code;
+    }
+    let Some(len) = code[start..].find("\n});") else {
+        return code;
+    };
+    let block = &code[start..start + len];
+    let key = |line: &str| {
+        let k = line.trim_start().split(": () =>").next().unwrap_or("");
+        serde_json::from_str::<String>(k).unwrap_or_else(|_| k.to_string())
+    };
+    let rank = |line: &str| {
+        let k = key(line);
+        order.iter().position(|o| *o == k).unwrap_or(order.len())
+    };
+    let mut lines: Vec<&str> = block.split('\n').map(|l| l.trim_end_matches(',')).collect();
+    lines.sort_by_key(|l| rank(l));
+    format!(
+        "{}{}{}",
+        &code[..start],
+        lines.join(",\n"),
+        &code[start + len..]
     )
 }
 
@@ -5275,17 +5331,43 @@ fn load_graph<'s>(
 fn graph_interop(abs: &Path, dir: &Path, src: &str) -> Option<String> {
     let in_package = abs.components().any(|c| c.as_os_str() == "node_modules");
     let node = in_package && is_esm_module(abs);
-    let is_cjs = |spec: &str| {
-        !is_test_api_module(spec)
-            && !is_node_builtin(spec)
-            && lazy_stub_match(spec).is_none()
-            && resolve_spec(spec, dir).is_some_and(|p| {
-                !is_asset(&p)
-                    && p.extension().and_then(|e| e.to_str()) != Some("json")
-                    && detect_kind(&p) == Kind::Cjs
-            })
+    let target = |spec: &str| {
+        use crate::esm_cjs::Target;
+        if is_test_api_module(spec) || is_node_builtin(spec) || lazy_stub_match(spec).is_some() {
+            return Target::Other;
+        }
+        match resolve_spec(spec, dir) {
+            Some(p) if is_asset(&p) || p.extension().and_then(|e| e.to_str()) == Some("json") => {
+                Target::Other
+            }
+            Some(p) if detect_kind(&p) == Kind::Cjs => Target::Cjs,
+            Some(p) if !p.components().any(|c| c.as_os_str() == "node_modules") => Target::AppEsm,
+            _ => Target::Other,
+        }
     };
-    crate::esm_cjs::graph_interop_rewrite(src, &is_cjs, node)
+    crate::esm_cjs::graph_interop_rewrite(src, &target, node)
+}
+
+/// An app ES module's namespace as vitest lists it: its names in source order, tagged `Module`
+/// (runtime.js `__ttOrderedNs`, turbo-test#141).
+fn ordered_namespace<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+    ns: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let order = read_transformed(abs, false, false)
+        .and_then(|src| crate::esm_cjs::export_order(&src))
+        .unwrap_or_default();
+    let items: Vec<v8::Local<v8::Value>> = order
+        .iter()
+        .filter_map(|n| v8::String::new(scope, n).map(Into::into))
+        .collect();
+    let order = v8::Array::new_with_elements(scope, &items);
+    let global = scope.get_current_context().global(scope);
+    let key = v8::String::new(scope, "__ttOrderedNs")?;
+    let f = v8::Local::<v8::Function>::try_from(global.get(scope, key.into())?).ok()?;
+    let undefined = v8::undefined(scope).into();
+    f.call(scope, undefined, &[ns, order.into()])
 }
 
 /// The `?__tt_*` request kind of `spec`.
@@ -5311,7 +5393,10 @@ fn variant_view<'s>(
 ) -> Option<v8::Local<'s, v8::Value>> {
     let global = scope.get_current_context().global(scope);
     let (name, args): (&str, Vec<v8::Local<v8::Value>>) = if kind == Variant::Node {
-        ("__ttToESMDep", vec![exports, v8::Boolean::new(scope, true).into()])
+        (
+            "__ttToESMDep",
+            vec![exports, v8::Boolean::new(scope, true).into()],
+        )
     } else {
         ("__ttToESM", vec![exports])
     };
@@ -5328,8 +5413,21 @@ fn variant_module<'s>(
     abs: &Path,
     kind: Variant,
 ) -> Option<v8::Local<'s, v8::Module>> {
-    let exports = REGISTRY.with(|r| r.borrow().cjs_exports.get(abs).cloned())?;
-    let exports = v8::Local::new(scope, &exports);
+    let (exports, esm) = REGISTRY.with(|r| {
+        let reg = r.borrow();
+        // an ES module (not mocked): its namespace, read once it is evaluated
+        match reg.esm_by_path.get(abs) {
+            Some(_) if kind == Variant::Ns && !reg.mocks.contains_key(abs) => (None, true),
+            _ => (reg.cjs_exports.get(abs).cloned(), false),
+        }
+    });
+    if !esm && exports.is_none() {
+        return None;
+    }
+    let exports = match exports {
+        Some(e) => v8::Local::new(scope, &e),
+        None => v8::undefined(scope).into(),
+    };
     let names = match kind {
         Variant::Ns => vec!["default".to_string()],
         Variant::Star | Variant::Node => {
@@ -5349,8 +5447,7 @@ fn variant_module<'s>(
         export_names.push(v8::String::new(scope, n)?);
     }
     let mod_name = v8::String::new(scope, "<synthetic>")?;
-    let module =
-        v8::Module::create_synthetic_module(scope, mod_name, &export_names, variant_eval);
+    let module = v8::Module::create_synthetic_module(scope, mod_name, &export_names, variant_eval);
     let hash = module.get_identity_hash().get();
     REGISTRY.with(|r| {
         r.borrow_mut()
@@ -5369,8 +5466,13 @@ fn variant_eval<'s>(
     let entry = REGISTRY.with(|r| {
         let reg = r.borrow();
         let (path, kind, names) = reg.variant_by_hash.get(&hash)?.clone();
+        if kind == Variant::Ns && !reg.mocks.contains_key(&path) {
+            if let Some(m) = reg.esm_by_path.get(&path) {
+                return Some((Err((m.clone(), path)), kind, names));
+            }
+        }
         let exports = reg.cjs_exports.get(&path)?.clone();
-        Some((exports, kind, names))
+        Some((Ok(exports), kind, names))
     });
     let Some((exports, kind, names)) = entry else {
         throw(
@@ -5379,8 +5481,17 @@ fn variant_eval<'s>(
         );
         return None;
     };
-    let exports = v8::Local::new(scope, &exports);
-    let view = variant_view(scope, exports, kind)?;
+    let view = match exports {
+        Ok(exports) => {
+            let exports = v8::Local::new(scope, &exports);
+            variant_view(scope, exports, kind)?
+        }
+        Err((module, path)) => {
+            let module = v8::Local::new(scope, &module);
+            let ns = module.get_module_namespace();
+            ordered_namespace(scope, &path, ns)?
+        }
+    };
     if kind == Variant::Ns {
         let k = v8::String::new(scope, "default")?;
         module.set_synthetic_module_export(scope, k, view)?;
@@ -5873,11 +5984,19 @@ fn dynamic_import<'s>(
             })
         })
         .flatten();
+        let app_esm = !is_builtin
+            && !abs.components().any(|c| c.as_os_str() == "node_modules")
+            && REGISTRY.with(|r| {
+                let reg = r.borrow();
+                !reg.mocks.contains_key(&abs) && reg.esm_by_path.contains_key(&abs)
+            });
         let ns = match cjs {
             Some(g) => {
                 let exports = v8::Local::new(scope, &g);
                 variant_view(scope, exports, Variant::Ns)?
             }
+            // an app ES module: its names in source order (turbo-test#141)
+            None if app_esm => ordered_namespace(scope, &abs, ns)?,
             None => ns,
         };
         // (a synthetic module, e.g. a node builtin, evaluated before gives no promise)
