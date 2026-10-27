@@ -64,3 +64,26 @@ fn errors_print_as_vitest_print_error() {
     };
     assert_eq!(print_error(&bare, root), "Error: load boom");
 }
+
+#[test]
+#[ignore = "turbo-test#169: fails until the fix"]
+fn anonymous_async_frames_keep_their_location() {
+    // turbo-test#169: V8 writes an anonymous function suspended at an await as
+    // `at async <location>` (no parentheses); its location was read as `async /p/…` and the
+    // frame dropped, so an error made after an await had no location in the test file
+    let stack = "Error: Matcher did not succeed in time.\n\
+                 \x20   at run (<anonymous>:4303:86)\n\
+                 \x20   at async /p/pfail.test.js:3:9\n\
+                 \x20   at async file:///p/x y.test.js:7:12\n\
+                 \x20   at async <anonymous>:1:1\n\
+                 \x20   at async Promise.all (index 0)\n\
+                 \x20   at async fn (/p/h.ts:2:5)";
+    assert_eq!(
+        parse_stack(stack),
+        vec![
+            frame("", "/p/pfail.test.js", 3, 9),
+            frame("", "/p/x y.test.js", 7, 12),
+            frame("fn", "/p/h.ts", 2, 5),
+        ]
+    );
+}
