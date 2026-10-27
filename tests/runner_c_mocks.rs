@@ -806,6 +806,99 @@ it('restoring puts the original descriptor back', () => {
     }
 }
 
+/// turbo-test#148: asset imports give vite's strings (vitest 4.1.12): `?raw` the file's text,
+/// `?url` and a known asset type (`.txt`, `.png`, a large `.svg`, …) its root-relative URL with
+/// the rest of the query, a small `.svg` vite's inline `data:` URL; `import.meta.glob`'s
+/// `query: '?raw'` / `as: 'raw'` with it. turbo-test gave `'default'` (module runner) or `{}`
+/// (ESM graph). vitest on the same project: 1 passed.
+#[test]
+#[ignore = "turbo-test#148: fails until the fix"]
+fn asset_imports_are_vites_strings() {
+    let files: [(&str, &str); 8] = [
+        (
+            "package.json",
+            "{\"name\":\"rc-assets\",\"type\":\"module\"}\n",
+        ),
+        (
+            "assets/t.txt",
+            r##"hello raw
+"##,
+        ),
+        ("assets/i.svg", r##"<svg/>"##),
+        (
+            "assets/big.svg",
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/><g/></svg>"##,
+        ),
+        (
+            "assets/q.svg",
+            r##"<svg a="it's">
+  <g  fill="#f00"> 50% </g>
+</svg>
+"##,
+        ),
+        ("assets/t2.svg", r##"<svg><text>x</text></svg>"##),
+        ("assets/p.png", r##"PNG"##),
+        (
+            "assets/m.ts",
+            r##"export const x = 1;
+"##,
+        ),
+    ];
+    let test = r##"import { expect, it } from 'vitest';
+import raw from './assets/t.txt?raw';
+import url from './assets/t.txt?url';
+import plain from './assets/t.txt';
+import svg from './assets/i.svg';
+import big from './assets/big.svg';
+import quoted from './assets/q.svg';
+import text from './assets/t2.svg';
+import png from './assets/p.png';
+import tsRaw from './assets/m.ts?raw';
+it('asset imports are vite strings', async () => {
+  expect([raw, url, plain, svg, big, png, tsRaw]).toEqual(['hello raw\n', '/assets/t.txt', '/assets/t.txt', 'data:image/svg+xml,%3csvg/%3e', '/assets/big.svg', '/assets/p.png', 'export const x = 1;\n']);
+  expect([quoted, text]).toEqual([`data:image/svg+xml;base64,${btoa(`<svg a="it's">\n  <g  fill="#f00"> 50% </g>\n</svg>\n`)}`, `data:image/svg+xml;base64,${btoa('<svg><text>x</text></svg>')}`]);
+  expect((await import('./assets/t.txt?raw')).default).toBe('hello raw\n');
+  expect((await import('./assets/t.txt?raw=true')).default).toBe('/assets/t.txt?raw=true');
+  expect((await import('./assets/p.png?url')).default).toBe('/assets/p.png');
+  expect((await import('./assets/p.png?v=1&url')).default).toBe('/assets/p.png?v=1');
+  expect(import.meta.glob('./assets/*.txt', { query: '?raw', import: 'default', eager: true })).toEqual({ './assets/t.txt': 'hello raw\n' });
+  expect(import.meta.glob('./assets/*.txt', { as: 'raw', eager: true })).toEqual({ './assets/t.txt': 'hello raw\n' });
+});
+"##;
+    for esbuild in [true, false] {
+        let p = Project::new(if esbuild {
+            "rc-assets"
+        } else {
+            "rc-assets-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in files {
+            p.file(f, c);
+        }
+        p.file("a.test.ts", test);
+        let envs: &[&[(&str, &str)]] = if esbuild {
+            &[
+                &[],
+                &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
+                &[("TURBO_REUSE_ISOLATE", "1")],
+            ]
+        } else {
+            &[&[], &[("TURBO_REUSE_ISOLATE", "1")]]
+        };
+        for env in envs {
+            let r = turbo_test(&p.dir, &[], env);
+            assert!(
+                r.stdout.contains("Tests  1 passed (1)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            assert_eq!(r.code, Some(0), "esbuild={esbuild} {env:?}\n{}", r.all());
+        }
+    }
+}
+
 #[test]
 fn import_meta_keeps_coverage_line_mapping() {
     let p = esbuild_project("rc-import-meta-cov");
