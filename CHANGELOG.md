@@ -313,6 +313,17 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   honour the value argument; missing arguments throw TypeError; `size` exists; `forEach` and the
   `keys` / `values` / `entries` iterators are live (`[object URLSearchParams Iterator]`);
   `toString()` escapes `!'()~` as form-urlencoding does.
+- `TextEncoder` / `TextDecoder` follow Node 26 (turbo-test#118): lone surrogates encode as
+  U+FFFD (`EF BF BD`; a lone high surrogate became a bogus 4-byte sequence); `encodeInto` exists
+  and stops before a character that does not fit, counting a surrogate pair as 2 read; invalid
+  or truncated UTF-8 decodes to one U+FFFD per maximal subpart (it produced garbage code units),
+  `fatal: true` throws TypeError `ERR_ENCODING_INVALID_ENCODED_DATA`, a leading BOM is stripped
+  unless `ignoreBOM`, and `stream: true` keeps a partial sequence for the next call; `decode`
+  takes an ArrayBuffer, SharedArrayBuffer or any view (offset and length honoured; a
+  `Uint16Array`/`DataView` decoded the whole buffer) and throws TypeError for anything else;
+  `encoding` / `fatal` / `ignoreBOM` are prototype getters; the label is trimmed and
+  case-folded, accepting only the UTF-8 labels, and any other label throws RangeError
+  `ERR_ENCODING_NOT_SUPPORTED`. `Buffer#toString` keeps a BOM, as Node.
 - `URLSearchParams.set` replaces the first pair of the name in place and removes the others, as
   Node's (turbo-test#116); it moved the pair to the end (`a=1&b=2&a=3` set `a` gave `b=2&a=9`,
   Node `a=9&b=2`), in `toString()`, iteration and a URL's `href`.

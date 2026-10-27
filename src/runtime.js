@@ -86,7 +86,7 @@ globalThis.process = {
 function __streamWrite(fd, args) {
   const chunk = args[0];
   const cb = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
-  const text = typeof chunk === 'string' ? chunk : (chunk instanceof Uint8Array ? new TextDecoder().decode(chunk) : String(chunk));
+  const text = typeof chunk === 'string' ? chunk : (chunk instanceof Uint8Array ? new TextDecoder('utf-8', { ignoreBOM: true }).decode(chunk) : String(chunk));
   if (!globalThis.__TT_SILENT) globalThis.__ttWrite(fd, text);
   if (cb) Promise.resolve().then(() => cb());
   return true;
@@ -345,46 +345,124 @@ globalThis.localStorage = new __Storage();
 globalThis.sessionStorage = new __Storage();
 
 // ---- TextEncoder/TextDecoder (host globals; bare V8 has none) ----
+// WHATWG Encoding (UTF-8 only), checked row by row against Node 26 (turbo-test#118): lone
+// surrogates encode as U+FFFD, invalid UTF-8 decodes to U+FFFD per maximal subpart (or throws
+// with `fatal`), a leading BOM is stripped unless `ignoreBOM`, `stream` keeps a partial sequence.
+const __codecError = (Ctor, code, msg) => { const e = new Ctor(msg); e.code = code; return e; };
 if (typeof globalThis.TextEncoder === 'undefined') {
+  // UTF-8 bytes of s[i..] into out[j..] while they fit; returns [code units read, bytes written]
+  const encodeTo = (s, out) => {
+    const n = s.length; const max = out.length; let i = 0; let j = 0;
+    while (i < n) {
+      let c = s.charCodeAt(i); let units = 1;
+      if (c >= 0xd800 && c <= 0xdfff) {
+        const d = c < 0xdc00 && i + 1 < n ? s.charCodeAt(i + 1) : 0;
+        if (d >= 0xdc00 && d <= 0xdfff) { c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00); units = 2; }
+        else c = 0xfffd;
+      }
+      const len = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+      if (j + len > max) break;
+      if (len === 1) out[j++] = c;
+      else if (len === 2) { out[j++] = 0xc0 | (c >> 6); out[j++] = 0x80 | (c & 0x3f); }
+      else if (len === 3) { out[j++] = 0xe0 | (c >> 12); out[j++] = 0x80 | ((c >> 6) & 0x3f); out[j++] = 0x80 | (c & 0x3f); }
+      else { out[j++] = 0xf0 | (c >> 18); out[j++] = 0x80 | ((c >> 12) & 0x3f); out[j++] = 0x80 | ((c >> 6) & 0x3f); out[j++] = 0x80 | (c & 0x3f); }
+      i += units;
+    }
+    return [i, j];
+  };
   globalThis.TextEncoder = class TextEncoder {
     get encoding() { return 'utf-8'; }
-    encode(s) {
-      s = String(s); const b = [];
-      for (let i = 0; i < s.length; i++) {
-        let c = s.charCodeAt(i);
-        if (c < 0x80) b.push(c);
-        else if (c < 0x800) b.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
-        else if (c >= 0xd800 && c < 0xdc00) {
-          const c2 = s.charCodeAt(++i);
-          c = 0x10000 + ((c & 0x3ff) << 10) + (c2 & 0x3ff);
-          b.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 0x3f), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
-        } else b.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
-      }
-      return new Uint8Array(b);
+    encode(input = '') {
+      if (!(this instanceof TextEncoder)) throw new TypeError('Receiver must be an instance of class TextEncoder');
+      const s = `${input}`;
+      const out = new Uint8Array(s.length * 3);
+      return out.slice(0, encodeTo(s, out)[1]);
+    }
+    encodeInto(src, dest) {
+      if (!(this instanceof TextEncoder)) throw new TypeError('Receiver must be an instance of class TextEncoder');
+      if (typeof src !== 'string') throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "src" argument must be of type string');
+      if (!(dest instanceof Uint8Array)) throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "dest" argument must be an instance of Uint8Array');
+      const [read, written] = encodeTo(src, dest);
+      return { read, written };
     }
   };
+  Object.defineProperty(globalThis.TextEncoder.prototype, Symbol.toStringTag, { value: 'TextEncoder', configurable: true });
 }
 if (typeof globalThis.TextDecoder === 'undefined') {
+  const LABELS = ['unicode-1-1-utf-8', 'unicode11utf8', 'unicode20utf8', 'utf-8', 'utf8', 'x-unicode20utf8'];
+  const abLen = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get;
+  // SharedArrayBuffer is looked up per call: it may be installed after this file runs
+  const sabLen = () => typeof SharedArrayBuffer === 'function' && Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, 'byteLength').get;
+  const isBuffer = (x, get) => { if (!get) return false; try { get.call(x); return true; } catch { return false; } };
+  const bytesOf = (input) => {
+    if (input === undefined) return new Uint8Array(0);
+    if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+    if (isBuffer(input, abLen) || isBuffer(input, sabLen())) return new Uint8Array(input);
+    throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "input" argument must be an instance of SharedArrayBuffer, ArrayBuffer or ArrayBufferView.');
+  };
+  const options = (o) => {
+    if (o == null) return {};
+    if (typeof o !== 'object' && typeof o !== 'function') throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object.');
+    return o;
+  };
+  const state = new WeakMap();
+  const self = (d) => {
+    const st = state.get(d);
+    if (!st) throw __codecError(TypeError, 'ERR_INVALID_THIS', 'Value of "this" must be of type TextDecoder');
+    return st;
+  };
   globalThis.TextDecoder = class TextDecoder {
-    constructor(enc) { this.encoding = enc || 'utf-8'; }
-    decode(buf) {
-      if (!buf) return '';
-      const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf.buffer || buf);
-      let s = '';
-      for (let i = 0; i < b.length;) {
-        let c = b[i++];
-        if (c < 0x80) s += String.fromCharCode(c);
-        else if (c < 0xe0) s += String.fromCharCode(((c & 0x1f) << 6) | (b[i++] & 0x3f));
-        else if (c < 0xf0) s += String.fromCharCode(((c & 0xf) << 12) | ((b[i++] & 0x3f) << 6) | (b[i++] & 0x3f));
-        else {
-          let cp = ((c & 0x7) << 18) | ((b[i++] & 0x3f) << 12) | ((b[i++] & 0x3f) << 6) | (b[i++] & 0x3f);
-          cp -= 0x10000;
-          s += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
+    constructor(label = 'utf-8', opts = undefined) {
+      const name = `${label}`.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '').replace(/[A-Z]+/g, (c) => c.toLowerCase());
+      if (!LABELS.includes(name)) throw __codecError(RangeError, 'ERR_ENCODING_NOT_SUPPORTED', `The "${label}" encoding is not supported`);
+      const o = options(opts);
+      state.set(this, { fatal: !!o.fatal, ignoreBOM: !!o.ignoreBOM, pending: null, bomSeen: false });
+    }
+    get encoding() { self(this); return 'utf-8'; }
+    get fatal() { return self(this).fatal; }
+    get ignoreBOM() { return self(this).ignoreBOM; }
+    decode(input = undefined, opts = undefined) {
+      const st = self(this);
+      let b = bytesOf(input);
+      const stream = !!options(opts).stream;
+      if (st.pending) { const m = new Uint8Array(st.pending.length + b.length); m.set(st.pending); m.set(b, st.pending.length); b = m; st.pending = null; }
+      const units = []; let out = '';
+      const n = b.length; let i = 0;
+      const unit = (u) => { units.push(u); if (units.length >= 8192) { out += String.fromCharCode.apply(null, units); units.length = 0; } };
+      const bad = () => {
+        if (st.fatal) { st.pending = null; st.bomSeen = false; throw __codecError(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', 'The encoded data was not valid for encoding utf-8'); }
+        unit(0xfffd);
+      };
+      while (i < n) {
+        const c = b[i];
+        if (c < 0x80) { unit(c); i++; continue; }
+        let need; let cp; let lo = 0x80; let hi = 0xbf;
+        if (c >= 0xc2 && c <= 0xdf) { need = 1; cp = c & 0x1f; }
+        else if (c >= 0xe0 && c <= 0xef) { need = 2; cp = c & 0xf; if (c === 0xe0) lo = 0xa0; if (c === 0xed) hi = 0x9f; }
+        else if (c >= 0xf0 && c <= 0xf4) { need = 3; cp = c & 0x7; if (c === 0xf0) lo = 0x90; if (c === 0xf4) hi = 0x8f; }
+        else { bad(); i++; continue; }
+        let j = i + 1;
+        for (; j <= i + need && j < n; j++) {
+          if (b[j] < lo || b[j] > hi) break;
+          cp = (cp << 6) | (b[j] & 0x3f); lo = 0x80; hi = 0xbf;
         }
+        if (j > i + need) {
+          if (cp < 0x10000) unit(cp);
+          else { cp -= 0x10000; unit(0xd800 + (cp >> 10)); unit(0xdc00 + (cp & 0x3ff)); }
+        } else if (j === n && stream) { st.pending = b.slice(i); break; } // valid so far: wait for more
+        else bad(); // one U+FFFD for the maximal subpart b[i..j)
+        i = j;
       }
-      return s;
+      out += String.fromCharCode.apply(null, units);
+      if (!st.ignoreBOM && !st.bomSeen && out.length > 0) {
+        st.bomSeen = true;
+        if (out.charCodeAt(0) === 0xfeff) out = out.slice(1);
+      }
+      if (!stream) st.bomSeen = false; // end of stream: reset (a partial sequence already became U+FFFD)
+      return out;
     }
   };
+  Object.defineProperty(globalThis.TextDecoder.prototype, Symbol.toStringTag, { value: 'TextDecoder', configurable: true });
 }
 
 // ---- Web platform globals (bare V8 lacks these) ----
@@ -759,8 +837,8 @@ if (typeof globalThis.Blob === 'undefined') {
     text() {
       return Promise.resolve(this._parts.map((p) => {
         if (typeof p === 'string') return p;
-        if (p instanceof ArrayBuffer) return new globalThis.TextDecoder().decode(new Uint8Array(p));
-        if (p && p.buffer instanceof ArrayBuffer) return new globalThis.TextDecoder().decode(p); // TypedArray
+        if (p instanceof ArrayBuffer) return new globalThis.TextDecoder('utf-8', { ignoreBOM: true }).decode(new Uint8Array(p));
+        if (p && p.buffer instanceof ArrayBuffer) return new globalThis.TextDecoder('utf-8', { ignoreBOM: true }).decode(p); // TypedArray
         if (p && typeof p._parts !== 'undefined') return p._parts.join(''); // nested Blob
         return String(p);
       }).join(''));
@@ -1292,7 +1370,7 @@ if (typeof globalThis.Buffer === 'undefined') {
     toString(enc) {
       if (enc === 'hex') return Array.from(this).map((b) => b.toString(16).padStart(2, '0')).join('');
       if (enc === 'base64') return globalThis.__b64encodeBytes(Array.from(this));
-      return new globalThis.TextDecoder().decode(this);
+      return new globalThis.TextDecoder('utf-8', { ignoreBOM: true }).decode(this); // Node keeps a BOM
     }
     toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
   }

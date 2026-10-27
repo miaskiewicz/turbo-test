@@ -749,7 +749,6 @@ test('URLSearchParams', () => {
 }
 
 #[test]
-#[ignore = "turbo-test#118: fails until the fix"]
 fn text_encoder_decoder_surface_is_nodes() {
     // turbo-test#118 and the rest of the TextEncoder/TextDecoder surface, table-driven: encode
     // (lone surrogates -> U+FFFD bytes), encodeInto read/written (surrogate pairs at the buffer
