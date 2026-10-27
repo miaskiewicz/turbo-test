@@ -1563,3 +1563,26 @@ fn junit_norm(x: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// turbo-test#164: the summary line names a load error as the module runner does
+/// (`Error: boom`), without the ESM-graph loader's load-phase prefix; the error message kept
+/// for the reporters is unchanged.
+#[test]
+#[ignore = "turbo-test#164: fails until the fix"]
+fn the_error_line_drops_the_load_phase_prefix() {
+    let f = Path::new("/p/a.test.ts");
+    for (e, shown) in [
+        ("module errored: Error: top boom", "Error: top boom"),
+        ("evaluate threw: TypeError: x", "TypeError: x"),
+        (
+            "instantiate: SyntaxError: The requested module './l.mjs' does not provide an export named 'n'",
+            "SyntaxError: The requested module './l.mjs' does not provide an export named 'n'",
+        ),
+        ("graph load failed", "graph load failed"),
+        ("Error: module errored: inside", "Error: module errored: inside"),
+    ] {
+        let r = file_result(0, f, Err(e.into()), 1.0);
+        assert_eq!(r.line, format!("ERROR /p/a.test.ts  ({shown})"));
+        assert_eq!(r.error_msg, e);
+    }
+}
