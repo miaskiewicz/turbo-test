@@ -820,6 +820,53 @@ fn junit_frames_at_imported_calls_are_vitests() {
     }
 }
 
+/// turbo-test#176: in a `.js` file on the ESM-graph loader (no transform map), a call of an
+/// imported function pointed at the call's `(` after esm_spy's `__ttR(…)` rewrite (`5:7`), and a
+/// frame in an imported `.js` module was not mapped back through the rewrite at all
+/// (`h2.js:2:78`); vitest 4.1.12 points at the callee. The module runner (esbuild) run too.
+#[test]
+fn junit_frames_at_imported_calls_in_js_files_are_vitests() {
+    for esbuild in [false, true] {
+        let p = Project::new("rep-junit-js-call-frames");
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", "{\"type\":\"module\"}\n");
+        p.file(
+            "h.js",
+            "export function boom() { throw new Error('helper boom'); }\n",
+        );
+        p.file(
+            "h2.js",
+            "import { boom } from './h.js';\n\
+             export function viaHelper() { const r = boom(); return r; }\n\
+             export function lead() {\n  boom();\n}\n",
+        );
+        p.file(
+            "a.test.js",
+            "import { it } from 'vitest';\n\
+             import { boom } from './h.js';\n\
+             import { viaHelper, lead } from './h2.js';\n\
+             it('s', () => {\n  boom()\n});\n\
+             it('x', () => { const v = boom(); return v; });\n\
+             it('y', () => { [1].map(() => boom()); });\n\
+             it('z', () => { const o = { k: boom() }; return o; });\n\
+             it('w', () => { return [1, boom()]; });\n\
+             it('v', () => { const r = viaHelper(); return r; });\n\
+             it('l', () => { lead(); });\n\
+             it('a', () => { boom (1, 2) });\n",
+        );
+        let r = turbo_test(&p.dir, &["--reporter", "junit"], &[]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert_eq!(
+            normalize_junit(&r.stdout),
+            include_str!("data/junit-js-call-frames-vitest-4.1.12.xml"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+    }
+}
+
 /// turbo-test#99: a test file that fails to compile (itself, or a module it imports) fails with
 /// V8's SyntaxError as vitest 4.1.12 reports it (`Failed Suites`, the json `message`, the junit
 /// failing case); turbo-test said `graph load failed` and V8 printed `Uncaught SyntaxError` to

@@ -186,8 +186,14 @@ pub fn resolve_frame(script: &str, line: usize, column: usize) -> Option<(u32, u
         Some(found) => found,
         None => MODULES.with(|m| {
             let m = m.borrow();
-            let (map, offset) = m.get(Path::new(script))?;
-            mapped(map, *offset)
+            match m.get(Path::new(script)) {
+                Some((map, offset)) => mapped(map, *offset),
+                // a module the loader did not transform but edited in-line (a `.js` module's
+                // spy rewrite, esm_spy.rs): its columns before the edits (turbo-test#176)
+                None => SHIFTS
+                    .with(|s| s.borrow().contains_key(Path::new(script)))
+                    .then(|| (line as u32, unshift(script, line, column) as u32)),
+            }
         }),
     }
 }

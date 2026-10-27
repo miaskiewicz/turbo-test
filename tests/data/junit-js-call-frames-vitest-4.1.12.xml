@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="8" failures="8" errors="0" time="T">
+    <testsuite name="a.test.js" timestamp="S" hostname="H" tests="8" failures="8" errors="0" skipped="0" time="T">
+        <testcase classname="a.test.js" name="s" time="T">
+            <failure message="helper boom" type="Error">
+Error: helper boom
+ ❯ boom h.js:1:32
+ ❯ a.test.js:5:3
+            </failure>
+        </testcase>
+        <testcase classname="a.test.js" name="x" time="T">
+            <failure message="helper boom" type="Error">
+Error: helper boom
+ ❯ boom h.js:1:32
+ ❯ a.test.js:7:27
+            </failure>
+        </testcase>
+        <testcase classname="a.test.js" name="y" time="T">
+            <failure message="helper boom" type="Error">
+Error: helper boom
+ ❯ boom h.js:1:32
+ ❯ a.test.js:8:31
+ ❯ a.test.js:8:21
+            </failure>
+        </testcase>
+        <testcase classname="a.test.js" name="z" time="T">
+            <failure message="helper boom" type="Error">
+Error: helper boom
+ ❯ boom h.js:1:32
+ ❯ a.test.js:9:32
+            </failure>
+        </testcase>
+        <testcase classname="a.test.js" name="w" time="T">
+            <failure message="helper boom" type="Error">
+Error: helper boom
+ ❯ boom h.js:1:32
+ ❯ a.test.js:10:28
+            </failure>
+        </testcase>
+        <testcase classname="a.test.js" name="v" time="T">
+            <failure message="helper boom" type="Error">
+Error: helper boom
+ ❯ boom h.js:1:32
+ ❯ viaHelper h2.js:2:41
+ ❯ a.test.js:11:27
+            </failure>
+        </testcase>
+        <testcase classname="a.test.js" name="l" time="T">
+            <failure message="helper boom" type="Error">
+Error: helper boom
+ ❯ boom h.js:1:32
+ ❯ lead h2.js:4:3
+ ❯ a.test.js:12:17
+            </failure>
+        </testcase>
+        <testcase classname="a.test.js" name="a" time="T">
+            <failure message="helper boom" type="Error">
+Error: helper boom
+ ❯ boom h.js:1:32
+ ❯ a.test.js:13:17
+            </failure>
+        </testcase>
+    </testsuite>
+</testsuites>
