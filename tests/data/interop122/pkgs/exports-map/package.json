@@ -1,0 +1,1 @@
+{"name":"exports-map","exports":{".":{"import":"./esm.mjs","require":"./cjs.cjs","default":"./cjs.cjs"}}}
