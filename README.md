@@ -21,8 +21,11 @@ npx turbo-test src/foo.test.ts       # run specific files
 npx turbo-test --changed             # only files affected by your git diff
 npx turbo-test --jobs 8              # parallelism (default = cores)
 npx turbo-test --coverage            # native V8 coverage (honors the config's thresholds)
-npx turbo-test --reporter json       # json | tap | default
+npx turbo-test --reporter json       # default | verbose | json | junit | tap | dot
 ```
+
+The default and verbose reporters print vitest 4.1.12's output (under an AI agent, its agent
+reporter); `TURBO_LEGACY_REPORTER=1` keeps turbo-test's compact `PASS` / `FAIL` lines.
 
 Swap it into CI/scripts by replacing `vitest run` with `turbo-test`:
 

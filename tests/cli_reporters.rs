@@ -587,6 +587,96 @@ fn junit_is_vitests_report() {
     }
 }
 
+/// turbo-test#96: every test function gets vitest's TestContext — `task` (its name, ids, suite,
+/// file, result), `skip(note?)` / `skip(condition, note?)` (skipped at run time, even when the
+/// PendingError is caught), `onTestFinished` (after afterEach, last registered first) /
+/// `onTestFailed`, `signal`, `expect`, `annotate` (junit `<properties>`); beforeEach / afterEach
+/// get it too, `.for` rows and `it.extend` fixtures see the same context, `.each` handlers do
+/// not. `tests/data/junit-context-vitest-4.1.12.xml` is vitest 4.1.12's report (the tests log
+/// what they see), on both loaders.
+#[test]
+fn test_functions_get_vitests_test_context() {
+    for esbuild in [false, true] {
+        let p = Project::new("rep-junit-context");
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", "{\"type\":\"module\"}\n");
+        p.file("a.test.ts", include_str!("data/context/a.test.ts"));
+        let r = turbo_test(&p.dir, &["--reporter", "junit"], &[]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert_eq!(
+            normalize_junit(&r.stdout),
+            include_str!("data/junit-context-vitest-4.1.12.xml"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+    }
+}
+
+/// turbo-test#97: what is not an `Error` with a message prints as vitest prints it — a thrown
+/// primitive is `Unknown Error: <value>` (junit's `<failure>` with its `message` only), a value
+/// without a message its serialized form (`{ a: 1, stacks: [] }`), and the serialized error's own
+/// properties (inherited methods as `Function<name>`; a cause's too) follow its frames as
+/// `Serialized Error: { … }`; `tests/data/junit-errors-vitest-4.1.12.xml` is vitest 4.1.12's
+/// report, on both loaders. The JSON reporter's `failureMessages` are the serialized error's
+/// stack, else its message, else null.
+#[test]
+fn thrown_values_and_error_properties_print_as_vitest_prints_them() {
+    for esbuild in [false, true] {
+        let p = Project::new("rep-junit-errors");
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", "{\"type\":\"module\"}\n");
+        p.file("a.test.ts", include_str!("data/errors/a.test.ts"));
+        p.file("b.test.ts", include_str!("data/errors/b.test.ts"));
+        let r = turbo_test(&p.dir, &["--reporter", "junit"], &[]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert_eq!(
+            normalize_junit(&r.stdout),
+            include_str!("data/junit-errors-vitest-4.1.12.xml"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+        let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+        let v = json_report(&r);
+        let mut files: Vec<&serde_json::Value> =
+            v["testResults"].as_array().unwrap().iter().collect();
+        files.sort_by_key(|f| f["name"].as_str().unwrap().to_string());
+        let firsts: Vec<String> = files
+            .iter()
+            .flat_map(|f| f["assertionResults"].as_array().unwrap())
+            .map(|a| {
+                let first = match &a["failureMessages"][0] {
+                    serde_json::Value::String(s) => format!("{:?}", s.split('\n').next().unwrap()),
+                    other => other.to_string(),
+                };
+                format!("{} {first}", a["title"].as_str().unwrap())
+            })
+            .collect();
+        assert_eq!(
+            firsts,
+            [
+                "string \"plain string\"",
+                "props \"Error: with code\"",
+                "object null",
+                "null \"null\"",
+                "multi \"line one\"",
+                "undef \"undefined\"",
+                "number \"42\"",
+                "empty \"\"",
+                "named \"msg\"",
+                "nameonly null",
+                "class \"MyError: mine\"",
+                "cause props \"Error: outer\"",
+                "fn prop \"TypeError: typed\"",
+            ],
+            "esbuild={esbuild}"
+        );
+    }
+}
+
 /// turbo-test#81, the failure bodies: string / multi-line / type-mismatch / empty diffs, no diff
 /// for the comparison matchers (vitest passes showDiff false), a helper module's frame with its
 /// function name (mapped back through that module's transform), an error's cause, and console

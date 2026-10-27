@@ -58,7 +58,8 @@ Full matrix + quirks: `vitest.compat.md`. Summary:
 **Test / `vi` / `expect` API** ✅
 - `describe`/`it`/`test` + `.skip`/`.only`/`.todo`/`.each`/`.for`/`.skipIf`/`.runIf`/`.concurrent`
   (concurrent runs sequentially within a file), `it.fails`.
-- hooks `beforeAll`/`afterAll`/`beforeEach`/`afterEach`; per-test `{ timeout }`/`{ retry }`.
+- hooks `beforeAll`/`afterAll`/`beforeEach`/`afterEach`; per-test `{ timeout }`/`{ retry }`; the test
+  context (`task`, `skip`, `onTestFinished`/`onTestFailed`, `signal`, `expect`, `annotate`).
 - `expect` + a large matcher set, `expect.extend`, `.soft`, asymmetric matchers,
   `expect.assertions`/`hasAssertions` (enforced), `toMatchObject`/`toContainEqual`/`toSatisfy`/
   `toHaveBeenCalledOnce`/`toHaveBeenNthCalledWith`/…
@@ -76,7 +77,7 @@ text / html reporters; thresholds gate; include/exclude globs (auto-read from co
   `--coverage.*` flag form is not parsed (use the `--coverage-*` namespace).
 - `toMatchInlineSnapshot` / `toThrowErrorMatchingInlineSnapshot`: **compare-only**, no auto-write —
   pass the expected string explicitly.
-- `it.extend` fixtures: best-effort (no per-fixture teardown / `{ auto }` / `TestContext` extras).
+- `it.extend` fixtures: best-effort (no per-fixture teardown / `{ auto }`).
 - `bench()`: not implemented.
 - Config read is a regex scan: dynamic/`defineConfig`-computed config, plugins, aliases beyond
   tsconfig `paths`, and most `test.*` non-discovery options are not read from config.

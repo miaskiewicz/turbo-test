@@ -102,10 +102,12 @@ test('--reporter dot prints one char per file and still exits by status', () => 
   assert.equal(fail.code, 1);
 });
 
-test('--reporter default behaves like the text reporter', () => {
-  const { code, out } = run(['--reporter', 'default', NAMES]);
+// vitest's default reporter (turbo-test#94): a passing file is its module line
+const NO_COLOR = { env: { ...process.env, NO_COLOR: '1' } };
+test('--reporter default prints vitest\'s module line', () => {
+  const { code, out } = run(['--reporter', 'default', NAMES], NO_COLOR);
   assert.equal(code, 0);
-  assert.match(out, /PASS/);
+  assert.match(out, / ✓ fixtures\/compat\/names\.test\.ts \(3 tests\) \d+ms\n/);
 });
 
 // ---------------------------------------------------------------- json + outputFile
@@ -119,7 +121,7 @@ test('--reporter json honors --outputFile (writes JSON to disk)', () => {
 
 // ---------------------------------------------------------------- unknown reporter
 test('an unimplemented reporter value is accepted (falls back to text), never errors', () => {
-  const { code, out } = run(['--reporter', 'html', NAMES]);
+  const { code, out } = run(['--reporter', 'html', NAMES], NO_COLOR);
   assert.equal(code, 0, 'unknown reporter must not error');
-  assert.match(out, /PASS/);
+  assert.match(out, / ✓ fixtures\/compat\/names\.test\.ts \(3 tests\) \d+ms\n/);
 });
