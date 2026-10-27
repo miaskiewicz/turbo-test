@@ -106,6 +106,16 @@ void assertTrue;
 void expect.soft;
 void expect.unreachable;
 void expect.poll;
+// expect.poll / addSnapshotSerializer / a matcher's this.utils (turbo-test#161–#163)
+void expect.poll(() => 1, { interval: 10, timeout: 100, message: 'm' }).toBe(1);
+expect.addSnapshotSerializer({ test: (v) => v instanceof Date, serialize: (v, config, indentation, depth, refs, printer) => printer(v, config, indentation, depth, refs) });
+expect.addSnapshotSerializer({ test: () => false, print: (v, serialize) => serialize(v) });
+expect.extend({
+  toBeK5(received: unknown, expected: unknown) {
+    const hint: string = this.utils.matcherHint('toBeK5', undefined, undefined, { isNot: this.isNot, promise: this.promise });
+    return { pass: received === expected, message: () => `${hint}\n${this.utils.printExpected(expected)}\n${this.utils.printReceived(received)}` };
+  },
+});
 void expect.assertType;
 
 // ---- test.for / describe.for: the row is one argument, plus the test context ------------------

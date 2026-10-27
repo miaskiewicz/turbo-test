@@ -5,6 +5,31 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Added — `expect.poll`, `expect.addSnapshotSerializer`, vitest's `this.utils` (K5, turbo-test#161–#163)
+- `expect.poll(fn, { interval = 50, timeout = 1000, message })` (turbo-test#161) was undefined.
+  As in vitest 4.1.12, each matcher re-runs `fn` until it passes or the timeout ran out, then
+  throws the last error with the cause `Matcher did not succeed in time.` at the matcher's call
+  site. The interval and timeout run on turbo-test's virtual clock as internal timers the fake
+  timers do not see; while the timers are faked, each retry advances the fake clock by the
+  interval, as vitest's real-time wait followed by `vi.advanceTimersByTime(interval)` does. The
+  snapshot / throw matchers and `.resolves` / `.rejects` are vitest's SyntaxError, a call outside
+  a test throws, and a matcher that is not awaited never runs and fails its test.
+- `expect.addSnapshotSerializer(plugin)` (turbo-test#162) was undefined, and turbo-test's
+  pretty-format took no plugins. A serializer (`{ test, serialize }` or the older
+  `{ test, print }`) now applies to every later snapshot, the newest first, with pretty-format's
+  config / indentation / depth / refs / printer, so snapshots of custom types match the ones
+  vitest wrote. The `snapshotSerializers` config key is still not read (turbo-test#167).
+- A custom matcher's `this.utils` (turbo-test#163) was JSON-based (`printReceived({ a: [1] })`
+  printed `{"a":[1]}`, `matcherHint('.toK')` printed `.toK`), so matchers that format their own
+  messages (@testing-library/jest-dom and the like) printed differently from vitest. It is now
+  vitest's getMatcherUtils: pretty-format printers with trailing spaces as `·`, `stringify` with
+  its depth / maxLength / options, `matcherHint` with every option, `diff` with its annotation
+  options, `printDiffOrStringify`, `printWithType`, `INVERTED_COLOR`; the members vitest does
+  not have (`EXPECTED_LABEL`, `RECEIVED_LABEL`, `pluralize`, `highlightTrailingWhitespace`) are
+  gone.
+- Checked against rows, inline snapshots and a `.snap` file recorded with vitest 4.1.12
+  (`tests/runner_c_expect_surface.rs`, `tests/data/expect_surface/{poll,serializer,utils}.*`).
+
 ### Performance — a failing file runs once (K1, turbo-test#126, #144, #150)
 - Under isolate reuse (vitest `isolate: false`, or `--no-isolate`) every file with a failure —
   or with nothing passed — was run a second time on a fresh isolate and that result reported,
