@@ -1346,3 +1346,168 @@ t('legacy long', () => { const b = new Uint8Array(20000).fill(0xe9); const s = n
     }
     assert_eq!(got.lines().count(), want.lines().count());
 }
+
+#[test]
+fn blob_and_file_surface_is_nodes() {
+    // turbo-test#128: Blob / File as Node 26: size in UTF-8 bytes, type lower-cased (or '' with a
+    // character outside U+0020..U+007E), parts copied at construction, endings, arrayBuffer() /
+    // bytes() / text() / stream() (one chunk per non-empty part) / textStream(), slice() with
+    // clamped and negative bounds and its own type, accessors on the prototype, toStringTag, the
+    // argument errors. Expected: Node 26.11 (each row is [case, result] or
+    // [case, ["throws", name, code]]).
+    let p = Project::new("rc-blob-surface");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "t.test.js",
+        r##"import { test } from 'vitest'
+import * as fs from 'node:fs'
+test('Blob / File surface', async () => {
+  const rows = []
+const t = async (name, f) => { let r; try { r = await f() } catch (e) { r = ['throws', e.name, e.code ?? null] } rows.push(JSON.stringify([name, r])) }
+const u8 = (x) => [...new Uint8Array(x)]
+const b = new Blob(['€', new Uint8Array([1, 2])], { type: 'TEXT/Plain' })
+await t('size mixed', () => b.size)
+await t('size astral', () => new Blob(['😀', 'é']).size)
+await t('size lone surrogate', () => new Blob(['\uD800']).size)
+await t('size nested', () => new Blob([b, new ArrayBuffer(4), new Uint16Array(3)]).size)
+await t('size empty', () => new Blob().size)
+await t('type lowercased', () => b.type)
+await t('type default', () => new Blob([]).type)
+await t('type non-ascii', () => new Blob([], { type: 'text/plainé' }).type)
+await t('type control', () => new Blob([], { type: 'a\nb' }).type)
+await t('type space kept', () => new Blob([], { type: ' A B ' }).type)
+await t('type number', () => new Blob([], { type: 12 }).type)
+await t('arrayBuffer', async () => u8(await b.arrayBuffer()))
+await t('arrayBuffer instance', async () => (await b.arrayBuffer()) instanceof ArrayBuffer)
+await t('bytes typeof', () => typeof b.bytes)
+await t('bytes', async () => { const x = await b.bytes(); return [x.constructor.name, [...x]] })
+await t('bytes fresh copy', async () => { const x = await b.bytes(); x[0] = 0; return [...(await b.bytes())] })
+await t('source copied', async () => { const s = new Uint8Array([5, 6]); const c = new Blob([s]); s[0] = 9; return [...(await c.bytes())] })
+await t('slice(1)', () => new Blob(['abc']).slice(1).text())
+await t('slice(1,2)', () => new Blob(['abcd']).slice(1, 2).text())
+await t('slice(-2)', () => new Blob(['abcd']).slice(-2).text())
+await t('slice(-10, -1)', () => new Blob(['abcd']).slice(-10, -1).text())
+await t('slice(3,1)', async () => { const s = new Blob(['abcd']).slice(3, 1); return [s.size, await s.text()] })
+await t('slice(10)', () => new Blob(['abcd']).slice(10).size)
+await t('slice(1.7, 3.2)', () => new Blob(['abcd']).slice(1.7, 3.2).text())
+await t('slice() keeps nothing of type', () => b.slice().type)
+await t('slice type', () => b.slice(0, 1, 'X/Y').type)
+await t('slice type non-ascii', () => b.slice(0, 1, 'é').type)
+await t('slice bytes', async () => [...(await b.slice(1, 4).bytes())])
+await t('slice returns Blob', () => Object.prototype.toString.call(new File(['ab'], 'f').slice(0, 1)))
+await t('stream typeof', () => typeof b.stream())
+await t('stream instance', () => b.stream() instanceof ReadableStream)
+await t('stream read', async () => { const r = b.stream().getReader(); const out = []; for (;;) { const { done, value } = await r.read(); if (done) break; out.push(value.constructor.name, ...value) } return out })
+await t('stream empty', async () => { const r = new Blob().stream().getReader(); return (await r.read()).done })
+await t('toStringTag Blob', () => Object.prototype.toString.call(b))
+await t('toStringTag File', () => Object.prototype.toString.call(new File([], 'f')))
+await t('File instanceof Blob', () => new File([], 'f') instanceof Blob)
+await t('File name', () => new File([], 12).name)
+await t('File size type', () => { const f = new File(['€x'], 'f', { type: 'A/B', lastModified: 7 }); return [f.size, f.type, f.lastModified] })
+await t('File lastModified default', () => typeof new File([], 'f').lastModified)
+await t('File bytes', async () => [...(await new File(['hi'], 'f').bytes())])
+await t('File slice', () => new File(['hello'], 'f').slice(1, 3).text())
+await t('own keys', () => Object.keys(b))
+const chunks = async (s) => { const r = s.getReader(); const out = []; for (;;) { const { done, value } = await r.read(); if (done) break; out.push(typeof value === 'string' ? value : [...value]) } return out }
+await t('stream chunks per part', () => chunks(new Blob(['', 'a', new Blob(['b', 'c']), new Uint8Array(0), 'd']).stream()))
+await t('stream chunks of slice', () => chunks(new Blob(['abc', 'def']).slice(1, 5).stream()))
+await t('textStream', () => chunks(new Blob(['ab', 'c']).textStream()))
+await t('textStream split char', () => chunks(new Blob([new Uint8Array([0xe2, 0x82]), new Uint8Array([0xac])]).textStream()))
+await t('endings native', () => new Blob(['a\rb\r\nc\n'], { endings: 'native' }).text())
+await t('endings transparent', () => new Blob(['a\rb\r\nc\n'], { endings: 'transparent' }).size)
+await t('endings bogus', () => new Blob([], { endings: 'bogus' }))
+await t('parts iterable', () => new Blob(new Set(['a', 'b'])).text())
+await t('parts undefined', () => new Blob(undefined).size)
+await t('parts null', () => new Blob(null))
+await t('parts string', () => new Blob('abc'))
+await t('parts plain object', () => new Blob({}))
+await t('options string', () => new Blob([], 'x'))
+await t('options null', () => new Blob([], null).type)
+await t('Blob() without new', () => Blob())
+await t('prototype size', () => Blob.prototype.size)
+await t('slice string start', () => new Blob(['ab']).slice('1').text())
+await t('slice undefined start', () => new Blob(['ab']).slice(undefined, 1).text())
+await t('File missing args', () => new File([]))
+await t('File lastModified coerced', () => [new File([], 'n', { lastModified: '5' }).lastModified, new File([], 'n', { lastModified: 1.9 }).lastModified])
+await t('lengths', () => [Blob.name, Blob.length, File.name, File.length])
+await t('Blob.prototype names', () => Object.getOwnPropertyNames(Blob.prototype))
+await t('File.prototype names', () => Object.getOwnPropertyNames(File.prototype))
+await t('File name is accessor', () => typeof Object.getOwnPropertyDescriptor(File.prototype, 'name').get)
+  fs.writeFileSync('out.txt', rows.join('\n'))
+})
+"##,
+    );
+    let r = turbo_test(&p.dir, &["t.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let got = std::fs::read_to_string(p.path("out.txt")).unwrap();
+    let want = r##"["size mixed",5]
+["size astral",6]
+["size lone surrogate",3]
+["size nested",15]
+["size empty",0]
+["type lowercased","text/plain"]
+["type default",""]
+["type non-ascii",""]
+["type control",""]
+["type space kept"," a b "]
+["type number","12"]
+["arrayBuffer",[226,130,172,1,2]]
+["arrayBuffer instance",true]
+["bytes typeof","function"]
+["bytes",["Uint8Array",[226,130,172,1,2]]]
+["bytes fresh copy",[226,130,172,1,2]]
+["source copied",[5,6]]
+["slice(1)","bc"]
+["slice(1,2)","b"]
+["slice(-2)","cd"]
+["slice(-10, -1)","abc"]
+["slice(3,1)",[0,""]]
+["slice(10)",0]
+["slice(1.7, 3.2)","c"]
+["slice() keeps nothing of type",""]
+["slice type","x/y"]
+["slice type non-ascii",""]
+["slice bytes",[130,172,1]]
+["slice returns Blob","[object Blob]"]
+["stream typeof","object"]
+["stream instance",true]
+["stream read",["Uint8Array",226,130,172,"Uint8Array",1,2]]
+["stream empty",true]
+["toStringTag Blob","[object Blob]"]
+["toStringTag File","[object File]"]
+["File instanceof Blob",true]
+["File name","12"]
+["File size type",[4,"a/b",7]]
+["File lastModified default","number"]
+["File bytes",[104,105]]
+["File slice","el"]
+["own keys",[]]
+["stream chunks per part",[[97],[98],[99],[100]]]
+["stream chunks of slice",[[98,99],[100,101]]]
+["textStream",["ab","c"]]
+["textStream split char",["€"]]
+["endings native","a\nb\nc\n"]
+["endings transparent",7]
+["endings bogus",["throws","TypeError","ERR_INVALID_ARG_VALUE"]]
+["parts iterable","ab"]
+["parts undefined",0]
+["parts null",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["parts string",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["parts plain object",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["options string",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["options null",""]
+["Blob() without new",["throws","TypeError",null]]
+["prototype size",["throws","TypeError","ERR_INVALID_THIS"]]
+["slice string start","b"]
+["slice undefined start","a"]
+["File missing args",["throws","TypeError","ERR_MISSING_ARGS"]]
+["File lastModified coerced",[5,1.9]]
+["lengths",["Blob",0,"File",2]]
+["Blob.prototype names",["constructor","type","size","slice","arrayBuffer","text","bytes","stream","textStream"]]
+["File.prototype names",["constructor","name","lastModified"]]
+["File name is accessor","function"]"##;
+    for (g, w) in got.lines().zip(want.lines()) {
+        assert_eq!(g, w);
+    }
+    assert_eq!(got.lines().count(), want.lines().count());
+}
