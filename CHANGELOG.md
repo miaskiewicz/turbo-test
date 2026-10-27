@@ -303,6 +303,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   Error expected was compared by message only and an object by `message` substring, so
   `toThrow(new Error('abc'))` passed for a `TypeError('abc')` and `toThrow({ message: 'ab' })`
   for `Error('abc')`.
+- The URL global parses the userinfo (turbo-test#114): `http://u:p@a.com:8080/` has
+  `username` `u`, `password` `p`, `host` `a.com:8080` and origin `http://a.com:8080` (both
+  percent-encoded with the userinfo set, kept in `href` and by relative resolution), and its parts
+  are no own enumerable keys (`Object.keys(url)` is `[]`), as Node's. The authority was taken
+  whole as the host (`hostname` `u`, `port` `p@a.com`) with `username` / `password` undefined.
 - A URL / URLSearchParams prints as Node's (turbo-test#112): `URL { href: 'http://a/', origin: …,
   searchParams: URLSearchParams {}, hash: '' }` / `URLSearchParams { 'a' => '1' }` in matcher
   messages (vitest's loupe hands them to Node's inspect) and `util.inspect` / `console.log`;

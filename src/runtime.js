@@ -461,10 +461,17 @@ if (typeof globalThis.URL === 'undefined') {
       let searchStr;
       if (m) {
         this._hierarchical = true;
+        // `user:pass@` before the last '@' is the userinfo, percent-encoded (WHATWG; turbo-test#114)
+        const at = m[2].lastIndexOf('@');
+        const info = at < 0 ? '' : m[2].slice(0, at);
+        const hostport = at < 0 ? m[2] : m[2].slice(at + 1);
+        const colon = info.indexOf(':');
+        this.username = URL._encode(colon < 0 ? info : info.slice(0, colon), URL._USERINFO);
+        this.password = colon < 0 ? '' : URL._encode(info.slice(colon + 1), URL._USERINFO);
         // a file URL's `localhost` host is the empty host (WHATWG)
-        this.host = this.protocol.toLowerCase() === 'file:' && /^localhost$/i.test(m[2]) ? '' : m[2] || '';
+        this.host = this.protocol.toLowerCase() === 'file:' && /^localhost$/i.test(hostport) ? '' : hostport;
         this.hostname = this.host.split(':')[0];
-        this.port = (m[2] || '').split(':')[1] || '';
+        this.port = hostport.split(':')[1] || '';
         this.pathname = m[3] || '/';
         searchStr = m[4] || '';
         this.hash = m[5] || '';
@@ -472,6 +479,7 @@ if (typeof globalThis.URL === 'undefined') {
       } else {
         // opaque URL (no authority): everything after the scheme is the path (sans query/hash).
         this._hierarchical = false;
+        this.username = ''; this.password = '';
         this.host = ''; this.hostname = ''; this.port = '';
         const rest = url.slice(this.protocol.length);
         const qi = rest.indexOf('?'); const hi = rest.indexOf('#');
@@ -487,7 +495,11 @@ if (typeof globalThis.URL === 'undefined') {
       // so post-construction `searchParams.set()/append()` mutations are reflected (real URL semantics
       // — previously href was frozen at construction and dropped them).
       this._sp = new globalThis.URLSearchParams(searchStr);
+      // the parts live in non-enumerable slots: a real URL has no own enumerable keys
+      for (const k of Object.keys(this)) Object.defineProperty(this, k, { enumerable: false });
     }
+    // `user:pass@` in href (empty parts left out, as WHATWG serializes them)
+    get _userinfo() { return this.username || this.password ? this.username + (this.password ? ':' + this.password : '') + '@' : ''; }
     // The path and fragment keep the WHATWG percent-encode sets (turbo-test#85): a hierarchical
     // path is dot-normalised and encoded on every set, as Node's URL does.
     get pathname() { return this._path; }
@@ -510,10 +522,10 @@ if (typeof globalThis.URL === 'undefined') {
     get search() { const s = this._sp.toString(); return s ? '?' + s : ''; }
     set search(v) { this._sp = new globalThis.URLSearchParams(String(v).replace(/^\?/, '')); }
     get href() {
-      const auth = this._hierarchical ? this.protocol + '//' + this.host : this.protocol;
+      const auth = this._hierarchical ? this.protocol + '//' + this._userinfo + this.host : this.protocol;
       return auth + this._path + this.search + this._hash;
     }
-    set href(v) { const u = new globalThis.URL(v); this.protocol = u.protocol; this.host = u.host; this.hostname = u.hostname; this.port = u.port; this._path = u._path; this._hash = u._hash; this.origin = u.origin; this._hierarchical = u._hierarchical; this._sp = u._sp; }
+    set href(v) { const u = new globalThis.URL(v); this.protocol = u.protocol; this.username = u.username; this.password = u.password; this.host = u.host; this.hostname = u.hostname; this.port = u.port; this._path = u._path; this._hash = u._hash; this.origin = u.origin; this._hierarchical = u._hierarchical; this._sp = u._sp; }
     toString() { return this.href; }
     // JSON.stringify and pretty-format (vitest's diffs) show the href, as Node's URL
     toJSON() { return this.href; }
@@ -525,7 +537,7 @@ if (typeof globalThis.URL === 'undefined') {
       const name = (this.constructor && this.constructor.name) || 'URL';
       if (typeof depth === 'number' && depth < 0) return `${name} {}`;
       const obj = {
-        href: this.href, origin: this.origin, protocol: this.protocol, username: this.username || '', password: this.password || '',
+        href: this.href, origin: this.origin, protocol: this.protocol, username: this.username, password: this.password,
         host: this.host, hostname: this.hostname, port: this.port, pathname: this.pathname, search: this.search,
         searchParams: this.searchParams, hash: this.hash,
       };
@@ -538,7 +550,7 @@ if (typeof globalThis.URL === 'undefined') {
     // and a relative path merged with the base path's directory. Dot segments are removed by
     // the caller's pathname normalization. An opaque base (`mailto:x`) only takes a fragment.
     static _resolve(rel, b) {
-      const auth = b.protocol + '//' + b.host;
+      const auth = b.protocol + '//' + b._userinfo + b.host;
       const noHash = b.href.replace(/#.*$/, '');
       if (!b._hierarchical) {
         if (rel.startsWith('#')) return noHash + rel;
@@ -573,6 +585,7 @@ if (typeof globalThis.URL === 'undefined') {
     static get _C0() { return '\x7f'; }
     static get _PATH() { return '\x7f "#<>?^`{}'; }
     static get _FRAGMENT() { return '\x7f "<>`'; }
+    static get _USERINFO() { return '\x7f "#<>?^`{}/:;=@[\\]|'; }
     static revokeObjectURL() {}
     static parse(url, base) { try { return new globalThis.URL(url, base); } catch { return null; } }
     static canParse(url, base) { try { new globalThis.URL(url, base); return true; } catch { return false; } }

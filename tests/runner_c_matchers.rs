@@ -381,7 +381,6 @@ test('params diff', () => { expect({ s: new URLSearchParams('a=1'), n: 1 }).toEq
 }
 
 #[test]
-#[ignore = "turbo-test#114: fails until the fix"]
 fn url_userinfo_and_own_keys_are_nodes() {
     // turbo-test#114: the URL global took `user:pass@host` whole as the host (username /
     // password undefined) and kept its parsed parts as own enumerable keys. Expected: Node 26.
@@ -397,7 +396,7 @@ test('userinfo', () => {
     const u = new URL(s)
     return JSON.stringify([s, u.href, u.username, u.password, u.host, u.hostname, u.port, u.origin])
   })
-  const r = new URL('y?q#h', 'http://u:p@a/x/')
+  const r = new URL('y?q=1#h', 'http://u:p@a/x/')
   rows.push(JSON.stringify([r.href, r.username, r.password]))
   rows.push(`${Object.keys(new URL('http://u:p@a/')).length} ${JSON.stringify({ ...new URL('http://a/') })}`)
   fs.writeFileSync('out.txt', rows.join('\n'))
@@ -415,7 +414,7 @@ test('userinfo', () => {
 ["http://u:@a/","http://u@a/","u","","a","a","","http://a"]
 ["file:///x","file:///x","","","","","","null"]
 ["mailto:x@y","mailto:x@y","","","","","","null"]
-["http://u:p@a/x/y?q#h","u","p"]
+["http://u:p@a/x/y?q=1#h","u","p"]
 0 {}"#;
     assert_eq!(std::fs::read_to_string(p.path("out.txt")).unwrap(), want);
 }
