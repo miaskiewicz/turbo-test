@@ -629,3 +629,77 @@ fn junit_failures_print_as_vitest_prints_them() {
         );
     }
 }
+
+/// turbo-test#99: a test file that fails to compile (itself, or a module it imports) fails with
+/// V8's SyntaxError as vitest 4.1.12 reports it (`Failed Suites`, the json `message`, the junit
+/// failing case); turbo-test said `graph load failed` and V8 printed `Uncaught SyntaxError` to
+/// stdout three times, with a line of the transformed code.
+#[test]
+#[ignore = "turbo-test#99: fails until the fix"]
+fn a_compile_error_is_the_files_syntax_error() {
+    const MSG: &str = "Invalid regular expression: /e{,2}/u: Incomplete quantifier";
+    let case = |f: &str| {
+        format!(
+            "    <testsuite name=\"{f}\" timestamp=\"S\" hostname=\"H\" tests=\"1\" failures=\"1\" errors=\"0\" skipped=\"0\" time=\"T\">\n        <testcase classname=\"{f}\" name=\"{f}\" time=\"T\">\n            <failure message=\"{MSG}\" type=\"SyntaxError\">\nSyntaxError: {MSG}\n            </failure>\n        </testcase>\n    </testsuite>\n"
+        )
+    };
+    // vitest 4.1.12's report for this project
+    let junit = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<testsuites name=\"vitest tests\" tests=\"2\" failures=\"2\" errors=\"0\" time=\"T\">\n{}{}</testsuites>\n",
+        case("a.test.ts"),
+        case("b.test.ts")
+    );
+    for esbuild in [false, true] {
+        let p = Project::new("rep-compile-error");
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", "{\"type\":\"module\"}\n");
+        p.file(
+            "a.test.ts",
+            "import { it } from 'vitest';\nit('x', () => { console.log(/e{,2}/u); });\n",
+        );
+        p.file(
+            "b.test.ts",
+            "import { it } from 'vitest';\nimport { v } from './bad';\nit('y', () => { console.log(v); });\n",
+        );
+        p.file(
+            "bad.ts",
+            "export const v = 1;\nexport const w = /e{,2}/u;\n",
+        );
+        let r = run(&p, &[]);
+        assert!(
+            r.stdout.starts_with(&format!(
+                "ERROR a.test.ts  (SyntaxError: {MSG})\nERROR b.test.ts  (SyntaxError: {MSG})\n"
+            )),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+        assert!(
+            !r.all().contains("Uncaught"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+        assert!(!r.all().contains("graph load failed"), "{}", r.all());
+        let j = json_report(&run(&p, &["--reporter", "json"]));
+        let msgs: Vec<&str> = j["testResults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["message"].as_str().unwrap())
+            .collect();
+        assert_eq!(msgs, [MSG, MSG], "esbuild={esbuild}");
+        let r = run(&p, &["--reporter", "junit"]);
+        assert_eq!(
+            normalize_junit(&r.stdout),
+            junit,
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+        assert!(
+            !r.all().contains("Uncaught"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+    }
+}
