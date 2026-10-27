@@ -4559,8 +4559,12 @@ fn native_require(
         }
         return;
     }
-    // CSS/asset/JSON imports -> stub via load_dep (CSS-module proxy / parsed JSON value)
-    if is_asset(&abs) || abs.extension().and_then(|e| e.to_str()) == Some("json") {
+    // CSS/asset/JSON imports -> stub via load_dep (CSS-module proxy / vite's asset string / parsed
+    // JSON value)
+    if is_asset(&abs)
+        || crate::vite_asset::is_asset_id(&abs)
+        || abs.extension().and_then(|e| e.to_str()) == Some("json")
+    {
         load_dep(scope, &abs);
         if let Some(g) = REGISTRY.with(|r| r.borrow().cjs_exports.get(&abs).cloned()) {
             rv.set(v8::Local::new(scope, &g));
@@ -4725,7 +4729,10 @@ fn query_mock_variant(spec: &str, abs: PathBuf) -> PathBuf {
         return abs;
     };
     let key = PathBuf::from(format!("{}?{query}", abs.display()));
-    if REGISTRY.with(|r| r.borrow().mocks.contains_key(&key)) {
+    // vite's `?raw` / `?url` / asset-with-query ids are modules of their own (turbo-test#148)
+    if REGISTRY.with(|r| r.borrow().mocks.contains_key(&key))
+        || crate::vite_asset::is_asset_id(&key)
+    {
         key
     } else {
         abs
@@ -5320,6 +5327,17 @@ fn load_dep<'s>(scope: &mut v8::PinScope<'s, '_>, dep: &Path) -> Option<()> {
     });
     if mocked {
         return Some(());
+    }
+    // vite's asset imports (turbo-test#148): `default` is the `?raw` text / the URL / the inline
+    // svg; any other name reads as itself, as the asset stub below
+    let root = std::env::current_dir().unwrap_or_default();
+    if let Some(v) = crate::vite_asset::value(dep, &root) {
+        let v = serde_json::to_string(&v).ok()?;
+        return register_mock(
+            scope,
+            dep,
+            &format!("() => new Proxy({{ default: {v} }}, {{ get: (t, p) => p in t ? t[p] : typeof p === 'string' ? p : undefined }})"),
+        );
     }
     // CSS/asset imports -> stub (CSS-module proxy: any class name -> its own string). Assets and
     // JSON are registered via register_mock, i.e. recorded in `mocks`, so an already-loaded one

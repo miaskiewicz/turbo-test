@@ -33,6 +33,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `url` / `filename` / `dirname` plus vitest's `env` (live `process.env`, `DEV` / `PROD` / `SSR`
   booleans), and `process.env` carries vite's `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` (`SSR`
   off under a `jsdom` / `happy-dom` environment), as vitest sets them.
+- Asset imports give vite's strings (turbo-test#148): `import t from './t.txt?raw'`, `?url` and
+  plain imports of images / fonts / media / `.txt` gave `'default'` on the module runner and `{}`
+  on the ESM graph. Now `?raw` is the file's text, `?url` and known asset types the root-relative
+  URL (the rest of the query kept), a small `.svg` vite's inline `data:` URL
+  (`src/vite_asset.rs`), so `import.meta.glob(..., { query: '?raw' })` / `as: 'raw'` work too.
 - `mockRestore` / `vi.restoreAllMocks` put the spied property's original descriptor back
   (turbo-test#157), as vitest does: they redefined it as an enumerable data property holding the
   original, so on the module runner a restored re-export (`export *`, `export { x } from`) was no

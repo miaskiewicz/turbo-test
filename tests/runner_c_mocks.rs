@@ -812,7 +812,6 @@ it('restoring puts the original descriptor back', () => {
 /// `query: '?raw'` / `as: 'raw'` with it. turbo-test gave `'default'` (module runner) or `{}`
 /// (ESM graph). vitest on the same project: 1 passed.
 #[test]
-#[ignore = "turbo-test#148: fails until the fix"]
 fn asset_imports_are_vites_strings() {
     let files: [(&str, &str); 8] = [
         (
