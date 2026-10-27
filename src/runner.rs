@@ -5721,23 +5721,28 @@ fn ensure_vitest_builtin<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<()> {
     }
     let global = scope.get_current_context().global(scope);
     let obj = v8::Object::new(scope);
-    for n in [
-        "describe",
-        "it",
-        "test",
-        "expect",
-        "expectTypeOf",
-        "assertType",
-        "vi",
-        "jest",
-        "beforeEach",
-        "afterEach",
-        "beforeAll",
-        "afterAll",
-        "assert",
+    // export name -> the global holding it (chai's assert / chai / should are kept on hidden
+    // globals, turbo-test#160)
+    for (n, g) in [
+        ("describe", "describe"),
+        ("it", "it"),
+        ("test", "test"),
+        ("expect", "expect"),
+        ("expectTypeOf", "expectTypeOf"),
+        ("assertType", "assertType"),
+        ("vi", "vi"),
+        ("jest", "jest"),
+        ("beforeEach", "beforeEach"),
+        ("afterEach", "afterEach"),
+        ("beforeAll", "beforeAll"),
+        ("afterAll", "afterAll"),
+        ("assert", "__ttVitestAssert"),
+        ("chai", "__ttVitestChai"),
+        ("should", "__ttVitestShould"),
     ] {
         let k = v8::String::new(scope, n)?;
-        if let Some(v) = global.get(scope, k.into()) {
+        let gk = v8::String::new(scope, g)?;
+        if let Some(v) = global.get(scope, gk.into()) {
             if !v.is_undefined() {
                 obj.set(scope, k.into(), v);
             }
@@ -6252,6 +6257,19 @@ pub(crate) fn framework_snapshot() -> &'static Vec<u8> {
             );
             let pcode = v8::String::new(scope, &prelude).unwrap();
             v8::Script::compile(scope, pcode, None).unwrap().run(scope).unwrap();
+            // chai (turbo-test#160): vitest's expect(x) is a chai Assertion; runtime.js loads it
+            // through the globalThis.__ttLoadChai this defines
+            let chai = chai_script();
+            {
+                let tc = std::pin::pin!(v8::TryCatch::new(scope));
+                let tc = &mut tc.init();
+                let ccode = v8::String::new(tc, &chai).unwrap();
+                let ran = v8::Script::compile(tc, ccode, None).and_then(|s| s.run(tc));
+                if ran.is_none() {
+                    let msg = caught_message(tc, "Error").unwrap_or_default();
+                    chai_missing(&format!("chai failed to load: {msg}"));
+                }
+            }
             let code = v8::String::new(scope, RUNTIME_JS).unwrap();
             let s = v8::Script::compile(scope, code, None).unwrap();
             s.run(scope).unwrap();
@@ -6272,6 +6290,51 @@ pub(crate) fn framework_snapshot() -> &'static Vec<u8> {
             .expect("framework snapshot")
             .to_vec()
     })
+}
+
+/// Where chai's ES-module build is: `TURBO_CHAI` (cli.js sets it to the `chai` this npm package
+/// depends on); in this crate's unit tests, the repo's `node_modules/chai` (`npm ci`).
+fn chai_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("TURBO_CHAI") {
+        return Some(PathBuf::from(p));
+    }
+    if cfg!(test) {
+        return Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("node_modules/chai/index.js"));
+    }
+    None
+}
+
+/// No chai, no expect: say so and stop (never a silent fallback).
+fn chai_missing(why: &str) -> ! {
+    let msg = format!(
+        "turbo-test: {why}\nturbo-test needs the `chai` package it depends on (vitest's expect is chai): \
+         run it through its npm launcher (cli.js), which passes TURBO_CHAI, or set TURBO_CHAI to chai's index.js."
+    );
+    if cfg!(test) {
+        panic!("{msg}");
+    }
+    eprintln!("{msg}");
+    std::process::exit(1);
+}
+
+/// chai's `index.js` (an ES module) lowered to CommonJS by the native ESM→CJS emitter, wrapped
+/// into `globalThis.__ttLoadChai()`, which runtime.js calls once its EventTarget / Event exist
+/// (chai's plugin events need them) and which returns chai's exports.
+fn chai_script() -> String {
+    let Some(path) = chai_path() else {
+        chai_missing("TURBO_CHAI is not set");
+    };
+    let src = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| chai_missing(&format!("cannot read chai at {}: {e}", path.display())));
+    let cjs = crate::esm_cjs::emit_with(&path, &src, false).unwrap_or_else(|| {
+        chai_missing(&format!(
+            "cannot lower chai at {} to CommonJS",
+            path.display()
+        ))
+    });
+    format!(
+        "globalThis.__ttLoadChai = () => {{ const module = {{ exports: {{}} }}; (function (module, exports) {{\n{cjs}\n}})(module, module.exports); return module.exports; }};"
+    )
 }
 
 /// Node's `process.platform` for a Rust `std::env::consts::OS`.

@@ -57,6 +57,17 @@ function bundledEsbuild() {
   }
 }
 
+// The `chai` this package depends on (turbo-test#160): vitest's expect(x) is a chai Assertion, so the
+// binary loads chai's ES-module build into its runtime. Without it the binary stops with an error.
+function chaiPath() {
+  try {
+    const p = path.join(path.dirname(require.resolve('chai/package.json')), 'index.js');
+    return fs.existsSync(p) ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 function main() {
   const bin = binaryPath();
   if (!bin) {
@@ -72,6 +83,10 @@ function main() {
   if (!env.TURBO_ESBUILD) {
     const esbuild = bundledEsbuild();
     if (esbuild) env.TURBO_ESBUILD = esbuild;
+  }
+  if (!env.TURBO_CHAI) {
+    const chai = chaiPath();
+    if (chai) env.TURBO_CHAI = chai;
   }
   const res = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit', env });
   if (res.error) { console.error('turbo-test:', res.error.message); process.exit(1); }

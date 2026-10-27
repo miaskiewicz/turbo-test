@@ -180,7 +180,7 @@ test('circular decorated models (@Entity/@Field, User <-> Post) load — legacy 
 
 // turbo-test#160: cli.js passes the binary the chai this package depends on (TURBO_CHAI), so a
 // user's environment needs nothing: chai's BDD chain and vitest's assert export work.
-test('cli.js gives the runtime its chai: expect(x).to… and assert from vitest', { todo: 'turbo-test#160' }, () => {
+test('cli.js gives the runtime its chai: expect(x).to… and assert from vitest', () => {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'tt-chai-'));
   try {
     fs.writeFileSync(path.join(dir, 'package.json'), '{ "type": "module" }');

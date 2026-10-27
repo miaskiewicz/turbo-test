@@ -17,7 +17,6 @@ const KNOWN_MISSING: [(&str, &str); 2] = [
 ];
 
 #[test]
-#[ignore = "turbo-test#160: fails until the fix"]
 fn expect_members_are_vitests() {
     // turbo-test#153 / #154 / #155: expect.closeTo / schemaMatching / addEqualityTesters / fail /
     // unreachable / getState / setState / toSatisfy were missing, expect.extend made no
@@ -130,7 +129,6 @@ fn to_match_object_diff_is_vitests() {
 }
 
 #[test]
-#[ignore = "turbo-test#160: fails until the fix"]
 fn chai_chain_and_assert_are_vitests() {
     // turbo-test#160: vitest's expect(x) is a chai Assertion. turbo-test had no BDD chain
     // (`expect(1).to.equal(1)`: Invalid Chai property: to), no sinon-style members, no
@@ -159,7 +157,6 @@ fn chai_chain_and_assert_are_vitests() {
 }
 
 #[test]
-#[ignore = "turbo-test#160: fails until the fix"]
 fn a_missing_chai_fails_loudly() {
     // turbo-test#160: the runtime is built on chai; without it (TURBO_CHAI unset or wrong — cli.js
     // passes the chai this package depends on) the run stops with an error, never a fallback.

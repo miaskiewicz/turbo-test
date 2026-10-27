@@ -137,8 +137,8 @@ impl Run {
 /// every inherited `TURBO_*` variable, every CI variable (`turbo_test::ci::env_vars`) and every
 /// AI-agent variable (`turbo_test::agent::AGENT_VARS`, `EDITOR`, `TERM_PROGRAM`) and colour
 /// variable (`NO_COLOR`, `FORCE_COLOR`, `FORCE_TTY`, `TERM`) removed,
-/// `TURBO_JOBS=2` and `TURBO_LEGACY_REPORTER=1` unless `env` overrides them, and `env` applied
-/// last.
+/// `TURBO_JOBS=2`, `TURBO_LEGACY_REPORTER=1` and `TURBO_CHAI` (the repo's `node_modules/chai`)
+/// unless `env` overrides them, and `env` applied last.
 pub fn run_exe(exe: &str, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Run {
     let tmp = cwd.join(".tt-tmp");
     std::fs::create_dir_all(&tmp).unwrap();
@@ -169,6 +169,11 @@ pub fn run_exe(exe: &str, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Ru
     }
     // the tests written against turbo-test's own PASS / FAIL lines keep them; the vitest human
     // reporters (turbo-test#94) are checked with TURBO_LEGACY_REPORTER=0
+    // the chai cli.js passes (turbo-test#160): the repo's own, installed by `npm ci`
+    cmd.env(
+        "TURBO_CHAI",
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("node_modules/chai/index.js"),
+    );
     cmd.env("TMPDIR", &tmp)
         .env("TURBO_CACHE_DIR", cwd.join(".tt-cache"))
         .env("TURBO_JOBS", "2")

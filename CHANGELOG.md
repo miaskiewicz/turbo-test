@@ -5,6 +5,16 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Changed — expect(x) is a chai Assertion (turbo-test#160)
+- As in vitest, `expect(x)` is now a chai Assertion. turbo-test had no BDD chain:
+  `expect(1).to.equal(1)` threw `Invalid Chai property: to`. It also lacked vitest's sinon-style
+  members (`called`, `calledWith`, ...), `expect.assert` and the `vitest` module's `assert` /
+  `chai` / `should`, and its matcher errors were not `chai.AssertionError`s. The npm package now
+  depends on `chai` 6.3.0 (vitest 4.1.12's, pinned exactly). `cli.js` passes its location to the
+  binary as `TURBO_CHAI`; the binary loads it once into the runtime snapshot through the native
+  ESM→CJS emitter, and every jest-style matcher becomes a method of chai's Assertion, as
+  vitest's JestChaiExpect does. Running the binary without chai is now an error.
+
 ### Performance — a failing file runs once (K1, turbo-test#126, #144, #150)
 - Under isolate reuse (vitest `isolate: false`, or `--no-isolate`) every file with a failure —
   or with nothing passed — was run a second time on a fresh isolate and that result reported,

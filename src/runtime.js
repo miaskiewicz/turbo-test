@@ -3689,6 +3689,8 @@ function __snapFinish(skipped) {
 }
 
 // ---- expect ----
+// The jest-style matchers of one call on a chai Assertion (__attachMatcher): `actual`, `negated`,
+// `message` and `promise` are the assertion's object / negate / message / promise flags.
 function makeExpect(actual, negated = false, message = undefined, promise = '') {
   // `msg` is a thunk: the failure message (and the formatting of the operands in it) is built
   // only when the assertion fails, as vitest does — formatting can throw (a native class
@@ -3709,7 +3711,6 @@ function makeExpect(actual, negated = false, message = undefined, promise = '') 
   const argsEqual = (a, b) => a.length === b.length && a.every((x, i) => deepEqual(x, b[i]));
   const testers = __customTesters;
   const api = {
-    get not() { return makeExpect(actual, !negated, message); },
     toBeTypeOf(t) { c(typeof actual === t, 'expected #{this} to be type of #{exp}', 'expected #{this} not to be type of #{exp}', t, typeof actual); },
     toHaveBeenCalledExactlyOnceWith(...a) {
       const spy = spyOf();
@@ -3718,38 +3719,6 @@ function makeExpect(actual, negated = false, message = undefined, promise = '') 
       if (negated ? !pass : pass) return;
       const msg = __chaiMsg(negated ? `expected "${name}" to not be called once with arguments: #{exp}` : `expected "${name}" to be called once with arguments: #{exp}`, actual, a, actual);
       throw new __ChaiAssertionError(__formatCalls(spy, msg, a));
-    },
-    // async matchers: `await expect(promise).resolves.toX(...)`, `.rejects.toX(...)`, and
-    // `.resolves.not.toX(...)` / `.rejects.not.toX(...)`: as vitest's, a proxy over the assertion
-    // whose matchers run on the settled value; `.rejects` calls a function first. Anything but a
-    // thenable is vitest's TypeError, thrown when `.resolves` / `.rejects` is read.
-    get resolves() {
-      if (typeof actual?.then !== 'function') throw new TypeError(`You must provide a Promise to expect() when using .resolves, not '${typeof actual}'.`);
-      const mk = (neg) => new Proxy(makeExpect(actual, neg, message, 'resolves'), { get: (t, m) => {
-        if (m === 'not') return mk(!neg);
-        const f = Reflect.get(t, m);
-        if (typeof f !== 'function') return f;
-        return (...args) => Promise.resolve(actual).then(
-          (v) => makeExpect(v, neg, message, 'resolves')[m](...args),
-          (e) => { const err = new __ChaiAssertionError(`promise rejected "${__inspect(e)}" instead of resolving`, { showDiff: false }); err.cause = e; throw err; },
-        );
-      } });
-      return mk(negated);
-    },
-    get rejects() {
-      const wrapper = typeof actual === 'function' ? actual() : actual;
-      if (typeof wrapper?.then !== 'function') throw new TypeError(`You must provide a Promise to expect() when using .rejects, not '${typeof wrapper}'.`);
-      const mk = (neg) => new Proxy(makeExpect(wrapper, neg, message, 'rejects'), { get: (t, m) => {
-        if (m === 'not') return mk(!neg);
-        const f = Reflect.get(t, m);
-        if (typeof f !== 'function') return f;
-        return (...args) => Promise.resolve(wrapper).then(
-          (v) => { throw new __ChaiAssertionError(`promise resolved "${__inspect(v)}" instead of rejecting`, { actual: v, expected: new Error('rejected promise') }); },
-          // `.rejects.toThrow()` checks the rejection as a thrown error (vitest wraps it in a thrower)
-          (e) => (m === 'toThrow' || m === 'toThrowError' ? makeExpect(() => { throw e; }, neg, message, 'rejects') : makeExpect(e, neg, message, 'rejects'))[m](...args),
-        );
-      } });
-      return mk(negated);
     },
     toBe(e) {
       const pass = Object.is(actual, e);
@@ -4083,54 +4052,11 @@ function makeExpect(actual, negated = false, message = undefined, promise = '') 
       };
     }
   }
-  return __proxify(api);
+  return api;
 }
 // vitest's JestExtendError: a jest-style matcher's failure (name 'Error')
 class __JestExtendError extends Error {
   constructor(message, actual, expected) { super(message); this.actual = actual; this.expected = expected; }
-}
-// chai's proxify over the assertion (vitest's expect(x) is a chai Assertion): reading a member it
-// does not have throws `Invalid Chai property: x` (with the nearest member name within an edit
-// distance of 4, chai's suggestion); then / catch / inspect / toJSON and symbols read as is. A
-// matcher that returns nothing returns the assertion, as chai's methods return `this`.
-const __proxyExcludedKeys = ['then', 'catch', 'inspect', 'toJSON'];
-const __chaiBuiltins = ['__flags', '__methods', '_obj', 'assert'];
-function __proxify(api) {
-  const proxy = new Proxy(api, {
-    get(target, property) {
-      if (typeof property === 'string' && !__proxyExcludedKeys.includes(property) && !Reflect.has(target, property)) {
-        let suggestion = null, distance = 4;
-        const props = Object.getOwnPropertyNames(target);
-        for (let p = Object.getPrototypeOf(target); p !== null; p = Object.getPrototypeOf(p)) for (const k of Object.getOwnPropertyNames(p)) if (!props.includes(k)) props.push(k);
-        for (const prop of props) {
-          // eslint-disable-next-line no-prototype-builtins
-          if (Object.prototype.hasOwnProperty(prop) || __chaiBuiltins.includes(prop)) continue;
-          const d = __stringDistanceCapped(property, prop, distance);
-          if (d < distance) { suggestion = prop; distance = d; }
-        }
-        throw Error(suggestion !== null ? `Invalid Chai property: ${property}. Did you mean "${suggestion}"?` : `Invalid Chai property: ${property}`);
-      }
-      const v = Reflect.get(target, property);
-      if (typeof v !== 'function' || !Object.hasOwn(target, property)) return v;
-      return (...args) => { const r = v(...args); return r === undefined ? proxy : r; };
-    },
-  });
-  return proxy;
-}
-// chai's stringDistanceCapped, as is (its first memo row leaves the last column 0)
-function __stringDistanceCapped(strA, strB, cap) {
-  if (Math.abs(strA.length - strB.length) >= cap) return cap;
-  const memo = [];
-  for (let i = 0; i <= strA.length; i++) { memo[i] = Array(strB.length + 1).fill(0); memo[i][0] = i; }
-  for (let j = 0; j < strB.length; j++) memo[0][j] = j;
-  for (let i = 1; i <= strA.length; i++) {
-    const ch = strA.charCodeAt(i - 1);
-    for (let j = 1; j <= strB.length; j++) {
-      if (Math.abs(i - j) >= cap) { memo[i][j] = cap; continue; }
-      memo[i][j] = Math.min(memo[i - 1][j] + 1, memo[i][j - 1] + 1, memo[i - 1][j - 1] + (ch === strB.charCodeAt(j - 1) ? 0 : 1));
-    }
-  }
-  return memo[strA.length][strB.length];
 }
 // `message: ` before the message (and the stack's first line) of an assertion failure: chai's
 // AssertionError or a jest-style matcher's plain Error, once; any other error (a TypeError from
@@ -4179,22 +4105,110 @@ function __matcherState(isNot, promise) {
     poll: undefined,
   };
 }
-globalThis.expect = (actual, message) => { __snap.assertCount++; return makeExpect(actual, false, message); };
+// ---- chai: vitest's expect(x) is a chai Assertion (turbo-test#160) ----
+// The runner puts chai 6.3.0 (this package's dependency) into the snapshot as __ttLoadChai
+// (runner.rs chai_script), loaded here. As vitest's JestChaiExpect does, every jest-style matcher is a method of
+// chai's Assertion, run on the assertion's flags; chai brings its BDD chain (`to`, `be`, `deep`,
+// `equal`, `include`, ...), its proxy (`Invalid Chai property`), `assert` and `should`.
+const __chai = globalThis.__ttLoadChai && globalThis.__ttLoadChai();
+delete globalThis.__ttLoadChai;
+if (!__chai || typeof __chai.Assertion !== 'function') throw new Error('turbo-test: chai is not loaded');
+const __cu = __chai.util;
+// the `vitest` module's assert / chai / should exports (runner.rs vitest_exports)
+Object.defineProperty(globalThis, '__ttVitestChai', { value: __chai });
+Object.defineProperty(globalThis, '__ttVitestAssert', { value: __chai.assert });
+Object.defineProperty(globalThis, '__ttVitestShould', { value: __chai.should });
+function __attachMatcher(name) {
+  __cu.addMethod(__chai.Assertion.prototype, name, function (...args) {
+    const obj = __cu.flag(this, 'object');
+    const promise = __cu.flag(this, 'promise') || '';
+    // `.rejects.toThrow()` checks the rejection as a thrown error (vitest wraps it in a thrower)
+    const actual = promise === 'rejects' && (name === 'toThrow' || name === 'toThrowError') ? () => { throw obj; } : obj;
+    return makeExpect(actual, !!__cu.flag(this, 'negate'), __cu.flag(this, 'message'), promise)[name](...args);
+  });
+}
+for (const name of Object.keys(makeExpect(undefined))) __attachMatcher(name);
+// vitest's chai-style matchSnapshot and its sinon-chai-like members (ChaiStyleAssertions)
+__cu.addMethod(__chai.Assertion.prototype, 'matchSnapshot', function (...args) { return __chai.Assertion.prototype.toMatchSnapshot.call(this, ...args); });
+for (const [name, to, ...fixed] of [['called', 'toHaveBeenCalled'], ['calledOnce', 'toHaveBeenCalledOnce'], ['calledTwice', 'toHaveBeenCalledTimes', 2], ['calledThrice', 'toHaveBeenCalledTimes', 3]]) {
+  __cu.addProperty(__chai.Assertion.prototype, name, function () { return __chai.Assertion.prototype[to].call(this, ...fixed); });
+}
+for (const [name, to] of [
+  ['callCount', 'toHaveBeenCalledTimes'], ['calledWith', 'toHaveBeenCalledWith'], ['calledOnceWith', 'toHaveBeenCalledExactlyOnceWith'],
+  ['lastCalledWith', 'toHaveBeenLastCalledWith'], ['nthCalledWith', 'toHaveBeenNthCalledWith'], ['returned', 'toHaveReturned'],
+  ['returnedWith', 'toHaveReturnedWith'], ['returnedTimes', 'toHaveReturnedTimes'], ['lastReturnedWith', 'toHaveLastReturnedWith'],
+  ['nthReturnedWith', 'toHaveNthReturnedWith'], ['calledBefore', 'toHaveBeenCalledBefore'], ['calledAfter', 'toHaveBeenCalledAfter'],
+]) {
+  __cu.addMethod(__chai.Assertion.prototype, name, function (...args) { return __chai.Assertion.prototype[to].call(this, ...args); });
+}
+// vitest's internal withTest / withContext (flags)
+__cu.addMethod(__chai.Assertion.prototype, 'withTest', function (test) { __cu.flag(this, 'vitest-test', test); return this; });
+__cu.addMethod(__chai.Assertion.prototype, 'withContext', function (context) { for (const key in context) __cu.flag(this, key, context[key]); return this; });
+// vitest's chai throw / throws / Throw under .resolves / .rejects
+for (const m of ['throw', 'throws', 'Throw']) {
+  __cu.overwriteMethod(__chai.Assertion.prototype, m, (_super) => function (...args) {
+    const promise = __cu.flag(this, 'promise');
+    const object = __cu.flag(this, 'object');
+    const isNot = __cu.flag(this, 'negate');
+    if (promise === 'rejects') {
+      __cu.flag(this, 'object', () => { throw object; });
+    } else if (promise === 'resolves' && typeof object !== 'function') {
+      if (!isNot) throw new __chai.AssertionError(__cu.flag(this, 'message') || "expected promise to throw an error, but it didn't", { showDiff: false }, __cu.flag(this, 'ssfi'));
+      return;
+    }
+    _super.apply(this, args);
+  });
+}
+// async matchers: `await expect(promise).resolves.toX(...)` / `.rejects.toX(...)`, as vitest's: a
+// proxy over the assertion whose methods run on the settled value (`.rejects` calls a function
+// first); anything but a thenable is vitest's TypeError, thrown when the property is read. A
+// failure's stack is the one taken where `.resolves` / `.rejects` was read.
+function __asyncProperty(kind) {
+  __cu.addProperty(__chai.Assertion.prototype, kind, function () {
+    const error = new Error(kind);
+    __cu.flag(this, 'promise', kind);
+    __cu.flag(this, 'error', error);
+    const obj = __cu.flag(this, 'object');
+    const wrapper = kind === 'rejects' && typeof obj === 'function' ? obj() : obj;
+    if (typeof wrapper?.then !== 'function') throw new TypeError(`You must provide a Promise to expect() when using .${kind}, not '${typeof wrapper}'.`);
+    const proxy = new Proxy(this, { get: (target, key, receiver) => {
+      const result = Reflect.get(target, key, receiver);
+      if (typeof result !== 'function') return result instanceof __chai.Assertion ? proxy : result;
+      return (...args) => {
+        __cu.flag(this, '_name', key);
+        return Promise.resolve(wrapper).then(
+          kind === 'resolves'
+            ? (value) => { __cu.flag(this, 'object', value); return result.call(this, ...args); }
+            : (value) => { throw new __chai.AssertionError(`promise resolved "${__cu.inspect(value)}" instead of rejecting`, { showDiff: true, expected: new Error('rejected promise'), actual: value }); },
+          kind === 'resolves'
+            ? (err) => { const e = new __chai.AssertionError(`promise rejected "${__cu.inspect(err)}" instead of resolving`, { showDiff: false }); e.cause = err; throw e; }
+            : (err) => { __cu.flag(this, 'object', err); return result.call(this, ...args); },
+        ).catch((err) => {
+          if (err instanceof Error && error.stack) err.stack = error.stack.replace(error.message, err.message);
+          throw err;
+        });
+      };
+    } });
+    return proxy;
+  });
+}
+__asyncProperty('resolves');
+__asyncProperty('rejects');
+globalThis.expect = (actual, message) => { __snap.assertCount++; return __chai.expect(actual, message); };
+// chai.expect's own statics (vitest: Object.assign(expect, chai.expect)) — `fail`
+Object.assign(globalThis.expect, __chai.expect);
+globalThis.expect.assert = __chai.assert;
 // expect.extend: the matchers, and their asymmetric expect.<name> / expect.not.<name> (#153)
 globalThis.expect.extend = (matchers) => {
-  for (const [name, matcher] of Object.entries(matchers || {})) { __customMatchers[name] = matcher; __addAsymmetric(name, matcher); }
+  for (const [name, matcher] of Object.entries(matchers || {})) { __customMatchers[name] = matcher; __attachMatcher(name); __addAsymmetric(name, matcher); }
 };
 // expect.addEqualityTesters (turbo-test#155)
 globalThis.expect.addEqualityTesters = (testers) => {
   if (!Array.isArray(testers)) throw new TypeError(`expect.customEqualityTesters: Must be set to an array of Testers. Was given "${__getType(testers)}"`);
   __customTesters.push(...testers);
 };
-// chai's expect.fail and vitest's expect.unreachable: an AssertionError
-globalThis.expect.fail = function fail(actual, expected, msg, operator) {
-  if (arguments.length < 2) { msg = actual; actual = undefined; }
-  throw new __ChaiAssertionError(msg || 'expect.fail()', { actual, expected, operator });
-};
-globalThis.expect.unreachable = (msg) => { throw new __ChaiAssertionError(`expected${msg ? ` "${msg}" ` : ' '}not to be reached`); };
+// vitest's expect.unreachable: chai's assert.fail
+globalThis.expect.unreachable = (msg) => { __chai.assert.fail(`expected${msg ? ` "${msg}" ` : ' '}not to be reached`); };
 // vitest's matcher state (expect.getState / setState): the assertion counters of the running test
 // live in __snap; anything else set is kept as is
 const __extraState = {};
@@ -4227,15 +4241,19 @@ globalThis.expect.hasAssertions = function hasAssertions() {
   if (Error.captureStackTrace) Error.captureStackTrace(error, hasAssertions);
   __snap.hasAssertions = error;
 };
-globalThis.expect.soft = (actual, message) => { __snap.assertCount++; return makeExpect(actual, false, message); };
-globalThis.expect.anything = () => new __Anything();
-globalThis.expect.any = (expected) => new __Any(expected);
-globalThis.expect.stringContaining = (expected) => new __StringContaining(expected);
-globalThis.expect.objectContaining = (expected) => new __ObjectContaining(expected);
-globalThis.expect.arrayContaining = (expected) => new __ArrayContaining(expected);
-globalThis.expect.stringMatching = (expected) => new __StringMatching(expected);
-globalThis.expect.closeTo = (expected, precision) => new __CloseTo(expected, precision);
-globalThis.expect.schemaMatching = (expected) => new __SchemaMatching(expected);
+globalThis.expect.soft = (actual, message) => globalThis.expect(actual, message).withContext({ soft: true });
+// vitest adds these with chai's addMethod (on chai.expect, then copied): called on `expect`, they
+// leave chai's `__flags` on it
+for (const [name, make] of Object.entries({
+  anything: () => new __Anything(),
+  any: (expected) => new __Any(expected),
+  stringContaining: (expected) => new __StringContaining(expected),
+  objectContaining: (expected) => new __ObjectContaining(expected),
+  arrayContaining: (expected) => new __ArrayContaining(expected),
+  stringMatching: (expected) => new __StringMatching(expected),
+  closeTo: (expected, precision) => new __CloseTo(expected, precision),
+  schemaMatching: (expected) => new __SchemaMatching(expected),
+})) __cu.addMethod(globalThis.expect, name, make);
 globalThis.expect.not = {
   stringContaining: (expected) => new __StringContaining(expected, true),
   objectContaining: (expected) => new __ObjectContaining(expected, true),
@@ -5160,10 +5178,10 @@ function __objDisplay(v) {
 // whose `#{this}` / `#{exp}` / `#{act}` show values as chai's `objDisplay` (loupe, 40 chars), and for
 // the spy matchers vitest's call / return listings with @vitest/utils' `diff` of pretty-format
 // output (no colours, as with NO_COLOR).
-class __ChaiAssertionError extends Error {
+// (chai's AssertionError itself, turbo-test#160: `instanceof chai.AssertionError` holds, as in vitest)
+class __ChaiAssertionError extends __chai.AssertionError {
   constructor(message, props) {
     super(message);
-    this.name = 'AssertionError';
     this.showDiff = !(props && props.showDiff === false);
     if (props && 'actual' in props) this.actual = props.actual;
     if (props && 'expected' in props) this.expected = props.expected;
