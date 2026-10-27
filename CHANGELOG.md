@@ -264,6 +264,17 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   file whose import of it failed (a different module's apart), as vitest. turbo-test
   said `graph load failed` and V8 printed `Uncaught SyntaxError` to stdout three times, with a
   line number of the transformed code.
+- `toEqual` / `toStrictEqual` compare as vitest's `equals` (turbo-test#103): Dates by time,
+  RegExps by source and flags, boxed primitives by value (never equal to the primitive), URLs
+  by href, Sets / Maps by members in any order, other iterables in order, symbol keys, the
+  extra properties of an array, Errors by name / message / cause / properties, DOM nodes by
+  `isEqualNode`, typed arrays by kind, circular structures; `toStrictEqual` also tells a hole
+  from `undefined` and ArrayBuffers by bytes. The matchers on the same comparison use vitest's
+  testers each: the spy matchers as `toEqual`, `toMatchObject` (and snapshot property matchers)
+  with `subsetEquality`, `toContainEqual` / `toHaveProperty` / `toHaveReturnedWith` /
+  `objectContaining` / `arrayContaining` without `iterableEquality`. Only own enumerable string
+  keys were compared, so `new Date(1)` equalled `new Date(2)`, `new Map([[1, 2]])` equalled
+  `new Map([[1, 3]])`, `new Error('a')` equalled `new Error('b')`.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain

@@ -2388,8 +2388,10 @@ globalThis.__mkRequire = (dir, isEsm, importer) => {
 // ---- asymmetric matchers (expect.objectContaining et al) ----
 class Asymmetric {
   constructor(kind, sample, negate) { this.__asymmetric = kind; this.sample = sample; this.__negate = !!negate; }
-  matches(actual) { return this.__negate ? !this.__matchesInner(actual) : this.__matchesInner(actual); }
-  __matchesInner(actual) {
+  // `testers`: the custom testers of the `equals` this match is part of (vitest's
+  // asymmetricMatch(other, customTesters)); objectContaining / arrayContaining compare with them.
+  matches(actual, testers) { return this.__negate ? !this.__matchesInner(actual, testers) : this.__matchesInner(actual, testers); }
+  __matchesInner(actual, testers) {
     switch (this.__asymmetric) {
       case 'any':
         if (this.sample === String) return typeof actual === 'string';
@@ -2400,11 +2402,14 @@ class Asymmetric {
         if (this.sample === Array) return Array.isArray(actual);
         return actual instanceof this.sample;
       case 'anything': return actual !== null && actual !== undefined;
-      case 'objectContaining':
-        return actual && typeof actual === 'object' &&
-          Object.keys(this.sample).every((k) => deepEqual(actual[k], this.sample[k]));
+      case 'objectContaining': {
+        // vitest ObjectContaining: every enumerable own key (symbols too) of the sample is a
+        // property of `actual` (own or inherited) whose value equals the sample's.
+        const has = (o, k) => o != null && (__hasKey(o, k) || has(Object.getPrototypeOf(o), k));
+        return __eqKeys(this.sample, __hasKey).every((k) => has(actual, k) && __equals(this.sample[k], actual[k], testers));
+      }
       case 'arrayContaining':
-        return Array.isArray(actual) && this.sample.every((s) => actual.some((a) => deepEqual(a, s)));
+        return this.sample.length === 0 || (Array.isArray(actual) && this.sample.every((s) => actual.some((a) => __equals(s, a, testers))));
       case 'stringContaining': return typeof actual === 'string' && actual.includes(this.sample);
       case 'stringMatching': {
         const r = this.sample instanceof RegExp ? this.sample : new RegExp(this.sample);
@@ -2415,35 +2420,192 @@ class Asymmetric {
   }
 }
 
-// ---- deep equality (asymmetric-aware) ----
-// `strict` mirrors jest/vitest: toEqual/toHaveBeenCalledWith (strict=false) treat an own
-// property whose value is `undefined` as ABSENT ({a:1,b:undefined} equals {a:1}); toStrictEqual
-// (strict=true) keeps undefined-valued keys significant. Array indices are NEVER stripped in
-// either mode — a hole/undefined element changes length, so [1,undefined] != [1].
-// toStrictEqual also checks the types as vitest's typeEquality does: both sides' `constructor`
-// must be the same (a class instance never strictly equals a plain object; turbo-test#98).
-function deepEqual(a, b, strict = false) {
-  if (b instanceof Asymmetric) return b.matches(a);
-  if (a instanceof Asymmetric) return a.matches(b);
+// ---- deep equality: @vitest/expect's `equals` and its testers (turbo-test#103) ----
+// `equals(a, b, testers, strictCheck)` is jasmine's `eq` as vitest runs it: asymmetric matchers,
+// then the custom testers (the first defined answer wins), URLs by href, Object.is, the
+// `Object.prototype.toString` class (boxed primitives by value, Dates by time — invalid Dates are
+// equal —, RegExps by source and flags), DOM nodes by isEqualNode, circular structures (equal
+// when both cycle at the same depth), Errors by name / message / cause / AggregateError errors /
+// enumerable properties, then enumerable own string keys and enumerable symbol keys. Without
+// `strictCheck` an own key whose value is `undefined` counts as absent (string keys only).
+// Each matcher passes vitest's testers: toEqual and the spy matchers [iterableEquality];
+// toStrictEqual adds typeEquality, sparseArrayEquality, arrayBufferEquality with strictCheck;
+// toMatchObject [iterableEquality, subsetEquality]; toContainEqual / toHaveProperty none.
+function __hasKey(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+function __hasDefinedKey(o, k) { return __hasKey(o, k) && o[k] !== undefined; }
+function __eqKeys(o, hasKey) {
+  const out = [];
+  for (const k in o) if (hasKey(o, k)) out.push(k);
+  return out.concat(Object.getOwnPropertySymbols(o).filter((s) => Object.getOwnPropertyDescriptor(o, s).enumerable));
+}
+function __isError(v) {
+  if (typeof Error.isError === 'function') return Error.isError(v);
+  const t = Object.prototype.toString.call(v);
+  return t === '[object Error]' || t === '[object Exception]' || t === '[object DOMException]' || v instanceof Error;
+}
+function __isDomNode(o) {
+  // `in` first, as vitest: a mocked module's namespace throws on a read of a missing export
+  return o !== null && typeof o === 'object' && 'nodeType' in o && typeof o.nodeType === 'number' &&
+    'nodeName' in o && typeof o.nodeName === 'string' && 'isEqualNode' in o && typeof o.isEqualNode === 'function';
+}
+function __equals(a, b, testers, strictCheck) {
+  return __eq(a, b, [], [], testers || [], strictCheck ? __hasKey : __hasDefinedKey);
+}
+function __eq(a, b, aStack, bStack, testers, hasKey) {
+  const asymA = a instanceof Asymmetric, asymB = b instanceof Asymmetric;
+  if (asymA && !asymB) return a.matches(b, testers);
+  if (asymB && !asymA) return b.matches(a, testers);
+  const ctx = { equals: __equals };
+  for (const t of testers) {
+    const r = t.call(ctx, a, b, testers);
+    if (r !== undefined) return r;
+  }
+  if (typeof URL === 'function' && a instanceof URL && b instanceof URL) return a.href === b.href;
   if (Object.is(a, b)) return true;
-  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
-  if (strict && a.constructor !== b.constructor) return false;
-  if (Array.isArray(a) !== Array.isArray(b)) return false;
-  if (Array.isArray(a)) {
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) if (!deepEqual(a[i], b[i], strict)) return false;
-    return true;
+  if (a === null || b === null) return a === b;
+  const cls = Object.prototype.toString.call(a);
+  if (cls !== Object.prototype.toString.call(b)) return false;
+  switch (cls) {
+    case '[object Boolean]':
+    case '[object String]':
+    case '[object Number]':
+      if (typeof a !== typeof b) return false;
+      if (typeof a !== 'object') return Object.is(a, b);
+      return Object.is(a.valueOf(), b.valueOf());
+    case '[object Date]': {
+      const x = +a, y = +b;
+      return x === y || (Number.isNaN(x) && Number.isNaN(y));
+    }
+    case '[object RegExp]': return a.source === b.source && a.flags === b.flags;
   }
-  if (strict) {
-    const ka = Object.keys(a), kb = Object.keys(b);
-    if (ka.length !== kb.length) return false;
-    return ka.every((k) => (k in b) && deepEqual(a[k], b[k], true));
+  if (typeof a !== 'object' || typeof b !== 'object') return false;
+  if (__isDomNode(a) && __isDomNode(b)) return a.isEqualNode(b);
+  for (let i = aStack.length; i--;) {
+    if (aStack[i] === a) return bStack[i] === b;
+    if (bStack[i] === b) return false;
   }
-  // non-strict: drop own keys whose value is `undefined` on both sides before comparing.
-  const ka = Object.keys(a).filter((k) => a[k] !== undefined);
-  const kb = Object.keys(b).filter((k) => b[k] !== undefined);
-  if (ka.length !== kb.length) return false;
-  return ka.every((k) => deepEqual(a[k], b[k], false));
+  aStack.push(a);
+  bStack.push(b);
+  if (cls === '[object Array]' && a.length !== b.length) return false;
+  if (__isError(a) && __isError(b)) {
+    try {
+      let r = Object.prototype.toString.call(a) === Object.prototype.toString.call(b) && a.name === b.name && a.message === b.message;
+      if (typeof b.cause !== 'undefined') r = r && __eq(a.cause, b.cause, aStack, bStack, testers, hasKey);
+      if (a instanceof AggregateError && b instanceof AggregateError) r = r && __eq(a.errors, b.errors, aStack, bStack, testers, hasKey);
+      return r && __eq({ ...a }, { ...b }, aStack, bStack, testers, hasKey);
+    } finally {
+      aStack.pop();
+      bStack.pop();
+    }
+  }
+  const aKeys = __eqKeys(a, hasKey);
+  if (__eqKeys(b, hasKey).length !== aKeys.length) return false;
+  for (let i = aKeys.length; i--;) {
+    const k = aKeys[i];
+    if (!(hasKey(b, k) && __eq(a[k], b[k], aStack, bStack, testers, hasKey))) return false;
+  }
+  aStack.pop();
+  bStack.pop();
+  return true;
+}
+// vitest iterableEquality: two non-array iterables of the same constructor — Sets by members and
+// Maps by entries (in any order, deep-equal members match), others in iteration order plus their
+// enumerable own entries.
+function __iterableEquality(a, b, testers = [], aStack = [], bStack = []) {
+  if (typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) || Array.isArray(b) ||
+    a == null || b == null || !a[Symbol.iterator] || !b[Symbol.iterator]) return undefined;
+  if (a.constructor !== b.constructor) return false;
+  for (let i = aStack.length; i--;) if (aStack[i] === a) return bStack[i] === b;
+  aStack.push(a);
+  bStack.push(b);
+  const withStack = (x, y) => __iterableEquality(x, y, [...testers], [...aStack], [...bStack]);
+  const inner = [...testers.filter((t) => t !== __iterableEquality), withStack];
+  const isA = (t, v) => Object.prototype.toString.call(v) === `[object ${t}]`;
+  if (a.size !== undefined) {
+    if (a.size !== b.size) return false;
+    if (isA('Set', a)) {
+      let all = true;
+      for (const av of a) {
+        if (!b.has(av)) {
+          let has = false;
+          for (const bv of b) if (__equals(av, bv, inner) === true) has = true;
+          if (!has) { all = false; break; }
+        }
+      }
+      aStack.pop(); bStack.pop();
+      return all;
+    }
+    if (isA('Map', a)) {
+      let all = true;
+      for (const [ak, av] of a) {
+        if (!b.has(ak) || !__equals(av, b.get(ak), inner)) {
+          let has = false;
+          for (const [bk, bv] of b) if (__equals(ak, bk, inner) === true && __equals(av, bv, inner) === true) has = true;
+          if (!has) { all = false; break; }
+        }
+      }
+      aStack.pop(); bStack.pop();
+      return all;
+    }
+  }
+  const bi = b[Symbol.iterator]();
+  for (const av of a) {
+    const nb = bi.next();
+    if (nb.done || !__equals(av, nb.value, inner)) return false;
+  }
+  if (!bi.next().done) return false;
+  if (!__equals(Object.entries(a), Object.entries(b), inner)) return false;
+  aStack.pop();
+  bStack.pop();
+  return true;
+}
+// vitest typeEquality: toStrictEqual tells apart values whose `constructor` differs (a class
+// instance never strictly equals a plain object; turbo-test#98).
+function __typeEquality(a, b) {
+  return a == null || b == null || a.constructor === b.constructor ? undefined : false;
+}
+// vitest sparseArrayEquality: a hole is not an `undefined` element under toStrictEqual.
+function __sparseArrayEquality(a, b, testers = []) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return undefined;
+  return __equals(a, b, testers.filter((t) => t !== __sparseArrayEquality), true) && __equals(Object.keys(a), Object.keys(b));
+}
+// vitest arrayBufferEquality: ArrayBuffers / DataViews by their bytes.
+function __arrayBufferEquality(a, b) {
+  let x = a, y = b;
+  if (!(a instanceof DataView && b instanceof DataView)) {
+    if (!(a instanceof ArrayBuffer) || !(b instanceof ArrayBuffer)) return undefined;
+    try { x = new DataView(a); y = new DataView(b); } catch { return undefined; }
+  }
+  if (x.byteLength !== y.byteLength) return false;
+  for (let i = 0; i < x.byteLength; i++) if (x.getUint8(i) !== y.getUint8(i)) return false;
+  return true;
+}
+// vitest subsetEquality (toMatchObject, snapshot property matchers): every key of an object
+// subset is a property of the object (own or inherited, short of Object.prototype) whose value
+// matches, recursively.
+function __subsetEquality(object, subset, testers = []) {
+  const inner = testers.filter((t) => t !== __subsetEquality);
+  const inObj = (o, k) => !!o && typeof o === 'object' && o !== Object.prototype && (__hasKey(o, k) || inObj(Object.getPrototypeOf(o), k));
+  const withSeen = (seen = new WeakMap()) => (obj, sub) => {
+    if (!(sub !== null && typeof sub === 'object' && !__isError(sub) && !Array.isArray(sub) &&
+      !(sub instanceof Date) && !(sub instanceof Set) && !(sub instanceof Map))) return undefined;
+    return Object.keys(sub).every((k) => {
+      if (sub[k] != null && typeof sub[k] === 'object') {
+        if (seen.has(sub[k])) return __equals(obj[k], sub[k], inner);
+        seen.set(sub[k], true);
+      }
+      const r = obj != null && inObj(obj, k) && __equals(obj[k], sub[k], [...inner, withSeen(seen)]);
+      seen.delete(sub[k]);
+      return r;
+    });
+  };
+  return withSeen()(object, subset);
+}
+// toEqual (strict=false) / toStrictEqual (strict=true) with vitest's testers for each.
+function deepEqual(a, b, strict = false) {
+  return strict
+    ? __equals(a, b, [__iterableEquality, __typeEquality, __sparseArrayEquality, __arrayBufferEquality], true)
+    : __equals(a, b, [__iterableEquality]);
 }
 
 function fmt(v) {
@@ -2787,7 +2949,7 @@ function makeExpect(actual, negated = false) {
       const pass = list != null && list.includes(x);
       __chaiAssert(negated, pass, 'expected #{this} to include #{exp}', 'expected #{this} to not include #{exp}', list, x, list);
     },
-    toContainEqual(x) { c(actual != null && Array.from(actual).some((a) => deepEqual(a, x)), 'expected #{this} to deep equally contain #{exp}', 'expected #{this} to not deep equally contain #{exp}', x); },
+    toContainEqual(x) { c(actual != null && Array.from(actual).some((a) => __equals(a, x)), 'expected #{this} to deep equally contain #{exp}', 'expected #{this} to not deep equally contain #{exp}', x); },
     toBeInstanceOf(ctor) {
       if (typeof ctor !== 'function') {
         const t = ctor === null ? 'null' : Object.prototype.toString.call(ctor).slice(8, -1);
@@ -2909,7 +3071,7 @@ function makeExpect(actual, negated = false) {
           if (cur != null && (k in Object(cur))) cur = cur[k]; else { present = false; break; }
         }
       }
-      const pass = arguments.length < 2 ? present : (present && deepEqual(cur, value));
+      const pass = arguments.length < 2 ? present : (present && __equals(value, cur));
       const name = Array.isArray(path) ? path.map((k) => String(k).replace(/([.[\]])/g, '\\$1')).join('.') : path;
       const withValue = arguments.length < 2 ? '' : ` with value ${__objDisplay(value)}`;
       c(pass, `expected #{this} to have property "${name}"${withValue}`, `expected #{this} to not have property "${name}"${withValue}`, value, present ? cur : undefined);
@@ -2997,7 +3159,7 @@ function makeExpect(actual, negated = false) {
     },
     toHaveReturnedWith(v) {
       const spy = spyOf();
-      const pass = spy.mock.results.some((r) => r.type === 'return' && deepEqual(v, r.value));
+      const pass = spy.mock.results.some((r) => r.type === 'return' && __equals(v, r.value));
       if (negated ? !pass : pass) return;
       const name = spy.getMockName();
       const msg = __chaiMsg(negated ? `expected "${name}" to not return with: #{exp}` : `expected "${name}" to return with: #{exp} at least once`, actual, v, actual);
@@ -3010,7 +3172,7 @@ function makeExpect(actual, negated = false) {
       const ctx = {
         isNot: negated,
         promise: '',
-        equals: (a, b) => deepEqual(a, b),
+        equals: __equals,
         utils: __matcherUtils,
       };
       let res;
@@ -4087,7 +4249,7 @@ function __strippedCount(actual, subset, seen = new WeakSet()) {
     return 0;
   }
   if (actual instanceof Date || !isObj(actual) || !isObj(subset)) return 0;
-  if (deepEqual(actual, subset) || __subsetMatches(actual, subset)) return 0;
+  if (__subsetMatches(actual, subset)) return 0;
   seen.add(actual);
   let n = 0;
   for (const k of keys(actual)) {
@@ -4100,11 +4262,9 @@ function __strippedCount(actual, subset, seen = new WeakSet()) {
   }
   return n;
 }
+// vitest's toMatchObject comparison: equals with [iterableEquality, subsetEquality].
 function __subsetMatches(a, e) {
-  if (e instanceof Asymmetric) return e.matches(a);
-  if (e == null || typeof e !== 'object') return deepEqual(a, e);
-  if (Array.isArray(e)) return Array.isArray(a) && a.length === e.length && e.every((x, i) => __subsetMatches(a[i], x));
-  return a != null && typeof a === 'object' && Object.keys(e).every((k) => __subsetMatches(a[k], e[k]));
+  return __equals(a, e, [__iterableEquality, __subsetEquality]);
 }
 
 // @vitest/utils `format(spec, item)` for one placeholder.

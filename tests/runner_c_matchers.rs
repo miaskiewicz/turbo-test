@@ -38,7 +38,6 @@ fn rows(v: &Value) -> Vec<(String, String, String)> {
 }
 
 #[test]
-#[ignore = "turbo-test#103: fails until the fix"]
 fn failed_matchers_throw_what_vitest_throws() {
     // turbo-test#71: a failed matcher threw a plain `Error` with turbo-test's own wording
     // (`expected 1 to be 2`, `expected {"a":1} to equal {"a":2}`, `expected spy called 3x, got 2`).
