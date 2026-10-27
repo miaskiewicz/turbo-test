@@ -255,7 +255,6 @@ fn matcher_utils_are_vitests() {
 }
 
 #[test]
-#[ignore = "turbo-test#167: fails until the fix"]
 fn snapshot_serializers_config_is_vitests() {
     // turbo-test#167: the config's `snapshotSerializers` (paths relative to the root, an ES
     // module's or a CommonJS module's default export) were not read. vitest 4.1.12 adds each one

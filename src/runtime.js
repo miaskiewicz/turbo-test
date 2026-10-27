@@ -3483,6 +3483,19 @@ function __serialize(v) {
   return __pf(v, { indent: 2, basic: false, escape: false, fnName: false, escapeRegex: true, mocks: true, plugins: __snapSerializers }).replace(/\r\n|\r/g, '\n');
 }
 const __snapSerializers = [];
+// the config's snapshotSerializers (turbo-test#167), as vitest's loadSnapshotSerializers: each
+// file's default export, checked, then added in order (a file once per worker)
+const __snapSerializerFiles = new Set();
+globalThis.__ttLoadSnapshotSerializers = (files) => {
+  const loaded = files.filter((file) => !__snapSerializerFiles.has(file)).map((file) => {
+    const mo = globalThis.__ttToESM(globalThis.__ttImportActual('/', file));
+    if (!mo || typeof mo.default !== 'object' || mo.default === null) throw new Error(`invalid snapshot serializer file ${file}. Must export a default object`);
+    const config = mo.default;
+    if (typeof config.test !== 'function' || (typeof config.serialize !== 'function' && typeof config.print !== 'function')) throw new TypeError(`invalid snapshot serializer in ${file}. Must have a 'test' method along with either a 'serialize' or 'print' method.`);
+    return [file, config];
+  });
+  for (const [file, config] of loaded) { __snapSerializerFiles.add(file); __snapSerializers.unshift(config); }
+};
 // Read a .snap file (vitest's or turbo-test's older one: both are `exports[...] = ...;` JS).
 function __parseSnapFile(text) {
   const out = Object.create(null);
