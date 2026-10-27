@@ -635,7 +635,6 @@ fn junit_failures_print_as_vitest_prints_them() {
 /// failing case); turbo-test said `graph load failed` and V8 printed `Uncaught SyntaxError` to
 /// stdout three times, with a line of the transformed code.
 #[test]
-#[ignore = "turbo-test#99: fails until the fix"]
 fn a_compile_error_is_the_files_syntax_error() {
     const MSG: &str = "Invalid regular expression: /e{,2}/u: Incomplete quantifier";
     let case = |f: &str| {

@@ -271,9 +271,11 @@ fn load_errors_name_the_failing_phase() {
         ),
         "{o}"
     );
-    assert!(line_for(o, "depsyn.test.js").contains("(graph load failed)"));
+    // a module of the graph that does not compile: its SyntaxError (turbo-test#99)
+    assert!(line_for(o, "depsyn.test.js").ends_with("(SyntaxError: Unexpected token '=')"));
     assert!(line_for(o, "miss.test.js").contains("(graph load failed)"));
-    assert!(line_for(o, "entrysyn.test.js").contains("(graph load failed)"));
+    assert!(line_for(o, "entrysyn.test.js").ends_with("(SyntaxError: Unexpected token ')')"));
+    assert!(!o.contains("Uncaught"), "{o}");
     assert!(line_for(o, "evalthrow.test.js").contains("(module errored: Error: top boom)"));
     assert!(line_for(o, "tla.test.js").contains("(module errored: Error: tla boom)"));
     assert!(line_for(o, "ok.test.js").starts_with("PASS"));

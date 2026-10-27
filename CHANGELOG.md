@@ -223,6 +223,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - `toStrictEqual` checks the types as vitest does (turbo-test#98): both sides must have the same
   `constructor`, so a class instance never strictly equals a plain object with the same
   properties (nor a null-prototype object `{}`, an `Array` subclass `[]`); it passed.
+- A test file that fails to compile — itself or a module it imports — fails with V8's
+  `SyntaxError` as vitest reports it (turbo-test#99): the file's load error, the json
+  `message` and the junit failing case (`type="SyntaxError"`, no frames) carry it. turbo-test
+  said `graph load failed` and V8 printed `Uncaught SyntaxError` to stdout three times, with a
+  line number of the transformed code.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain
