@@ -376,10 +376,18 @@ fn export_star_as_namespace_is_a_named_toesm_export() {
 
 #[test]
 fn reexport_from_with_string_names() {
+    // re-exporting `default` reads it through the interop (turbo-test#122)
     let o = e("export { \"a\" as \"b\", default as c } from \"s\";");
-    assert!(o.contains("var import_s_1000001 = require(\"s\");"), "{o}");
+    assert!(
+        o.contains("var import_s_1000001 = __toESM(require(\"s\"));"),
+        "{o}"
+    );
     assert!(o.contains("  b: () => import_s_1000001.a,\n"), "{o}");
     assert!(o.contains("  c: () => import_s_1000001.default,\n"), "{o}");
+    // without `default` the module is read as is
+    let o = e("export { a as b } from \"s\";");
+    assert!(o.contains("var import_s_1000001 = require(\"s\");"), "{o}");
+    assert!(o.contains("  b: () => import_s_1000001.a,\n"), "{o}");
 }
 
 #[test]
@@ -619,6 +627,7 @@ fn parts(js: &str) -> ModuleParts {
     let ctx = LowerCtx {
         exports_obj: "m9_exports".into(),
         resolve: Some(&resolve),
+        module_path: None,
     };
     transform_to_parts(js, &ctx).expect("transform_to_parts should succeed")
 }
@@ -788,6 +797,7 @@ fn transform_to_parts_in_app_mode_keeps_everything_external() {
     let ctx = LowerCtx {
         exports_obj: "__tt_exports".into(),
         resolve: None,
+        module_path: None,
     };
     let p = transform_to_parts(
         "import x from \"./esm\"; const y = require(\"./cjs\"); x(y);",
@@ -810,6 +820,7 @@ fn transform_to_parts_bails_on_parse_and_semantic_errors() {
     let ctx = LowerCtx {
         exports_obj: "__tt_exports".into(),
         resolve: None,
+        module_path: None,
     };
     assert!(transform_to_parts("x(", &ctx).is_none(), "parse error");
     assert!(
@@ -836,6 +847,7 @@ fn lower_raw(src: &str, stype: SourceType) -> Option<Vec<String>> {
     let ctx = LowerCtx {
         exports_obj: "__tt_exports".into(),
         resolve: None,
+        module_path: None,
     };
     let (parts, _) = lower(AstBuilder::new(&alloc), scoping, &ctx, &mut program, None)?;
     Some(

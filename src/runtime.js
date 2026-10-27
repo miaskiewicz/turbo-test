@@ -59,7 +59,9 @@ globalThis.console = {
 // its isMusl() reads process.report().header.glibcVersionRuntime to pick gnu vs musl.
 // Hardcoding 'darwin'/'arm64' made every non-mac host load the macOS .node -> dlopen fails.
 globalThis.process = {
-  env: { NODE_ENV: 'test', VITEST: 'true', TZ: 'UTC', TURBO_DOM_PARSER: 'native' },
+  // vitest also sets vite's MODE / DEV / PROD / SSR / BASE_URL (SSR '' under a DOM environment:
+  // the runner sets it per file, turbo-test#123)
+  env: { NODE_ENV: 'test', VITEST: 'true', TZ: 'UTC', TURBO_DOM_PARSER: 'native', MODE: 'test', DEV: '1', PROD: '', SSR: '1', BASE_URL: '/' },
   platform: globalThis.__ttPlatform || 'darwin',
   arch: globalThis.__ttArch || 'arm64',
   // glibcVersionRuntime truthy => glibc (gnu); falsy => musl. __ttGlibc is the glibc
@@ -817,48 +819,134 @@ if (typeof globalThis.AbortController === 'undefined') {
     abort(reason) { if (!this.signal || this.signal.aborted) return; this.signal.aborted = true; this.signal.reason = reason || new DOMException('Aborted', 'AbortError'); this.signal._fire(); }
   };
 }
+// Blob / File as Node 26's (turbo-test#120, #128): the parts' bytes are copied at construction
+// (strings as UTF-8, `endings: 'native'` turning CR / CRLF into LF), one chunk per non-empty
+// part, nested Blobs contributing their chunks; size / type / name / lastModified are prototype
+// accessors; slice() takes [Clamp]ed, negative-relative bounds and its own type.
 if (typeof globalThis.Blob === 'undefined') {
+  const thisErr = (what) => __codecError(TypeError, 'ERR_INVALID_THIS', 'Value of "this" must be of type ' + what);
+  // a type with any character outside U+0020..U+007E is '', otherwise it is lower-cased
+  const normType = (t) => { const s = String(t); return /^[\x20-\x7e]*$/.test(s) ? s.toLowerCase() : ''; };
+  // WebIDL [Clamp] long long: NaN -> 0, ties to even
+  const clamp = (v) => {
+    const n = Number(v);
+    if (Number.isNaN(n)) return 0;
+    if (!Number.isFinite(n)) return n;
+    const f = Math.floor(n), d = n - f;
+    return d < 0.5 ? f : d > 0.5 ? f + 1 : (f % 2 === 0 ? f : f + 1);
+  };
+  const received = (v) => typeof v === 'string' ? `type string ('${v}')` : `type ${typeof v} (${String(v)})`;
+  const concat = (chunks, size) => {
+    const out = new Uint8Array(size);
+    let at = 0;
+    for (const c of chunks) { out.set(c, at); at += c.length; }
+    return out;
+  };
   globalThis.Blob = class Blob {
-    constructor(parts = [], opts = {}) {
-      this._parts = parts || [];
-      this.type = (opts && opts.type) || '';
-      this.size = this._parts.reduce((n, p) => {
-        if (p == null) return n;
-        if (typeof p === 'string') return n + p.length;
-        if (typeof p.byteLength === 'number') return n + p.byteLength; // ArrayBuffer / TypedArray
-        if (typeof p.size === 'number') return n + p.size;             // Blob / File
-        if (typeof p.length === 'number') return n + p.length;
-        return n;
-      }, 0);
+    #chunks = [];
+    #size = 0;
+    #type = '';
+    constructor(blobParts = undefined, options = undefined) {
+      if (blobParts !== undefined && (blobParts === null || (typeof blobParts !== 'object' && typeof blobParts !== 'function') || typeof blobParts[Symbol.iterator] !== 'function'))
+        throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'Value cannot be converted to sequence.');
+      if (options != null && typeof options !== 'object' && typeof options !== 'function')
+        throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "options" argument must be a dictionary. Received ' + received(options));
+      const o = options == null ? {} : options;
+      const endings = o.endings === undefined ? 'transparent' : String(o.endings);
+      if (endings !== 'transparent' && endings !== 'native')
+        throw __codecError(TypeError, 'ERR_INVALID_ARG_VALUE', `The property 'options.endings' is invalid. Received '${endings}'`);
+      this.#type = o.type === undefined ? '' : normType(o.type);
+      const add = (c) => { if (c.length) { this.#chunks.push(c); this.#size += c.length; } };
+      for (const p of blobParts === undefined ? [] : blobParts) {
+        if (p instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && p instanceof SharedArrayBuffer)) add(new Uint8Array(p.slice(0)));
+        else if (ArrayBuffer.isView(p)) add(new Uint8Array(p.buffer, p.byteOffset, p.byteLength).slice());
+        else if (p !== null && typeof p === 'object' && #chunks in p) p.#chunks.forEach(add);
+        else {
+          let s = String(p);
+          if (endings === 'native') s = s.replace(/\r\n?/g, '\n');
+          add(new globalThis.TextEncoder().encode(s));
+        }
+      }
     }
-    // the bytes of every part, concatenated: strings as UTF-8, buffers and views as their bytes,
-    // nested Blobs as theirs, anything else stringified
-    _bytes() {
-      const chunks = this._parts.map((p) => {
-        if (p instanceof ArrayBuffer) return new Uint8Array(p);
-        if (ArrayBuffer.isView(p)) return new Uint8Array(p.buffer, p.byteOffset, p.byteLength);
-        if (p && typeof p._bytes === 'function') return p._bytes(); // nested Blob / File
-        return new globalThis.TextEncoder().encode(typeof p === 'string' ? p : String(p));
-      });
-      const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+    get type() { if (!(#chunks in this)) throw thisErr('Blob'); return this.#type; }
+    get size() { if (!(#chunks in this)) throw thisErr('Blob'); return this.#size; }
+    slice(start = undefined, end = undefined, contentType = undefined) {
+      if (!(#chunks in this)) throw thisErr('Blob');
+      const size = this.#size;
+      const rel = (v, dflt) => { if (v === undefined) return dflt; const n = clamp(v); return n < 0 ? Math.max(size + n, 0) : Math.min(n, size); };
+      const from = rel(start, 0), to = rel(end, size);
+      const out = new Blob([], contentType === undefined ? undefined : { type: contentType });
       let at = 0;
-      for (const c of chunks) { out.set(c, at); at += c.length; }
+      for (const c of this.#chunks) {
+        const lo = Math.max(from - at, 0), hi = Math.min(to - at, c.length);
+        if (lo < hi) { out.#chunks.push(lo === 0 && hi === c.length ? c : c.subarray(lo, hi)); out.#size += hi - lo; }
+        at += c.length;
+      }
       return out;
+    }
+    arrayBuffer() {
+      if (!(#chunks in this)) return Promise.reject(thisErr('Blob'));
+      return Promise.resolve(concat(this.#chunks, this.#size).buffer);
     }
     // WHATWG "UTF-8 decode" of all the bytes at once (turbo-test#120): a sequence split across
     // parts is one character and one leading BOM is stripped, as Node's
     text() {
-      return Promise.resolve(new globalThis.TextDecoder().decode(this._bytes()));
+      if (!(#chunks in this)) return Promise.reject(thisErr('Blob'));
+      return Promise.resolve(new globalThis.TextDecoder().decode(concat(this.#chunks, this.#size)));
     }
-    arrayBuffer() { return Promise.resolve(new ArrayBuffer(this.size)); }
-    slice() { return new globalThis.Blob(); }
-    stream() { return null; }
+    bytes() {
+      if (!(#chunks in this)) return Promise.reject(thisErr('Blob'));
+      return Promise.resolve(concat(this.#chunks, this.#size));
+    }
+    // a ReadableStream of one Uint8Array (a copy) per chunk
+    stream() {
+      if (!(#chunks in this)) throw thisErr('Blob');
+      const chunks = this.#chunks;
+      let i = 0;
+      return new globalThis.ReadableStream({
+        pull(c) {
+          if (i < chunks.length) c.enqueue(new Uint8Array(chunks[i++]));
+          if (i >= chunks.length) c.close();
+        },
+      });
+    }
+    // the chunks UTF-8-decoded as one stream (a sequence split across chunks is one character),
+    // empty pieces skipped
+    textStream() {
+      if (!(#chunks in this)) throw thisErr('Blob');
+      const chunks = this.#chunks;
+      const dec = new globalThis.TextDecoder();
+      let i = 0;
+      return new globalThis.ReadableStream({
+        pull(c) {
+          while (i < chunks.length) {
+            const s = dec.decode(chunks[i++], { stream: true });
+            if (s) { c.enqueue(s); if (i < chunks.length) return; }
+          }
+          const rest = dec.decode();
+          if (rest) c.enqueue(rest);
+          c.close();
+        },
+      });
+    }
   };
+  Object.defineProperty(globalThis.Blob.prototype, Symbol.toStringTag, { value: 'Blob', configurable: true });
 }
 if (typeof globalThis.File === 'undefined') {
   globalThis.File = class File extends globalThis.Blob {
-    constructor(parts, name, opts) { super(parts, opts); this.name = String(name); this.lastModified = (opts && opts.lastModified) || 0; }
+    #name;
+    #lastModified;
+    constructor(fileBits, fileName, options = undefined) {
+      if (arguments.length < 2) throw __codecError(TypeError, 'ERR_MISSING_ARGS', 'The "fileBits" and "fileName" arguments must be specified');
+      super(fileBits, options);
+      this.#name = String(fileName);
+      const lm = options == null ? undefined : options.lastModified;
+      this.#lastModified = lm === undefined ? Date.now() : Number(lm);
+    }
+    get name() { if (!(#name in this)) throw __codecError(TypeError, 'ERR_INVALID_THIS', 'Value of "this" must be of type File'); return this.#name; }
+    get lastModified() { if (!(#name in this)) throw __codecError(TypeError, 'ERR_INVALID_THIS', 'Value of "this" must be of type File'); return this.#lastModified; }
   };
+  Object.defineProperty(globalThis.File.prototype, Symbol.toStringTag, { value: 'File', configurable: true });
 }
 // Pure base64 (no btoa<->Buffer interdependency — turbo-dom's btoa calls Buffer.from, so
 // Buffer.toString('base64') must NOT call back into btoa or it infinitely recurses).
@@ -888,34 +976,117 @@ if (typeof globalThis.btoa === 'undefined') {
   globalThis.btoa = (s) => { const str = String(s); const b = new Array(str.length); for (let i = 0; i < str.length; i++) b[i] = str.charCodeAt(i) & 255; return globalThis.__b64encodeBytes(b); };
   globalThis.atob = (s) => String.fromCharCode.apply(null, globalThis.__b64decodeToBytes(s));
 }
+// FileReader as jsdom's (turbo-test#132, #139): a read reads the Blob's bytes, sets readyState
+// LOADING at once, then (asynchronously) fires loadstart, progress (a non-empty Blob), load and
+// loadend; abort() while LOADING fires abort and loadend instead. Listeners are kept in order
+// (addEventListener deduplicated, on<type> handlers holding the slot of their first set).
 if (typeof globalThis.FileReader === 'undefined') {
+  const EVENTS = ['loadstart', 'progress', 'load', 'abort', 'error', 'loadend'];
+  const invalidState = () => {
+    const e = new globalThis.DOMException('The object is in an invalid state.', 'InvalidStateError');
+    Object.defineProperty(e, 'code', { value: 11, configurable: true });
+    return e;
+  };
+  // the encoding readAsText decodes with: a UTF-8 / UTF-16 BOM wins, then the label, then UTF-8
+  const textOf = (b, label) => {
+    let enc = 'utf-8';
+    if (b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf) enc = 'utf-8';
+    else if (b[0] === 0xff && b[1] === 0xfe) enc = 'utf-16le';
+    else if (b[0] === 0xfe && b[1] === 0xff) enc = 'utf-16be';
+    else if (label !== undefined) { try { enc = new globalThis.TextDecoder(String(label)).encoding; } catch {} }
+    return new globalThis.TextDecoder(enc).decode(b);
+  };
   globalThis.FileReader = class FileReader {
-    constructor() { this.result = null; this.error = null; this.readyState = 0; this.onload = null; this.onerror = null; this.onloadend = null; this.onabort = null; }
-    _emit(name, ev) { if (typeof this['on' + name] === 'function') this['on' + name](ev); }
-    _read(blob, kind) {
-      Promise.resolve().then(async () => {
+    #listeners = Object.create(null); // type -> [{ fn }] (an on<type> handler's entry has `on: true`)
+    #gen = 0;                          // bumped by every read and abort; a stale read stops
+    constructor() { this.result = null; this.error = null; this.readyState = 0; }
+    addEventListener(type, fn) {
+      if (fn == null) return;
+      const list = this.#listeners[type] || (this.#listeners[type] = []);
+      if (!list.some((l) => !l.on && l.fn === fn)) list.push({ fn });
+    }
+    removeEventListener(type, fn) {
+      const list = this.#listeners[type];
+      if (list) this.#listeners[type] = list.filter((l) => l.on || l.fn !== fn);
+    }
+    dispatchEvent(ev) {
+      for (const l of (this.#listeners[ev.type] || []).slice()) {
         try {
-          const text = blob && blob.text ? await blob.text() : '';
-          if (kind === 'data') { const bytes = []; for (let i = 0; i < text.length; i++) bytes.push(text.charCodeAt(i) & 255); this.result = 'data:' + ((blob && blob.type) || 'application/octet-stream') + ';base64,' + globalThis.__b64encodeBytes(bytes); }
-          else if (kind === 'buffer') { const u = new Uint8Array((text || '').length); for (let i = 0; i < u.length; i++) u[i] = text.charCodeAt(i) & 255; this.result = u.buffer; }
-          else this.result = text;
-          this.readyState = 2;
-          const ev = { target: this };
-          this._emit('load', ev); this._emit('loadend', ev);
+          if (typeof l.fn === 'function') l.fn.call(this, ev);
+          else if (l.fn && typeof l.fn.handleEvent === 'function') l.fn.handleEvent(ev);
+        } catch (e) { console.error(e); } // reported, as jsdom's virtual console does
+      }
+      return !ev.defaultPrevented;
+    }
+    #handler(type) { const l = (this.#listeners[type] || []).find((x) => x.on); return l ? l.fn : null; }
+    #setHandler(type, fn) {
+      const list = this.#listeners[type] || (this.#listeners[type] = []);
+      const at = list.findIndex((x) => x.on);
+      if (typeof fn !== 'function' && (fn === null || typeof fn !== 'object')) { if (at >= 0) list.splice(at, 1); return; }
+      if (at >= 0) list[at].fn = fn; else list.push({ fn, on: true });
+    }
+    #fire(type, loaded = 0, total = 0, lengthComputable = false) {
+      const ev = new globalThis.Event(type);
+      for (const [k, v] of [['target', this], ['currentTarget', this], ['loaded', loaded], ['total', total], ['lengthComputable', lengthComputable]])
+        Object.defineProperty(ev, k, { value: v, configurable: true, enumerable: true });
+      this.dispatchEvent(ev);
+    }
+    #read(blob, kind, label) {
+      if (blob === null || typeof blob !== 'object' || typeof blob.arrayBuffer !== 'function')
+        throw new TypeError(`Failed to execute '${kind}' on 'FileReader': parameter 1 is not of type 'Blob'.`);
+      if (this.readyState === 1) throw invalidState();
+      const gen = ++this.#gen;
+      this.readyState = 1;
+      this.result = null;
+      this.error = null;
+      Promise.resolve().then(async () => {
+        let bytes;
+        try {
+          // the Blob's bytes, not char codes of its decoded text (turbo-test#132)
+          bytes = typeof blob.bytes === 'function' ? await blob.bytes() : new Uint8Array(await blob.arrayBuffer());
         } catch (e) {
-          this.error = e; this.readyState = 2;
-          const ev = { target: this };
-          this._emit('error', ev); this._emit('loadend', ev);
+          if (gen !== this.#gen) return;
+          this.readyState = 2; this.error = e;
+          this.#fire('loadstart'); this.#fire('error'); this.#fire('loadend');
+          return;
         }
+        if (gen !== this.#gen) return;
+        this.#fire('loadstart');
+        if (gen !== this.#gen) return;
+        if (bytes.length) { this.#fire('progress', bytes.length, bytes.length, true); if (gen !== this.#gen) return; }
+        if (kind === 'readAsDataURL') this.result = 'data:' + (blob.type || 'application/octet-stream') + ';base64,' + globalThis.__b64encodeBytes(bytes);
+        else if (kind === 'readAsArrayBuffer') this.result = bytes.slice().buffer;
+        else if (kind === 'readAsBinaryString') { let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)); this.result = s; }
+        else this.result = textOf(bytes, label);
+        this.readyState = 2;
+        this.#fire('load');
+        this.#fire('loadend');
       });
     }
-    readAsDataURL(b) { this._read(b, 'data'); }
-    readAsText(b) { this._read(b, 'text'); }
-    readAsArrayBuffer(b) { this._read(b, 'buffer'); }
-    addEventListener(n, f) { this['on' + n] = f; }
-    removeEventListener(n) { this['on' + n] = null; }
-    abort() { this._emit('abort', { target: this }); }
+    readAsArrayBuffer(blob) { this.#read(blob, 'readAsArrayBuffer'); }
+    readAsBinaryString(blob) { this.#read(blob, 'readAsBinaryString'); }
+    readAsDataURL(blob) { this.#read(blob, 'readAsDataURL'); }
+    readAsText(blob, encoding = undefined) { this.#read(blob, 'readAsText', encoding); }
+    abort() {
+      if (this.readyState === 0 || this.readyState === 2) { this.result = null; return; }
+      this.#gen++;
+      this.readyState = 2;
+      this.result = null;
+      this.#fire('abort');
+      this.#fire('loadend');
+    }
+    static #accessors = (() => {
+      for (const type of EVENTS) Object.defineProperty(FileReader.prototype, 'on' + type, {
+        get() { return this.#handler(type); },
+        set(fn) { this.#setHandler(type, fn); },
+        configurable: true, enumerable: true,
+      });
+    })();
   };
+  ['EMPTY', 'LOADING', 'DONE'].forEach((k, i) => {
+    Object.defineProperty(globalThis.FileReader, k, { value: i, enumerable: true });
+    Object.defineProperty(globalThis.FileReader.prototype, k, { value: i, enumerable: true });
+  });
 }
 // turbo-dom's installGlobals replaces Blob/File with SoA-backed versions whose .text()/byte
 // reads return zero-filled content. Capture our working implementations so the DOM bootstrap
@@ -1432,6 +1603,11 @@ if (typeof globalThis.EventTarget === 'undefined') {
     }
   };
 }
+// FileReader is defined above EventTarget; make it one (turbo-test#139)
+if (globalThis.FileReader && !(globalThis.FileReader.prototype instanceof globalThis.EventTarget)) {
+  Object.setPrototypeOf(globalThis.FileReader.prototype, globalThis.EventTarget.prototype);
+  Object.setPrototypeOf(globalThis.FileReader, globalThis.EventTarget);
+}
 if (typeof globalThis.Event === 'undefined') {
   globalThis.Event = class Event {
     constructor(type, init) { init = init || {}; this.type = type; this.bubbles = !!init.bubbles; this.cancelable = !!init.cancelable; this.composed = !!init.composed; this.defaultPrevented = false; this.target = null; this.currentTarget = null; this.timeStamp = 0; }
@@ -1479,6 +1655,75 @@ globalThis.__pathToFileURL = (p) => {
   return url;
 };
 globalThis.__dirnameOf = (p) => { const s = String(p).replace(/\/+$/, ''); const i = s.lastIndexOf('/'); return i <= 0 ? '/' : s.slice(0, i); };
+// import.meta (turbo-test#123): the module runner's CJS output (native emit + dep bundler, esbuild
+// transforms) calls __ttImportMeta(<module path>) where the source said `import.meta` — one object
+// per module path, like vitest's; the ESM graph's host callback fills V8's object with
+// __ttFillImportMeta. vitest's import.meta.env: process.env, read and written live, DEV / PROD /
+// SSR as booleans (vitest module-evaluator createImportMetaEnvProxy).
+const __ttMetaBool = ['DEV', 'PROD', 'SSR'];
+globalThis.__ttImportMetaEnv = new Proxy({}, {
+  get: (_, k) => (typeof k !== 'string' ? undefined : __ttMetaBool.includes(k) ? !!globalThis.process.env[k] : globalThis.process.env[k]),
+  set: (_, k, v) => {
+    if (typeof k === 'string') globalThis.process.env[k] = __ttMetaBool.includes(k) ? (v ? '1' : '') : v;
+    return true;
+  },
+  has: (_, k) => k in globalThis.process.env,
+  deleteProperty: (_, k) => delete globalThis.process.env[k],
+  ownKeys: () => Reflect.ownKeys(globalThis.process.env),
+  getOwnPropertyDescriptor: (_, k) => {
+    if (!Object.prototype.hasOwnProperty.call(globalThis.process.env, k)) return undefined;
+    return { value: globalThis.__ttImportMetaEnv[k], writable: true, enumerable: true, configurable: true };
+  },
+});
+// vitest 4.1.12's members (vite createNodeImportMeta, turbo-test#130), in its order: filename,
+// dirname, url, env, resolve (Node's import.meta.resolve from the module), glob (vite replaces a
+// full-name call at transform time, src/import_glob.rs; any other call throws), main (false), and
+// in the test file the non-enumerable `vitest` getter (in-source testing's vitest module).
+const __ttMetaGlob = { glob() { throw new Error('[module runner] "import.meta.glob" is statically replaced during file transformation. Make sure to reference it by the full name.'); } }.glob;
+// Node's import.meta.resolve(specifier, parent): relative / absolute specifiers and URLs against
+// the parent URL (no file check), builtins as `node:` URLs, packages by the ESM conditions.
+const __ttMetaResolve = (specifier, parent) => {
+  const spec = String(specifier);
+  if (/^\.{0,2}\//.test(spec) || spec === '.' || spec === '..') return new globalThis.URL(spec, parent).href;
+  if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(spec) && !spec.startsWith('node:')) {
+    try { return new globalThis.URL(spec).href; } catch (e) { /* not a URL: a package name */ }
+  }
+  let from;
+  try { from = globalThis.__fileURLToPath(parent); } catch (e) { from = String(parent); }
+  const r = globalThis.__ttRequireResolve(globalThis.__dirnameOf(from), spec, true);
+  if (typeof r === 'string' && r.startsWith('/')) return globalThis.__pathToFileURL(r).href;
+  if (typeof r === 'string' && spec !== 'vitest' && spec !== '@jest/globals') return 'node:' + r.replace(/^node:/, '');
+  const pkg = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0];
+  const e = new Error(`Cannot find package '${pkg}' imported from ${from}`);
+  e.code = 'ERR_MODULE_NOT_FOUND';
+  throw e;
+};
+globalThis.__ttFillImportMeta = (m, filename) => {
+  const url = globalThis.__pathToFileURL(filename).href;
+  const dirname = globalThis.__dirnameOf(filename);
+  m.filename = filename;
+  m.dirname = dirname;
+  m.url = url;
+  m.env = globalThis.__ttImportMetaEnv;
+  m.resolve = { resolve(specifier, parent) { return __ttMetaResolve(specifier, parent ?? url); } }.resolve;
+  m.glob = __ttMetaGlob;
+  m.main = false;
+  __ttMetas.set(filename, m);
+  return __ttMetaVitest(m, filename);
+};
+// the test file's `vitest` (its import.meta can be made before the file is the current one: the
+// entry's vi.mock prepass)
+const __ttMetaVitest = (m, filename) => {
+  if (filename === globalThis.__ttFile && !Object.prototype.hasOwnProperty.call(m, 'vitest')) {
+    Object.defineProperty(m, 'vitest', { get: () => globalThis.__nativeRequire(m.dirname, 'vitest', true) });
+  }
+  return m;
+};
+const __ttMetas = new Map();
+globalThis.__ttImportMeta = (filename) => __ttMetaVitest(__ttMetas.get(filename) || globalThis.__ttFillImportMeta({}, filename), filename);
+// the runner names the test file once it is loaded: its import.meta, made while loading, gets
+// `vitest` then
+globalThis.__ttMetaOfTestFile = () => { const m = __ttMetas.get(globalThis.__ttFile); if (m) __ttMetaVitest(m, globalThis.__ttFile); };
 const __os = {
   platform: () => globalThis.__ttPlatform || 'darwin', arch: () => globalThis.__ttArch || 'arm64', type: () => globalThis.__ttOsType || 'Darwin', release: () => '23.0.0',
   version: () => 'Darwin Kernel', EOL: '\n', tmpdir: () => globalThis.__ttTmpdir || '/tmp', homedir: () => globalThis.__ttHomedir || '/', hostname: () => 'localhost',
@@ -2753,6 +2998,14 @@ const __requireCache = new Proxy({}, {
     return e && { value: e, writable: true, enumerable: true, configurable: true };
   },
 });
+// ESM-graph namespaces' export setters (esm_spy.rs, turbo-test#131): a module registers one for
+// its own namespace; __ttNsSet(ns, name, value) sets that export (false: no setter / no export)
+const __ttNsSetters = new WeakMap();
+globalThis.__ttNsSetter = (ns, set) => { __ttNsSetters.set(ns, set); };
+globalThis.__ttNsSet = (ns, k, v) => {
+  const set = ns !== null && typeof ns === 'object' ? __ttNsSetters.get(ns) : undefined;
+  return set !== undefined && set(k, v) === true;
+};
 globalThis.__mkRequire = (dir, isEsm, importer) => {
   const req = (spec) => globalThis.__nativeRequire(dir, spec, isEsm, importer);
   // as Node: the resolved path (a builtin stays its name); MODULE_NOT_FOUND when nothing resolves
@@ -3232,7 +3485,7 @@ function __snapFinish(skipped) {
 }
 
 // ---- expect ----
-function makeExpect(actual, negated = false) {
+function makeExpect(actual, negated = false, message = undefined) {
   // `msg` is a thunk: the failure message (and the formatting of the operands in it) is built
   // only when the assertion fails, as vitest does — formatting can throw (a native class
   // prototype whose members check their receiver) and must not fail a passing assertion.
@@ -3251,7 +3504,7 @@ function makeExpect(actual, negated = false) {
   };
   const argsEqual = (a, b) => a.length === b.length && a.every((x, i) => deepEqual(x, b[i]));
   const api = {
-    get not() { return makeExpect(actual, !negated); },
+    get not() { return makeExpect(actual, !negated, message); },
     toBeTypeOf(t) { c(typeof actual === t, 'expected #{this} to be type of #{exp}', 'expected #{this} not to be type of #{exp}', t, typeof actual); },
     // a jest-style matcher in vitest: a plain Error with its matcher hint
     toSatisfy(fn, message) {
@@ -3276,7 +3529,7 @@ function makeExpect(actual, negated = false) {
       const mk = (neg) => new Proxy({}, { get: (_, m) => {
         if (m === 'not') return mk(!neg);
         return (...args) => Promise.resolve(actual).then(
-          (v) => makeExpect(v, neg)[m](...args),
+          (v) => makeExpect(v, neg, message)[m](...args),
           (e) => { const err = new __ChaiAssertionError(`promise rejected "${__inspect(e)}" instead of resolving`, { showDiff: false }); err.cause = e; throw err; },
         );
       } });
@@ -3288,7 +3541,7 @@ function makeExpect(actual, negated = false) {
         return (...args) => Promise.resolve(actual).then(
           (v) => { throw new __ChaiAssertionError(`promise resolved "${__inspect(v)}" instead of rejecting`, { actual: v, expected: new Error('rejected promise') }); },
           // `.rejects.toThrow()` checks the rejection as a thrown error (vitest wraps it in a thrower)
-          (e) => (m === 'toThrow' || m === 'toThrowError' ? makeExpect(() => { throw e; }, neg) : makeExpect(e, neg))[m](...args),
+          (e) => (m === 'toThrow' || m === 'toThrowError' ? makeExpect(() => { throw e; }, neg, message) : makeExpect(e, neg, message))[m](...args),
         );
       } });
       return mk(negated);
@@ -3571,7 +3824,32 @@ function makeExpect(actual, negated = false) {
       return api;
     };
   }
+  // expect(value, message): vitest prefixes `message: ` to a matcher's failure (turbo-test#138)
+  if (message) {
+    for (const name of Object.keys(api)) {
+      const d = Object.getOwnPropertyDescriptor(api, name);
+      if (typeof d.value !== 'function') continue;
+      const matcher = d.value;
+      api[name] = (...args) => {
+        let r;
+        try { r = matcher(...args); } catch (e) { throw __withExpectMessage(e, message); }
+        return r && typeof r.then === 'function' ? r.then(undefined, (e) => { throw __withExpectMessage(e, message); }) : r;
+      };
+    }
+  }
   return api;
+}
+// `message: ` before the message (and the stack's first line) of an assertion failure: chai's
+// AssertionError or a jest-style matcher's plain Error, once; any other error (a TypeError from
+// a non-spy, ...) passes through
+const __prefixedErrors = new WeakSet();
+function __withExpectMessage(e, message) {
+  if (!(e instanceof __ChaiAssertionError || (e instanceof Error && e.constructor === Error)) || __prefixedErrors.has(e)) return e;
+  __prefixedErrors.add(e);
+  const before = `${e.name}: ${e.message}`;
+  e.message = `${message}: ${e.message}`;
+  if (typeof e.stack === 'string' && e.stack.startsWith(before)) e.stack = `${e.name}: ${e.message}` + e.stack.slice(before.length);
+  return e;
 }
 const __matcherUtils = {
   printReceived: (x) => fmt(x),
@@ -3589,7 +3867,7 @@ const __matcherUtils = {
   highlightTrailingWhitespace: (s) => s,
 };
 const __customMatchers = {};
-globalThis.expect = (actual) => { __snap.assertCount++; return makeExpect(actual); };
+globalThis.expect = (actual, message) => { __snap.assertCount++; return makeExpect(actual, false, message); };
 globalThis.expect.extend = (matchers) => { Object.assign(__customMatchers, matchers || {}); };
 // expect.assertions(n) / expect.hasAssertions(): record the expectation; runSuite verifies the
 // count at test end (see __snap.assertCount, reset per test). These calls do NOT count themselves.
@@ -3600,7 +3878,7 @@ globalThis.expect.hasAssertions = function hasAssertions() {
   if (Error.captureStackTrace) Error.captureStackTrace(error, hasAssertions);
   __snap.hasAssertions = error;
 };
-globalThis.expect.soft = (actual) => { __snap.assertCount++; return makeExpect(actual); };
+globalThis.expect.soft = (actual, message) => { __snap.assertCount++; return makeExpect(actual, false, message); };
 globalThis.expect.any = (ctor) => new Asymmetric('any', ctor);
 globalThis.expect.anything = () => new Asymmetric('anything');
 globalThis.expect.objectContaining = (s) => new Asymmetric('objectContaining', s);
@@ -3719,6 +3997,8 @@ function __automock(mod, depth) {
     }
     // a class instance: its prototype methods become mocks too
     __automockProtoMethods(out, Object.getPrototypeOf(mod));
+    // an ES module's automock is still an ES module: its `default` is the mocked default
+    if (mod[Symbol.for('turbo-test.esm')]) Object.defineProperty(out, Symbol.for('turbo-test.esm'), { value: true });
     return out;
   }
   return mod;
@@ -3754,15 +4034,71 @@ const __ttMockErrorSpecs = new Set();
 // read undefined instead (jest semantics); checked on access, because the mock prepass registers
 // every factory via vi.mock and an isolate reuse keeps that first exports object.
 const __ttLenientMockKeys = new Set();
+// The strict mock proxies: their `default` is the factory's own (`__ttToESM` adds none).
+const __ttStrictMocks = new WeakSet();
 function __ttStrictMock(mod, key, spec) {
   if (mod === null || typeof mod !== 'object' || __ttMockErrors.has(mod)) return mod;
-  return new Proxy(mod, {
+  const proxy = new Proxy(mod, {
     get: (t, k, r) => {
-      if (typeof k === 'symbol' || k in t || k === 'then' || k === '__esModule' || __ttLenientMockKeys.has(key)) return Reflect.get(t, k, r);
-      throw new Error(`[vitest] No "${k}" export is defined on the "${spec}" mock. Did you want to return the actual module?`);
+      if (typeof k === 'symbol' || k in t || k === 'then' || k === '__esModule') return Reflect.get(t, k, r);
+      // jest: a factory without `default` is its own default (babel's interop)
+      if (__ttLenientMockKeys.has(key)) return k === 'default' ? r : Reflect.get(t, k, r);
+      const e = new Error(`[vitest] No "${k}" export is defined on the "${spec}" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+`);
+      e.codeFrame = `vi.mock(import("${spec}"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})`;
+      throw e;
     },
   });
+  __ttStrictMocks.add(proxy);
+  return proxy;
 }
+// The ES-module view of a required module: what `import X from` / `import * as ns from` read
+// once lowered to `__toESM(require(...))` (turbo-test#122), vitest's `interopModule` for a
+// CommonJS module. turbo-test's own ES modules (marked by `__toCommonJS`) and mocks are
+// themselves. A CommonJS `module.exports` marked `__esModule` (tsc / babel output) has its own
+// `default` (none: the whole object); so has an app file's (vitest inlines it). Any other's
+// default is the whole `module.exports` — added in place when it has no `default` (one object for
+// every importer, so `vi.spyOn` is seen by all), else, for a package's, read through a view (its
+// own `default` stays what CommonJS code reads).
+const __ttEsmMark = Symbol.for('turbo-test.esm');
+// packages' `module.exports` with an own `default` and no `__esModule` (the loader adds them)
+const __ttExternalCjs = new WeakSet();
+globalThis.__ttExternalCjs = __ttExternalCjs;
+const __ttCjsViews = new WeakMap();
+function __ttCjsView(m) {
+  let v = __ttCjsViews.get(m);
+  if (!v) {
+    v = new Proxy(m, {
+      get: (t, k, r) => (k === 'default' ? t : Reflect.get(t, k, t)),
+      has: (t, k) => k === 'default' || k in t,
+      getOwnPropertyDescriptor: (t, k) => {
+        const d = Reflect.getOwnPropertyDescriptor(t, k);
+        if (k !== 'default' || (d && !d.configurable)) return d;
+        return { value: t, writable: true, enumerable: d ? d.enumerable : false, configurable: true };
+      },
+    });
+    __ttCjsViews.set(m, v);
+  }
+  return v;
+}
+globalThis.__ttToESM = (m) => {
+  if (!m || (typeof m !== 'object' && typeof m !== 'function') || __ttStrictMocks.has(m) || m[__ttEsmMark]) return m;
+  if (m.__esModule || '__esModule' in m) return ('default' in m || m.default !== undefined) ? m : __ttCjsView(m);
+  if ('default' in m) return m.default === m || !__ttExternalCjs.has(m) ? m : __ttCjsView(m);
+  try {
+    Object.defineProperty(m, 'default', { value: m, configurable: true });
+    return m;
+  } catch (e) {
+    return __ttCjsView(m);
+  }
+};
 // Modules (resolved absolute paths) the entry's mock prepass registered for the current file.
 // vitest calls a hoisted factory ONCE; the module's own hoisted vi.mock call for such a module
 // keeps the prepass registration instead of running the factory a second time. Consumed by
@@ -3895,7 +4231,12 @@ globalThis.vi = {
     s.__name = String(key);
     // Use defineProperty so it replaces a (configurable) live-export getter, not just a
     // writable data prop — module-runner exports are configurable getters.
-    const define = (v) => { try { Object.defineProperty(obj, key, { configurable: true, enumerable: true, writable: true, value: v }); } catch (e) { try { obj[key] = v; } catch (e2) {} } };
+    // An ESM-graph module's namespace is V8's (read-only): its export is set through the
+    // module's setter (esm_spy.rs, turbo-test#131).
+    const define = (v) => {
+      if (globalThis.__ttNsSet(obj, key, v)) return;
+      try { Object.defineProperty(obj, key, { configurable: true, enumerable: true, writable: true, value: v }); } catch (e) { try { obj[key] = v; } catch (e2) {} }
+    };
     s.mockRestore = () => define(orig);
     define(s);
     return __trackSpy(s);
@@ -4017,8 +4358,8 @@ globalThis.vi = {
     cache[i] = v;
     return v;
   },
-  importActual: (p) => { try { return Promise.resolve(globalThis.__ttImportActual(globalThis.__ttDir, String(p))); } catch (e) { return Promise.resolve({}); } },
-  importMock: (p) => { try { return Promise.resolve(globalThis.__nativeRequire(globalThis.__ttDir, String(p))); } catch (e) { return Promise.resolve({}); } },
+  importActual: (p) => { try { return Promise.resolve(globalThis.__ttImportActual(globalThis.__ttDir || globalThis.__ttEntryDir, String(p))); } catch (e) { return Promise.resolve({}); } },
+  importMock: (p) => { try { return Promise.resolve(globalThis.__nativeRequire(globalThis.__ttDir || globalThis.__ttEntryDir, String(p))); } catch (e) { return Promise.resolve({}); } },
   unstubAllEnvs: () => {
     const m = globalThis.__stubbedEnvs;
     if (m) { m.forEach(({ had, val }, k) => { if (had) globalThis.process.env[k] = val; else delete globalThis.process.env[k]; }); m.clear(); }
@@ -4087,8 +4428,8 @@ globalThis.jest = {
   isMockFunction: (f) => globalThis.vi.isMockFunction(f),
   // jest.requireActual / requireMock are SYNCHRONOUS (return the module, not a Promise) —
   // unlike vi.importActual. Bridge to the native sync loader directly.
-  requireActual: (p) => { try { return globalThis.__ttImportActual(globalThis.__ttDir, String(p)); } catch (e) { return {}; } },
-  requireMock: (p) => { try { return globalThis.__nativeRequire(globalThis.__ttDir, String(p)); } catch (e) { return {}; } },
+  requireActual: (p) => { try { return globalThis.__ttImportActual(globalThis.__ttDir || globalThis.__ttEntryDir, String(p)); } catch (e) { return {}; } },
+  requireMock: (p) => { try { return globalThis.__nativeRequire(globalThis.__ttDir || globalThis.__ttEntryDir, String(p)); } catch (e) { return {}; } },
   // jest.isolateModules(fn): run `fn` with a fresh module registry. Approximate with a
   // resetModules around the (sync) callback — enough for the common "re-require with new env".
   isolateModules: (fn) => { globalThis.vi.resetModules(); try { fn(); } finally { globalThis.vi.resetModules(); } },

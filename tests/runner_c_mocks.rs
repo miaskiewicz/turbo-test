@@ -146,6 +146,355 @@ fn esm_graph_import_meta_has_filename_and_dirname() {
     assert_passes(&turbo_test(&p.dir, &[], &[]), 1);
 }
 
+/// turbo-test#123: `import.meta` (url / filename / dirname, `env`) on every loader path — the
+/// module runner's native (oxc) CJS emit and dep bundler, its esbuild transforms and dep bundles,
+/// and the ESM graph — in the test file, an app module, a setup file, a `vi.mock` factory (the
+/// test file's) and ES-module packages (each module its own location). The report's
+/// `Cannot use 'import.meta' outside a module` was an `import.meta` left in CJS output. vitest
+/// 4.1.12 on the same project: all 7 pass (its `import.meta.env` reads and writes
+/// `process.env`, with `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` set there).
+#[test]
+fn import_meta_works_on_every_loader_path() {
+    let files: [(&str, &str); 10] = [
+        ("package.json", "{\"name\":\"rc-meta-paths\",\"type\":\"module\"}\n"),
+        (
+            "vitest.config.mjs",
+            "export default { test: { setupFiles: ['./setup.ts'] } }\n",
+        ),
+        (
+            "setup.ts",
+            "(globalThis as any).__setupMeta = [import.meta.url, import.meta.env.MODE];\n",
+        ),
+        (
+            "src/app.ts",
+            "export const appMeta = () => ({ url: import.meta.url, filename: import.meta.filename, \
+             dirname: import.meta.dirname, mode: import.meta.env.MODE, same: import.meta === import.meta });\n",
+        ),
+        ("src/other.ts", "export const where = (): string => 'real';\n"),
+        (
+            "node_modules/esm-pkg/package.json",
+            "{\"name\":\"esm-pkg\",\"type\":\"module\",\"exports\":\"./lib/index.js\"}\n",
+        ),
+        (
+            "node_modules/esm-pkg/lib/index.js",
+            "import { h } from './sub/h.js';\nexport const own = () => import.meta.url;\nexport const sub = h;\n",
+        ),
+        (
+            "node_modules/esm-pkg/lib/sub/h.js",
+            "export const h = () => [import.meta.url, import.meta.dirname];\n",
+        ),
+        (
+            "node_modules/mjsdep/package.json",
+            "{\"name\":\"mjsdep\",\"main\":\"index.mjs\"}\n",
+        ),
+        (
+            "node_modules/mjsdep/index.mjs",
+            "export const asset = () => new URL('./x.txt', import.meta.url).href;\n",
+        ),
+    ];
+    let test = r#"import { expect, it, vi } from 'vitest';
+import { appMeta } from './src/app';
+import { where } from './src/other';
+import { own, sub } from 'esm-pkg';
+import { asset } from 'mjsdep';
+vi.mock('./src/other', () => ({ where: (): string => import.meta.url }));
+const P = process.cwd();
+it('the test file', () => {
+  expect([import.meta.url, import.meta.filename, import.meta.dirname]).toEqual([`file://${P}/a.test.ts`, `${P}/a.test.ts`, P]);
+  expect(import.meta).toBe(import.meta);
+});
+it('an app module', () => {
+  expect(appMeta()).toEqual({ url: `file://${P}/src/app.ts`, filename: `${P}/src/app.ts`, dirname: `${P}/src`, mode: 'test', same: true });
+});
+it('ES-module packages', () => {
+  expect(own()).toBe(`file://${P}/node_modules/esm-pkg/lib/index.js`);
+  expect(sub()).toEqual([`file://${P}/node_modules/esm-pkg/lib/sub/h.js`, `${P}/node_modules/esm-pkg/lib/sub`]);
+  expect(asset()).toBe(`file://${P}/node_modules/mjsdep/x.txt`);
+});
+it('a setup file', () => { expect((globalThis as any).__setupMeta).toEqual([`file://${P}/setup.ts`, 'test']); });
+it('a mock factory is the test file', () => { expect(where()).toBe(`file://${P}/a.test.ts`); });
+it('import.meta.env', () => {
+  const env = import.meta.env as any;
+  expect([env.MODE, env.DEV, env.PROD, env.SSR, env.BASE_URL, env.NODE_ENV, env.TT_UNSET]).toEqual(['test', true, false, true, '/', 'test', undefined]);
+  expect([process.env.MODE, process.env.DEV, process.env.PROD, process.env.SSR, process.env.BASE_URL]).toEqual(['test', '1', '', '1', '/']);
+  process.env.TT_META_X = 'a';
+  expect(env.TT_META_X).toBe('a');
+  env.TT_META_Y = 'b';
+  expect(process.env.TT_META_Y).toBe('b');
+  env.DEV = false;
+  expect([process.env.DEV, env.DEV]).toEqual(['', false]);
+  env.DEV = true;
+  expect(['MODE' in env, 'TT_UNSET' in env]).toEqual([true, false]);
+  expect(import.meta.env).toBe(import.meta.env);
+});
+"#;
+    for esbuild in [true, false] {
+        let p = Project::new(if esbuild {
+            "rc-meta-paths"
+        } else {
+            "rc-meta-paths-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in files {
+            p.file(f, c);
+        }
+        p.file("a.test.ts", test);
+        // vitest's web transform mode: SSR is off under a DOM environment
+        p.file(
+            "b.test.ts",
+            "// @vitest-environment happy-dom\nimport { expect, it } from 'vitest';\n\
+             it('SSR under a DOM environment', () => {\n\
+             \x20 expect([(import.meta.env as any).SSR, process.env.SSR, (import.meta.env as any).DEV]).toEqual([false, '', true]);\n\
+             });\n",
+        );
+        let envs: &[&[(&str, &str)]] = if esbuild {
+            &[
+                &[],
+                &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
+                &[("TURBO_REUSE_ISOLATE", "1")],
+            ]
+        } else {
+            &[&[], &[("TURBO_REUSE_ISOLATE", "1")]]
+        };
+        for env in envs {
+            let r = turbo_test(&p.dir, &[], env);
+            assert!(
+                r.stdout.contains("Tests  7 passed (7)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            assert_eq!(r.code, Some(0), "esbuild={esbuild} {env:?}\n{}", r.all());
+        }
+    }
+}
+
+/// turbo-test#130: vitest 4.1.12 gives every module `import.meta.resolve` (Node's, from the
+/// module), `import.meta.main` (`false`), `import.meta.glob` (statically replaced at a full-name
+/// call: eager / lazy, `import`, negated and array patterns, `exhaustive`, relative and
+/// root-absolute patterns, the module itself skipped; anything else throws) and, in the test file,
+/// the non-enumerable `import.meta.vitest`. turbo-test gave `url, filename, dirname, env` only.
+/// vitest 4.1.12 on the same project: all 6 pass.
+#[test]
+fn import_meta_resolve_main_and_glob_on_every_loader_path() {
+    let files: [(&str, &str); 10] = [
+        ("package.json", "{\"name\":\"rc-meta-members\",\"type\":\"module\"}\n"),
+        (
+            "node_modules/esm-pkg/package.json",
+            "{\"name\":\"esm-pkg\",\"type\":\"module\",\"exports\":\"./lib/index.js\"}\n",
+        ),
+        ("node_modules/esm-pkg/lib/index.js", "export const own = 1;\n"),
+        ("src/mods/a.ts", "export default 'A'; export const n = 1;\n"),
+        ("src/mods/b.js", "export default 'B'; export const n = 2;\n"),
+        ("src/mods/deep/z.ts", "export default 'Z'; export const n = 26;\n"),
+        ("src/mods/.hidden.ts", "export const n = 0;\n"),
+        ("src/mods/node_modules/x/i.ts", "export const n = 9;\n"),
+        (
+            "src/mods/user.ts",
+            "export const siblings = (): string[] => Object.keys(import.meta.glob('./*.ts', { eager: true }));\n\
+             export const up = (): string[] => Object.keys(import.meta.glob('../*.ts'));\n\
+             export const resolveHere = (s: string): string => import.meta.resolve(s);\n\
+             export const names = (): string[] => Object.getOwnPropertyNames(import.meta);\n",
+        ),
+        ("src/app.ts", "export const app = 'app';\n"),
+    ];
+    let test = r#"import { expect, it, vi } from 'vitest';
+import { siblings, up, resolveHere, names } from './src/mods/user';
+const P = process.cwd();
+it('import.meta has vitest members', () => {
+  expect(Object.getOwnPropertyNames(import.meta)).toEqual(['filename', 'dirname', 'url', 'env', 'resolve', 'glob', 'main', 'vitest']);
+  expect(Object.keys(import.meta)).toEqual(['filename', 'dirname', 'url', 'env', 'resolve', 'glob', 'main']);
+  expect(names()).toEqual(['filename', 'dirname', 'url', 'env', 'resolve', 'glob', 'main']);
+  expect(import.meta.main).toBe(false);
+  expect([import.meta.resolve.name, import.meta.resolve.length, import.meta.glob.name, import.meta.glob.length]).toEqual(['resolve', 2, 'glob', 0]);
+  const v = (import.meta as any).vitest;
+  expect([v.expect === expect, v.vi === vi, v.it === it]).toEqual([true, true, true]);
+  expect(Object.getOwnPropertyDescriptor(import.meta, 'vitest')!.enumerable).toBe(false);
+});
+it('import.meta.resolve', () => {
+  expect(import.meta.resolve('./src/app.ts')).toBe(`file://${P}/src/app.ts`);
+  expect(import.meta.resolve('./src/app')).toBe(`file://${P}/src/app`);
+  expect(import.meta.resolve('./no such.js')).toBe(`file://${P}/no%20such.js`);
+  expect(import.meta.resolve('esm-pkg')).toBe(`file://${P}/node_modules/esm-pkg/lib/index.js`);
+  expect([import.meta.resolve('fs'), import.meta.resolve('node:path')]).toEqual(['node:fs', 'node:path']);
+  expect(import.meta.resolve('./x', 'file:///tmp/a/')).toBe('file:///tmp/a/x');
+  expect(import.meta.resolve('data:text/javascript,1')).toBe('data:text/javascript,1');
+  expect(resolveHere('./a.ts')).toBe(`file://${P}/src/mods/a.ts`);
+  expect(resolveHere('../app.ts')).toBe(`file://${P}/src/app.ts`);
+  let err: any;
+  try { import.meta.resolve('nopkg-xyz'); } catch (e) { err = e; }
+  expect([err?.name, err?.code, err?.message]).toEqual(['Error', 'ERR_MODULE_NOT_FOUND', `Cannot find package 'nopkg-xyz' imported from ${P}/a.test.ts`]);
+});
+it('import.meta.glob not called by its full name throws', () => {
+  const g = import.meta.glob;
+  expect(() => g('./src/*.ts')).toThrow(new Error('[module runner] "import.meta.glob" is statically replaced during file transformation. Make sure to reference it by the full name.'));
+});
+it('import.meta.glob eager', async () => {
+  const mods = import.meta.glob('./src/mods/**/*', { eager: true });
+  expect(Object.keys(mods)).toEqual(['./src/mods/a.ts', './src/mods/b.js', './src/mods/deep/z.ts', './src/mods/user.ts']);
+  expect(mods['./src/mods/a.ts']).toBe(await import('./src/mods/a.ts'));
+  expect(import.meta.glob(['./src/mods/*.ts', './src/mods/*.js', '!./src/mods/a.ts'], { eager: true, import: 'n' })).toEqual({ './src/mods/b.js': 2 });
+  expect(import.meta.glob('./src/mods/*.{ts,js}', { eager: true, import: 'default' })).toEqual({ './src/mods/a.ts': 'A', './src/mods/b.js': 'B', './src/mods/user.ts': undefined });
+  expect(Object.keys(import.meta.glob('./src/mods/**/*.ts', { eager: true, exhaustive: true }))).toEqual(['./src/mods/.hidden.ts', './src/mods/a.ts', './src/mods/deep/z.ts', './src/mods/node_modules/x/i.ts', './src/mods/user.ts']);
+  expect(Object.keys(import.meta.glob('/src/*.ts', { eager: true }))).toEqual(['/src/app.ts']);
+  expect(import.meta.glob('./nomatch/*.ts')).toEqual({});
+});
+it('import.meta.glob lazy', async () => {
+  const lazy = import.meta.glob('./src/mods/*.ts');
+  expect(Object.keys(lazy)).toEqual(['./src/mods/a.ts', './src/mods/user.ts']);
+  expect(await lazy['./src/mods/a.ts']()).toBe(await import('./src/mods/a.ts'));
+  const named = import.meta.glob<string>('./src/mods/deep/*.ts', { import: 'default' });
+  expect(await named['./src/mods/deep/z.ts']()).toBe('Z');
+});
+it('import.meta.glob in an app module is relative to it and skips the module itself', () => {
+  expect(siblings()).toEqual(['./a.ts']);
+  expect(up()).toEqual(['../app.ts']);
+});
+"#;
+    for esbuild in [true, false] {
+        let p = Project::new(if esbuild {
+            "rc-meta-members"
+        } else {
+            "rc-meta-members-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in files {
+            p.file(f, c);
+        }
+        p.file("a.test.ts", test);
+        let envs: &[&[(&str, &str)]] = if esbuild {
+            &[
+                &[],
+                &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
+                &[("TURBO_REUSE_ISOLATE", "1")],
+            ]
+        } else {
+            &[&[], &[("TURBO_REUSE_ISOLATE", "1")]]
+        };
+        for env in envs {
+            let r = turbo_test(&p.dir, &[], env);
+            assert!(
+                r.stdout.contains("Tests  6 passed (6)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            assert_eq!(r.code, Some(0), "esbuild={esbuild} {env:?}\n{}", r.all());
+        }
+    }
+}
+
+/// turbo-test#131: `vi.spyOn` on an app module's namespace export reaches the modules importing
+/// it, on the ESM-graph loader (no esbuild) as on the module runner: `export const` / `function` /
+/// `class`, a renamed local (`export { a as b }`), `export default` (expression and anonymous
+/// function), re-exports (`export { x as y } from`, `export *`), with `mockRestore` putting the
+/// original back. The ESM graph's namespaces are V8's (not writable), so the spy was silently
+/// dropped: `expected 'hi a!' to be 'spied!'`. vitest 4.1.12 on the same project: all 4 pass.
+#[test]
+
+fn spy_on_a_namespace_export_reaches_its_importers_on_every_loader_path() {
+    let files: [(&str, &str); 6] = [
+        (
+            "package.json",
+            "{\"name\":\"rc-ns-spy\",\"type\":\"module\"}\n",
+        ),
+        (
+            "src/dep.ts",
+            r#"export const greet = (n: string): string => 'hi ' + n;
+export function fn(): string { return 'fn'; }
+export class K { static who(): string { return 'K'; } }
+const inner = (): string => 'inner';
+export { inner as renamed };
+export let counter = 1;
+export default (): string => 'default';
+"#,
+        ),
+        (
+            "src/deffn.ts",
+            r#"export default function (): string { return 'deffn'; }
+"#,
+        ),
+        (
+            "src/barrel.ts",
+            r#"export { greet as hello } from './dep';
+export * from './star';
+"#,
+        ),
+        (
+            "src/star.ts",
+            r#"export const starred = (): string => 'star';
+"#,
+        ),
+        (
+            "src/svc.ts",
+            r#"import def, { greet, fn, renamed } from './dep';
+import deffn from './deffn';
+import { hello, starred } from './barrel';
+export const all = (): string[] => [greet('a'), fn(), renamed(), def(), deffn(), hello('b'), starred()];
+"#,
+        ),
+    ];
+    let test = r#"import { expect, it, vi, afterEach } from 'vitest';
+import * as dep from './src/dep';
+import * as deffn from './src/deffn';
+import * as barrel from './src/barrel';
+import * as star from './src/star';
+import { greet } from './src/dep';
+import { all } from './src/svc';
+afterEach(() => { vi.restoreAllMocks(); });
+it('spies on every export form reach the importer', () => {
+  vi.spyOn(dep, 'greet').mockReturnValue('G');
+  vi.spyOn(dep, 'fn').mockReturnValue('F');
+  vi.spyOn(dep, 'renamed').mockReturnValue('R');
+  vi.spyOn(dep, 'default').mockReturnValue('D');
+  vi.spyOn(deffn, 'default').mockReturnValue('DF');
+  vi.spyOn(star, 'starred').mockReturnValue('S');
+  expect(all()).toEqual(['G', 'F', 'R', 'D', 'DF', 'G', 'S']);
+  expect(greet('x')).toBe('G');
+  expect(dep.greet).toBe(greet);
+  expect(vi.isMockFunction(dep.greet)).toBe(true);
+});
+it('restore puts the originals back', () => {
+  expect(all()).toEqual(['hi a', 'fn', 'inner', 'default', 'deffn', 'hi b', 'star']);
+  expect(vi.isMockFunction(dep.greet)).toBe(false);
+});
+it('spy through a re-exporting barrel', () => {
+  vi.spyOn(barrel, 'hello').mockReturnValue('H');
+  vi.spyOn(barrel, 'starred').mockReturnValue('BS');
+  expect([barrel.hello('z'), barrel.starred()]).toEqual(['H', 'BS']);
+});
+it('a static method of an exported class', () => {
+  vi.spyOn(dep.K, 'who').mockReturnValue('k');
+  expect(dep.K.who()).toBe('k');
+});
+"#;
+    for esbuild in [false, true] {
+        let p = Project::new(if esbuild {
+            "rc-ns-spy"
+        } else {
+            "rc-ns-spy-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in files {
+            p.file(f, c);
+        }
+        p.file("spy.test.ts", test);
+        for env in [&[][..], &[("TURBO_REUSE_ISOLATE", "1")][..]] {
+            let r = turbo_test(&p.dir, &[], env);
+            assert!(
+                r.stdout.contains("Tests  4 passed (4)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            assert_eq!(r.code, Some(0), "esbuild={esbuild} {env:?}\n{}", r.all());
+        }
+    }
+}
+
 #[test]
 fn import_meta_keeps_coverage_line_mapping() {
     let p = esbuild_project("rc-import-meta-cov");
@@ -346,11 +695,11 @@ test("the setup's vi.hoisted values do not leak into the test file's", () => {
     }
 }
 
-/// vitest's error for reading a name the factory did not return.
+/// vitest 4.1.12's error for reading a name the factory did not return (its first line).
 fn no_export(name: &str, spec: &str) -> String {
     format!(
         "[vitest] No \"{name}\" export is defined on the \"{spec}\" mock. \
-         Did you want to return the actual module?"
+         Did you forget to return it from \"vi.mock\"?"
     )
 }
 

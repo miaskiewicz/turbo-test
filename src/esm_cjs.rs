@@ -132,6 +132,9 @@ pub(crate) struct LowerCtx<'r> {
     pub exports_obj: String,
     /// resolve a specifier → `SourceRef`. `None` = app mode (always `External`).
     pub resolve: Option<&'r dyn Fn(&str) -> SourceRef>,
+    /// the module's path for `import.meta` (bundler: each bundled module's own); `None` = the CJS
+    /// wrapper's `__filename` (app mode)
+    pub module_path: Option<String>,
 }
 
 impl LowerCtx<'_> {
@@ -166,6 +169,8 @@ struct EmitState<'a, 'r> {
     resolve: Option<&'r dyn Fn(&str) -> SourceRef>,
     /// set when the body now calls `__toESM` (see `ModuleParts::uses_to_esm`).
     uses_to_esm: bool,
+    /// `LowerCtx::module_path`
+    module_path: Option<String>,
 }
 
 impl<'a> EmitState<'a, '_> {
@@ -198,6 +203,33 @@ impl<'a> EmitState<'a, '_> {
             self.ast.identifier_name(span, self.ast.ident(&access.prop)),
             false,
         ))
+    }
+
+    /// `globalThis.__ttImportMeta(<module path>)` (the module path a string literal in bundler
+    /// mode, else the CJS wrapper's `__filename`), with `span` (the `import.meta`'s) for the map.
+    fn build_import_meta(&self, span: Span) -> Expression<'a> {
+        let path = match &self.module_path {
+            Some(p) => self
+                .ast
+                .expression_string_literal(span, self.ast.str(p), None),
+            None => self
+                .ast
+                .expression_identifier(span, self.ast.ident("__filename")),
+        };
+        let global = self
+            .ast
+            .expression_identifier(span, self.ast.ident("globalThis"));
+        let callee = Expression::StaticMemberExpression(
+            self.ast.alloc_static_member_expression(
+                span,
+                global,
+                self.ast
+                    .identifier_name(span, self.ast.ident("__ttImportMeta")),
+                false,
+            ),
+        );
+        let args = self.ast.vec1(Argument::from(path));
+        self.ast.expression_call(span, callee, NONE, args, false)
     }
 
     /// `f(arg)` for a global function name.
@@ -357,6 +389,14 @@ impl<'a> VisitMut<'a> for EmitState<'a, '_> {
                 }
             }
         }
+        // `import.meta` → runtime.js `__ttImportMeta(<module path>)` (a CJS script cannot hold
+        // `import.meta`: V8's "Cannot use 'import.meta' outside a module", turbo-test#123)
+        if let Expression::MetaProperty(m) = &*expr {
+            if m.meta.name == "import" && m.property.name == "meta" {
+                *expr = self.build_import_meta(m.span);
+                return;
+            }
+        }
         if matches!(expr, Expression::ImportExpression(_)) {
             // take the node out, rewrite its (recursively-visited) source into a require chain.
             let taken = std::mem::replace(expr, self.ast.expression_boolean_literal(SPAN, false));
@@ -453,6 +493,7 @@ fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -
     let ctx = LowerCtx {
         exports_obj: "__tt_exports".to_string(),
         resolve: None,
+        module_path: None,
     };
     let map_src = if with_map { Some((path, src)) } else { None };
     let (parts, mappings) = lower(ast, scoping, &ctx, &mut program, map_src)?;
@@ -524,6 +565,7 @@ fn lower<'a>(
         scoping,
         resolve: ctx.resolve,
         uses_to_esm: false,
+        module_path: ctx.module_path.clone(),
     };
     let mut body = p.body_stmts;
     for stmt in body.iter_mut() {
@@ -913,7 +955,13 @@ fn collect_export_named<'a>(
         let src = source.value.as_str();
         // bind the module's namespace to a local var, then getters read `var.local`.
         let var = import_var(src, seq + 1_000_000);
-        let (prelude, expr) = module_namespace_expr(ctx, src, seq, false);
+        // re-exporting `default` reads it through the ES-module interop, as an import of it does
+        // (a CommonJS module's default is its `module.exports`, turbo-test#122)
+        let reads_default = decl
+            .specifiers
+            .iter()
+            .any(|spec| module_export_name(&spec.local) == "default");
+        let (prelude, expr) = module_namespace_expr(ctx, src, seq, reads_default);
         requires.extend(prelude);
         requires.push(format!("var {var} = {expr};"));
         for spec in &decl.specifiers {
@@ -1042,11 +1090,12 @@ fn module_export_name(n: &ModuleExportName) -> String {
     }
 }
 
-/// The identity-preserving `__toESM` helper line (self-contained). Part of `PREAMBLE`; also
-/// prepended alone to a script (no module syntax) whose lowered `import()` calls it.
+/// The identity-preserving `__toESM` helper line: runtime.js's `__ttToESM` (vitest's interop,
+/// turbo-test#122). Part of `PREAMBLE`; also prepended alone to a script (no module syntax) whose
+/// lowered `import()` calls it.
 macro_rules! to_esm_helper {
     () => {
-        "var __toESM = (mod) => (mod && mod.__esModule ? mod : (mod && (typeof mod === \"object\" || typeof mod === \"function\") && !(\"default\" in mod) && Object.defineProperty(mod, \"default\", { value: mod, configurable: true }), mod));\n"
+        "var __toESM = (mod) => globalThis.__ttToESM(mod);\n"
     };
 }
 const TO_ESM_HELPER: &str = to_esm_helper!();
@@ -1065,7 +1114,7 @@ var __copyProps = (to, from, except, desc) => { if (from && typeof from === "obj
 var __reExport = (target, mod, secondTarget) => (__copyProps(target, mod, "default"), secondTarget && __copyProps(secondTarget, mod, "default"));
 "#,
     to_esm_helper!(),
-    r#"var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+    r#"var __toCommonJS = (mod) => __copyProps(__defProp(__defProp({}, "__esModule", { value: true }), Symbol.for("turbo-test.esm"), { value: true }), mod);
 var __commonJS = (cb) => { var mod; return () => (mod || (mod = { exports: {} }, cb(mod.exports, mod)), mod.exports); };
 var __esm = (fn) => { var done, res; return () => (done || (done = 1, res = fn()), res); };
 "#

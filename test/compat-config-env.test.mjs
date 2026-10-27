@@ -176,3 +176,32 @@ test('config/env flags do not consume a following test-file arg as their value',
   const j = parseJson(run(['--reporter', 'json', '--no-isolate', '--isolate', NAMES]).out);
   assert.equal(j.numPassedTests, 3);
 });
+
+// ---- a project without node_modules/.bin/esbuild (pnpm) -----------------------
+
+test("a project without its own esbuild runs on turbo-test's (cli.js sets TURBO_ESBUILD)", () => {
+  // pnpm keeps a transitive esbuild under node_modules/.pnpm and links no .bin/esbuild; vitest
+  // (its own transform) sees a spied export from the importing module, as an esbuild project does
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tt-no-esbuild-'));
+  const put = (rel, s) => {
+    fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+    fs.writeFileSync(path.join(dir, rel), s);
+  };
+  put('package.json', '{"type":"module"}\n');
+  put('node_modules/.pnpm/esbuild@0.28.2/node_modules/esbuild/package.json', '{"name":"esbuild"}\n');
+  put('dep.ts', "export const greet = (n: string): string => 'hi ' + n;\n");
+  put('svc.ts', "import { greet } from './dep';\nexport const shout = (n: string): string => greet(n) + '!';\n");
+  put(
+    'e.test.ts',
+    "import { expect, it, vi } from 'vitest';\nimport * as dep from './dep';\nimport { shout } from './svc';\n" +
+      "it('spyOn an export reaches its importer', () => {\n  vi.spyOn(dep, 'greet').mockReturnValue('spied');\n" +
+      "  expect(shout('a')).toBe('spied!');\n});\n",
+  );
+  const env = { ...process.env };
+  delete env.TURBO_ESBUILD;
+  const { code, out, err } = run(['--reporter', 'json'], { cwd: dir, env });
+  const j = parseJson(out);
+  assert.equal(code, 0, out + err);
+  assert.equal(j.numPassedTests, 1, out);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

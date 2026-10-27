@@ -1322,12 +1322,15 @@ fn rewrite_shared_lets_routes_through_global() {
 
 #[test]
 fn postprocess_mr_cjs_rewrites_esbuild_helpers() {
-    let src = "var __defProp = Object.defineProperty;\nvar __toESM = (mod) => mod;\nrest";
+    let src = "var __defProp = Object.defineProperty;\nvar __toESM = (mod) => mod;\nvar __toCommonJS = (mod) => __copyProps(__defProp({}, \"__esModule\", { value: true }), mod);\nrest";
     let out = postprocess_mr_cjs(src.to_string());
     assert!(out.contains(
         "var __defProp = (o, k, d) => Object.defineProperty(o, k, Object.assign({ configurable: true }, d));"
     ));
-    assert!(out.contains("var __toESM = (m) => (m && m.__esModule ? m :"));
+    assert!(out.contains("var __toESM = (m) => globalThis.__ttToESM(m); var __toESM_unused = "));
+    assert!(out.contains(
+        "var __toCommonJS = (mod) => __copyProps(__defProp(__defProp({}, \"__esModule\", { value: true }), Symbol.for(\"turbo-test.esm\"), { value: true }), mod);\n"
+    ));
     assert!(out.contains("var __toESM_unused = (mod) => mod;"));
     assert!(out.ends_with("\nrest"));
     assert_eq!(postprocess_mr_cjs("plain".to_string()), "plain");

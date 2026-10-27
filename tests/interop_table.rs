@@ -1,0 +1,308 @@
+//! Default/named-export interop table (turbo-test#122): the project in `tests/data/interop122`
+//! imports CommonJS and ES modules every way a React/TS suite does — `module.exports = X`,
+//! `exports.default` with and without `__esModule`, tsc and babel output (`__importDefault`,
+//! `__importStar`, `_interopRequireDefault`, `_interopRequireWildcard`), re-exports of a default
+//! (`export { default } from`, `export * from` a CommonJS module), packages with an `exports` map
+//! or a `module` field, `vi.mock` / `vi.importActual` of CommonJS, a CommonJS package that
+//! requires an ESM-only one, `import()` and `createRequire`. Each row describes the value it got
+//! (`cases/d.ts`) and compares it with vitest 4.1.12's description (`cases/expected.ts`), which is
+//! the same under `environment: 'happy-dom'` and `'node'`, `isolate` true and false.
+//!
+//! The rows run on both of turbo-test's loaders: the module runner (a project with
+//! `node_modules/.bin/esbuild`) and the ES-module graph loader (a project without it, as a vite 8
+//! install has none).
+#![cfg(unix)]
+
+mod common;
+use common::{json_report, repo_root, turbo_test, Project};
+use std::path::Path;
+
+/// Rows turbo-test still answers differently from vitest, with the issue that tracks each and
+/// turbo-test's description: `(loader, row, turbo-test's value, issue)`. `loader` is `"mr"`,
+/// `"graph"` or `"*"` (both).
+const KNOWN: &[(&str, &str, &str, &str)] = &[
+    (
+        "mr",
+        "dynamic|esm-only ns",
+        "{default=fn:EsmOnly,x=string:x}!esm",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "dynamic|exp-default-flag ns",
+        "{default=fn:DefFlag,named=string:n}",
+        "turbo-test#133",
+    ),
+    (
+        "mr",
+        "dynamic|mexp-fn ns",
+        "fn:MexpFn",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "dynamic|mexp-fn ns",
+        "{default=fn:MexpFn}",
+        "turbo-test#133",
+    ),
+    (
+        "*",
+        "dynamic|require cjs-requires-esm",
+        "{def=fn:EsmOnly,ns={default=fn:EsmOnly,x=string:x}!esm}",
+        "turbo-test#133",
+    ),
+    (
+        "*",
+        "dynamic|require exports-map",
+        "{default=fn:FromImport,which=string:import}!esm",
+        "turbo-test#134",
+    ),
+    (
+        "*",
+        "mock|Comp",
+        "{default=fn:LessonPage,readerSiteName=fn:readerSiteName}!esm",
+        "turbo-test#133",
+    ),
+    (
+        "*",
+        "mock|automock default",
+        "{Comp=fn:fn,a=number:1}",
+        "turbo-test#136",
+    ),
+    (
+        "*",
+        "mock|automock named",
+        "fn:fn",
+        "turbo-test#136",
+    ),
+    (
+        "*",
+        "mock|exp-default-noflag",
+        "{default=fn:DefNoFlag,named=string:n}",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "mock|factory without default",
+        "{named=string:only}",
+        "turbo-test#137",
+    ),
+    (
+        "*",
+        "mock|mexp-fn",
+        "fn:MexpFn",
+        "turbo-test#133",
+    ),
+    (
+        "mr",
+        "mock|tsc-out",
+        "{default=fn:TscComp,named=string:n,viaDefault=fn:DefFlag,viaPlain={default=fn:Mocked},viaStar={default=obj}}!esm",
+        "turbo-test#135",
+    ),
+    (
+        "graph",
+        "mock|tsc-out",
+        "{default=fn:TscComp,named=string:n,viaDefault={default=fn:DefFlag,named=string:mocked},viaPlain={default=fn:Mocked},viaStar={default=obj}}!esm",
+        "turbo-test#135",
+    ),
+    (
+        "graph",
+        "static|babel ns",
+        "{default=fn:BabelComp,named=string:n,viaDefault=fn:DefFlag,viaPlain=fn:MexpFn,viaStar={default=fn:MexpFn}}",
+        "turbo-test#133",
+    ),
+    (
+        "mr",
+        "static|barrel ns",
+        "{LessonPage=fn:LessonPage,default=fn:LessonPage,readerSiteName=fn:readerSiteName}!esm",
+        "turbo-test#133",
+    ),
+    (
+        "*",
+        "static|cjs-requires-esm default",
+        "{def=fn:EsmOnly,ns={default=fn:EsmOnly,x=string:x}!esm}",
+        "turbo-test#133",
+    ),
+    (
+        "mr",
+        "static|esm-reexport-cjs ns",
+        "{Comp=fn:Comp,DefFlag=fn:DefFlag,a=number:1,default=fn:MexpFn}!esm",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "static|esm-reexport-cjs ns",
+        "{Comp=fn:Comp,DefFlag=fn:DefFlag,a=number:1,default=fn:MexpFn}",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "static|exp-default-flag ns",
+        "{default=fn:DefFlag,named=string:n}",
+        "turbo-test#133",
+    ),
+    (
+        "mr",
+        "static|mexp-fn ns",
+        "fn:MexpFn",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "static|mexp-fn ns",
+        "{default=fn:MexpFn}",
+        "turbo-test#133",
+    ),
+    (
+        "*",
+        "static|module-field default",
+        "fn:ModuleEsm",
+        "turbo-test#134",
+    ),
+    (
+        "*",
+        "static|requires-exports-map default",
+        "fn:FromImport",
+        "turbo-test#134",
+    ),
+    (
+        "mr",
+        "static|star-flag ns",
+        "{named=string:n}!esm",
+        "turbo-test#133",
+    ),
+    (
+        "mr",
+        "static|star-mexp ns",
+        "{Comp=fn:Comp,a=number:1}!esm",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "static|star-mexp ns",
+        "{Comp=fn:Comp,a=number:1}",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "static|tsc ns",
+        "{default=fn:TscComp,named=string:n,viaDefault=fn:DefFlag,viaPlain=fn:MexpFn,viaStar={default=fn:MexpFn,length=number:0,name=string:MexpFn,prototype=obj}}",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "static|tsc reexport ns",
+        "{Comp=fn:Comp,a=number:1,default=fn:DefFlag}",
+        "turbo-test#133",
+    ),
+];
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let dst = to.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            copy_tree(&e.path(), &dst);
+        } else {
+            std::fs::copy(e.path(), &dst).unwrap();
+        }
+    }
+}
+
+fn project(name: &str, esbuild: bool) -> Project {
+    let data = repo_root().join("tests/data/interop122");
+    let p = Project::new(name);
+    p.file("package.json", "{\"type\":\"module\"}\n");
+    copy_tree(&data.join("cases"), &p.path("cases"));
+    copy_tree(&data.join("src"), &p.path("src"));
+    copy_tree(&data.join("pkgs"), &p.path("node_modules"));
+    if esbuild {
+        p.with_esbuild();
+    }
+    p
+}
+
+/// Run the table under every vitest config; returns `config: row: message` for each row that
+/// failed (vitest's description differs) and is not a KNOWN row of `loader`.
+fn run_table(p: &Project, loader: &str) -> Vec<String> {
+    let mut bad = Vec::new();
+    for env in ["happy-dom", "node"] {
+        for isolate in [true, false] {
+            p.file(
+                "vitest.config.mjs",
+                &format!(
+                    "export default {{ test: {{ environment: '{env}', isolate: {isolate}, include: ['cases/**/*.test.ts'] }} }}\n"
+                ),
+            );
+            // one worker under isolate: false, so the files share their module registry
+            let jobs = if isolate { "2" } else { "1" };
+            let r = turbo_test(&p.dir, &["--reporter", "json"], &[("TURBO_JOBS", jobs)]);
+            let report = json_report(&r);
+            let files = report["testResults"].as_array().unwrap();
+            assert_eq!(files.len(), 4, "{}", r.all());
+            let mut rows = 0;
+            for f in files {
+                let results = f["assertionResults"].as_array().unwrap();
+                assert!(!results.is_empty(), "{f}");
+                for a in results {
+                    rows += 1;
+                    let title = a["title"].as_str().unwrap();
+                    let file = Path::new(f["name"].as_str().unwrap())
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace(".test.ts", "");
+                    let row = format!("{file}|{title}");
+                    let msg = a["failureMessages"]
+                        .as_array()
+                        .and_then(|m| m.first())
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
+                    let known = KNOWN
+                        .iter()
+                        .find(|k| (k.0 == loader || k.0 == "*") && k.1 == row);
+                    match (a["status"].as_str().unwrap(), known) {
+                        ("passed", None) => {}
+                        ("passed", Some(k)) => bad.push(format!(
+                            "{env} isolate={isolate}: {row}: passes now, drop it from KNOWN ({})",
+                            k.3
+                        )),
+                        (_, Some(k)) if msg.contains(&format!("GOT<{}>: WANT<", k.2)) => {}
+                        _ => bad.push(format!("{env} isolate={isolate}: {row}: {msg}")),
+                    }
+                }
+            }
+            assert_eq!(rows, 89, "{}", r.all());
+        }
+    }
+    bad
+}
+
+#[test]
+fn interop_table_matches_vitest_on_the_module_runner() {
+    let p = project("interop-table-mr", true);
+    let bad = run_table(&p, "mr");
+    assert!(
+        bad.is_empty(),
+        "{} rows differ:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+}
+
+#[test]
+fn interop_table_matches_vitest_on_the_esm_graph_loader() {
+    let p = project("interop-table-graph", false);
+    let bad = run_table(&p, "graph");
+    assert!(
+        bad.is_empty(),
+        "{} rows differ:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+}

@@ -990,7 +990,34 @@ fn project_root_uncached(file: &Path) -> Option<PathBuf> {
         }
         d = dir.parent();
     }
+    // No project-local esbuild: pnpm keeps a transitive esbuild under node_modules/.pnpm and links
+    // no node_modules/.bin/esbuild, so every vi.mock factory used to fall back to raw (untransformed)
+    // evaluation. With turbo-test's own esbuild available (TURBO_ESBUILD, set by cli.js), the nearest
+    // ancestor that has node_modules is the root: bare imports resolve from there and the prepass
+    // writes into its node_modules.
+    if std::env::var_os("TURBO_ESBUILD").is_some() {
+        let mut d = file.parent();
+        while let Some(dir) = d {
+            if dir.join("node_modules").is_dir() {
+                return Some(dir.to_path_buf());
+            }
+            d = dir.parent();
+        }
+    }
     None
+}
+
+/// The esbuild binary for `root`: the project's own `node_modules/.bin/esbuild` when it has one,
+/// otherwise turbo-test's bundled esbuild (`TURBO_ESBUILD`, resolved by cli.js).
+fn esbuild_bin(root: &Path) -> PathBuf {
+    let local = root.join("node_modules/.bin/esbuild");
+    if local.exists() {
+        return local;
+    }
+    match std::env::var_os("TURBO_ESBUILD") {
+        Some(p) => PathBuf::from(p),
+        None => local,
+    }
 }
 
 /// Nearest ancestor with `node_modules/typescript` — the root `tsc_transform_esm` needs. Unlike
@@ -1046,7 +1073,7 @@ fn esbuild_bundle_full(
         Some(r) => r.to_path_buf(),
         None => project_root(file)?,
     };
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
     let mtime = std::fs::metadata(file)
         .ok()
@@ -1231,6 +1258,24 @@ fn forced_env(s: &str) -> Option<String> {
             .ok()
             .map(|v| v.to_ascii_lowercase())
     })
+}
+
+/// vite's `process.env.SSR` for `file` as vitest sets it: `''` under a DOM environment
+/// (`jsdom` / `happy-dom`, configured or by pragma — vitest's web transform mode), else `'1'`
+/// (turbo-test#123; runtime.js starts it at `'1'`).
+fn set_ssr_env(scope: &mut v8::PinScope, file: &Path) {
+    let s = std::fs::read_to_string(file).unwrap_or_default();
+    let web = matches!(
+        forced_env(&s).as_deref(),
+        Some("jsdom") | Some("happy-dom") | Some("happydom")
+    );
+    run_js(
+        scope,
+        &format!(
+            "globalThis.process.env.SSR = '{}';",
+            if web { "" } else { "1" }
+        ),
+    );
 }
 
 /// Whether a file needs a DOM environment (so we don't impose one on pure-logic tests,
@@ -1739,9 +1784,9 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String>
         let ext = entry.extension().and_then(|e| e.to_str()).unwrap_or("js");
         let transform = crate::transform::needs_transform(entry);
         let require = format!("globalThis.__mkRequire({entry_dir}, true)");
+        // (runtime.js __ttImportMeta: url / filename / dirname / env, turbo-test#123)
         let meta = format!(
-            "({{ url: {}, filename: {}, dirname: {entry_dir} }})",
-            js_string_literal(&file_url(entry)),
+            "globalThis.__ttImportMeta({})",
             js_string_literal(&entry.to_string_lossy()),
         );
         let scoped = |code: String| {
@@ -2101,7 +2146,7 @@ process.stdout.write(out.outputText);
 /// (TS/decorators lowered), so this is a pure format conversion.
 fn esbuild_format_cjs(root: &Path, js: &str) -> Option<String> {
     use std::io::Write;
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(root);
     let mut child = std::process::Command::new(&esbuild)
         .current_dir(root)
         .args([
@@ -2176,19 +2221,21 @@ fn file_has_decorator(src: &str) -> bool {
 /// falls back to esbuild.
 fn native_transform_cjs(file: &Path) -> Option<String> {
     use std::hash::{Hash, Hasher};
-    let raw = with_binder(file, std::fs::read_to_string(file).ok()?, true);
+    let raw = with_binder(file, read_app_source(file)?, true);
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
     file.extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .hash(&mut h);
-    "native-cjs-v4".hash(&mut h); // v4: await_do_mocks_on_import
-                                  // Legacy-decorator lowering happens inside esm_cjs::emit when the project enables
-                                  // experimentalDecorators/emitDecoratorMetadata AND this file uses a decorator. Without it the
-                                  // native emitter leaves `@Decorator` syntax intact (→ "Unexpected token 'export'") or lowers
-                                  // it with 2022-standard semantics (→ "Cannot access 'X' before initialization" TDZ). Key the
-                                  // cache on this decision so a config/file change can't serve stale (mis-lowered) output.
+    // v4: await_do_mocks_on_import; v5: import.meta (turbo-test#123); v6: `__toESM` is
+    // runtime.js's `__ttToESM` (turbo-test#122)
+    "native-cjs-v6".hash(&mut h);
+    // Legacy-decorator lowering happens inside esm_cjs::emit when the project enables
+    // experimentalDecorators/emitDecoratorMetadata AND this file uses a decorator. Without it the
+    // native emitter leaves `@Decorator` syntax intact (→ "Unexpected token 'export'") or lowers
+    // it with 2022-standard semantics (→ "Cannot access 'X' before initialization" TDZ). Key the
+    // cache on this decision so a config/file change can't serve stale (mis-lowered) output.
     let legacy_decorators = decorator_metadata_enabled(file) && file_has_decorator(&raw);
     legacy_decorators.hash(&mut h);
     // coverage output carries an inline source map → key it separately so the no-map and with-map
@@ -2222,7 +2269,7 @@ fn native_transform_cjs_located(file: &Path) -> Option<String> {
 /// `native_transform_cjs` with the map of its lines back to the source (and that source): the
 /// test file's for test locations, another app module's while failure frames are printed.
 fn native_transform_cjs_mapped(file: &Path) -> Option<(String, crate::location::Segments, String)> {
-    let raw = with_binder(file, std::fs::read_to_string(file).ok()?, true);
+    let raw = with_binder(file, read_app_source(file)?, true);
     let legacy_decorators = decorator_metadata_enabled(file) && file_has_decorator(&raw);
     let emitted = crate::esm_cjs::emit_mapped(file, &raw, legacy_decorators)?;
     let map = crate::coverage::inline_segments(&emitted)?;
@@ -2255,7 +2302,8 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .hash(&mut h);
-    "native-dep-v3-bundle".hash(&mut h);
+    // v4: import.meta (turbo-test#123); v5: `__toESM` is runtime.js's `__ttToESM` (turbo-test#122)
+    "native-dep-v5-bundle".hash(&mut h);
     let cache = cache_dir().join(format!("ntvdep-{:016x}.cjs", h.finish()));
     if let Ok(c) = std::fs::read_to_string(&cache) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
@@ -2274,9 +2322,9 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
 /// esbuild's export getters to be CONFIGURABLE (so spyOn can redefine them). Cached.
 fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     let root = project_root(file)?;
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
-    let raw = std::fs::read_to_string(file).ok()?;
+    let raw = read_app_source(file)?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
     file.extension()
@@ -2285,8 +2333,10 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
         .hash(&mut h);
     // v2: `import.meta` is filled in (fill_import_meta) instead of esbuild's empty object;
     // v3: import() waits for a pending async vi.doMock (await_do_mocks_on_import);
-    // v4: import.meta.url is the percent-encoded file URL (turbo-test#87)
-    "mr-cjs-v4".hash(&mut h);
+    // v4: import.meta.url is the percent-encoded file URL (turbo-test#87);
+    // v5: import.meta is runtime.js __ttImportMeta (env, one object per module; turbo-test#123)
+    // v6: `__toESM` is runtime.js's `__ttToESM`, `__toCommonJS` marks the module (turbo-test#122)
+    "mr-cjs-v6".hash(&mut h);
     // esbuild can't emit decorator metadata. By default we DON'T pay that cost — only when a
     // decorator file actually threw at load (Mongoose @Prop / Sequelize @Column read design:type
     // at class-definition) does the loader retry with `prefer_metadata`, routing it through the
@@ -2324,7 +2374,7 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
             .and_then(|r| r.ok())
         });
         if let Some(cjs) = meta_esm.and_then(|esm| esbuild_format_cjs(&root, &esm)) {
-            let code = await_do_mocks_on_import(fill_import_meta(postprocess_mr_cjs(cjs)));
+            let code = await_do_mocks_on_import(fill_import_meta(postprocess_mr_cjs(cjs), None));
             let mut code = hoist_mock_setup(&code);
             let shared = shared_mock_lets(&raw);
             if !shared.is_empty() {
@@ -2347,8 +2397,24 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
         }
         d = dir.parent();
     }
+    // a module whose import.meta.glob calls were expanded (turbo-test#130) goes in on stdin
+    let expanded = std::fs::read_to_string(file).ok().as_deref() != Some(raw.as_str());
     let mut cmd = std::process::Command::new(&esbuild);
-    cmd.current_dir(&root).arg(file).args([
+    cmd.current_dir(&root);
+    if expanded {
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("js");
+        let loader = match ext {
+            "ts" | "mts" | "cts" => "ts",
+            "tsx" | "jsx" => ext,
+            _ => "jsx",
+        };
+        cmd.arg(format!("--sourcefile={}", file.display()))
+            .arg(format!("--loader={loader}"))
+            .stdin(std::process::Stdio::piped());
+    } else {
+        cmd.arg(file);
+    }
+    cmd.args([
         "--format=cjs",
         "--platform=browser",
         "--jsx=automatic",
@@ -2365,12 +2431,23 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     if let Some(tc) = &tsconfig {
         cmd.arg(format!("--tsconfig={}", tc.display()));
     }
-    let out = cmd.stderr(std::process::Stdio::null()).output().ok()?;
+    let out = if expanded {
+        use std::io::Write;
+        let mut child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        child.stdin.take()?.write_all(raw.as_bytes()).ok()?;
+        child.wait_with_output().ok()?
+    } else {
+        cmd.stderr(std::process::Stdio::null()).output().ok()?
+    };
     if !out.status.success() {
         return None;
     }
     let code = postprocess_mr_cjs(String::from_utf8(out.stdout).ok()?);
-    let mut code = await_do_mocks_on_import(fill_import_meta(code));
+    let mut code = await_do_mocks_on_import(fill_import_meta(code, None));
     // vitest-style vi.mock hoisting: move consumer requires below the vi.mock setup so the mock
     // is registered (immediately, in this module's scope) before the mocked module loads.
     code = hoist_mock_setup(&code);
@@ -2388,20 +2465,30 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
 
 /// esbuild's `--format=cjs` turns `import.meta` into an empty object (`const import_meta = {};`,
 /// one per source module), so `import.meta.url` read as undefined. Give it the module's own
-/// location instead, as vitest/Node do: `url` (`pathToFileURL(__filename).href`, the
-/// percent-encoded form the ESM-graph import.meta callback gives too), `filename` and `dirname`. They come from the CJS
-/// wrapper's `__filename`/`__dirname` at run time — the transform cache is content-keyed, so the
-/// same source in two places shares one output. Replaced on the same line, so the inline source
-/// map (coverage) keeps its line mapping.
-fn fill_import_meta(code: String) -> String {
+/// import.meta instead, as vitest/Node do: runtime.js `__ttImportMeta(<path>)` (`url` — the
+/// percent-encoded file URL the ESM-graph callback gives too — `filename`, `dirname` and vitest's
+/// `env`, turbo-test#123). A per-file transform's module is the CJS wrapper's `__filename` at run
+/// time (the transform cache is content-keyed, so the same source in two places shares one
+/// output). In a dep bundle (`bundle_root`: esbuild's cwd) each module's code follows esbuild's
+/// `// <path relative to the cwd>` comment, which names it. Replaced on the same line, so the
+/// inline source map (coverage) keeps its line mapping.
+fn fill_import_meta(code: String, bundle_root: Option<&Path>) -> String {
     if !code.contains("import_meta") {
         return code;
     }
     let mut out = String::with_capacity(code.len() + 96);
+    let mut module: Option<String> = None;
     for line in code.split_inclusive('\n') {
         let body = line.trim_end_matches('\n');
+        if let (Some(root), Some(rel)) = (bundle_root, body.strip_prefix("// ")) {
+            let abs = root.join(rel);
+            if abs.is_file() {
+                module = Some(js_string_literal(&abs.to_string_lossy()));
+            }
+        }
         let decl = body
             .strip_prefix("const ")
+            .or_else(|| body.strip_prefix("var "))
             .and_then(|r| r.strip_suffix(" = {};"))
             .filter(|n| {
                 n.strip_prefix("import_meta")
@@ -2409,9 +2496,9 @@ fn fill_import_meta(code: String) -> String {
             });
         match decl {
             Some(name) => {
-                out.push_str(&format!(
-                    "const {name} = {{ url: globalThis.__pathToFileURL(__filename).href, filename: __filename, dirname: __dirname }};"
-                ));
+                let kw = &body[..body.find(' ').unwrap_or(0)];
+                let path = module.as_deref().unwrap_or("__filename");
+                out.push_str(&format!("{kw} {name} = globalThis.__ttImportMeta({path});"));
                 out.push_str(&line[body.len()..]);
             }
             None => out.push_str(line),
@@ -3024,9 +3111,10 @@ fn rewrite_shared_lets(code: &str, names: &[String]) -> String {
 
 /// Post-process esbuild CJS output for the module runner:
 /// - make export getters CONFIGURABLE so `spyOn` can redefine them (mutable live exports);
-/// - replace `__toESM` (which COPIES the namespace) with one that returns the SAME exports
-///   object (adding `default` for CJS interop) so `import * as ns` + `import {x}` share one
-///   object — `vi.spyOn(ns,'x')` is then seen by every importer (vitest semantics).
+/// - replace `__toESM` (which COPIES the namespace) with runtime.js's `__ttToESM`, which returns
+///   the SAME exports object (adding `default` for CJS interop, or a view when CommonJS has its
+///   own) so `import * as ns` + `import {x}` share one object — `vi.spyOn(ns,'x')` is then seen
+///   by every importer (vitest semantics) — and `__toCommonJS` with one that marks the module.
 fn postprocess_mr_cjs(mut code: String) -> String {
     code = code.replace(
         "var __defProp = Object.defineProperty;",
@@ -3034,7 +3122,12 @@ fn postprocess_mr_cjs(mut code: String) -> String {
     );
     code = code.replace(
         "var __toESM = ",
-        "var __toESM = (m) => (m && m.__esModule ? m : (m && (typeof m === \"object\" || typeof m === \"function\") && !(\"default\" in m) && Object.defineProperty(m, \"default\", { value: m, configurable: true }), m)); var __toESM_unused = ",
+        "var __toESM = (m) => globalThis.__ttToESM(m); var __toESM_unused = ",
+    );
+    // turbo-test's own ES modules are marked, so `__ttToESM` tells them from CommonJS
+    code = code.replace(
+        "var __toCommonJS = (mod) => __copyProps(__defProp({}, \"__esModule\", { value: true }), mod);",
+        "var __toCommonJS = (mod) => __copyProps(__defProp(__defProp({}, \"__esModule\", { value: true }), Symbol.for(\"turbo-test.esm\"), { value: true }), mod);",
     );
     code
 }
@@ -3088,7 +3181,7 @@ fn e12_enabled() -> bool {
 /// externalized so it's shared. Returns the bundled code. Cached by entry+mtime.
 fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     let root = project_root(abs)?;
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
     let mtime = std::fs::metadata(abs)
         .ok()
@@ -3099,7 +3192,9 @@ fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     abs.hash(&mut h);
     mtime.hash(&mut h);
-    "mr-dep-v1".hash(&mut h);
+    // v2: import.meta filled (turbo-test#123); v3: `__toESM` is runtime.js's `__ttToESM`
+    // (turbo-test#122)
+    "mr-dep-v3".hash(&mut h);
     let cache = cache_dir().join(format!("mrdep-{:016x}.cjs", h.finish()));
     if let Ok(c) = std::fs::read_to_string(&cache) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
@@ -3138,7 +3233,10 @@ fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     // `__toESM(require(x), 1)` (node interop for ESM `import default`) sets `.default` to the
     // whole module, so `import styled from '@emotion/styled'` yields the exports object instead
     // of the styled function (breaking flux-ui etc.).
-    let code = postprocess_mr_cjs(String::from_utf8(out.stdout).ok()?);
+    let code = fill_import_meta(
+        postprocess_mr_cjs(String::from_utf8(out.stdout).ok()?),
+        Some(&root),
+    );
     write_atomic(&cache, &code);
     Some(code)
 }
@@ -3238,7 +3336,7 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
             }
         }
     }
-    let raw = with_binder(abs, std::fs::read_to_string(abs).ok()?, false);
+    let raw = with_binder(abs, read_app_source(abs)?, false);
     if !crate::transform::needs_transform(abs) {
         if crate::location::is_entry(abs) {
             crate::location::set_identity(abs);
@@ -3959,6 +4057,7 @@ fn load_cjs_inner<'s>(
     }
 
     let final_exports = module_obj.get(scope, exports_key.into())?;
+    mark_external_cjs(scope, global, abs, final_exports);
     let names = object_keys(scope, global, final_exports);
     let exports_global = v8::Global::new(scope, final_exports);
     let synth = make_synthetic(scope, &names)?;
@@ -3975,6 +4074,48 @@ fn load_cjs_inner<'s>(
         reg.path_by_hash.insert(hash, abs.to_path_buf());
     });
     Some(())
+}
+
+/// A package's CommonJS `module.exports` with its own `default` and no `__esModule` goes into
+/// runtime.js's `__ttExternalCjs`: `import X from` it gives the whole `module.exports`, as vitest
+/// imports an external through Node; an app CommonJS file's own `default` stays its default,
+/// as vitest's inlined-module interop gives it (turbo-test#122).
+fn mark_external_cjs<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    global: v8::Local<'s, v8::Object>,
+    abs: &Path,
+    exports: v8::Local<'s, v8::Value>,
+) {
+    if !abs.components().any(|c| c.as_os_str() == "node_modules") {
+        return;
+    }
+    let Ok(obj) = v8::Local::<v8::Object>::try_from(exports) else {
+        return;
+    };
+    let (Some(dkey), Some(ekey), Some(skey), Some(add)) = (
+        v8::String::new(scope, "default"),
+        v8::String::new(scope, "__esModule"),
+        v8::String::new(scope, "__ttExternalCjs"),
+        v8::String::new(scope, "add"),
+    ) else {
+        return;
+    };
+    if !obj.has(scope, dkey.into()).unwrap_or(false) || obj.has(scope, ekey.into()).unwrap_or(true)
+    {
+        return;
+    }
+    let Some(set) = global
+        .get(scope, skey.into())
+        .and_then(|s| v8::Local::<v8::Object>::try_from(s).ok())
+    else {
+        return;
+    };
+    if let Some(f) = set
+        .get(scope, add.into())
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok())
+    {
+        f.call(scope, set.into(), &[exports]);
+    }
 }
 
 fn object_keys(
@@ -4039,12 +4180,14 @@ fn synth_eval<'s>(
             && !is_asset(&path)
             && path.extension().and_then(|e| e.to_str()) != Some("json");
         let names = reg.cjs_export_names.get(&path).cloned().unwrap_or_default();
-        Some((exports, names, is_mock))
+        let app_cjs =
+            !path.components().any(|c| c.as_os_str() == "node_modules") && !path.starts_with("<");
+        Some((exports, names, is_mock, app_cjs))
     });
     // A module whose exports were dropped (a reused isolate's reset) fails its importer's
     // evaluation: evaluation steps that return nothing without an exception abort V8
     // (`Check failed: has_exception()`, turbo-test#79).
-    let Some((exports_g, names, is_mock)) = entry else {
+    let Some((exports_g, names, is_mock, app_cjs)) = entry else {
         throw(
             scope,
             "turbo-test: an imported module was unloaded before it was evaluated",
@@ -4054,10 +4197,24 @@ fn synth_eval<'s>(
     let exports = v8::Local::new(scope, &exports_g);
     let dkey = v8::String::new(scope, "default")?;
     // A mock's (factory result's / automock's) own `default` key IS its default export (vitest,
-    // and the module runner's interop); otherwise the whole object is (CJS `module.exports`).
+    // and the module runner's interop). For CommonJS the whole `module.exports` is, except that
+    // vitest's interop (`interopModule`) takes `exports.default` of one marked `__esModule` (tsc /
+    // babel output) that has a `default` (turbo-test#122).
+    // An app CommonJS file (vitest inlines it) has its own `default` as its default either way.
+    let esm_marked = |scope: &mut v8::PinScope<'s, '_>, o: v8::Local<v8::Object>| {
+        let k = v8::String::new(scope, "__esModule").unwrap();
+        (app_cjs || o.has(scope, k.into()).unwrap_or(false))
+            && o.has(scope, dkey.into()).unwrap_or(false)
+    };
     let default = v8::Local::<v8::Object>::try_from(exports)
         .ok()
-        .filter(|o| is_mock && o.has_own_property(scope, dkey.into()).unwrap_or(false))
+        .filter(|o| {
+            if is_mock {
+                o.has_own_property(scope, dkey.into()).unwrap_or(false)
+            } else {
+                esm_marked(scope, *o)
+            }
+        })
         .and_then(|o| o.get(scope, dkey.into()))
         .unwrap_or(exports);
     module.set_synthetic_module_export(scope, dkey, default)?;
@@ -4259,6 +4416,18 @@ fn factory_bindings(entry: &Path, src: &str, mr: bool) -> Vec<crate::mock_scope:
 
 /// `src` of the file `abs` as it loads: the test file gets the binder statement that hands its
 /// factories' bindings to the runtime, on a line of its own at the end (so no position moves).
+/// An app module's source as vite's transform sees it: `import.meta.glob` calls expanded against
+/// the file system (src/import_glob.rs, turbo-test#130), the vitest root (the working directory)
+/// the base of `/` patterns. node_modules are read as they are (vitest externalizes them).
+fn read_app_source(file: &Path) -> Option<String> {
+    let src = std::fs::read_to_string(file).ok()?;
+    if file.components().any(|c| c.as_os_str() == "node_modules") {
+        return Some(src);
+    }
+    let root = std::env::current_dir().ok()?;
+    Some(crate::import_glob::expand(file, &src, &root).unwrap_or(src))
+}
+
 fn with_binder(abs: &Path, src: String, mr: bool) -> String {
     if !TEST_FILE.with(|f| *f.borrow() == abs) {
         return src;
@@ -4943,6 +5112,12 @@ fn load_graph<'s>(
     // App code authored for the CJS world (NestJS seed runners, country-config loaders) reads them
     // at top level, so inject Node-CJS-equivalent module-local bindings when referenced.
     let raw = inject_dirname_esm(abs, &raw).unwrap_or(raw);
+    // vi.spyOn on an app module's namespace sets its export (turbo-test#131)
+    let raw = if abs.components().any(|c| c.as_os_str() == "node_modules") {
+        raw
+    } else {
+        crate::esm_spy::spyable(abs, &raw).unwrap_or(raw)
+    };
     let code = v8::String::new(scope, &raw)?;
     let name = v8::String::new(scope, &abs.to_string_lossy())?;
     let origin = module_origin(scope, name);
@@ -5225,19 +5400,27 @@ extern "C" fn import_meta_callback(
     v8::scope!(let scope, scope);
     let hash = module.get_identity_hash().get();
     let path = REGISTRY.with(|r| r.borrow().path_by_hash.get(&hash).cloned());
-    let url = path
-        .as_ref()
-        .map(|p| file_url(p))
-        .unwrap_or_else(|| "file:///<unknown>".to_string());
-    let k = v8::String::new(scope, "url").unwrap();
-    let v = v8::String::new(scope, &url).unwrap();
-    meta.create_data_property(scope, k.into(), v.into());
-    // Node 20.11+/vitest also expose the file's path and directory
-    if let Some(p) = &path {
-        let dir = p.parent().unwrap_or(p);
-        for (name, val) in [("filename", p.as_path()), ("dirname", dir)] {
-            let k = v8::String::new(scope, name).unwrap();
-            let v = v8::String::new(scope, &val.to_string_lossy()).unwrap();
+    // vitest's members (filename / dirname / url / env / resolve / glob / main, the test file's
+    // `vitest`), as the CJS paths' __ttImportMeta: runtime.js fills V8's object (turbo-test#123,
+    // #130)
+    let global = context.global(scope);
+    let name = v8::String::new(scope, "__ttFillImportMeta").unwrap();
+    let fill = global
+        .get(scope, name.into())
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok());
+    match (path, fill) {
+        (Some(p), Some(fill)) => {
+            let file = v8::String::new(scope, &p.to_string_lossy()).unwrap();
+            let undefined = v8::undefined(scope).into();
+            fill.call(scope, undefined, &[meta.into(), file.into()]);
+        }
+        (p, _) => {
+            let url = p
+                .as_ref()
+                .map(|p| file_url(p))
+                .unwrap_or_else(|| "file:///<unknown>".to_string());
+            let k = v8::String::new(scope, "url").unwrap();
+            let v = v8::String::new(scope, &url).unwrap();
             meta.create_data_property(scope, k.into(), v.into());
         }
     }
@@ -6636,6 +6819,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         }
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
 
+        set_ssr_env(scope, &entry_abs);
         let result = 'work: {
             // 0. DOM environment (turbo-dom) — only for files that need it, so pure-logic
             //    tests keep their clean globals (mirrors vitest per-file environment).
@@ -6892,6 +7076,7 @@ fn run_test_file_reused(
         }
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
 
+        set_ssr_env(scope, entry_abs);
         let result: Result<TestReport, String> = 'work: {
             // DOM: install once per worker; subsequent files reset it via env.reset() above.
             if needs_dom(entry_abs) && !DOM_INSTALLED.with(|d| d.get()) {
@@ -7133,7 +7318,7 @@ fn drive_tests_bounded(
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
         let js = format!(
-            "globalThis.__ttFile = {:?}; globalThis.__ttFileName = {};",
+            "globalThis.__ttFile = {:?}; globalThis.__ttFileName = {}; globalThis.__ttMetaOfTestFile?.();",
             entry_abs.to_string_lossy(),
             json_string(&task_file_name(entry_abs, &root))
         );
