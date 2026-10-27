@@ -328,21 +328,28 @@ fn transient_and_fresh_isolate_retries() {
         &logging("partial", &format!("{PASS}\n{FAIL}")),
     );
     p.file("pass.test.ts", &logging("pass", PASS));
+    // fails with a TypeError, not an assertion: under reuse that may be a reuse artifact
+    p.file(
+        "throws.test.ts",
+        &logging("throws", "test('t', () => { (null as any).x })"),
+    );
     let count = |p: &Project, tag: &str| log(p).iter().filter(|l| *l == tag).count();
+    let counts = |p: &Project| {
+        (
+            count(p, "fail"),
+            count(p, "partial"),
+            count(p, "pass"),
+            count(p, "throws"),
+        )
+    };
 
-    // fresh isolates: an all-failing file is re-run twice (3 evaluations); others once
+    // fresh isolates: every file runs once, an all-failing one too (turbo-test#144)
     let r = tt(&p, &["--isolate", "--jobs", "1"]);
     assert_eq!(r.code, Some(1), "{}", r.all());
-    assert_eq!(
-        (count(&p, "fail"), count(&p, "partial"), count(&p, "pass")),
-        (3, 1, 1),
-        "{:?} {}",
-        log(&p),
-        r.all()
-    );
+    assert_eq!(counts(&p), (1, 1, 1, 1), "{:?} {}", log(&p), r.all());
 
-    // isolate reuse (vitest isolate:false, turbo-test#126): every file runs once and its report
-    // is final — no same-isolate retry, no fresh-isolate re-run of a failing file
+    // isolate reuse (vitest isolate:false, turbo-test#126): an assertion failure is final — no
+    // same-isolate retry, no fresh-isolate re-run; the TypeError gets one fresh-isolate run
     std::fs::remove_file(p.path("run.log")).unwrap();
     let r = tt(&p, &["--no-isolate", "--jobs", "1"]);
     assert_eq!(r.code, Some(1), "{}", r.all());
@@ -350,24 +357,23 @@ fn transient_and_fresh_isolate_retries() {
         r.stdout
             .contains("FAIL  fail.test.ts  (0 passed, 1 failed)")
             && r.stdout
-                .contains("FAIL  partial.test.ts  (1 passed, 1 failed)"),
+                .contains("FAIL  partial.test.ts  (1 passed, 1 failed)")
+            && r.stdout
+                .contains("FAIL  throws.test.ts  (0 passed, 1 failed)"),
         "{}",
         r.all()
     );
-    assert_eq!(
-        (count(&p, "fail"), count(&p, "partial"), count(&p, "pass")),
-        (1, 1, 1),
-        "{:?} {}",
-        log(&p),
-        r.all()
-    );
+    assert_eq!(counts(&p), (1, 1, 1, 2), "{:?} {}", log(&p), r.all());
 
-    // --isolate wins over a config `isolate: false`
+    // --isolate wins over a config `isolate: false`: no fresh-isolate re-run of the TypeError
     p.file(
         "vitest.config.ts",
         "export default { test: { isolate: false } }\n",
     );
     std::fs::remove_file(p.path("run.log")).unwrap();
-    tt(&p, &["--isolate", "--jobs", "1", "fail.test.ts"]);
-    assert_eq!(count(&p, "fail"), 3);
+    tt(&p, &["--isolate", "--jobs", "1", "throws.test.ts"]);
+    assert_eq!(count(&p, "throws"), 1);
+    std::fs::remove_file(p.path("run.log")).unwrap();
+    tt(&p, &["--jobs", "1", "throws.test.ts"]);
+    assert_eq!(count(&p, "throws"), 2);
 }

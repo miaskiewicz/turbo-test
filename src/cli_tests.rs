@@ -540,33 +540,21 @@ fn json_names_and_history_keys_are_absolute() {
 
 #[test]
 fn transient_score_and_fail_predicates() {
+    // only a file that did not run its tests is transient; no report is (turbo-test#144)
     let dom = TestReport {
-        passed: 3,
+        passed: 0,
         failed: 1,
         failures: vec!["t: document is not defined".into()],
         ..Default::default()
     };
-    assert!(looks_transient(&Ok(report(0, 2))));
-    assert!(looks_transient(&Ok(dom)));
-    for f in ["window is not defined", "DOM is not defined"] {
-        let r = TestReport {
-            passed: 1,
-            failed: 1,
-            failures: vec![f.into()],
-            ..Default::default()
-        };
-        assert!(looks_transient(&Ok(r)), "{f}");
-    }
-    let other = TestReport {
-        passed: 1,
-        failed: 1,
-        failures: vec!["foo is not defined".into(), "document mismatch".into()],
-        ..Default::default()
-    };
-    assert!(!looks_transient(&Ok(other)));
+    assert!(!looks_transient(&Ok(dom)));
+    assert!(!looks_transient(&Ok(report(0, 2))));
     assert!(!looks_transient(&Ok(report(1, 1))));
     assert!(!looks_transient(&Ok(report(0, 0))));
     assert!(looks_transient(&Err("load".into())));
+    assert!(!looks_transient(&Err(crate::heap_guard::oom_message(
+        256 << 20
+    ))));
 
     assert_eq!(score(&Ok(report(2, 3))), 1997);
     assert_eq!(score(&Err("e".into())), i64::MIN);
@@ -684,31 +672,22 @@ fn partial_failure_is_not_retried_without_reuse() {
 }
 
 #[test]
-fn all_failing_file_retried_twice_keeping_best() {
-    // attempt 2 is better (1 pass) and not transient → loop stops after it
+fn load_error_retries_keep_the_best_attempt() {
+    // a later report beats the load error; the loop stops at the first report
     let s = Script::new(
-        vec![Ok(report(0, 2)), Ok(report(1, 1)), Ok(report(5, 0))],
+        vec![Err("load".into()), Ok(report(0, 1)), Ok(report(5, 0))],
         vec![],
         false,
     );
-    let r = exec(&s).unwrap();
-    assert_eq!((r.passed, r.failed), (1, 1));
+    assert_eq!(exec(&s).unwrap().failed, 1);
     assert_eq!(s.calls(), (2, 0));
-    // always failing: 3 attempts, the best (fewest failures) wins
+    // three load errors: the first is kept
     let s = Script::new(
-        vec![Ok(report(0, 3)), Ok(report(0, 1)), Ok(report(0, 2))],
+        vec![Err("first".into()), Err("second".into())],
         vec![],
         false,
     );
-    assert_eq!(exec(&s).unwrap().failed, 1);
-    assert_eq!(s.calls(), (3, 0));
-    // a later, worse attempt does not replace the earlier one
-    let s = Script::new(
-        vec![Ok(report(0, 1)), Err("load".into()), Ok(report(0, 4))],
-        vec![],
-        false,
-    );
-    assert_eq!(exec(&s).unwrap().failed, 1);
+    assert_eq!(exec(&s).unwrap_err(), "first");
     assert_eq!(s.calls(), (3, 0));
 }
 
@@ -781,13 +760,16 @@ fn reuse_error_adopts_fresh_result() {
     let r = exec(&s).unwrap();
     assert_eq!((r.passed, r.failed), (1, 2));
     assert_eq!(s.calls(), (3, 1));
-    // a transient fresh result is re-run up to twice more, keeping the best
+    // a fresh load error is re-run up to twice more, stopping at the first report
     let s = Script::new(
         vec![Err("load".into())],
         vec![Err("x".into()), Ok(report(0, 1)), Ok(report(0, 3))],
         true,
     );
     assert_eq!(exec(&s).unwrap().failed, 1);
+    assert_eq!(s.calls(), (3, 2));
+    let s = Script::new(vec![Err("load".into())], vec![Err("x".into())], true);
+    assert_eq!(exec(&s).unwrap_err(), "x");
     assert_eq!(s.calls(), (3, 3));
     let s = Script::new(
         vec![Err("load".into())],
@@ -911,7 +893,6 @@ fn reuse_keeps_a_final_report_and_retries_the_rest_fresh() {
 }
 
 #[test]
-#[ignore = "turbo-test#144: fails until the fix"]
 fn a_report_is_never_rerun_on_the_same_kind_of_isolate() {
     // vitest runs a file once: a file whose tests all fail (or one that mentions an undefined
     // `document`) is reported from its one run, with fresh isolates too (turbo-test#144)

@@ -53,7 +53,7 @@ for (const [label, args] of [['isolate: false in the config', []], ['--no-isolat
 
 // turbo-test#144: with a fresh isolate per file, a file whose every test fails was re-run twice
 // more ("transient" retry). vitest runs it once.
-test('a file whose tests all fail runs once with fresh isolates (--isolate)', { todo: 'turbo-test#144: fails until the fix' }, () => {
+test('a file whose tests all fail runs once with fresh isolates (--isolate)', () => {
   check(run(['--isolate']));
 });
 

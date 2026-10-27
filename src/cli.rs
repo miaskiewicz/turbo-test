@@ -482,19 +482,14 @@ pub fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "panic".into())
 }
 
-/// The shared turbo-dom .node addon stores a process-global env that a concurrent worker's DOM
-/// bootstrap can transiently clobber → "document is not defined" for a whole file. A whole file
-/// failing (0 passed, ≥1 failed), an explicit DOM-not-ready error, or a load error is the
-/// init-race signature worth re-running.
+/// Whether a file is worth re-running on the same kind of isolate: only a file that did not run
+/// its tests (a load error, a panic). A report — however many of its tests failed — is what
+/// vitest reports from its one run of the file (turbo-test#144); the old all-failing /
+/// "document is not defined" heuristic guarded a DOM init race in the shared turbo-dom `.node`
+/// addon, which the in-process turbo-dom-browser-env binding does not have.
 pub fn looks_transient(r: &FileOutcome) -> bool {
     match r {
-        Ok(rep) => {
-            (rep.passed == 0 && rep.failed > 0)
-                || rep.failures.iter().any(|f| {
-                    f.contains("is not defined")
-                        && (f.contains("document") || f.contains("window") || f.contains("DOM"))
-                })
-        }
+        Ok(_) => false,
         // A file the heap guard stopped: same-mode retries would only run out of memory again
         // (under reuse the fresh-isolate retry below still gives it a clean heap).
         Err(e) => !crate::heap_guard::is_oom(e),
@@ -528,8 +523,8 @@ pub fn reuse_result_is_final(r: &FileOutcome) -> bool {
             .all(|t| !t.errors.is_empty() && t.errors.iter().all(|e| e.name == "AssertionError"))
 }
 
-/// Run one file: panic-guarded, re-run up to 2 more times while the result looks transient
-/// (keeping the best attempt), then — under isolate reuse, unless the result is final
+/// Run one file: panic-guarded, re-run up to 2 more times while it did not run its tests
+/// ([`looks_transient`], keeping the best attempt), then — under isolate reuse, unless the result is final
 /// ([`reuse_result_is_final`]) — re-run on a fresh isolate whose (best-of-3) result is
 /// authoritative.
 pub fn execute_file(engine: &Engine, file: &Path) -> FileOutcome {
@@ -543,15 +538,13 @@ pub fn execute_file(engine: &Engine, file: &Path) -> FileOutcome {
                 Err(format!("panicked: {}", panic_message(&*p)))
             }
         };
-    // Re-run (up to 3x) and KEEP THE BEST attempt — a flaky file lands a clean pass on some
-    // attempt; a genuinely all-failing file stays the same (just slower). This keeps the suite
-    // deterministic across runs.
+    // A file that did not run its tests is re-run (up to 3x), keeping the best attempt. A report
+    // never is (turbo-test#144) — under reuse a second run on the reused isolate would also find
+    // the file's module already evaluated and collect no tests ("No test suite found").
     let mut r = run_once();
     let mut tries = 0;
-    // Under reuse a report is never re-run on the reused isolate: the file's module is already
-    // evaluated there, so a second run collects no tests ("No test suite found").
     let reuse = (engine.reuse_enabled)();
-    while looks_transient(&r) && tries < 2 && !(reuse && r.is_ok()) {
+    while looks_transient(&r) && tries < 2 {
         tries += 1;
         let r2 = run_once();
         if score(&r2) > score(&r) {

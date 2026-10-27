@@ -5,7 +5,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
-### Performance — a failing file runs once under isolate reuse (K1, turbo-test#126)
+### Performance — a failing file runs once (K1, turbo-test#126, #144)
 - Under isolate reuse (vitest `isolate: false`, or `--no-isolate`) every file with a failure —
   or with nothing passed — was run a second time on a fresh isolate and that result reported,
   doubling the cost of each failing file (a profiling hotspot in #79). vitest runs each file
@@ -18,6 +18,12 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   (an out-of-memory file is still not retried on the same kind of isolate, turbo-test#124). `test/compat-reuse-retry.test.mjs`
   pins the outcome and the run count against vitest 4.1.12 on `fixtures/reuse-fail-once`
   (`tests/data/reuse-fail-once-vitest-4.1.12.json`).
+- A file whose tests all fail runs once (turbo-test#144). Any report with 0 passed and ≥1 failed
+  (or a "document / window / DOM is not defined" failure) was re-run twice more on the same kind
+  of isolate, isolated or not, and the best attempt kept — a guard for a DOM init race in the old
+  shared turbo-dom `.node` addon, which the in-process turbo-dom-browser-env binding does not
+  have. vitest runs the file once; now only a file that did not run its tests (a load error, a
+  panic) is retried. The same test pins it with `--isolate` (vitest's report is identical).
 
 ### Fixed
 - Config discovery (turbo-test#43 item 1): `setupFiles` are read from every config file vitest
