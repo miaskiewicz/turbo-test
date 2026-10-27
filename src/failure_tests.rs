@@ -54,7 +54,7 @@ fn errors_print_as_vitest_print_error() {
     assert_eq!(
         print_error(&e, root),
         "AssertionError: expected 1 to be 2\n\n- Expected\n+ Received\n\n- 2\n+ 1\n\n \
-         ❯ a.test.ts:5:35\n ❯ helper /elsewhere/h.ts:2:9\n\nCaused by: TypeError: inner\n ❯ a.test.ts:6:1"
+         ❯ a.test.ts:5:35\n ❯ dep node_modules/d/i.js:1:1\n ❯ helper /elsewhere/h.ts:2:9\n\nCaused by: TypeError: inner\n ❯ a.test.ts:6:1"
     );
     // no diff, no frames
     let bare = ErrorInfo {
@@ -84,5 +84,74 @@ fn anonymous_async_frames_keep_their_location() {
             frame("", "/p/x y.test.js", 7, 12),
             frame("fn", "/p/h.ts", 2, 5),
         ]
+    );
+}
+
+#[test]
+fn eval_frames_point_at_the_eval_origin() {
+    // turbo-test#175: a frame in code from `eval` / `new Function` is
+    // `at fn (eval at <caller> (<origin>), <anonymous>:L:C)`; vitest's parseSingleV8Stack drops
+    // the `(eval at …` and the `, <anonymous>:L:C` parts, so the frame is the eval's origin
+    // (a nested eval's location keeps a `)` and is dropped, as vitest drops it)
+    let stack = "Error: late\n\
+                 \x20   at eval (eval at <anonymous> (/p/afail.test.js:2:14), <anonymous>:3:41)\n\
+                 \x20   at f (eval at <anonymous> (file:///p/e.test.js:3:3), <anonymous>:2:9)\n\
+                 \x20   at async eval (eval at run (/p/r.js:7:5), <anonymous>:1:1)\n\
+                 \x20   at g (eval at h (eval at <anonymous> (/p/n.js:4:2)), <anonymous>:1:1)\n\
+                 \x20   at eval code (eval code:1:1)\n\
+                 \x20   at eval (<anonymous>:1:1)\n\
+                 \x20   at /p/afail.test.js:4:3";
+    assert_eq!(
+        parse_stack(stack),
+        vec![
+            frame("eval", "/p/afail.test.js", 2, 14),
+            frame("f", "/p/e.test.js", 3, 3),
+            frame("eval", "/p/r.js", 7, 5),
+            frame("", "/p/afail.test.js", 4, 3),
+        ]
+    );
+}
+
+#[test]
+fn stacks_drop_only_vitests_ignored_frames() {
+    // turbo-test#173: vitest's parseStacktrace leaves out the frames its `stackIgnorePatterns`
+    // match (its own packages, chai, tinyspy, node internals) and keeps a dependency's
+    let at = |file: &str| format!("    at f ({file}:1:1)");
+    let ignored = [
+        "/p/node_modules/chai/index.js",
+        "/p/node_modules/tinyspy/dist/index.js",
+        "/p/node_modules/@vitest/runner/dist/index.js",
+        "/p/node_modules/vitest/dist/chunks/x.js",
+        "/p/vitest/src/x.js",
+        "/p/packages/runner/dist/index.js",
+        "/p/node_modules/vite/dist/node/module-runner.js",
+        "/p/node_modules/rolldown-vite/dist/node/module-runner.js",
+        "/p/node_modules/.vite/deps/chunk-AB.js",
+        "/p/node_modules/.vite/deps/@vitest_x.js",
+        "/p/node_modules/.vite/deps/loupe.js",
+        "/p/node_modules/.vite/deps/chai.js",
+        "/p/node_modules/.vite/deps/vitest_x.js",
+        "/p/node_modules/@vitest/browser-playwright/dist/locators.js",
+        "/p/node_modules/@vitest/browser-webdriverio/dist/locators.js",
+        "/p/node_modules/@vitest/browser-preview/dist/locators.js",
+        "/p/x/node:internal/x.js",
+        "/p/node:fs/x.js",
+        "/p/__vitest_test__/x.js",
+        "/p/__vitest_browser__/x.js",
+        "/p/@id/__x00__vitest/browser.js",
+    ];
+    let kept = [
+        "/p/node_modules/k6dep/index.js",
+        "/p/node_modules/chai-x/index.js",
+        "/p/packages/dist/index.js",
+        "/p/packages/a-b/dist/index.js",
+        "/p/node_modules/@vitest/x/lib/index.js",
+        "/p/node:/x.js",
+        "/p/a.test.js",
+    ];
+    let stack: Vec<String> = ignored.iter().chain(&kept).map(|f| at(f)).collect();
+    assert_eq!(
+        parse_stack(&stack.join("\n")),
+        kept.iter().map(|f| frame("f", f, 1, 1)).collect::<Vec<_>>()
     );
 }
