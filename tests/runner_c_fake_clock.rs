@@ -56,7 +56,6 @@ test('Date.now under fake timers does not move while awaiting real time', async 
 "#;
 
 #[test]
-#[ignore = "turbo-test#168: fails until the fix"]
 fn fake_timers_fire_only_when_the_fake_clock_advances() {
     let p = Project::new("rc-fake-clock");
     p.file("package.json", r#"{ "type": "module" }"#);
@@ -124,10 +123,104 @@ fn fake_timers_fire_only_when_the_fake_clock_advances() {
         assert_eq!(r.code, Some(1), "{}", r.all());
     }
     // the human reporter names the timeout, as vitest's does
-    let r = turbo_test(&p.dir, &["fake.test.js"], &[("TURBO_LEGACY_REPORTER", "0")]);
+    let r = turbo_test(
+        &p.dir,
+        &["fake.test.js"],
+        &[("TURBO_LEGACY_REPORTER", "0"), ("NO_COLOR", "1")],
+    );
     assert!(
         r.all().contains("Error: Test timed out in 300ms."),
         "{}",
         r.all()
     );
+}
+
+/// Rows recorded from vitest 4.1.12 (all pass there): vitest fakes the global timer functions
+/// only, so node:timers, node:timers/promises and a setImmediate captured before
+/// `useFakeTimers` stay on the real clock; `vi.waitFor` advances fake timers by its interval;
+/// the `*Async` advance functions yield a real macrotask around each timer, so timers set by
+/// promise callbacks run, the sync ones do not; `setSystemTime` moves Date and leaves pending
+/// timers due where they were; a second `useFakeTimers` starts a fresh clock.
+const REAL_AND_ASYNC: &str = r#"import { test, expect, vi, afterEach } from 'vitest'
+import { setTimeout as sleep } from 'node:timers/promises'
+import * as timers from 'node:timers'
+const capturedImmediate = setImmediate
+afterEach(() => { vi.useRealTimers() })
+test('node:timers and a captured setImmediate stay real', async () => {
+  vi.useFakeTimers()
+  await sleep(10)
+  const log = []
+  await new Promise((r) => timers.setTimeout(() => { log.push('timers'); r() }, 10))
+  await new Promise((r) => capturedImmediate(() => { log.push('captured'); r() }))
+  expect([log, vi.getTimerCount(), setTimeout === timers.setTimeout, typeof setTimeout.clock]).toEqual([['timers', 'captured'], 0, false, 'object'])
+  vi.useRealTimers()
+  expect([setTimeout === timers.setTimeout, setTimeout.clock]).toEqual([true, undefined])
+}, 500)
+test('waitFor advances fake timers by its interval', async () => {
+  vi.useFakeTimers()
+  let done = false
+  setTimeout(() => { done = true }, 120)
+  const t0 = Date.now()
+  await vi.waitFor(() => { if (!done) throw new Error('no') }, { interval: 50, timeout: 1000 })
+  expect(Date.now() - t0).toBe(150)
+})
+test('the async advance functions run timers set by promise callbacks', async () => {
+  vi.useFakeTimers()
+  const log = []
+  const chain = async (tag) => { await new Promise((r) => setTimeout(r, 10)); log.push(tag + 1); await new Promise((r) => setTimeout(r, 10)); log.push(tag + 2) }
+  chain('a')
+  await vi.advanceTimersByTimeAsync(20)
+  chain('b')
+  await vi.runAllTimersAsync()
+  chain('c')
+  await vi.advanceTimersToNextTimerAsync()
+  expect([log, vi.getTimerCount()]).toEqual([['a1', 'a2', 'b1', 'b2', 'c1'], 1])
+  await vi.runOnlyPendingTimersAsync()
+  expect(log).toEqual(['a1', 'a2', 'b1', 'b2', 'c1', 'c2'])
+})
+test('the sync advance runs only timers already set', async () => {
+  vi.useFakeTimers()
+  const log = []
+  const chain = async () => { await new Promise((r) => setTimeout(r, 10)); log.push(1); await new Promise((r) => setTimeout(r, 10)); log.push(2) }
+  chain()
+  vi.advanceTimersByTime(20)
+  await null
+  await null
+  expect([log, vi.getTimerCount()]).toEqual([[1], 1])
+})
+test('setSystemTime moves Date, not the pending fake timers', () => {
+  vi.useFakeTimers()
+  let fired = 0
+  setTimeout(() => { fired++ }, 100)
+  vi.setSystemTime(new Date('2020-01-01T00:00:00Z'))
+  vi.advanceTimersByTime(99)
+  expect([fired, new Date().toISOString()]).toEqual([0, '2020-01-01T00:00:00.099Z'])
+  vi.advanceTimersByTime(1)
+  expect(fired).toBe(1)
+})
+test('useFakeTimers again starts a fresh clock', () => {
+  vi.useFakeTimers()
+  let fired = 0
+  setTimeout(() => { fired++ }, 10)
+  vi.useFakeTimers()
+  expect(vi.getTimerCount()).toBe(0)
+  vi.advanceTimersByTime(20)
+  expect(fired).toBe(0)
+})
+"#;
+
+#[test]
+fn fake_timers_leave_node_timers_real_and_yield_in_the_async_functions() {
+    let p = Project::new("rc-fake-clock-async");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file("nodet.test.js", REAL_AND_ASYNC);
+    for reuse in ["0", "1"] {
+        let r = turbo_test(
+            &p.dir,
+            &["nodet.test.js"],
+            &[("TURBO_REUSE_ISOLATE", reuse)],
+        );
+        assert_eq!(r.code, Some(0), "reuse={reuse}\n{}", r.all());
+        assert!(r.all().contains("6 passed"), "reuse={reuse}\n{}", r.all());
+    }
 }
