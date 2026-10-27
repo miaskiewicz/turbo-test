@@ -412,7 +412,14 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
     }
     get(k) { const e = this._.find((p) => p[0] === k); return e ? e[1] : null; }
     getAll(k) { return this._.filter((p) => p[0] === k).map((p) => p[1]); }
-    set(k, v) { this._ = this._.filter((p) => p[0] !== k); this._.push([k, String(v)]); this._update(); }
+    // the first pair of the name takes the value in place and the others go; a new name is
+    // appended (WHATWG; turbo-test#116)
+    set(k, v) {
+      const i = this._.findIndex((p) => p[0] === k);
+      if (i < 0) this._.push([k, String(v)]);
+      else { this._[i][1] = String(v); this._ = this._.filter((p, j) => j <= i || p[0] !== k); }
+      this._update();
+    }
     append(k, v) { this._.push([k, String(v)]); this._update(); }
     has(k) { return this._.some((p) => p[0] === k); }
     delete(k) { this._ = this._.filter((p) => p[0] !== k); this._update(); }
