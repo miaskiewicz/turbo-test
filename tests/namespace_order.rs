@@ -58,13 +58,11 @@ fn assert_passes(p: &Project, env: &[(&str, &str)]) {
 }
 
 #[test]
-#[ignore = "turbo-test#159: fails until the fix"]
 fn namespace_order_and_tag_on_the_module_runner() {
     assert_passes(&project("ns-order-mr", true), &[]);
 }
 
 #[test]
-#[ignore = "turbo-test#159: fails until the fix"]
 fn namespace_order_and_tag_on_the_module_runner_with_esbuild() {
     assert_passes(
         &project("ns-order-esbuild", true),

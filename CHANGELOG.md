@@ -47,6 +47,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `require()` of an ES module from CommonJS has Node's enumerable `__esModule: true`; an
   automock of a package's CommonJS module mocks Node's namespace (`import { Comp }` reads
   `undefined`, #136).
+- A package's ES module's namespace lists Node's sorted names on the module runner too, as
+  vitest imports a package through Node (turbo-test#159; app modules keep source order, #141).
+  On the ESM graph loader `import()` of a `vi.mock` factory's module without `default` gives the
+  mock, whose `default` throws vitest's `No "default" export…` on every read, as `import * as`
+  does (turbo-test#158; it gave #137's stand-in function).
 - `require()` (and `createRequire`) resolves a dual package's `require` build and reads `main`
   before `module`, an import reads `main` before `module` too, as Node does for vitest
   (turbo-test#134): a CommonJS consumer requiring a dual package got its ES build's exports

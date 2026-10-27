@@ -10,9 +10,18 @@ use common::{turbo_test, Project};
 fn project(name: &str, esbuild: bool) -> Project {
     let p = Project::new(name);
     p.file("package.json", "{\"type\":\"module\"}\n");
-    p.file("dep.ts", "export default 1;\nexport const named = 'real';\n");
-    p.file("node_modules/pkg/package.json", "{\"name\":\"pkg\",\"main\":\"index.js\"}\n");
-    p.file("node_modules/pkg/index.js", "module.exports = { named: 'real' };\n");
+    p.file(
+        "dep.ts",
+        "export default 1;\nexport const named = 'real';\n",
+    );
+    p.file(
+        "node_modules/pkg/package.json",
+        "{\"name\":\"pkg\",\"main\":\"index.js\"}\n",
+    );
+    p.file(
+        "node_modules/pkg/index.js",
+        "module.exports = { named: 'real' };\n",
+    );
     p.file(
         "ns.test.ts",
         r#"import { expect, it, vi } from 'vitest';

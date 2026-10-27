@@ -2347,7 +2347,8 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
     // v4: import.meta (turbo-test#123); v5: `__toESM` is runtime.js's `__ttToESM` (turbo-test#122)
     // v6: package interop `__ttToESMDep`, Node's for a package Node runs as ES modules
     // (turbo-test#133)
-    "native-dep-v6-bundle".hash(&mut h);
+    // v7: package ES modules marked "pkg" (turbo-test#159)
+    "native-dep-v7-bundle".hash(&mut h);
     let node = is_esm_module(file);
     node.hash(&mut h);
     let cache = cache_dir().join(format!("ntvdep-{:016x}.cjs", h.finish()));
@@ -3185,7 +3186,7 @@ fn postprocess_mr_cjs(code: String) -> String {
 /// (esbuild passes Node's interop flag for a `.mjs` / `"type": "module"` file), its `export *`
 /// re-exports Node's namespace names when the package is one Node runs as ES modules (`node`).
 fn postprocess_mr_dep_cjs(code: String, node: bool) -> String {
-    postprocess_esbuild_cjs(
+    package_esm_mark(postprocess_esbuild_cjs(
         code,
         "var __toESM = (m, n) => globalThis.__ttToESMDep(m, n);",
         if node {
@@ -3193,6 +3194,16 @@ fn postprocess_mr_dep_cjs(code: String, node: bool) -> String {
         } else {
             "m"
         },
+    ))
+}
+
+/// A package's ES modules are marked `"pkg"` (runtime.js lists their namespace's names sorted,
+/// as Node's, which vitest imports a package through; turbo-test#159).
+fn package_esm_mark(code: String) -> String {
+    code.replacen(
+        "Symbol.for(\"turbo-test.esm\"), { value: true })",
+        "Symbol.for(\"turbo-test.esm\"), { value: \"pkg\" })",
+        1,
     )
 }
 
@@ -3258,20 +3269,21 @@ fn source_order_exports(code: String, order: &[String]) -> String {
 /// `postprocess_mr_dep_cjs`: Node's for a package Node runs as ES modules (`node`).
 fn dep_interop(code: String, node: bool) -> String {
     let n = if node { "1" } else { "0" };
-    code.replacen(
-        crate::esm_cjs::TO_ESM_HELPER,
-        &format!("var __toESM = (mod) => globalThis.__ttToESMDep(mod, {n});\n"),
-        1,
-    )
-    .replacen(
-        crate::esm_cjs::STAR_HELPER,
-        if node {
-            "var __toESMStar = (mod) => globalThis.__ttToESMDep(mod, 1);\n"
-        } else {
-            "var __toESMStar = (mod) => mod;\n"
-        },
-        1,
-    )
+    package_esm_mark(code)
+        .replacen(
+            crate::esm_cjs::TO_ESM_HELPER,
+            &format!("var __toESM = (mod) => globalThis.__ttToESMDep(mod, {n});\n"),
+            1,
+        )
+        .replacen(
+            crate::esm_cjs::STAR_HELPER,
+            if node {
+                "var __toESMStar = (mod) => globalThis.__ttToESMDep(mod, 1);\n"
+            } else {
+                "var __toESMStar = (mod) => mod;\n"
+            },
+            1,
+        )
 }
 
 /// The module-runner's lowered `import()` (esbuild's and esm_cjs's
@@ -3337,7 +3349,8 @@ fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     // v2: import.meta filled (turbo-test#123); v3: `__toESM` is runtime.js's `__ttToESM`
     // (turbo-test#122)
     // v4: package interop `__ttToESMDep`, `export *` of Node's names (turbo-test#133)
-    "mr-dep-v4".hash(&mut h);
+    // v5: package ES modules marked "pkg" (turbo-test#159)
+    "mr-dep-v5".hash(&mut h);
     let cache = cache_dir().join(format!("mrdep-{:016x}.cjs", h.finish()));
     if let Ok(c) = std::fs::read_to_string(&cache) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);

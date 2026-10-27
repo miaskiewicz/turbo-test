@@ -1372,6 +1372,17 @@ fn postprocess_mr_cjs_rewrites_esbuild_helpers() {
     let native = dep_interop(crate::esm_cjs::PREAMBLE.to_string(), true);
     assert!(native.contains("var __toESM = (mod) => globalThis.__ttToESMDep(mod, 1);\n"));
     assert!(native.contains("var __toESMStar = (mod) => globalThis.__ttToESMDep(mod, 1);\n"));
+    // a package's ES modules are marked "pkg" (turbo-test#159)
+    assert!(native.contains("Symbol.for(\"turbo-test.esm\"), { value: \"pkg\" })"));
+    assert!(postprocess_mr_dep_cjs(
+        "var __toCommonJS = (mod) => __copyProps(__defProp({}, \"__esModule\", { value: true }), mod);".to_string(),
+        false
+    )
+    .contains("Symbol.for(\"turbo-test.esm\"), { value: \"pkg\" })"));
+    assert!(!postprocess_mr_cjs(
+        "var __toCommonJS = (mod) => __copyProps(__defProp({}, \"__esModule\", { value: true }), mod);".to_string()
+    )
+    .contains("\"pkg\""));
     let native = dep_interop(crate::esm_cjs::PREAMBLE.to_string(), false);
     assert!(native.contains("var __toESM = (mod) => globalThis.__ttToESMDep(mod, 0);\n"));
     assert!(native.contains("var __toESMStar = (mod) => mod;\n"));

@@ -4216,7 +4216,12 @@ function __ttEsmNs(m) {
     v = new Proxy(m, {
       get: (t, k) => (k === '__esModule' ? undefined : k === Symbol.toStringTag ? 'Module' : Reflect.get(t, k, t)),
       has: (t, k) => k !== '__esModule' && k in t,
-      ownKeys: (t) => Reflect.ownKeys(t).filter((k) => k !== '__esModule'),
+      // a package's (marked "pkg"): Node's namespace, its names sorted (turbo-test#159)
+      ownKeys: (t) => {
+        const keys = Reflect.ownKeys(t).filter((k) => k !== '__esModule');
+        if (t[__ttEsmMark] !== 'pkg') return keys;
+        return [...keys.filter((k) => typeof k === 'string').sort(), ...keys.filter((k) => typeof k !== 'string')];
+      },
       getOwnPropertyDescriptor: (t, k) => (k === '__esModule' ? undefined : Reflect.getOwnPropertyDescriptor(t, k)),
     });
     __ttEsmViews.set(m, v);
