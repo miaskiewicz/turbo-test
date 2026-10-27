@@ -20,6 +20,15 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `url` / `filename` / `dirname` plus vitest's `env` (live `process.env`, `DEV` / `PROD` / `SSR`
   booleans), and `process.env` carries vite's `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` (`SSR`
   off under a `jsdom` / `happy-dom` environment), as vitest sets them.
+- `import.meta.resolve` / `main` / `glob` / `vitest` (turbo-test#130): every module's
+  `import.meta` was `url, filename, dirname, env` only. It now has vitest 4.1.12's members in its
+  order: `resolve` (Node's, from the module: relative paths and URLs against it, builtins as
+  `node:` URLs, packages by the ESM conditions, `ERR_MODULE_NOT_FOUND` otherwise), `main`
+  (`false`), `glob` and, in the test file, the non-enumerable `vitest`. A full-name
+  `import.meta.glob(...)` call with literal arguments is expanded before the module's transform,
+  as vite does (`src/import_glob.rs`: eager / lazy, `import`, negated and array patterns,
+  `exhaustive`, relative and `/`-root patterns, the module itself, dot files and `node_modules`
+  skipped); any other call throws vitest's "statically replaced" error.
 - Config discovery (turbo-test#43 item 1): `setupFiles` are read from every config file vitest
   resolves, in its order (`vitest.config` then `vite.config`, each `.ts .mts .cts .js .mjs
   .cjs`); `vitest.config.{cts,mjs,cjs}` and `vite.config.{mts,cts,js,mjs,cjs}` were ignored and

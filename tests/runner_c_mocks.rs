@@ -277,7 +277,6 @@ it('import.meta.env', () => {
 /// the non-enumerable `import.meta.vitest`. turbo-test gave `url, filename, dirname, env` only.
 /// vitest 4.1.12 on the same project: all 6 pass.
 #[test]
-#[ignore = "turbo-test#130: fails until the fix"]
 fn import_meta_resolve_main_and_glob_on_every_loader_path() {
     let files: [(&str, &str); 10] = [
         ("package.json", "{\"name\":\"rc-meta-members\",\"type\":\"module\"}\n"),

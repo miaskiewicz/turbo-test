@@ -1569,8 +1569,8 @@ globalThis.__pathToFileURL = (p) => {
 globalThis.__dirnameOf = (p) => { const s = String(p).replace(/\/+$/, ''); const i = s.lastIndexOf('/'); return i <= 0 ? '/' : s.slice(0, i); };
 // import.meta (turbo-test#123): the module runner's CJS output (native emit + dep bundler, esbuild
 // transforms) calls __ttImportMeta(<module path>) where the source said `import.meta` — one object
-// per module path, like vitest's (url / filename / dirname / env); the ESM graph's host callback
-// adds the same `env`. vitest's import.meta.env: process.env, read and written live, DEV / PROD /
+// per module path, like vitest's; the ESM graph's host callback fills V8's object with
+// __ttFillImportMeta. vitest's import.meta.env: process.env, read and written live, DEV / PROD /
 // SSR as booleans (vitest module-evaluator createImportMetaEnvProxy).
 const __ttMetaBool = ['DEV', 'PROD', 'SSR'];
 globalThis.__ttImportMetaEnv = new Proxy({}, {
@@ -1587,15 +1587,55 @@ globalThis.__ttImportMetaEnv = new Proxy({}, {
     return { value: globalThis.__ttImportMetaEnv[k], writable: true, enumerable: true, configurable: true };
   },
 });
-const __ttMetas = new Map();
-globalThis.__ttImportMeta = (filename) => {
-  let m = __ttMetas.get(filename);
-  if (!m) {
-    m = { url: globalThis.__pathToFileURL(filename).href, filename, dirname: globalThis.__dirnameOf(filename), env: globalThis.__ttImportMetaEnv };
-    __ttMetas.set(filename, m);
+// vitest 4.1.12's members (vite createNodeImportMeta, turbo-test#130), in its order: filename,
+// dirname, url, env, resolve (Node's import.meta.resolve from the module), glob (vite replaces a
+// full-name call at transform time, src/import_glob.rs; any other call throws), main (false), and
+// in the test file the non-enumerable `vitest` getter (in-source testing's vitest module).
+const __ttMetaGlob = { glob() { throw new Error('[module runner] "import.meta.glob" is statically replaced during file transformation. Make sure to reference it by the full name.'); } }.glob;
+// Node's import.meta.resolve(specifier, parent): relative / absolute specifiers and URLs against
+// the parent URL (no file check), builtins as `node:` URLs, packages by the ESM conditions.
+const __ttMetaResolve = (specifier, parent) => {
+  const spec = String(specifier);
+  if (/^\.{0,2}\//.test(spec) || spec === '.' || spec === '..') return new globalThis.URL(spec, parent).href;
+  if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(spec) && !spec.startsWith('node:')) {
+    try { return new globalThis.URL(spec).href; } catch (e) { /* not a URL: a package name */ }
+  }
+  let from;
+  try { from = globalThis.__fileURLToPath(parent); } catch (e) { from = String(parent); }
+  const r = globalThis.__ttRequireResolve(globalThis.__dirnameOf(from), spec, true);
+  if (typeof r === 'string' && r.startsWith('/')) return globalThis.__pathToFileURL(r).href;
+  if (typeof r === 'string' && spec !== 'vitest' && spec !== '@jest/globals') return 'node:' + r.replace(/^node:/, '');
+  const pkg = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0];
+  const e = new Error(`Cannot find package '${pkg}' imported from ${from}`);
+  e.code = 'ERR_MODULE_NOT_FOUND';
+  throw e;
+};
+globalThis.__ttFillImportMeta = (m, filename) => {
+  const url = globalThis.__pathToFileURL(filename).href;
+  const dirname = globalThis.__dirnameOf(filename);
+  m.filename = filename;
+  m.dirname = dirname;
+  m.url = url;
+  m.env = globalThis.__ttImportMetaEnv;
+  m.resolve = { resolve(specifier, parent) { return __ttMetaResolve(specifier, parent ?? url); } }.resolve;
+  m.glob = __ttMetaGlob;
+  m.main = false;
+  __ttMetas.set(filename, m);
+  return __ttMetaVitest(m, filename);
+};
+// the test file's `vitest` (its import.meta can be made before the file is the current one: the
+// entry's vi.mock prepass)
+const __ttMetaVitest = (m, filename) => {
+  if (filename === globalThis.__ttFile && !Object.prototype.hasOwnProperty.call(m, 'vitest')) {
+    Object.defineProperty(m, 'vitest', { get: () => globalThis.__nativeRequire(m.dirname, 'vitest', true) });
   }
   return m;
 };
+const __ttMetas = new Map();
+globalThis.__ttImportMeta = (filename) => __ttMetaVitest(__ttMetas.get(filename) || globalThis.__ttFillImportMeta({}, filename), filename);
+// the runner names the test file once it is loaded: its import.meta, made while loading, gets
+// `vitest` then
+globalThis.__ttMetaOfTestFile = () => { const m = __ttMetas.get(globalThis.__ttFile); if (m) __ttMetaVitest(m, globalThis.__ttFile); };
 const __os = {
   platform: () => globalThis.__ttPlatform || 'darwin', arch: () => globalThis.__ttArch || 'arm64', type: () => globalThis.__ttOsType || 'Darwin', release: () => '23.0.0',
   version: () => 'Darwin Kernel', EOL: '\n', tmpdir: () => globalThis.__ttTmpdir || '/tmp', homedir: () => globalThis.__ttHomedir || '/', hostname: () => 'localhost',
