@@ -495,6 +495,126 @@ it('a static method of an exported class', () => {
     }
 }
 
+/// turbo-test#145: the rest of vite's `import.meta.glob` (vitest 4.1.12): eager glob imports
+/// evaluate before the module's own imports; `base` (keys relative to it), `query` / `as` (added to
+/// each import), `resolve.alias` patterns (keys root-relative), and a module that takes the
+/// decorator-metadata (tsc) transform. turbo-test threw vitest's "statically replaced" error for
+/// these, ran eager imports last, and did not expand on the tsc path. vitest on the same project:
+/// 5 passed.
+#[test]
+#[ignore = "turbo-test#145: fails until the fix"]
+fn import_meta_glob_options_aliases_order_and_the_tsc_path() {
+    let files: [(&str, &str); 8] = [
+        (
+            "package.json",
+            "{\"name\":\"rc-glob-opts\",\"type\":\"module\"}\n",
+        ),
+        (
+            "sub/a.ts",
+            r#"export default 'A'; export const n = 1;
+"#,
+        ),
+        (
+            "sub/deep/z.ts",
+            r#"export const n = 26;
+"#,
+        ),
+        (
+            "sub/order1.ts",
+            r#"(globalThis as any).__order = [...((globalThis as any).__order ?? []), 'order1'];
+export const o = 1;
+"#,
+        ),
+        (
+            "sub/order2.ts",
+            r#"(globalThis as any).__order = [...((globalThis as any).__order ?? []), 'order2'];
+export const o = 2;
+"#,
+        ),
+        (
+            "tsconfig.json",
+            r#"{ "compilerOptions": { "experimentalDecorators": true, "emitDecoratorMetadata": true, "target": "ES2021", "module": "ESNext", "moduleResolution": "bundler" } }
+"#,
+        ),
+        (
+            "src/model.ts",
+            r#"const tag = (): ClassDecorator => () => {};
+@tag()
+export class Model { name = 'm'; }
+export const found = (): string[] => Object.keys(import.meta.glob('../sub/*.ts', { eager: true }));
+"#,
+        ),
+        (
+            "vitest.config.ts",
+            r#"import path from 'node:path';
+export default { resolve: { alias: { '@sub': path.resolve(import.meta.dirname, 'sub') } } };
+"#,
+        ),
+    ];
+    let test = r#"import { expect, it } from 'vitest';
+import { o } from './sub/order2';
+import { found } from './src/model';
+const early = import.meta.glob('./sub/order1.ts', { eager: true });
+it('eager glob imports evaluate before the module imports', () => {
+  expect([(globalThis as any).__order, o, Object.keys(early)]).toEqual([['order1', 'order2'], 2, ['./sub/order1.ts']]);
+});
+it('base', () => {
+  expect(Object.keys(import.meta.glob('./*.ts', { base: './sub', eager: true }))).toEqual(['./a.ts', './order1.ts', './order2.ts']);
+  expect(Object.keys(import.meta.glob('./deep/*.ts', { base: './sub' }))).toEqual(['./deep/z.ts']);
+  expect(import.meta.glob('/sub/deep/*.ts', { base: '/sub', eager: true, import: 'n' })).toEqual({ './deep/z.ts': 26 });
+});
+it('query and as', async () => {
+  const q = import.meta.glob('./sub/a.ts', { query: { foo: 'bar' }, import: 'n' });
+  expect([Object.keys(q), await q['./sub/a.ts']()]).toEqual([['./sub/a.ts'], 1]);
+  const s = import.meta.glob('./sub/deep/*.ts', { query: '?x=1', eager: true, import: 'n' });
+  expect(s).toEqual({ './sub/deep/z.ts': 26 });
+});
+it('alias patterns', () => {
+  expect(import.meta.glob('@sub/*.ts', { eager: true, import: 'default' })).toEqual({ '/sub/a.ts': 'A', '/sub/order1.ts': undefined, '/sub/order2.ts': undefined });
+  expect(Object.keys(import.meta.glob(['@sub/**/*.ts', '!@sub/order*.ts']))).toEqual(['/sub/a.ts', '/sub/deep/z.ts']);
+});
+it('a decorator-metadata module', () => {
+  expect(found()).toEqual(['../sub/a.ts', '../sub/order1.ts', '../sub/order2.ts']);
+});
+"#;
+    for esbuild in [true, false] {
+        let p = Project::new(if esbuild {
+            "rc-glob-opts"
+        } else {
+            "rc-glob-opts-esm"
+        });
+        p.with_typescript();
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in files {
+            p.file(f, c);
+        }
+        p.file("a.test.ts", test);
+        // the launcher passes vitest.config's resolve.alias as TURBO_ALIAS
+        let alias = format!("@sub\u{1f}{}", p.path("sub").display());
+        let envs: Vec<Vec<(&str, &str)>> = if esbuild {
+            vec![
+                vec![],
+                vec![("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
+                vec![("TURBO_REUSE_ISOLATE", "1")],
+            ]
+        } else {
+            vec![vec![], vec![("TURBO_REUSE_ISOLATE", "1")]]
+        };
+        for mut env in envs {
+            env.push(("TURBO_ALIAS", &alias));
+            let r = turbo_test(&p.dir, &[], &env);
+            assert!(
+                r.stdout.contains("Tests  5 passed (5)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            assert_eq!(r.code, Some(0), "esbuild={esbuild} {env:?}\n{}", r.all());
+        }
+    }
+}
+
 #[test]
 fn import_meta_keeps_coverage_line_mapping() {
     let p = esbuild_project("rc-import-meta-cov");
