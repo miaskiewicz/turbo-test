@@ -947,6 +947,14 @@ fn graph_interop_rewrite_requests_of_commonjs() {
         "import D from \"cjs?__tt_node\";\nexport { default as E } from \"cjs2?__tt_node\";\nexport * from \"cjs?__tt_node\";\nimport 'esm';"
     );
     assert_eq!(r("not js (", true), None);
+    // `export * as` a name that is no identifier keeps it quoted; a queried or other module's
+    // `export *` stays, as does an ES module's under Node
+    assert_eq!(
+        r("export * as \"a-b\" from 'cjs';", false).unwrap(),
+        "export { default as \"a-b\" } from \"cjs?__tt_ns\";"
+    );
+    assert_eq!(r("export * from 'cjs?raw';", false), None);
+    assert_eq!(r("export * from './m';", true), None);
 }
 
 #[test]

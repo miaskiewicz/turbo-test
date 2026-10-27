@@ -89,6 +89,9 @@ fn scanners_follow_the_regular_expressions() {
     assert_eq!(identifier("\\u{}", 0), None);
     assert_eq!(identifier("\\u{41}b", 0), Some((7, false)));
     assert_eq!(template("`a\\", 0), Some((2, "")));
+    // an unterminated template runs to the end of the line
+    assert_eq!(template("`a${b", 0), Some((4, "${")));
+    assert_eq!(template("}éb", 0), Some((4, "")));
     assert_eq!(string_literal("'a\\", 0), Some(2));
     assert_eq!(punctuator("@", 0), None);
 }

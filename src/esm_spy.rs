@@ -78,17 +78,16 @@ pub fn spyable(file: &Path, code: &str) -> Option<(String, Vec<crate::location::
                     if let Some(n) = &name {
                         imported.insert(local.name.to_string(), (source.to_string(), n.clone()));
                     }
-                    let Some(symbol) = local.symbol_id.get() else {
-                        continue;
-                    };
-                    if api {
-                        continue;
+                    // (the semantic pass gives every binding a symbol, a redeclared one too)
+                    if let (Some(symbol), false) = (local.symbol_id.get(), api) {
+                        let read = match name {
+                            Some(n) => {
+                                format!("(globalThis.__ttR({}, {}))", ns_of(source), lit(&n))
+                            }
+                            None => format!("(globalThis.__ttNs({}))", local.name),
+                        };
+                        reads.insert(symbol, read);
                     }
-                    let read = match name {
-                        Some(n) => format!("(globalThis.__ttR({}, {}))", ns_of(source), lit(&n)),
-                        None => format!("(globalThis.__ttNs({}))", local.name),
-                    };
-                    reads.insert(symbol, read);
                 }
             }
             Statement::ExportNamedDeclaration(e) if e.with_clause.is_none() => {
