@@ -379,3 +379,43 @@ test('params diff', () => { expect({ s: new URLSearchParams('a=1'), n: 1 }).toEq
         "{out}"
     );
 }
+
+#[test]
+#[ignore = "turbo-test#114: fails until the fix"]
+fn url_userinfo_and_own_keys_are_nodes() {
+    // turbo-test#114: the URL global took `user:pass@host` whole as the host (username /
+    // password undefined) and kept its parsed parts as own enumerable keys. Expected: Node 26.
+    let p = Project::new("rc-url-userinfo");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "u.test.js",
+        r#"import { test } from 'vitest'
+import * as fs from 'node:fs'
+test('userinfo', () => {
+  const rows = ['http://u:p@a.com:8080/x', 'http://u@a/', 'http://:p@a/', 'http://a b:c@d/', 'http://u:p:q@a/',
+    'http://a@b@c/', 'http://u:@a/', 'file:///x', 'mailto:x@y'].map((s) => {
+    const u = new URL(s)
+    return JSON.stringify([s, u.href, u.username, u.password, u.host, u.hostname, u.port, u.origin])
+  })
+  const r = new URL('y?q#h', 'http://u:p@a/x/')
+  rows.push(JSON.stringify([r.href, r.username, r.password]))
+  rows.push(`${Object.keys(new URL('http://u:p@a/')).length} ${JSON.stringify({ ...new URL('http://a/') })}`)
+  fs.writeFileSync('out.txt', rows.join('\n'))
+})
+"#,
+    );
+    let r = turbo_test(&p.dir, &["u.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let want = r#"["http://u:p@a.com:8080/x","http://u:p@a.com:8080/x","u","p","a.com:8080","a.com","8080","http://a.com:8080"]
+["http://u@a/","http://u@a/","u","","a","a","","http://a"]
+["http://:p@a/","http://:p@a/","","p","a","a","","http://a"]
+["http://a b:c@d/","http://a%20b:c@d/","a%20b","c","d","d","","http://d"]
+["http://u:p:q@a/","http://u:p%3Aq@a/","u","p%3Aq","a","a","","http://a"]
+["http://a@b@c/","http://a%40b@c/","a%40b","","c","c","","http://c"]
+["http://u:@a/","http://u@a/","u","","a","a","","http://a"]
+["file:///x","file:///x","","","","","","null"]
+["mailto:x@y","mailto:x@y","","","","","","null"]
+["http://u:p@a/x/y?q#h","u","p"]
+0 {}"#;
+    assert_eq!(std::fs::read_to_string(p.path("out.txt")).unwrap(), want);
+}
