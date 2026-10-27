@@ -23,4 +23,5 @@ pub mod napi_host;
 pub mod parse_error;
 pub mod runner;
 pub mod structured_clone;
+pub mod text_decoder;
 pub mod transform;

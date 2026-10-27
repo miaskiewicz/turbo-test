@@ -345,10 +345,43 @@ globalThis.localStorage = new __Storage();
 globalThis.sessionStorage = new __Storage();
 
 // ---- TextEncoder/TextDecoder (host globals; bare V8 has none) ----
-// WHATWG Encoding (UTF-8 only), checked row by row against Node 26 (turbo-test#118): lone
-// surrogates encode as U+FFFD, invalid UTF-8 decodes to U+FFFD per maximal subpart (or throws
-// with `fatal`), a leading BOM is stripped unless `ignoreBOM`, `stream` keeps a partial sequence.
+// WHATWG Encoding, checked row by row against Node 26 (turbo-test#118): lone surrogates encode
+// as U+FFFD, invalid UTF-8 decodes to U+FFFD per maximal subpart (or throws with `fatal`), a
+// leading BOM is stripped unless `ignoreBOM`, `stream` keeps a partial sequence. TextDecoder's
+// other encodings (turbo-test#119) decode natively through encoding_rs (src/text_decoder.rs).
 const __codecError = (Ctor, code, msg) => { const e = new Ctor(msg); e.code = code; return e; };
+// The one WHATWG UTF-8 decoder (turbo-test#121): b[start..end) (any indexable bytes) to a string,
+// one U+FFFD per maximal invalid subpart (or `onBad()`'s throw, for `fatal`). With `stream`, an
+// incomplete-but-valid sequence at the end is left undecoded; returns [string, where it starts].
+function __utf8Run(b, start, end, stream, onBad) {
+  const units = []; let out = '';
+  const unit = (u) => { units.push(u); if (units.length >= 8192) { out += String.fromCharCode.apply(null, units); units.length = 0; } };
+  const bad = () => { if (onBad) onBad(); unit(0xfffd); };
+  let i = start;
+  while (i < end) {
+    const c = b[i];
+    if (c < 0x80) { unit(c); i++; continue; }
+    let need; let cp; let lo = 0x80; let hi = 0xbf;
+    if (c >= 0xc2 && c <= 0xdf) { need = 1; cp = c & 0x1f; }
+    else if (c >= 0xe0 && c <= 0xef) { need = 2; cp = c & 0xf; if (c === 0xe0) lo = 0xa0; if (c === 0xed) hi = 0x9f; }
+    else if (c >= 0xf0 && c <= 0xf4) { need = 3; cp = c & 0x7; if (c === 0xf0) lo = 0x90; if (c === 0xf4) hi = 0x8f; }
+    else { bad(); i++; continue; }
+    let j = i + 1;
+    for (; j <= i + need && j < end; j++) {
+      if (b[j] < lo || b[j] > hi) break;
+      cp = (cp << 6) | (b[j] & 0x3f); lo = 0x80; hi = 0xbf;
+    }
+    if (j > i + need) {
+      if (cp < 0x10000) unit(cp);
+      else { cp -= 0x10000; unit(0xd800 + (cp >> 10)); unit(0xdc00 + (cp & 0x3ff)); }
+    } else if (j === end && stream) break; // valid so far: wait for more
+    else bad(); // one U+FFFD for the maximal subpart b[i..j)
+    i = j;
+  }
+  return [out + String.fromCharCode.apply(null, units), i];
+}
+// UTF-8 decode without BOM handling (Buffer#toString, querystring, URLSearchParams, StringDecoder)
+function __utf8Decode(b, start = 0, end = b.length) { return __utf8Run(b, start, end, false, null)[0]; }
 if (typeof globalThis.TextEncoder === 'undefined') {
   // UTF-8 bytes of s[i..] into out[j..] while they fit; returns [code units read, bytes written]
   const encodeTo = (s, out) => {
@@ -414,46 +447,31 @@ if (typeof globalThis.TextDecoder === 'undefined') {
   globalThis.TextDecoder = class TextDecoder {
     constructor(label = 'utf-8', opts = undefined) {
       const name = `${label}`.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '').replace(/[A-Z]+/g, (c) => c.toLowerCase());
-      if (!LABELS.includes(name)) throw __codecError(RangeError, 'ERR_ENCODING_NOT_SUPPORTED', `The "${label}" encoding is not supported`);
+      // UTF-8 here; any other WHATWG label names its encoding natively (undefined: not a label)
+      const encoding = LABELS.includes(name) ? 'utf-8' : globalThis.__ttTextEncoding(name);
+      if (encoding === undefined) throw __codecError(RangeError, 'ERR_ENCODING_NOT_SUPPORTED', `The "${label}" encoding is not supported`);
+      if (encoding === 'replacement') throw __codecError(RangeError, 'ERR_ENCODING_NOT_SUPPORTED', 'The "replacement" encoding is not supported');
       const o = options(opts);
-      state.set(this, { fatal: !!o.fatal, ignoreBOM: !!o.ignoreBOM, pending: null, bomSeen: false });
+      const id = encoding === 'utf-8' ? 0 : globalThis.__ttTextDecoderId();
+      state.set(this, { encoding, id, fatal: !!o.fatal, ignoreBOM: !!o.ignoreBOM, pending: null, bomSeen: false });
     }
-    get encoding() { self(this); return 'utf-8'; }
+    get encoding() { return self(this).encoding; }
     get fatal() { return self(this).fatal; }
     get ignoreBOM() { return self(this).ignoreBOM; }
     decode(input = undefined, opts = undefined) {
       const st = self(this);
       let b = bytesOf(input);
       const stream = !!options(opts).stream;
-      if (st.pending) { const m = new Uint8Array(st.pending.length + b.length); m.set(st.pending); m.set(b, st.pending.length); b = m; st.pending = null; }
-      const units = []; let out = '';
-      const n = b.length; let i = 0;
-      const unit = (u) => { units.push(u); if (units.length >= 8192) { out += String.fromCharCode.apply(null, units); units.length = 0; } };
-      const bad = () => {
-        if (st.fatal) { st.pending = null; st.bomSeen = false; throw __codecError(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', 'The encoded data was not valid for encoding utf-8'); }
-        unit(0xfffd);
-      };
-      while (i < n) {
-        const c = b[i];
-        if (c < 0x80) { unit(c); i++; continue; }
-        let need; let cp; let lo = 0x80; let hi = 0xbf;
-        if (c >= 0xc2 && c <= 0xdf) { need = 1; cp = c & 0x1f; }
-        else if (c >= 0xe0 && c <= 0xef) { need = 2; cp = c & 0xf; if (c === 0xe0) lo = 0xa0; if (c === 0xed) hi = 0x9f; }
-        else if (c >= 0xf0 && c <= 0xf4) { need = 3; cp = c & 0x7; if (c === 0xf0) lo = 0x90; if (c === 0xf4) hi = 0x8f; }
-        else { bad(); i++; continue; }
-        let j = i + 1;
-        for (; j <= i + need && j < n; j++) {
-          if (b[j] < lo || b[j] > hi) break;
-          cp = (cp << 6) | (b[j] & 0x3f); lo = 0x80; hi = 0xbf;
-        }
-        if (j > i + need) {
-          if (cp < 0x10000) unit(cp);
-          else { cp -= 0x10000; unit(0xd800 + (cp >> 10)); unit(0xdc00 + (cp & 0x3ff)); }
-        } else if (j === n && stream) { st.pending = b.slice(i); break; } // valid so far: wait for more
-        else bad(); // one U+FFFD for the maximal subpart b[i..j)
-        i = j;
+      if (st.id) {
+        const text = globalThis.__ttTextDecode(st.id, st.encoding, st.ignoreBOM, st.fatal, stream, b);
+        if (text === null) throw __codecError(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', `The encoded data was not valid for encoding ${st.encoding}`);
+        return text;
       }
-      out += String.fromCharCode.apply(null, units);
+      if (st.pending) { const m = new Uint8Array(st.pending.length + b.length); m.set(st.pending); m.set(b, st.pending.length); b = m; st.pending = null; }
+      const fail = () => { st.pending = null; st.bomSeen = false; throw __codecError(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', 'The encoded data was not valid for encoding utf-8'); };
+      const [decoded, rest] = __utf8Run(b, 0, b.length, stream, st.fatal ? fail : null);
+      if (rest < b.length) st.pending = b.slice(rest);
+      let out = decoded;
       if (!st.ignoreBOM && !st.bomSeen && out.length > 0) {
         st.bomSeen = true;
         if (out.charCodeAt(0) === 0xfeff) out = out.slice(1);
@@ -474,33 +492,12 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
     return String(v).toWellFormed();
   };
   const need = (n, got, what) => { if (got < n) throw new TypeError(`The ${what} must be specified`); };
-  // UTF-8 decode with U+FFFD for each maximal invalid subpart (WHATWG "UTF-8 decode without BOM")
-  const utf8 = (b) => {
-    let out = '';
-    for (let i = 0; i < b.length;) {
-      const c = b[i];
-      if (c < 0x80) { out += String.fromCharCode(c); i++; continue; }
-      let n; let cp; let lo = 0x80; let hi = 0xbf;
-      if (c >= 0xc2 && c <= 0xdf) { n = 1; cp = c & 0x1f; }
-      else if (c >= 0xe0 && c <= 0xef) { n = 2; cp = c & 0xf; if (c === 0xe0) lo = 0xa0; if (c === 0xed) hi = 0x9f; }
-      else if (c >= 0xf0 && c <= 0xf4) { n = 3; cp = c & 0x7; if (c === 0xf0) lo = 0x90; if (c === 0xf4) hi = 0x8f; }
-      else { out += '�'; i++; continue; }
-      let j = i + 1;
-      for (; j <= i + n; j++) {
-        if (j >= b.length || b[j] < lo || b[j] > hi) break;
-        cp = (cp << 6) | (b[j] & 0x3f); lo = 0x80; hi = 0xbf;
-      }
-      out += j > i + n ? String.fromCodePoint(cp) : '�';
-      i = j;
-    }
-    return out;
-  };
   // percent-decode (a `%` not followed by two hex digits stays as written), then UTF-8 decode.
   // Raw characters are whole UTF-8 sequences, so each run of %XX bytes decodes on its own.
   const pctDecode = (s) => s.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
     const b = [];
     for (let i = 0; i < run.length; i += 3) b.push(parseInt(run.slice(i + 1, i + 3), 16));
-    return utf8(b);
+    return __utf8Decode(b);
   });
   // application/x-www-form-urlencoded parser: pairs split on '&' (empty ones dropped), name and
   // value at the first '=', '+' is a space
@@ -834,14 +831,24 @@ if (typeof globalThis.Blob === 'undefined') {
         return n;
       }, 0);
     }
+    // the bytes of every part, concatenated: strings as UTF-8, buffers and views as their bytes,
+    // nested Blobs as theirs, anything else stringified
+    _bytes() {
+      const chunks = this._parts.map((p) => {
+        if (p instanceof ArrayBuffer) return new Uint8Array(p);
+        if (ArrayBuffer.isView(p)) return new Uint8Array(p.buffer, p.byteOffset, p.byteLength);
+        if (p && typeof p._bytes === 'function') return p._bytes(); // nested Blob / File
+        return new globalThis.TextEncoder().encode(typeof p === 'string' ? p : String(p));
+      });
+      const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+      let at = 0;
+      for (const c of chunks) { out.set(c, at); at += c.length; }
+      return out;
+    }
+    // WHATWG "UTF-8 decode" of all the bytes at once (turbo-test#120): a sequence split across
+    // parts is one character and one leading BOM is stripped, as Node's
     text() {
-      return Promise.resolve(this._parts.map((p) => {
-        if (typeof p === 'string') return p;
-        if (p instanceof ArrayBuffer) return new globalThis.TextDecoder('utf-8', { ignoreBOM: true }).decode(new Uint8Array(p));
-        if (p && p.buffer instanceof ArrayBuffer) return new globalThis.TextDecoder('utf-8', { ignoreBOM: true }).decode(p); // TypedArray
-        if (p && typeof p._parts !== 'undefined') return p._parts.join(''); // nested Blob
-        return String(p);
-      }).join(''));
+      return Promise.resolve(new globalThis.TextDecoder().decode(this._bytes()));
     }
     arrayBuffer() { return Promise.resolve(new ArrayBuffer(this.size)); }
     slice() { return new globalThis.Blob(); }
@@ -2294,31 +2301,6 @@ const __querystring = {
 };
 __querystring.decode = __querystring.parse;
 __querystring.encode = __querystring.stringify;
-// WHATWG UTF-8 decode (one U+FFFD per maximal invalid subpart, like Node's Buffer#toString)
-function __utf8Decode(b, start, end) {
-  let s = '';
-  let i = start || 0;
-  end = end === undefined ? b.length : end;
-  while (i < end) {
-    const c = b[i];
-    if (c < 0x80) { s += String.fromCharCode(c); i++; continue; }
-    let need = 0, cp = 0, lo = 0x80, hi = 0xbf;
-    if (c >= 0xc2 && c <= 0xdf) { need = 1; cp = c & 0x1f; }
-    else if (c >= 0xe0 && c <= 0xef) { need = 2; cp = c & 0xf; if (c === 0xe0) lo = 0xa0; if (c === 0xed) hi = 0x9f; }
-    else if (c >= 0xf0 && c <= 0xf4) { need = 3; cp = c & 0x7; if (c === 0xf0) lo = 0x90; if (c === 0xf4) hi = 0x8f; }
-    else { s += '\ufffd'; i++; continue; }
-    let j = i + 1, k = 0;
-    for (; k < need && j < end; k++, j++) {
-      const x = b[j];
-      if (x < lo || x > hi) break;
-      lo = 0x80; hi = 0xbf;
-      cp = (cp << 6) | (x & 0x3f);
-    }
-    s += k < need ? '\ufffd' : String.fromCodePoint(cp);
-    i = j;
-  }
-  return s;
-}
 // Length of the incomplete-but-valid UTF-8 sequence at the end of b (0 if none).
 function __utf8Tail(b) {
   for (let back = 1; back <= 3 && back <= b.length; back++) {

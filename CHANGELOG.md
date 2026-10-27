@@ -322,8 +322,21 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   takes an ArrayBuffer, SharedArrayBuffer or any view (offset and length honoured; a
   `Uint16Array`/`DataView` decoded the whole buffer) and throws TypeError for anything else;
   `encoding` / `fatal` / `ignoreBOM` are prototype getters; the label is trimmed and
-  case-folded, accepting only the UTF-8 labels, and any other label throws RangeError
-  `ERR_ENCODING_NOT_SUPPORTED`. `Buffer#toString` keeps a BOM, as Node.
+  case-folded, accepting the UTF-8 labels (the legacy encodings followed in turbo-test#119), and
+  an unknown label throws RangeError `ERR_ENCODING_NOT_SUPPORTED`. `Buffer#toString` keeps a BOM, as Node.
+- `TextDecoder` decodes the legacy encodings Node 26 does (turbo-test#119): every WHATWG
+  Encoding label is accepted (`latin1` / `ascii` are `windows-1252`, `utf-16` is `utf-16le`,
+  `sjis` is `shift_jis`, ...; the `replacement` labels throw RangeError
+  `The "replacement" encoding is not supported`) and the single-byte, UTF-16LE/BE and CJK
+  multi-byte encodings decode natively through encoding_rs, with `fatal` (TypeError naming the
+  encoding), `ignoreBOM` and `stream` (a partial sequence or ISO-2022-JP's mode carries over).
+  Every other label threw RangeError `ERR_ENCODING_NOT_SUPPORTED`. Node's ICU big5 / euc-jp /
+  euc-kr / shift_jis decoders differ from the Encoding Standard on some bytes; turbo-test follows
+  the standard there (vitest.compat.md).
+- `Blob#text()` UTF-8-decodes the concatenated bytes of all parts once, as Node 26
+  (turbo-test#120): a sequence split across parts is one character (`[E2 82] + [AC]` gave two
+  U+FFFD, now `€`), one leading BOM is stripped (it was kept), and a nested Blob contributes its
+  bytes (its parts were joined as strings).
 - `URLSearchParams.set` replaces the first pair of the name in place and removes the others, as
   Node's (turbo-test#116); it moved the pair to the end (`a=1&b=2&a=3` set `a` gave `b=2&a=9`,
   Node `a=9&b=2`), in `toString()`, iteration and a URL's `href`.
@@ -397,6 +410,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   call history (~70 MB per file in the fixture) until it ran out. It now holds spies weakly. Unlike
   #107 a finished file's spies are not `mockClear()`ed: vitest 4.1.12 with `isolate: false` keeps a
   spy's `mock.calls` across files when the spy is still referenced, and so does turbo-test.
+
+### Changed
+- `src/runtime.js` has one WHATWG UTF-8 decoder (turbo-test#121): `TextDecoder`, `URLSearchParams`
+  percent-decoding, `querystring.unescape` and `StringDecoder` share `__utf8Run` instead of three
+  copies of the maximal-subpart decoder. No behaviour change.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain
