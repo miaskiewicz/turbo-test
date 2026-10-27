@@ -1618,7 +1618,6 @@ fn config_string_lists_are_the_literal_strings_of_the_key() {
 }
 
 #[test]
-#[ignore = "turbo-test#191: fails until the fix"]
 fn a_serializers_variable_does_not_read_the_next_keys_list() {
     // vitest 4.1.12 takes the variable's value; the static reader takes no list (turbo-test#191)
     let list = |s: &str| config_string_list(s, "snapshotSerializers");

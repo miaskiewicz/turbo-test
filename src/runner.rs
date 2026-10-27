@@ -1619,27 +1619,26 @@ fn config_object_literal(s: &str, key: &str) -> Option<String> {
     Some(format!("{{{inner}}}"))
 }
 
-/// The quoted strings of a config key's `[...]` list (empty when the key is absent).
+/// The quoted strings of a config key's `[...]` list: empty when the key is absent or its value
+/// is not a literal list (a variable's list is not another key's, turbo-test#191).
 fn config_string_list(s: &str, key: &str) -> Vec<String> {
-    let Some(start) = find_config_key(s, key) else {
-        return Vec::new();
+    let list = || {
+        let start = find_config_key(s, key)?;
+        let colon = start + s[start..].find(':')?;
+        let rest = s[colon + 1..].trim_start().strip_prefix('[')?;
+        Some(&rest[..rest.find(']')?])
     };
-    let tail = &s[start..];
-    let Some(lb) = tail.find('[') else {
-        return Vec::new();
-    };
-    let Some(rb) = tail[lb..].find(']') else {
-        return Vec::new();
-    };
-    tail[lb + 1..lb + rb]
-        .split(',')
-        .map(|part| {
-            part.trim()
-                .trim_matches(|c| c == '\'' || c == '"' || c == '`')
-                .to_string()
-        })
-        .filter(|q| !q.is_empty())
-        .collect()
+    list().map_or_else(Vec::new, |inner| {
+        inner
+            .split(',')
+            .map(|part| {
+                part.trim()
+                    .trim_matches(|c| c == '\'' || c == '"' || c == '`')
+                    .to_string()
+            })
+            .filter(|q| !q.is_empty())
+            .collect()
+    })
 }
 
 /// Add the config's snapshot serializers (`__ttLoadSnapshotSerializers` in runtime.js): a file
