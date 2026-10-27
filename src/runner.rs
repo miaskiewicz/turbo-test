@@ -5391,6 +5391,14 @@ fn native_require_cache(
     }
 }
 
+const UNLOADED: &str = "turbo-test: an imported module was unloaded before it was evaluated";
+
+/// `throw` for an `Option`-returning V8 callback: throws `msg`, then None.
+fn throw_none<T>(scope: &mut v8::PinScope, msg: &str) -> Option<T> {
+    throw(scope, msg);
+    None
+}
+
 fn throw(scope: &mut v8::PinScope, msg: &str) {
     let m = v8::String::new(scope, msg).unwrap();
     let exc = v8::Exception::error(scope, m);
@@ -5774,13 +5782,9 @@ fn variant_eval<'s>(
         let exports = reg.cjs_exports.get(&path)?.clone();
         Some((Ok(exports), kind, names))
     });
-    let Some((exports, kind, names)) = entry else {
-        throw(
-            scope,
-            "turbo-test: an imported module was unloaded before it was evaluated",
-        );
-        return None;
-    };
+    // (a variant is linked and evaluated within one file's run: the registry is pruned between
+    // files only, so its entry is there)
+    let (exports, kind, names) = entry.or_else(|| throw_none(scope, UNLOADED))?;
     let view = match exports {
         Ok(exports) => {
             let exports = v8::Local::new(scope, &exports);
@@ -5801,11 +5805,10 @@ fn variant_eval<'s>(
         for n in names {
             let k = v8::String::new(scope, &n)?;
             // a name a mock lacks stays undefined without being read (see synth_eval)
-            if !obj.has(scope, k.into()).unwrap_or(false) {
-                continue;
-            }
-            if let Some(v) = obj.get(scope, k.into()) {
-                module.set_synthetic_module_export(scope, k, v)?;
+            if obj.has(scope, k.into()).unwrap_or(false) {
+                if let Some(v) = obj.get(scope, k.into()) {
+                    module.set_synthetic_module_export(scope, k, v)?;
+                }
             }
         }
     }
@@ -5945,22 +5948,18 @@ fn load_dep<'s>(scope: &mut v8::PinScope<'s, '_>, dep: &Path) -> Option<()> {
     // CSS/asset imports -> stub (CSS-module proxy: any class name -> its own string). Assets and
     // JSON are registered via register_mock, i.e. recorded in `mocks`, so an already-loaded one
     // is served by the mocked branch above; reaching here means it is not loaded yet.
-    if is_asset(dep) {
+    // (every other asset type is one of vite's, served above)
+    if matches!(
+        dep.extension().and_then(|e| e.to_str()),
+        Some("css" | "scss" | "sass" | "less" | "styl")
+    ) {
         // Stylesheets: the proxy is also its own `default` and is not `__esModule`, so the
         // module-runner's CJS interop (`__toESM(require(..)).default`) reaches it too and
         // `import s from './s.module.css'` gives `s.foo === 'foo'` on both paths.
-        let style = matches!(
-            dep.extension().and_then(|e| e.to_str()),
-            Some("css" | "scss" | "sass" | "less" | "styl")
-        );
         return register_mock(
             scope,
             dep,
-            if style {
-                "() => { const s = new Proxy({}, { get: (t, p) => p === 'default' ? s : typeof p === 'string' && p !== '__esModule' ? p : undefined }); return s; }"
-            } else {
-                "() => new Proxy({}, { get: (t, p) => typeof p === 'string' ? p : undefined })"
-            },
+            "() => { const s = new Proxy({}, { get: (t, p) => p === 'default' ? s : typeof p === 'string' && p !== '__esModule' ? p : undefined }); return s; }",
         );
     }
     // JSON imports -> module with default = parsed value + named keys

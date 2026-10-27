@@ -713,7 +713,12 @@ fn an_imported_markdown_file_is_parsed_as_javascript() {
         let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
         let report = common::json_report(&r);
         let file = &report["testResults"][0];
-        assert_eq!(common::file_status(file), "error", "esbuild={esbuild}\n{}", r.all());
+        assert_eq!(
+            common::file_status(file),
+            "error",
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
         if !esbuild {
             assert_eq!(
                 file["message"],

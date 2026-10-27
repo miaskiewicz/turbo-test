@@ -303,10 +303,22 @@ fn a_bundled_setup_file_shares_the_test_files_package_instances() {
     // CommonJS package). Expected: vitest 4.1.12 on the same project.
     let p = Project::new("ra-setup-bundle-externals");
     p.with_esbuild();
-    p.file("package.json", r#"{"name":"ra-setup-bundle-externals","type":"module"}"#);
-    p.file("node_modules/pk/package.json", r#"{"name":"pk","main":"i.js"}"#);
-    p.file("node_modules/pk/i.js", "exports.obj = { id: 'pk' }; exports.n = 1;\n");
-    p.file("node_modules/pk2/package.json", r#"{"name":"pk2","main":"i.js"}"#);
+    p.file(
+        "package.json",
+        r#"{"name":"ra-setup-bundle-externals","type":"module"}"#,
+    );
+    p.file(
+        "node_modules/pk/package.json",
+        r#"{"name":"pk","main":"i.js"}"#,
+    );
+    p.file(
+        "node_modules/pk/i.js",
+        "exports.obj = { id: 'pk' }; exports.n = 1;\n",
+    );
+    p.file(
+        "node_modules/pk2/package.json",
+        r#"{"name":"pk2","main":"i.js"}"#,
+    );
     p.file("node_modules/pk2/i.js", "exports.obj2 = { id: 'pk2' };\n");
     p.file(
         "vitest.config.ts",
