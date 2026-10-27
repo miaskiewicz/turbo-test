@@ -57,7 +57,8 @@ pub struct RollupDetails {
 /// The frames of a V8 `stack` (`    at fn (/abs/file.ts:3:9)` / `    at /abs/file.ts:3:9`) that
 /// point into a file: frames of scripts without a path (`<anonymous>`, the runtime's own) are
 /// left out, as vitest's stack parser drops them, and so are the frames its
-/// `stackIgnorePatterns` match ([`ignored`]). `async ` and a `file://` prefix are dropped,
+/// `stackIgnorePatterns` match ([`ignored`]). An eval frame is its eval's origin
+/// ([`without_eval`]). `async ` and a `file://` prefix are dropped,
 /// and so is an `Object.` receiver: the module runner calls an imported function on its
 /// module's exports object (`import_h.helper()`), where vitest's module objects have no
 /// constructor name, so V8 names vitest's frame `helper`.
@@ -65,7 +66,9 @@ pub fn parse_stack(stack: &str) -> Vec<Frame> {
     stack
         .lines()
         .filter_map(|l| l.trim_start().strip_prefix("at "))
+        .map(without_eval)
         .filter_map(|rest| {
+            let rest = rest.as_str();
             let (method, loc) = match rest.strip_suffix(')').and_then(|r| r.rsplit_once(" (")) {
                 Some((m, loc)) => (m, loc),
                 // an anonymous frame: `at <location>`, or `at async <location>` when it is
@@ -89,6 +92,30 @@ pub fn parse_stack(stack: &str) -> Vec<Frame> {
             })
         })
         .collect()
+}
+
+/// A frame in `eval` / `new Function` code, `fn (eval at <caller> (<origin>), <anonymous>:L:C)`,
+/// as its origin `fn (<origin>)`: vitest's parseSingleV8Stack replaces `eval code` with `eval`,
+/// then drops each `(eval at <no parentheses>` and everything from the first `,`
+/// (turbo-test#175). A nested eval's origin keeps a `)` and is not a location.
+fn without_eval(frame: &str) -> String {
+    if !frame.contains("(eval ") {
+        return frame.to_string();
+    }
+    let line = frame.replace("eval code", "eval");
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line.as_str();
+    while let Some(c) = rest.chars().next() {
+        if let Some(after) = rest.strip_prefix("(eval at ") {
+            rest = &after[after.find(['(', ')']).unwrap_or(after.len())..];
+        } else if c == ',' {
+            break;
+        } else {
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
 }
 
 /// @vitest/utils' default `stackIgnorePatterns`: the frames vitest's stack parser leaves out

@@ -88,7 +88,6 @@ fn anonymous_async_frames_keep_their_location() {
 }
 
 #[test]
-#[ignore = "turbo-test#175: fails until the fix"]
 fn eval_frames_point_at_the_eval_origin() {
     // turbo-test#175: a frame in code from `eval` / `new Function` is
     // `at fn (eval at <caller> (<origin>), <anonymous>:L:C)`; vitest's parseSingleV8Stack drops
