@@ -93,6 +93,7 @@ jobs:
           fixtures/compat/css-style-declaration.test.ts
           fixtures/compat/css-stylesheet-contracts.test.ts
           fixtures/compat/cssom-grammar.test.ts
+          fixtures/compat/dom-large-tree.test.ts
           fixtures/compat/dom-prototype.test.ts
           fixtures/compat/namespace-attributes.test.ts
           fixtures/compat/reflected-attributes.test.ts

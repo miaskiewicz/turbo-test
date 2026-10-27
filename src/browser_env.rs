@@ -5963,6 +5963,9 @@ fn ownership_callback<'s, 'i, F>(
     if scope.is_execution_terminating() {
         return;
     }
+    // `F` consumes `args`; remember what it touches for the (possibly deferred) ownership reconcile.
+    let touched: Vec<v8::Local<v8::Value>> =
+        std::iter::once(args.this().into()).chain((0..args.length()).map(|index| args.get(index))).collect();
     let reactions = custom_elements::reactions(scope);
     F::get()(scope, args, rv);
     if scope.has_terminated() {
@@ -5982,7 +5985,7 @@ fn ownership_callback<'s, 'i, F>(
         scope.rethrow();
         return;
     }
-    dom_ownership::reconcile_all(scope);
+    dom_ownership::reconcile_after_call(scope, touched);
     if scope.has_terminated() {
         scope.rethrow();
         return;
@@ -6084,6 +6087,7 @@ fn ownership_setter<'s, 'i, S>(
     if scope.is_execution_terminating() {
         return;
     }
+    let touched: [v8::Local<v8::Value>; 2] = [args.holder().into(), value];
     S::get()(scope, name, value, args, rv);
     if scope.has_terminated() {
         scope.rethrow();
@@ -6101,7 +6105,7 @@ fn ownership_setter<'s, 'i, S>(
         scope.rethrow();
         return;
     }
-    dom_ownership::reconcile_all(scope);
+    dom_ownership::reconcile_after_call(scope, touched);
     if scope.has_terminated() {
         scope.rethrow();
         return;
@@ -7390,10 +7394,22 @@ pub fn native_document_count_for_testing() -> usize {
     }) + DOM.with(|state| usize::from(state.borrow().is_some()))
 }
 
+/// Register GC tracking on a worker isolate so the DOM's ownership sweeps only run after a GC.
+pub fn track_gc(isolate: &mut v8::Isolate) {
+    dom_ownership::track_gc(isolate);
+}
+
+/// Reconcile any deferred ownership work now (see `dom_ownership::reconcile_after_call`).
+/// Hosts call this whenever control returns to their event loop.
+pub fn flush_ownership(scope: &mut v8::PinScope) {
+    dom_ownership::flush(scope);
+}
+
 /// Reset the per-thread DOM (call between test files when reusing an isolate).
 pub fn reset() {
     // An embedding's cached runtime may be destroyed after a binding TLS cell.
     // That cell has already released its handles; clear every cell still alive.
+    dom_ownership::forget_deferred();
     let _ = OTHER_DOMS.try_with(|d| d.borrow_mut().clear());
     let _ = DOM_CONTEXTS.try_with(|d| d.borrow_mut().clear());
     let _ = DOM_ID.try_with(|d| d.set(0));
