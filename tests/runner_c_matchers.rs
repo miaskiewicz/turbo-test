@@ -418,3 +418,61 @@ test('userinfo', () => {
 0 {}"#;
     assert_eq!(std::fs::read_to_string(p.path("out.txt")).unwrap(), want);
 }
+
+#[test]
+#[ignore = "turbo-test#115: fails until the fix"]
+fn url_query_is_kept_as_parsed_like_nodes() {
+    // turbo-test#115: the URL global re-serialized its query through URLSearchParams
+    // (`?q` -> `?q=`, `%20` -> `+`, empty pairs dropped). WHATWG keeps the parsed query
+    // (percent-encoded with the query set) until the searchParams change. Expected: Node 26.
+    let p = Project::new("rc-url-query");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "u.test.js",
+        r#"import { test } from 'vitest'
+import * as fs from 'node:fs'
+test('query', () => {
+  const rows = ['http://a/?q', 'http://a/?a%20b=c d', 'http://a/?x=1&&y', 'http://a/?', "http://a/?it's", "foo://a/?it's", 'http://a/?€', 'http://a/?a+b', 'http://a/?"<>`', 'mailto:x?a b'].map((s) => {
+    const u = new URL(s)
+    return JSON.stringify([s, u.href, u.search, [...u.searchParams]])
+  })
+  const u = new URL('http://a/?q&x=1')
+  const sp = u.searchParams
+  sp.append('y', 'a b'); rows.push(JSON.stringify([u.href, u.search]))
+  sp.delete('q'); sp.delete('x'); sp.delete('y'); rows.push(JSON.stringify([u.href, u.search]))
+  u.search = 'z z'; rows.push(JSON.stringify([u.href, u.search, sp.get('z z'), u.searchParams === sp]))
+  u.search = ''; rows.push(JSON.stringify([u.href, u.search, [...sp]]))
+  u.search = '?'; rows.push(JSON.stringify([u.href, u.search]))
+  u.href = 'http://b/?k'; rows.push(JSON.stringify([u.href, sp.get('k'), u.searchParams === sp]))
+  sp.sort(); rows.push(JSON.stringify([u.href]))
+  sp.set('k', '1'); rows.push(JSON.stringify([u.href]))
+  rows.push(JSON.stringify([new URL('?q', 'http://a/p').href, new URL('#h', 'http://a/p?q').href, new URL('x', 'http://a/p?q').href]))
+  rows.push(String(Object.keys(sp).length))
+  fs.writeFileSync('out.txt', rows.join('\n'))
+})
+"#,
+    );
+    let r = turbo_test(&p.dir, &["u.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let want = r#"["http://a/?q","http://a/?q","?q",[["q",""]]]
+["http://a/?a%20b=c d","http://a/?a%20b=c%20d","?a%20b=c%20d",[["a b","c d"]]]
+["http://a/?x=1&&y","http://a/?x=1&&y","?x=1&&y",[["x","1"],["y",""]]]
+["http://a/?","http://a/?","",[]]
+["http://a/?it's","http://a/?it%27s","?it%27s",[["it's",""]]]
+["foo://a/?it's","foo://a/?it's","?it's",[["it's",""]]]
+["http://a/?€","http://a/?%E2%82%AC","?%E2%82%AC",[["€",""]]]
+["http://a/?a+b","http://a/?a+b","?a+b",[["a b",""]]]
+["http://a/?\"<>`","http://a/?%22%3C%3E`","?%22%3C%3E`",[["\"<>`",""]]]
+["mailto:x?a b","mailto:x?a%20b","?a%20b",[["a b",""]]]
+["http://a/?q=&x=1&y=a+b","?q=&x=1&y=a+b"]
+["http://a/",""]
+["http://a/?z%20z","?z%20z","",true]
+["http://a/","",[]]
+["http://a/?",""]
+["http://b/?k","",true]
+["http://b/?k="]
+["http://b/?k=1"]
+["http://a/p?q","http://a/p?q#h","http://a/x"]
+0"#;
+    assert_eq!(std::fs::read_to_string(p.path("out.txt")).unwrap(), want);
+}
