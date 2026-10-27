@@ -2,7 +2,8 @@
 //! `--reporter verbose` and, when an AI agent runs the tests (std-env `isAgent`), the agent
 //! reporter vitest picks without `--reporter`. `tests/data/human/<scenario>-<reporter>.{out,err}`
 //! are vitest's stdout / stderr for each scenario's project with `NO_COLOR=1` (TZ=UTC), the root,
-//! the start time, the duration line and per-line durations normalised.
+//! the start time, the duration line and per-line durations normalised; `--reporter dot`
+//! (turbo-test#100) against `tests/data/dot` and `tests/data/dot-color`.
 #![cfg(unix)]
 
 mod common;
@@ -455,6 +456,60 @@ fn coloured_output_is_vitests() {
                     reference("err"),
                     "{ctx}"
                 );
+            }
+        }
+    }
+}
+
+/// `--reporter dot` against vitest 4.1.12's DotReporter (turbo-test#100): the RUN banner and
+/// console blocks of the default reporter, then one character per test as it finishes (`·`
+/// passed, `x` failed, `-` skipped or todo; off a TTY each is written on its own as
+/// `formatTests([state])`, an empty yellow run before it), an empty line, the default footer, and
+/// the default reporter's Failed Suites / Failed Tests sections on stderr. Every scenario, plain
+/// (`NO_COLOR`, `tests/data/dot`) and coloured (`tests/data/dot-color`), on both loaders.
+#[test]
+#[ignore = "turbo-test#100: fails until the fix"]
+fn dot_reporter_prints_what_vitest_prints() {
+    let all = SCENARIOS
+        .iter()
+        .map(|(name, files)| (*name, *files, &[][..]))
+        .chain(MORE.iter().copied());
+    for (scenario, files, args) in all {
+        for colored in [false, true] {
+            for esbuild in [false, true] {
+                let p = project(&format!("hd-{scenario}"), files, esbuild);
+                let root = p.dir.display().to_string();
+                let mut argv: Vec<&str> = args.to_vec();
+                argv.extend(["--reporter", "dot"]);
+                let mut env = vec![("TURBO_LEGACY_REPORTER", "0"), ("TURBO_JOBS", "1")];
+                env.push(if colored {
+                    ("TERM", "xterm-256color")
+                } else {
+                    ("NO_COLOR", "1")
+                });
+                let r = turbo_test(&p.dir, &argv, &env);
+                let ctx = format!(
+                    "{scenario} colored={colored} esbuild={esbuild}\n{}",
+                    r.all()
+                );
+                let dir = if colored { "dot-color" } else { "dot" };
+                let reference = |stream: &str| {
+                    let path = common::repo_root()
+                        .join("tests/data")
+                        .join(dir)
+                        .join(format!("{scenario}.{stream}"));
+                    std::fs::read_to_string(&path)
+                        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                };
+                let norm = |text: &str| {
+                    if colored {
+                        normalize_colored(text, &root)
+                    } else {
+                        normalize(text, &root)
+                    }
+                };
+                assert_eq!(norm(&r.stdout), reference("out"), "{ctx}");
+                assert_eq!(norm(&r.stderr), reference("err"), "{ctx}");
             }
         }
     }
