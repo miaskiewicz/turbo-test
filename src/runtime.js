@@ -2910,6 +2910,14 @@ const __requireCache = new Proxy({}, {
     return e && { value: e, writable: true, enumerable: true, configurable: true };
   },
 });
+// ESM-graph namespaces' export setters (esm_spy.rs, turbo-test#131): a module registers one for
+// its own namespace; __ttNsSet(ns, name, value) sets that export (false: no setter / no export)
+const __ttNsSetters = new WeakMap();
+globalThis.__ttNsSetter = (ns, set) => { __ttNsSetters.set(ns, set); };
+globalThis.__ttNsSet = (ns, k, v) => {
+  const set = ns !== null && typeof ns === 'object' ? __ttNsSetters.get(ns) : undefined;
+  return set !== undefined && set(k, v) === true;
+};
 globalThis.__mkRequire = (dir, isEsm, importer) => {
   const req = (spec) => globalThis.__nativeRequire(dir, spec, isEsm, importer);
   // as Node: the resolved path (a builtin stays its name); MODULE_NOT_FOUND when nothing resolves
@@ -4052,7 +4060,12 @@ globalThis.vi = {
     s.__name = String(key);
     // Use defineProperty so it replaces a (configurable) live-export getter, not just a
     // writable data prop — module-runner exports are configurable getters.
-    const define = (v) => { try { Object.defineProperty(obj, key, { configurable: true, enumerable: true, writable: true, value: v }); } catch (e) { try { obj[key] = v; } catch (e2) {} } };
+    // An ESM-graph module's namespace is V8's (read-only): its export is set through the
+    // module's setter (esm_spy.rs, turbo-test#131).
+    const define = (v) => {
+      if (globalThis.__ttNsSet(obj, key, v)) return;
+      try { Object.defineProperty(obj, key, { configurable: true, enumerable: true, writable: true, value: v }); } catch (e) { try { obj[key] = v; } catch (e2) {} }
+    };
     s.mockRestore = () => define(orig);
     define(s);
     return __trackSpy(s);

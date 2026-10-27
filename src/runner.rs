@@ -5041,6 +5041,12 @@ fn load_graph<'s>(
     // App code authored for the CJS world (NestJS seed runners, country-config loaders) reads them
     // at top level, so inject Node-CJS-equivalent module-local bindings when referenced.
     let raw = inject_dirname_esm(abs, &raw).unwrap_or(raw);
+    // vi.spyOn on an app module's namespace sets its export (turbo-test#131)
+    let raw = if abs.components().any(|c| c.as_os_str() == "node_modules") {
+        raw
+    } else {
+        crate::esm_spy::spyable(abs, &raw).unwrap_or(raw)
+    };
     let code = v8::String::new(scope, &raw)?;
     let name = v8::String::new(scope, &abs.to_string_lossy())?;
     let origin = module_origin(scope, name);
