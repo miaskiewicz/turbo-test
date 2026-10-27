@@ -47,12 +47,21 @@ const sorted = (o) => Object.fromEntries(Object.keys(o).sort().map((k) => [k, o[
 
 for (const [label, args] of [['isolate: false in the config', []], ['--no-isolate', ['--no-isolate']]]) {
   test(`a failing file runs once under isolate reuse and reports what vitest does (${label})`, () => {
-    const r = run(args);
-    assert.deepEqual(r.runs, ORACLE.runs, `each file must be evaluated exactly once\n${r.err.slice(-2000)}`);
-    assert.deepEqual(sorted(r.files), ORACLE.files);
-    assert.equal(r.report.numTotalTests, ORACLE.numTotalTests);
-    assert.equal(r.report.numPassedTests, ORACLE.numPassedTests);
-    assert.equal(r.report.numFailedTests, ORACLE.numFailedTests);
-    assert.equal(r.code, ORACLE.exitCode);
+    check(run(args));
   });
+}
+
+// turbo-test#144: with a fresh isolate per file, a file whose every test fails was re-run twice
+// more ("transient" retry). vitest runs it once.
+test('a file whose tests all fail runs once with fresh isolates (--isolate)', { todo: 'turbo-test#144: fails until the fix' }, () => {
+  check(run(['--isolate']));
+});
+
+function check(r) {
+  assert.deepEqual(r.runs, ORACLE.runs, `each file must be evaluated exactly once\n${r.err.slice(-2000)}`);
+  assert.deepEqual(sorted(r.files), ORACLE.files);
+  assert.equal(r.report.numTotalTests, ORACLE.numTotalTests);
+  assert.equal(r.report.numPassedTests, ORACLE.numPassedTests);
+  assert.equal(r.report.numFailedTests, ORACLE.numFailedTests);
+  assert.equal(r.code, ORACLE.exitCode);
 }

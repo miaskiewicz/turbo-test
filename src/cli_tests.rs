@@ -910,6 +910,20 @@ fn reuse_keeps_a_final_report_and_retries_the_rest_fresh() {
     assert_eq!(s.calls(), (1, 0));
 }
 
+#[test]
+#[ignore = "turbo-test#144: fails until the fix"]
+fn a_report_is_never_rerun_on_the_same_kind_of_isolate() {
+    // vitest runs a file once: a file whose tests all fail (or one that mentions an undefined
+    // `document`) is reported from its one run, with fresh isolates too (turbo-test#144)
+    let mut dom = report(0, 1);
+    dom.failures = vec!["t: ReferenceError: document is not defined".into()];
+    for first in [report(0, 2), dom] {
+        let s = Script::new(vec![Ok(first), Ok(report(5, 0))], vec![], false);
+        assert_eq!(exec(&s).unwrap().passed, 0);
+        assert_eq!(s.calls(), (1, 0));
+    }
+}
+
 // ---- file results / worker pool -----------------------------------------------------------
 
 #[test]
