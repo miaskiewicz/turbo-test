@@ -19,6 +19,17 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `[vitest] No "default" export is defined on the "x" mock. Did you forget to return it from
   "vi.mock"?` on access instead of giving the factory object (the missing-name message is
   vitest 4.1.12's too). Remaining differences are tracked in turbo-test#133–#137.
+- Mocks and packages (turbo-test#135, #136, #137; rows of the #122 interop table): a `vi.mock`
+  no longer reaches a package's own `require()` — vitest loads an external through Node, so
+  `require('x')` inside `node_modules` gets the real `x` (a tsc package's `__importDefault`
+  wrapped the mock into `{ default: { default: Mocked } }`, an object where a component was
+  expected). An automocked function keeps its name (`Comp.name`, was `fn`). On the ESM graph
+  loader a `vi.mock` factory without `default` makes the default import throw vitest's
+  `[vitest] No "default" export is defined on the "x" mock…` when it is used (read, called,
+  constructed, its keys listed — a synthetic module's binding cannot throw on the read itself),
+  instead of giving the factory object; a `jest.mock` factory stays its own default there.
+  Still differs: a named import of an automocked CommonJS module reads the mock where vitest
+  reads `undefined` (needs #133's namespace).
 - A project with no `node_modules/.bin/esbuild` — pnpm, whose transitive esbuild lives only under
   `node_modules/.pnpm`, or one that does not depend on esbuild — now runs on turbo-test's own
   esbuild (PR #80 by alphajew420, turbo-test#79): `cli.js` passes it as `TURBO_ESBUILD`, every

@@ -626,3 +626,52 @@ fn import_meta_url_is_percent_encoded() {
         assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
     }
 }
+
+/// The ES-module graph loader (no esbuild): a `vi.mock` factory without `default` makes every
+/// use of the default import throw vitest's error — a property read, a call, `new`, its keys —
+/// while a `jest.mock` one is its own default (turbo-test#137).
+#[test]
+fn esm_graph_mock_without_default_throws_on_use() {
+    let p = Project::new("rc-graph-mock-default");
+    p.file(
+        "package.json",
+        r#"{"name":"rc-graph-mock-default","type":"module"}"#,
+    );
+    p.file(
+        "m.js",
+        "export default function Real() {}\nexport const n = 'real';\n",
+    );
+    p.file(
+        "j.js",
+        "export default function Real() {}\nexport const n = 'real';\n",
+    );
+    p.file(
+        "a.test.js",
+        &format!(
+            r#"import M, {{ n }} from './m.js';
+import J from './j.js';
+vi.mock('./m.js', () => ({{ n: 'only' }}));
+jest.mock('./j.js', () => ({{ n: 'jest' }}));
+const msg = {msg:?};
+test('the named export reads', () => {{
+  expect(n).toBe('only');
+}});
+test('every use of the missing default throws', () => {{
+  expect(() => M.name).toThrow(msg);
+  expect(() => M()).toThrow(msg);
+  expect(() => new M()).toThrow(msg);
+  expect(() => Object.keys(M)).toThrow(msg);
+  expect(() => 'x' in M).toThrow(msg);
+}});
+test('a jest.mock factory is its own default', () => {{
+  expect(J.n).toBe('jest');
+  expect(Object.keys(J)).toEqual(['n']);
+}});
+"#,
+            msg = no_export("default", "./m.js")
+        ),
+    );
+    for env in FRESH_AND_REUSE {
+        assert_passes(&turbo_test(&p.dir, &[], env), 3);
+    }
+}

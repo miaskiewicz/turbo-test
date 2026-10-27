@@ -63,6 +63,14 @@ const KNOWN: &[(&str, &str, &str, &str)] = &[
         "{default=fn:LessonPage,readerSiteName=fn:readerSiteName}!esm",
         "turbo-test#133",
     ),
+    // an automock's namespace has only Node's keys (`default`, `module.exports`, the names
+    // cjs-module-lexer finds): needs #133's namespace
+    (
+        "*",
+        "mock|automock named",
+        "fn:Comp",
+        "turbo-test#136",
+    ),
     (
         "*",
         "mock|exp-default-noflag",
@@ -254,7 +262,6 @@ fn run_table(p: &Project, loader: &str) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "turbo-test#135/#136/#137: fails until the fix"]
 fn interop_table_matches_vitest_on_the_module_runner() {
     let p = project("interop-table-mr", true);
     let bad = run_table(&p, "mr");
@@ -267,7 +274,6 @@ fn interop_table_matches_vitest_on_the_module_runner() {
 }
 
 #[test]
-#[ignore = "turbo-test#135/#136/#137: fails until the fix"]
 fn interop_table_matches_vitest_on_the_esm_graph_loader() {
     let p = project("interop-table-graph", false);
     let bad = run_table(&p, "graph");
