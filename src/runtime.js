@@ -691,6 +691,8 @@ if (typeof globalThis.TextDecoder === 'undefined') {
     if (typeof o !== 'object' && typeof o !== 'function') throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object.');
     return o;
   };
+  // Node's error for a text longer than V8's string limit (turbo-test#187)
+  const tooLong = () => __codecError(Error, 'ERR_STRING_TOO_LONG', 'Cannot create a string longer than 0x1fffffe8 characters');
   const state = new WeakMap();
   const self = (d) => {
     const st = state.get(d);
@@ -718,11 +720,13 @@ if (typeof globalThis.TextDecoder === 'undefined') {
       if (st.id) {
         const text = globalThis.__ttTextDecode(st.id, st.encoding, st.ignoreBOM, st.fatal, stream, b);
         if (text === null) throw __codecError(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', `The encoded data was not valid for encoding ${st.encoding}`);
+        if (text === undefined) throw tooLong();
         return text;
       }
       if (st.pending) { const m = new Uint8Array(st.pending.length + b.length); m.set(st.pending); m.set(b, st.pending.length); b = m; st.pending = null; }
       const fail = () => { st.pending = null; st.bomSeen = false; throw __codecError(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', 'The encoded data was not valid for encoding utf-8'); };
-      const [decoded, rest] = __utf8Run(b, 0, b.length, stream, st.fatal ? fail : null);
+      let decoded, rest;
+      try { [decoded, rest] = __utf8Run(b, 0, b.length, stream, st.fatal ? fail : null); } catch (e) { throw e instanceof RangeError ? tooLong() : e; }
       if (rest < b.length) st.pending = b.slice(rest);
       let out = decoded;
       if (!st.ignoreBOM && !st.bomSeen && out.length > 0) {

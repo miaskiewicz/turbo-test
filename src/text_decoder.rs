@@ -97,8 +97,8 @@ pub fn native_text_decoder_id(
     rv.set(v8::Number::new(scope, new_id() as f64).into());
 }
 
-/// `__ttTextDecode(id, encoding, ignoreBOM, fatal, stream, view)`: the decoded string, or null
-/// for malformed input with `fatal`.
+/// `__ttTextDecode(id, encoding, ignoreBOM, fatal, stream, view)`: the decoded string, null
+/// for malformed input with `fatal`, undefined when the text is longer than V8's string limit.
 pub fn native_text_decode(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -109,29 +109,21 @@ pub fn native_text_decode(
     let ignore_bom = args.get(2).boolean_value(scope);
     let fatal = args.get(3).boolean_value(scope);
     let stream = args.get(4).boolean_value(scope);
-    let bytes = match v8::Local::<v8::ArrayBufferView>::try_from(args.get(5)) {
-        Ok(view) => {
+    // runtime.js passes the input as a Uint8Array (bytesOf)
+    let bytes = v8::Local::<v8::ArrayBufferView>::try_from(args.get(5))
+        .map(|view| {
             let mut buf = vec![0; view.byte_length()];
             view.copy_contents(&mut buf);
             buf
-        }
-        Err(_) => Vec::new(),
-    };
+        })
+        .unwrap_or_default();
     let Some(text) = decode(id, &encoding, ignore_bom, fatal, stream, &bytes) else {
         return rv.set_null();
     };
-    match v8::String::new(scope, &text) {
-        Some(s) => rv.set(s.into()),
-        None => {
-            // longer than V8's string limit: Node's ERR_STRING_TOO_LONG message
-            let msg = v8::String::new(
-                scope,
-                "Cannot create a string longer than 0x1fffffe8 characters",
-            )
-            .unwrap();
-            let e = v8::Exception::error(scope, msg);
-            scope.throw_exception(e);
-        }
+    // longer than V8's string limit: undefined, which runtime.js throws as Node's
+    // ERR_STRING_TOO_LONG (turbo-test#187)
+    if let Some(s) = v8::String::new(scope, &text) {
+        rv.set(s.into());
     }
 }
 

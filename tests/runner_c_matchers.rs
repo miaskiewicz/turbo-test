@@ -1854,7 +1854,6 @@ test('reported', () => { expect({ x: 3 }).toEqual({ x: expect.toBeOneOf([1, 2]) 
 }
 
 #[test]
-#[ignore = "turbo-test#187: fails until the fix"]
 fn text_decoder_output_past_v8s_string_limit_is_nodes_err_string_too_long() {
     // A decode whose text is longer than V8's string limit (0x1fffffe8 characters) throws Node's
     // ERR_STRING_TOO_LONG, on the native legacy-encoding path as on the UTF-8 one (turbo-test#187).
