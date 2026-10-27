@@ -179,7 +179,7 @@ test('config/env flags do not consume a following test-file arg as their value',
 
 // ---- a project without node_modules/.bin/esbuild (pnpm) -----------------------
 
-test("a project without its own esbuild runs on turbo-test's (cli.js sets TURBO_ESBUILD)", { todo: 'turbo-test#79' }, () => {
+test("a project without its own esbuild runs on turbo-test's (cli.js sets TURBO_ESBUILD)", () => {
   // pnpm keeps a transitive esbuild under node_modules/.pnpm and links no .bin/esbuild; vitest
   // (its own transform) sees a spied export from the importing module, as an esbuild project does
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tt-no-esbuild-'));

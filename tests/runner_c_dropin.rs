@@ -339,7 +339,6 @@ fn a_mock_factory_that_cannot_compile_fails_the_file() {
 /// transform) on the same projects: typed and JSX `vi.mock` factories apply, a mock factory on a
 /// pnpm package applies, and `vi.spyOn` on a module's export is seen by the module importing it.
 #[test]
-#[ignore = "turbo-test#79: fails until the fix"]
 fn a_project_without_a_linked_esbuild_uses_turbo_tests_own() {
     let files: [(&str, &str); 6] = [
         ("dep.ts", "export const greet = (n: string): string => 'hi ' + n;\n"),
