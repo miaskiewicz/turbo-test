@@ -622,7 +622,6 @@ it('a decorator-metadata module', () => {
 /// the ESM graph the spy replaced the binding itself (`dep.greetTwice` called the spy). vitest on
 /// the same project: 9 passed.
 #[test]
-#[ignore = "turbo-test#146: fails until the fix"]
 fn a_namespace_spy_leaves_the_modules_own_references_alone() {
     let files: [(&str, &str); 5] = [
         (
@@ -675,8 +674,8 @@ it.each([
   ['dep.default', () => vi.spyOn(dep, 'default').mockReturnValue('S'), ['hi a', 'fn', 'S', 'hi b', 'star', 'fn', 'own'], () => [dep.callsDef(), dep.default()], ['def', 'S']],
   ['barrel.hello', () => vi.spyOn(barrel, 'hello').mockReturnValue('S'), ['hi a', 'fn', 'def', 'S', 'star', 'fn', 'own'], () => [dep.greet('x'), barrel.hello('x')], ['hi x', 'S']],
   ['barrel.viaImport', () => vi.spyOn(barrel, 'viaImport').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'star', 'S', 'own'], () => [dep.fn(), dep.callsFn()], ['fn', 'fn']],
-  ['barrel.starred', () => vi.spyOn(barrel, 'starred').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'S', 'fn', 'own'], () => [star.starred(), star.callsStarred()], ['star', 'star']],
   ['star.starred', () => vi.spyOn(star, 'starred').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'S', 'fn', 'own'], () => [barrel.starred(), star.callsStarred()], ['S', 'star']],
+  ['barrel.starred', () => vi.spyOn(barrel, 'starred').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'S', 'fn', 'own'], () => [star.starred(), star.callsStarred()], ['star', 'star']],
   ['barrel.barrelOwn', () => vi.spyOn(barrel, 'barrelOwn').mockReturnValue('S'), ['hi a', 'fn', 'def', 'hi b', 'star', 'fn', 'S'], () => [barrel.barrelOwn()], ['S']],
 ])('vi.spyOn(%s)', (_name, spy, expected, more, moreExpected) => {
   spy();

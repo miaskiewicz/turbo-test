@@ -1,89 +1,48 @@
-//! Spy-able namespaces on the ESM-graph loader (turbo-test#131). vitest's module runner gives
-//! every module a plain exports object, so `vi.spyOn(ns, 'greet')` replaces the export its
-//! importers read. V8's module namespace objects are read-only, so on the ESM graph the spy was
-//! dropped. An app module (plain JS, after its TS / JSX transform) therefore gets a setter for
-//! each of its exports, registered for its own namespace (a self-import) through runtime.js
-//! `__ttNsSetter`; `vi.spyOn` / `mockRestore` call it (`__ttNsSet`) where defining the property
-//! fails. A setter assigns the export's local binding (`export const` becomes `let`, an
-//! anonymous default export gets a binding); a re-export (`export { x } from`, an exported
-//! import, `export *`) forwards to the source module's setter.
+//! Spy-able namespaces on the ESM-graph loader (turbo-test#131, #146). vitest's module runner
+//! gives every module a plain exports object and compiles an importer's uses of an imported
+//! binding to reads of that object, so `vi.spyOn(ns, 'greet')` changes what the importers see,
+//! while the exporting module's own references keep the original. V8's module namespaces are
+//! read-only, so an app module on the ESM graph gets the same shape by rewriting (plain JS,
+//! after its TS / JSX transform):
 //!
-//! Edits keep every line where it was (the setter goes after the last line), so test locations
-//! and source maps still hold.
+//! - as an exporter, it registers its namespace (a self-import) with runtime.js
+//!   `__ttNsRegister`, naming its own exports and its re-exports (`export { x } from`, an
+//!   exported import, `export *`), which read through to the source module;
+//! - as an importer, every read of an imported binding becomes `__ttR(<namespace>, <name>)` (the
+//!   spied value when there is one, else the live binding), a namespace import is read through
+//!   `__ttNs` (a view with the same overrides), and `import()` resolves to that view.
+//!
+//! `vi.spyOn` / `mockRestore` set the override (`__ttNsSet`). Edits keep every line where it was
+//! (the registration follows the last line), so test locations and source maps still hold.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Declaration, ExportDefaultDeclarationKind, ImportDeclarationSpecifier, ModuleExportName,
-    Statement, VariableDeclarationKind,
+    Declaration, Expression, IdentifierReference, ImportDeclarationSpecifier, ImportExpression,
+    ModuleExportName, ObjectProperty, Statement, VariableDeclarationKind,
 };
+use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType};
+use oxc_semantic::{Scoping, SemanticBuilder, SymbolId};
+use oxc_span::SourceType;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// How a setter reaches one export.
-enum Target {
-    /// assign this module-scope binding
-    Local(String),
-    /// forward to `ns` (a namespace import of the source module) under this name
-    Forward(String, String),
-}
-
-/// `code` (the ES module at `file`) with its exports' setter registered, or `None` when it has
-/// no export a setter can reach (or does not parse).
+/// `code` (the ES module at `file`) with its imports read through the spy overrides and its
+/// namespace registered, or `None` when there is nothing to do (or it does not parse).
 pub fn spyable(file: &Path, code: &str) -> Option<String> {
-    if !code.contains("export") {
+    if !code.contains("import") && !code.contains("export") {
         return None;
     }
     let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, code, SourceType::mjs().with_jsx(true)).parse();
+    let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
     if !parsed.errors.is_empty() {
         return None;
     }
-    let body = &parsed.program.body;
-    // local name -> (source, imported name) of the module's named / default imports
-    let mut imports: HashMap<String, (String, String)> = HashMap::new();
-    // top-level `const` declarations by bound name: their keyword's offset
-    let mut consts: HashMap<String, u32> = HashMap::new();
-    for st in body {
-        match st {
-            Statement::ImportDeclaration(d) => {
-                for s in d.specifiers.iter().flatten() {
-                    let (local, imported) = match s {
-                        ImportDeclarationSpecifier::ImportSpecifier(s) => {
-                            (s.local.name.to_string(), s.imported.name().to_string())
-                        }
-                        ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
-                            (s.local.name.to_string(), "default".to_string())
-                        }
-                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => continue,
-                    };
-                    imports.insert(local, (d.source.value.to_string(), imported));
-                }
-            }
-            Statement::VariableDeclaration(v) if v.kind == VariableDeclarationKind::Const => {
-                for d in &v.declarations {
-                    for id in d.id.get_binding_identifiers() {
-                        consts.insert(id.name.to_string(), v.span.start);
-                    }
-                }
-            }
-            Statement::ExportNamedDeclaration(e) => {
-                if let Some(Declaration::VariableDeclaration(v)) = &e.declaration {
-                    if v.kind == VariableDeclarationKind::Const {
-                        for d in &v.declarations {
-                            for id in d.id.get_binding_identifiers() {
-                                consts.insert(id.name.to_string(), v.span.start);
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut targets: Vec<(String, Target)> = Vec::new();
-    let mut stars: Vec<String> = Vec::new();
+    let program = parsed.program;
+    let semantic = SemanticBuilder::new().build(&program).semantic;
+    let scoping = semantic.scoping();
+    let lit = |s: &str| serde_json::to_string(s).unwrap_or_default();
+
     let mut sources: Vec<String> = Vec::new();
     let mut ns_of = |source: &str| -> String {
         let i = sources.iter().position(|s| s == source).unwrap_or_else(|| {
@@ -92,179 +51,195 @@ pub fn spyable(file: &Path, code: &str) -> Option<String> {
         });
         format!("__tt_ns_{i}")
     };
-    // (start, end, replacement), applied back to front
-    let mut edits: Vec<(u32, u32, String)> = Vec::new();
-    let mut tail = String::new();
-    for st in body {
+    // import binding symbol -> the expression an importer's read of it becomes
+    let mut reads: HashMap<SymbolId, String> = HashMap::new();
+    // local name -> (source, imported name) of named / default imports (for re-exports)
+    let mut imported: HashMap<String, (String, String)> = HashMap::new();
+    let mut own: Vec<String> = Vec::new();
+    let mut reexports: Vec<(String, String, String)> = Vec::new();
+    let mut stars: Vec<String> = Vec::new();
+    for st in &program.body {
         match st {
+            Statement::ImportDeclaration(d) if d.with_clause.is_none() && d.phase.is_none() => {
+                let source = d.source.value.as_str();
+                let api =
+                    matches!(source, "vitest" | "@jest/globals") || source.starts_with("node:");
+                for s in d.specifiers.iter().flatten() {
+                    let (local, name) = match s {
+                        ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                            (&s.local, Some(s.imported.name().to_string()))
+                        }
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                            (&s.local, Some("default".to_string()))
+                        }
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => (&s.local, None),
+                    };
+                    if let Some(n) = &name {
+                        imported.insert(local.name.to_string(), (source.to_string(), n.clone()));
+                    }
+                    let Some(symbol) = local.symbol_id.get() else {
+                        continue;
+                    };
+                    if api {
+                        continue;
+                    }
+                    let read = match name {
+                        Some(n) => format!("(globalThis.__ttR({}, {}))", ns_of(source), lit(&n)),
+                        None => format!("(globalThis.__ttNs({}))", local.name),
+                    };
+                    reads.insert(symbol, read);
+                }
+            }
             Statement::ExportNamedDeclaration(e) if e.with_clause.is_none() => {
                 if let Some(src) = &e.source {
                     for s in &e.specifiers {
-                        let ns = ns_of(&src.value);
-                        targets.push((
+                        reexports.push((
                             s.exported.name().to_string(),
-                            Target::Forward(ns, s.local.name().to_string()),
+                            src.value.to_string(),
+                            s.local.name().to_string(),
                         ));
                     }
                     continue;
                 }
                 match &e.declaration {
-                    Some(Declaration::VariableDeclaration(v)) => {
+                    Some(Declaration::VariableDeclaration(v))
                         if !matches!(
                             v.kind,
                             VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing
-                        ) {
-                            for d in &v.declarations {
-                                for id in d.id.get_binding_identifiers() {
-                                    let n = id.name.to_string();
-                                    targets.push((n.clone(), Target::Local(n)));
-                                }
-                            }
+                        ) =>
+                    {
+                        for d in &v.declarations {
+                            own.extend(
+                                d.id.get_binding_identifiers()
+                                    .iter()
+                                    .map(|i| i.name.to_string()),
+                            );
                         }
                     }
                     Some(Declaration::FunctionDeclaration(f)) => {
-                        if let Some(id) = &f.id {
-                            let n = id.name.to_string();
-                            targets.push((n.clone(), Target::Local(n)));
-                        }
+                        own.extend(f.id.iter().map(|i| i.name.to_string()))
                     }
                     Some(Declaration::ClassDeclaration(c)) => {
-                        if let Some(id) = &c.id {
-                            let n = id.name.to_string();
-                            targets.push((n.clone(), Target::Local(n)));
-                        }
+                        own.extend(c.id.iter().map(|i| i.name.to_string()))
                     }
                     _ => {}
                 }
                 for s in &e.specifiers {
-                    let ModuleExportName::IdentifierReference(local) = &s.local else {
-                        continue;
-                    };
                     let exported = s.exported.name().to_string();
-                    let local = local.name.to_string();
-                    match imports.get(&local) {
-                        Some((source, imported)) => {
-                            let ns = ns_of(source);
-                            targets.push((exported, Target::Forward(ns, imported.clone())));
+                    match &s.local {
+                        ModuleExportName::IdentifierReference(r)
+                            if imported.contains_key(r.name.as_str()) =>
+                        {
+                            let (source, name) = imported[r.name.as_str()].clone();
+                            reexports.push((exported, source, name));
                         }
-                        None => targets.push((exported, Target::Local(local))),
+                        _ => own.push(exported),
                     }
                 }
             }
-            Statement::ExportAllDeclaration(e)
-                if e.exported.is_none() && e.with_clause.is_none() =>
-            {
-                stars.push(ns_of(&e.source.value));
-            }
-            Statement::ExportDefaultDeclaration(e) => {
-                let local = "__tt_default".to_string();
-                match &e.declaration {
-                    ExportDefaultDeclarationKind::FunctionDeclaration(f) => match &f.id {
-                        Some(id) => {
-                            targets.push(("default".into(), Target::Local(id.name.to_string())))
-                        }
-                        None => {
-                            let at = f.params.span.start;
-                            edits.push((at, at, format!(" {local}")));
-                            tail.push_str(&format!(
-                                "Object.defineProperty({local}, \"name\", {{ value: \"default\" }});"
-                            ));
-                            targets.push(("default".into(), Target::Local(local)));
-                        }
-                    },
-                    ExportDefaultDeclarationKind::ClassDeclaration(c) => match &c.id {
-                        Some(id) => {
-                            targets.push(("default".into(), Target::Local(id.name.to_string())))
-                        }
-                        None => {
-                            let start = c.span.start as usize;
-                            let Some(k) = code[start..c.span.end as usize].find("class") else {
-                                continue;
-                            };
-                            let at = (start + k + "class".len()) as u32;
-                            edits.push((at, at, format!(" {local}")));
-                            tail.push_str(&format!(
-                                "Object.defineProperty({local}, \"name\", {{ value: \"default\", configurable: true }});"
-                            ));
-                            targets.push(("default".into(), Target::Local(local)));
-                        }
-                    },
-                    d => {
-                        let Some(expr) = d.as_expression() else {
-                            continue;
-                        };
-                        let (s, x) = (expr.span().start, expr.span().end);
-                        // `export default <expr>` -> a binding of its own (an anonymous function
-                        // or class keeps the name `default`), exported as `default`
-                        edits.push((e.span.start, s, format!("let {local} = ({{ default: ")));
-                        edits.push((x, x, " }).default".to_string()));
-                        tail.push_str(&format!("export {{ {local} as default }};"));
-                        targets.push(("default".into(), Target::Local(local)));
-                    }
-                }
-            }
+            Statement::ExportDefaultDeclaration(_) => own.push("default".to_string()),
+            Statement::ExportAllDeclaration(e) if e.with_clause.is_none() => match &e.exported {
+                Some(n) => own.push(n.name().to_string()),
+                None => stars.push(e.source.value.to_string()),
+            },
             _ => {}
         }
     }
-    if targets.is_empty() && stars.is_empty() {
-        return None;
+
+    struct Reads<'s> {
+        scoping: &'s Scoping,
+        reads: &'s HashMap<SymbolId, String>,
+        edits: Vec<(u32, u32, String)>,
     }
-    // a `const` a setter assigns becomes a `let` (same width: `let  `)
-    let mut lets: Vec<u32> = targets
-        .iter()
-        .filter_map(|(_, t)| match t {
-            Target::Local(n) => consts.get(n).copied(),
-            Target::Forward(..) => None,
-        })
-        .collect();
-    lets.sort_unstable();
-    lets.dedup();
-    for at in lets {
-        if code[at as usize..].starts_with("const") {
-            edits.push((at, at + 5, "let  ".to_string()));
+    impl Reads<'_> {
+        fn read_of(&self, it: &IdentifierReference) -> Option<&String> {
+            let r = self.scoping.get_reference(it.reference_id.get()?);
+            if r.is_write() {
+                return None;
+            }
+            self.reads.get(&r.symbol_id()?)
         }
+    }
+    impl<'a> Visit<'a> for Reads<'_> {
+        fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
+            if let Some(read) = self.read_of(it) {
+                self.edits.push((it.span.start, it.span.end, read.clone()));
+            }
+        }
+        fn visit_object_property(&mut self, it: &ObjectProperty<'a>) {
+            if let (true, Expression::Identifier(id)) = (it.shorthand, &it.value) {
+                if let Some(read) = self.read_of(id) {
+                    let edit = format!("{}: {read}", id.name);
+                    self.edits.push((it.span.start, it.span.end, edit));
+                    return;
+                }
+            }
+            walk::walk_object_property(self, it);
+        }
+        // `export { binding }` names the binding, it does not read it
+        fn visit_export_named_declaration(
+            &mut self,
+            it: &oxc_ast::ast::ExportNamedDeclaration<'a>,
+        ) {
+            if let Some(d) = &it.declaration {
+                self.visit_declaration(d);
+            }
+        }
+        fn visit_import_expression(&mut self, it: &ImportExpression<'a>) {
+            self.edits
+                .push((it.span.start, it.span.start, "(".to_string()));
+            let end = it.span.end;
+            self.edits
+                .push((end, end, ").then(globalThis.__ttNs)".to_string()));
+            walk::walk_import_expression(self, it);
+        }
+    }
+    let mut v = Reads {
+        scoping,
+        reads: &reads,
+        edits: Vec::new(),
+    };
+    v.visit_program(&program);
+    let mut edits = v.edits;
+    let exporter = !own.is_empty() || !reexports.is_empty() || !stars.is_empty();
+    if edits.is_empty() && !exporter {
+        return None;
     }
     let mut out = code.to_string();
     edits.sort_by_key(|e| std::cmp::Reverse((e.0, e.1)));
     for (s, e, text) in edits {
         out.replace_range(s as usize..e as usize, &text);
     }
-    let me = file.file_name()?.to_string_lossy().into_owned();
-    let lit = |s: &str| serde_json::to_string(s).unwrap_or_default();
-    let mut setter = String::new();
+    // the registration, after the last line
+    let mut tail = String::new();
+    let re: Vec<String> = reexports
+        .iter()
+        .map(|(name, source, imported)| {
+            format!("{}: [{}, {}]", lit(name), ns_of(source), lit(imported))
+        })
+        .collect();
+    let star_ns: Vec<String> = stars.iter().map(|s| ns_of(s)).collect();
     for (i, s) in sources.iter().enumerate() {
-        setter.push_str(&format!("import * as __tt_ns_{i} from {};", lit(s)));
+        tail.push_str(&format!("import * as __tt_ns_{i} from {};", lit(s)));
     }
-    setter.push_str(&format!(
-        "import * as __tt_self from {};",
-        lit(&format!("./{me}"))
-    ));
-    setter.push_str(&tail);
-    setter.push_str("globalThis.__ttNsSetter?.(__tt_self, (k, v) => { switch (k) {");
-    for (name, t) in &targets {
-        match t {
-            Target::Local(local) => {
-                setter.push_str(&format!(" case {}: {local} = v; return true;", lit(name)))
-            }
-            Target::Forward(ns, imported) => setter.push_str(&format!(
-                " case {}: return globalThis.__ttNsSet({ns}, {}, v);",
-                lit(name),
-                lit(imported)
-            )),
-        }
-    }
-    setter.push_str(" } ");
-    for ns in &stars {
-        setter.push_str(&format!(
-            "if (k !== \"default\" && k in {ns}) return globalThis.__ttNsSet({ns}, k, v); "
+    if exporter {
+        let me = file.file_name()?.to_string_lossy().into_owned();
+        let own: Vec<String> = own.iter().map(|n| lit(n)).collect();
+        tail.push_str(&format!(
+            "import * as __tt_self from {};globalThis.__ttNsRegister?.(__tt_self, [{}], {{{}}}, [{}]);",
+            lit(&format!("./{me}")),
+            own.join(", "),
+            re.join(", "),
+            star_ns.join(", ")
         ));
     }
-    setter.push_str("return false; });");
-    if !out.ends_with('\n') {
+    if !tail.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&tail);
         out.push('\n');
     }
-    out.push_str(&setter);
-    out.push('\n');
     Some(out)
 }
 

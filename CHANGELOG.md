@@ -33,14 +33,19 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `url` / `filename` / `dirname` plus vitest's `env` (live `process.env`, `DEV` / `PROD` / `SSR`
   booleans), and `process.env` carries vite's `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` (`SSR`
   off under a `jsdom` / `happy-dom` environment), as vitest sets them.
+- A namespace spy on the ESM-graph loader reaches the importers only, as in vitest (turbo-test#146):
+  it replaced the export's binding, so the exporting module's own calls (`greetTwice()` calling
+  `greet`) and other modules' re-exports saw the spy too. Importers now read imported bindings
+  through the spy overrides (`__ttR` / `__ttNs`, also for an `import()` namespace) and modules
+  register their own names, re-exports and `export *` sources (`src/esm_spy.rs`); the module's
+  own references keep the original, as vitest's exports objects do.
 - `vi.spyOn` on a module's export on the ESM-graph loader (turbo-test#131, the binary run without
   `TURBO_ESBUILD` in a project without esbuild): V8's namespace objects are read-only, so the spy
   was dropped and the importing module kept calling the original (`expected 'hi a!' to be
   'spied!'`). Each app module now registers a setter for its own namespace (`src/esm_spy.rs`):
   `export const` / `let` / `function` / `class`, renamed locals, `export default` (expression or
   anonymous declaration) and re-exports (forwarded to the source module); `mockRestore` puts the
-  original back. On this loader the spy replaces the binding itself, so the module's own uses
-  see it too.
+  original back.
 - `import.meta.resolve` / `main` / `glob` / `vitest` (turbo-test#130): every module's
   `import.meta` was `url, filename, dirname, env` only. It now has vitest 4.1.12's members in its
   order: `resolve` (Node's, from the module: relative paths and URLs against it, builtins as
