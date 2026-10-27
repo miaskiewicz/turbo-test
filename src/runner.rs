@@ -1294,20 +1294,45 @@ fn forced_env(s: &str) -> Option<String> {
     })
 }
 
-/// vite's `process.env.SSR` for `file` as vitest sets it: `''` under a DOM environment
-/// (`jsdom` / `happy-dom`, configured or by pragma — vitest's web transform mode), else `'1'`
-/// (turbo-test#123; runtime.js starts it at `'1'`).
-fn set_ssr_env(scope: &mut v8::PinScope, file: &Path) {
+thread_local! {
+    /// This worker thread's pool slot (0-based) and the run-wide sequence number of the file it
+    /// is running ([`set_worker_slot`]).
+    static WORKER_SLOT: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// Called by the worker pool before each file: `pool` is the worker's 0-based slot, `seq` the
+/// file's position in the run (vitest's VITEST_POOL_ID / VITEST_WORKER_ID, [`set_file_env`]).
+pub fn set_worker_slot(pool: usize, seq: usize) {
+    WORKER_SLOT.with(|w| w.set((pool, seq)));
+}
+
+/// The per-file part of vitest's process.env (turbo-test#123, #156): vite's `SSR` (`''` under a
+/// DOM environment — `jsdom` / `happy-dom`, configured or by pragma, vitest's web transform mode
+/// — else `'1'`), `VITEST_POOL_ID` (the worker, from 1) and `VITEST_WORKER_ID` (vitest numbers a
+/// fresh worker per file from 0; a reused isolate keeps its worker's). Also `expect.getState()`'s
+/// `environment`.
+fn set_file_env(scope: &mut v8::PinScope, file: &Path) {
     let s = std::fs::read_to_string(file).unwrap_or_default();
+    let env = forced_env(&s);
     let web = matches!(
-        forced_env(&s).as_deref(),
+        env.as_deref(),
         Some("jsdom") | Some("happy-dom") | Some("happydom")
     );
+    let (pool, seq) = WORKER_SLOT.with(|w| w.get());
+    let worker = if on_reuse_path() { pool } else { seq };
     run_js(
         scope,
         &format!(
-            "globalThis.process.env.SSR = '{}';",
-            if web { "" } else { "1" }
+            "globalThis.process.env.SSR = '{}'; globalThis.process.env.VITEST_POOL_ID = '{}'; \
+             globalThis.process.env.VITEST_WORKER_ID = '{}'; globalThis.__ttEnvName = {};",
+            if web { "" } else { "1" },
+            pool + 1,
+            worker,
+            json_string(match env.as_deref() {
+                Some("happydom") => "happy-dom",
+                Some(e) => e,
+                None => "node",
+            }),
         ),
     );
 }
@@ -6494,11 +6519,12 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     install_host_env(scope, global);
 }
 
-/// process.env as vitest's (turbo-test#143): the environment turbo-test was started with, in its
-/// order (a non-UTF-8 name / value lossily decoded), then vitest's own variables. The host's
-/// NODE_ENV wins (vitest only defaults it to 'test'); runtime.js's MODE / DEV / PROD / SSR /
-/// BASE_URL / VITEST replace the host's. The object is filled in place: `node:process`'s `env`
-/// and `import.meta.env` read this same object.
+/// process.env as vitest's (turbo-test#143, #156): the environment turbo-test was started with, in
+/// its order (a non-UTF-8 name / value lossily decoded), then vitest's own variables. The host's
+/// NODE_ENV wins (vitest only defaults it to 'test'); runtime.js's TEST / VITEST / BASE_URL / MODE
+/// / VITEST_MODE / SSR / ... replace the host's; PROD is '1' (DEV '') under NODE_ENV=production;
+/// FORCE_TTY is 'true' when stdout is a terminal. The object is filled in place: `node:process`'s
+/// `env` and `import.meta.env` read this same object.
 fn install_host_env(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let host = v8::Object::new(scope);
     for (k, v) in std::env::vars_os() {
@@ -6512,11 +6538,16 @@ fn install_host_env(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     }
     let key = v8::String::new(scope, "__ttHostEnv").unwrap();
     global.set(scope, key.into(), host.into());
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        run_js(scope, "globalThis.process.env.FORCE_TTY = 'true';");
+    }
     run_js(
         scope,
         "(() => { const e = globalThis.process.env, h = globalThis.__ttHostEnv; delete globalThis.__ttHostEnv; \
          const own = { ...e }; for (const k of Object.keys(e)) delete e[k]; Object.assign(e, h); \
-         e.NODE_ENV = h.NODE_ENV ?? own.NODE_ENV; delete own.NODE_ENV; Object.assign(e, own); })();",
+         if (h.NODE_ENV !== undefined) delete own.NODE_ENV; Object.assign(e, own); \
+         e.PROD = e.NODE_ENV === 'production' ? '1' : ''; e.DEV = e.PROD ? '' : '1'; })();",
     );
 }
 
@@ -7363,7 +7394,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         }
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
 
-        set_ssr_env(scope, &entry_abs);
+        set_file_env(scope, &entry_abs);
         let result = 'work: {
             // 0. DOM environment (turbo-dom) — only for files that need it, so pure-logic
             //    tests keep their clean globals (mirrors vitest per-file environment).
@@ -7620,7 +7651,7 @@ fn run_test_file_reused(
         }
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
 
-        set_ssr_env(scope, entry_abs);
+        set_file_env(scope, entry_abs);
         let result: Result<TestReport, String> = 'work: {
             // DOM: install once per worker and keep it across its files, as vitest `isolate: false`
             // keeps one environment (turbo-test#150); a fresh-isolate run or a recycle reinstalls.

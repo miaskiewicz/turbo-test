@@ -32,6 +32,25 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   panic) is retried. The same test pins it with `--isolate` (vitest's report is identical).
 
 ### Fixed
+- The `expect` surface is now vitest 4.1.12's, checked member by member against vitest
+  (`tests/runner_c_expect_surface.rs`, turbo-test#152–#155). The asymmetric matchers are
+  vitest's classes, with `$$typeof`, `asymmetricMatch`, `toString`, `getExpectedType` and
+  `toAsymmetricMatcher`; `equals` and the printers also accept a user-defined matcher. Added
+  `expect.closeTo`, `schemaMatching`, `toSatisfy`, `addEqualityTesters`, `fail`, `unreachable`,
+  `getState` / `setState`, and `expect.<name>` / `expect.not.<name>` for every `expect.extend`
+  matcher. Added 17 missing matchers (the `toBeCalled*` / `toReturn*` aliases, the
+  returned-times and nth / last returned family, the resolved family, called-before / after,
+  `toBeNullable`); for these, vi.fn now records `invocationCallOrder` and `settledResults`.
+  An unknown matcher throws chai's `Invalid Chai property` (it used to be `undefined`, so
+  `is not a function`), and a passing matcher returns the assertion. `.resolves` / `.rejects`
+  on a non-promise throw vitest's TypeError. A failed toMatchObject diffs against the received
+  subset (it printed `Received: undefined`). Still missing: chai's BDD chain and `assert`
+  (#160), `expect.poll` (#161), `addSnapshotSerializer` (#162), and vitest's `this.utils`
+  printers (#163).
+- `process.env` has vitest's `TEST`, `VITEST_MODE`, `FORCE_TTY`, `VITEST_POOL_ID` (the worker)
+  and `VITEST_WORKER_ID` (per file, or per worker on a reused isolate), in vitest's key order
+  (turbo-test#156). `PROD` / `DEV` follow `NODE_ENV` as in vite (`'1'` / `''` under
+  `production`), so `import.meta.env.DEV` is false in a production build.
 - runtime.js no longer defines `__ttRestoreFileApis` (turbo-test#147). It restored Blob / File /
   FileReader after the JS turbo-dom bootstrap replaced them; that bootstrap went in v0.3.0 and the
   native DOM (`turbo-dom-browser-env`) never replaces them, so nothing called it. Wiring it
