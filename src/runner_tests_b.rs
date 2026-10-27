@@ -538,7 +538,6 @@ fn drive_loop_gives_up_after_its_turn_budget() {
 /// the drive loop settles it (`flush_ownership`) once the task's microtasks have drained, so a
 /// subtree the task detached is collectable before the next task.
 #[test]
-#[ignore = "turbo-dom#112: fails until the drive loop flushes"]
 fn drive_loop_settles_deferred_dom_ownership_after_each_task() {
     with_context(|scope, global| {
         turbo_dom_browser_env::browser_env::install(scope);
@@ -569,7 +568,10 @@ fn drive_loop_settles_deferred_dom_ownership_after_each_task() {
         for _ in 0..3 {
             scope.low_memory_notification();
         }
-        assert!(gone.is_empty(), "the detached wrapper was collected after the task");
+        assert!(
+            gone.is_empty(),
+            "the detached wrapper was collected after the task"
+        );
         turbo_dom_browser_env::browser_env::reset();
     });
 }
