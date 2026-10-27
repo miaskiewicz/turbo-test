@@ -322,8 +322,17 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   takes an ArrayBuffer, SharedArrayBuffer or any view (offset and length honoured; a
   `Uint16Array`/`DataView` decoded the whole buffer) and throws TypeError for anything else;
   `encoding` / `fatal` / `ignoreBOM` are prototype getters; the label is trimmed and
-  case-folded, accepting only the UTF-8 labels, and any other label throws RangeError
-  `ERR_ENCODING_NOT_SUPPORTED`. `Buffer#toString` keeps a BOM, as Node.
+  case-folded, accepting the UTF-8 labels (the legacy encodings followed in turbo-test#119), and
+  an unknown label throws RangeError `ERR_ENCODING_NOT_SUPPORTED`. `Buffer#toString` keeps a BOM, as Node.
+- `TextDecoder` decodes the legacy encodings Node 26 does (turbo-test#119): every WHATWG
+  Encoding label is accepted (`latin1` / `ascii` are `windows-1252`, `utf-16` is `utf-16le`,
+  `sjis` is `shift_jis`, ...; the `replacement` labels throw RangeError
+  `The "replacement" encoding is not supported`) and the single-byte, UTF-16LE/BE and CJK
+  multi-byte encodings decode natively through encoding_rs, with `fatal` (TypeError naming the
+  encoding), `ignoreBOM` and `stream` (a partial sequence or ISO-2022-JP's mode carries over).
+  Every other label threw RangeError `ERR_ENCODING_NOT_SUPPORTED`. Node's ICU big5 / euc-jp /
+  euc-kr / shift_jis decoders differ from the Encoding Standard on some bytes; turbo-test follows
+  the standard there (vitest.compat.md).
 - `Blob#text()` UTF-8-decodes the concatenated bytes of all parts once, as Node 26
   (turbo-test#120): a sequence split across parts is one character (`[E2 82] + [AC]` gave two
   U+FFFD, now `€`), one leading BOM is stripped (it was kept), and a nested Blob contributes its

@@ -1110,7 +1110,6 @@ await t('file', () => new File([new Uint8Array([0xe2, 0x82]), new Uint8Array([0x
 }
 
 #[test]
-#[ignore = "turbo-test#119: fails until the fix"]
 fn text_decoder_legacy_encodings_are_nodes() {
     // turbo-test#119: TextDecoder takes every WHATWG label Node 26 does (the replacement
     // encoding's labels throw RangeError naming "replacement") and decodes the legacy encodings:

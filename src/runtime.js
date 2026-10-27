@@ -345,9 +345,10 @@ globalThis.localStorage = new __Storage();
 globalThis.sessionStorage = new __Storage();
 
 // ---- TextEncoder/TextDecoder (host globals; bare V8 has none) ----
-// WHATWG Encoding (UTF-8 only), checked row by row against Node 26 (turbo-test#118): lone
-// surrogates encode as U+FFFD, invalid UTF-8 decodes to U+FFFD per maximal subpart (or throws
-// with `fatal`), a leading BOM is stripped unless `ignoreBOM`, `stream` keeps a partial sequence.
+// WHATWG Encoding, checked row by row against Node 26 (turbo-test#118): lone surrogates encode
+// as U+FFFD, invalid UTF-8 decodes to U+FFFD per maximal subpart (or throws with `fatal`), a
+// leading BOM is stripped unless `ignoreBOM`, `stream` keeps a partial sequence. TextDecoder's
+// other encodings (turbo-test#119) decode natively through encoding_rs (src/text_decoder.rs).
 const __codecError = (Ctor, code, msg) => { const e = new Ctor(msg); e.code = code; return e; };
 // The one WHATWG UTF-8 decoder (turbo-test#121): b[start..end) (any indexable bytes) to a string,
 // one U+FFFD per maximal invalid subpart (or `onBad()`'s throw, for `fatal`). With `stream`, an
@@ -446,17 +447,26 @@ if (typeof globalThis.TextDecoder === 'undefined') {
   globalThis.TextDecoder = class TextDecoder {
     constructor(label = 'utf-8', opts = undefined) {
       const name = `${label}`.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '').replace(/[A-Z]+/g, (c) => c.toLowerCase());
-      if (!LABELS.includes(name)) throw __codecError(RangeError, 'ERR_ENCODING_NOT_SUPPORTED', `The "${label}" encoding is not supported`);
+      // UTF-8 here; any other WHATWG label names its encoding natively (undefined: not a label)
+      const encoding = LABELS.includes(name) ? 'utf-8' : globalThis.__ttTextEncoding(name);
+      if (encoding === undefined) throw __codecError(RangeError, 'ERR_ENCODING_NOT_SUPPORTED', `The "${label}" encoding is not supported`);
+      if (encoding === 'replacement') throw __codecError(RangeError, 'ERR_ENCODING_NOT_SUPPORTED', 'The "replacement" encoding is not supported');
       const o = options(opts);
-      state.set(this, { fatal: !!o.fatal, ignoreBOM: !!o.ignoreBOM, pending: null, bomSeen: false });
+      const id = encoding === 'utf-8' ? 0 : globalThis.__ttTextDecoderId();
+      state.set(this, { encoding, id, fatal: !!o.fatal, ignoreBOM: !!o.ignoreBOM, pending: null, bomSeen: false });
     }
-    get encoding() { self(this); return 'utf-8'; }
+    get encoding() { return self(this).encoding; }
     get fatal() { return self(this).fatal; }
     get ignoreBOM() { return self(this).ignoreBOM; }
     decode(input = undefined, opts = undefined) {
       const st = self(this);
       let b = bytesOf(input);
       const stream = !!options(opts).stream;
+      if (st.id) {
+        const text = globalThis.__ttTextDecode(st.id, st.encoding, st.ignoreBOM, st.fatal, stream, b);
+        if (text === null) throw __codecError(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', `The encoded data was not valid for encoding ${st.encoding}`);
+        return text;
+      }
       if (st.pending) { const m = new Uint8Array(st.pending.length + b.length); m.set(st.pending); m.set(b, st.pending.length); b = m; st.pending = null; }
       const fail = () => { st.pending = null; st.bomSeen = false; throw __codecError(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', 'The encoded data was not valid for encoding utf-8'); };
       const [decoded, rest] = __utf8Run(b, 0, b.length, stream, st.fatal ? fail : null);

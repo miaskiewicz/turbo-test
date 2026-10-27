@@ -5701,6 +5701,24 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         "__ttStructuredClone",
         crate::structured_clone::native_structured_clone,
     );
+    bind_fn(
+        scope,
+        global,
+        "__ttTextEncoding",
+        crate::text_decoder::native_text_encoding,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttTextDecoderId",
+        crate::text_decoder::native_text_decoder_id,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttTextDecode",
+        crate::text_decoder::native_text_decode,
+    );
     if std::env::var("TURBO_STACK").is_ok() {
         if let Some(code) = v8::String::new(scope, "globalThis.__TT_STACK=true") {
             if let Some(s) = v8::Script::compile(scope, code, None) {
