@@ -1,19 +1,9 @@
 
  RUN  v4.1.12 <root>
 
- ❯ a.test.ts (9 tests | 9 failed) <ms>
-   × multi <ms>
-   × undef <ms>
-   × number <ms>
-   × empty <ms>
-   × named <ms>
-   × nameonly <ms>
-   × class <ms>
-   × cause props <ms>
-   × fn prop <ms>
 
- Test Files  1 failed (1)
-      Tests  9 failed (9)
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
    Start at  <time>
    Duration  <duration>
 

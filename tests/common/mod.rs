@@ -135,7 +135,8 @@ impl Run {
 
 /// Run an executable with `args` in `cwd`, an isolated TMPDIR/TURBO_CACHE_DIR under `cwd`,
 /// every inherited `TURBO_*` variable, every CI variable (`turbo_test::ci::env_vars`) and every
-/// AI-agent variable (`turbo_test::agent::AGENT_VARS`, `EDITOR`, `TERM_PROGRAM`) removed,
+/// AI-agent variable (`turbo_test::agent::AGENT_VARS`, `EDITOR`, `TERM_PROGRAM`) and colour
+/// variable (`NO_COLOR`, `FORCE_COLOR`, `FORCE_TTY`, `TERM`) removed,
 /// `TURBO_JOBS=2` and `TURBO_LEGACY_REPORTER=1` unless `env` overrides them, and `env` applied
 /// last.
 pub fn run_exe(exe: &str, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Run {
@@ -160,6 +161,10 @@ pub fn run_exe(exe: &str, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Ru
         .iter()
         .chain(&["EDITOR", "TERM_PROGRAM"])
     {
+        cmd.env_remove(k);
+    }
+    // vitest's colours (tinyrainbow) follow these: the tests set them where they check colours
+    for k in ["NO_COLOR", "FORCE_COLOR", "FORCE_TTY", "TERM"] {
         cmd.env_remove(k);
     }
     // the tests written against turbo-test's own PASS / FAIL lines keep them; the vitest human

@@ -12,7 +12,7 @@ const __noop = () => {};
 // instead (__ttLog), on the test, suite or file it belongs to, as vitest's console does.
 const __emit = (tag) => (...a) => {
   if (globalThis.__TT_SILENT) return;
-  if (globalThis.__TT_CAPTURE_LOGS) return __ttLog(tag === '[error]' || tag === '[warn]' ? 'stderr' : 'stdout', __nodeFormat(...a) + '\n');
+  if (globalThis.__TT_CAPTURE_LOGS) return __ttLog(tag === '[error]' || tag === '[warn]' ? 'stderr' : 'stdout', __nodeFormatWith({ colors: !!globalThis.__TT_COLORS }, ...a) + '\n');
   globalThis.log(tag, __nodeFormat(...a));
 };
 // The console output: [type, content, tick] entries of the running test (junit) and
@@ -1455,9 +1455,145 @@ const __v8 = { serialize: (x) => { try { return JSON.stringify(x); } catch (e) {
 const __dc = { channel: () => ({ publish: () => {}, subscribe: () => {}, unsubscribe: () => {}, hasSubscribers: false }), hasSubscribers: () => false, subscribe: () => {}, unsubscribe: () => {} }; __dc.default = __dc;
 class __AsyncLocalStorage { constructor() { this._store = undefined; } run(store, cb, ...a) { const p = this._store; this._store = store; try { return cb(...a); } finally { this._store = p; } } getStore() { return this._store; } enterWith(s) { this._store = s; } disable() {} exit(cb, ...a) { return cb(...a); } }
 const __async_hooks = { AsyncLocalStorage: __AsyncLocalStorage, AsyncResource: class { runInAsyncScope(fn, thisArg, ...a) { return fn.apply(thisArg, a); } emitDestroy() { return this; } bind(fn) { return fn; } }, createHook: () => ({ enable() { return this; }, disable() { return this; } }), executionAsyncId: () => 0, triggerAsyncId: () => 0 }; __async_hooks.default = __async_hooks;
-// ---- Node's util.inspect / util.format (Node 26, colors off; turbo-test#93) ----
+// ---- Node's util.inspect / util.format (Node 26; turbo-test#93) ----
 // The shape of Node's formatValue / formatRaw / reduceToSingleString / groupArrayElements:
 // depth 2, breakLength 80, compact 3, maxArrayLength 100; console.log formats through it.
+// `colors` (vitest's console under its coloured reporters, turbo-test#94) stylizes as Node's
+// stylizeWithColor with inspect.styles, RegExps through Node's highlightRegExp.
+const __inspectStyles = { special: [36, 39], number: [33, 39], bigint: [33, 39], boolean: [33, 39], undefined: [90, 39], null: [1, 22], string: [32, 39], symbol: [32, 39], date: [35, 39], module: [4, 24] };
+function __sty(ctx, str, type) {
+  if (!ctx.colors) return str;
+  if (type === 'regexp') return __highlightRegExp(str);
+  const c = __inspectStyles[type];
+  return c ? `\x1b[${c[0]}m${str}\x1b[${c[1]}m` : str;
+}
+const __stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
+// Node's highlightRegExp: the pattern's parts in the depth palette green, red, yellow, cyan,
+// magenta (groups, classes, quantifiers, escapes, assertions), the flags after the closing `/`.
+function __highlightRegExp(re) {
+  const palette = [[32, 39], [31, 39], [33, 39], [36, 39], [35, 39]];
+  let out = '';
+  let i = 0;
+  let depth = 0;
+  let inClass = false;
+  const write = (str) => { const c = palette[depth % palette.length] ?? palette[0]; out += `\x1b[${c[0]}m${str}\x1b[${c[1]}m`; };
+  const writeDepth = (str, incDepth, incI) => { depth += incDepth; write(str); depth -= incDepth; i += incI; };
+  const writeGroup = (start, end, decreaseDepth = 1) => {
+    let seq = '';
+    i++;
+    while (i < re.length && re[i] !== end) seq += re[i++];
+    if (i < re.length) {
+      depth -= decreaseDepth;
+      write(start);
+      writeDepth(seq, 1, 1);
+      write(end);
+      depth += decreaseDepth;
+    } else {
+      writeDepth(start, 1, -seq.length);
+    }
+  };
+  write('/');
+  depth++;
+  i = 1;
+  while (i < re.length) {
+    const ch = re[i];
+    if (inClass) {
+      if (ch === '\\') {
+        let seq = '\\';
+        i++;
+        if (i < re.length) {
+          seq += re[i++];
+          const next = seq[1];
+          if (next === 'u' && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); continue; }
+          else if ((next === 'p' || next === 'P') && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); continue; }
+          else if (seq[1] === 'x') { seq += re.slice(i, i + 2); i += 2; }
+        }
+        write(seq);
+      } else if (ch === ']') {
+        depth--; write(']'); i++; inClass = false;
+      } else if (ch === '-' && re[i - 1] !== '[' && i + 1 < re.length && re[i + 1] !== ']') {
+        writeDepth('-', 1, 1);
+      } else {
+        write(ch); i++;
+      }
+    } else if (ch === '[') {
+      write('['); depth++; i++; inClass = true;
+    } else if (ch === '(') {
+      write('('); depth++; i++;
+      if (i < re.length && re[i] === '?') {
+        i++;
+        const a = i < re.length ? re[i] : '';
+        if (a === ':' || a === '=' || a === '!') {
+          writeDepth(`?${a}`, -1, 1);
+        } else {
+          const b = i + 1 < re.length ? re[i + 1] : '';
+          if (a === '<' && (b === '=' || b === '!')) {
+            writeDepth(`?<${b}`, -1, 2);
+          } else if (a === '<') {
+            i++;
+            const start = i;
+            while (i < re.length && re[i] !== '>') i++;
+            const name = re.slice(start, i);
+            if (i < re.length && re[i] === '>') {
+              depth--; write('?<'); writeDepth(name, 1, 0); write('>'); depth++; i++;
+            } else {
+              writeDepth('?<', -1, 0); write(name);
+            }
+          } else {
+            write('?');
+          }
+        }
+      }
+    } else if (ch === ')') {
+      depth--; write(')'); i++;
+    } else if (ch === '\\') {
+      let seq = '\\';
+      i++;
+      if (i < re.length) {
+        seq += re[i++];
+        const next = seq[1];
+        if (i < re.length) {
+          if (next === 'u' && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); continue; }
+          else if (next === 'x') { seq += re.slice(i, i + 2); i += 2; }
+          else if (next >= '0' && next <= '9') { while (i < re.length && re[i] >= '0' && re[i] <= '9') seq += re[i++]; }
+          else if (next === 'k' && re[i] === '<') { writeGroup(`${seq}<`, '>'); continue; }
+          else if ((next === 'p' || next === 'P') && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); continue; }
+        }
+      }
+      writeDepth(seq, 1, 0);
+    } else if (ch === '|' || ch === '+' || ch === '*' || ch === '?' || ch === ',' || ch === '^' || ch === '$') {
+      writeDepth(ch, 3, 1);
+    } else if (ch === '{') {
+      i++;
+      let digits = '';
+      while (i < re.length && re[i] >= '0' && re[i] <= '9') digits += re[i++];
+      if (digits) { write('{'); depth++; writeDepth(digits, 1, 0); }
+      if (i < re.length) {
+        if (re[i] === ',') {
+          if (!digits) { write('{'); depth++; }
+          write(','); i++;
+        } else if (!digits) {
+          depth += 1; write('{'); depth -= 1;
+          continue;
+        }
+      }
+      let digits2 = '';
+      while (i < re.length && re[i] >= '0' && re[i] <= '9') digits2 += re[i++];
+      if (digits2) writeDepth(digits2, 1, 0);
+      if (i < re.length && re[i] === '}') { depth--; write('}'); i++; }
+      if (i < re.length && re[i] === '?') writeDepth('?', 3, 1);
+    } else if (ch === '.') {
+      writeDepth(ch, 2, 1);
+    } else if (ch === '/') {
+      break;
+    } else {
+      writeDepth(ch, 1, 1);
+    }
+  }
+  writeDepth('/', -1, 1);
+  if (i < re.length) write(re.slice(i));
+  return out;
+}
 const __inspectMeta = ['\\x00', '\\x01', '\\x02', '\\x03', '\\x04', '\\x05', '\\x06', '\\x07', '\\b', '\\t', '\\n', '\\x0B', '\\f', '\\r', '\\x0E', '\\x0F', '\\x10', '\\x11', '\\x12', '\\x13', '\\x14', '\\x15', '\\x16', '\\x17', '\\x18', '\\x19', '\\x1A', '\\x1B', '\\x1C', '\\x1D', '\\x1E', '\\x1F'];
 function __strEscape(str) {
   let quote = "'";
@@ -1504,27 +1640,29 @@ function __fnBase(fn, ctor) {
   if (ctor === null) base += ' (null prototype)';
   return base;
 }
-function __inspectPrimitive(v, ctx) {
+// formatPrimitive; `plain` is Node's stylizeNoColor (boxed primitives)
+function __inspectPrimitive(v, ctx, plain) {
+  const sty = (str, type) => (plain ? str : __sty(ctx, str, type));
   switch (typeof v) {
     case 'string': {
       const trailer = '';
       if (v.length > 16 && v.length > 80 - ctx.indentationLvl - 4) {
         const parts = v.split(/(?<=\n)/);
-        if (parts.length > 1) return parts.map((l) => __strEscape(l)).join(` +\n${' '.repeat(ctx.indentationLvl + 2)}`) + trailer;
+        if (parts.length > 1) return parts.map((l) => sty(__strEscape(l), 'string')).join(` +\n${' '.repeat(ctx.indentationLvl + 2)}`) + trailer;
       }
-      return __strEscape(v) + trailer;
+      return sty(__strEscape(v), 'string') + trailer;
     }
-    case 'number': return Object.is(v, -0) ? '-0' : String(v);
-    case 'bigint': return `${v}n`;
-    case 'boolean': return String(v);
-    case 'undefined': return 'undefined';
-    case 'symbol': return v.toString();
+    case 'number': return sty(Object.is(v, -0) ? '-0' : String(v), 'number');
+    case 'bigint': return sty(`${v}n`, 'bigint');
+    case 'boolean': return sty(String(v), 'boolean');
+    case 'undefined': return sty('undefined', 'undefined');
+    case 'symbol': return sty(v.toString(), 'symbol');
   }
   return String(v);
 }
 function __formatValue(ctx, value, recurseTimes, typedArray) {
   if (typeof value !== 'object' && typeof value !== 'function') return __inspectPrimitive(value, ctx);
-  if (value === null) return 'null';
+  if (value === null) return __sty(ctx, 'null', 'null');
   // a [util.inspect.custom](depth, options, inspect) method formats its own value
   const custom = value[Symbol.for('nodejs.util.inspect.custom')];
   if (typeof custom === 'function' && custom !== __util.inspect) {
@@ -1538,7 +1676,7 @@ function __formatValue(ctx, value, recurseTimes, typedArray) {
       index = ctx.circular.get(value);
       if (index === undefined) { index = ctx.circular.size + 1; ctx.circular.set(value, index); }
     }
-    return `[Circular *${index}]`;
+    return __sty(ctx, `[Circular *${index}]`, 'special');
   }
   return __formatRaw(ctx, value, recurseTimes, typedArray);
 }
@@ -1551,14 +1689,16 @@ function __formatProperty(ctx, value, recurseTimes, key, type, desc) {
     str = __formatValue(ctx, desc.value, recurseTimes);
     ctx.indentationLvl -= diff;
   } else if (desc.get !== undefined) {
-    str = desc.set !== undefined ? '[Getter/Setter]' : '[Getter]';
+    str = __sty(ctx, desc.set !== undefined ? '[Getter/Setter]' : '[Getter]', 'special');
   } else if (desc.set !== undefined) {
-    str = '[Setter]';
+    str = __sty(ctx, '[Setter]', 'special');
   } else {
-    str = 'undefined';
+    str = __sty(ctx, 'undefined', 'undefined');
   }
   if (type === 1) return str; // an array element (2: an array's extra key)
-  name = typeof key === 'symbol' ? key.toString() : desc.enumerable === false ? `[${key}]` : __inspectKey(key);
+  if (typeof key === 'symbol') name = __sty(ctx, key.toString(), 'symbol');
+  else if (desc.enumerable === false) name = `[${key}]`;
+  else name = /^[a-zA-Z_][a-zA-Z_0-9]*$/.test(key) ? key : __sty(ctx, __strEscape(key), 'string');
   return `${name}: ${str}`;
 }
 function __groupArrayElements(ctx, output, value) {
@@ -1569,7 +1709,7 @@ function __groupArrayElements(ctx, output, value) {
   const separatorSpace = 2;
   const dataLen = new Array(outputLength);
   for (let i = 0; i < outputLength; i++) {
-    const len = output[i].length;
+    const len = ctx.colors ? __stripAnsi(output[i]).length : output[i].length;
     dataLen[i] = len;
     totalLength += len + separatorSpace;
     if (maxLength < len) maxLength = len;
@@ -1623,7 +1763,7 @@ function __isBelowBreakLength(ctx, output, start, base) {
   let totalLength = output.length + start;
   if (totalLength + output.length > ctx.breakLength) return false;
   for (let i = 0; i < output.length; i++) {
-    totalLength += output[i].length;
+    totalLength += ctx.colors ? __stripAnsi(output[i]).length : output[i].length;
     if (totalLength > ctx.breakLength) return false;
   }
   return base === '' || !base.includes('\n');
@@ -1675,10 +1815,10 @@ function __formatRaw(ctx, value, recurseTimes, typedArray) {
       let holes = 0;
       for (let i = 0; i < len; i++) {
         if (!Object.prototype.hasOwnProperty.call(value, i)) { holes++; continue; }
-        if (holes) { out.push(`<${holes} empty item${holes > 1 ? 's' : ''}>`); holes = 0; }
+        if (holes) { out.push(__sty(ctx, `<${holes} empty item${holes > 1 ? 's' : ''}>`, 'undefined')); holes = 0; }
         out.push(__formatProperty(ctx, value, recurseTimes, i, 1));
       }
-      if (holes) out.push(`<${holes} empty item${holes > 1 ? 's' : ''}>`);
+      if (holes) out.push(__sty(ctx, `<${holes} empty item${holes > 1 ? 's' : ''}>`, 'undefined'));
       if (value.length > len) { const n = value.length - len; out.push(`... ${n} more item${n > 1 ? 's' : ''}`); }
       return out;
     };
@@ -1724,15 +1864,15 @@ function __formatRaw(ctx, value, recurseTimes, typedArray) {
   } else {
     if (typeof value === 'function') {
       base = __fnBase(value, ctor);
-      if (keys.length === 0) return base;
+      if (keys.length === 0) return __sty(ctx, base, 'special');
       braces = ['{', '}'];
     } else if (value instanceof RegExp) {
-      base = RegExp.prototype.toString.call(value);
-      if (keys.length === 0) return base;
+      base = __sty(ctx, RegExp.prototype.toString.call(value), 'regexp');
+      if (keys.length === 0 || recurseTimes > ctx.depth) return base;
       braces = ['{', '}'];
     } else if (value instanceof Date) {
       base = Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
-      if (keys.length === 0) return base;
+      if (keys.length === 0) return __sty(ctx, base, 'date');
       braces = ['{', '}'];
     } else if (value instanceof Error) {
       base = value.stack ? String(value.stack) : `[${Error.prototype.toString.call(value)}]`;
@@ -1741,16 +1881,16 @@ function __formatRaw(ctx, value, recurseTimes, typedArray) {
       braces = ['{', '}'];
     } else if (value instanceof Number || value instanceof String || value instanceof Boolean) {
       const type = value instanceof Number ? 'Number' : value instanceof String ? 'String' : 'Boolean';
-      base = `[${type}: ${__inspectPrimitive(value.valueOf(), ctx)}]`;
+      base = `[${type}: ${__inspectPrimitive(value.valueOf(), ctx, true)}]`;
       if (value instanceof String) keys = keys.filter((k) => !/^(0|[1-9][0-9]*)$/.test(k));
-      if (keys.length === 0) return base;
+      if (keys.length === 0) return __sty(ctx, base, type.toLowerCase());
       braces = ['{', '}'];
     } else if (value instanceof Promise) {
       braces = [`${prefix('Promise', '')}{`, '}'];
-      formatter = () => ['<pending>'];
+      formatter = () => [__sty(ctx, '<pending>', 'special')];
     } else if (value instanceof WeakMap || value instanceof WeakSet) {
       braces = [`${prefix(value instanceof WeakMap ? 'WeakMap' : 'WeakSet', '')}{`, '}'];
-      formatter = () => ['<items unknown>'];
+      formatter = () => [__sty(ctx, '<items unknown>', 'special')];
     } else {
       const p = ctor === 'Object' && !(typeof tag === 'string' && tag !== '') ? '' : prefix('Object', '');
       braces = [`${p}{`, '}'];
@@ -1759,7 +1899,7 @@ function __formatRaw(ctx, value, recurseTimes, typedArray) {
   }
   if (recurseTimes > ctx.depth) {
     const name = (ctor || tag || 'Object');
-    return Array.isArray(value) ? '[Array]' : `[${name}]`;
+    return __sty(ctx, Array.isArray(value) ? '[Array]' : `[${name}]`, 'special');
   }
   recurseTimes++;
   ctx.seen.push(value);
@@ -1770,24 +1910,30 @@ function __formatRaw(ctx, value, recurseTimes, typedArray) {
   let res = __reduceToSingleString(ctx, output, base, braces, extrasType, recurseTimes, value);
   if (ctx.circular !== undefined) {
     const index = ctx.circular.get(value);
-    if (index !== undefined) res = `<ref *${index}> ${res}`;
+    if (index !== undefined) res = `${__sty(ctx, `<ref *${index}>`, 'special')} ${res}`;
   }
   void noIterator;
   return res;
 }
 function __nodeInspect(value, opts) {
-  const ctx = { seen: [], indentationLvl: 0, currentDepth: 0, depth: 2, breakLength: 80, compact: 3, maxArrayLength: 100, circular: undefined };
+  const ctx = { seen: [], indentationLvl: 0, currentDepth: 0, depth: 2, breakLength: 80, compact: 3, maxArrayLength: 100, circular: undefined, colors: false };
   if (opts) {
     if (typeof opts.depth === 'number' || opts.depth === null) ctx.depth = opts.depth === null ? Infinity : opts.depth;
     if (typeof opts.breakLength === 'number') ctx.breakLength = opts.breakLength;
     if (opts.compact !== undefined) ctx.compact = opts.compact;
+    if (opts.colors) ctx.colors = true;
   }
   return __formatValue(ctx, value, 0);
 }
 // util.format: %s %d %i %f %j %o %O %c %%, the rest inspected (strings as they are)
 function __nodeFormat(...args) {
+  return __nodeFormatWith({}, ...args);
+}
+// util.formatWithOptions: `o.colors` colours %o / %O and the inspected rest (not %s / %d / …)
+function __nodeFormatWith(o, ...args) {
+  const colors = !!(o && o.colors);
   const first = args[0];
-  const insp = (v) => (typeof v === 'string' ? v : __nodeInspect(v));
+  const insp = (v) => (typeof v === 'string' ? v : __nodeInspect(v, { colors }));
   if (typeof first !== 'string') return args.map(insp).join(' ');
   let i = 1;
   let out = '';
@@ -1808,8 +1954,8 @@ function __nodeFormat(...args) {
       case 'i': s = typeof a === 'bigint' ? `${a}n` : typeof a === 'symbol' ? 'NaN' : String(parseInt(a)); break;
       case 'f': s = typeof a === 'symbol' ? 'NaN' : String(parseFloat(a)); break;
       case 'j': try { s = JSON.stringify(a); } catch (e) { s = '[Circular]'; } break;
-      case 'o': s = __nodeInspect(a, { depth: 4 }); break;
-      case 'O': s = __nodeInspect(a); break;
+      case 'o': s = __nodeInspect(a, { depth: 4, colors }); break;
+      case 'O': s = __nodeInspect(a, { colors }); break;
       case 'c': s = ''; break;
     }
     out += first.slice(last, p) + s;
@@ -1826,7 +1972,7 @@ const __util = {
   callbackify: (f) => (...args) => { const cb = args.pop(); Promise.resolve(f(...args)).then((v) => cb(null, v), (e) => cb(e)); },
   inspect: (x, opts) => __nodeInspect(x, opts),
   format: (...a) => __nodeFormat(...a),
-  formatWithOptions: (_o, ...a) => __nodeFormat(...a),
+  formatWithOptions: (o, ...a) => __nodeFormatWith(o, ...a),
   deprecate: (fn, _msg) => fn,
   debuglog: () => (() => {}),
   isDeepStrictEqual: (a, b) => { try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return a === b; } },
@@ -3901,30 +4047,251 @@ function __pfProps(v, cfg, ind, depth, refs) {
 function __stringify(v) {
   return __pf(v, { maxDepth: 10, escape: false });
 }
-// A line diff (longest common subsequence): [op, line] with op -1 delete, 1 insert, 0 common.
-function __lineDiff(a, b) {
-  const n = a.length;
-  const m = b.length;
-  if (n * m > 4e6) return [...a.map((l) => [-1, l]), ...b.map((l) => [1, l])];
-  const lcs = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) lcs[i][j] = a[i] === b[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
-  const out = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) { out.push([0, i, j]); i++; j++; }
-    else if (lcs[i + 1][j] >= lcs[i][j + 1]) { out.push([-1, i]); i++; }
-    else { out.push([1, j]); j++; }
+// tinyrainbow's colours for the diffs vitest's worker prints with its colours on (turbo-test#94:
+// `__TT_COLORS`, the coloured human reporters); identity otherwise.
+function __tr(open, close, replace = open) {
+  return (input) => {
+    const s = `${input}`;
+    if (!globalThis.__TT_COLORS) return s;
+    let i = s.indexOf(close, open.length);
+    if (i === -1) return open + s + close;
+    let out = '';
+    let last = 0;
+    do { out += s.substring(last, i) + replace; last = i + close.length; i = s.indexOf(close, last); } while (i !== -1);
+    return open + out + s.substring(last) + close;
+  };
+}
+const __dcol = {
+  green: __tr('\x1b[32m', '\x1b[39m'),
+  red: __tr('\x1b[31m', '\x1b[39m'),
+  yellow: __tr('\x1b[33m', '\x1b[39m'),
+  dim: __tr('\x1b[2m', '\x1b[22m', '\x1b[22m\x1b[2m'),
+  inverse: __tr('\x1b[7m', '\x1b[27m'),
+};
+// diff-sequences (jest): the common subsequences of a[0, aLength) and b[0, bLength) by Myers'
+// linear-space bidirectional search, reported in order as foundSubsequence(nCommon, aCommon,
+// bCommon) — the edit script jest-diff and vitest's diff build on.
+function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
+  const countF = (aIndex, aEnd, bIndex, bEnd, common) => {
+    let n = 0;
+    while (aIndex < aEnd && bIndex < bEnd && common(aIndex, bIndex)) { aIndex++; bIndex++; n++; }
+    return n;
+  };
+  const countR = (aStart, aIndex, bStart, bIndex, common) => {
+    let n = 0;
+    while (aStart <= aIndex && bStart <= bIndex && common(aIndex, bIndex)) { aIndex--; bIndex--; n++; }
+    return n;
+  };
+  const extendF = (d, aEnd, bEnd, bF, common, aIndexesF, iMaxF) => {
+    let iF = 0;
+    let kF = -d;
+    let aFirst = aIndexesF[iF];
+    let aIndexPrev1 = aFirst;
+    aIndexesF[iF] += countF(aFirst + 1, aEnd, bF + aFirst - kF + 1, bEnd, common);
+    const nF = d < iMaxF ? d : iMaxF;
+    for (iF += 1, kF += 2; iF <= nF; iF += 1, kF += 2) {
+      if (iF !== d && aIndexPrev1 < aIndexesF[iF]) aFirst = aIndexesF[iF];
+      else {
+        aFirst = aIndexPrev1 + 1;
+        if (aEnd <= aFirst) return iF - 1;
+      }
+      aIndexPrev1 = aIndexesF[iF];
+      aIndexesF[iF] = aFirst + countF(aFirst + 1, aEnd, bF + aFirst - kF + 1, bEnd, common);
+    }
+    return iMaxF;
+  };
+  const extendR = (d, aStart, bStart, bR, common, aIndexesR, iMaxR) => {
+    let iR = 0;
+    let kR = d;
+    let aFirst = aIndexesR[iR];
+    let aIndexPrev1 = aFirst;
+    aIndexesR[iR] -= countR(aStart, aFirst - 1, bStart, bR + aFirst - kR - 1, common);
+    const nR = d < iMaxR ? d : iMaxR;
+    for (iR += 1, kR -= 2; iR <= nR; iR += 1, kR -= 2) {
+      if (iR !== d && aIndexesR[iR] < aIndexPrev1) aFirst = aIndexesR[iR];
+      else {
+        aFirst = aIndexPrev1 - 1;
+        if (aFirst < aStart) return iR - 1;
+      }
+      aIndexPrev1 = aIndexesR[iR];
+      aIndexesR[iR] = aFirst - countR(aStart, aFirst - 1, bStart, bR + aFirst - kR - 1, common);
+    }
+    return iMaxR;
+  };
+  const overlapF = (d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division) => {
+    const bF = bStart - aStart;
+    const baDeltaLength = (bEnd - bStart) - (aEnd - aStart);
+    const kMin = -baDeltaLength - (d - 1);
+    const kMax = -baDeltaLength + (d - 1);
+    let aIndexPrev1 = 0;
+    const nF = d < iMaxF ? d : iMaxF;
+    for (let iF = 0, kF = -d; iF <= nF; iF += 1, kF += 2) {
+      const insert = iF === 0 || (iF !== d && aIndexPrev1 < aIndexesF[iF]);
+      const aLastPrev = insert ? aIndexesF[iF] : aIndexPrev1;
+      const aFirst = insert ? aLastPrev : aLastPrev + 1;
+      const bFirst = bF + aFirst - kF;
+      const nCommonF = countF(aFirst + 1, aEnd, bFirst + 1, bEnd, common);
+      const aLast = aFirst + nCommonF;
+      aIndexPrev1 = aIndexesF[iF];
+      aIndexesF[iF] = aLast;
+      if (kMin <= kF && kF <= kMax) {
+        const iR = (d - 1 - (kF + baDeltaLength)) / 2;
+        if (iR <= iMaxR && aIndexesR[iR] - 1 <= aLast) {
+          const bLastPrev = bF + aLastPrev - (insert ? kF + 1 : kF - 1);
+          const nCommonR = countR(aStart, aLastPrev, bStart, bLastPrev, common);
+          const aEndPreceding = aLastPrev - nCommonR + 1;
+          const bEndPreceding = bLastPrev - nCommonR + 1;
+          division.nChangePreceding = d - 1;
+          if (d - 1 === aEndPreceding + bEndPreceding - aStart - bStart) { division.aEndPreceding = aStart; division.bEndPreceding = bStart; }
+          else { division.aEndPreceding = aEndPreceding; division.bEndPreceding = bEndPreceding; }
+          division.nCommonPreceding = nCommonR;
+          if (nCommonR !== 0) { division.aCommonPreceding = aEndPreceding; division.bCommonPreceding = bEndPreceding; }
+          division.nCommonFollowing = nCommonF;
+          if (nCommonF !== 0) { division.aCommonFollowing = aFirst + 1; division.bCommonFollowing = bFirst + 1; }
+          const aStartFollowing = aLast + 1;
+          const bStartFollowing = bFirst + nCommonF + 1;
+          division.nChangeFollowing = d - 1;
+          if (d - 1 === aEnd + bEnd - aStartFollowing - bStartFollowing) { division.aStartFollowing = aEnd; division.bStartFollowing = bEnd; }
+          else { division.aStartFollowing = aStartFollowing; division.bStartFollowing = bStartFollowing; }
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  const overlapR = (d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division) => {
+    const bR = bEnd - aEnd;
+    const baDeltaLength = (bEnd - bStart) - (aEnd - aStart);
+    const kMin = baDeltaLength - d;
+    const kMax = baDeltaLength + d;
+    let aIndexPrev1 = 0;
+    const nR = d < iMaxR ? d : iMaxR;
+    for (let iR = 0, kR = d; iR <= nR; iR += 1, kR -= 2) {
+      const insert = iR === 0 || (iR !== d && aIndexesR[iR] < aIndexPrev1);
+      const aLastPrev = insert ? aIndexesR[iR] : aIndexPrev1;
+      const aFirst = insert ? aLastPrev : aLastPrev - 1;
+      const bFirst = bR + aFirst - kR;
+      const nCommonR = countR(aStart, aFirst - 1, bStart, bFirst - 1, common);
+      const aLast = aFirst - nCommonR;
+      aIndexPrev1 = aIndexesR[iR];
+      aIndexesR[iR] = aLast;
+      if (kMin <= kR && kR <= kMax) {
+        const iF = (d + (kR - baDeltaLength)) / 2;
+        if (iF <= iMaxF && aLast - 1 <= aIndexesF[iF]) {
+          const bLast = bFirst - nCommonR;
+          division.nChangePreceding = d;
+          if (d === aLast + bLast - aStart - bStart) { division.aEndPreceding = aStart; division.bEndPreceding = bStart; }
+          else { division.aEndPreceding = aLast; division.bEndPreceding = bLast; }
+          division.nCommonPreceding = nCommonR;
+          if (nCommonR !== 0) { division.aCommonPreceding = aLast; division.bCommonPreceding = bLast; }
+          division.nChangeFollowing = d - 1;
+          if (d === 1) {
+            division.nCommonFollowing = 0;
+            division.aStartFollowing = aEnd;
+            division.bStartFollowing = bEnd;
+          } else {
+            const bLastPrev = bR + aLastPrev - (insert ? kR - 1 : kR + 1);
+            const nCommonF = countF(aLastPrev, aEnd, bLastPrev, bEnd, common);
+            division.nCommonFollowing = nCommonF;
+            if (nCommonF !== 0) { division.aCommonFollowing = aLastPrev; division.bCommonFollowing = bLastPrev; }
+            const aStartFollowing = aLastPrev + nCommonF;
+            const bStartFollowing = bLastPrev + nCommonF;
+            if (d - 1 === aEnd + bEnd - aStartFollowing - bStartFollowing) { division.aStartFollowing = aEnd; division.bStartFollowing = bEnd; }
+            else { division.aStartFollowing = aStartFollowing; division.bStartFollowing = bStartFollowing; }
+          }
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  const divide = (nChange, aStart, aEnd, bStart, bEnd, common, aIndexesF, aIndexesR, division) => {
+    const bF = bStart - aStart;
+    const bR = bEnd - aEnd;
+    const aLength = aEnd - aStart;
+    const bLength = bEnd - bStart;
+    const baDeltaLength = bLength - aLength;
+    let iMaxF = aLength;
+    let iMaxR = aLength;
+    aIndexesF[0] = aStart - 1;
+    aIndexesR[0] = aEnd;
+    if (baDeltaLength % 2 === 0) {
+      const dMin = (nChange || baDeltaLength) / 2;
+      const dMax = (aLength + bLength) / 2;
+      for (let d = 1; d <= dMax; d += 1) {
+        iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
+        if (d < dMin) iMaxR = extendR(d, aStart, bStart, bR, common, aIndexesR, iMaxR);
+        else if (overlapR(d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division)) return;
+      }
+    } else {
+      const dMin = ((nChange || baDeltaLength) + 1) / 2;
+      const dMax = (aLength + bLength + 1) / 2;
+      let d = 1;
+      iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
+      for (d += 1; d <= dMax; d += 1) {
+        iMaxR = extendR(d - 1, aStart, bStart, bR, common, aIndexesR, iMaxR);
+        if (d < dMin) iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
+        else if (overlapF(d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division)) return;
+      }
+    }
+    throw new Error(`diff-sequences: no overlap aStart=${aStart} aEnd=${aEnd} bStart=${bStart} bEnd=${bEnd}`);
+  };
+  const find = (nChange, aStart, aEnd, bStart, bEnd, transposed, callbacks, aIndexesF, aIndexesR, division) => {
+    if (bEnd - bStart < aEnd - aStart) {
+      transposed = !transposed;
+      if (transposed && callbacks.length === 1) {
+        const { found, common } = callbacks[0];
+        callbacks[1] = { found: (n, bc, ac) => found(n, ac, bc), common: (bi, ai) => common(ai, bi) };
+      }
+      [aStart, aEnd, bStart, bEnd] = [bStart, bEnd, aStart, aEnd];
+    }
+    const { found, common } = callbacks[transposed ? 1 : 0];
+    divide(nChange, aStart, aEnd, bStart, bEnd, common, aIndexesF, aIndexesR, division);
+    const { nChangePreceding, aEndPreceding, bEndPreceding, nCommonPreceding, aCommonPreceding, bCommonPreceding, nCommonFollowing, aCommonFollowing, bCommonFollowing, nChangeFollowing, aStartFollowing, bStartFollowing } = division;
+    if (aStart < aEndPreceding && bStart < bEndPreceding) find(nChangePreceding, aStart, aEndPreceding, bStart, bEndPreceding, transposed, callbacks, aIndexesF, aIndexesR, division);
+    if (nCommonPreceding !== 0) found(nCommonPreceding, aCommonPreceding, bCommonPreceding);
+    if (nCommonFollowing !== 0) found(nCommonFollowing, aCommonFollowing, bCommonFollowing);
+    if (aStartFollowing < aEnd && bStartFollowing < bEnd) find(nChangeFollowing, aStartFollowing, aEnd, bStartFollowing, bEnd, transposed, callbacks, aIndexesF, aIndexesR, division);
+  };
+  const nCommonF = countF(0, aLength, 0, bLength, isCommon);
+  if (nCommonF !== 0) foundSubsequence(nCommonF, 0, 0);
+  if (aLength !== nCommonF || bLength !== nCommonF) {
+    const aStart = nCommonF;
+    const bStart = nCommonF;
+    const nCommonR = countR(aStart, aLength - 1, bStart, bLength - 1, isCommon);
+    const aEnd = aLength - nCommonR;
+    const bEnd = bLength - nCommonR;
+    const nCommonFR = nCommonF + nCommonR;
+    if (aLength !== nCommonFR && bLength !== nCommonFR) {
+      const division = { aCommonFollowing: 0, aCommonPreceding: 0, aEndPreceding: 0, aStartFollowing: 0, bCommonFollowing: 0, bCommonPreceding: 0, bEndPreceding: 0, bStartFollowing: 0, nChangeFollowing: 0, nChangePreceding: 0, nCommonFollowing: 0, nCommonPreceding: 0 };
+      find(0, aStart, aEnd, bStart, bEnd, false, [{ found: foundSubsequence, common: isCommon }], [0], [0], division);
+    }
+    if (nCommonR !== 0) foundSubsequence(nCommonR, aEnd, bEnd);
   }
-  while (i < n) out.push([-1, i++]);
-  while (j < m) out.push([1, j++]);
+}
+// jest-diff `diffLinesRaw`: [op, line] with op -1 delete, 1 insert, 0 common (the b line).
+function __lineDiff(a, b) {
+  const out = [];
+  let ai = 0;
+  let bi = 0;
+  __diffSequences(a.length, b.length, (i, j) => a[i] === b[j], (n, ac, bc) => {
+    for (; ai !== ac; ai++) out.push([-1, ai]);
+    for (; bi !== bc; bi++) out.push([1, bi]);
+    for (; n !== 0; n--, ai++, bi++) out.push([0, ai, bi]);
+  });
+  for (; ai !== a.length; ai++) out.push([-1, ai]);
+  for (; bi !== b.length; bi++) out.push([1, bi]);
   return out;
 }
-// jest-diff `joinAlignedDiffsNoExpand` (5 context lines, `@@` patch marks).
+// jest-diff `printAnnotation` (vitest's diff options: `- Expected` green, `+ Received` red).
+const __annotation = () => `${__dcol.green('- Expected')}\n${__dcol.red('+ Received')}\n\n`;
+// jest-diff `joinAlignedDiffsNoExpand` (5 context lines, `@@` patch marks), each line as
+// printDiffLine colours it: deleted green, inserted red, common dim, the marks yellow.
 function __joinDiffs(diffs) {
   const ctx = 5;
   const ctx2 = ctx + ctx;
-  const line = (ind, l, first) => (l.length ? `${ind} ${l}` : ind !== ' ' ? ind : '');
+  const color = { '-': __dcol.green, '+': __dcol.red, ' ': __dcol.dim };
+  const line = (ind, l) => (l.length ? color[ind](`${ind} ${l}`) : ind !== ' ' ? color[ind](ind) : '');
   const len = diffs.length;
   let jLength = len;
   let excessEdge = false;
@@ -3950,7 +4317,7 @@ function __joinDiffs(diffs) {
   const common = (l) => { lines.push(line(' ', l)); aEnd++; bEnd++; };
   const del = (l) => { lines.push(line('-', l)); aEnd++; };
   const ins = (l) => { lines.push(line('+', l)); bEnd++; };
-  const patchMark = () => `@@ -${aStart + 1},${aEnd - aStart} +${bStart + 1},${bEnd - bStart} @@`;
+  const patchMark = () => __dcol.yellow(`@@ -${aStart + 1},${aEnd - aStart} +${bStart + 1},${bEnd - bStart} @@`);
   i = 0;
   while (i !== len) {
     let start = i;
@@ -3983,14 +4350,310 @@ function __joinDiffs(diffs) {
   if (patch) lines[mark] = patchMark();
   return lines.join('\n');
 }
-// jest-diff `diffLinesUnified2`: align by the compare lines, show the display lines.
-function __diffLines(aDisp, bDisp, aCmp = aDisp, bCmp = bDisp) {
+// jest-diff `diffLinesUnified2`: align by the compare lines, show the display lines; with
+// `annotate` the `- Expected` / `+ Received` lines first (printDiffLines).
+function __diffLines(aDisp, bDisp, aCmp = aDisp, bCmp = bDisp, annotate = false) {
   const empty = (l) => l.length === 1 && l[0].length === 0;
   if (empty(aDisp) && empty(aCmp)) { aDisp = []; aCmp = []; }
   if (empty(bDisp) && empty(bCmp)) { bDisp = []; bCmp = []; }
   if (aDisp.length !== aCmp.length || bDisp.length !== bCmp.length) { aCmp = aDisp; bCmp = bDisp; }
   const diffs = __lineDiff(aCmp, bCmp).map((d) => (d[0] === -1 ? [-1, aDisp[d[1]]] : d[0] === 1 ? [1, bDisp[d[1]]] : [0, bDisp[d[2]]]));
-  return __joinDiffs(diffs);
+  return (annotate ? __annotation() : '') + __joinDiffs(diffs);
+}
+// diff-match-patch's cleanup, as @vitest/utils' `diffStringsRaw(a, b, true)` runs it.
+function __commonPrefix(t1, t2) {
+  if (!t1 || !t2 || t1.charAt(0) !== t2.charAt(0)) return 0;
+  let min = 0;
+  let max = Math.min(t1.length, t2.length);
+  let mid = max;
+  let start = 0;
+  while (min < mid) {
+    if (t1.substring(start, mid) === t2.substring(start, mid)) { min = mid; start = min; } else max = mid;
+    mid = Math.floor((max - min) / 2 + min);
+  }
+  return mid;
+}
+function __commonSuffix(t1, t2) {
+  if (!t1 || !t2 || t1.charAt(t1.length - 1) !== t2.charAt(t2.length - 1)) return 0;
+  let min = 0;
+  let max = Math.min(t1.length, t2.length);
+  let mid = max;
+  let end = 0;
+  while (min < mid) {
+    if (t1.substring(t1.length - mid, t1.length - end) === t2.substring(t2.length - mid, t2.length - end)) { min = mid; end = min; } else max = mid;
+    mid = Math.floor((max - min) / 2 + min);
+  }
+  return mid;
+}
+function __commonOverlap(t1, t2) {
+  const l1 = t1.length;
+  const l2 = t2.length;
+  if (l1 === 0 || l2 === 0) return 0;
+  if (l1 > l2) t1 = t1.substring(l1 - l2);
+  else if (l1 < l2) t2 = t2.substring(0, l1);
+  const len = Math.min(l1, l2);
+  if (t1 === t2) return len;
+  let best = 0;
+  let length = 1;
+  for (;;) {
+    const found = t2.indexOf(t1.substring(len - length));
+    if (found === -1) return best;
+    length += found;
+    if (found === 0 || t1.substring(len - length) === t2.substring(0, length)) { best = length; length++; }
+  }
+}
+function __semanticScore(one, two) {
+  if (!one || !two) return 6;
+  const c1 = one.charAt(one.length - 1);
+  const c2 = two.charAt(0);
+  const nonAlnum1 = /[^a-z0-9]/i.test(c1);
+  const nonAlnum2 = /[^a-z0-9]/i.test(c2);
+  const ws1 = nonAlnum1 && /\s/.test(c1);
+  const ws2 = nonAlnum2 && /\s/.test(c2);
+  const lb1 = ws1 && /[\r\n]/.test(c1);
+  const lb2 = ws2 && /[\r\n]/.test(c2);
+  const blank1 = lb1 && /\n\r?\n$/.test(one);
+  const blank2 = lb2 && /^\r?\n\r?\n/.test(two);
+  if (blank1 || blank2) return 5;
+  if (lb1 || lb2) return 4;
+  if (nonAlnum1 && !ws1 && ws2) return 3;
+  if (ws1 || ws2) return 2;
+  if (nonAlnum1 || nonAlnum2) return 1;
+  return 0;
+}
+function __cleanupSemanticLossless(diffs) {
+  let pointer = 1;
+  while (pointer < diffs.length - 1) {
+    if (diffs[pointer - 1][0] === 0 && diffs[pointer + 1][0] === 0) {
+      let eq1 = diffs[pointer - 1][1];
+      let edit = diffs[pointer][1];
+      let eq2 = diffs[pointer + 1][1];
+      const off = __commonSuffix(eq1, edit);
+      if (off) {
+        const common = edit.substring(edit.length - off);
+        eq1 = eq1.substring(0, eq1.length - off);
+        edit = common + edit.substring(0, edit.length - off);
+        eq2 = common + eq2;
+      }
+      let bestEq1 = eq1;
+      let bestEdit = edit;
+      let bestEq2 = eq2;
+      let bestScore = __semanticScore(eq1, edit) + __semanticScore(edit, eq2);
+      while (edit.charAt(0) === eq2.charAt(0)) {
+        eq1 += edit.charAt(0);
+        edit = edit.substring(1) + eq2.charAt(0);
+        eq2 = eq2.substring(1);
+        const score = __semanticScore(eq1, edit) + __semanticScore(edit, eq2);
+        if (score >= bestScore) { bestScore = score; bestEq1 = eq1; bestEdit = edit; bestEq2 = eq2; }
+      }
+      if (diffs[pointer - 1][1] !== bestEq1) {
+        if (bestEq1) diffs[pointer - 1][1] = bestEq1;
+        else { diffs.splice(pointer - 1, 1); pointer--; }
+        diffs[pointer][1] = bestEdit;
+        if (bestEq2) diffs[pointer + 1][1] = bestEq2;
+        else { diffs.splice(pointer + 1, 1); pointer--; }
+      }
+    }
+    pointer++;
+  }
+}
+function __cleanupMerge(diffs) {
+  diffs.push([0, '']);
+  let pointer = 0;
+  let nDel = 0;
+  let nIns = 0;
+  let tDel = '';
+  let tIns = '';
+  while (pointer < diffs.length) {
+    switch (diffs[pointer][0]) {
+      case 1: nIns++; tIns += diffs[pointer][1]; pointer++; break;
+      case -1: nDel++; tDel += diffs[pointer][1]; pointer++; break;
+      case 0:
+        if (nDel + nIns > 1) {
+          if (nDel !== 0 && nIns !== 0) {
+            let n = __commonPrefix(tIns, tDel);
+            if (n !== 0) {
+              if (pointer - nDel - nIns > 0 && diffs[pointer - nDel - nIns - 1][0] === 0) diffs[pointer - nDel - nIns - 1][1] += tIns.substring(0, n);
+              else { diffs.splice(0, 0, [0, tIns.substring(0, n)]); pointer++; }
+              tIns = tIns.substring(n);
+              tDel = tDel.substring(n);
+            }
+            n = __commonSuffix(tIns, tDel);
+            if (n !== 0) {
+              diffs[pointer][1] = tIns.substring(tIns.length - n) + diffs[pointer][1];
+              tIns = tIns.substring(0, tIns.length - n);
+              tDel = tDel.substring(0, tDel.length - n);
+            }
+          }
+          pointer -= nDel + nIns;
+          diffs.splice(pointer, nDel + nIns);
+          if (tDel.length) { diffs.splice(pointer, 0, [-1, tDel]); pointer++; }
+          if (tIns.length) { diffs.splice(pointer, 0, [1, tIns]); pointer++; }
+          pointer++;
+        } else if (pointer !== 0 && diffs[pointer - 1][0] === 0) {
+          diffs[pointer - 1][1] += diffs[pointer][1];
+          diffs.splice(pointer, 1);
+        } else {
+          pointer++;
+        }
+        nIns = 0; nDel = 0; tDel = ''; tIns = '';
+        break;
+    }
+  }
+  if (diffs.at(-1)?.[1] === '') diffs.pop();
+  let changes = false;
+  pointer = 1;
+  while (pointer < diffs.length - 1) {
+    if (diffs[pointer - 1][0] === 0 && diffs[pointer + 1][0] === 0) {
+      const prev = diffs[pointer - 1][1];
+      const cur = diffs[pointer][1];
+      const next = diffs[pointer + 1][1];
+      if (cur.substring(cur.length - prev.length) === prev) {
+        diffs[pointer][1] = prev + cur.substring(0, cur.length - prev.length);
+        diffs[pointer + 1][1] = prev + next;
+        diffs.splice(pointer - 1, 1);
+        changes = true;
+      } else if (cur.substring(0, next.length) === next) {
+        diffs[pointer - 1][1] += next;
+        diffs[pointer][1] = cur.substring(next.length) + next;
+        diffs.splice(pointer + 1, 1);
+        changes = true;
+      }
+    }
+    pointer++;
+  }
+  if (changes) __cleanupMerge(diffs);
+}
+function __cleanupSemantic(diffs) {
+  let changes = false;
+  const equalities = [];
+  let nEq = 0;
+  let lastEquality = null;
+  let pointer = 0;
+  let ins1 = 0, del1 = 0, ins2 = 0, del2 = 0;
+  while (pointer < diffs.length) {
+    if (diffs[pointer][0] === 0) {
+      equalities[nEq++] = pointer;
+      ins1 = ins2; del1 = del2; ins2 = 0; del2 = 0;
+      lastEquality = diffs[pointer][1];
+    } else {
+      if (diffs[pointer][0] === 1) ins2 += diffs[pointer][1].length;
+      else del2 += diffs[pointer][1].length;
+      if (lastEquality && lastEquality.length <= Math.max(ins1, del1) && lastEquality.length <= Math.max(ins2, del2)) {
+        diffs.splice(equalities[nEq - 1], 0, [-1, lastEquality]);
+        diffs[equalities[nEq - 1] + 1][0] = 1;
+        nEq--;
+        nEq--;
+        pointer = nEq > 0 ? equalities[nEq - 1] : -1;
+        ins1 = 0; del1 = 0; ins2 = 0; del2 = 0;
+        lastEquality = null;
+        changes = true;
+      }
+    }
+    pointer++;
+  }
+  if (changes) __cleanupMerge(diffs);
+  __cleanupSemanticLossless(diffs);
+  pointer = 1;
+  while (pointer < diffs.length) {
+    if (diffs[pointer - 1][0] === -1 && diffs[pointer][0] === 1) {
+      const deletion = diffs[pointer - 1][1];
+      const insertion = diffs[pointer][1];
+      const o1 = __commonOverlap(deletion, insertion);
+      const o2 = __commonOverlap(insertion, deletion);
+      if (o1 >= o2) {
+        if (o1 >= deletion.length / 2 || o1 >= insertion.length / 2) {
+          diffs.splice(pointer, 0, [0, insertion.substring(0, o1)]);
+          diffs[pointer - 1][1] = deletion.substring(0, deletion.length - o1);
+          diffs[pointer + 1][1] = insertion.substring(o1);
+          pointer++;
+        }
+      } else if (o2 >= deletion.length / 2 || o2 >= insertion.length / 2) {
+        diffs.splice(pointer, 0, [0, deletion.substring(0, o2)]);
+        diffs[pointer - 1][0] = 1;
+        diffs[pointer - 1][1] = insertion.substring(0, insertion.length - o2);
+        diffs[pointer + 1][0] = -1;
+        diffs[pointer + 1][1] = deletion.substring(o2);
+        pointer++;
+      }
+      pointer++;
+    }
+    pointer++;
+  }
+}
+// @vitest/utils `diffStringsRaw(a, b, true)`: the character diff, cleaned up semantically.
+function __diffStringsRaw(a, b) {
+  const diffs = [];
+  let ai = 0;
+  let bi = 0;
+  __diffSequences(a.length, b.length, (i, j) => a[i] === b[j], (n, ac, bc) => {
+    if (ai !== ac) diffs.push([-1, a.slice(ai, ac)]);
+    if (bi !== bc) diffs.push([1, b.slice(bi, bc)]);
+    ai = ac + n;
+    bi = bc + n;
+    diffs.push([0, b.slice(bc, bi)]);
+  });
+  if (ai !== a.length) diffs.push([-1, a.slice(ai)]);
+  if (bi !== b.length) diffs.push([1, b.slice(bi)]);
+  __cleanupSemantic(diffs);
+  return diffs;
+}
+// jest-diff `getAlignedDiffs`: the character diffs of two multi-line strings (a newline
+// appended to each) as lines, the changed substrings of a line holding common ones inverse.
+function __alignedDiffs(diffs) {
+  const relevant = (op, line) => line.reduce((r, d) => r + (d[0] === 0 ? d[1] : d[0] === op && d[1].length !== 0 ? __dcol.inverse(d[1]) : ''), '');
+  const changeBuffer = (op) => {
+    const b = { line: [], lines: [] };
+    b.pushLine = () => {
+      b.lines.push(b.line.length !== 1 ? [op, relevant(op, b.line)] : b.line[0][0] === op ? b.line[0] : [op, b.line[0][1]]);
+      b.line.length = 0;
+    };
+    b.isLineEmpty = () => b.line.length === 0;
+    b.align = (d) => {
+      if (d[1].includes('\n')) {
+        const subs = d[1].split('\n');
+        subs.forEach((sub, i) => {
+          if (i < subs.length - 1) { b.line.push([op, sub]); b.pushLine(); }
+          else if (sub.length !== 0) b.line.push([op, sub]);
+        });
+      } else b.line.push(d);
+    };
+    b.moveLinesTo = (lines) => { if (!b.isLineEmpty()) b.pushLine(); lines.push(...b.lines); b.lines.length = 0; };
+    return b;
+  };
+  const del = changeBuffer(-1);
+  const ins = changeBuffer(1);
+  const lines = [];
+  const pushChange = (d) => {
+    const empty = d[1].length === 0;
+    if (!empty || del.isLineEmpty()) del.line.push(d);
+    if (!empty || ins.isLineEmpty()) ins.line.push(d);
+  };
+  const flush = () => { del.moveLinesTo(lines); ins.moveLinesTo(lines); };
+  for (const d of diffs) {
+    if (d[0] === -1) del.align(d);
+    else if (d[0] === 1) ins.align(d);
+    else if (d[1].includes('\n')) {
+      const subs = d[1].split('\n');
+      subs.forEach((sub, i) => {
+        if (i === 0) {
+          if (del.isLineEmpty() && ins.isLineEmpty()) { flush(); lines.push([0, sub]); }
+          else { pushChange([0, sub]); flush(); }
+        } else if (i < subs.length - 1) lines.push([0, sub]);
+        else if (sub.length !== 0) pushChange([0, sub]);
+      });
+    } else pushChange(d);
+  }
+  flush();
+  return lines;
+}
+// @vitest/utils `diffStringsUnified` for two different non-empty multi-line strings: aligned
+// character diffs when they share a substring (but the appended newline), else a line diff.
+function __diffStringsUnified(a, b) {
+  const diffs = __diffStringsRaw(`${a}\n`, `${b}\n`);
+  const last = diffs.length - 1;
+  if (diffs.some((d, i) => d[0] === 0 && (i !== last || d[1] !== '\n'))) return __annotation() + __joinDiffs(__alignedDiffs(diffs));
+  return __diffLines(a.split('\n'), b.split('\n'), undefined, undefined, true);
 }
 function __diffType(v) {
   if (v === undefined) return 'undefined';
@@ -4004,8 +4667,8 @@ function __diffType(v) {
   return 'object';
 }
 const __NO_DIFF = 'Compared values have no visual difference.';
-// @vitest/utils `diff(expected, received, { omitAnnotationLines: true })`.
-function __vdiff(a, b) {
+// @vitest/utils `diff(expected, received)`; `annotate` false is its `omitAnnotationLines: true`.
+function __vdiff(a, b, annotate = false) {
   if (Object.is(a, b)) return '';
   let type = __diffType(a);
   if (a instanceof Asymmetric) {
@@ -4017,23 +4680,24 @@ function __vdiff(a, b) {
   const fmt = { indent: 2, basic: false, maxDepth: 20, errors: true };
   const fallback = { ...fmt, maxDepth: 8, toJSON: false };
   if (type !== __diffType(b)) {
-    return `- Expected:\n${__pf(a, fallback)}\n\n+ Received:\n${__pf(b, fallback)}`;
+    return `${__dcol.green('- Expected:')}\n${__pf(a, fallback)}\n\n${__dcol.red('+ Received:')}\n${__pf(b, fallback)}`;
   }
+  const noDiff = __dcol.dim(__NO_DIFF);
   const objects = (opts) => {
     const ac = __pf(a, { ...opts, indent: 0 });
     const bc = __pf(b, { ...opts, indent: 0 });
-    if (ac === bc) return __NO_DIFF;
-    return __diffLines(__pf(a, opts).split('\n'), __pf(b, opts).split('\n'), ac.split('\n'), bc.split('\n'));
+    if (ac === bc) return noDiff;
+    return __diffLines(__pf(a, opts).split('\n'), __pf(b, opts).split('\n'), ac.split('\n'), bc.split('\n'), annotate);
   };
   const sortMap = (x) => new Map([...x.entries()].sort());
   const sortSet = (x) => new Set([...x.values()].sort());
   switch (type) {
-    case 'string': return __diffLines(a.split('\n'), b.split('\n'));
+    case 'string': return __diffLines(a.split('\n'), b.split('\n'), undefined, undefined, annotate);
     case 'boolean':
     case 'number': {
       const af = __pf(a, fmt);
       const bf = __pf(b, fmt);
-      return af === bf ? '' : __diffLines(af.split('\n'), bf.split('\n'));
+      return af === bf ? '' : __diffLines(af.split('\n'), bf.split('\n'), undefined, undefined, annotate);
     }
     case 'map': a = sortMap(a); b = sortMap(b); break;
     case 'set': a = sortSet(a); b = sortSet(b); break;
@@ -4041,9 +4705,9 @@ function __vdiff(a, b) {
   let d;
   let threw = false;
   try { d = objects(fmt); } catch (e) { threw = true; }
-  if (d === undefined || d === __NO_DIFF) {
+  if (d === undefined || d === noDiff) {
     d = objects(fallback);
-    if (d !== __NO_DIFF && !threw) d = `Compared values serialize to the same structure.\nPrinting internal object structure without calling \`toJSON\` instead.\n\n${d}`;
+    if (d !== noDiff && !threw) d = `${__dcol.dim('Compared values serialize to the same structure.\nPrinting internal object structure without calling `toJSON` instead.')}\n\n${d}`;
   }
   return d;
 }
@@ -4485,12 +5149,16 @@ globalThis.__ttErrorInfo = (e) => __errorInfo(e);
 // @vitest/utils printDiffOrStringify(received, expected)
 function __printDiffOrStringify(received, expected) {
   if (typeof expected === 'string' && typeof received === 'string' && expected.length > 0 && received.length > 0
-    && expected.length <= 20000 && received.length <= 20000 && expected !== received && !expected.includes('\n') && !received.includes('\n')) {
-    return `Expected: "${expected}"\nReceived: "${received}"`;
+    && expected.length <= 20000 && received.length <= 20000 && expected !== received) {
+    if (expected.includes('\n') || received.includes('\n')) return __diffStringsUnified(expected, received);
+    // the changed substrings inverse when the strings share any; trailing spaces as `·`
+    const diffs = __diffStringsRaw(expected, received);
+    const common = diffs.some((d) => d[0] === 0);
+    const side = (op) => diffs.reduce((r, d) => r + (d[0] === 0 ? d[1] : d[0] === op ? (common ? __dcol.inverse(d[1]) : d[1]) : ''), '');
+    const shown = (v) => `"${v}"`.replace(/\s+$/gm, (sp) => '·'.repeat(sp.length));
+    return `Expected: ${__dcol.green(shown(side(-1)))}\nReceived: ${__dcol.red(shown(side(1)))}`;
   }
-  const d = __vdiff(expected, received);
-  if (!d) return '';
-  return d.startsWith('- Expected:\n') ? d : `- Expected\n+ Received\n\n${d}`;
+  return __vdiff(expected, received, true) || '';
 }
 function __testRecord(t, chain, status, extra) {
   return {

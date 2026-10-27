@@ -1,0 +1,28 @@
+
+ RUN  v4.1.12 <root>
+
+ × a.test.ts > multi <ms>
+   → line one
+line two
+ × a.test.ts > undef <ms>
+   → undefined
+ × a.test.ts > number <ms>
+   → 42
+ × a.test.ts > empty <ms>
+   → 
+ × a.test.ts > named <ms>
+   → msg
+ × a.test.ts > nameonly <ms>
+   → undefined
+ × a.test.ts > class <ms>
+   → mine
+ × a.test.ts > cause props <ms>
+   → outer
+ × a.test.ts > fn prop <ms>
+   → typed
+
+ Test Files  1 failed (1)
+      Tests  9 failed (9)
+   Start at  <time>
+   Duration  <duration>
+
