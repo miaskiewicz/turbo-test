@@ -8,12 +8,14 @@
 # tarpaulin load the coverage maps of those executables so bin-only code is attributed.
 #
 # The gate measures production code only: the #[path] unit-test modules under src/ are
-# excluded. 9348/9349 lines (99.99%) are covered. The one known uncovered line is
-# coverage_accumulate's "script with no ranges" skip in runner.rs: V8 never sends such input
-# (precise coverage always reports a script's top-level function), and the guard stays so a
-# malformed inspector payload is skipped rather than mapped as all-zero. The lines that were
-# reachable only through pre-existing bugs (turbo-test#31 items 1-3) are covered since those
-# fixes; the "mocked but no exports" fallbacks they guarded were removed.
+# excluded. 13044/13046 lines (99.98%) are covered. The two known uncovered lines:
+# - cli.rs tap_flatten's `TapNode::Failed` arm: a file that did not load is a top-level TAP node
+#   (render_tap), never a describe's child, but the match over the enum must name it;
+# - runner.rs resolve_callback's lazy `load_cjs` of an app module the module runner transforms,
+#   reached only by a bundled (top-level-await) setup file's own vi.mock'd import, which loads the
+#   real module there (turbo-test#194); covering it would assert that bug.
+# (coverage_accumulate's "script with no ranges" guard, uncovered at 9348/9349, is covered in this
+# measurement.)
 [turbo-test]
 engine = "Llvm"
 target-dir = "target/cov"

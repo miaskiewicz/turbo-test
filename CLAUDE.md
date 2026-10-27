@@ -37,8 +37,8 @@ A release where these disagree is a bug. Bump both in the same commit.
   binary). Integration tests and the path/V8-sensitive unit modules are `cfg(unix)`.
 - `cargo tarpaulin` (reads `tarpaulin.toml`: Llvm engine, `target/cov`, `fail-under = 99.98`)
   is the CI `coverage` gate. New code needs behaviour-asserting tests (happy path + edge
-  cases) that keep every line covered; never add coverage-only no-op tests. The single
-  remaining uncovered line (a V8-unreachable guard) is explained in tarpaulin.toml.
+  cases) that keep every line covered; never add coverage-only no-op tests. The two
+  remaining uncovered lines (each with its reason or open issue) are explained in tarpaulin.toml.
 - CI detection (snapshot update mode `none` on CI) is std-env's `isCI`: `src/ci.rs` over the
   provider table `src/ci_providers.json`. When vitest's std-env changes, re-check the table with
   `node scripts/check-ci-detection.mjs <dir with vitest installed>` (0 mismatches). The test
