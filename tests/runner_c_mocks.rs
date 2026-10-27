@@ -714,6 +714,99 @@ it('a dynamically imported namespace', async () => {
     }
 }
 
+/// turbo-test#157: `mockRestore` / `vi.restoreAllMocks` put the property's original descriptor
+/// back, as vitest 4.1.12: a spy on a re-export (`export *`, `export { x as y } from`) restores
+/// the live re-export (the module runner left a data property holding the original, so a later
+/// spy on the source no longer showed through), and a non-enumerable method stays non-enumerable.
+/// vitest on the same project: 2 passed.
+#[test]
+#[ignore = "turbo-test#157: fails until the fix"]
+fn restoring_a_spy_puts_the_original_descriptor_back() {
+    let files: [(&str, &str); 4] = [
+        (
+            "package.json",
+            "{\"name\":\"rc-spy-restore\",\"type\":\"module\"}\n",
+        ),
+        (
+            "src/star.ts",
+            r#"export const starred = (): string => 'star';
+export const callsStarred = (): string => starred();
+"#,
+        ),
+        (
+            "src/barrel.ts",
+            r#"export * from './star';
+export { starred as aliased } from './star';
+"#,
+        ),
+        (
+            "src/use.ts",
+            r#"import { starred, aliased } from './barrel';
+export const use = (): string[] => [starred(), aliased()];
+"#,
+        ),
+    ];
+    let test = r#"import { expect, it, vi } from 'vitest';
+import * as barrel from './src/barrel';
+import * as star from './src/star';
+import { use } from './src/use';
+class C { m(): string { return 'm'; } }
+it('restoring a spy on a re-export puts the live re-export back', () => {
+  vi.spyOn(barrel, 'starred').mockReturnValue('B');
+  vi.spyOn(barrel, 'aliased').mockReturnValue('A');
+  expect(use()).toEqual(['B', 'A']);
+  vi.restoreAllMocks();
+  vi.spyOn(star, 'starred').mockReturnValue('S');
+  expect([barrel.starred(), barrel.aliased(), ...use()]).toEqual(['S', 'S', 'S', 'S']);
+  vi.restoreAllMocks();
+  expect(use()).toEqual(['star', 'star']);
+});
+it('restoring puts the original descriptor back', () => {
+  const before = Object.getOwnPropertyDescriptor(C.prototype, 'm');
+  const o = {} as { f: () => number };
+  Object.defineProperty(o, 'f', { value: () => 1, writable: true, enumerable: false, configurable: true });
+  const s1 = vi.spyOn(C.prototype, 'm').mockReturnValue('x');
+  const s2 = vi.spyOn(o, 'f').mockReturnValue(2);
+  expect([new C().m(), o.f()]).toEqual(['x', 2]);
+  s1.mockRestore();
+  s2.mockRestore();
+  expect(Object.getOwnPropertyDescriptor(C.prototype, 'm')).toEqual(before);
+  expect([Object.keys(o), o.f(), new C().m()]).toEqual([[], 1, 'm']);
+});
+"#;
+    for esbuild in [true, false] {
+        let p = Project::new(if esbuild {
+            "rc-spy-restore"
+        } else {
+            "rc-spy-restore-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in files {
+            p.file(f, c);
+        }
+        p.file("r.test.ts", test);
+        let envs: &[&[(&str, &str)]] = if esbuild {
+            &[
+                &[],
+                &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
+            ]
+        } else {
+            &[&[]]
+        };
+        for env in envs {
+            let r = turbo_test(&p.dir, &[], env);
+            assert!(
+                r.stdout.contains("Tests  2 passed (2)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            assert_eq!(r.code, Some(0), "esbuild={esbuild} {env:?}\n{}", r.all());
+        }
+    }
+}
+
 #[test]
 fn import_meta_keeps_coverage_line_mapping() {
     let p = esbuild_project("rc-import-meta-cov");
