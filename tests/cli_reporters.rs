@@ -833,3 +833,100 @@ fn a_compile_error_is_the_files_syntax_error() {
         );
     }
 }
+
+/// turbo-test#108: a static import that does not resolve fails the file with vitest's `Cannot
+/// find module '<as written>' imported from <importer>` (`Cannot find package` for a bare one),
+/// and a JS module that does not parse with vite's error — its import analysis's when the
+/// lexer rejects the source, else rolldown's `Parse failure` with the code frame —, as vitest
+/// 4.1.12 reports them (the json `message`, the Failed Suites header). turbo-test said `graph
+/// load failed` (printing `cannot resolve …` to stderr three times) and V8's SyntaxError.
+#[test]
+fn load_errors_are_vites() {
+    for esbuild in [false, true] {
+        let p = Project::new("rep-load-errors");
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", "{\"name\":\"x\"}\n");
+        let t = "test('t', () => {});";
+        p.file(
+            "miss.test.js",
+            &format!("import {{ test }} from 'vitest'; import './missing.mjs'; {t}\n"),
+        );
+        p.file("syn.mjs", "export const = ;\n");
+        p.file(
+            "depsyn.test.js",
+            &format!("import {{ test }} from 'vitest'; import './syn.mjs'; {t}\n"),
+        );
+        p.file(
+            "entrysyn.test.js",
+            &format!("import {{ test }} from 'vitest'; {t} )\n"),
+        );
+        p.file("mid.mjs", "import './missing2.mjs';\nexport const y = 1;\n");
+        p.file(
+            "missnested.test.js",
+            &format!("import {{ test }} from 'vitest'; import './mid.mjs'; {t}\n"),
+        );
+        p.file(
+            "misspkg.test.js",
+            &format!("import {{ test }} from 'vitest'; import 'nonexistent-pkg'; {t}\n"),
+        );
+        let root = std::fs::canonicalize(&p.dir).unwrap().display().to_string();
+        // vitest 4.1.12's json messages, by file
+        let want = [
+            ("depsyn.test.js", "Parse failure: Parse failed with 1 error:\nUnexpected token\n1: export const = ;\n                ^\nAt file: /syn.mjs:1:13".to_string()),
+            ("entrysyn.test.js", "Failed to parse source for import analysis because the content contains invalid JS syntax. If you are using JSX, make sure to name the file with the .jsx or .tsx extension.".to_string()),
+            ("miss.test.js", format!("Cannot find module './missing.mjs' imported from {root}/miss.test.js")),
+            ("missnested.test.js", format!("Cannot find module './missing2.mjs' imported from {root}/mid.mjs")),
+            ("misspkg.test.js", format!("Cannot find package 'nonexistent-pkg' imported from {root}/misspkg.test.js")),
+        ];
+        let r = run(&p, &["--reporter", "json"]);
+        let j = json_report(&r);
+        let mut got: Vec<(String, String)> = j["testResults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                let name = t["name"].as_str().unwrap();
+                let file = name.rsplit('/').next().unwrap().to_string();
+                (file, t["message"].as_str().unwrap_or_default().to_string())
+            })
+            .collect();
+        got.sort();
+        let want: Vec<(String, String)> = want
+            .iter()
+            .map(|(f, m)| (f.to_string(), m.clone()))
+            .collect();
+        assert_eq!(got, want, "esbuild={esbuild}\n{}", r.all());
+        assert!(
+            !r.stderr.contains("cannot resolve"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+        // the Failed Suites headers: the error's name and message
+        let r = turbo_test(
+            &p.dir,
+            &[],
+            &[("TURBO_LEGACY_REPORTER", "0"), ("NO_COLOR", "1")],
+        );
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        for header in [
+            "\nRolldownError: Parse failure: Parse failed with 1 error:\nUnexpected token\n".to_string(),
+            "\nError: Failed to parse source for import analysis because".to_string(),
+            format!("\nError: Cannot find module './missing.mjs' imported from {root}/miss.test.js\n"),
+            format!("\nError: Cannot find package 'nonexistent-pkg' imported from {root}/misspkg.test.js\n"),
+        ] {
+            assert!(r.stderr.contains(&header), "esbuild={esbuild} {header:?}\n{}", r.all());
+        }
+        assert!(
+            !r.all().contains("cannot resolve"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+        assert!(
+            !r.all().contains("graph load failed"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+    }
+}

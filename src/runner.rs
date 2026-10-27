@@ -1917,12 +1917,15 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String>
     ) {
         global.set(scope, k.into(), v.into());
     }
-    if let Some(module) = load_graph(scope, &bundled) {
+    {
+        // (a load error the prepass throws is the entry's own, reported when the entry loads)
         let tc = std::pin::pin!(v8::TryCatch::new(scope));
         let tc = &mut tc.init();
-        if module.instantiate_module(tc, resolve_callback) == Some(true) {
-            let _ = module.evaluate(tc);
-            tc.perform_microtask_checkpoint();
+        if let Some(module) = load_graph(tc, &bundled) {
+            if module.instantiate_module(tc, resolve_callback) == Some(true) {
+                let _ = module.evaluate(tc);
+                tc.perform_microtask_checkpoint();
+            }
         }
     }
     set_mock_prepass(scope, false);
@@ -4314,7 +4317,20 @@ fn native_require(
                 return;
             }
         }
-        throw_module_not_found(scope, &spec, args.get(3));
+        // the module runner's form of a static import: vitest's import error (turbo-test#108)
+        let importer = args.get(3);
+        let importer_path = (importer.is_string()).then(|| importer.to_rust_string_lossy(scope));
+        let imported = importer_path.as_ref().is_some_and(|f| {
+            std::fs::read_to_string(f)
+                .is_ok_and(|src| crate::parse_error::imports_statically(Path::new(f), &src, &spec))
+        });
+        if let (true, Some(f)) = (imported, &importer_path) {
+            let root = std::env::current_dir().unwrap_or_default();
+            let (message, code) = import_not_found(&spec, f, &root, true);
+            throw_with_code(scope, &message, code);
+        } else {
+            throw_module_not_found(scope, &spec, importer);
+        }
         return;
     };
     let abs = query_mock_variant(&spec, abs);
@@ -4417,7 +4433,29 @@ fn native_require(
                 // load that failed without one (unreadable / untransformable) gets a generic error.
                 match cause {
                     Some(e) => {
-                        let e = v8::Local::new(scope, &e);
+                        let mut e = v8::Local::new(scope, &e);
+                        // a module that did not compile, imported statically: vitest's import
+                        // fails with vite's parse error, where a require() fails as Node's
+                        // (turbo-test#108)
+                        let compile = COMPILE_EXC.with(|c| c.borrow().clone());
+                        if let Some((c, _)) = compile.filter(|(_, m)| *m == abs) {
+                            let importer = args.get(3);
+                            let imported = importer.is_string() && {
+                                let f = importer.to_rust_string_lossy(scope);
+                                std::fs::read_to_string(&f).is_ok_and(|src| {
+                                    crate::parse_error::imports_statically(
+                                        Path::new(&f),
+                                        &src,
+                                        &spec,
+                                    )
+                                })
+                            };
+                            if imported && v8::Local::new(scope, &c).strict_equals(e) {
+                                e = vite_compile_error(scope, &abs, e);
+                                let g = v8::Global::new(scope, e);
+                                COMPILE_EXC.with(|c| *c.borrow_mut() = Some((g, abs.clone())));
+                            }
+                        }
                         scope.throw_exception(e);
                     }
                     None => throw(scope, &format!("failed to load {spec}")),
@@ -4783,6 +4821,52 @@ fn throw(scope: &mut v8::PinScope, msg: &str) {
     scope.throw_exception(exc);
 }
 
+/// Throw an `Error` with `msg` and a `code` property.
+fn throw_with_code(scope: &mut v8::PinScope, msg: &str, code: &str) {
+    let (Some(m), Some(k), Some(c)) = (
+        v8::String::new(scope, msg),
+        v8::String::new(scope, "code"),
+        v8::String::new(scope, code),
+    ) else {
+        return;
+    };
+    let exc = v8::Exception::error(scope, m);
+    exc.cast::<v8::Object>().set(scope, k.into(), c.into());
+    scope.throw_exception(exc);
+}
+
+/// The error a module `abs` that V8 did not compile (`exc`) fails with: vite's for a JavaScript
+/// module that does not parse (crate::parse_error; turbo-test#108), else V8's — and always V8's
+/// for a dependency in node_modules (vitest leaves those to Node).
+fn vite_compile_error<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+    exc: v8::Local<'s, v8::Value>,
+) -> v8::Local<'s, v8::Value> {
+    if abs.components().any(|c| c.as_os_str() == "node_modules") {
+        return exc;
+    }
+    let root = std::env::current_dir().unwrap_or_default();
+    let vite = std::fs::read_to_string(abs)
+        .ok()
+        .and_then(|src| crate::parse_error::vite_parse_error(abs, &src, &root));
+    let Some((name, message)) = vite else {
+        return exc;
+    };
+    let (Some(m), Some(k), Some(n)) = (
+        v8::String::new(scope, &message),
+        v8::String::new(scope, "name"),
+        v8::String::new(scope, name),
+    ) else {
+        return exc;
+    };
+    let e = v8::Exception::error(scope, m);
+    if name != "Error" {
+        e.cast::<v8::Object>().set(scope, k.into(), n.into());
+    }
+    e
+}
+
 // ---- ESM graph ------------------------------------------------------------
 
 fn load_graph<'s>(
@@ -4801,7 +4885,25 @@ fn load_graph<'s>(
     let name = v8::String::new(scope, &abs.to_string_lossy())?;
     let origin = module_origin(scope, name);
     let mut source = v8::script_compiler::Source::new(code, Some(&origin));
-    let module = v8::script_compiler::compile_module(scope, &mut source)?;
+    let compiled = {
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let tc = &mut tc.init();
+        match v8::script_compiler::compile_module(tc, &mut source) {
+            Some(m) => Ok(v8::Global::new(tc, m)),
+            None => Err(tc.exception().map(|e| v8::Global::new(tc, e))),
+        }
+    };
+    let module = match compiled {
+        Ok(m) => v8::Local::new(scope, &m),
+        Err(exc) => {
+            if let Some(exc) = exc {
+                let exc = v8::Local::new(scope, &exc);
+                let exc = vite_compile_error(scope, abs, exc);
+                scope.throw_exception(exc);
+            }
+            return None;
+        }
+    };
 
     let hash = module.get_identity_hash().get();
     let global = v8::Global::new(scope, module);
@@ -4831,7 +4933,10 @@ fn load_graph<'s>(
             continue;
         }
         let Some(dep) = resolve_spec(&spec, &dir) else {
-            eprintln!("cannot resolve {spec} from {}", dir.display());
+            // vitest's error for a static import that does not resolve (turbo-test#108)
+            let root = std::env::current_dir().unwrap_or_default();
+            let (message, code) = import_not_found(&spec, &abs.to_string_lossy(), &root, true);
+            throw_with_code(scope, &message, code);
             return None;
         };
         load_dep(scope, &dep)?;
@@ -5152,7 +5257,12 @@ fn import_after_do_mock(
 /// not resolve (`root`: the project root): a relative specifier is named as vite resolved it,
 /// URL-resolved against the importer's root-relative path; an absolute one as written; a bare
 /// one is a missing package; an unknown `node:` one is not a built-in.
-fn import_not_found(spec: &str, importer: &str, root: &Path) -> (String, &'static str) {
+fn import_not_found(
+    spec: &str,
+    importer: &str,
+    root: &Path,
+    as_written: bool,
+) -> (String, &'static str) {
     if spec.starts_with("node:") {
         return (
             format!("No such built-in module: {spec}"),
@@ -5160,7 +5270,9 @@ fn import_not_found(spec: &str, importer: &str, root: &Path) -> (String, &'stati
         );
     }
     let module = |id: &str| format!("Cannot find module '{id}' imported from {importer}");
-    if spec.starts_with('/') {
+    // a static import names the module as written
+    if spec.starts_with('/') || (as_written && (spec.starts_with("./") || spec.starts_with("../")))
+    {
         return (module(spec), "ERR_MODULE_NOT_FOUND");
     }
     if spec.starts_with("./") || spec.starts_with("../") {
@@ -5225,7 +5337,7 @@ fn dynamic_import<'s>(
     };
     let Some(abs) = abs else {
         let root = std::env::current_dir().unwrap_or_default();
-        let (message, code) = import_not_found(&spec, &referrer, &root);
+        let (message, code) = import_not_found(&spec, &referrer, &root, false);
         let message = v8::String::new(scope, &message)?;
         let exc = v8::Exception::error(scope, message);
         let key = v8::String::new(scope, "code")?;

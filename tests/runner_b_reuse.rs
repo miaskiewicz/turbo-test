@@ -172,7 +172,8 @@ fn esm_graph_reuse_reports_load_errors_and_retries_fresh() {
             r.all()
         );
         assert!(
-            line("e-graph.test.js").ends_with("(SyntaxError: Unexpected token ')')"),
+            // vite's import analysis rejects it (turbo-test#108)
+            line("e-graph.test.js").contains("(Error: Failed to parse source for import analysis "),
             "{}",
             r.all()
         );
