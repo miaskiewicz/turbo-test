@@ -1762,7 +1762,6 @@ test('reported', () => { expect(1, 'GOT<x>').toBe(2) })
 }
 
 #[test]
-#[ignore = "turbo-test#140: fails until the fix"]
 fn to_be_one_of_is_vitests() {
     // turbo-test#140: `toBeOneOf` and the asymmetric `expect.toBeOneOf` / `expect.not.toBeOneOf`
     // were missing (`expect(...).toBeOneOf is not a function`). vitest compares each candidate
@@ -1805,7 +1804,7 @@ await t('asym string', () => { rows.push(JSON.stringify(['str', String(expect.to
 await t('asym bad arg', () => expect({ x: 3 }).toEqual({ x: expect.toBeOneOf(5) }))
 fs.writeFileSync('out.txt', rows.join('\n'))
 })
-test('reported', () => { expect({ x: 3 }).toMatchObject({ x: expect.toBeOneOf([1, 2]) }) })
+test('reported', () => { expect({ x: 3 }).toEqual({ x: expect.toBeOneOf([1, 2]) }) })
 "##,
     );
     let r = turbo_test(
@@ -1816,7 +1815,7 @@ test('reported', () => { expect({ x: 3 }).toMatchObject({ x: expect.toBeOneOf([1
     assert_eq!(r.code, Some(1), "{}", r.all());
     // the diff prints the matcher as vitest's toAsymmetricMatcher: its sample pretty-formatted
     for line in [
-        "AssertionError: expected { x: 3 } to match object { x: toBeOneOf<Array [",
+        "AssertionError: expected { x: 3 } to deeply equal { x: toBeOneOf<Array [",
         "-   \"x\": toBeOneOf<Array [\n-   1,\n-   2,\n- ]>,\n+   \"x\": 3,",
     ] {
         assert!(r.all().contains(line), "missing {line:?} in\n{}", r.all());

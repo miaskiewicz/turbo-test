@@ -6,6 +6,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 ## [Unreleased]
 
 ### Fixed
+- `toBeOneOf` and the asymmetric `expect.toBeOneOf` / `expect.not.toBeOneOf` (turbo-test#140)
+  were missing (`expect(...).toBeOneOf is not a function`). They now compare as vitest 4.1.12's
+  (`equals` per item, a Set by `has` first, an empty array / Set passes, anything else throws
+  vitest's TypeError), fail with its `expect(received).toBeOneOf()` message, and print as
+  `toBeOneOf<…>` / `not.toBeOneOf` in messages and diffs.
 - Default-export interop with CommonJS (turbo-test#122), checked by an 89-row table against
   vitest 4.1.12 (`tests/interop_table.rs`, happy-dom / node, isolate on and off, both loaders).
   On the ESM graph loader (a project without esbuild, as a vite 8 install) `import X from` tsc /
