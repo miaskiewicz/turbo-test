@@ -7,9 +7,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ### Changed — turbo-dom pin
 - The pre-publish `[patch.crates-io]` pins turbo-dom and turbo-dom-browser-env to the final
-  consolidation head of miaskiewicz/turbo-dom (f50e6cb; was 4c473ef), which carries the
+  consolidation head of miaskiewicz/turbo-dom (f860fea; was 4c473ef), which carries the
   turbo-dom fixes of this round (DOM ownership bookkeeping linear on large trees, turbo-dom#112;
-  `getComputedStyle` reuse, turbo-test#125; canvas, track, image and colour fixes). turbo-dom-v8
+  `getComputedStyle` reuse, turbo-test#125, which follows CSSOM edits across realms, turbo-dom#113; canvas, track, image and colour fixes). turbo-dom-v8
   stays on its candidate (e9b36c8).
 
 ### Fixed — the `vi`, mock and `jest` surface is vitest 4.1.12's and jest 30.5.2's (K8, turbo-test#179–#183)
