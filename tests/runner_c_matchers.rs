@@ -477,7 +477,6 @@ test('query', () => {
 }
 
 #[test]
-#[ignore = "turbo-test#116: fails until the fix"]
 fn url_search_params_set_replaces_in_place_like_nodes() {
     // turbo-test#116: URLSearchParams.set removed every pair of the name and appended one, so
     // the pair moved to the end. WHATWG: the first pair's value is replaced in place and the

@@ -303,6 +303,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   Error expected was compared by message only and an object by `message` substring, so
   `toThrow(new Error('abc'))` passed for a `TypeError('abc')` and `toThrow({ message: 'ab' })`
   for `Error('abc')`.
+- `URLSearchParams.set` replaces the first pair of the name in place and removes the others, as
+  Node's (turbo-test#116); it moved the pair to the end (`a=1&b=2&a=3` set `a` gave `b=2&a=9`,
+  Node `a=9&b=2`), in `toString()`, iteration and a URL's `href`.
 - The URL global keeps its query as parsed (turbo-test#115), percent-encoded with WHATWG's query
   set (`'` too for a special scheme): `http://a/?q`, `?a%20b=c%20d`, `?x=1&&y` and a bare `?` stay
   as written, and the query is re-serialized from `searchParams` only when that object changes
