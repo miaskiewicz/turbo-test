@@ -59,9 +59,10 @@ globalThis.console = {
 // its isMusl() reads process.report().header.glibcVersionRuntime to pick gnu vs musl.
 // Hardcoding 'darwin'/'arm64' made every non-mac host load the macOS .node -> dlopen fails.
 globalThis.process = {
-  // vitest also sets vite's MODE / DEV / PROD / SSR / BASE_URL (SSR '' under a DOM environment:
-  // the runner sets it per file, turbo-test#123)
-  env: { NODE_ENV: 'test', VITEST: 'true', TZ: 'UTC', TURBO_DOM_PARSER: 'native', MODE: 'test', DEV: '1', PROD: '', SSR: '1', BASE_URL: '/' },
+  // vitest's own variables: NODE_ENV (when the host has none), VITEST and vite's MODE / DEV / PROD
+  // / SSR / BASE_URL (SSR '' under a DOM environment: the runner sets it per file, turbo-test#123).
+  // The runner puts the host environment underneath (install_host_env, turbo-test#143).
+  env: { NODE_ENV: 'test', VITEST: 'true', MODE: 'test', DEV: '1', PROD: '', SSR: '1', BASE_URL: '/' },
   platform: globalThis.__ttPlatform || 'darwin',
   arch: globalThis.__ttArch || 'arm64',
   // glibcVersionRuntime truthy => glibc (gnu); falsy => musl. __ttGlibc is the glibc
@@ -1088,13 +1089,6 @@ if (typeof globalThis.FileReader === 'undefined') {
     Object.defineProperty(globalThis.FileReader.prototype, k, { value: i, enumerable: true });
   });
 }
-// turbo-dom's installGlobals replaces Blob/File with SoA-backed versions whose .text()/byte
-// reads return zero-filled content. Capture our working implementations so the DOM bootstrap
-// can restore them (FileReader/fileToBase64/CSV parsing need real bytes).
-globalThis.__ttRestoreFileApis = (() => {
-  const B = globalThis.Blob, F = globalThis.File, FR = globalThis.FileReader;
-  return () => { globalThis.Blob = B; globalThis.File = F; globalThis.FileReader = FR; };
-})();
 if (typeof globalThis.fetch === 'undefined') {
   globalThis.fetch = () => Promise.reject(new Error('fetch is not supported in turbo-test env'));
   globalThis.Headers = class Headers {
@@ -3046,6 +3040,7 @@ class Asymmetric {
       case 'arrayContaining':
         return this.sample.length === 0 || (Array.isArray(actual) && this.sample.every((s) => actual.some((a) => __equals(s, a, testers))));
       case 'stringContaining': return typeof actual === 'string' && actual.includes(this.sample);
+      case 'toBeOneOf': return __oneOf(actual, this.sample);
       case 'stringMatching': {
         const r = this.sample instanceof RegExp ? this.sample : new RegExp(this.sample);
         return typeof actual === 'string' && r.test(actual);
@@ -3053,6 +3048,21 @@ class Asymmetric {
       default: return false;
     }
   }
+}
+
+// expect.toBeOneOf / expect.not.toBeOneOf: vitest makes them (as every expect.extend matcher)
+// with asymmetricMatch, toString (`[not.]toBeOneOf`) and `$$typeof` (turbo-test#140).
+class __OneOfMatcher extends Asymmetric {
+  constructor(sample, negate) { super('toBeOneOf', sample, negate); this.$$typeof = Symbol.for('jest.asymmetricMatcher'); }
+  asymmetricMatch(other) { return this.matches(other); }
+  toString() { return __asymName(this); }
+}
+// vitest's toBeOneOf (turbo-test#140): `actual` equals one of an array's / Set's items (a Set by
+// `has` first) with `equals` and no testers; an empty array / Set always passes.
+function __oneOf(actual, expected) {
+  if (Array.isArray(expected)) return expected.length === 0 || expected.some((item) => __equals(item, actual));
+  if (expected instanceof Set) return expected.size === 0 || expected.has(actual) || [...expected].some((item) => __equals(item, actual));
+  throw new TypeError(`You must provide an array or set to expect(received).toBeOneOf(expected), not '${typeof expected}'.`);
 }
 
 // ---- deep equality: @vitest/expect's `equals` and its testers (turbo-test#103) ----
@@ -3515,6 +3525,14 @@ function makeExpect(actual, negated = false, message = undefined) {
         ? `expect(received).not.toSatisfy()\n\nExpected value to not satisfy:\n${shown}\nReceived:\n${__stringify(actual)}`
         : `expect(received).toSatisfy()\n\nExpected value to satisfy:\n${shown}\n\nReceived:\n${__stringify(actual)}`);
     },
+    // vitest's jest-style toBeOneOf: a plain Error with its matcher hint (turbo-test#140)
+    toBeOneOf(expected) {
+      const pass = __oneOf(actual, expected);
+      if (negated ? !pass : pass) return;
+      throw new Error(negated
+        ? `expect(received).not.toBeOneOf()\n\nExpected value to not be one of:\n${__stringify(expected)}\nReceived:\n${__stringify(actual)}`
+        : `expect(received).toBeOneOf()\n\nExpected value to be one of:\n${__stringify(expected)}\n\nReceived:\n${__stringify(actual)}`);
+    },
     toHaveBeenCalledExactlyOnceWith(...a) {
       const spy = spyOf();
       const name = spy.getMockName();
@@ -3883,11 +3901,13 @@ globalThis.expect.any = (ctor) => new Asymmetric('any', ctor);
 globalThis.expect.anything = () => new Asymmetric('anything');
 globalThis.expect.objectContaining = (s) => new Asymmetric('objectContaining', s);
 globalThis.expect.arrayContaining = (s) => new Asymmetric('arrayContaining', s);
+globalThis.expect.toBeOneOf = (s) => new __OneOfMatcher(s);
 globalThis.expect.not = {
   arrayContaining: (s) => new Asymmetric('arrayContaining', s, true),
   objectContaining: (s) => new Asymmetric('objectContaining', s, true),
   stringContaining: (s) => new Asymmetric('stringContaining', s, true),
   stringMatching: (s) => new Asymmetric('stringMatching', s, true),
+  toBeOneOf: (s) => new __OneOfMatcher(s, true),
 };
 globalThis.expect.stringContaining = (s) => new Asymmetric('stringContaining', s);
 globalThis.expect.stringMatching = (s) => new Asymmetric('stringMatching', s);
@@ -4709,6 +4729,7 @@ function __asymName(m) {
     case 'arrayContaining': return not ? 'ArrayNotContaining' : 'ArrayContaining';
     case 'stringContaining': return not ? 'StringNotContaining' : 'StringContaining';
     case 'stringMatching': return not ? 'StringNotMatching' : 'StringMatching';
+    case 'toBeOneOf': return not ? 'not.toBeOneOf' : 'toBeOneOf';
     default: return String(m.__asymmetric);
   }
 }
@@ -4756,6 +4777,8 @@ function __pfPrint(v, cfg, ind, depth, refs, calledToJSON) {
       case 'anything': return 'Anything';
       case 'arrayContaining': return d > cfg.maxDepth ? `[${name}]` : `${name} [${__pfItems(Array.from(v.sample), cfg, ind, d, refs, pp)}]`;
       case 'objectContaining': return d > cfg.maxDepth ? `[${name}]` : `${name} {${__pfProps(v.sample, cfg, ind, d, refs)}}`;
+      // vitest's toAsymmetricMatcher: the sample stringified on its own (not re-indented)
+      case 'toBeOneOf': return `${name}<${__stringify(v.sample)}>`;
       default: return `${name} ${p(v.sample, ind)}`;
     }
   }

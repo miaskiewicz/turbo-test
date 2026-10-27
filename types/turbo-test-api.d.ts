@@ -196,11 +196,13 @@ export interface ExpectStatic {
   stringContaining(expected: string): any;
   stringMatching(expected: string | RegExp): any;
   closeTo(expected: number, precision?: number): any;
+  toBeOneOf(expected: any[] | Set<any>): any;
   not: {
     objectContaining(expected: any): any;
     arrayContaining(expected: any[]): any;
     stringContaining(expected: string): any;
     stringMatching(expected: string | RegExp): any;
+    toBeOneOf(expected: any[] | Set<any>): any;
   };
 }
 

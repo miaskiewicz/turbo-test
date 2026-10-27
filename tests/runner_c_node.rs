@@ -458,3 +458,45 @@ it('console.log', () => { console.log('two', { a: 1 }, [1, 'b']); });
         r.all()
     );
 }
+
+#[test]
+fn process_env_is_the_host_environment() {
+    // turbo-test#143: process.env was a fixed stub, so a variable the user exported was
+    // undefined in tests. As in vitest 4.1.12: the host environment (values as is: `=`, empty,
+    // non-ASCII), the host's NODE_ENV and TZ win, vitest's own MODE / VITEST / BASE_URL / SSR
+    // override the host's, and nothing turbo-test-specific is added. Same in every file of a
+    // worker (two files, one worker).
+    let p = Project::new("rc-host-env");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    let body = r#"import { test, expect } from 'vitest'
+import { env } from 'node:process'
+test('env', () => {
+  const e = process.env
+  expect([env === e, e.K4_PROBE, e.K4_EQ, e.K4_EMPTY, e.K4_UNI, e.NODE_ENV, e.MODE, e.VITEST, e.BASE_URL, e.SSR, e.TZ, e.HOME, e.TURBO_DOM_PARSER, 'K4_PROBE' in e, Object.keys(e).includes('K4_EMPTY')])
+    .toEqual([true, 'host-value', 'a=b=c', '', 'zażółć', 'production', 'test', 'true', '/', '1', 'Asia/Tokyo', __HOME__, undefined, true, true])
+})
+"#;
+    let home = std::env::var("HOME").unwrap();
+    let body = body.replace("__HOME__", &format!("{home:?}"));
+    p.file("a.test.js", &body);
+    p.file("b.test.js", &body);
+    let r = turbo_test(
+        &p.dir,
+        &["a.test.js", "b.test.js"],
+        &[
+            ("TURBO_JOBS", "1"),
+            ("K4_PROBE", "host-value"),
+            ("K4_EQ", "a=b=c"),
+            ("K4_EMPTY", ""),
+            ("K4_UNI", "zażółć"),
+            ("NODE_ENV", "production"),
+            ("MODE", "host-mode"),
+            ("VITEST", "host"),
+            ("BASE_URL", "/x/"),
+            ("SSR", "host"),
+            ("TZ", "Asia/Tokyo"),
+        ],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(r.all().contains("2 passed"), "{}", r.all());
+}

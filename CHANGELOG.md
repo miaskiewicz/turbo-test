@@ -6,6 +6,21 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 ## [Unreleased]
 
 ### Fixed
+- runtime.js no longer defines `__ttRestoreFileApis` (turbo-test#147). It restored Blob / File /
+  FileReader after the JS turbo-dom bootstrap replaced them; that bootstrap went in v0.3.0 and the
+  native DOM (`turbo-dom-browser-env`) never replaces them, so nothing called it. Wiring it
+  between files would also diverge from vitest, whose `isolate: false` keeps a file's global
+  changes for the next file.
+- `process.env` is the host environment (turbo-test#143): it was a fixed stub, so a variable
+  the user exported (`K=v turbo-test`) was `undefined` in tests. As in vitest 4.1.12 it now holds
+  the environment turbo-test was started with, the host's `NODE_ENV` wins (`'test'` only when
+  unset), vitest's `VITEST` / `MODE` / `DEV` / `PROD` / `SSR` / `BASE_URL` replace the host's, and
+  the stub's `TZ: 'UTC'` (not the real time zone) and `TURBO_DOM_PARSER` are gone.
+- `toBeOneOf` and the asymmetric `expect.toBeOneOf` / `expect.not.toBeOneOf` (turbo-test#140)
+  were missing (`expect(...).toBeOneOf is not a function`). They now compare as vitest 4.1.12's
+  (`equals` per item, a Set by `has` first, an empty array / Set passes, anything else throws
+  vitest's TypeError), fail with its `expect(received).toBeOneOf()` message, and print as
+  `toBeOneOf<…>` / `not.toBeOneOf` in messages and diffs.
 - Default-export interop with CommonJS (turbo-test#122), checked by an 89-row table against
   vitest 4.1.12 (`tests/interop_table.rs`, happy-dom / node, isolate on and off, both loaders).
   On the ESM graph loader (a project without esbuild, as a vite 8 install) `import X from` tsc /
