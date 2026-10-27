@@ -29,7 +29,8 @@ use std::path::Path;
 
 /// `code` (the ES module at `file`) with its imports read through the spy overrides and its
 /// namespace registered, or `None` when there is nothing to do (or it does not parse).
-pub fn spyable(file: &Path, code: &str) -> Option<String> {
+/// The returned shifts are the in-line edits (location.rs maps V8's columns back through them).
+pub fn spyable(file: &Path, code: &str) -> Option<(String, Vec<crate::location::Shift>)> {
     if !code.contains("import") && !code.contains("export") {
         return None;
     }
@@ -206,8 +207,9 @@ pub fn spyable(file: &Path, code: &str) -> Option<String> {
         return None;
     }
     let mut out = code.to_string();
-    edits.sort_by_key(|e| std::cmp::Reverse((e.0, e.1)));
-    for (s, e, text) in edits {
+    edits.sort_by_key(|e| (e.0, e.1));
+    let shifts = shifts(code, &edits);
+    for (s, e, text) in edits.into_iter().rev() {
         out.replace_range(s as usize..e as usize, &text);
     }
     // the registration, after the last line
@@ -240,7 +242,34 @@ pub fn spyable(file: &Path, code: &str) -> Option<String> {
         out.push_str(&tail);
         out.push('\n');
     }
-    Some(out)
+    Some((out, shifts))
+}
+
+/// The edits (sorted, byte offsets into `code`, no newlines) as UTF-16 column shifts per line.
+fn shifts(code: &str, edits: &[(u32, u32, String)]) -> Vec<crate::location::Shift> {
+    let mut out = Vec::new();
+    // (line, the line's start offset, the column delta so far on it)
+    let mut cur: Option<(u32, usize, i64)> = None;
+    for (s, e, text) in edits {
+        let (s, e) = (*s as usize, *e as usize);
+        let line_start = code[..s].rfind('\n').map_or(0, |n| n + 1);
+        let line = code[..s].matches('\n').count() as u32;
+        let delta = match cur {
+            Some((l, _, d)) if l == line => d,
+            _ => 0,
+        };
+        let col = |at: usize| code[line_start..at].encode_utf16().count() as i64;
+        let (old_s, old_e) = (col(s), col(e));
+        let new_s = old_s + delta;
+        let new_e = new_s + text.encode_utf16().count() as i64;
+        out.push(crate::location::Shift {
+            line,
+            new: (new_s as u32, new_e as u32),
+            old: (old_s as u32, old_e as u32),
+        });
+        cur = Some((line, line_start, delta + (new_e - new_s) - (old_e - old_s)));
+    }
+    out
 }
 
 #[cfg(test)]

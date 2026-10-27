@@ -1,7 +1,44 @@
 use super::*;
 
 fn run(code: &str) -> Option<String> {
-    spyable(Path::new("/p/m.js"), code)
+    spyable(Path::new("/p/m.js"), code).map(|(c, _)| c)
+}
+
+#[test]
+fn edits_are_reported_as_column_shifts() {
+    use crate::location::Shift;
+    let code = "import { a } from './x';\nconst é = [a, a];\nimport('./y');\n";
+    let (out, shifts) = spyable(Path::new("/p/m.js"), code).unwrap();
+    let r = "(globalThis.__ttR(__tt_ns_0, \"a\"))".len() as u32;
+    assert!(out.starts_with(&format!(
+        "import {{ a }} from './x';\nconst é = [{0}, {0}];\n(import('./y')).then(globalThis.__ttNs);\n",
+        "(globalThis.__ttR(__tt_ns_0, \"a\"))"
+    )));
+    assert_eq!(
+        shifts,
+        vec![
+            Shift {
+                line: 1,
+                new: (11, 11 + r),
+                old: (11, 12)
+            },
+            Shift {
+                line: 1,
+                new: (13 + r, 13 + 2 * r),
+                old: (14, 15)
+            },
+            Shift {
+                line: 2,
+                new: (0, 1),
+                old: (0, 0)
+            },
+            Shift {
+                line: 2,
+                new: (14, 39),
+                old: (13, 13)
+            },
+        ]
+    );
 }
 
 #[test]
