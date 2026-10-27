@@ -4321,12 +4321,11 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         // snapshot; Context::new yields the baked default context (framework already
         // present). We time setup (isolate+context+natives) — the M3/M0 guardrail.
         let setup_start = std::time::Instant::now();
-        let blob = framework_snapshot();
-        let params =
-            v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(blob.clone()));
-        let isolate = &mut v8::Isolate::new(params);
+        let isolate = &mut v8::Isolate::new(isolate_params());
         isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
         isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
+        crate::heap_guard::install(isolate);
+        crate::heap_guard::arm();
         // Coverage: attach an inspector to this isolate BEFORE entering scopes (needs &mut isolate).
         let mut collector =
             crate::coverage::enabled().then(|| crate::coverage::Collector::new(isolate));
@@ -4478,6 +4477,17 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
             drive_tests(scope, global, &entry_abs)
         };
 
+        // A file that ran into the isolate's heap limit was terminated by the heap guard: report
+        // that, not whatever the half-unwound run happened to say.
+        let result = if crate::heap_guard::tripped() {
+            Err(crate::heap_guard::oom_message(scope.get_heap_statistics().heap_size_limit()))
+        } else {
+            result
+        };
+        if crate::heap_guard::log_enabled() {
+            log_heap(scope, &entry_abs, false);
+        }
+
         // Coverage: read out V8's precise counts for everything this file executed, then map the
         // byte ranges back to original source lines. Done before teardown (isolate still alive).
         if let Some(c) = collector.as_mut() {
@@ -4498,6 +4508,37 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     outcome
 }
 
+/// Create params for a worker isolate: the framework snapshot, plus an explicit heap limit when
+/// `TURBO_MAX_HEAP_MB` is set.
+fn isolate_params() -> v8::CreateParams {
+    let blob = framework_snapshot();
+    let mut params = v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(blob.clone()));
+    if let Some(max) = crate::heap_guard::max_heap_bytes() {
+        params = params.heap_limits(0, max);
+    }
+    params
+}
+
+/// Log the isolate's heap after a full GC when `TURBO_HEAP_LOG` is set (one line per file).
+fn log_heap(scope: &mut v8::PinScope, entry: &Path, recycled: bool) {
+    scope.low_memory_notification();
+    let st = scope.get_heap_statistics();
+    let modules = REGISTRY.with(|r| {
+        let r = r.borrow();
+        r.cjs_exports.len() + r.esm_by_path.len()
+    });
+    eprintln!(
+        "[heap] {:?} used={}MB total={}MB limit={}MB modules={} recycled={} {}",
+        std::thread::current().id(),
+        crate::heap_guard::mb(st.used_heap_size()),
+        crate::heap_guard::mb(st.total_heap_size()),
+        crate::heap_guard::mb(st.heap_size_limit()),
+        modules,
+        recycled,
+        entry.display()
+    );
+}
+
 /// Reuse path: run one file on this worker's persistent isolate+context. node_modules modules
 /// stay evaluated across files; per-file framework + app state is reset between files.
 fn run_test_file_reused(
@@ -4511,17 +4552,17 @@ fn run_test_file_reused(
     // init the persistent isolate once per worker
     REUSE_ISO.with(|iso_cell| {
         if iso_cell.borrow().is_none() {
-            let blob = framework_snapshot();
-            let params =
-                v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(blob.clone()));
-            let mut isolate = v8::Isolate::new(params);
+            let mut isolate = v8::Isolate::new(isolate_params());
             isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
             isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
+            crate::heap_guard::install(&mut isolate);
             *iso_cell.borrow_mut() = Some(isolate);
         }
     });
 
-    REUSE_ISO.with(|iso_cell| {
+    crate::heap_guard::arm();
+    // (result, replace this worker's isolate before the next file, why)
+    let (outcome, recycle) = REUSE_ISO.with(|iso_cell| {
         let mut iso_b = iso_cell.borrow_mut();
         let isolate = iso_b.as_mut().unwrap();
         v8::scope!(let scope, isolate);
@@ -4681,13 +4722,37 @@ fn run_test_file_reused(
             drive_tests(scope, global, entry_abs)
         };
 
+        // Heap guard. A file that hit the limit was terminated mid-run: report the OOM and throw the
+        // isolate away. Otherwise a reused isolate only ever gets bigger (every file's module
+        // graph and DOM stays reachable by design, like vitest's `isolate: false`), so once its
+        // live heap passes the threshold after a full GC it is replaced and the next file starts
+        // a new one, instead of growing until V8 aborts the process.
+        let limit = scope.get_heap_statistics().heap_size_limit();
+        let tripped = crate::heap_guard::tripped();
+        let threshold = crate::heap_guard::recycle_threshold(limit);
+        let mut recycle = tripped;
+        if !tripped && (crate::heap_guard::log_enabled() || scope.get_heap_statistics().used_heap_size() > threshold / 2) {
+            scope.low_memory_notification();
+            recycle = scope.get_heap_statistics().used_heap_size() > threshold;
+            if crate::heap_guard::log_enabled() {
+                log_heap(scope, entry_abs, recycle);
+            }
+        }
+        let result = if tripped { Err(crate::heap_guard::oom_message(limit)) } else { result };
         // NOTE: no clear_registry() here — node_modules Globals stay alive for the next file;
         // app + mock entries are pruned at the top of the next file (reset_app_registry).
-        result.map(|mut r| {
-            r.setup_us = setup_us;
-            r
-        })
-    })
+        (
+            result.map(|mut r| {
+                r.setup_us = setup_us;
+                r
+            }),
+            recycle,
+        )
+    });
+    if recycle {
+        end_worker_reuse();
+    }
+    outcome
 }
 
 /// End-of-worker cleanup for the reuse path: drop registry Globals + the context while the
@@ -4698,6 +4763,7 @@ pub fn end_worker_reuse() {
         return;
     }
     clear_registry();
+    SETUP_MOCK_SNAPSHOT.with(|s| s.borrow_mut().clear());
     REUSE_CTX.with(|c| {
         let _ = c.borrow_mut().take();
     });
@@ -4706,7 +4772,6 @@ pub fn end_worker_reuse() {
     });
     DOM_INSTALLED.with(|d| d.set(false));
     SETUP_MOCKS.with(|s| s.borrow_mut().clear());
-    SETUP_MOCK_SNAPSHOT.with(|s| s.borrow_mut().clear());
 }
 
 /// Whether isolate-reuse was selected for this run (env or vitest config). False until the first

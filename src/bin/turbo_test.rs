@@ -382,6 +382,11 @@ fn main() {
                         dur_ms,
                     },
                 };
+                // TURBO_PROGRESS: report each file as it finishes. The summary below prints only at
+                // the end, so a run that dies (or is killed) would otherwise lose every result.
+                if std::env::var_os("TURBO_PROGRESS").is_some_and(|v| !v.is_empty() && v != "0") {
+                    eprintln!("[done] {:>6.0}ms {}", fr.dur_ms, fr.line.lines().next().unwrap_or(""));
+                }
                 if bail > 0 {
                     failed_total.fetch_add(fr.failed as usize, Ordering::Relaxed);
                 }
