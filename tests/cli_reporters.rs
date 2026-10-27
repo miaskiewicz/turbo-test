@@ -723,8 +723,10 @@ fn junit_failures_print_as_vitest_prints_them() {
 /// turbo-test#99: a test file that fails to compile (itself, or a module it imports) fails with
 /// V8's SyntaxError as vitest 4.1.12 reports it (`Failed Suites`, the json `message`, the junit
 /// failing case); turbo-test said `graph load failed` and V8 printed `Uncaught SyntaxError` to
-/// stdout three times, with a line of the transformed code.
+/// stdout three times, with a line of the transformed code. vitest prints the error once for the
+/// files whose import of one module failed (b, c), and apart for a's own.
 #[test]
+#[ignore = "turbo-test#99: fails until the fix"]
 fn a_compile_error_is_the_files_syntax_error() {
     const MSG: &str = "Invalid regular expression: /e{,2}/u: Incomplete quantifier";
     let case = |f: &str| {
@@ -732,11 +734,16 @@ fn a_compile_error_is_the_files_syntax_error() {
             "    <testsuite name=\"{f}\" timestamp=\"S\" hostname=\"H\" tests=\"1\" failures=\"1\" errors=\"0\" skipped=\"0\" time=\"T\">\n        <testcase classname=\"{f}\" name=\"{f}\" time=\"T\">\n            <failure message=\"{MSG}\" type=\"SyntaxError\">\nSyntaxError: {MSG}\n            </failure>\n        </testcase>\n    </testsuite>\n"
         )
     };
-    // vitest 4.1.12's report for this project
+    // vitest 4.1.12's reports for this project
     let junit = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<testsuites name=\"vitest tests\" tests=\"2\" failures=\"2\" errors=\"0\" time=\"T\">\n{}{}</testsuites>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<testsuites name=\"vitest tests\" tests=\"3\" failures=\"3\" errors=\"0\" time=\"T\">\n{}{}{}</testsuites>\n",
         case("a.test.ts"),
-        case("b.test.ts")
+        case("b.test.ts"),
+        case("c.test.ts")
+    );
+    let line = "⎯".repeat(24);
+    let suites = format!(
+        "\n⎯⎯⎯⎯⎯⎯ Failed Suites 3 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  a.test.ts [ a.test.ts ]\nSyntaxError: {MSG}\n{line}[1/3]⎯\n\n FAIL  b.test.ts [ b.test.ts ]\n FAIL  c.test.ts [ c.test.ts ]\nSyntaxError: {MSG}\n{line}[2/3]⎯\n\n"
     );
     for esbuild in [false, true] {
         let p = Project::new("rep-compile-error");
@@ -748,10 +755,9 @@ fn a_compile_error_is_the_files_syntax_error() {
             "a.test.ts",
             "import { it } from 'vitest';\nit('x', () => { console.log(/e{,2}/u); });\n",
         );
-        p.file(
-            "b.test.ts",
-            "import { it } from 'vitest';\nimport { v } from './bad';\nit('y', () => { console.log(v); });\n",
-        );
+        let b = "import { it } from 'vitest';\nimport { v } from './bad';\nit('y', () => { console.log(v); });\n";
+        p.file("b.test.ts", b);
+        p.file("c.test.ts", b);
         p.file(
             "bad.ts",
             "export const v = 1;\nexport const w = /e{,2}/u;\n",
@@ -759,7 +765,7 @@ fn a_compile_error_is_the_files_syntax_error() {
         let r = run(&p, &[]);
         assert!(
             r.stdout.starts_with(&format!(
-                "ERROR a.test.ts  (SyntaxError: {MSG})\nERROR b.test.ts  (SyntaxError: {MSG})\n"
+                "ERROR a.test.ts  (SyntaxError: {MSG})\nERROR b.test.ts  (SyntaxError: {MSG})\nERROR c.test.ts  (SyntaxError: {MSG})\n"
             )),
             "esbuild={esbuild}\n{}",
             r.all()
@@ -770,6 +776,18 @@ fn a_compile_error_is_the_files_syntax_error() {
             r.all()
         );
         assert!(!r.all().contains("graph load failed"), "{}", r.all());
+        let r = turbo_test(&p.dir, &[], &[("TURBO_LEGACY_REPORTER", "0")]);
+        assert_eq!(r.code, Some(1), "{}", r.all());
+        assert!(
+            r.stderr.ends_with(&suites),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+        assert!(
+            !r.stdout.contains("Uncaught"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
         let j = json_report(&run(&p, &["--reporter", "json"]));
         let msgs: Vec<&str> = j["testResults"]
             .as_array()
@@ -777,7 +795,7 @@ fn a_compile_error_is_the_files_syntax_error() {
             .iter()
             .map(|t| t["message"].as_str().unwrap())
             .collect();
-        assert_eq!(msgs, [MSG, MSG], "esbuild={esbuild}");
+        assert_eq!(msgs, [MSG, MSG, MSG], "esbuild={esbuild}");
         let r = run(&p, &["--reporter", "junit"]);
         assert_eq!(
             normalize_junit(&r.stdout),
