@@ -4019,10 +4019,13 @@ function makeExpect(actual, negated = false, message = undefined, promise = '') 
   // jest-style matchers — vitest's built-in toSatisfy / toBeOneOf and expect.extend's (e.g.
   // @testing-library/jest-dom) — run with vitest's matcher state as `this` and fail with its
   // JestExtendError (`message: ` already prefixed); an async result is awaited
+  // (`message` is the result's own name, so a non-function throws vitest's `message is not a
+  // function`)
+  const customMessage = message;
   const jestMatcher = (matcher) => (...args) => {
     const result = matcher.call(__matcherState(negated || undefined, promise), actual, ...args);
-    const check = ({ pass, message: m, actual: a, expected: e }) => {
-      if ((pass && negated) || (!pass && !negated)) throw new __JestExtendError((message ? `${message}: ` : '') + m(), a, e);
+    const check = ({ pass, message, actual: a, expected: e }) => {
+      if ((pass && negated) || (!pass && !negated)) throw new __JestExtendError((customMessage ? `${customMessage}: ` : '') + message(), a, e);
     };
     if (result && typeof result === 'object' && typeof result.then === 'function') return result.then(check);
     check(result);
