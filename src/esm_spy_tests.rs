@@ -42,6 +42,34 @@ fn edits_are_reported_as_column_shifts() {
 }
 
 #[test]
+fn a_called_import_takes_in_its_paren() {
+    // turbo-test#176: V8 places a call of `(globalThis.__ttR(…))(…)` at the call's `(`; the edit
+    // covers it (and the blanks before it) so the frame maps to the callee, as vitest's does.
+    // An uncalled read and an insertion before a `(` keep their own extent.
+    use crate::location::Shift;
+    let code = "import { a } from './x';\na(1); a \t(2); a.b(); (a)();\n";
+    let (out, shifts) = spyable(Path::new("/p/m.js"), code).unwrap();
+    let r = "(globalThis.__ttR(__tt_ns_0, \"a\"))".len() as u32;
+    let read = "(globalThis.__ttR(__tt_ns_0, \"a\"))";
+    assert!(
+        out.starts_with(&format!(
+            "import {{ a }} from './x';\n{read}(1); {read} \t(2); {read}.b(); ({read})();\n"
+        )),
+        "{out}"
+    );
+    let s = |new, old| Shift { line: 1, new, old };
+    assert_eq!(
+        shifts,
+        vec![
+            s((0, r + 1), (0, 2)),
+            s((r + 5, 2 * r + 8), (6, 10)),
+            s((2 * r + 12, 3 * r + 12), (14, 15)),
+            s((3 * r + 19, 4 * r + 19), (22, 23)),
+        ]
+    );
+}
+
+#[test]
 fn importers_read_imports_through_the_overrides() {
     let code = "import d, { a as b } from './x';\nimport * as ns from './y';\nimport { c } from './x';\n\
                 import { expect } from 'vitest';\nimport fs from 'node:fs';\nimport j from './j.json' with { type: 'json' };\n\

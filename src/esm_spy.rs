@@ -245,7 +245,8 @@ pub fn spyable(file: &Path, code: &str) -> Option<(String, Vec<crate::location::
     Some((out, shifts))
 }
 
-/// The edits (sorted, byte offsets into `code`, no newlines) as UTF-16 column shifts per line.
+/// The edits (sorted, byte offsets into `code`, no newlines) as UTF-16 column shifts per line;
+/// a replaced reference that is called (`boom(`, `boom (`) takes in the `(`, so V8's call position maps to the callee.
 fn shifts(code: &str, edits: &[(u32, u32, String)]) -> Vec<crate::location::Shift> {
     let mut out = Vec::new();
     // (line, the line's start offset, the column delta so far on it)
@@ -259,9 +260,18 @@ fn shifts(code: &str, edits: &[(u32, u32, String)]) -> Vec<crate::location::Shif
             _ => 0,
         };
         let col = |at: usize| code[line_start..at].encode_utf16().count() as i64;
-        let (old_s, old_e) = (col(s), col(e));
+        // a call of the rewritten reference: V8 places the call at its `(`, vitest's frame at
+        // the callee, so the `(` (and blanks before it) belong to the edit (turbo-test#176)
+        let rest = &code[e..];
+        let blanks = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+        let paren = if s < e && rest[blanks..].starts_with('(') {
+            blanks as i64 + 1
+        } else {
+            0
+        };
+        let (old_s, old_e) = (col(s), col(e) + paren);
         let new_s = old_s + delta;
-        let new_e = new_s + text.encode_utf16().count() as i64;
+        let new_e = new_s + text.encode_utf16().count() as i64 + paren;
         out.push(crate::location::Shift {
             line,
             new: (new_s as u32, new_e as u32),

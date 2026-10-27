@@ -5,6 +5,14 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Fixed — frames at imported calls in `.js` files (turbo-test#176)
+- On the ESM-graph loader (the binary without `TURBO_ESBUILD`), a frame at a call of an imported
+  function in a `.js` file pointed at the call's `(` (`a.test.js:5:7`, vitest `5:3`): the spy
+  rewrite (`esm_spy.rs`) made the callee `(globalThis.__ttR(…))`, whose call V8 places at the
+  `(`. A called import's edit now takes in its `(`, so the frame maps to the callee. A frame in
+  an imported `.js` module (no transform map) was not mapped back through the rewrite at all
+  (`h2.js:2:78`, vitest `2:41`); it now is (`location::resolve_frame`).
+
 ### Added — `expect.poll`, snapshot serializers, vitest's `this.utils` (K5, turbo-test#161–#163, #167)
 - `expect.poll(fn, { interval = 50, timeout = 1000, message })` (turbo-test#161) was undefined.
   As in vitest 4.1.12, each matcher re-runs `fn` until it passes or the timeout ran out, then
