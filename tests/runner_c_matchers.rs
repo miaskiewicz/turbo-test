@@ -1036,3 +1036,76 @@ test('TextEncoder/TextDecoder', () => {
     }
     assert_eq!(got.lines().count(), want.lines().count());
 }
+
+#[test]
+#[ignore = "turbo-test#120: fails until the fix"]
+fn blob_text_decodes_the_concatenated_bytes_like_nodes() {
+    // turbo-test#120: Blob#text UTF-8-decodes the bytes of all parts at once (a sequence split
+    // across parts is one character, one leading BOM is stripped), whatever the part types
+    // (string, ArrayBuffer, any view honouring offset and length, nested Blob, File, other values
+    // stringified). Expected: Node 26 (each row is [case, result]).
+    let p = Project::new("rc-blob-text");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "t.test.js",
+        r##"import { test } from 'vitest'
+import * as fs from 'node:fs'
+test('Blob#text', async () => {
+  const rows = []
+const t = async (name, f) => { let r; try { r = await f() } catch (e) { r = ['throws', e.name, e.code ?? null] } rows.push(JSON.stringify([name, r])) }
+const B = (...parts) => new Blob(parts).text()
+const cu = (s) => [...s].map((c) => c.codePointAt(0).toString(16))
+await t('split 3-byte', () => B(new Uint8Array([0xe2, 0x82]), new Uint8Array([0xac])))
+await t('split 4-byte over 3 parts', () => B(new Uint8Array([0xf0]), new Uint8Array([0x9f, 0x98]), new Uint8Array([0x80])))
+await t('split string then bytes', () => B('a', new Uint8Array([0xc3]), new Uint8Array([0xbc]), 'b'))
+await t('truncated then string', () => B(new Uint8Array([0xe2, 0x82]), 'x'))
+await t('bom stripped', async () => cu(await B(new Uint8Array([0xef, 0xbb, 0xbf, 0x41]))))
+await t('bom split', async () => cu(await B(new Uint8Array([0xef]), new Uint8Array([0xbb, 0xbf]), 'A')))
+await t('bom string part', async () => cu(await B('﻿A')))
+await t('bom second only', async () => cu(await B('A', new Uint8Array([0xef, 0xbb, 0xbf]))))
+await t('two boms', async () => cu(await B(new Uint8Array([0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf]))))
+await t('invalid', () => B(new Uint8Array([0xff, 0x41])))
+await t('ArrayBuffer part', () => B(new Uint8Array([0xe2, 0x82]).buffer, new Uint8Array([0xac]).buffer))
+await t('subarray part', () => B(new Uint8Array([0x61, 0x62, 0x63, 0x64]).subarray(1, 3)))
+await t('DataView part', () => B(new DataView(new Uint8Array([0x61, 0x62, 0x63, 0x64]).buffer, 1, 2)))
+await t('Uint16Array part', () => B(new Uint16Array([0x6261])))
+await t('nested blob bytes', () => B(new Blob([new Uint8Array([0xe2, 0x82])]), new Uint8Array([0xac])))
+await t('nested blob string', () => B('<', new Blob(['é', new Blob(['ü'])]), '>'))
+await t('lone surrogate string', async () => cu(await B('\uD800x')))
+await t('number part', () => B(12, null, undefined))
+await t('object part', () => B({ toString: () => 'o' }))
+await t('empty', () => B())
+await t('file', () => new File([new Uint8Array([0xe2, 0x82]), new Uint8Array([0xac])], 'f.txt').text())
+  fs.writeFileSync('out.txt', rows.join('\n'))
+})
+"##,
+    );
+    let r = turbo_test(&p.dir, &["t.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let got = std::fs::read_to_string(p.path("out.txt")).unwrap();
+    let want = r##"["split 3-byte","€"]
+["split 4-byte over 3 parts","😀"]
+["split string then bytes","aüb"]
+["truncated then string","�x"]
+["bom stripped",["41"]]
+["bom split",["41"]]
+["bom string part",["41"]]
+["bom second only",["41","feff"]]
+["two boms",["feff"]]
+["invalid","�A"]
+["ArrayBuffer part","€"]
+["subarray part","bc"]
+["DataView part","bc"]
+["Uint16Array part","ab"]
+["nested blob bytes","€"]
+["nested blob string","<éü>"]
+["lone surrogate string",["fffd","78"]]
+["number part","12nullundefined"]
+["object part","o"]
+["empty",""]
+["file","€"]"##;
+    for (g, w) in got.lines().zip(want.lines()) {
+        assert_eq!(g, w);
+    }
+    assert_eq!(got.lines().count(), want.lines().count());
+}
