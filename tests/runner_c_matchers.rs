@@ -747,3 +747,293 @@ test('URLSearchParams', () => {
     }
     assert_eq!(got.lines().count(), want.lines().count());
 }
+
+#[test]
+#[ignore = "turbo-test#118: fails until the fix"]
+fn text_encoder_decoder_surface_is_nodes() {
+    // turbo-test#118 and the rest of the TextEncoder/TextDecoder surface, table-driven: encode
+    // (lone surrogates -> U+FFFD bytes), encodeInto read/written (surrogate pairs at the buffer
+    // edge), decode (U+FFFD per maximal subpart, BOM stripped unless ignoreBOM, fatal -> TypeError,
+    // stream keeps partial sequences), input types (ArrayBuffer / any view honouring offset and
+    // length / undefined), getters, utf-8 label normalisation and RangeError for other labels,
+    // plus Buffer (which decodes through TextDecoder) keeping a BOM.
+    // Expected: Node 26 (each row is [case, result] or [case, ["throws", error name, code]]).
+    let p = Project::new("rc-text-codec-surface");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "t.test.js",
+        r##"import { test } from 'vitest'
+import * as fs from 'node:fs'
+test('TextEncoder/TextDecoder', () => {
+  const rows = []
+  const t = (name, f) => { let r; try { r = f() } catch (e) { r = ['throws', e.name, e.code ?? null] } rows.push(JSON.stringify([name, r])) }
+  const E = (s) => [...new TextEncoder().encode(s)]
+  const D = (bytes, label, opts) => new TextDecoder(label, opts).decode(new Uint8Array(bytes))
+  const cu = (s) => [...s].map((c) => c.codePointAt(0).toString(16))
+  // encode
+  t('enc ascii', () => E('aZ~'))
+  t('enc 2/3/4 byte', () => E('ü€😀'))
+  t('enc lone high', () => E('\uD800'))
+  t('enc lone low', () => E('\uDC00'))
+  t('enc high at end', () => E('a\uD83D'))
+  t('enc high+high+low', () => E('\uD800😀'))
+  t('enc low+high', () => E('\uDC00\uD800x'))
+  t('enc nul', () => E('\0'))
+  t('enc boundaries', () => E('\u007f\u0080߿ࠀ￿\u{10000}\u{10ffff}'))
+  t('enc undefined', () => E(undefined))
+  t('enc none', () => [...new TextEncoder().encode()])
+  t('enc null', () => E(null))
+  t('enc number', () => E(12.5))
+  t('enc object', () => E({ toString: () => 'o' }))
+  t('enc symbol', () => E(Symbol('s')))
+  t('enc result type', () => { const r = new TextEncoder().encode('ab'); return [r.constructor.name, r.byteOffset, r.buffer.byteLength] })
+  t('enc encoding', () => new TextEncoder().encoding)
+  t('enc encoding own', () => Object.prototype.hasOwnProperty.call(new TextEncoder(), 'encoding'))
+  t('enc tag', () => Object.prototype.toString.call(new TextEncoder()))
+  // encodeInto
+  const I = (s, n, off = 0) => { const u = new Uint8Array(n).fill(0xaa); const r = new TextEncoder().encodeInto(s, off ? u.subarray(off) : u); return [r.read, r.written, [...u]] }
+  t('into fits', () => I('abc', 5))
+  t('into short ascii', () => I('abcdef', 3))
+  t('into multi stops', () => I('a€b', 3))
+  t('into exact', () => I('a€', 4))
+  t('into pair edge 3', () => I('x😀y', 4))
+  t('into pair edge exact', () => I('x😀y', 5))
+  t('into pair fits', () => I('😀', 4))
+  t('into pair no room', () => I('😀', 3))
+  t('into lone surrogate', () => I('\uD800a', 4))
+  t('into lone low short', () => I('a\uDC00', 3))
+  t('into empty dest', () => I('abc', 0))
+  t('into empty src', () => I('', 2))
+  t('into subarray', () => I('hi', 4, 1))
+  t('into undefined src', () => I(undefined, 10))
+  t('into keys', () => Object.keys(new TextEncoder().encodeInto('a', new Uint8Array(2))))
+  t('into non-u8', () => new TextEncoder().encodeInto('a', new Uint16Array(2)))
+  t('into no dest', () => new TextEncoder().encodeInto('a'))
+  // decode: valid
+  t('dec ascii', () => D([0x61, 0x62]))
+  t('dec multi', () => D([0xc3, 0xbc, 0xe2, 0x82, 0xac, 0xf0, 0x9f, 0x98, 0x80]))
+  t('dec boundaries', () => cu(D([0x7f, 0xc2, 0x80, 0xdf, 0xbf, 0xe0, 0xa0, 0x80, 0xef, 0xbf, 0xbf, 0xf0, 0x90, 0x80, 0x80, 0xf4, 0x8f, 0xbf, 0xbf])))
+  t('dec nul', () => D([0, 0x41]))
+  // decode: invalid (maximal subpart)
+  t('dec issue118', () => D([0xff, 0x41, 0xe2, 0x82]))
+  t('dec lone cont', () => D([0x80, 0xbf, 0x41]))
+  t('dec overlong c0 c1', () => D([0xc0, 0x80, 0xc1, 0xbf]))
+  t('dec overlong e0', () => D([0xe0, 0x80, 0x80]))
+  t('dec overlong f0', () => D([0xf0, 0x80, 0x80, 0x80]))
+  t('dec surrogate ed', () => D([0xed, 0xa0, 0x80, 0xed, 0x9f, 0xbf]))
+  t('dec above max f4', () => D([0xf4, 0x90, 0x80, 0x80]))
+  t('dec f5-ff', () => D([0xf5, 0xf8, 0xfc, 0xfe, 0xff]))
+  t('dec truncated 2', () => D([0xc3]))
+  t('dec truncated 3', () => D([0xe2, 0x82, 0x41]))
+  t('dec truncated 4', () => D([0xf0, 0x9f, 0x98]))
+  t('dec truncated 4 then ascii', () => D([0xf0, 0x9f, 0x41]))
+  t('dec lead then lead', () => D([0xc3, 0xc3, 0xbc]))
+  t('dec e0 bad second', () => D([0xe0, 0x9f, 0x80]))
+  t('dec f4 then cont', () => D([0xf4, 0x8f, 0x41]))
+  t('dec cont run', () => D([0xe2, 0x82, 0xac, 0x82, 0xac]))
+  // BOM
+  t('bom stripped', () => D([0xef, 0xbb, 0xbf, 0x41]))
+  t('bom only first', () => D([0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf, 0x41]).length)
+  t('bom ignoreBOM', () => D([0xef, 0xbb, 0xbf, 0x41], 'utf-8', { ignoreBOM: true }).length)
+  t('bom mid', () => D([0x41, 0xef, 0xbb, 0xbf]).length)
+  t('bom partial', () => D([0xef, 0xbb, 0x41]))
+  t('bom per decode', () => { const d = new TextDecoder(); const b = new Uint8Array([0xef, 0xbb, 0xbf, 0x41]); return [d.decode(b), d.decode(b)] })
+  // fatal
+  t('fatal invalid', () => D([0x41, 0xff], 'utf-8', { fatal: true }))
+  t('fatal truncated', () => D([0xe2, 0x82], 'utf-8', { fatal: true }))
+  t('fatal valid', () => D([0x41, 0xc3, 0xbc], 'utf-8', { fatal: true }))
+  t('fatal surrogate', () => D([0xed, 0xa0, 0x80], 'utf-8', { fatal: true }))
+  t('fatal truthy', () => new TextDecoder('utf-8', { fatal: 1 }).fatal)
+  t('fatal recovers', () => { const d = new TextDecoder('utf-8', { fatal: true }); let a; try { d.decode(new Uint8Array([0xe2]), { stream: true }); d.decode(new Uint8Array([0x41])) } catch (e) { a = e.name } return [a, d.decode(new Uint8Array([0x42]))] })
+  // stream
+  t('stream split 3', () => { const d = new TextDecoder(); return [d.decode(new Uint8Array([0x61, 0xe2]), { stream: true }), d.decode(new Uint8Array([0x82]), { stream: true }), d.decode(new Uint8Array([0xac, 0x62]))] })
+  t('stream split 4', () => { const d = new TextDecoder(); const out = []; for (const b of [0xf0, 0x9f, 0x98, 0x80]) out.push(d.decode(new Uint8Array([b]), { stream: true })); out.push(d.decode()); return out })
+  t('stream flush partial', () => { const d = new TextDecoder(); return [d.decode(new Uint8Array([0xe2, 0x82]), { stream: true }), d.decode()] })
+  t('stream invalid cont', () => { const d = new TextDecoder(); return [d.decode(new Uint8Array([0xe2]), { stream: true }), d.decode(new Uint8Array([0x41]))] })
+  t('stream bom split', () => { const d = new TextDecoder(); return [d.decode(new Uint8Array([0xef]), { stream: true }), d.decode(new Uint8Array([0xbb, 0xbf, 0x41]), { stream: true }), d.decode(new Uint8Array([0xef, 0xbb, 0xbf])).length] })
+  t('stream reset after flush', () => { const d = new TextDecoder(); d.decode(new Uint8Array([0xe2]), { stream: true }); d.decode(); return d.decode(new Uint8Array([0x82])) })
+  t('stream fatal flush', () => { const d = new TextDecoder('utf-8', { fatal: true }); return [d.decode(new Uint8Array([0xe2]), { stream: true }), d.decode()] })
+  t('stream empty', () => { const d = new TextDecoder(); return [d.decode(undefined, { stream: true }), d.decode(new Uint8Array(0))] })
+  // input types
+  t('in ArrayBuffer', () => new TextDecoder().decode(new Uint8Array([0x68, 0x69]).buffer))
+  t('in subarray', () => new TextDecoder().decode(new Uint8Array([0x61, 0x62, 0x63, 0x64]).subarray(1, 3)))
+  t('in DataView', () => new TextDecoder().decode(new DataView(new Uint8Array([0x61, 0x62, 0x63, 0x64]).buffer, 1, 2)))
+  t('in Uint16Array', () => new TextDecoder().decode(new Uint16Array([0x6261])))
+  t('in Int8Array', () => new TextDecoder().decode(new Int8Array([-61, -68])))
+  t('in Float64 offset', () => new TextDecoder().decode(new Float64Array(new Uint8Array([0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70]).buffer, 8, 1)))
+  t('in Uint8ClampedArray', () => new TextDecoder().decode(new Uint8ClampedArray([0x41])))
+  t('in undefined', () => new TextDecoder().decode(undefined))
+  t('in none', () => new TextDecoder().decode())
+  t('in null', () => new TextDecoder().decode(null))
+  t('in string', () => new TextDecoder().decode('ab'))
+  t('in number', () => new TextDecoder().decode(5))
+  t('in array', () => new TextDecoder().decode([0x41]))
+  t('in object', () => new TextDecoder().decode({ buffer: new ArrayBuffer(1) }))
+  // getters / labels
+  const G = (d) => [d.encoding, d.fatal, d.ignoreBOM]
+  t('get default', () => G(new TextDecoder()))
+  t('get opts', () => G(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })))
+  t('get undefined label', () => G(new TextDecoder(undefined, { ignoreBOM: 'x' })))
+  t('get own props', () => Object.getOwnPropertyNames(new TextDecoder()))
+  t('get proto', () => ['encoding', 'fatal', 'ignoreBOM'].map((k) => typeof Object.getOwnPropertyDescriptor(TextDecoder.prototype, k)?.get))
+  t('dec tag', () => Object.prototype.toString.call(new TextDecoder()))
+  for (const l of ['utf-8', 'UTF-8', 'utf8', 'Utf8', ' utf-8 ', '\tutf-8\n', '\f\rutf8', 'unicode-1-1-utf-8', 'unicode11utf8', 'unicode20utf8', 'x-unicode20utf8', 'UNICODE-1-1-UTF-8'])
+    t('label ' + JSON.stringify(l), () => new TextDecoder(l).encoding)
+  for (const l of ['foo', '', 'utf-7', 'utf_8', 'utf-8x', 'u\u0000tf-8', ' utf-8', null])
+    t('label bad ' + JSON.stringify(l), () => new TextDecoder(l).encoding)
+  t('label number', () => new TextDecoder(8).encoding)
+  t('label object', () => new TextDecoder({ toString: () => 'UTF8' }).encoding)
+  t('label symbol', () => new TextDecoder(Symbol('s')))
+  t('opt null', () => G(new TextDecoder('utf-8', null)))
+  t('opt number', () => new TextDecoder('utf-8', 5))
+  t('dec opt null', () => new TextDecoder().decode(new Uint8Array([0x41]), null))
+  t('dec opt number', () => new TextDecoder().decode(new Uint8Array([0x41]), 5))
+  t('in SharedArrayBuffer', () => new TextDecoder().decode(new SharedArrayBuffer(1)))
+  t('enc bad this', () => TextEncoder.prototype.encode.call({}, 'a'))
+  t('dec bad this', () => TextDecoder.prototype.decode.call({}, new Uint8Array(1)))
+  t('getter bad this', () => Object.getOwnPropertyDescriptor(TextDecoder.prototype, 'fatal').get.call({}))
+  t('buffer keeps bom', () => Buffer.from([0xef, 0xbb, 0xbf, 0x41]).toString().length)
+  t('buffer replaces invalid', () => Buffer.from([0xff, 0x41]).toString())
+  t('buffer from lone surrogate', () => [...Buffer.from('\uD800')])
+  fs.writeFileSync('out.txt', rows.join('\n'))
+})
+"##,
+    );
+    let r = turbo_test(&p.dir, &["t.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let got = std::fs::read_to_string(p.path("out.txt")).unwrap();
+    let want = r##"["enc ascii",[97,90,126]]
+["enc 2/3/4 byte",[195,188,226,130,172,240,159,152,128]]
+["enc lone high",[239,191,189]]
+["enc lone low",[239,191,189]]
+["enc high at end",[97,239,191,189]]
+["enc high+high+low",[239,191,189,240,159,152,128]]
+["enc low+high",[239,191,189,239,191,189,120]]
+["enc nul",[0]]
+["enc boundaries",[127,194,128,223,191,224,160,128,239,191,191,240,144,128,128,244,143,191,191]]
+["enc undefined",[]]
+["enc none",[]]
+["enc null",[110,117,108,108]]
+["enc number",[49,50,46,53]]
+["enc object",[111]]
+["enc symbol",["throws","TypeError",null]]
+["enc result type",["Uint8Array",0,2]]
+["enc encoding","utf-8"]
+["enc encoding own",false]
+["enc tag","[object TextEncoder]"]
+["into fits",[3,3,[97,98,99,170,170]]]
+["into short ascii",[3,3,[97,98,99]]]
+["into multi stops",[1,1,[97,170,170]]]
+["into exact",[2,4,[97,226,130,172]]]
+["into pair edge 3",[1,1,[120,170,170,170]]]
+["into pair edge exact",[3,5,[120,240,159,152,128]]]
+["into pair fits",[2,4,[240,159,152,128]]]
+["into pair no room",[0,0,[170,170,170]]]
+["into lone surrogate",[2,4,[239,191,189,97]]]
+["into lone low short",[1,1,[97,170,170]]]
+["into empty dest",[0,0,[]]]
+["into empty src",[0,0,[170,170]]]
+["into subarray",[2,2,[170,104,105,170]]]
+["into undefined src",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["into keys",["read","written"]]
+["into non-u8",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["into no dest",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["dec ascii","ab"]
+["dec multi","ü€😀"]
+["dec boundaries",["7f","80","7ff","800","ffff","10000","10ffff"]]
+["dec nul","\u0000A"]
+["dec issue118","�A�"]
+["dec lone cont","��A"]
+["dec overlong c0 c1","����"]
+["dec overlong e0","���"]
+["dec overlong f0","����"]
+["dec surrogate ed","���퟿"]
+["dec above max f4","����"]
+["dec f5-ff","�����"]
+["dec truncated 2","�"]
+["dec truncated 3","�A"]
+["dec truncated 4","�"]
+["dec truncated 4 then ascii","�A"]
+["dec lead then lead","�ü"]
+["dec e0 bad second","���"]
+["dec f4 then cont","�A"]
+["dec cont run","€��"]
+["bom stripped","A"]
+["bom only first",2]
+["bom ignoreBOM",2]
+["bom mid",2]
+["bom partial","�A"]
+["bom per decode",["A","A"]]
+["fatal invalid",["throws","TypeError","ERR_ENCODING_INVALID_ENCODED_DATA"]]
+["fatal truncated",["throws","TypeError","ERR_ENCODING_INVALID_ENCODED_DATA"]]
+["fatal valid","Aü"]
+["fatal surrogate",["throws","TypeError","ERR_ENCODING_INVALID_ENCODED_DATA"]]
+["fatal truthy",true]
+["fatal recovers",["TypeError","B"]]
+["stream split 3",["a","","€b"]]
+["stream split 4",["","","","😀",""]]
+["stream flush partial",["","�"]]
+["stream invalid cont",["","�A"]]
+["stream bom split",["","A",1]]
+["stream reset after flush","�"]
+["stream fatal flush",["throws","TypeError","ERR_ENCODING_INVALID_ENCODED_DATA"]]
+["stream empty",["",""]]
+["in ArrayBuffer","hi"]
+["in subarray","bc"]
+["in DataView","bc"]
+["in Uint16Array","ab"]
+["in Int8Array","ü"]
+["in Float64 offset","ijklmnop"]
+["in Uint8ClampedArray","A"]
+["in undefined",""]
+["in none",""]
+["in null",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["in string",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["in number",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["in array",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["in object",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["get default",["utf-8",false,false]]
+["get opts",["utf-8",true,true]]
+["get undefined label",["utf-8",false,true]]
+["get own props",[]]
+["get proto",["function","function","function"]]
+["dec tag","[object TextDecoder]"]
+["label \"utf-8\"","utf-8"]
+["label \"UTF-8\"","utf-8"]
+["label \"utf8\"","utf-8"]
+["label \"Utf8\"","utf-8"]
+["label \" utf-8 \"","utf-8"]
+["label \"\\tutf-8\\n\"","utf-8"]
+["label \"\\f\\rutf8\"","utf-8"]
+["label \"unicode-1-1-utf-8\"","utf-8"]
+["label \"unicode11utf8\"","utf-8"]
+["label \"unicode20utf8\"","utf-8"]
+["label \"x-unicode20utf8\"","utf-8"]
+["label \"UNICODE-1-1-UTF-8\"","utf-8"]
+["label bad \"foo\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED"]]
+["label bad \"\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED"]]
+["label bad \"utf-7\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED"]]
+["label bad \"utf_8\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED"]]
+["label bad \"utf-8x\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED"]]
+["label bad \"u\\u0000tf-8\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED"]]
+["label bad \" utf-8\"",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED"]]
+["label bad null",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED"]]
+["label number",["throws","RangeError","ERR_ENCODING_NOT_SUPPORTED"]]
+["label object","utf-8"]
+["label symbol",["throws","TypeError",null]]
+["opt null",["utf-8",false,false]]
+["opt number",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["dec opt null","A"]
+["dec opt number",["throws","TypeError","ERR_INVALID_ARG_TYPE"]]
+["in SharedArrayBuffer","\u0000"]
+["enc bad this",["throws","TypeError",null]]
+["dec bad this",["throws","TypeError","ERR_INVALID_THIS"]]
+["getter bad this",["throws","TypeError","ERR_INVALID_THIS"]]
+["buffer keeps bom",2]
+["buffer replaces invalid","�A"]
+["buffer from lone surrogate",[239,191,189]]"##;
+    for (g, w) in got.lines().zip(want.lines()) {
+        assert_eq!(g, w);
+    }
+    assert_eq!(got.lines().count(), want.lines().count());
+}
