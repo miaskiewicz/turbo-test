@@ -70,6 +70,21 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   panic) is retried. The same test pins it with `--isolate` (vitest's report is identical).
 
 ### Fixed
+- The fake-timer API is vitest 4.1.12's (turbo-test#171, #172). Without fake timers the advance /
+  run functions and `getTimerCount` throw vitest's `A function to advance timers was called but
+  the timers APIs are not mocked. …` (they silently did nothing, so a test that forgot
+  `useFakeTimers` passed); `vi.useFakeTimers(config)` reads `toFake`, `now`,
+  `shouldAdvanceTime` / `advanceTimeDelta` and `loopLimit` (it ignored its argument);
+  `performance` and `process.hrtime` are faked by default and count the fake clock's time (they
+  were stuck at 0); `runAllTimers` aborts an endless timer chain or interval after `loopLimit`
+  (10000) timers as sinon does, instead of stopping at the first interval; restoring real timers
+  gives back the same `Date`; `advanceTimersToNextFrame` and `runAllTicks` exist. The `jest.*`
+  timer functions stay no-ops without fake timers (jest warns). `tests/runner_c_fake_timer_api.rs`.
+- `vi.waitFor` / `vi.waitUntil` are vitest's (turbo-test#174): the timeout errors are
+  `Timed out in waitFor!` / `Timed out in waitUntil!` located at the call (they were
+  `vi.waitFor timed out` at the await), a number is the timeout, `waitFor` resolves with a
+  `false` / `null` result, `waitUntil` rejects with the callback's error at once, and a promise
+  result is awaited before polling again. `tests/runner_c_fake_timer_api.rs`.
 - Fake timers fire only when the test moves the fake clock (turbo-test#168). The drive loop fired
   the earliest timer whenever the test was pending, fake or not, so a faked `setTimeout` ran as
   soon as the test awaited anything — a test vitest times out passed. Fake timers now live on
