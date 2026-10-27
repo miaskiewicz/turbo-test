@@ -20,7 +20,182 @@ use std::path::Path;
 /// Rows turbo-test still answers differently from vitest, with the issue that tracks each and
 /// turbo-test's description: `(loader, row, turbo-test's value, issue)`. `loader` is `"mr"`,
 /// `"graph"` or `"*"` (both).
-const KNOWN: &[(&str, &str, &str, &str)] = &[];
+const KNOWN: &[(&str, &str, &str, &str)] = &[
+    (
+        "mr",
+        "dynamic|esm-only ns",
+        "{default=fn:EsmOnly,x=string:x}!esm",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "dynamic|exp-default-flag ns",
+        "{default=fn:DefFlag,named=string:n}",
+        "turbo-test#133",
+    ),
+    (
+        "mr",
+        "dynamic|mexp-fn ns",
+        "fn:MexpFn",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "dynamic|mexp-fn ns",
+        "{default=fn:MexpFn}",
+        "turbo-test#133",
+    ),
+    (
+        "*",
+        "dynamic|require cjs-requires-esm",
+        "{def=fn:EsmOnly,ns={default=fn:EsmOnly,x=string:x}!esm}",
+        "turbo-test#133",
+    ),
+    (
+        "*",
+        "dynamic|require exports-map",
+        "{default=fn:FromImport,which=string:import}!esm",
+        "turbo-test#134",
+    ),
+    (
+        "*",
+        "mock|Comp",
+        "{default=fn:LessonPage,readerSiteName=fn:readerSiteName}!esm",
+        "turbo-test#133",
+    ),
+    (
+        "*",
+        "mock|automock default",
+        "{Comp=fn:fn,a=number:1}",
+        "turbo-test#136",
+    ),
+    (
+        "*",
+        "mock|automock named",
+        "fn:fn",
+        "turbo-test#136",
+    ),
+    (
+        "*",
+        "mock|exp-default-noflag",
+        "{default=fn:DefNoFlag,named=string:n}",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "mock|factory without default",
+        "{named=string:only}",
+        "turbo-test#137",
+    ),
+    (
+        "*",
+        "mock|mexp-fn",
+        "fn:MexpFn",
+        "turbo-test#133",
+    ),
+    (
+        "mr",
+        "mock|tsc-out",
+        "{default=fn:TscComp,named=string:n,viaDefault=fn:DefFlag,viaPlain={default=fn:Mocked},viaStar={default=obj}}!esm",
+        "turbo-test#135",
+    ),
+    (
+        "graph",
+        "mock|tsc-out",
+        "{default=fn:TscComp,named=string:n,viaDefault={default=fn:DefFlag,named=string:mocked},viaPlain={default=fn:Mocked},viaStar={default=obj}}!esm",
+        "turbo-test#135",
+    ),
+    (
+        "graph",
+        "static|babel ns",
+        "{default=fn:BabelComp,named=string:n,viaDefault=fn:DefFlag,viaPlain=fn:MexpFn,viaStar={default=fn:MexpFn}}",
+        "turbo-test#133",
+    ),
+    (
+        "mr",
+        "static|barrel ns",
+        "{LessonPage=fn:LessonPage,default=fn:LessonPage,readerSiteName=fn:readerSiteName}!esm",
+        "turbo-test#133",
+    ),
+    (
+        "*",
+        "static|cjs-requires-esm default",
+        "{def=fn:EsmOnly,ns={default=fn:EsmOnly,x=string:x}!esm}",
+        "turbo-test#133",
+    ),
+    (
+        "mr",
+        "static|esm-reexport-cjs ns",
+        "{Comp=fn:Comp,DefFlag=fn:DefFlag,a=number:1,default=fn:MexpFn}!esm",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "static|esm-reexport-cjs ns",
+        "{Comp=fn:Comp,DefFlag=fn:DefFlag,a=number:1,default=fn:MexpFn}",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "static|exp-default-flag ns",
+        "{default=fn:DefFlag,named=string:n}",
+        "turbo-test#133",
+    ),
+    (
+        "mr",
+        "static|mexp-fn ns",
+        "fn:MexpFn",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "static|mexp-fn ns",
+        "{default=fn:MexpFn}",
+        "turbo-test#133",
+    ),
+    (
+        "*",
+        "static|module-field default",
+        "fn:ModuleEsm",
+        "turbo-test#134",
+    ),
+    (
+        "*",
+        "static|requires-exports-map default",
+        "fn:FromImport",
+        "turbo-test#134",
+    ),
+    (
+        "mr",
+        "static|star-flag ns",
+        "{named=string:n}!esm",
+        "turbo-test#133",
+    ),
+    (
+        "mr",
+        "static|star-mexp ns",
+        "{Comp=fn:Comp,a=number:1}!esm",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "static|star-mexp ns",
+        "{Comp=fn:Comp,a=number:1}",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "static|tsc ns",
+        "{default=fn:TscComp,named=string:n,viaDefault=fn:DefFlag,viaPlain=fn:MexpFn,viaStar={default=fn:MexpFn,length=number:0,name=string:MexpFn,prototype=obj}}",
+        "turbo-test#133",
+    ),
+    (
+        "graph",
+        "static|tsc reexport ns",
+        "{Comp=fn:Comp,a=number:1,default=fn:DefFlag}",
+        "turbo-test#133",
+    ),
+];
 
 fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
@@ -97,29 +272,37 @@ fn run_table(p: &Project, loader: &str) -> Vec<String> {
                             "{env} isolate={isolate}: {row}: passes now, drop it from KNOWN ({})",
                             k.3
                         )),
-                        (_, Some(k)) if msg.contains(&format!("GOT<{}>:", k.2)) => {}
+                        (_, Some(k)) if msg.contains(&format!("GOT<{}>: WANT<", k.2)) => {}
                         _ => bad.push(format!("{env} isolate={isolate}: {row}: {msg}")),
                     }
                 }
             }
-            assert_eq!(rows, 87, "{}", r.all());
+            assert_eq!(rows, 89, "{}", r.all());
         }
     }
     bad
 }
 
 #[test]
-#[ignore = "turbo-test#122: fails until the fix"]
 fn interop_table_matches_vitest_on_the_module_runner() {
     let p = project("interop-table-mr", true);
     let bad = run_table(&p, "mr");
-    assert!(bad.is_empty(), "{} rows differ:\n{}", bad.len(), bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "{} rows differ:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
 }
 
 #[test]
-#[ignore = "turbo-test#122: fails until the fix"]
 fn interop_table_matches_vitest_on_the_esm_graph_loader() {
     let p = project("interop-table-graph", false);
     let bad = run_table(&p, "graph");
-    assert!(bad.is_empty(), "{} rows differ:\n{}", bad.len(), bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "{} rows differ:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
 }

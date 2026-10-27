@@ -127,6 +127,10 @@ export const expected: Record<string, string> = {
     "fn:LocalFlag",
   "static|local-flag.cjs named":
     "string:n",
+  "static|local-noflag.cjs default":
+    "fn:LocalNoFlag",
+  "static|local-noflag.cjs named":
+    "string:n",
   "static|local.cjs default":
     "fn:LocalCjs",
   "static|mexp-fn default":

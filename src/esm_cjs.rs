@@ -913,7 +913,13 @@ fn collect_export_named<'a>(
         let src = source.value.as_str();
         // bind the module's namespace to a local var, then getters read `var.local`.
         let var = import_var(src, seq + 1_000_000);
-        let (prelude, expr) = module_namespace_expr(ctx, src, seq, false);
+        // re-exporting `default` reads it through the ES-module interop, as an import of it does
+        // (a CommonJS module's default is its `module.exports`, turbo-test#122)
+        let reads_default = decl
+            .specifiers
+            .iter()
+            .any(|spec| module_export_name(&spec.local) == "default");
+        let (prelude, expr) = module_namespace_expr(ctx, src, seq, reads_default);
         requires.extend(prelude);
         requires.push(format!("var {var} = {expr};"));
         for spec in &decl.specifiers {
@@ -1042,11 +1048,12 @@ fn module_export_name(n: &ModuleExportName) -> String {
     }
 }
 
-/// The identity-preserving `__toESM` helper line (self-contained). Part of `PREAMBLE`; also
-/// prepended alone to a script (no module syntax) whose lowered `import()` calls it.
+/// The identity-preserving `__toESM` helper line: runtime.js's `__ttToESM` (vitest's interop,
+/// turbo-test#122). Part of `PREAMBLE`; also prepended alone to a script (no module syntax) whose
+/// lowered `import()` calls it.
 macro_rules! to_esm_helper {
     () => {
-        "var __toESM = (mod) => (mod && mod.__esModule ? mod : (mod && (typeof mod === \"object\" || typeof mod === \"function\") && !(\"default\" in mod) && Object.defineProperty(mod, \"default\", { value: mod, configurable: true }), mod));\n"
+        "var __toESM = (mod) => globalThis.__ttToESM(mod);\n"
     };
 }
 const TO_ESM_HELPER: &str = to_esm_helper!();
@@ -1065,7 +1072,7 @@ var __copyProps = (to, from, except, desc) => { if (from && typeof from === "obj
 var __reExport = (target, mod, secondTarget) => (__copyProps(target, mod, "default"), secondTarget && __copyProps(secondTarget, mod, "default"));
 "#,
     to_esm_helper!(),
-    r#"var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+    r#"var __toCommonJS = (mod) => __copyProps(__defProp(__defProp({}, "__esModule", { value: true }), Symbol.for("turbo-test.esm"), { value: true }), mod);
 var __commonJS = (cb) => { var mod; return () => (mod || (mod = { exports: {} }, cb(mod.exports, mod)), mod.exports); };
 var __esm = (fn) => { var done, res; return () => (done || (done = 1, res = fn()), res); };
 "#

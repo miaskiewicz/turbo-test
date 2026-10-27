@@ -29,6 +29,7 @@ import * as starFlagNs from '../src/star-flag';
 import * as starMexpNs from '../src/star-mexp';
 import LocalCjs from '../src/local.cjs';
 import LocalFlag, { named as localFlagNamed } from '../src/local-flag.cjs';
+import LocalNoFlag, { named as localNoFlagNamed } from '../src/local-noflag.cjs';
 
 const F = 'static';
 describe('cjs module.exports', () => {
@@ -95,4 +96,6 @@ describe('source modules', () => {
   row(F, 'local.cjs default', () => LocalCjs);
   row(F, 'local-flag.cjs default', () => LocalFlag);
   row(F, 'local-flag.cjs named', () => localFlagNamed);
+  row(F, 'local-noflag.cjs default', () => LocalNoFlag);
+  row(F, 'local-noflag.cjs named', () => localNoFlagNamed);
 });

@@ -389,7 +389,8 @@ test('synthetic modules', () => {
   expect(j.n).toBe(1);
   expect(c.k).toBe('k');
   expect(fromA).toBe('1:k');
-  expect(def.default).toBe('dflt');
+  // an app CommonJS file's own `default` is its default (vitest 4.1.12, turbo-test#122)
+  expect(def).toBe('dflt');
   expect(named).toBe('n');
   expect(vm.runInThisContext('1 + 1')).toBe(2);
 });

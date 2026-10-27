@@ -1,7 +1,7 @@
 // Describes an imported value for the interop table (turbo-test#122): functions by name,
 // objects by their sorted own enumerable keys (two levels) plus an `!esm` marker for a
 // truthy `__esModule`, primitives by type and value.
-import { expect, it } from 'vitest';
+import { it } from 'vitest';
 import { expected } from './expected';
 
 export function d(v: unknown, depth = 0): string {
@@ -25,7 +25,8 @@ export function row(file: string, name: string, value: () => unknown) {
       got = `throws:${(e as Error).message.split('\n')[0]}`;
     }
     console.log(`ROW ${file}|${name}|${got}`);
-    // the message carries the whole description (chai truncates long values)
-    expect(got, `GOT<${got}>`).toBe(expected[`${file}|${name}`]);
+    // the error carries the whole description (chai truncates long values)
+    const want = expected[`${file}|${name}`];
+    if (got !== want) throw new Error(`GOT<${got}>: WANT<${want}>`);
   });
 }

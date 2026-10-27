@@ -6,6 +6,21 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 ## [Unreleased]
 
 ### Fixed
+- Default-export interop with CommonJS (turbo-test#122), checked by an 89-row table against
+  vitest 4.1.12 (`tests/interop_table.rs`, happy-dom / node, isolate on and off, both loaders).
+  On the ESM graph loader (a project without esbuild, as a vite 8 install) `import X from` tsc /
+  babel output (`exports.default` + `__esModule`) gave the whole exports object, so React
+  reported `Element type is invalid … got: object`; it now gives `exports.default`, as vitest.
+  On the module runner a package's `exports.default` without `__esModule` is no longer its
+  default (vitest gives the whole `module.exports`), while an app `.cjs` file's own `default`
+  is (both loaders); `export { default } from` reads through the same interop;
+  `import.meta` in a package's ES module no longer fails the native bundle ("Cannot use
+  'import.meta' outside a module") or reads `{}` in the esbuild fallback; `vi.importActual` /
+  `importMock` called from a test body work on the ESM graph loader (they resolved from no
+  directory and gave `undefined`); a `vi.mock` factory without `default` throws vitest's
+  `[vitest] No "default" export is defined on the "x" mock. Did you forget to return it from
+  "vi.mock"?` on access instead of giving the factory object (the missing-name message is
+  vitest 4.1.12's too). Remaining differences are tracked in turbo-test#133–#137.
 - Config discovery (turbo-test#43 item 1): `setupFiles` are read from every config file vitest
   resolves, in its order (`vitest.config` then `vite.config`, each `.ts .mts .cts .js .mjs
   .cjs`); `vitest.config.{cts,mjs,cjs}` and `vite.config.{mts,cts,js,mjs,cjs}` were ignored and

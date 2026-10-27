@@ -2183,12 +2183,13 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .hash(&mut h);
-    "native-cjs-v4".hash(&mut h); // v4: await_do_mocks_on_import
-                                  // Legacy-decorator lowering happens inside esm_cjs::emit when the project enables
-                                  // experimentalDecorators/emitDecoratorMetadata AND this file uses a decorator. Without it the
-                                  // native emitter leaves `@Decorator` syntax intact (→ "Unexpected token 'export'") or lowers
-                                  // it with 2022-standard semantics (→ "Cannot access 'X' before initialization" TDZ). Key the
-                                  // cache on this decision so a config/file change can't serve stale (mis-lowered) output.
+    // v4: await_do_mocks_on_import; v5: `__toESM` is runtime.js's `__ttToESM` (turbo-test#122)
+    "native-cjs-v5".hash(&mut h);
+    // Legacy-decorator lowering happens inside esm_cjs::emit when the project enables
+    // experimentalDecorators/emitDecoratorMetadata AND this file uses a decorator. Without it the
+    // native emitter leaves `@Decorator` syntax intact (→ "Unexpected token 'export'") or lowers
+    // it with 2022-standard semantics (→ "Cannot access 'X' before initialization" TDZ). Key the
+    // cache on this decision so a config/file change can't serve stale (mis-lowered) output.
     let legacy_decorators = decorator_metadata_enabled(file) && file_has_decorator(&raw);
     legacy_decorators.hash(&mut h);
     // coverage output carries an inline source map → key it separately so the no-map and with-map
@@ -2255,7 +2256,9 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .hash(&mut h);
-    "native-dep-v3-bundle".hash(&mut h);
+    // v4: import.meta is lowered (bundler::with_import_meta), `__toESM` is runtime.js's
+    // `__ttToESM` (turbo-test#122)
+    "native-dep-v4-bundle".hash(&mut h);
     let cache = cache_dir().join(format!("ntvdep-{:016x}.cjs", h.finish()));
     if let Ok(c) = std::fs::read_to_string(&cache) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
@@ -2286,7 +2289,8 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     // v2: `import.meta` is filled in (fill_import_meta) instead of esbuild's empty object;
     // v3: import() waits for a pending async vi.doMock (await_do_mocks_on_import);
     // v4: import.meta.url is the percent-encoded file URL (turbo-test#87)
-    "mr-cjs-v4".hash(&mut h);
+    // v5: `__toESM` is runtime.js's `__ttToESM`, `__toCommonJS` marks the module (turbo-test#122)
+    "mr-cjs-v5".hash(&mut h);
     // esbuild can't emit decorator metadata. By default we DON'T pay that cost — only when a
     // decorator file actually threw at load (Mongoose @Prop / Sequelize @Column read design:type
     // at class-definition) does the loader retry with `prefer_metadata`, routing it through the
@@ -2387,7 +2391,8 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
 }
 
 /// esbuild's `--format=cjs` turns `import.meta` into an empty object (`const import_meta = {};`,
-/// one per source module), so `import.meta.url` read as undefined. Give it the module's own
+/// one per source module; `var import_meta = {};` in a package bundle, where `__filename` is the
+/// bundle entry's), so `import.meta.url` read as undefined. Give it the module's own
 /// location instead, as vitest/Node do: `url` (`pathToFileURL(__filename).href`, the
 /// percent-encoded form the ESM-graph import.meta callback gives too), `filename` and `dirname`. They come from the CJS
 /// wrapper's `__filename`/`__dirname` at run time — the transform cache is content-keyed, so the
@@ -2400,17 +2405,19 @@ fn fill_import_meta(code: String) -> String {
     let mut out = String::with_capacity(code.len() + 96);
     for line in code.split_inclusive('\n') {
         let body = line.trim_end_matches('\n');
-        let decl = body
-            .strip_prefix("const ")
-            .and_then(|r| r.strip_suffix(" = {};"))
-            .filter(|n| {
-                n.strip_prefix("import_meta")
-                    .is_some_and(|d| d.bytes().all(|b| b.is_ascii_digit()))
-            });
+        // `const` from the per-file transform, `var` from a package bundle
+        let (kw, rest) = match body.strip_prefix("const ") {
+            Some(r) => ("const", Some(r)),
+            None => ("var", body.strip_prefix("var ")),
+        };
+        let decl = rest.and_then(|r| r.strip_suffix(" = {};")).filter(|n| {
+            n.strip_prefix("import_meta")
+                .is_some_and(|d| d.bytes().all(|b| b.is_ascii_digit()))
+        });
         match decl {
             Some(name) => {
                 out.push_str(&format!(
-                    "const {name} = {{ url: globalThis.__pathToFileURL(__filename).href, filename: __filename, dirname: __dirname }};"
+                    "{kw} {name} = {{ url: globalThis.__pathToFileURL(__filename).href, filename: __filename, dirname: __dirname }};"
                 ));
                 out.push_str(&line[body.len()..]);
             }
@@ -3024,9 +3031,10 @@ fn rewrite_shared_lets(code: &str, names: &[String]) -> String {
 
 /// Post-process esbuild CJS output for the module runner:
 /// - make export getters CONFIGURABLE so `spyOn` can redefine them (mutable live exports);
-/// - replace `__toESM` (which COPIES the namespace) with one that returns the SAME exports
-///   object (adding `default` for CJS interop) so `import * as ns` + `import {x}` share one
-///   object — `vi.spyOn(ns,'x')` is then seen by every importer (vitest semantics).
+/// - replace `__toESM` (which COPIES the namespace) with runtime.js's `__ttToESM`, which returns
+///   the SAME exports object (adding `default` for CJS interop, or a view when CommonJS has its
+///   own) so `import * as ns` + `import {x}` share one object — `vi.spyOn(ns,'x')` is then seen
+///   by every importer (vitest semantics) — and `__toCommonJS` with one that marks the module.
 fn postprocess_mr_cjs(mut code: String) -> String {
     code = code.replace(
         "var __defProp = Object.defineProperty;",
@@ -3034,7 +3042,12 @@ fn postprocess_mr_cjs(mut code: String) -> String {
     );
     code = code.replace(
         "var __toESM = ",
-        "var __toESM = (m) => (m && m.__esModule ? m : (m && (typeof m === \"object\" || typeof m === \"function\") && !(\"default\" in m) && Object.defineProperty(m, \"default\", { value: m, configurable: true }), m)); var __toESM_unused = ",
+        "var __toESM = (m) => globalThis.__ttToESM(m); var __toESM_unused = ",
+    );
+    // turbo-test's own ES modules are marked, so `__ttToESM` tells them from CommonJS
+    code = code.replace(
+        "var __toCommonJS = (mod) => __copyProps(__defProp({}, \"__esModule\", { value: true }), mod);",
+        "var __toCommonJS = (mod) => __copyProps(__defProp(__defProp({}, \"__esModule\", { value: true }), Symbol.for(\"turbo-test.esm\"), { value: true }), mod);",
     );
     code
 }
@@ -3099,7 +3112,9 @@ fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     abs.hash(&mut h);
     mtime.hash(&mut h);
-    "mr-dep-v1".hash(&mut h);
+    // v2: `import.meta` is filled in (fill_import_meta), as in app files, `__toESM` is
+    // runtime.js's `__ttToESM` (turbo-test#122)
+    "mr-dep-v2".hash(&mut h);
     let cache = cache_dir().join(format!("mrdep-{:016x}.cjs", h.finish()));
     if let Ok(c) = std::fs::read_to_string(&cache) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
@@ -3138,7 +3153,7 @@ fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     // `__toESM(require(x), 1)` (node interop for ESM `import default`) sets `.default` to the
     // whole module, so `import styled from '@emotion/styled'` yields the exports object instead
     // of the styled function (breaking flux-ui etc.).
-    let code = postprocess_mr_cjs(String::from_utf8(out.stdout).ok()?);
+    let code = fill_import_meta(postprocess_mr_cjs(String::from_utf8(out.stdout).ok()?));
     write_atomic(&cache, &code);
     Some(code)
 }
@@ -3959,6 +3974,7 @@ fn load_cjs_inner<'s>(
     }
 
     let final_exports = module_obj.get(scope, exports_key.into())?;
+    mark_external_cjs(scope, global, abs, final_exports);
     let names = object_keys(scope, global, final_exports);
     let exports_global = v8::Global::new(scope, final_exports);
     let synth = make_synthetic(scope, &names)?;
@@ -3975,6 +3991,48 @@ fn load_cjs_inner<'s>(
         reg.path_by_hash.insert(hash, abs.to_path_buf());
     });
     Some(())
+}
+
+/// A package's CommonJS `module.exports` with its own `default` and no `__esModule` goes into
+/// runtime.js's `__ttExternalCjs`: `import X from` it gives the whole `module.exports`, as vitest
+/// imports an external through Node; an app CommonJS file's own `default` stays its default,
+/// as vitest's inlined-module interop gives it (turbo-test#122).
+fn mark_external_cjs<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    global: v8::Local<'s, v8::Object>,
+    abs: &Path,
+    exports: v8::Local<'s, v8::Value>,
+) {
+    if !abs.components().any(|c| c.as_os_str() == "node_modules") {
+        return;
+    }
+    let Ok(obj) = v8::Local::<v8::Object>::try_from(exports) else {
+        return;
+    };
+    let (Some(dkey), Some(ekey), Some(skey), Some(add)) = (
+        v8::String::new(scope, "default"),
+        v8::String::new(scope, "__esModule"),
+        v8::String::new(scope, "__ttExternalCjs"),
+        v8::String::new(scope, "add"),
+    ) else {
+        return;
+    };
+    if !obj.has(scope, dkey.into()).unwrap_or(false) || obj.has(scope, ekey.into()).unwrap_or(true)
+    {
+        return;
+    }
+    let Some(set) = global
+        .get(scope, skey.into())
+        .and_then(|s| v8::Local::<v8::Object>::try_from(s).ok())
+    else {
+        return;
+    };
+    if let Some(f) = set
+        .get(scope, add.into())
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok())
+    {
+        f.call(scope, set.into(), &[exports]);
+    }
 }
 
 fn object_keys(
@@ -4039,12 +4097,14 @@ fn synth_eval<'s>(
             && !is_asset(&path)
             && path.extension().and_then(|e| e.to_str()) != Some("json");
         let names = reg.cjs_export_names.get(&path).cloned().unwrap_or_default();
-        Some((exports, names, is_mock))
+        let app_cjs =
+            !path.components().any(|c| c.as_os_str() == "node_modules") && !path.starts_with("<");
+        Some((exports, names, is_mock, app_cjs))
     });
     // A module whose exports were dropped (a reused isolate's reset) fails its importer's
     // evaluation: evaluation steps that return nothing without an exception abort V8
     // (`Check failed: has_exception()`, turbo-test#79).
-    let Some((exports_g, names, is_mock)) = entry else {
+    let Some((exports_g, names, is_mock, app_cjs)) = entry else {
         throw(
             scope,
             "turbo-test: an imported module was unloaded before it was evaluated",
@@ -4054,10 +4114,24 @@ fn synth_eval<'s>(
     let exports = v8::Local::new(scope, &exports_g);
     let dkey = v8::String::new(scope, "default")?;
     // A mock's (factory result's / automock's) own `default` key IS its default export (vitest,
-    // and the module runner's interop); otherwise the whole object is (CJS `module.exports`).
+    // and the module runner's interop). For CommonJS the whole `module.exports` is, except that
+    // vitest's interop (`interopModule`) takes `exports.default` of one marked `__esModule` (tsc /
+    // babel output) that has a `default` (turbo-test#122).
+    // An app CommonJS file (vitest inlines it) has its own `default` as its default either way.
+    let esm_marked = |scope: &mut v8::PinScope<'s, '_>, o: v8::Local<v8::Object>| {
+        let k = v8::String::new(scope, "__esModule").unwrap();
+        (app_cjs || o.has(scope, k.into()).unwrap_or(false))
+            && o.has(scope, dkey.into()).unwrap_or(false)
+    };
     let default = v8::Local::<v8::Object>::try_from(exports)
         .ok()
-        .filter(|o| is_mock && o.has_own_property(scope, dkey.into()).unwrap_or(false))
+        .filter(|o| {
+            if is_mock {
+                o.has_own_property(scope, dkey.into()).unwrap_or(false)
+            } else {
+                esm_marked(scope, *o)
+            }
+        })
         .and_then(|o| o.get(scope, dkey.into()))
         .unwrap_or(exports);
     module.set_synthetic_module_export(scope, dkey, default)?;

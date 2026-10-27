@@ -346,11 +346,11 @@ test("the setup's vi.hoisted values do not leak into the test file's", () => {
     }
 }
 
-/// vitest's error for reading a name the factory did not return.
+/// vitest 4.1.12's error for reading a name the factory did not return (its first line).
 fn no_export(name: &str, spec: &str) -> String {
     format!(
         "[vitest] No \"{name}\" export is defined on the \"{spec}\" mock. \
-         Did you want to return the actual module?"
+         Did you forget to return it from \"vi.mock\"?"
     )
 }
 

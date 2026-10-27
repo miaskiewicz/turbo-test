@@ -3737,6 +3737,8 @@ function __automock(mod, depth) {
     }
     // a class instance: its prototype methods become mocks too
     __automockProtoMethods(out, Object.getPrototypeOf(mod));
+    // an ES module's automock is still an ES module: its `default` is the mocked default
+    if (mod[Symbol.for('turbo-test.esm')]) Object.defineProperty(out, Symbol.for('turbo-test.esm'), { value: true });
     return out;
   }
   return mod;
@@ -3753,15 +3755,71 @@ const __ttMockErrorSpecs = new Set();
 // read undefined instead (jest semantics); checked on access, because the mock prepass registers
 // every factory via vi.mock and an isolate reuse keeps that first exports object.
 const __ttLenientMockKeys = new Set();
+// The strict mock proxies: their `default` is the factory's own (`__ttToESM` adds none).
+const __ttStrictMocks = new WeakSet();
 function __ttStrictMock(mod, key, spec) {
   if (mod === null || typeof mod !== 'object' || __ttMockErrors.has(mod)) return mod;
-  return new Proxy(mod, {
+  const proxy = new Proxy(mod, {
     get: (t, k, r) => {
-      if (typeof k === 'symbol' || k in t || k === 'then' || k === '__esModule' || __ttLenientMockKeys.has(key)) return Reflect.get(t, k, r);
-      throw new Error(`[vitest] No "${k}" export is defined on the "${spec}" mock. Did you want to return the actual module?`);
+      if (typeof k === 'symbol' || k in t || k === 'then' || k === '__esModule') return Reflect.get(t, k, r);
+      // jest: a factory without `default` is its own default (babel's interop)
+      if (__ttLenientMockKeys.has(key)) return k === 'default' ? r : Reflect.get(t, k, r);
+      const e = new Error(`[vitest] No "${k}" export is defined on the "${spec}" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+`);
+      e.codeFrame = `vi.mock(import("${spec}"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})`;
+      throw e;
     },
   });
+  __ttStrictMocks.add(proxy);
+  return proxy;
 }
+// The ES-module view of a required module: what `import X from` / `import * as ns from` read
+// once lowered to `__toESM(require(...))` (turbo-test#122), vitest's `interopModule` for a
+// CommonJS module. turbo-test's own ES modules (marked by `__toCommonJS`) and mocks are
+// themselves. A CommonJS `module.exports` marked `__esModule` (tsc / babel output) has its own
+// `default` (none: the whole object); so has an app file's (vitest inlines it). Any other's
+// default is the whole `module.exports` — added in place when it has no `default` (one object for
+// every importer, so `vi.spyOn` is seen by all), else, for a package's, read through a view (its
+// own `default` stays what CommonJS code reads).
+const __ttEsmMark = Symbol.for('turbo-test.esm');
+// packages' `module.exports` with an own `default` and no `__esModule` (the loader adds them)
+const __ttExternalCjs = new WeakSet();
+globalThis.__ttExternalCjs = __ttExternalCjs;
+const __ttCjsViews = new WeakMap();
+function __ttCjsView(m) {
+  let v = __ttCjsViews.get(m);
+  if (!v) {
+    v = new Proxy(m, {
+      get: (t, k, r) => (k === 'default' ? t : Reflect.get(t, k, t)),
+      has: (t, k) => k === 'default' || k in t,
+      getOwnPropertyDescriptor: (t, k) => {
+        const d = Reflect.getOwnPropertyDescriptor(t, k);
+        if (k !== 'default' || (d && !d.configurable)) return d;
+        return { value: t, writable: true, enumerable: d ? d.enumerable : false, configurable: true };
+      },
+    });
+    __ttCjsViews.set(m, v);
+  }
+  return v;
+}
+globalThis.__ttToESM = (m) => {
+  if (!m || (typeof m !== 'object' && typeof m !== 'function') || __ttStrictMocks.has(m) || m[__ttEsmMark]) return m;
+  if (m.__esModule || '__esModule' in m) return ('default' in m || m.default !== undefined) ? m : __ttCjsView(m);
+  if ('default' in m) return m.default === m || !__ttExternalCjs.has(m) ? m : __ttCjsView(m);
+  try {
+    Object.defineProperty(m, 'default', { value: m, configurable: true });
+    return m;
+  } catch (e) {
+    return __ttCjsView(m);
+  }
+};
 // Modules (resolved absolute paths) the entry's mock prepass registered for the current file.
 // vitest calls a hoisted factory ONCE; the module's own hoisted vi.mock call for such a module
 // keeps the prepass registration instead of running the factory a second time. Consumed by
@@ -4017,8 +4075,8 @@ globalThis.vi = {
     cache[i] = v;
     return v;
   },
-  importActual: (p) => { try { return Promise.resolve(globalThis.__ttImportActual(globalThis.__ttDir, String(p))); } catch (e) { return Promise.resolve({}); } },
-  importMock: (p) => { try { return Promise.resolve(globalThis.__nativeRequire(globalThis.__ttDir, String(p))); } catch (e) { return Promise.resolve({}); } },
+  importActual: (p) => { try { return Promise.resolve(globalThis.__ttImportActual(globalThis.__ttDir || globalThis.__ttEntryDir, String(p))); } catch (e) { return Promise.resolve({}); } },
+  importMock: (p) => { try { return Promise.resolve(globalThis.__nativeRequire(globalThis.__ttDir || globalThis.__ttEntryDir, String(p))); } catch (e) { return Promise.resolve({}); } },
   unstubAllEnvs: () => {
     const m = globalThis.__stubbedEnvs;
     if (m) { m.forEach(({ had, val }, k) => { if (had) globalThis.process.env[k] = val; else delete globalThis.process.env[k]; }); m.clear(); }
@@ -4087,8 +4145,8 @@ globalThis.jest = {
   isMockFunction: (f) => globalThis.vi.isMockFunction(f),
   // jest.requireActual / requireMock are SYNCHRONOUS (return the module, not a Promise) —
   // unlike vi.importActual. Bridge to the native sync loader directly.
-  requireActual: (p) => { try { return globalThis.__ttImportActual(globalThis.__ttDir, String(p)); } catch (e) { return {}; } },
-  requireMock: (p) => { try { return globalThis.__nativeRequire(globalThis.__ttDir, String(p)); } catch (e) { return {}; } },
+  requireActual: (p) => { try { return globalThis.__ttImportActual(globalThis.__ttDir || globalThis.__ttEntryDir, String(p)); } catch (e) { return {}; } },
+  requireMock: (p) => { try { return globalThis.__nativeRequire(globalThis.__ttDir || globalThis.__ttEntryDir, String(p)); } catch (e) { return {}; } },
   // jest.isolateModules(fn): run `fn` with a fresh module registry. Approximate with a
   // resetModules around the (sync) callback — enough for the common "re-require with new env".
   isolateModules: (fn) => { globalThis.vi.resetModules(); try { fn(); } finally { globalThis.vi.resetModules(); } },

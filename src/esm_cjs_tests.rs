@@ -376,10 +376,18 @@ fn export_star_as_namespace_is_a_named_toesm_export() {
 
 #[test]
 fn reexport_from_with_string_names() {
+    // re-exporting `default` reads it through the interop (turbo-test#122)
     let o = e("export { \"a\" as \"b\", default as c } from \"s\";");
-    assert!(o.contains("var import_s_1000001 = require(\"s\");"), "{o}");
+    assert!(
+        o.contains("var import_s_1000001 = __toESM(require(\"s\"));"),
+        "{o}"
+    );
     assert!(o.contains("  b: () => import_s_1000001.a,\n"), "{o}");
     assert!(o.contains("  c: () => import_s_1000001.default,\n"), "{o}");
+    // without `default` the module is read as is
+    let o = e("export { a as b } from \"s\";");
+    assert!(o.contains("var import_s_1000001 = require(\"s\");"), "{o}");
+    assert!(o.contains("  b: () => import_s_1000001.a,\n"), "{o}");
 }
 
 #[test]
