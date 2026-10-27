@@ -801,7 +801,6 @@ fn is_asset(path: &Path) -> bool {
                 | "wav"
                 | "mp3"
                 | "txt"
-                | "md"
         )
     )
 }

@@ -3,8 +3,9 @@
 //!
 //! vite transforms a `.ts` / `.tsx` / `.mts` / `.cts` / `.jsx` module with oxc first (its
 //! `vite:oxc` plugin): a module oxc does not parse fails with `Transform failed with N error(s):`
-//! and rolldown's diagnostics as ariadne renders them (coloured, whatever NO_COLOR says). A
-//! `.js` / `.mjs` / `.cjs` module is parsed twice: the import analysis lexes it with
+//! and rolldown's diagnostics as ariadne renders them (coloured, whatever NO_COLOR says). Any
+//! other module (`.js` / `.mjs` / `.cjs`, or a file vite has no plugin for, such as `.md`; not
+//! `.json`) is parsed twice: the import analysis lexes it with
 //! es-module-lexer (a source the lexer rejects — an unbalanced `)` / `}`, an unterminated string,
 //! template or regular expression — fails with vite's "Failed to parse source for import analysis
 //! …"), then rewrites its imports to vite's URLs, and the SSR transform parses that with
@@ -47,7 +48,9 @@ pub fn vite_error(
     match path.extension().and_then(|e| e.to_str())? {
         "js" | "mjs" | "cjs" => vite_parse_error(path, src, root, resolve),
         "ts" | "tsx" | "mts" | "cts" | "jsx" => vite_transform_error(path, src, root),
-        _ => None,
+        // vite's JSON plugin takes .json; any other module is JavaScript to it (turbo-test#192)
+        "json" => None,
+        _ => vite_parse_error(path, src, root, resolve),
     }
 }
 

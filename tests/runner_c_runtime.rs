@@ -696,7 +696,6 @@ it('pathToFileURL', () => {
 }
 
 #[test]
-#[ignore = "turbo-test#192: fails until the fix"]
 fn an_imported_markdown_file_is_parsed_as_javascript() {
     // `.md` is no vite asset type: vite parses it as JavaScript, so importing one fails the file
     // with rolldown's parse failure (vitest 4.1.12's message for this project), on both loaders

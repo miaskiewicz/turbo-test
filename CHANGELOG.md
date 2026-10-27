@@ -12,7 +12,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `getComputedStyle` reuse, turbo-test#125, which follows CSSOM edits across realms, turbo-dom#113; canvas, track, image and colour fixes). turbo-dom-v8
   stays on its candidate (e9b36c8).
 
-### Fixed — found by the coverage step (turbo-test#187–#189, #191, #193)
+### Fixed — found by the coverage step (turbo-test#187–#189, #191–#193)
 - `TextDecoder#decode` of a text longer than V8's string limit throws Node's `Error` with
   `code: 'ERR_STRING_TOO_LONG'` ("Cannot create a string longer than 0x1fffffe8 characters") for
   every encoding; it was an `Error` without the code (legacy encodings) or a `RangeError`
@@ -31,6 +31,8 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `module.exports` is a primitive (`module.exports = 42`) gets Node's namespace of it — `default`
   and `'module.exports'` the value, re-exported by `export *` — on both loaders; it got an
   empty namespace (`default` undefined) (turbo-test#193).
+- Importing a `.md` file fails the file as vite does (rolldown's `Parse failure`: vite has no
+  asset type for it and parses it as JavaScript); it was stubbed as an asset (turbo-test#192).
 
 ### Fixed — the `vi`, mock and `jest` surface is vitest 4.1.12's and jest 30.5.2's (K8, turbo-test#179–#183)
 - The members of `vi`, of a `vi.fn()` / `vi.spyOn()` mock and its `mock`, and of `jest` were
