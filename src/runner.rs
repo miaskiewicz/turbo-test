@@ -1548,6 +1548,47 @@ fn vitest_snapshot_serializers_uncached(start: &Path) -> Vec<PathBuf> {
     Vec::new()
 }
 
+/// vitest's `test.fakeTimers` (turbo-test#180): the `{ ... }` object literal in the nearest vitest
+/// config, as source text (the runtime evaluates it), memoized by the test file's directory.
+fn vitest_fake_timers(entry: &Path) -> Option<String> {
+    let dir = entry.parent()?;
+    thread_local! {
+        static FAKE_TIMERS_MEMO: RefCell<HashMap<PathBuf, Option<String>>> = RefCell::new(HashMap::new());
+    }
+    if let Some(v) = FAKE_TIMERS_MEMO.with(|m| m.borrow().get(dir).cloned()) {
+        return v;
+    }
+    let v = vitest_fake_timers_uncached(dir);
+    FAKE_TIMERS_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v.clone()));
+    v
+}
+
+fn vitest_fake_timers_uncached(start: &Path) -> Option<String> {
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        for cfg in VITEST_CONFIG_FILES {
+            if let Ok(s) = std::fs::read_to_string(d.join(cfg)) {
+                return config_object_literal(&s, "fakeTimers");
+            }
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// The `{ ... }` value of a config key, braces included (`None` when the key is absent or its
+/// value is not an object literal).
+fn config_object_literal(s: &str, key: &str) -> Option<String> {
+    let start = find_config_key(s, key)?;
+    let colon = start + s[start..].find(':')?;
+    let open = colon + 1 + s[colon + 1..].find(|c: char| !c.is_whitespace())?;
+    if s.as_bytes()[open] != b'{' {
+        return None;
+    }
+    let (inner, _) = crate::launcher::balanced_block_end(s, open)?;
+    Some(format!("{{{inner}}}"))
+}
+
 /// The quoted strings of a config key's `[...]` list (empty when the key is absent).
 fn config_string_list(s: &str, key: &str) -> Vec<String> {
     let Some(start) = find_config_key(s, key) else {
@@ -7591,6 +7632,15 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
                 setup_dom(scope, &entry_abs);
             }
 
+            // 0a. the config's test.fakeTimers (turbo-test#180): what vi.useFakeTimers() uses, in
+            //     the setup files too
+            //     (a literal that does not evaluate is left out, as vitest would fail earlier)
+            if let Some(ft) = vitest_fake_timers(&entry_abs) {
+                run_js(
+                    scope,
+                    &format!("try {{ globalThis.__ttSetConfigFakeTimers(({ft})); }} catch (e) {{}}"),
+                );
+            }
             // 0b. project setupFiles: register jest-dom matchers (expect.extend) AND any
             //     global vi.mock()s, draining each into the path-keyed mock registry.
             for sf in &setup_files {

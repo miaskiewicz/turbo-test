@@ -129,9 +129,12 @@ export type HookFunction = (
 
 export interface MockContext<TArgs extends any[] = any[], TReturn = any> {
   calls: TArgs[];
-  results: Array<{ type: 'return' | 'throw'; value: any }>;
+  results: Array<{ type: 'return' | 'throw' | 'incomplete'; value: any }>;
+  settledResults: Array<{ type: 'fulfilled' | 'rejected' | 'incomplete'; value: any }>;
   instances: any[];
-  lastCall?: TArgs;
+  contexts: any[];
+  invocationCallOrder: number[];
+  readonly lastCall: TArgs | undefined;
 }
 
 // vitest-4 generic form: the type parameter is the mocked function's *signature*, not an args
@@ -154,7 +157,12 @@ export interface Mock<T extends (...args: any[]) => any = (...args: any[]) => an
   mockResolvedValueOnce(value: Awaited<ReturnType<T>>): this;
   mockRejectedValue(value: any): this;
   mockRejectedValueOnce(value: any): this;
+  mockThrow(value: any): this;
+  mockThrowOnce(value: any): this;
   getMockImplementation(): T | undefined;
+  // `fn` is the implementation while `callback` runs (until its promise settles)
+  withImplementation(fn: T, callback: () => void): this;
+  withImplementation(fn: T, callback: () => Promise<void>): Promise<this>;
 }
 
 // A mocked function keeps its original call signature AND gains the mock methods.
@@ -368,20 +376,27 @@ export type AssertType = <T>(value: T) => void;
 export interface ViAPI {
   fn(): Mock;
   fn<T extends (...args: any[]) => any>(impl?: T): Mock<T>;
-  spyOn(obj: any, method: any): Mock;
+  spyOn(obj: any, method: any, accessType?: 'get' | 'set'): Mock;
   // async factory: `importOriginal<T>()` returns the real module typed as T
   // (`vi.mock('x', async (importOriginal) => ({ ...await importOriginal<typeof X>() }))`).
   mock(path: string, factory: (importOriginal: ImportOriginal) => any): void;
   mock(path: string, factory?: (...args: any[]) => any): void;
   unmock(path: string): void;
-  doMock(path: string, factory: (importOriginal: ImportOriginal) => any): void;
-  doMock(path: string, factory?: (...args: any[]) => any): void;
+  doMock(path: string, factory: (importOriginal: ImportOriginal) => any): object;
+  doMock(path: string, factory?: (...args: any[]) => any): object;
   doUnmock(path: string): void;
   // vi.hoisted: run a factory above the module's imports; returns its value (used for shared mock refs).
   hoisted<T>(factory: () => T): T;
   // function → MockedFunction (exposes mockReturnValue/.mock/…); anything else → MockedObject.
   mocked<T extends (...args: any[]) => any>(item: T, deep?: boolean): MockedFunction<T>;
   mocked<T>(item: T, deep?: boolean): MockedObject<T>;
+  // the automocker on a value: a mocked deep copy, or (`spy: true`) the value with spies in place
+  mockObject<T>(value: T, options?: { spy?: boolean }): MockedObject<T>;
+  // a helper whose frames are left out of an error's location
+  defineHelper<F extends (...args: any[]) => any>(fn: F): F;
+  // vitest's runtime config (e.g. `{ fakeTimers }`); resetConfig puts the first setConfig's copy back
+  setConfig(config: Record<string, any>): void;
+  resetConfig(): void;
   importActual<T = any>(path: string): Promise<T>;
   importMock<T = any>(path: string): Promise<T>;
   clearAllMocks(): ViAPI;
@@ -408,8 +423,10 @@ export interface ViAPI {
   runOnlyPendingTimersAsync(): Promise<ViAPI>;
   clearAllTimers(): ViAPI;
   getTimerCount(): number;
+  setTimerTickMode(mode: 'manual' | 'nextTimerAsync'): ViAPI;
+  setTimerTickMode(mode: 'interval', interval?: number): ViAPI;
   // env / globals
-  stubEnv(name: string, value: string): ViAPI;
+  stubEnv(name: string, value: string | boolean | undefined): ViAPI;
   unstubAllEnvs(): ViAPI;
   stubGlobal(name: string, value: any): ViAPI;
   unstubAllGlobals(): ViAPI;
@@ -420,10 +437,48 @@ export interface ViAPI {
 }
 
 // jest's controller mirrors vi's surface (turbo-test backs both with the same implementation),
-// plus jest-only sync helpers.
-export interface JestAPI extends ViAPI {
+// plus jest-only helpers. Its timer functions return undefined and useFakeTimers takes jest's
+// options (turbo-test#181).
+type JestTimerKeys = 'useFakeTimers' | 'useRealTimers' | 'setSystemTime' | 'advanceTimersByTime' | 'advanceTimersByTimeAsync'
+  | 'advanceTimersToNextTimer' | 'advanceTimersToNextTimerAsync' | 'advanceTimersToNextFrame' | 'runAllTicks' | 'runAllTimers'
+  | 'runAllTimersAsync' | 'runOnlyPendingTimers' | 'runOnlyPendingTimersAsync' | 'clearAllTimers' | 'setTimerTickMode'
+  | 'clearAllMocks' | 'resetAllMocks' | 'restoreAllMocks';
+export interface JestFakeTimersConfig {
+  now?: number | Date;
+  doNotFake?: string[];
+  timerLimit?: number;
+  advanceTimers?: boolean | number;
+  legacyFakeTimers?: boolean;
+}
+export interface JestAPI extends Omit<ViAPI, JestTimerKeys> {
+  useFakeTimers(config?: JestFakeTimersConfig): JestAPI;
+  useRealTimers(): JestAPI;
+  setSystemTime(time?: number | Date): void;
+  advanceTimersByTime(ms: number): void;
+  advanceTimersByTimeAsync(ms: number): Promise<void>;
+  advanceTimersToNextTimer(steps?: number): void;
+  advanceTimersToNextTimerAsync(steps?: number): Promise<void>;
+  advanceTimersToNextFrame(): void;
+  runAllTicks(): void;
+  runAllTimers(): void;
+  runAllTimersAsync(): Promise<void>;
+  runOnlyPendingTimers(): void;
+  runOnlyPendingTimersAsync(): Promise<void>;
+  runAllImmediates(): void;
+  clearAllTimers(): void;
+  setTimerTickMode(config: { mode: 'manual' | 'nextAsync' } | { mode: 'interval'; delta?: number }): JestAPI;
+  clearAllMocks(): JestAPI;
+  resetAllMocks(): JestAPI;
+  restoreAllMocks(): JestAPI;
   requireActual<T = any>(path: string): T;
   requireMock<T = any>(path: string): T;
+  createMockFromModule<T = any>(path: string): T;
+  setMock(path: string, exports: any): JestAPI;
+  deepUnmock(path: string): JestAPI;
+  unstable_mockModule(path: string, factory: () => any): JestAPI;
+  unstable_unmockModule(path: string): JestAPI;
+  getSeed(): number;
+  isEnvironmentTornDown(): boolean;
   isolateModules(fn: () => void): void;
   isolateModulesAsync(fn: () => Promise<void>): Promise<void>;
   setTimeout(ms: number): JestAPI;

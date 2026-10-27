@@ -49,7 +49,6 @@ fn rows_diff(want: &Value, got: &Value) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "turbo-test#179: fails until the fix"]
 fn vi_and_mock_members_are_vitests() {
     // turbo-test#179: vi lacked getRealSystemTime (declared in the types), setTimerTickMode,
     // defineHelper, mockObject and resetConfig; a mock lacked getMockImplementation, mockThrow,
@@ -82,7 +81,6 @@ fn vi_and_mock_members_are_vitests() {
 }
 
 #[test]
-#[ignore = "turbo-test#179: fails until the fix"]
 fn vi_and_mock_members_behave_as_vitests() {
     // One row per member that was missing or differed (turbo-test#179): the new vi members
     // (setTimerTickMode's modes and errors, defineHelper's `this` / promise / name, mockObject
@@ -111,7 +109,6 @@ fn vi_and_mock_members_behave_as_vitests() {
 }
 
 #[test]
-#[ignore = "turbo-test#180: fails until the fix"]
 fn config_fake_timers_are_use_fake_timers_defaults() {
     // turbo-test#180: `test.fakeTimers` (now, toFake, loopLimit) is what vi.useFakeTimers() uses,
     // an argument is merged over it, vi.setConfig({ fakeTimers }) replaces it (sinon's loopLimit
@@ -164,7 +161,6 @@ fn jest_project(name: &str) -> Project {
 }
 
 #[test]
-#[ignore = "turbo-test#179: fails until the fix"]
 fn jest_members_are_jests() {
     // turbo-test#179 / #181: the jest object lacked advanceTimersToNextFrame,
     // advanceTimersToNextTimerAsync, runAllTicks, runOnlyPendingTimersAsync, setTimerTickMode,
@@ -204,7 +200,6 @@ fn jest_members_are_jests() {
 }
 
 #[test]
-#[ignore = "turbo-test#181: fails until the fix"]
 fn jest_fake_timers_are_jests() {
     // turbo-test#181: jest.useFakeTimers reads jest's options — `now`, `doNotFake`, `timerLimit`
     // (default 100000), `advanceTimers` (true / ms) and `legacyFakeTimers` (Date real,
@@ -228,7 +223,6 @@ fn jest_fake_timers_are_jests() {
 }
 
 #[test]
-#[ignore = "turbo-test#179: fails until the fix"]
 fn jest_module_members_are_jests() {
     // turbo-test#179: createMockFromModule (the real module automocked), setMock (the module is
     // the given exports), deepUnmock / unstable_mockModule / unstable_unmockModule /

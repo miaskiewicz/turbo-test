@@ -135,6 +135,9 @@ const __loop = {
   realPerf: null,  // the global `performance` property / process.hrtime the fake ones replaced
   realHrtime: null,
   advanceId: null, // shouldAdvanceTime's real-clock interval
+  tickMode: 'manual', // vi.setTimerTickMode's (sinon's tick mode), its delta and a counter that
+  tickDelta: undefined, // ends a 'nextAsync' loop when the mode changes
+  tickCounter: 0,
   systemTime: 0,   // wall-clock base used by Date when faking (Date.now() = systemTime + fnow)
   RealDate: Date,
   realNow: Date.now.bind(Date),
@@ -143,9 +146,10 @@ const __loop = {
   waited: 0,
   elapsed() { return __loop.realNow() + __loop.waited; },
 };
-function __schedule(cb, delay, interval, fake) {
+function __schedule(cb, delay, interval, fake, immediate) {
   const id = __loop.seq++;
-  if (fake) __loop.fmacro.push({ id, due: __loop.fnow + Math.max(0, delay | 0), cb, interval, gen: __loop.gen });
+  // `immediate`: a setImmediate (jest's legacy runAllImmediates)
+  if (fake) __loop.fmacro.push({ id, due: __loop.fnow + Math.max(0, delay | 0), cb, interval, gen: __loop.gen, immediate });
   else __loop.macro.push({ id, due: __loop.now + Math.max(0, delay | 0), cb, interval, gen: __loop.gen });
   return id;
 }
@@ -319,7 +323,7 @@ function __timerFns(fake) {
   return {
     setTimeout: (cb, d, ...a) => __schedule(() => cb(...a), d, null, fake),
     setInterval: (cb, d, ...a) => __schedule(() => cb(...a), d, Math.max(1, d | 0), fake),
-    setImmediate: (cb, ...a) => __schedule(() => cb(...a), 0, null, fake),
+    setImmediate: (cb, ...a) => __schedule(() => cb(...a), 0, null, fake, true),
     clearTimeout: (id) => __clearTimer(id),
     clearInterval: (id) => __clearTimer(id),
     clearImmediate: (id) => __clearTimer(id),
@@ -376,11 +380,22 @@ function __fakePerformance(real) {
 // queueMicrotask (requestAnimationFrame & co. and Intl are not faked here)
 const __TO_FAKE = ['setTimeout', 'clearTimeout', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'Date', 'hrtime', 'performance'];
 const __epochOf = (t) => (t == null ? 0 : typeof t === 'number' ? t : t instanceof __loop.RealDate || (t && typeof t.getTime === 'function') ? t.getTime() : Number(t) || 0);
-// vi.useFakeTimers(config): a fresh fake clock (sinon's install with vitest's `now: Date.now()`)
+// vitest's runtime config, as far as the runtime reads it (vi.setConfig / vi.resetConfig):
+// `fakeTimers` is vitest's default (`loopLimit: 10_000`, `shouldClearNativeTimers`) under the
+// project's `test.fakeTimers` (__ttSetConfigFakeTimers, from the runner per file, turbo-test#180)
+const __ttConfigDefaults = () => ({ fakeTimers: { loopLimit: 10000, shouldClearNativeTimers: true } });
+let __ttConfig = __ttConfigDefaults();
+let __ttConfigSaved = null;
+globalThis.__ttSetConfigFakeTimers = (ft) => {
+  if (ft && typeof ft === 'object') __ttConfig.fakeTimers = Object.assign(__ttConfigDefaults().fakeTimers, ft);
+};
+// vi.useFakeTimers(config): a fresh fake clock (sinon's install with vitest's `now: Date.now()`);
+// a config without `loopLimit` (vi.setConfig replaced the default one) gets sinon's 1000
 function __installFake(cfg) {
-  const c = Object.assign({ loopLimit: 10000 }, cfg || {});
+  const c = Object.assign({}, cfg || {});
   const start = c.now !== undefined ? __epochOf(c.now) : globalThis.Date.now();
   if (__loop.fake) __uninstallFake();
+  __loop.dateMocked = false;
   const toFake = Array.isArray(c.toFake) && c.toFake.length ? c.toFake : __TO_FAKE;
   __loop.fake = true;
   __loop.faked = new Set(toFake);
@@ -400,20 +415,42 @@ function __installFake(cfg) {
     globalThis.process.hrtime = __fakeHrtime;
   }
   // shouldAdvanceTime: a real-clock interval ticks the fake clock by advanceTimeDelta (20ms)
-  if (c.shouldAdvanceTime === true) {
-    const delta = c.advanceTimeDelta || 20;
-    __loop.advanceId = __realTimers.setInterval(() => __loop.advance(delta), delta);
+  if (c.shouldAdvanceTime === true) __setTickMode('interval', c.advanceTimeDelta);
+}
+// sinon's setTickMode (vi.setTimerTickMode, shouldAdvanceTime): 'interval' is a real-clock
+// interval moving the fake clock by `delta` (20ms) each time; 'nextAsync' fires the next fake
+// timer after each real macrotask until the mode changes; 'manual' stops both
+function __setTickMode(mode, delta) {
+  if (mode === __loop.tickMode && delta === __loop.tickDelta) return;
+  if (__loop.advanceId != null) { __realTimers.clearInterval(__loop.advanceId); __loop.advanceId = null; }
+  const counter = ++__loop.tickCounter;
+  __loop.tickMode = mode;
+  __loop.tickDelta = delta;
+  if (mode === 'interval') {
+    const d = delta || 20;
+    __loop.advanceId = __realTimers.setInterval(() => __loop.advance(d), d);
+  } else if (mode === 'nextAsync') {
+    (async () => {
+      while (__loop.tickCounter === counter) {
+        await __realTick();
+        await __realTick();
+        if (__loop.tickCounter !== counter) return;
+        const n = __loop.fmacro.slice().sort(__byDue)[0];
+        if (n) { __fireFake(n); __loop.drainNextTicks(); }
+      }
+    })();
   }
 }
 // sinon's uninstall: the real functions back, the fake clock's pending timers dropped
 function __uninstallFake() {
   __loop.fake = false;
+  __loop.dateMocked = false;
   __loop.dropFake();
   __restoreDate();
   __installTimers(__realTimers);
   if (__loop.realPerf) { Object.defineProperty(globalThis, 'performance', __loop.realPerf); __loop.realPerf = null; }
   if (__loop.realHrtime) { globalThis.process.hrtime = __loop.realHrtime; __loop.realHrtime = null; }
-  if (__loop.advanceId != null) { __realTimers.clearInterval(__loop.advanceId); __loop.advanceId = null; }
+  __setTickMode('manual');
   __loop.loopLimit = 10000;
 }
 // vitest's _checkFakeTimers (turbo-test#171)
@@ -4638,33 +4675,67 @@ globalThis.assertType = () => undefined;
 // ---- vi (mocks/spies) ----
 // vitest's invocationCallOrder: one counter for every mock in the worker, from 1
 let __mockCallOrder = 0;
-function makeSpy(impl) {
-  const onceQueue = [];
-  const fn = function (...args) {
-    fn.mock.calls.push(args);
-    fn.mock.instances.push(this);
-    fn.mock.lastCall = args;
-    fn.mock.invocationCallOrder.push(++__mockCallOrder);
+// A mock function as @vitest/spy 4.1.12 makes one (vi.fn, vi.spyOn, the automocker): its state
+// is `fn.mock` ({ calls, contexts, instances, invocationCallOrder, settledResults, results,
+// lastCall }), its implementation, once-queue and name live in a closure (no own internals), it is
+// named after the original (`Mock` without one) with the implementation's length, and
+// mockReturnValue & co. are implementations. `opts`: `original` (spyOn's method, called while no
+// implementation is set), `restore` (spyOn's, run by mockRestore / vi.restoreAllMocks),
+// `keepName` (spyOn: mockReset keeps the method's name).
+const __mockRestores = new Set();
+const __mockStatic = new Set(['length', 'name', 'prototype', Symbol.for('nodejs.util.promisify.custom')]);
+function __mockDescriptor(o, k) {
+  for (let p = o; p != null; p = Object.getPrototypeOf(p)) {
+    const d = Object.getOwnPropertyDescriptor(p, k);
+    if (d) return [p, d];
+  }
+  return undefined;
+}
+function __mockConstructorError(shorthand) {
+  return new TypeError(`Cannot use \`${shorthand}\` when called with \`new\`. Use \`mockImplementation\` with a \`class\` keyword instead. See https://vitest.dev/api/mock#class-support for more information.`);
+}
+function makeSpy(impl, opts) {
+  opts = opts || {};
+  const original = opts.original;
+  if (opts.restore) __mockRestores.add(opts.restore);
+  const config = { impl: undefined, once: [], name: 'vi.fn()' };
+  const state = {
+    calls: [], contexts: [], instances: [], invocationCallOrder: [], settledResults: [], results: [],
+    get lastCall() { return state.calls[state.calls.length - 1]; },
+  };
+  const name = (original && original.name) || 'Mock';
+  const fn = { [name]: function (...args) {
+    state.calls.push(args);
+    state.invocationCallOrder.push(++__mockCallOrder);
+    const result = { type: 'incomplete', value: undefined };
     // vitest's settledResults: 'incomplete' until the returned promise settles
     const settled = { type: 'incomplete', value: undefined };
-    fn.mock.settledResults.push(settled);
+    state.results.push(result);
+    state.settledResults.push(settled);
+    const context = new.target ? undefined : this;
+    const at = state.instances.push(context);
+    state.contexts.push(context);
+    const implementation = config.once.shift() || config.impl || original || function () {};
     let ret;
-    // a throwing call is recorded as vitest records it (`{ type: 'throw', value }`)
     try {
-      // constructor call (e.g. vi.spyOn(mod, 'default') on a class, then `new spy()`): construct
-      // the original with `new` — calling a class via .apply throws "cannot be invoked without new".
-      if (new.target) {
-        ret = typeof fn.__impl === 'function' ? Reflect.construct(fn.__impl, args, new.target) : this;
-      } else if (onceQueue.length) ret = onceQueue.shift().apply(this, args);
-      else if (fn.__returnValue !== undefined) ret = fn.__returnValue;
-      else if (fn.__impl) ret = fn.__impl.apply(this, args);
+      // `new spy()` constructs the implementation (a class cannot be called with .apply)
+      ret = new.target ? Reflect.construct(implementation, args, new.target) : implementation.apply(this, args);
     } catch (e) {
-      fn.mock.results.push({ type: 'throw', value: e });
+      result.type = 'throw';
+      result.value = e;
       settled.type = 'rejected';
       settled.value = e;
+      if (e instanceof TypeError && String(e.message).includes('is not a constructor')) {
+        globalThis.console.warn(`[vitest] The ${fn.getMockName()} mock did not use 'function' or 'class' in its implementation, see https://vitest.dev/api/vi#vi-spyon for examples.`);
+      }
       throw e;
     }
-    fn.mock.results.push({ type: 'return', value: ret });
+    result.type = 'return';
+    result.value = ret;
+    if (new.target) {
+      state.contexts[at - 1] = ret;
+      state.instances[at - 1] = ret;
+    }
     if (ret instanceof Promise) {
       ret.then((v) => { settled.type = 'fulfilled'; settled.value = v; }, (e) => { settled.type = 'rejected'; settled.value = e; });
     } else {
@@ -4672,24 +4743,67 @@ function makeSpy(impl) {
       settled.value = ret;
     }
     return ret;
-  };
-  fn.mock = { calls: [], results: [], instances: [], lastCall: undefined, invocationCallOrder: [], settledResults: [] };
+  } }[name];
+  // the original's (or implementation's) own and inherited statics, as vitest copies them
+  for (let src = original || impl; src && src !== Object.prototype && src !== Function.prototype; src = Object.getPrototypeOf(src)) {
+    for (const k of [...Object.getOwnPropertyNames(src), ...Object.getOwnPropertySymbols(src)]) {
+      if (__mockStatic.has(k) || __mockDescriptor(fn, k)) continue;
+      try { Object.defineProperty(fn, k, Object.getOwnPropertyDescriptor(src, k)); } catch (e) {}
+    }
+  }
+  Object.defineProperty(fn, 'length', { writable: true, enumerable: false, configurable: true, value: (impl || original) ? (impl || original).length : 0 });
+  if (opts.keepName) config.name = fn.name || 'vi.fn()';
   fn._isMockFunction = true;
-  fn.__impl = impl;
-  fn.mockReturnValue = (v) => { fn.__returnValue = v; return fn; };
-  fn.mockReturnThis = () => { fn.__impl = function () { return this; }; fn.__returnValue = undefined; return fn; };
-  fn.mockImplementation = (f) => { fn.__impl = f; fn.__returnValue = undefined; return fn; };
-  fn.mockResolvedValue = (v) => { fn.__impl = () => Promise.resolve(v); fn.__returnValue = undefined; return fn; };
-  fn.mockRejectedValue = (v) => { fn.__impl = () => Promise.reject(v); fn.__returnValue = undefined; return fn; };
-  fn.mockReturnValueOnce = (v) => { onceQueue.push(() => v); return fn; };
-  fn.mockImplementationOnce = (f) => { onceQueue.push(typeof f === 'function' ? f : () => f); return fn; };
-  fn.mockResolvedValueOnce = (v) => { onceQueue.push(() => Promise.resolve(v)); return fn; };
-  fn.mockRejectedValueOnce = (v) => { onceQueue.push(() => Promise.reject(v)); return fn; };
-  fn.mockClear = () => { fn.mock.calls = []; fn.mock.results = []; fn.mock.instances = []; fn.mock.lastCall = undefined; fn.mock.invocationCallOrder = []; fn.mock.settledResults = []; return fn; };
-  fn.mockReset = () => { fn.mockClear(); fn.__impl = undefined; fn.__returnValue = undefined; onceQueue.length = 0; return fn; };
-  fn.mockRestore = () => {};
-  fn.getMockName = () => fn.__name || 'vi.fn()';
-  fn.mockName = (n) => { fn.__name = n; return fn; };
+  // the implementation the next call runs (vitest: a queued once first)
+  fn.getMockImplementation = () => config.once[0] || config.impl;
+  Object.defineProperty(fn, 'mock', { configurable: false, enumerable: true, writable: false, value: state });
+  fn.mockImplementation = (f) => { config.impl = f; return fn; };
+  fn.mockImplementationOnce = (f) => { config.once.push(f); return fn; };
+  // runs `cb` with `f` as the implementation (no once-queue), then puts both back; a promise
+  // `cb` result restores when it settles and resolves to the mock
+  fn.withImplementation = (f, cb) => {
+    const prevImpl = config.impl;
+    const prevOnce = config.once;
+    const reset = () => { config.impl = prevImpl; config.once = prevOnce; };
+    config.impl = f;
+    config.once = [];
+    const r = cb();
+    if (typeof r === 'object' && r !== null && typeof r.then === 'function') return r.then(() => { reset(); return fn; });
+    reset();
+    return fn;
+  };
+  fn.mockReturnThis = () => fn.mockImplementation(function () { return this; });
+  const value = (shorthand, make) => function () { if (new.target) throw __mockConstructorError(shorthand); return make(); };
+  fn.mockReturnValue = (v) => fn.mockImplementation(value('mockReturnValue', () => v));
+  fn.mockReturnValueOnce = (v) => fn.mockImplementationOnce(value('mockReturnValueOnce', () => v));
+  fn.mockThrow = (v) => fn.mockImplementation(() => { throw v; });
+  fn.mockThrowOnce = (v) => fn.mockImplementationOnce(() => { throw v; });
+  fn.mockResolvedValue = (v) => fn.mockImplementation(value('mockResolvedValue', () => Promise.resolve(v)));
+  fn.mockResolvedValueOnce = (v) => fn.mockImplementationOnce(value('mockResolvedValueOnce', () => Promise.resolve(v)));
+  fn.mockRejectedValue = (v) => fn.mockImplementation(value('mockRejectedValue', () => Promise.reject(v)));
+  fn.mockRejectedValueOnce = (v) => fn.mockImplementationOnce(value('mockRejectedValueOnce', () => Promise.reject(v)));
+  fn.mockClear = () => {
+    state.calls = [];
+    state.contexts = [];
+    state.instances = [];
+    state.invocationCallOrder = [];
+    state.results = [];
+    state.settledResults = [];
+    return fn;
+  };
+  // back to vi.fn(impl)'s implementation (a spy calls its original again)
+  fn.mockReset = () => {
+    fn.mockClear();
+    config.impl = opts.resetTo;
+    config.name = opts.keepName ? fn.name || 'vi.fn()' : 'vi.fn()';
+    config.once = [];
+    return fn;
+  };
+  fn.mockRestore = () => { fn.mockReset(); return opts.restore ? opts.restore() : undefined; };
+  fn.mockName = (n) => { if (typeof n === 'string') config.name = n; return fn; };
+  fn.getMockName = () => config.name || 'vi.fn()';
+  if (Symbol.dispose) fn[Symbol.dispose] = () => fn.mockRestore();
+  if (impl) fn.mockImplementation(impl);
   return fn;
 }
 // vitest automock (factory-less vi.mock, both loader paths): functions become vi.fn() mocks
@@ -4700,12 +4814,12 @@ function __isBuiltinProto(p) {
   if (p === Object.prototype || p === Function.prototype) return true;
   try { return typeof p.constructor === 'function' && /\{\s*\[native code\]\s*\}$/.test(Function.prototype.toString.call(p.constructor)); } catch (e) { return true; }
 }
-function __automockProtoMethods(target, proto) {
+function __automockProtoMethods(target, proto, spy) {
   for (let p = proto; p && !__isBuiltinProto(p); p = Object.getPrototypeOf(p)) {
     for (const k of Object.getOwnPropertyNames(p)) {
       if (k === 'constructor' || Object.prototype.hasOwnProperty.call(target, k)) continue;
       const d = Object.getOwnPropertyDescriptor(p, k);
-      if (typeof d.value === 'function') { target[k] = __trackSpy(makeSpy()); }
+      if (typeof d.value === 'function') { target[k] = __trackSpy(makeSpy(undefined, { original: spy ? d.value : undefined })); }
     }
   }
 }
@@ -4713,38 +4827,55 @@ function __automockProtoMethods(target, proto) {
 // module exports them, undefined): an automock's of a package's CommonJS module.
 const __ttMockNames = new WeakMap();
 globalThis.__ttMockNames = (m) => (m && (typeof m === 'object' || typeof m === 'function') ? __ttMockNames.get(m) : undefined);
-function __automock(mod, depth) {
+// `spy` (vi.mockObject's `{ spy: true }`, vitest's autospy): functions call their originals and
+// arrays are kept.
+function __automock(mod, depth, spy) {
   depth = depth || 0;
   if (typeof mod === 'function') {
-    const m = __trackSpy(makeSpy());
+    const m = __trackSpy(makeSpy(undefined, { original: spy ? mod : undefined }));
     // vitest's automocker keeps the function's own name (`Comp.name`, not the spy's) (turbo-test#136)
     try { Object.defineProperty(m, 'name', { value: mod.name, configurable: true }); } catch (e) {}
     if (depth < 3) {
       // own statics (class static methods are non-enumerable), not the function's built-ins
       for (const k of Object.getOwnPropertyNames(mod)) {
         if (k === 'length' || k === 'name' || k === 'prototype' || k === 'caller' || k === 'arguments') continue;
-        try { m[k] = __automock(mod[k], depth + 1); } catch (e) {}
+        try { m[k] = __automock(mod[k], depth + 1, spy); } catch (e) {}
       }
       // class / constructor function: `new m()` returns an instance of m.prototype, whose
       // methods (inherited ones included) are mocks
-      if (mod.prototype && mod.prototype.constructor === mod) __automockProtoMethods(m.prototype, mod.prototype);
+      if (mod.prototype && mod.prototype.constructor === mod) __automockProtoMethods(m.prototype, mod.prototype, spy);
     }
     return m;
   }
-  if (Array.isArray(mod)) return [];
+  if (Array.isArray(mod)) return spy ? mod.slice() : [];
   if (mod && typeof mod === 'object') {
     const out = {};
     for (const k of Object.keys(mod)) {
       let v; try { v = mod[k]; } catch (e) { continue; }
-      out[k] = depth < 4 ? __automock(v, depth + 1) : v;
+      out[k] = depth < 4 ? __automock(v, depth + 1, spy) : v;
     }
     // a class instance: its prototype methods become mocks too
-    __automockProtoMethods(out, Object.getPrototypeOf(mod));
+    __automockProtoMethods(out, Object.getPrototypeOf(mod), spy);
     // an ES module's automock is still an ES module: its `default` is the mocked default
     if (mod[Symbol.for('turbo-test.esm')]) Object.defineProperty(out, Symbol.for('turbo-test.esm'), { value: true });
     return out;
   }
   return mod;
+}
+// vitest's autospy (vi.mockObject(value, { spy: true })): in place, each function (nested
+// objects' too) becomes a spy on it; arrays and other values stay.
+function __autospy(v, depth, seen) {
+  if (typeof v === 'function') return __automock(v, depth, true);
+  if (v === null || typeof v !== 'object' || Array.isArray(v) || seen.has(v) || depth > 4) return v;
+  seen.add(v);
+  for (const k of Object.keys(v)) {
+    let x;
+    try { x = v[k]; } catch (e) { continue; }
+    if (typeof x === 'function' || (x && typeof x === 'object')) {
+      try { v[k] = __autospy(x, depth + 1, seen); } catch (e) {}
+    }
+  }
+  return v;
 }
 // Registry behind vi.clearAllMocks/resetAllMocks/restoreAllMocks, held WEAKLY (turbo-test#124,
 // from alphajew420's miaskiewicz/turbo-test#107). Each spy keeps every call's arguments, receiver
@@ -5183,37 +5314,59 @@ function __waitUntil(callback, options = {}) {
     intervalId = setInterval(checkCallback, interval);
   });
 }
+// vitest's argument check of vi.doMock / vi.doUnmock
+function __viPath(name, path) {
+  if (typeof path !== 'string') throw new TypeError(`vi.${name}() expects a string path, but received a ${typeof path}`);
+}
 globalThis.vi = {
-  fn: (impl) => __trackSpy(makeSpy(impl)),
-  spyOn: (obj, key) => {
-    // a registered ESM-graph namespace: its current value (a spy already set on it included)
-    const nsRaw = obj !== null && typeof obj === 'object' ? __ttNsRaw.get(obj) || obj : obj;
-    const orig = __ttNsInfo.has(__ttNsTarget(nsRaw)) ? globalThis.__ttR(nsRaw, key) : obj[key];
-    // Do NOT bind orig to obj — for a prototype-method spy (spyOn(Cls.prototype, 'm')) the
-    // original must run with the CALL's `this` (the instance), not the prototype. makeSpy's
-    // fn applies the call-time `this` to __impl, preserving it.
-    const s = makeSpy(orig);
-    // vitest names a spy after its method
-    s.__name = String(key);
-    // Use defineProperty so it replaces a (configurable) live-export getter, not just a
-    // writable data prop — module-runner exports are configurable getters.
-    // An ESM-graph module's namespace is V8's (read-only): the spy is its override (esm_spy.rs,
-    // turbo-test#131, #146).
-    const define = (v) => {
-      if (globalThis.__ttNsSet(obj, key, v)) return;
-      try { Object.defineProperty(obj, key, { configurable: true, enumerable: true, writable: true, value: v }); } catch (e) { try { obj[key] = v; } catch (e2) {} }
+  // a mock given a mock is that mock (vitest)
+  fn: (impl) => (impl != null && globalThis.vi.isMockFunction(impl) ? impl : __trackSpy(makeSpy(impl, { resetTo: impl }))),
+  // @vitest/spy's spyOn: `accessor` 'get' / 'set' spies on an accessor; a getter holding a
+  // function (a live re-export) is spied through it; the original descriptor comes back on
+  // restore (a method found on a prototype is deleted from the object again)
+  spyOn: (obj, key, accessor) => {
+    if (obj == null) throw new Error('The vi.spyOn() function could not find an object to spy upon. The first argument must be defined.');
+    if (typeof obj !== 'object' && typeof obj !== 'function') throw new Error('Vitest cannot spy on a primitive value.');
+    // a registered ESM-graph namespace: the spy is its override (esm_spy.rs, turbo-test#131,
+    // #146); its current value (a spy already set on it included) is the original
+    const nsRaw = typeof obj === 'object' ? __ttNsRaw.get(obj) || obj : obj;
+    let isNs = false;
+    try { isNs = !accessor && typeof key === 'string' && __ttNsInfo.has(__ttNsTarget(nsRaw)) && key in nsRaw; } catch (e) {}
+    const found = isNs ? undefined : __mockDescriptor(obj, key);
+    const [descObj, desc] = found || [];
+    let has = !!desc;
+    if (!has) { try { has = key in obj; } catch (e) { has = true; } }
+    if (!has) throw new Error(`The property "${String(key)}" is not defined on the ${typeof obj}.`);
+    let accessType = accessor || 'value';
+    let ssr = false;
+    if (accessType === 'value' && desc && desc.value == null && desc.get) { accessType = 'get'; ssr = true; }
+    let original;
+    if (isNs) original = globalThis.__ttR(nsRaw, key);
+    else if (desc) {
+      original = desc[accessType];
+      if (original == null && accessType === 'value') original = obj[key];
+    } else if (accessType !== 'value') original = () => obj[key];
+    else original = obj[key];
+    const originalImpl = ssr && original ? original.call(obj) : original;
+    if (!(typeof originalImpl === 'function' || (accessType !== 'value' && original == null))) {
+      throw new Error(`vi.spyOn() can only spy on a function. Received ${typeof originalImpl}.`);
+    }
+    if (globalThis.vi.isMockFunction(originalImpl)) return originalImpl;
+    const reassign = (cb) => {
+      if (isNs) { globalThis.__ttNsSet(obj, key, cb); return; }
+      const d = Object.assign({}, desc || { configurable: true, writable: true });
+      delete d.value;
+      if (accessType !== 'value') delete d.writable;
+      d[accessType] = cb;
+      Object.defineProperty(obj, key, d);
     };
-    // restore the original descriptor itself, as vitest: a live re-export getter stays live, a
-    // non-enumerable method stays non-enumerable (turbo-test#157)
-    let own;
-    try { own = Object.getOwnPropertyDescriptor(obj, key); } catch (e) { own = undefined; }
-    s.mockRestore = () => {
-      if (own !== undefined && own.configurable && !globalThis.__ttNsSet(obj, key, orig)) {
-        try { Object.defineProperty(obj, key, own); return; } catch (e) { /* fall back to the value */ }
-      }
-      define(orig);
+    const restore = () => {
+      if (!isNs && descObj !== obj) Reflect.deleteProperty(obj, key);
+      else if (!isNs && desc && !original) Object.defineProperty(obj, key, desc);
+      else reassign(original);
     };
-    define(s);
+    const s = makeSpy(undefined, { original: originalImpl, restore, keepName: true });
+    reassign(ssr ? () => s : s);
     return __trackSpy(s);
   },
   // Record (specifier, evaluated-exports) into a queue the native loader drains after the
@@ -5227,21 +5380,40 @@ globalThis.vi = {
     const dir = globalThis.__ttDir || globalThis.__cwd;
     if (globalThis.__ttUnmock && dir) { try { globalThis.__ttUnmock(dir, String(spec)); } catch (e) {} }
   },
-  doMock: (spec, factory) => __ttMock(spec, factory, true, true),
-  doUnmock: (spec) => globalThis.vi.unmock(spec),
+  // vitest's: a string path or a TypeError; the result disposes the mock (`using`)
+  doMock: (spec, factory) => {
+    __viPath('doMock', spec);
+    __ttMock(spec, factory, true, true);
+    const r = {};
+    if (Symbol.dispose) r[Symbol.dispose] = () => globalThis.vi.doUnmock(spec);
+    return r;
+  },
+  doUnmock: (spec) => { __viPath('doUnmock', spec); globalThis.vi.unmock(spec); },
   dynamicImportSettled: () => __ttImportsSettled(),
-  clearAllMocks: () => { __eachSpy((s) => s.mockClear()); },
-  resetAllMocks: () => { __eachSpy((s) => s.mockReset()); },
-  restoreAllMocks: () => { __eachSpy((s) => { if (s.mockRestore) s.mockRestore(); }); },
+  clearAllMocks: () => { __eachSpy((s) => s.mockClear()); return globalThis.vi; },
+  resetAllMocks: () => { __eachSpy((s) => s.mockReset()); return globalThis.vi; },
+  // vitest 4: puts back what vi.spyOn replaced (each once); vi.fn() mocks keep their state
+  restoreAllMocks: () => {
+    for (const restore of __mockRestores) restore();
+    __mockRestores.clear();
+    return globalThis.vi;
+  },
+  // the global's own descriptor comes back on unstubAllGlobals (none: it is deleted)
   stubGlobal: (k, v) => {
     const m = globalThis.__stubbedGlobals || (globalThis.__stubbedGlobals = new Map());
-    if (!m.has(k)) m.set(k, { had: k in globalThis, val: globalThis[k] });
-    globalThis[k] = v;
+    if (!m.has(k)) m.set(k, Object.getOwnPropertyDescriptor(globalThis, k));
+    Object.defineProperty(globalThis, k, { value: v, writable: true, configurable: true, enumerable: true });
+    return globalThis.vi;
   },
+  // import.meta.env (process.env): a string, DEV / PROD / SSR as '1' / '', undefined deletes
   stubEnv: (k, v) => {
+    const env = globalThis.process.env;
     const m = globalThis.__stubbedEnvs || (globalThis.__stubbedEnvs = new Map());
-    if (!m.has(k)) m.set(k, { had: k in globalThis.process.env, val: globalThis.process.env[k] });
-    globalThis.process.env[k] = v;
+    if (!m.has(k)) m.set(k, env[k]);
+    if (__ttMetaBool.includes(k)) env[k] = v ? '1' : '';
+    else if (v === undefined) delete env[k];
+    else env[k] = String(v);
+    return globalThis.vi;
   },
   isMockFunction: (f) => typeof f === 'function' && f._isMockFunction === true,
   // fake timers
@@ -5249,7 +5421,8 @@ globalThis.vi = {
   // the previous one's timers are dropped with it), faking `config.toFake` (default: every
   // timer function, Date, performance, process.hrtime). The fake set carries `.clock`, so
   // @testing-library's jestFakeTimersAreEnabled() drives jest.advanceTimersByTime().
-  useFakeTimers: (cfg) => { __installFake(cfg); return globalThis.vi; },
+  // the config's `fakeTimers` (test.fakeTimers / vi.setConfig) with `cfg` over it (turbo-test#180)
+  useFakeTimers: (cfg) => { __installFake(cfg ? Object.assign({}, __ttConfig.fakeTimers, cfg) : __ttConfig.fakeTimers); return globalThis.vi; },
   useRealTimers: () => { __uninstallFake(); return globalThis.vi; },
   isFakeTimers: () => __loop.fake,
   setSystemTime: (t) => {
@@ -5261,9 +5434,11 @@ globalThis.vi = {
     // `new Date()` / Date.now() reflect the set time (timer faking stays separate). Under fake
     // timers whose `toFake` leaves Date out, Date stays real.
     if (!__loop.fake || __loop.faked.has('Date')) __installFakeDate();
+    if (!__loop.fake) __loop.dateMocked = true;
     return globalThis.vi;
   },
-  getMockedSystemTime: () => (__loop.fake ? new __loop.RealDate(__loop.systemTime + __loop.fnow) : null),
+  // the fake clock's time, the time vi.setSystemTime mocked Date to without fake timers, or null
+  getMockedSystemTime: () => (__loop.fake || __loop.dateMocked ? new __loop.RealDate(__loop.systemTime + __loop.fnow) : null),
   waitFor: (fn, opts) => __waitFor(fn, opts),
   waitUntil: (fn, opts) => __waitUntil(fn, opts),
   // each throws vitest's error without fake timers (turbo-test#171; the async ones reject)
@@ -5280,25 +5455,36 @@ globalThis.vi = {
   runAllTicks: () => { __checkFake(); return globalThis.vi; },
   getTimerCount: () => { __checkFake(); return __loop.fmacro.length; },
   clearAllTimers: () => { __loop.dropFake(); return globalThis.vi; },
-  mocked: (f) => {
-    if (typeof f === 'function' && !f.mock) {
-      f.mock = { calls: [], results: [] };
-      f.mockClear = () => { f.mock.calls = []; f.mock.results = []; return f; };
-      f.mockReset = () => f;
-      f.mockRestore = () => {};
-      f.mockReturnValue = () => f;
-      f.mockReturnValueOnce = () => f;
-      f.mockImplementation = () => f;
-      f.mockImplementationOnce = () => f;
-      f.mockResolvedValue = () => f;
-      f.mockRejectedValue = () => f;
-    }
-    return f;
+  // the real clock, also under fake timers or a mocked Date (turbo-test#179)
+  getRealSystemTime: () => __loop.realNow(),
+  // sinon's tick modes (turbo-test#179): 'manual' (the default), 'nextTimerAsync' (each real
+  // macrotask fires the next fake timer), 'interval' (a real interval moves the clock by `delta`)
+  setTimerTickMode: (mode, delta) => {
+    __checkFake();
+    if (mode === 'manual') __setTickMode('manual');
+    else if (mode === 'nextTimerAsync') __setTickMode('nextAsync');
+    else if (mode === 'interval') __setTickMode('interval', delta);
+    else throw new Error(`Invalid tick mode: ${mode}`);
+    return globalThis.vi;
   },
+  // a helper whose frames vitest leaves out of an error's location (turbo-test#179): it runs `fn`
+  // with the call's `this` and a thenable result is awaited by a new promise
+  defineHelper: (fn) => function __VITEST_HELPER__(...args) {
+    const result = fn.apply(this, args);
+    if (result && typeof result === 'object' && typeof result.then === 'function') return (async function __VITEST_HELPER__() { return await result; })();
+    return result;
+  },
+  // the automocker on a value (turbo-test#179): a deep copy whose functions are mocks returning
+  // undefined (arrays emptied) or, with `{ spy: true }`, the value itself with its functions
+  // replaced by spies calling the originals
+  mockObject: (value, options) => (options && options.spy ? __autospy(value, 0, new Set()) : __automock(value, 0)),
+  // a type helper: the value itself
+  mocked: (item) => item,
   // vi.hoisted must return the SAME value in the mock-prepass and the entry module (the mock
   // closure and the test share it). Cache by call-index: the prepass fills the cache, then the
   // entry (index reset to 0) hits it — so `const x = vi.hoisted(...)` is one object everywhere.
   hoisted: (f) => {
+    if (typeof f !== 'function') throw new TypeError(`"vi.hoisted" factory value must be function, received "${f === null ? 'null' : typeof f}"`);
     const cache = globalThis.__hoistedCache || (globalThis.__hoistedCache = []);
     const i = globalThis.__hoistedIdx || 0;
     globalThis.__hoistedIdx = i + 1;
@@ -5311,18 +5497,23 @@ globalThis.vi = {
   importMock: (p) => { try { return Promise.resolve(globalThis.__nativeRequire(globalThis.__ttDir || globalThis.__ttEntryDir, String(p))); } catch (e) { return Promise.resolve({}); } },
   unstubAllEnvs: () => {
     const m = globalThis.__stubbedEnvs;
-    if (m) { m.forEach(({ had, val }, k) => { if (had) globalThis.process.env[k] = val; else delete globalThis.process.env[k]; }); m.clear(); }
+    if (m) { m.forEach((val, k) => { if (val === undefined) delete globalThis.process.env[k]; else globalThis.process.env[k] = val; }); m.clear(); }
+    return globalThis.vi;
   },
   unstubAllGlobals: () => {
     const m = globalThis.__stubbedGlobals;
-    if (m) { m.forEach(({ had, val }, k) => { if (had) globalThis[k] = val; else delete globalThis[k]; }); m.clear(); }
+    if (m) { m.forEach((d, k) => { if (d) Object.defineProperty(globalThis, k, d); else Reflect.deleteProperty(globalThis, k); }); m.clear(); }
+    return globalThis.vi;
   },
   resetModules: () => { if (globalThis.__ttResetModules) globalThis.__ttResetModules(); return globalThis.vi; },
-  setConfig: () => {},
-  stubEnv: (k, v) => {
-    const m = globalThis.__stubbedEnvs || (globalThis.__stubbedEnvs = new Map());
-    if (!m.has(k)) m.set(k, { had: k in globalThis.process.env, val: globalThis.process.env[k] });
-    globalThis.process.env[k] = v;
+  // vitest's runtime config (turbo-test#179, #180): setConfig assigns over it (the first call
+  // keeps a copy), resetConfig puts that copy back. `fakeTimers` is what vi.useFakeTimers reads.
+  setConfig: (config) => {
+    if (!__ttConfigSaved) __ttConfigSaved = Object.assign({}, __ttConfig);
+    Object.assign(__ttConfig, config);
+  },
+  resetConfig: () => {
+    if (__ttConfigSaved) Object.assign(__ttConfig, __ttConfigSaved);
   },
 };
 
@@ -5358,6 +5549,36 @@ globalThis.babelHelpers.decorateMetadata = function (metadataKey, metadataValue)
 };
 
 // ---- jest compatibility shim ----
+// jest.useFakeTimers(config) as jest-environment's modern fake timers (turbo-test#181): jest
+// fakes every timer API but those in `doNotFake`, stops runAllTimers after `timerLimit` (100000)
+// timers, and `advanceTimers` (true, or ms per real ms) moves the clock with real time.
+// `legacyFakeTimers` approximates jest's legacy timers: Date, performance and hrtime stay real
+// and runAllImmediates works.
+let __jestLegacy = false;
+const __jestSeed = Math.floor(Math.random() * 0xffffffff) - 0x80000000;
+function __jestInstallFake(cfg) {
+  const c = cfg || {};
+  const legacy = c.legacyFakeTimers === true;
+  const skip = new Set(legacy ? ['Date', 'performance', 'hrtime'] : Array.isArray(c.doNotFake) ? c.doNotFake : []);
+  const at = c.now === undefined ? undefined : c.now;
+  const delta = typeof c.advanceTimers === 'number' ? c.advanceTimers : undefined;
+  __installFake({
+    now: legacy ? undefined : at,
+    toFake: __TO_FAKE.filter((k) => !skip.has(k)),
+    loopLimit: c.timerLimit || 100000,
+    shouldAdvanceTime: !legacy && (c.advanceTimers === true || delta !== undefined),
+    advanceTimeDelta: delta,
+  });
+  __jestLegacy = legacy;
+}
+// jest's _checkFakeTimers: a warning, not vitest's error
+function __jestCheckFake() {
+  if (__loop.fake) return true;
+  const stack = String(new Error().stack || '').split('\n').slice(2).join('\n');
+  globalThis.console.warn(`A function to advance timers was called but the timers APIs are not replaced with fake timers. Call \`jest.useFakeTimers()\` in this test file or enable fake timers for all tests by setting 'fakeTimers': {'enableGlobally': true} in Jest configuration file.\nStack Trace:\n${stack}`);
+  return false;
+}
+
 // Jest's `jest` global maps onto the same machinery as `vi` (drop-in for jest projects, e.g.
 // NestJS backends using ts-jest). Most methods are identical; the jest-only ones (sync
 // requireActual/requireMock, isolateModules, setTimeout) are bridged here. Type-only members
@@ -5365,15 +5586,26 @@ globalThis.babelHelpers.decorateMetadata = function (metadataKey, metadataValue)
 // Defined unconditionally: it doesn't touch vitest behavior (vitest suites never reference `jest`).
 globalThis.jest = {
   fn: (impl) => globalThis.vi.fn(impl),
-  spyOn: (obj, key) => globalThis.vi.spyOn(obj, key),
+  spyOn: (obj, key, accessType) => globalThis.vi.spyOn(obj, key, accessType),
   mock: (spec, factory) => __ttMock(spec, factory, false),
   unmock: (spec) => globalThis.vi.unmock(spec),
   doMock: (spec, factory) => __ttMock(spec, factory, false, true),
   dontMock: (spec) => globalThis.vi.unmock(spec),
+  // jest's other module-registry members, on the same machinery (turbo-test#179): setMock is a
+  // doMock of the given exports, unstable_mockModule / unstable_unmockModule the ESM forms,
+  // deepUnmock an unmock, createMockFromModule the automock of the real module
+  deepUnmock: (spec) => { globalThis.vi.unmock(spec); return globalThis.jest; },
+  setMock: (spec, exports) => { __ttMock(spec, () => exports, false, true); return globalThis.jest; },
+  unstable_mockModule: (spec, factory) => { __ttMock(spec, factory, false, true); return globalThis.jest; },
+  unstable_unmockModule: (spec) => { globalThis.vi.unmock(spec); return globalThis.jest; },
+  createMockFromModule: (spec) => __automock(globalThis.jest.requireActual(spec)),
+  // the run's seed (jest: a 32-bit integer, one per run) and whether the file's environment is gone
+  getSeed: () => __jestSeed,
+  isEnvironmentTornDown: () => false,
   mocked: (item) => globalThis.vi.mocked(item),
-  clearAllMocks: () => globalThis.vi.clearAllMocks(),
-  resetAllMocks: () => globalThis.vi.resetAllMocks(),
-  restoreAllMocks: () => globalThis.vi.restoreAllMocks(),
+  clearAllMocks: () => { globalThis.vi.clearAllMocks(); return globalThis.jest; },
+  resetAllMocks: () => { globalThis.vi.resetAllMocks(); return globalThis.jest; },
+  restoreAllMocks: () => { globalThis.vi.restoreAllMocks(); return globalThis.jest; },
   isMockFunction: (f) => globalThis.vi.isMockFunction(f),
   // jest.requireActual / requireMock are SYNCHRONOUS (return the module, not a Promise) —
   // unlike vi.importActual. Bridge to the native sync loader directly.
@@ -5384,21 +5616,37 @@ globalThis.jest = {
   isolateModules: (fn) => { globalThis.vi.resetModules(); try { fn(); } finally { globalThis.vi.resetModules(); } },
   isolateModulesAsync: async (fn) => { globalThis.vi.resetModules(); try { await fn(); } finally { globalThis.vi.resetModules(); } },
   resetModules: () => { globalThis.vi.resetModules(); return globalThis.jest; },
-  // timers
-  useFakeTimers: (cfg) => { globalThis.vi.useFakeTimers(cfg); return globalThis.jest; },
-  useRealTimers: () => { globalThis.vi.useRealTimers(); return globalThis.jest; },
-  setSystemTime: (t) => { globalThis.vi.setSystemTime(t); return globalThis.jest; },
+  // timers (turbo-test#181): jest's modern fake timers. useFakeTimers reads jest's options
+  // (`now`, `doNotFake`, `timerLimit` (100000), `advanceTimers: true | ms`, `legacyFakeTimers`);
+  // vitest's toFake / loopLimit mean nothing to it. Without fake timers each advance function
+  // warns as jest does and does nothing; they return undefined.
+  useFakeTimers: (cfg) => { __jestInstallFake(cfg); return globalThis.jest; },
+  useRealTimers: () => { __uninstallFake(); __jestLegacy = false; return globalThis.jest; },
+  setSystemTime: (t) => { if (__jestCheckFake()) globalThis.vi.setSystemTime(t === undefined ? __loop.realNow() : t); },
   getRealSystemTime: () => __loop.realNow(),
-  now: () => (globalThis.vi.isFakeTimers() ? globalThis.vi.getMockedSystemTime().getTime() : __loop.realNow()),
-  advanceTimersByTime: (ms) => { if (__loop.fake) globalThis.vi.advanceTimersByTime(ms); return globalThis.jest; },
-  advanceTimersByTimeAsync: async (ms) => { if (__loop.fake) await globalThis.vi.advanceTimersByTimeAsync(ms); return globalThis.jest; },
-  advanceTimersToNextTimer: () => { if (__loop.fake) globalThis.vi.advanceTimersToNextTimer(); return globalThis.jest; },
-  runAllTimers: () => { if (__loop.fake) globalThis.vi.runAllTimers(); return globalThis.jest; },
-  runAllTimersAsync: async () => { if (__loop.fake) await globalThis.vi.runAllTimersAsync(); return globalThis.jest; },
-  runOnlyPendingTimers: () => { if (__loop.fake) globalThis.vi.runOnlyPendingTimers(); return globalThis.jest; },
-  clearAllTimers: () => { globalThis.vi.clearAllTimers(); return globalThis.jest; },
-  // jest only warns when timers are not faked (vitest throws, turbo-test#171): no-ops here
-  getTimerCount: () => (__loop.fake ? globalThis.vi.getTimerCount() : 0),
+  now: () => (__loop.fake ? __loop.systemTime + __loop.fnow : __loop.realNow()),
+  advanceTimersByTime: (ms) => { if (__jestCheckFake()) __loop.advance(ms); },
+  advanceTimersByTimeAsync: async (ms) => { if (__jestCheckFake()) await __loop.advanceAsync(ms); },
+  advanceTimersToNextTimer: (steps) => { if (__jestCheckFake()) for (let i = steps === undefined ? 1 : steps; i > 0 && __loop.fmacro.length; i--) __loop.toNext(); },
+  advanceTimersToNextTimerAsync: async (steps) => { if (__jestCheckFake()) for (let i = steps === undefined ? 1 : steps; i > 0 && __loop.fmacro.length; i--) await __loop.toNextAsync(); },
+  advanceTimersToNextFrame: () => { if (__jestCheckFake()) __loop.toFrame(); },
+  runAllTimers: () => { if (__jestCheckFake()) __loop.runAll(); },
+  runAllTimersAsync: async () => { if (__jestCheckFake()) await __loop.runAllAsync(); },
+  runOnlyPendingTimers: () => { if (__jestCheckFake()) __loop.runOnlyPending(); },
+  runOnlyPendingTimersAsync: async () => { if (__jestCheckFake()) await __loop.runOnlyPendingAsync(); },
+  runAllTicks: () => { __jestCheckFake(); },
+  // legacy fake timers only (jest's TypeError under the modern ones)
+  runAllImmediates: () => {
+    if (!__jestLegacy) throw new TypeError('`jest.runAllImmediates()` is only available when using legacy fake timers.');
+    for (const t of __loop.fmacro.filter((x) => x.immediate).sort(__byDue)) if (__loop.fmacro.includes(t)) { __clearTimer(t.id); try { t.cb(); } catch (e) { __reportUncaught(e); } }
+  },
+  clearAllTimers: () => { __loop.dropFake(); },
+  getTimerCount: () => (__jestCheckFake() ? __loop.fmacro.length : 0),
+  // `{ mode: 'manual' | 'nextAsync' | 'interval', delta }`
+  setTimerTickMode: (o) => {
+    if (__jestCheckFake()) __setTickMode(o && o.mode, o && o.delta);
+    return globalThis.jest;
+  },
   // per-test config knobs — no-ops (turbo-test has no per-file timeout/retry gate yet)
   setTimeout: () => globalThis.jest,
   retryTimes: () => globalThis.jest,
@@ -7497,6 +7745,9 @@ globalThis.__ttResetForNextFile = () => {
   // left on would otherwise hold every timer of the next one (turbo-test#168)
   if (__loop.fake) __uninstallFake();
   try { globalThis.vi && globalThis.vi.resetConfig && globalThis.vi.resetConfig(); } catch (e) {}
+  // the next file's config is set afresh (its project's test.fakeTimers, turbo-test#180)
+  __ttConfig = __ttConfigDefaults();
+  __ttConfigSaved = null;
   // NOTE: we do NOT call restoreAllMocks() here. A spyOn spy's mockRestore() redefines a
   // (possibly shared, cached) module export back to the `orig` captured at spy time. This
   // suite's own setup.ts afterEach already restores per test; calling it again between files

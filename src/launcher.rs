@@ -399,7 +399,7 @@ fn scan_number(text: &str, key: &str) -> Option<String> {
 /// The balanced `{...}`/`[...]` (or `(...)`) that OPENS at byte `open_at` — respecting nested
 /// `{}[]()` and quoted strings — returned as `(inner_text, close_index)`. `None` if unterminated.
 /// The close index lets a caller resume scanning PAST the block (so it can't re-match / loop).
-fn balanced_block_end(text: &str, open_at: usize) -> Option<(String, usize)> {
+pub(crate) fn balanced_block_end(text: &str, open_at: usize) -> Option<(String, usize)> {
     let b = text.as_bytes();
     let open = b[open_at];
     let close = match open {
