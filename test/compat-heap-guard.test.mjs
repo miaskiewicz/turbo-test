@@ -45,7 +45,7 @@ function run(fixture, env) {
 
 const statuses = (r) => Object.fromEntries(Object.entries(r.files).map(([k, v]) => [k, v.status]));
 
-test('a reused isolate that outgrows its budget is replaced, not aborted', { todo: 'turbo-test#124' }, () => {
+test('a reused isolate that outgrows its budget is replaced, not aborted', () => {
   const r = run('heap-stress', { TURBO_MAX_HEAP_MB: '700', TURBO_HEAP_RECYCLE_MB: '250' });
   assert.equal(r.signal, null, `the process died:\n${r.err.slice(-2000)}`);
   const expected = Object.fromEntries(
@@ -58,7 +58,7 @@ test('a reused isolate that outgrows its budget is replaced, not aborted', { tod
   assert.ok(recycles.length >= 2 && recycles.length <= 11, `recycles: ${recycles.length}\n${r.err.slice(-2000)}`);
 });
 
-test('a file that runs out of memory fails alone and the run continues', { todo: 'turbo-test#124' }, () => {
+test('a file that runs out of memory fails alone and the run continues', () => {
   const r = run('heap-oom', { TURBO_MAX_HEAP_MB: '256' });
   assert.equal(r.signal, null, `the process died:\n${r.err.slice(-2000)}`);
   assert.deepEqual(

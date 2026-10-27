@@ -380,6 +380,17 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   + vitest's `If this is a long-running test, …` hint (framed at the `it(` call); they carried
   turbo-test's own messages and no frame.
 
+- A file that runs out of heap fails alone (turbo-test#124, from alphajew420's #104): V8's answer
+  to an exhausted heap is to abort the process, which lost every result of a 529-file
+  `isolate: false` run (#79). A near-heap-limit callback now terminates the file, it is reported
+  as `JavaScript heap out of memory (limit N MB): the file was aborted and its isolate discarded`
+  (not retried on the same kind of isolate), the run continues and exits 1 — vitest likewise
+  fails the run without losing the other files. Under isolate reuse a worker whose live heap
+  after a full GC passes `TURBO_HEAP_RECYCLE_MB` (default 60% of the heap limit) gets a new
+  isolate for its next file (setup files re-run), instead of growing until V8 aborts.
+  `TURBO_MAX_HEAP_MB` sets the per-isolate limit, `TURBO_HEAP_LOG=1` prints the heap after
+  every file. The setup-mock snapshot handles are now dropped before their isolate.
+
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain
   1.98.0). The 28 clippy findings are fixed and the crate is rustfmt-clean (turbo-test#62).

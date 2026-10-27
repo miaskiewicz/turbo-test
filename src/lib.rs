@@ -13,6 +13,7 @@ pub mod coverage_branch;
 pub mod esm_cjs;
 pub mod failure;
 pub mod graph;
+pub mod heap_guard;
 pub mod highlight;
 pub mod human;
 pub mod launcher;
