@@ -1649,3 +1649,111 @@ await t('listener this and order onload last', () => run((r, log, ev) => { r.onl
     }
     assert_eq!(got.lines().count(), want.lines().count());
 }
+
+#[test]
+#[ignore = "turbo-test#138: fails until the fix"]
+fn expect_message_prefixes_the_failure_like_vitest() {
+    // turbo-test#138: `expect(value, message)` prefixes `message: ` to the failure of every chai
+    // and jest-style matcher (also through .not, .resolves / .rejects and expect.extend
+    // matchers), but not to a TypeError thrown before the assertion or to the .resolves
+    // rejection; '' and undefined add nothing, a number is stringified. The default reporter
+    // shows the prefixed message. Expected: vitest 4.1.12 (each row is [case, [name, message]]).
+    let p = Project::new("rc-expect-message");
+    p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "t.test.js",
+        r##"import { test, expect, vi } from 'vitest'
+import * as fs from 'node:fs'
+test('msg', async () => {
+const rows = []
+const t = async (name, f) => { let r; try { await f(); r = 'passed' } catch (e) { r = [e.name, e.message] } rows.push(JSON.stringify([name, r])) }
+const spy = vi.fn()
+const ext = { toBeFoo(received) { return { pass: received === 'foo', message: () => `expected ${received} to be foo` } } }
+expect.extend(ext)
+await t('toBe', () => expect(1, 'GOT<x>').toBe(2))
+await t('not.toBe', () => expect(1, 'M').not.toBe(1))
+await t('toEqual', () => expect({ a: 1 }, 'M').toEqual({ a: 2 }))
+await t('toStrictEqual', () => expect([1], 'M').toStrictEqual([2]))
+await t('toBeTruthy', () => expect(0, 'M').toBeTruthy())
+await t('toBeNull', () => expect(1, 'M').toBeNull())
+await t('toBeDefined', () => expect(undefined, 'M').toBeDefined())
+await t('toBeGreaterThan', () => expect(1, 'M').toBeGreaterThan(2))
+await t('toBeCloseTo', () => expect(1, 'M').toBeCloseTo(2))
+await t('toContain', () => expect([1], 'M').toContain(2))
+await t('toContainEqual', () => expect([{ a: 1 }], 'M').toContainEqual({ a: 2 }))
+await t('toHaveLength', () => expect([1], 'M').toHaveLength(2))
+await t('toHaveProperty', () => expect({}, 'M').toHaveProperty('a'))
+await t('toMatch', () => expect('abc', 'M').toMatch(/x/))
+await t('toMatchObject', () => expect({ a: 1 }, 'M').toMatchObject({ a: 2 }))
+await t('toBeInstanceOf', () => expect(1, 'M').toBeInstanceOf(Map))
+await t('toBeTypeOf', () => expect(1, 'M').toBeTypeOf('string'))
+await t('toThrow no throw', () => expect(() => {}, 'M').toThrow())
+await t('toThrow wrong', () => expect(() => { throw new Error('a') }, 'M').toThrow('b'))
+await t('toHaveBeenCalled', () => expect(spy, 'M').toHaveBeenCalled())
+await t('toHaveBeenCalledWith', () => expect(spy, 'M').toHaveBeenCalledWith(1))
+await t('toHaveBeenCalledTimes', () => expect(spy, 'M').toHaveBeenCalledTimes(2))
+await t('toHaveReturned', () => expect(spy, 'M').toHaveReturned())
+await t('toSatisfy', () => expect(1, 'M').toSatisfy((x) => x > 2))
+await t('custom matcher', () => expect('bar', 'M').toBeFoo())
+await t('not spy', () => expect(1, 'M').toHaveBeenCalled())
+await t('resolves', () => expect(Promise.resolve(1), 'M').resolves.toBe(2))
+await t('rejects', () => expect(Promise.reject(new Error('e')), 'M').rejects.toThrow('x'))
+await t('resolves rejected', () => expect(Promise.reject(new Error('e')), 'M').resolves.toBe(1))
+await t('empty message', () => expect(1, '').toBe(2))
+await t('number message', () => expect(1, 5).toBe(2))
+await t('undefined message', () => expect(1, undefined).toBe(2))
+await t('passes', () => expect(1, 'M').toBe(1))
+await t('soft', () => { expect.soft(1, 'S').toBe(1); return 'ok' })
+fs.writeFileSync('out.txt', rows.join('\n'))
+})
+test('reported', () => { expect(1, 'GOT<x>').toBe(2) })
+"##,
+    );
+    let r = turbo_test(&p.dir, &["t.test.js"], &[("NO_COLOR", "1")]);
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    assert!(
+        r.all()
+            .contains("AssertionError: GOT<x>: expected 1 to be 2 // Object.is equality"),
+        "{}",
+        r.all()
+    );
+    let got = std::fs::read_to_string(p.path("out.txt")).unwrap();
+    let want = r##"["toBe",["AssertionError","GOT<x>: expected 1 to be 2 // Object.is equality"]]
+["not.toBe",["AssertionError","M: expected 1 not to be 1 // Object.is equality"]]
+["toEqual",["AssertionError","M: expected { a: 1 } to deeply equal { a: 2 }"]]
+["toStrictEqual",["AssertionError","M: expected [ 1 ] to strictly equal [ 2 ]"]]
+["toBeTruthy",["AssertionError","M: expected +0 to be truthy"]]
+["toBeNull",["AssertionError","M: expected 1 to be null"]]
+["toBeDefined",["AssertionError","M: expected undefined to be defined"]]
+["toBeGreaterThan",["AssertionError","M: expected 1 to be greater than 2"]]
+["toBeCloseTo",["AssertionError","M: expected 1 to be close to 2, received difference is 1, but expected 0.005"]]
+["toContain",["AssertionError","M: expected [ 1 ] to include 2"]]
+["toContainEqual",["AssertionError","M: expected [ { a: 1 } ] to deep equally contain { a: 2 }"]]
+["toHaveLength",["AssertionError","M: expected [ 1 ] to have a length of 2 but got 1"]]
+["toHaveProperty",["AssertionError","M: expected {} to have property \"a\""]]
+["toMatch",["AssertionError","M: expected 'abc' to match /x/"]]
+["toMatchObject",["AssertionError","M: expected { a: 1 } to match object { a: 2 }"]]
+["toBeInstanceOf",["AssertionError","M: expected 1 to be an instance of Map"]]
+["toBeTypeOf",["AssertionError","M: expected 1 to be type of 'string'"]]
+["toThrow no throw",["AssertionError","M: expected [Function] to throw an error"]]
+["toThrow wrong",["AssertionError","M: expected [Function] to throw error including 'b' but got 'a'"]]
+["toHaveBeenCalled",["AssertionError","M: expected \"vi.fn()\" to be called at least once"]]
+["toHaveBeenCalledWith",["AssertionError","M: expected \"vi.fn()\" to be called with arguments: [ 1 ]\n\nNumber of calls: 0\n"]]
+["toHaveBeenCalledTimes",["AssertionError","M: expected \"vi.fn()\" to be called 2 times, but got 0 times"]]
+["toHaveReturned",["AssertionError","M: expected \"vi.fn()\" to be successfully called at least once"]]
+["toSatisfy",["Error","M: expect(received).toSatisfy()\n\nExpected value to satisfy:\n[Function anonymous]\n\nReceived:\n1"]]
+["custom matcher",["Error","M: expected bar to be foo"]]
+["not spy",["TypeError","1 is not a spy or a call to a spy!"]]
+["resolves",["AssertionError","M: expected 1 to be 2 // Object.is equality"]]
+["rejects",["AssertionError","M: expected [Function] to throw error including 'x' but got 'e'"]]
+["resolves rejected",["AssertionError","promise rejected \"Error: e\" instead of resolving"]]
+["empty message",["AssertionError","expected 1 to be 2 // Object.is equality"]]
+["number message",["AssertionError","5: expected 1 to be 2 // Object.is equality"]]
+["undefined message",["AssertionError","expected 1 to be 2 // Object.is equality"]]
+["passes","passed"]
+["soft","passed"]"##;
+    for (g, w) in got.lines().zip(want.lines()) {
+        assert_eq!(g, w);
+    }
+    assert_eq!(got.lines().count(), want.lines().count());
+}
