@@ -31,8 +31,9 @@ test('the advance functions throw without fake timers', async () => {
     ['getTimerCount', 'MSG'], ['clearAllTimers', 'vi'], ['runAllTicks', 'MSG'], ['advanceTimersToNextFrame', 'MSG'],
     ['advanceTimersByTimeAsync', 'MSG'], ['runAllTimersAsync', 'MSG'], ['runOnlyPendingTimersAsync', 'MSG'], ['advanceTimersToNextTimerAsync', 'MSG'],
   ])
-  // a synchronous throw: the async ones throw on call, not on await
-  expect(() => vi.advanceTimersByTimeAsync(1)).not.toThrow()
+  // the async ones reject: no throw on call
+  const p = vi.advanceTimersByTimeAsync(1)
+  await expect(p).rejects.toThrow(MSG)
 })
 test('with fake timers they return vi (getTimerCount the count), after useRealTimers they throw again', async () => {
   vi.useFakeTimers()
@@ -190,19 +191,16 @@ fn passes(name: &str, file: &str, body: &str, tests: usize) {
 }
 
 #[test]
-#[ignore = "turbo-test#171: fails until the fix"]
 fn advance_functions_throw_without_fake_timers() {
     passes("rc-ft-171", "api171.test.js", API_171, 3);
 }
 
 #[test]
-#[ignore = "turbo-test#172: fails until the fix"]
 fn performance_hrtime_and_the_fake_timer_options() {
     passes("rc-ft-172", "opts172.test.js", OPTS_172, 6);
 }
 
 #[test]
-#[ignore = "turbo-test#174: fails until the fix"]
 fn wait_for_and_wait_until_are_vitests() {
     let p = Project::new("rc-ft-174");
     p.file("package.json", r#"{ "type": "module" }"#);

@@ -344,6 +344,8 @@ export interface ViAPI {
   advanceTimersByTimeAsync(ms: number): Promise<ViAPI>;
   advanceTimersToNextTimer(): ViAPI;
   advanceTimersToNextTimerAsync(): Promise<ViAPI>;
+  advanceTimersToNextFrame(): ViAPI;
+  runAllTicks(): ViAPI;
   runAllTimers(): ViAPI;
   runAllTimersAsync(): Promise<ViAPI>;
   runOnlyPendingTimers(): ViAPI;
