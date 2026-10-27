@@ -1456,23 +1456,19 @@ pub(crate) fn cjs_literal_export_names(src: &str) -> Option<Vec<String>> {
         if i >= b.len() || b[i] == b'}' {
             break;
         }
+        // Some(name) for a key (None when it is not a well-formed string), None for a spread
         let key = if b[i..].starts_with(b"...") {
             i += 3;
             ws(&mut i);
             ident(&mut i)?;
             None
         } else if b[i] == b'\'' || b[i] == b'"' {
-            let q = b[i];
-            let s = i + 1;
-            let len = b[s..].iter().position(|&c| c == q || c == b'\\')?;
-            if b[s + len] != q {
-                break;
-            }
-            i = s + len + 1;
-            Some(String::from_utf8_lossy(&b[s..s + len]).into_owned())
+            let (key, end) = string_key(b, i)?;
+            i = end;
+            Some(key)
         } else {
             match ident(&mut i) {
-                Some(k) => Some(k),
+                Some(k) => Some(Some(k)),
                 None => break,
             }
         };
@@ -1486,7 +1482,7 @@ pub(crate) fn cjs_literal_export_names(src: &str) -> Option<Vec<String>> {
                 }
                 ws(&mut i);
             }
-            names.push(k);
+            names.extend(k);
         }
         if i < b.len() && b[i] == b',' {
             i += 1;
@@ -1618,6 +1614,65 @@ mod tests_dynimport {
         )
         .unwrap();
         assert!(o.contains("require(__tt_spec))))(import_s_1.p)"), "{o}");
+    }
+}
+
+/// The string literal starting at `b[at]` (its quote) as cjs-module-lexer reads an object key:
+/// its escapes decoded (`\\<line break>` keeps the line break), `None` for a value that is not
+/// well-formed UTF-16 (a lone surrogate); with the index past its closing quote. `None` when the
+/// literal is unterminated (turbo-test#189).
+fn string_key(b: &[u8], at: usize) -> Option<(Option<String>, usize)> {
+    let q = b[at];
+    let mut units: Vec<u16> = Vec::new();
+    let mut i = at + 1;
+    let hex = |s: &[u8]| u32::from_str_radix(std::str::from_utf8(s).ok()?, 16).ok();
+    loop {
+        let c = *b.get(i)?;
+        if c == q {
+            return Some((String::from_utf16(&units).ok(), i + 1));
+        }
+        if c != b'\\' {
+            // a run of source text up to the next quote or escape, as UTF-16
+            let len = b[i..].iter().position(|&c| c == q || c == b'\\')?;
+            units.extend(String::from_utf8_lossy(&b[i..i + len]).encode_utf16());
+            i += len;
+            continue;
+        }
+        let e = *b.get(i + 1)?;
+        i += 2;
+        let cp = match e {
+            b'n' => 0x0a,
+            b't' => 0x09,
+            b'r' => 0x0d,
+            b'b' => 0x08,
+            b'f' => 0x0c,
+            b'v' => 0x0b,
+            b'0' => 0,
+            b'x' => {
+                i += 2;
+                hex(b.get(i - 2..i)?)?
+            }
+            b'u' if b.get(i) == Some(&b'{') => {
+                let len = b[i..].iter().position(|&c| c == b'}')?;
+                let cp = hex(&b[i + 1..i + len])?;
+                i += len + 1;
+                cp
+            }
+            b'u' => {
+                i += 4;
+                hex(b.get(i - 4..i)?)?
+            }
+            _ => {
+                // any other character stands for itself (a line break included)
+                let ch = String::from_utf8_lossy(&b[i - 1..]).chars().next()?;
+                i += ch.len_utf8() - 1;
+                ch as u32
+            }
+        };
+        match char::from_u32(cp) {
+            Some(ch) => units.extend(ch.encode_utf16(&mut [0; 2]).iter()),
+            None => units.push(cp as u16),
+        }
     }
 }
 

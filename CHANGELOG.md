@@ -20,6 +20,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - A file that runs out of heap fails with the isolate's own limit in its error,
   `JavaScript heap out of memory (limit 64 MB)` under `TURBO_MAX_HEAP_MB=64`; it named the limit
   plus the 192 MB the heap guard grants the isolate to unwind (`limit 256 MB`) (turbo-test#188).
+- `import * as ns` of a package whose CommonJS module is `module.exports = { a, 'b\nc': d, e }`
+  lists Node's names (`a`, `b\nc`, `e`): a string key's escapes are decoded as cjs-module-lexer
+  decodes them (a key that is not well-formed UTF-16 is left out); the names stopped at the first
+  escaped key (turbo-test#189).
 
 ### Fixed — the `vi`, mock and `jest` surface is vitest 4.1.12's and jest 30.5.2's (K8, turbo-test#179–#183)
 - The members of `vi`, of a `vi.fn()` / `vi.spyOn()` mock and its `mock`, and of `jest` were

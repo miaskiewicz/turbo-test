@@ -959,7 +959,6 @@ fn export_order_is_source_order() {
 }
 
 #[test]
-#[ignore = "turbo-test#189: fails until the fix"]
 fn cjs_literal_export_names_decode_string_keys_as_the_lexer() {
     // Node 26's cjs-module-lexer (`Object.keys` of `import * as ns` of the module, turbo-test#189):
     // a string key's escapes are decoded and the names go on past it; a key that is not a well-
