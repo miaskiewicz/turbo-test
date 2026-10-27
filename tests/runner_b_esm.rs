@@ -46,7 +46,8 @@ describe('g', () => {
     const p = await import('node:path'); expect(typeof p.join).toBe('function');
     const v = await import('vitest'); expect(typeof v.vi.fn).toBe('function');
     await expect(import('./missing.mjs')).rejects.toThrow("Cannot find module '/missing.mjs' imported from ");
-    await expect(import('./bad.mjs')).rejects.toThrow("Unexpected token '='");
+    // vite's parse error, as vitest's import() (turbo-test#108)
+    await expect(import('./bad.mjs')).rejects.toThrow(expect.objectContaining({ name: 'RolldownError', message: expect.stringContaining('Parse failure: Parse failed with 1 error:\nUnexpected token\n') }));
   });
 });
 "#,
@@ -271,19 +272,20 @@ fn load_errors_name_the_failing_phase() {
         ),
         "{o}"
     );
-    // a module of the graph that does not compile: its SyntaxError (turbo-test#99)
-    assert!(line_for(o, "depsyn.test.js").ends_with("(SyntaxError: Unexpected token '=')"));
-    assert!(line_for(o, "miss.test.js").contains("(graph load failed)"));
-    assert!(line_for(o, "entrysyn.test.js").ends_with("(SyntaxError: Unexpected token ')')"));
+    // a module of the graph that does not parse: vite's parse error (turbo-test#99, #108)
+    assert!(line_for(o, "depsyn.test.js")
+        .ends_with("(RolldownError: Parse failure: Parse failed with 1 error:"));
+    assert!(line_for(o, "miss.test.js").ends_with(&format!(
+        "(Error: Cannot find module './missing.mjs' imported from {}/miss.test.js)",
+        std::fs::canonicalize(&p.dir).unwrap().display()
+    )));
+    assert!(line_for(o, "entrysyn.test.js")
+        .ends_with("(Error: Failed to parse source for import analysis because the content contains invalid JS syntax. If you are using JSX, make sure to name the file with the .jsx or .tsx extension.)"));
     assert!(!o.contains("Uncaught"), "{o}");
     assert!(line_for(o, "evalthrow.test.js").contains("(module errored: Error: top boom)"));
     assert!(line_for(o, "tla.test.js").contains("(module errored: Error: tla boom)"));
     assert!(line_for(o, "ok.test.js").starts_with("PASS"));
-    assert!(
-        r.stderr.contains("cannot resolve ./missing.mjs from "),
-        "{}",
-        r.all()
-    );
+    assert!(!r.stderr.contains("cannot resolve"), "{}", r.all());
 }
 
 #[test]

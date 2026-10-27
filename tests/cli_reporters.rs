@@ -841,7 +841,6 @@ fn a_compile_error_is_the_files_syntax_error() {
 /// 4.1.12 reports them (the json `message`, the Failed Suites header). turbo-test said `graph
 /// load failed` (printing `cannot resolve …` to stderr three times) and V8's SyntaxError.
 #[test]
-#[ignore = "turbo-test#108: fails until the fix"]
 fn load_errors_are_vites() {
     for esbuild in [false, true] {
         let p = Project::new("rep-load-errors");
@@ -905,7 +904,11 @@ fn load_errors_are_vites() {
             r.all()
         );
         // the Failed Suites headers: the error's name and message
-        let r = turbo_test(&p.dir, &[], &[("TURBO_LEGACY_REPORTER", "0")]);
+        let r = turbo_test(
+            &p.dir,
+            &[],
+            &[("TURBO_LEGACY_REPORTER", "0"), ("NO_COLOR", "1")],
+        );
         assert_eq!(r.code, Some(1), "{}", r.all());
         for header in [
             "\nRolldownError: Parse failure: Parse failed with 1 error:\nUnexpected token\n".to_string(),

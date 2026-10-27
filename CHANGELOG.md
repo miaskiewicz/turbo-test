@@ -292,6 +292,17 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `objectContaining` / `arrayContaining` without `iterableEquality`. Only own enumerable string
   keys were compared, so `new Date(1)` equalled `new Date(2)`, `new Map([[1, 2]])` equalled
   `new Map([[1, 3]])`, `new Error('a')` equalled `new Error('b')`.
+- A test file whose static import does not resolve, or whose JavaScript does not parse, fails
+  with vitest's error (turbo-test#108): `Cannot find module './x.mjs' imported from <importer>`
+  (`Cannot find package 'p' imported from …` for a bare specifier, `No such built-in module`
+  for an unknown `node:` one) on both loader paths — a `require()` the source wrote keeps
+  Node's `MODULE_NOT_FOUND` with the require stack —, and for a `.js` / `.mjs` / `.cjs` module
+  vite's parse errors: its import analysis's (`Failed to parse source for import analysis …`)
+  when es-module-lexer rejects the source, else rolldown's `RolldownError: Parse failure: Parse
+  failed with 1 error: …` with the code frame and `At file: /syn.mjs:1:13`; a `require()`d
+  module and a node_modules dependency keep V8's SyntaxError, as Node gives it to vitest.
+  turbo-test said `graph load failed` (printing `cannot resolve …` to stderr three times) and
+  V8's SyntaxError.
 
 ### CI
 - `lint` job: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (toolchain
