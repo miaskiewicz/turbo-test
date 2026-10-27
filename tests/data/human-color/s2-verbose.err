@@ -1,0 +1,62 @@
+[90mstderr[2m | a.test.ts[2m > [22m[2mtop <&> "q"
+[22m[39merr line
+
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 3 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22mouter[2m > [22minner[2m > [22mfails
+[31m[1mAssertionError[22m: expected 1 to be 2 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 2[39m
+[31m+ 1[39m
+
+[36m [2m❯[22m a.test.ts:[2m5:35[22m[39m
+    [90m  3|[39m   [34mit[39m([32m'passes'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([34m1[39m)[33m.[39m[34mtoBe[39m([34m1[39m)[33m;[39m })[33m;[39m
+    [90m  4|[39m   [34mdescribe[39m([32m'inner'[39m[33m,[39m () [33m=>[39m {
+    [90m  5|[39m     [34mit[39m([32m'fails'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([34m1[39m)[33m.[39m[34mtoBe[39m([34m2[39m)[33m;[39m })[33m;[39m
+    [90m   |[39m                                   [31m^[39m
+    [90m  6|[39m     it[33m.[39m[34mskip[39m([32m'skipped'[39m[33m,[39m () [33m=>[39m {})[33m;[39m
+    [90m  7|[39m   })[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22mobjects
+[31m[1mAssertionError[22m: expected { a: 1, b: [ 1, 2 ] } to deeply equal { a: 2, b: [ 1, 2 ] }[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "a": 2,[39m
+[31m+   "a": 1,[39m
+[2m    "b": [[22m
+[2m      1,[22m
+[2m      2,[22m
+[2m    ],[22m
+[2m  }[22m
+
+[36m [2m❯[22m a.test.ts:[2m10:51[22m[39m
+    [90m  8|[39m   it[33m.[39m[34mtodo[39m([32m'todo'[39m)[33m;[39m
+    [90m  9|[39m })[33m;[39m
+    [90m 10|[39m it('objects', () => { expect({ a: 1, b: [1, 2] }).toEqual({ a: 2, b: […
+    [90m   |[39m                                                   [31m^[39m
+    [90m 11|[39m [34mit[39m([32m'throws'[39m[33m,[39m () [33m=>[39m { [35mthrow[39m [35mnew[39m [33mTypeError[39m([32m'bad <thing> & "x"'[39m)[33m;[39m })[33m;[39m
+    [90m 12|[39m it('top <&> "q"', () => { console.log('out line'); console.error('err …
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22mthrows
+[31m[1mTypeError[22m: bad <thing> & "x"[39m
+[36m [2m❯[22m a.test.ts:[2m11:28[22m[39m
+    [90m  9|[39m })[33m;[39m
+    [90m 10|[39m it('objects', () => { expect({ a: 1, b: [1, 2] }).toEqual({ a: 2, b: […
+    [90m 11|[39m [34mit[39m([32m'throws'[39m[33m,[39m () [33m=>[39m { [35mthrow[39m [35mnew[39m [33mTypeError[39m([32m'bad <thing> & "x"'[39m)[33m;[39m })[33m;[39m
+    [90m   |[39m                            [31m^[39m
+    [90m 12|[39m it('top <&> "q"', () => { console.log('out line'); console.error('err …
+    [90m 13|[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯[22m[39m
+

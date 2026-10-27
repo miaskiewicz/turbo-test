@@ -1,27 +1,19 @@
 
  RUN  v4.1.12 <root>
 
- ↓ a.test.ts > noted <ms> [not today]
- ↓ a.test.ts > quiet <ms>
- ↓ a.test.ts > static
- ✓ a.test.ts > d > annotated <ms>
-
-   ❯ a.test.ts:6:51 notice
-     ↳ note one
-   ❯ a.test.ts:6:79 notice
-     ↳ note two
-   ❯ a.test.ts:6:107 warning
-     ↳ careful
-
- × a.test.ts > d > fails <ms>
-   → expected 1 to be 2 // Object.is equality
-
-   ❯ a.test.ts:7:47 notice
-     ↳ before failing
-
+ × a.test.ts > short strings <ms>
+   → expected 'hello world' to be 'hello there' // Object.is equality
+ × a.test.ts > lines <ms>
+   → expected 'a\nb\nc' to be 'a\nB\nc' // Object.is equality
+ × a.test.ts > arrays <ms>
+   → expected [ 1, 2, 3 ] to deeply equal [ 1, 3 ]
+ × a.test.ts > nested <ms>
+   → expected { a: 'x', n: { m: [ true, null ] } } to deeply equal { a: 'y', n: { m: [ false, null ] } }
+ × a.test.ts > numbers <ms>
+   → expected 0.30000000000000004 to be 0.3 // Object.is equality
 
  Test Files  1 failed (1)
-      Tests  1 failed | 1 passed | 3 skipped (5)
+      Tests  5 failed (5)
    Start at  <time>
    Duration  <duration>
 

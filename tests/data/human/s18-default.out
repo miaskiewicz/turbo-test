@@ -1,0 +1,16 @@
+
+ RUN  v4.1.12 <root>
+
+ ❯ a.test.ts (6 tests | 6 failed) <ms>
+   × aligned <ms>
+   × long <ms>
+   × json <ms>
+   × types <ms>
+   × trailing <ms>
+   × nothing common <ms>
+
+ Test Files  1 failed (1)
+      Tests  6 failed (6)
+   Start at  <time>
+   Duration  <duration>
+

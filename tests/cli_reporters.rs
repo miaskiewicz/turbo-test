@@ -812,6 +812,18 @@ fn a_compile_error_is_the_files_syntax_error() {
     let suites = format!(
         "\n⎯⎯⎯⎯⎯⎯ Failed Suites 3 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  a.test.ts [ a.test.ts ]\nSyntaxError: {MSG}\n{line}[1/3]⎯\n\n FAIL  b.test.ts [ b.test.ts ]\n FAIL  c.test.ts [ c.test.ts ]\nSyntaxError: {MSG}\n{line}[2/3]⎯\n\n"
     );
+    let fail =
+        |f: &str| format!("\x1b[41m\x1b[1m FAIL \x1b[22m\x1b[49m {f}\x1b[2m [ {f} ]\x1b[22m\n");
+    let err = format!("\x1b[31m\x1b[1mSyntaxError\x1b[22m: {MSG}\x1b[39m\n");
+    let divider = |n: u32| format!("\x1b[31m\x1b[2m{line}[{n}/3]⎯\x1b[22m\x1b[39m\n\n");
+    let suites_coloured = format!(
+        "\n\x1b[31m⎯⎯⎯⎯⎯⎯\x1b[39m\x1b[1m\x1b[41m Failed Suites 3 \x1b[49m\x1b[22m\x1b[31m⎯⎯⎯⎯⎯⎯⎯\x1b[39m\n\n{}{err}{}{}{}{err}{}",
+        fail("a.test.ts"),
+        divider(1),
+        fail("b.test.ts"),
+        fail("c.test.ts"),
+        divider(2)
+    );
     for esbuild in [false, true] {
         let p = Project::new("rep-compile-error");
         if esbuild {
@@ -843,12 +855,24 @@ fn a_compile_error_is_the_files_syntax_error() {
             r.all()
         );
         assert!(!r.all().contains("graph load failed"), "{}", r.all());
-        let r = turbo_test(&p.dir, &[], &[("TURBO_LEGACY_REPORTER", "0")]);
+        let r = turbo_test(
+            &p.dir,
+            &[],
+            &[("TURBO_LEGACY_REPORTER", "0"), ("NO_COLOR", "1")],
+        );
         assert_eq!(r.code, Some(1), "{}", r.all());
         assert!(
             r.stderr.ends_with(&suites),
             "esbuild={esbuild}\n{}",
             r.all()
+        );
+        // without NO_COLOR vitest colours it even in a pipe (turbo-test#94)
+        let c = turbo_test(&p.dir, &[], &[("TURBO_LEGACY_REPORTER", "0")]);
+        assert_eq!(c.code, Some(1), "{}", c.all());
+        assert!(
+            c.stderr.ends_with(&suites_coloured),
+            "esbuild={esbuild}\n{}",
+            c.all()
         );
         assert!(
             !r.stdout.contains("Uncaught"),
