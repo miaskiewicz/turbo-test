@@ -5,6 +5,23 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Fixed
+
+- A worker that runs out of V8 heap no longer aborts the whole run. V8's answer to an exhausted heap
+  is `FatalProcessOutOfMemory`, which kills every worker and loses the results of every file already
+  run (a 529-file suite under isolate reuse died at 2.0 GB with no per-file output). A near-heap-limit
+  guard now terminates the file that hit the limit, reports it as an error
+  (`JavaScript heap out of memory`) and the run continues; in the reuse path the worker's isolate is
+  also replaced once its live heap (after a full GC) passes `TURBO_HEAP_RECYCLE_MB` (default 60% of
+  the limit), so a reused isolate cannot grow until it dies. `TURBO_MAX_HEAP_MB` sets the per-isolate
+  limit, `TURBO_HEAP_LOG` prints the heap after every file and `TURBO_PROGRESS` prints each file's
+  result as it finishes (the summary only prints at the end). Part of #79.
+- `vi.fn()`/`vi.spyOn()` spies were registered in a strong, never-truncated array, and a spy keeps the
+  arguments and receiver of every call, so under isolate reuse the props, React elements and DOM nodes
+  of every test of every finished file stayed reachable until the worker ended. The registry behind
+  `vi.clearAllMocks`/`resetAllMocks`/`restoreAllMocks` now holds spies weakly and a finished file's
+  spies have their call history cleared at the file boundary. Part of #79.
+
 ### Release procedure
 
 - Determine missing V8 dependency versions through the official registry API,

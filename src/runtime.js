@@ -1695,7 +1695,7 @@ function makeSpy(impl) {
 function __automock(mod, depth) {
   depth = depth || 0;
   if (typeof mod === 'function') {
-    const m = makeSpy(); __spies.push(m);
+    const m = __trackSpy(makeSpy());
     // preserve static members / prototype methods as mocks too (auto-mocked class)
     if (depth < 3) { for (const k of Object.keys(mod)) { try { m[k] = __automock(mod[k], depth + 1); } catch (e) {} } }
     return m;
@@ -1711,9 +1711,28 @@ function __automock(mod, depth) {
   }
   return mod;
 }
-const __spies = [];
+// Registry behind vi.clearAllMocks/resetAllMocks/restoreAllMocks. Held WEAKLY and tagged with the
+// file generation it was created in: under isolate reuse every spy ever made used to stay
+// registered for the worker's life, and each one keeps its `mock.calls` / `instances` — the props,
+// React elements and DOM nodes of every call of every test of every file — reachable (the heap of
+// a 529-file React suite grew until V8 aborted; miaskiewicz/turbo-test#79). A spy something else
+// still references (an installed spyOn, a kept helper module's vi.fn) stays registered.
+let __spyRefs = [];
+let __spyGen = 0;
+let __spyCompactAt = 4096;
+function __trackSpy(s) {
+  __spyRefs.push({ r: new WeakRef(s), g: __spyGen });
+  if (__spyRefs.length > __spyCompactAt) {
+    __spyRefs = __spyRefs.filter((e) => e.r.deref() !== undefined);
+    __spyCompactAt = Math.max(4096, __spyRefs.length * 2);
+  }
+  return s;
+}
+function __eachSpy(f) {
+  for (const e of __spyRefs.slice()) { const s = e.r.deref(); if (s) f(s); }
+}
 globalThis.vi = {
-  fn: (impl) => { const s = makeSpy(impl); __spies.push(s); return s; },
+  fn: (impl) => __trackSpy(makeSpy(impl)),
   spyOn: (obj, key) => {
     const orig = obj[key];
     // Do NOT bind orig to obj — for a prototype-method spy (spyOn(Cls.prototype, 'm')) the
@@ -1725,8 +1744,7 @@ globalThis.vi = {
     const define = (v) => { try { Object.defineProperty(obj, key, { configurable: true, enumerable: true, writable: true, value: v }); } catch (e) { try { obj[key] = v; } catch (e2) {} } };
     s.mockRestore = () => define(orig);
     define(s);
-    __spies.push(s);
-    return s;
+    return __trackSpy(s);
   },
   // Record (specifier, evaluated-exports) into a queue the native loader drains after the
   // module runs, registering the mock keyed by the resolved absolute path. The factory runs
@@ -1765,9 +1783,9 @@ globalThis.vi = {
   },
   doMock: (spec, factory) => globalThis.vi.mock(spec, factory),
   doUnmock: (spec) => globalThis.vi.unmock(spec),
-  clearAllMocks: () => { __spies.forEach((s) => s.mockClear()); },
-  resetAllMocks: () => { __spies.forEach((s) => s.mockReset()); },
-  restoreAllMocks: () => { __spies.forEach((s) => { if (s.mockRestore) s.mockRestore(); }); },
+  clearAllMocks: () => { __eachSpy((s) => s.mockClear()); },
+  resetAllMocks: () => { __eachSpy((s) => s.mockReset()); },
+  restoreAllMocks: () => { __eachSpy((s) => { if (s.mockRestore) s.mockRestore(); }); },
   stubGlobal: (k, v) => {
     const m = globalThis.__stubbedGlobals || (globalThis.__stubbedGlobals = new Map());
     if (!m.has(k)) m.set(k, { had: k in globalThis, val: globalThis[k] });
@@ -2196,10 +2214,10 @@ globalThis.__ttCaptureHookBaseline = () => {
     ba: root.hooks.ba.slice(),
     aa: root.hooks.aa.slice(),
   };
-  // Spies created during setup (e.g. the analytics trackEvent vi.fn()) are the first entries in
-  // __spies and must persist; everything appended by a test file is per-file and must be dropped
-  // on reset. Record the setup count as the truncation point.
-  globalThis.__ttSpyBaseline = __spies.length;
+  // Spies created during setup (e.g. the analytics trackEvent vi.fn()) belong to generation 0 and
+  // keep their history; each test file's spies are generation 1, 2, ... and have their recorded
+  // calls dropped when the file ends (see __ttResetForNextFile).
+  __spyGen = 1;
 };
 
 // Per-file reset, modeled on vitest's isolate:false loop (vitest/dist .../base*.js): with
@@ -2223,6 +2241,13 @@ globalThis.__ttResetForNextFile = () => {
   // setup) is the lesser evil and handled elsewhere.
   current = root;
   globalThis.__tt.hasOnly = false;
+  // Drop the call history of the spies this file made (mockClear keeps implementations and leaves
+  // spyOn installed): `mock.calls`/`instances` hold every call's arguments and receiver, which in a
+  // reused isolate would stay reachable for the life of the worker.
+  for (const e of __spyRefs) {
+    if (e.g === __spyGen) { const s = e.r.deref(); if (s) s.mockClear(); }
+  }
+  __spyGen++;
   // mock-prepass scratch (turbo-test specific) — must be empty before the next file hoists.
   globalThis.__pendingMocks = [];
   globalThis.__hoistedCache = [];
