@@ -79,6 +79,6 @@ codegen-units = 1
 # and re-lock (`cargo update -p turbo-dom -p turbo-dom-browser-env -p turbo-dom-v8`)
 # once those versions are on crates.io, before tagging (RELEASING.md).
 [patch.crates-io]
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "f0fb3063a17a836d9f0fda4a14aa34a8deea7b12" }
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "f0fb3063a17a836d9f0fda4a14aa34a8deea7b12" }
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "d660013fd436a6a7037067995a5a5b995dbea15f" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "d660013fd436a6a7037067995a5a5b995dbea15f" }
 turbo-dom-v8 = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "e9b36c8733ef1cf1073f7053a8c5931381c978c5" }
