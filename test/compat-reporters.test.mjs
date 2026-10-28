@@ -93,8 +93,9 @@ test('--reporter tap writes to --outputFile too', () => {
 });
 
 // ---------------------------------------------------------------- verbose
+const NO_COLOR = { env: { ...process.env, NO_COLOR: '1' } };
 test('--reporter verbose prints each full test name with pass/fail mark', () => {
-  const { out } = run(['--reporter', 'verbose', MIXED]);
+  const { out } = run(['--reporter', 'verbose', MIXED], NO_COLOR);
   assert.match(out, /alpha|math > adds/); // adds appears
   assert.match(out, /math > adds/);
   assert.match(out, /math > fails subtraction/);
@@ -110,7 +111,6 @@ test('--reporter dot prints one char per file and still exits by status', () => 
 });
 
 // vitest's default reporter (turbo-test#94): a passing file is its module line
-const NO_COLOR = { env: { ...process.env, NO_COLOR: '1' } };
 test('--reporter default prints vitest\'s module line', () => {
   const { code, out } = run(['--reporter', 'default', NAMES], NO_COLOR);
   assert.equal(code, 0);

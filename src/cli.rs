@@ -1530,9 +1530,16 @@ pub fn human_kind_for(
 /// `new Date(ms).toTimeString().split(' ')[0]`: the local `HH:MM:SS` (`TZ` decides the zone).
 pub fn local_hms(epoch_ms: f64) -> String {
     let secs = (epoch_ms / 1000.0) as libc::time_t;
-    // SAFETY: localtime_r writes into `tm`, which outlives the call.
+    // SAFETY: localtime_r / localtime_s write into `tm`, which outlives the call.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&secs, &mut tm) };
+    #[cfg(not(windows))]
+    unsafe {
+        libc::localtime_r(&secs, &mut tm)
+    };
+    #[cfg(windows)]
+    unsafe {
+        libc::localtime_s(&mut tm, &secs)
+    };
     format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
 

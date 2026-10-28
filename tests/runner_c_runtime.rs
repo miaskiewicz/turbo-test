@@ -655,7 +655,7 @@ it('percent-encodes', () => {
 }
 
 /// turbo-test#84: `node:url` `fileURLToPath` decodes and validates like Node, `pathToFileURL`
-/// returns an encoded `URL` (values: Node 26 on darwin; the same through `url`).
+/// returns an encoded `URL` (values: Node 26; the host error names `process.platform`, as Node does).
 #[test]
 fn file_url_conversions_follow_node() {
     let p = Project::new("rc-file-url");
@@ -671,7 +671,7 @@ it('fileURLToPath', () => {
   const err = (s) => { try { fileURLToPath(s); return 'no throw'; } catch (e) { return [e.name, e.code, e.message]; } };
   expect(err('http://x/y')).toEqual(['TypeError', 'ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file']);
   expect(err('file:///a%2Fb')).toEqual(['TypeError', 'ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded / characters']);
-  expect(err('file://host/x')).toEqual(['TypeError', 'ERR_INVALID_FILE_URL_HOST', 'File URL host must be "localhost" or empty on darwin']);
+  expect(err('file://host/x')).toEqual(['TypeError', 'ERR_INVALID_FILE_URL_HOST', `File URL host must be "localhost" or empty on ${process.platform}`]);
   expect(url.fileURLToPath('file:///a%20b')).toBe('/a b');
   const local = new URL('file://LocalHost/x');
   expect([local.href, local.host, local.origin]).toEqual(['file:///x', '', 'null']);
