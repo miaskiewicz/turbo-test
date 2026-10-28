@@ -984,6 +984,92 @@ it('fine', () => { expect(Object.keys(import.meta.glob('./src/ok/*.ts'))).toEqua
     }
 }
 
+/// turbo-test#190: vite evaluates `import.meta.glob`'s options literal (spreads, computed keys,
+/// `!1`) and fails the module at transform on the options it rejects, with its message (vitest
+/// 4.1.12). turbo-test left those calls to throw vitest's "statically replaced" error when they
+/// ran, so the files' other tests passed. vitest on the same project:
+/// `Test Files  3 failed | 1 passed (4)`, `Tests  1 passed (1)`.
+#[test]
+#[ignore = "turbo-test#190: fails until the fix"]
+fn glob_options_are_evaluated_and_rejected_as_vite_does() {
+    let other = "it('other test', () => { expect(1).toBe(1); });\n";
+    let files: [(&str, String); 7] = [
+        (
+            "package.json",
+            "{\"name\":\"rc-glob-options\",\"type\":\"module\"}\n".into(),
+        ),
+        ("m/a.ts", "export const a = 'a';\n".into()),
+        ("m/b.ts", "export const b = 'b';\n".into()),
+        (
+            "ok.test.ts",
+            r#"import { expect, it } from 'vitest';
+it('folds the options as vite evaluates them', async () => {
+  const eager: any = import.meta.glob('./m/*.ts', { ...{ eager: true }, ['imp' + 'ort']: 'a' });
+  expect(eager).toEqual({ './m/a.ts': 'a', './m/b.ts': undefined });
+  const lazy: any = import.meta.glob(['./m/a.ts', , './m/b.ts'], { eager: !1, query: { ...{ raw: '' } }, import: 'default', caseSensitive: true });
+  expect(await lazy['./m/a.ts']()).toBe("export const a = 'a';\n");
+  expect(import.meta.glob([])).toEqual({});
+});
+"#
+            .into(),
+        ),
+        (
+            "base.test.ts",
+            format!("import {{ expect, it }} from 'vitest';\n{other}it('base', () => {{ expect(import.meta.glob('./m/*.ts', {{ base: 'lib' }})).toEqual({{}}); }});\n"),
+        ),
+        (
+            "num.test.ts",
+            format!("import {{ expect, it }} from 'vitest';\n{other}it('num', () => {{ expect(import.meta.glob('./m/*.ts', 5 as any)).toEqual({{}}); }});\n"),
+        ),
+        (
+            "static.test.ts",
+            format!("import {{ expect, it }} from 'vitest';\nconst isEager = true;\n{other}it('not static', () => {{ expect(import.meta.glob('./m/*.ts', {{ eager: isEager }})).toEqual({{}}); }});\n"),
+        ),
+    ];
+    for esbuild in [true, false] {
+        let p = Project::new(if esbuild {
+            "rc-glob-options"
+        } else {
+            "rc-glob-options-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in &files {
+            p.file(f, c);
+        }
+        let envs: &[&[(&str, &str)]] = if esbuild {
+            &[
+                &[],
+                &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
+            ]
+        } else {
+            &[&[]]
+        };
+        for env in envs {
+            let r = turbo_test(&p.dir, &[], env);
+            assert_eq!(r.code, Some(1), "esbuild={esbuild} {env:?}\n{}", r.all());
+            assert!(
+                r.stdout.contains("Test Files  3 failed | 1 passed (4)")
+                    && r.stdout.contains("Tests  1 passed (1)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            for (file, message) in [
+                ("base.test.ts", "Option \"base\" must start with '/', './' or '../', but got \"lib\""),
+                ("num.test.ts", "Invalid glob import syntax: Expected the second argument to be an object literal, but got \"Literal\""),
+                ("static.test.ts", "Vite is unable to parse the glob options as the value is not static"),
+            ] {
+                assert!(
+                    load_error_line(&r, file).ends_with(&format!("(Error: {message})")),
+                    "esbuild={esbuild} {env:?}\n{}",
+                    r.all()
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn import_meta_keeps_coverage_line_mapping() {
     let p = esbuild_project("rc-import-meta-cov");

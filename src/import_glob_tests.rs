@@ -241,3 +241,104 @@ fn normal_folds_dot_segments() {
     assert_eq!(normal(Path::new("./a/./b/../c")), Path::new("a/c"));
     assert_eq!(normal(Path::new("/a/../../b")), Path::new("/b"));
 }
+
+/// turbo-test#190: vite evaluates the options literal (spreads, computed keys, `!0`, `+`) and
+/// fails the module at transform on what its parseImportGlob / parseGlobOptions reject. Rows
+/// recorded from vitest 4.1.12 (vite 8.3.5) on the same project; turbo-test left these calls
+/// alone (vitest's run-time "statically replaced" error) or expanded what vite rejects.
+#[test]
+#[ignore = "turbo-test#190: fails until the fix"]
+fn vites_option_evaluation_and_errors() {
+    let d = project(&["m.ts", "a.ts", "b.ts"]);
+    let file = d.0.join("m.ts");
+    let ab = |a: &str, b: &str| format!("({{\"./a.ts\": {a}, \"./b.ts\": {b}}})");
+    let eager = format!(
+        "import * as __tt_glob_0_0 from \"./a.ts\";import * as __tt_glob_0_1 from \"./b.ts\";{}",
+        ab("__tt_glob_0_0", "__tt_glob_0_1")
+    );
+    let lazy = |q: &str| {
+        ab(
+            &format!("() => import(\"./a.ts{q}\")"),
+            &format!("() => import(\"./b.ts{q}\")"),
+        )
+    };
+    let expanded: [(&str, String); 14] = [
+        ("import.meta.glob('./*.ts', { ...{ eager: true } })", eager.clone()),
+        ("import.meta.glob('./*.ts', { eager: !0 })", eager.clone()),
+        ("import.meta.glob('./*.ts', { eager: false, ...{ eager: true } })", eager.clone()),
+        ("import.meta.glob('./*.ts', { ...{ ...{ eager: true } }, ...null, ...5 })", eager.clone()),
+        ("import.meta.glob('./*.ts', { ['eag' + 'er']: true } as any)", eager.clone()),
+        ("import.meta.glob('./*.ts', { query: { ...{ a: 1 }, b: '', c: false, d: -1.5 } })", lazy("?a=1&b&c=false&d=-1.5")),
+        ("import.meta.glob('./*.ts', { query: { a: 1, ...{ a: 2 } } })", lazy("?a=2")),
+        ("import.meta.glob('./*.ts', { caseSensitive: true, base: '', exhaustive: false })", lazy("")),
+        ("import.meta.glob('./*.ts', { as: 'foo' })", lazy("?foo")),
+        ("import.meta.glob('./*.ts', { as: 'raw', query: '' })", ab("() => import(\"./a.ts?raw\").then((m) => m[\"default\"])", "() => import(\"./b.ts?raw\").then((m) => m[\"default\"])")),
+        ("import.meta.glob('./*.ts', { import: '*' })", lazy("")),
+        ("import.meta.glob('./*.ts', { import: '', query: `x` })", lazy("?x")),
+        ("import.meta.glob([])", "({})".to_string()),
+        ("import.meta.glob(['./a.ts', , './b.ts'])", lazy("")),
+    ];
+    for (src, want) in expanded {
+        assert_eq!(expand(&file, src, &d.0, &[]).as_deref(), Some(want.as_str()), "{src}");
+    }
+    let syntax = |m: &str| format!("Invalid glob import syntax: {m}");
+    let errors: [(&str, String); 24] = [
+        ("import.meta.glob('./*.ts', { base: 'lib' })", "Option \"base\" must start with '/', './' or '../', but got \"lib\"".into()),
+        ("import.meta.glob('sub/*.ts', { base: 'lib' })", "Option \"base\" must start with '/', './' or '../', but got \"lib\"".into()),
+        ("import.meta.glob('./*.ts', { base: '!x' })", "Option \"base\" cannot start with \"!\"".into()),
+        ("import.meta.glob('./*.ts', 5)", syntax("Expected the second argument to be an object literal, but got \"Literal\"")),
+        ("import.meta.glob('./*.ts', 5 as any)", syntax("Expected the second argument to be an object literal, but got \"Literal\"")),
+        ("import.meta.glob('./*.ts', p)", syntax("Expected the second argument to be an object literal, but got \"Identifier\"")),
+        ("import.meta.glob('./*.ts', ...p)", syntax("Expected the second argument to be an object literal, but got \"SpreadElement\"")),
+        ("import.meta.glob('./*.ts', {}, {})", syntax("Expected 1-2 arguments, but got 3")),
+        ("import.meta.glob()", syntax("Expected 1-2 arguments, but got 0")),
+        ("import.meta.glob(5)", syntax("Expected glob to be a string, but got \"number\"")),
+        ("import.meta.glob([null])", syntax("Expected glob to be a string, but got \"object\"")),
+        ("import.meta.glob(p)", syntax("Could only use literals")),
+        ("import.meta.glob(['./*.ts', ...more])", syntax("Could only use literals")),
+        ("import.meta.glob(`./${p}`)", syntax("Expected glob to be a string, but got dynamic template literal")),
+        ("import.meta.glob('./*.ts', { foo: 1 })", "Unknown glob option \"foo\"".into()),
+        ("import.meta.glob('./*.ts', { eager: true, foo: 1, base: 'x' })", "Unknown glob option \"foo\"".into()),
+        ("import.meta.glob('./*.ts', { eager: 'yes' })", "Expected glob option \"eager\" to be of type boolean, but got string".into()),
+        ("import.meta.glob('./*.ts', { eager: undefined })", "Expected glob option \"eager\" to be of type boolean, but got undefined".into()),
+        ("import.meta.glob('./*.ts', { eager: null })", "Expected glob option \"eager\" to be of type boolean, but got object".into()),
+        ("import.meta.glob('./*.ts', { query: 5 })", "Expected glob option \"query\" to be of type object or string, but got number".into()),
+        ("import.meta.glob('./*.ts', { query: { a: {} } })", "Expected glob option \"query.a\" to be of type string, number, or boolean, but got object".into()),
+        ("import.meta.glob('./*.ts', { as: 'raw', query: '?x' })", "Options \"as\" and \"query\" cannot be used together".into()),
+        ("import.meta.glob('./*.ts', { as: 'raw', import: 'x' })", "Option \"import\" can only be \"default\" or \"*\" when \"as\" is \"raw\", but got \"x\"".into()),
+        ("import.meta.glob('./*.ts', { eager: isEager })", "Vite is unable to parse the glob options as the value is not static".into()),
+    ];
+    for (src, message) in errors {
+        let message = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            expand(&file, src, &d.0, &[]),
+            Some(format!("throw new Error({message});{src}")),
+            "{src}"
+        );
+    }
+    // the options' unknown names fail like a free variable; an option error wins over an
+    // invalid pattern of an earlier call
+    for src in [
+        "import.meta.glob('./*.ts', { ...p })",
+        "import.meta.glob('./*.ts', { [p]: 1 })",
+        "import.meta.glob('./*.ts', { query: { a: q } })",
+        "import.meta.glob('./*.ts', { eager: Foo })",
+        "import.meta.glob('x/*.ts'); import.meta.glob('./*.ts', { eager })",
+    ] {
+        assert_eq!(
+            expand(&file, src, &d.0, &[]),
+            Some(format!("throw new Error(\"Vite is unable to parse the glob options as the value is not static\");{src}")),
+            "{src}"
+        );
+    }
+    // what this transform does not evaluate (calls, members, Node's globals) or does not take
+    // (`caseSensitive: false`) is still left alone
+    for src in [
+        "import.meta.glob('./*.ts', { eager: Boolean(1) })",
+        "import.meta.glob('./*.ts', { eager: Boolean })",
+        "import.meta.glob('./*.ts', { eager: globalThis.x })",
+        "import.meta.glob('./*.ts', { caseSensitive: false })",
+    ] {
+        assert_eq!(expand(&file, src, &d.0, &[]), None, "{src}");
+    }
+}
