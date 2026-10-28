@@ -89,11 +89,9 @@ pub fn expand(file: &Path, src: &str, root: &Path, aliases: &[(String, String)])
     }
     let mut out = src.to_string();
     let mut imports: Vec<String> = Vec::new();
-    let mut changed = false;
     for (i, call) in calls.iter().enumerate().rev() {
-        let Some(found) = matches(call, file, dir, root, aliases) else {
-            continue;
-        };
+        // every pattern and base anchors here (checked above and by glob_options)
+        let found = matches(call, file, dir, root, aliases)?;
         let mut entries = Vec::new();
         let mut eager = String::new();
         for (j, (key, spec)) in found.iter().enumerate() {
@@ -119,10 +117,6 @@ pub fn expand(file: &Path, src: &str, root: &Path, aliases: &[(String, String)])
         let lines = "\n".repeat(src[start..end].matches('\n').count());
         let replacement = format!("({{{}}}{lines})", entries.join(", "));
         out.replace_range(start..end, &replacement);
-        changed = true;
-    }
-    if !changed {
-        return None;
     }
     imports.reverse();
     let imports = imports.concat();
@@ -519,8 +513,7 @@ fn eval(e: &Expression) -> Result<Value, Eval> {
                             {
                                 return Err(Eval::Unsupported)
                             }
-                            PropertyKey::PrivateIdentifier(_) => return Err(Eval::Unsupported),
-                            k => eval(k.to_expression())?.to_js_string(),
+                            k => eval(k.as_expression().ok_or(Eval::Unsupported)?)?.to_js_string(),
                         };
                         let value = eval(&p.value)?;
                         define(&mut props, key, value);

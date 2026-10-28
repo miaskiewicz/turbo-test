@@ -386,3 +386,38 @@ fn a_bundled_setup_file_imports_its_own_vi_mock() {
         assert_eq!(r.code, Some(0), "{env:?}\n{}", r.all());
     }
 }
+
+/// A bundled setup file (top-level await) importing a module a LATER setup file mocks loads the
+/// real module (the later vi.mock is not registered yet), and the test file gets the mock:
+/// vitest 4.1.12 on the same project gives `['real', 'mocked']` (1 passed): the setup's mock
+/// prepass (turbo-test#194) registers only its own mocks.
+#[test]
+fn a_bundled_setup_file_imports_the_real_module_a_later_setup_mocks() {
+    let p = Project::new("ra-setup-bundle-later-mock");
+    p.with_esbuild();
+    p.file(
+        "package.json",
+        r#"{"name":"ra-setup-bundle-later-mock","type":"module"}"#,
+    );
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { setupFiles: ['./setup1.ts', './setup2.ts'] } };\n",
+    );
+    p.file("src/dep.ts", "export const v = 'real';\n");
+    p.file(
+        "setup1.ts",
+        "import { v } from './src/dep';\nawait Promise.resolve();\n(globalThis as any).__setupV = v;\n",
+    );
+    p.file(
+        "setup2.ts",
+        "import { vi } from 'vitest';\nvi.mock('./src/dep', () => ({ v: 'mocked' }));\n",
+    );
+    p.file(
+        "a.test.ts",
+        "import { expect, it } from 'vitest';\nimport { v } from './src/dep';\n\
+         it('setup mock', () => { expect([(globalThis as any).__setupV, v]).toEqual(['real', 'mocked']); });\n",
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
+    assert_eq!(r.code, Some(0), "{}", r.all());
+}

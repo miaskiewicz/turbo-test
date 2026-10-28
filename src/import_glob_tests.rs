@@ -362,3 +362,241 @@ fn vites_option_evaluation_and_errors() {
         assert_eq!(expand(&file, src, &d.0, &[]), None, "{src}");
     }
 }
+
+/// `f` of the expression `src` (parsed as TypeScript, parenthesized: no directive).
+fn with_expr<T>(src: &str, f: impl FnOnce(&Expression) -> T) -> T {
+    let allocator = Allocator::default();
+    let code = format!("({src});");
+    let parsed = Parser::new(&allocator, &code, SourceType::ts()).parse();
+    assert!(parsed.errors.is_empty(), "{src}");
+    match &parsed.program.body[0] {
+        oxc_ast::ast::Statement::ExpressionStatement(s) => f(&s.expression),
+        _ => panic!("{src}"),
+    }
+}
+
+#[test]
+fn option_values_evaluate_as_js() {
+    use Value::*;
+    let ev = |src: &str| with_expr(src, eval);
+    let obj =
+        |kv: &[(&str, Value)]| Object(kv.iter().map(|(k, v)| (k.to_string(), v.clone())).collect());
+    for (src, want) in [
+        ("undefined", Ok(Undefined)),
+        ("process", Ok(Undefined)),
+        ("+NaN", Ok(Num(f64::NAN))),
+        ("-Infinity", Ok(Num(f64::NEG_INFINITY))),
+        ("+2", Ok(Num(2.0))),
+        ("1 + 2", Ok(Num(3.0))),
+        ("'a' + 1", Ok(Str("a1".into()))),
+        ("1.5 + 'a'", Ok(Str("1.5a".into()))),
+        ("`t`", Ok(Str("t".into()))),
+        ("void x", Err(Eval::NotStatic)),
+        ("void 0", Ok(Undefined)),
+        ("!''", Ok(Bool(true))),
+        ("!'a'", Ok(Bool(false))),
+        ("!0", Ok(Bool(true))),
+        ("!NaN", Ok(Bool(true))),
+        ("!-1", Ok(Bool(false))),
+        ("!null", Ok(Bool(true))),
+        ("!{}", Ok(Bool(false))),
+        ("!true", Ok(Bool(false))),
+        (
+            "[1, , 'b'] as any",
+            Ok(obj(&[("0", Num(1.0)), ("2", Str("b".into()))])),
+        ),
+        (
+            "({ b: 1, 2: 'x', a: 2, 1: 'y', b: 3 })",
+            Ok(obj(&[
+                ("b", Num(3.0)),
+                ("2", Str("x".into())),
+                ("a", Num(2.0)),
+                ("1", Str("y".into())),
+            ])),
+        ),
+        (
+            "({ ...'ab', ...true, ...undefined })",
+            Ok(obj(&[("0", Str("a".into())), ("1", Str("b".into()))])),
+        ),
+        (
+            "({ ...{ 2: 0, 1: 0 } })",
+            Ok(obj(&[("1", Num(0.0)), ("2", Num(0.0))])),
+        ),
+        (
+            "({ [1.5]: 0, [null]: 0, [undefined]: 0, [true]: 0, [{}]: 0, 'q': 0 })",
+            Ok(obj(&[
+                ("1.5", Num(0.0)),
+                ("null", Num(0.0)),
+                ("undefined", Num(0.0)),
+                ("true", Num(0.0)),
+                ("[object Object]", Num(0.0)),
+                ("q", Num(0.0)),
+            ])),
+        ),
+        (
+            "({ ['__proto__']: 1 })",
+            Ok(obj(&[("__proto__", Num(1.0))])),
+        ),
+        // what this does not model
+        ("({ ...'é' })", Err(Eval::Unsupported)),
+        ("({ __proto__: {} })", Err(Eval::Unsupported)),
+        ("({ '__proto__': {} })", Err(Eval::Unsupported)),
+        ("({ get a() { return 1; } })", Err(Eval::Unsupported)),
+        ("({ a() {} })", Err(Eval::Unsupported)),
+        ("[...x]", Err(Eval::Unsupported)),
+        ("-'1'", Err(Eval::Unsupported)),
+        ("+true", Err(Eval::Unsupported)),
+        ("typeof x", Err(Eval::NotStatic)),
+        ("typeof 1", Err(Eval::Unsupported)),
+        ("null + 1", Err(Eval::Unsupported)),
+        ("1 - 1", Err(Eval::Unsupported)),
+        ("`${1}`", Err(Eval::Unsupported)),
+        ("Math", Err(Eval::Unsupported)),
+        ("Mathx", Err(Eval::NotStatic)),
+        ("1n", Err(Eval::Unsupported)),
+    ] {
+        let got = ev(src);
+        match (&got, &want) {
+            (Ok(Num(a)), Ok(Num(b))) if a.is_nan() => assert!(b.is_nan(), "{src}"),
+            _ => assert_eq!(got, want, "{src}"),
+        }
+    }
+    // typeof, String() and truthiness of each kind
+    let all = [
+        Undefined,
+        Null,
+        Bool(true),
+        Num(-0.0),
+        Str(String::new()),
+        obj(&[]),
+    ];
+    let types: Vec<&str> = all.iter().map(Value::type_of).collect();
+    assert_eq!(
+        types,
+        [
+            "undefined",
+            "object",
+            "boolean",
+            "number",
+            "string",
+            "object"
+        ]
+    );
+    let strings: Vec<String> = all.iter().map(Value::to_js_string).collect();
+    assert_eq!(
+        strings,
+        ["undefined", "null", "true", "0", "", "[object Object]"]
+    );
+    let truthy: Vec<bool> = all.iter().map(Value::truthy).collect();
+    assert_eq!(truthy, [false, false, true, false, false, true]);
+    assert!(Str("a".into()).truthy() && Num(2.0).truthy() && !Bool(false).truthy());
+}
+
+#[test]
+fn numbers_print_as_js() {
+    for (n, want) in [
+        (f64::NAN, "NaN"),
+        (f64::INFINITY, "Infinity"),
+        (f64::NEG_INFINITY, "-Infinity"),
+        (-0.0, "0"),
+        (123.0, "123"),
+        (-1.5, "-1.5"),
+        (0.1, "0.1"),
+        (1e-6, "0.000001"),
+        (1e20, "100000000000000000000"),
+        (1e21, "1e+21"),
+        (-1.5e300, "-1.5e+300"),
+        (1.5e-7, "1.5e-7"),
+    ] {
+        assert_eq!(js_number(n), want, "{n}");
+    }
+}
+
+#[test]
+fn argument_node_types_and_glob_literals() {
+    for (src, want) in [
+        ("1", "Literal"),
+        ("/x/", "Literal"),
+        ("1n", "Literal"),
+        ("(null as any)", "Literal"),
+        ("`x`", "TemplateLiteral"),
+        ("x", "Identifier"),
+        ("import.meta", "MetaProperty"),
+        ("[]", "ArrayExpression"),
+        ("() => 1", "ArrowFunctionExpression"),
+        ("x = 1", "AssignmentExpression"),
+        ("async () => await x", "ArrowFunctionExpression"),
+        ("await x", "AwaitExpression"),
+        ("1 + 1", "BinaryExpression"),
+        ("f()", "CallExpression"),
+        ("a?.b", "ChainExpression"),
+        ("(class {})", "ClassExpression"),
+        ("a ? b : c", "ConditionalExpression"),
+        ("(function () {})", "FunctionExpression"),
+        ("import('x')", "ImportExpression"),
+        ("a || b", "LogicalExpression"),
+        ("new X()", "NewExpression"),
+        ("(a, b)", "SequenceExpression"),
+        ("t`x`", "TaggedTemplateExpression"),
+        ("this", "ThisExpression"),
+        ("-x", "UnaryExpression"),
+        ("x++", "UpdateExpression"),
+        ("a.b", "MemberExpression"),
+        ("a[0]", "MemberExpression"),
+        ("({})", "ObjectExpression"),
+    ] {
+        let got = with_expr(src, estree_type);
+        if want == "ObjectExpression" {
+            // parse_call takes an object literal before naming it
+            assert_eq!(got, "Expression", "{src}");
+        } else {
+            assert_eq!(got, want, "{src}");
+        }
+    }
+    let lit = |src: &str| with_expr(src, glob_literal);
+    assert_eq!(lit("'./a'"), Ok("./a".to_string()));
+    assert_eq!(lit("`./b`"), Ok("./b".to_string()));
+    assert_eq!(
+        lit("true"),
+        Err("Expected glob to be a string, but got \"boolean\"".to_string())
+    );
+    assert_eq!(
+        lit("1n"),
+        Err("Expected glob to be a string, but got \"bigint\"".to_string())
+    );
+    assert_eq!(
+        lit("/x/"),
+        Err("Expected glob to be a string, but got \"object\"".to_string())
+    );
+    assert_eq!(lit("f()"), Err("Could only use literals".to_string()));
+    // a spread first argument is no literal (vite's validateLiteral)
+    let d = project(&["m.ts"]);
+    // second arguments only a generator, a class or JSX can hold
+    let second = |m: &str| {
+        format!("throw new Error(\"Invalid glob import syntax: Expected the second argument to be an object literal, but got \\\"{m}\\\"\");")
+    };
+    for (file, src, ty) in [
+        (
+            "m.ts",
+            "function* g() { import.meta.glob('./*.ts', yield); }",
+            "YieldExpression",
+        ),
+        (
+            "m.ts",
+            "class C { #x = 1; m(o: any) { import.meta.glob('./*.ts', #x in o); } }",
+            "BinaryExpression",
+        ),
+        ("m.tsx", "import.meta.glob('./*.ts', <a />);", "JSXElement"),
+        ("m.tsx", "import.meta.glob('./*.ts', <></>);", "JSXFragment"),
+    ] {
+        assert_eq!(
+            expand(&d.0.join(file), src, &d.0, &[]),
+            Some(format!("{}{src}", second(ty))),
+            "{src}"
+        );
+    }
+    assert_eq!(
+        expand(&d.0.join("m.ts"), "import.meta.glob(...p)", &d.0, &[]),
+        Some("throw new Error(\"Invalid glob import syntax: Could only use literals\");import.meta.glob(...p)".to_string())
+    );
+}

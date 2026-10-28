@@ -8,12 +8,13 @@
 # tarpaulin load the coverage maps of those executables so bin-only code is attributed.
 #
 # The gate measures production code only: the #[path] unit-test modules under src/ are
-# excluded. 13044/13046 lines (99.98%) are covered. The two known uncovered lines:
+# excluded. 13250/13252 lines (99.98%) are covered. The two known uncovered lines:
 # - cli.rs tap_flatten's `TapNode::Failed` arm: a file that did not load is a top-level TAP node
 #   (render_tap), never a describe's child, but the match over the enum must name it;
-# - runner.rs resolve_callback's lazy `load_cjs` of an app module the module runner transforms,
-#   reached only by a bundled (top-level-await) setup file's own vi.mock'd import, which loads the
-#   real module there (turbo-test#194); covering it would assert that bug.
+# - runner.rs resolve_callback's lazy `load_cjs` of an app module the module runner transforms:
+#   load_graph already loads every static import of a module (load_dep) before it links, so the
+#   lookup above it finds the module loaded; no known input reaches it (turbo-test#194's setup
+#   bundle, fixed, does not either: its mocked import is preloaded too).
 # (coverage_accumulate's "script with no ranges" guard, uncovered at 9348/9349, is covered in this
 # measurement.)
 [turbo-test]
