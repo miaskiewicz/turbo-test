@@ -1087,15 +1087,15 @@ fn anchor(
             } else {
                 root.join(to)
             };
-            format!("{}{rest}", crate::coverage::slash_path(&to))
+            // walk from the target's filesystem root (`/`, or `C:\\` on Windows); the rest of
+            // the target joins the glob as `/`-separated segments
+            let top = to.ancestors().last().unwrap_or(&to).to_path_buf();
+            let below = crate::coverage::slash_path(to.strip_prefix(&top).unwrap_or(&to));
+            (top, format!("{below}{rest}"))
         })
     });
     let (start, rest, relative) = match alias {
-        Some(abs) => (
-            PathBuf::from("/"),
-            abs.trim_start_matches('/').to_string(),
-            false,
-        ),
+        Some((top, rel)) => (top, rel.trim_start_matches('/').to_string(), false),
         None if pattern.starts_with("./") || pattern.starts_with("../") => {
             (from.to_path_buf(), pattern.to_string(), true)
         }

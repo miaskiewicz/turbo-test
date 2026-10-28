@@ -47,8 +47,10 @@ const KNOWN: &[&str] = &[
 const INLINE_LIMIT: usize = 4096;
 
 fn split(id: &str) -> (&str, Option<&str>) {
-    match id.split_once('?') {
-        Some((f, q)) => (f, Some(q)),
+    // a Windows verbatim prefix (`\\?\C:\...`) is part of the path, not a query
+    let skip = if id.starts_with(r"\\?\") { 4 } else { 0 };
+    match id[skip..].find('?') {
+        Some(i) => (&id[..skip + i], Some(&id[skip + i + 1..])),
         None => (id, None),
     }
 }
