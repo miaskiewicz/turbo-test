@@ -1126,7 +1126,7 @@ fn esbuild_bundle_full(
         k.hash(&mut h);
         v.hash(&mut h);
     }
-    "esb-v4-react-ext".hash(&mut h);
+    "esb-v5-import-rewrite".hash(&mut h);
     mr_enabled().hash(&mut h);
     let out = cache_dir().join(format!("esb-{:016x}.mjs", h.finish()));
     // Record the source dir so resolve_callback can resolve this bundle's externalized bare
@@ -1230,9 +1230,15 @@ fn esbuild_bundle_full(
             for spec in externals {
                 if let Some(abs) = rewrite_map.get(&spec_basename(spec)) {
                     let abs_s = abs.to_string_lossy();
-                    for q in ['"', '\''] {
-                        let from = format!("{q}{spec}{q}");
-                        let to = format!("{q}{abs_s}{q}");
+                    // only the import specifiers esbuild writes (`from "x"`, `import "x"`,
+                    // `import("x")`): a string literal quoting the specifier (a `vi.mock` call's
+                    // argument, a message) keeps it (turbo-test#196)
+                    for (q, lead) in [('"', "from "), ('"', "import "), ('"', "import(")]
+                        .into_iter()
+                        .chain([('\'', "from "), ('\'', "import "), ('\'', "import(")])
+                    {
+                        let from = format!("{lead}{q}{spec}{q}");
+                        let to = format!("{lead}{q}{abs_s}{q}");
                         if text.contains(&from) {
                             text = text.replace(&from, &to);
                             changed = true;
@@ -1797,14 +1803,13 @@ fn run_setup_file(
         return err.map_or(Ok(()), failed);
     }
     // vitest hoists the setup's vi.mock calls above its imports here too (turbo-test#194): the
-    // mock prepass registers them before the bundle's externalized imports load
-    if mr_enabled() {
-        run_entry_mocks(scope, file).or_else(failed)?;
-        run_js(
-            scope,
-            "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;",
-        );
-    }
+    // mock prepass registers them before the bundle's externalized imports load (every loader
+    // path: turbo-test#196)
+    run_entry_mocks(scope, file).or_else(failed)?;
+    run_js(
+        scope,
+        "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;",
+    );
     // reset the pending-mock queue before this setup file runs
     {
         let global = scope.get_current_context().global(scope);

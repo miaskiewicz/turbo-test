@@ -427,7 +427,6 @@ fn a_bundled_setup_file_imports_the_real_module_a_later_setup_mocks() {
 /// imports. vitest 4.1.12 on the same project: `['mocked', 'mocked']` (1 passed); turbo-test
 /// gave `['real', 'mocked']`.
 #[test]
-#[ignore = "turbo-test#196: fails until the fix"]
 fn a_bundled_setup_file_imports_its_own_vi_mock_without_the_module_runner() {
     for esbuild in [true, false] {
         let name = if esbuild {
@@ -439,7 +438,10 @@ fn a_bundled_setup_file_imports_its_own_vi_mock_without_the_module_runner() {
         if esbuild {
             p.with_esbuild();
         }
-        p.file("package.json", &format!(r#"{{"name":"{name}","type":"module"}}"#));
+        p.file(
+            "package.json",
+            &format!(r#"{{"name":"{name}","type":"module"}}"#),
+        );
         p.file(
             "vitest.config.ts",
             "export default { test: { setupFiles: ['./setup.ts'] } };\n",
@@ -473,7 +475,6 @@ fn a_bundled_setup_file_imports_its_own_vi_mock_without_the_module_runner() {
 /// it (`'… "./src/dep" …'`, and the `vi.mock` call's own argument, so vitest's missing-export
 /// message named the absolute path). vitest 4.1.12 on the same project: 1 passed.
 #[test]
-#[ignore = "turbo-test#196: fails until the fix"]
 fn the_legacy_bundle_rewrites_only_import_specifiers() {
     let p = Project::new("ra-legacy-rewrite-literals");
     p.with_esbuild();
@@ -481,7 +482,10 @@ fn the_legacy_bundle_rewrites_only_import_specifiers() {
         "package.json",
         r#"{"name":"ra-legacy-rewrite-literals","type":"module"}"#,
     );
-    p.file("src/dep.ts", "export const v = 'real';\nexport const w = 'real-w';\n");
+    p.file(
+        "src/dep.ts",
+        "export const v = 'real';\nexport const w = 'real-w';\n",
+    );
     p.file(
         "a.test.ts",
         "import { expect, it, vi } from 'vitest';\nimport { v, w } from './src/dep';\n\
