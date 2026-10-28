@@ -24,15 +24,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, aarch64-apple-darwin, x86_64-pc-windows-msvc]
-        # macOS runners are scarce: PR CI skips the darwin build; tag/main pushes (releases) keep it
-        exclude:
-          - target: ${{ github.event_name == 'pull_request' && 'aarch64-apple-darwin' || 'none' }}
-        include:
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,   binname: turbo-test-linux-x64 }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,  binname: turbo-test-linux-arm64 }
-          - { os: macos-latest,   target: aarch64-apple-darwin,       binname: turbo-test-darwin-arm64 }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,     binname: turbo-test-win32-x64.exe }
+        # macOS runners are scarce: PR CI skips the darwin build; tag/main pushes (releases) keep it.
+        # (an `exclude` cannot drop an `include` entry, hence the two JSON lists)
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","binname":"turbo-test-linux-x64"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","binname":"turbo-test-linux-arm64"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","binname":"turbo-test-win32-x64.exe"}]' || '[{"os":"macos-latest","target":"aarch64-apple-darwin","binname":"turbo-test-darwin-arm64"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","binname":"turbo-test-linux-x64"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","binname":"turbo-test-linux-arm64"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","binname":"turbo-test-win32-x64.exe"}]') }}
     steps:
       - uses: actions/checkout@v4
 
