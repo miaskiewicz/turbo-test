@@ -1075,7 +1075,6 @@ it('folds the options as vite evaluates them', async () => {
 /// vitest's "statically replaced" error. vitest on the same project:
 /// `Test Files  2 failed | 1 passed (3)`, `Tests  1 passed (1)`.
 #[test]
-#[ignore = "turbo-test#195: fails until the fix"]
 fn glob_case_insensitivity_and_option_members_are_vites() {
     let other = "it('other test', () => { expect(1).toBe(1); });\n";
     let files: [(&str, String); 6] = [

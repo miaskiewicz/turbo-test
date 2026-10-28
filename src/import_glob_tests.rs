@@ -87,8 +87,8 @@ fn calls_it_cannot_replace_are_left_alone() {
         "import.meta.glob('./*.ts'",
         // options this transform does not evaluate (vite evaluates them; a call or a global)
         "import.meta.glob('./*.ts', { eager: f() })",
-        "import.meta.glob('./*.ts', { query: { a: Number } })",
-        "import.meta.glob('./*.ts', { ...Object })",
+        "import.meta.glob('./*.ts', { query: { a: [1].length } })",
+        "import.meta.glob('./*.ts', { eager: a?.b })",
     ] {
         assert_eq!(expand(&file, src, &d.0, &[]), None, "{src}");
     }
@@ -355,9 +355,8 @@ fn vites_option_evaluation_and_errors() {
     // (`caseSensitive: false`) is still left alone
     for src in [
         "import.meta.glob('./*.ts', { eager: Boolean(1) })",
-        "import.meta.glob('./*.ts', { eager: Boolean })",
-        "import.meta.glob('./*.ts', { eager: globalThis.x })",
-        "import.meta.glob('./*.ts', { caseSensitive: false })",
+        "import.meta.glob('./*.ts', { eager: [].length })",
+        "import.meta.glob('./*.ts', { eager: 1 & 1 })",
     ] {
         assert_eq!(expand(&file, src, &d.0, &[]), None, "{src}");
     }
@@ -446,12 +445,92 @@ fn option_values_evaluate_as_js() {
         ("[...x]", Err(Eval::Unsupported)),
         ("-'1'", Err(Eval::Unsupported)),
         ("+true", Err(Eval::Unsupported)),
-        ("typeof x", Err(Eval::NotStatic)),
-        ("typeof 1", Err(Eval::Unsupported)),
+        ("typeof x", Ok(Str("undefined".into()))),
+        ("typeof (x)", Ok(Str("undefined".into()))),
+        ("typeof x.y", Err(Eval::NotStatic)),
+        ("typeof 1", Ok(Str("number".into()))),
+        ("typeof Math", Ok(Str("object".into()))),
+        ("typeof Map", Ok(Str("function".into()))),
         ("null + 1", Err(Eval::Unsupported)),
-        ("1 - 1", Err(Eval::Unsupported)),
-        ("`${1}`", Err(Eval::Unsupported)),
-        ("Math", Err(Eval::Unsupported)),
+        ("1 - 1", Ok(Num(0.0))),
+        ("`${1}-${'x'}-${null}`", Ok(Str("1-x-null".into()))),
+        ("`${Math}`", Err(Eval::Unsupported)),
+        ("`${x}`", Err(Eval::NotStatic)),
+        // members (turbo-test#195)
+        ("({ a: 1 }).a", Ok(Num(1.0))),
+        ("({ a: 1 })['b']", Ok(Undefined)),
+        ("({ a: 1 }).toString", Err(Eval::Unsupported)),
+        ("[1].length", Err(Eval::Unsupported)),
+        ("({ a: 1 })[Math]", Err(Eval::Unsupported)),
+        ("'ab'.length", Ok(Num(2.0))),
+        ("'é'.length", Ok(Num(1.0))),
+        ("'ab'[1]", Ok(Str("b".into()))),
+        ("'ab'[2]", Ok(Undefined)),
+        ("'ab'['01']", Err(Eval::Unsupported)),
+        ("'é'[0]", Err(Eval::Unsupported)),
+        ("'ab'.at", Err(Eval::Unsupported)),
+        ("(1).x", Err(Eval::Unsupported)),
+        ("undefined.x", Err(Eval::NotStatic)),
+        ("null[0]", Err(Eval::NotStatic)),
+        ("globalThis.Map", Ok(Global("Map".into()))),
+        ("globalThis.process", Ok(Global("process".into()))),
+        ("globalThis.nope", Ok(Undefined)),
+        ("globalThis.localStorage", Ok(Undefined)),
+        (
+            "Math.E + Math.LN2 + Math.LN10 + Math.LOG2E + Math.LOG10E + Math.SQRT2 + Math.SQRT1_2",
+            Ok(Num(std::f64::consts::E
+                + std::f64::consts::LN_2
+                + std::f64::consts::LN_10
+                + std::f64::consts::LOG2_E
+                + std::f64::consts::LOG10_E
+                + std::f64::consts::SQRT_2
+                + std::f64::consts::FRAC_1_SQRT_2)),
+        ),
+        ("Number.MIN_SAFE_INTEGER", Ok(Num(-9007199254740991.0))),
+        ("Number.EPSILON", Ok(Num(f64::EPSILON))),
+        ("Number.MAX_VALUE", Ok(Num(f64::MAX))),
+        ("Number.MIN_VALUE", Ok(Num(5e-324))),
+        ("Number.POSITIVE_INFINITY", Ok(Num(f64::INFINITY))),
+        ("Number.NEGATIVE_INFINITY", Ok(Num(f64::NEG_INFINITY))),
+        ("Number.NaN", Ok(Num(f64::NAN))),
+        ("Number.parseInt", Err(Eval::Unsupported)),
+        ("Math.max", Err(Eval::Unsupported)),
+        // operators
+        ("7 % 4 / 2 * 3 - 1", Ok(Num(3.5))),
+        ("1 < 2", Ok(Bool(true))),
+        ("2 <= 2", Ok(Bool(true))),
+        ("1 > 2", Ok(Bool(false))),
+        ("1 >= NaN", Ok(Bool(false))),
+        ("'B' < 'a'", Ok(Bool(true))),
+        ("'b' >= 'a'", Ok(Bool(true))),
+        ("'1' < 2", Err(Eval::Unsupported)),
+        ("1 === 1", Ok(Bool(true))),
+        ("NaN === NaN", Ok(Bool(false))),
+        ("'1' === 1", Ok(Bool(false))),
+        ("'a' !== 'a'", Ok(Bool(false))),
+        ("({}) === ({})", Err(Eval::Unsupported)),
+        ("1 === Map", Err(Eval::Unsupported)),
+        ("null == undefined", Ok(Bool(true))),
+        ("null != 0", Ok(Bool(true))),
+        ("0 != undefined", Ok(Bool(true))),
+        ("true == true", Ok(Bool(true))),
+        ("'a' != 'b'", Ok(Bool(true))),
+        ("'1' == 1", Err(Eval::Unsupported)),
+        ("Map == Map", Err(Eval::Unsupported)),
+        ("1 << 1", Err(Eval::Unsupported)),
+        ("0 && x", Ok(Num(0.0))),
+        ("1 && 'r'", Ok(Str("r".into()))),
+        ("'l' || x", Ok(Str("l".into()))),
+        ("'' || 2", Ok(Num(2.0))),
+        ("0 ?? x", Ok(Num(0.0))),
+        ("null ?? 'd'", Ok(Str("d".into()))),
+        ("1 ? 'y' : x", Ok(Str("y".into()))),
+        ("0 ? x : 'n'", Ok(Str("n".into()))),
+        ("x ? 1 : 2", Err(Eval::NotStatic)),
+        ("({ [Math]: 1 })", Err(Eval::Unsupported)),
+        ("({ ...Map })", Ok(obj(&[]))),
+        ("!Map", Ok(Bool(false))),
+        ("Math", Ok(Global("Math".into()))),
         ("Mathx", Err(Eval::NotStatic)),
         ("1n", Err(Eval::Unsupported)),
     ] {
@@ -605,7 +684,6 @@ fn argument_node_types_and_glob_literals() {
 /// case), and the options' member reads, operators and `typeof` evaluate as vite's evalValue
 /// does. Rows recorded from vitest 4.1.12 (vite 8.3.5); turbo-test left these calls alone.
 #[test]
-#[ignore = "turbo-test#195: fails until the fix"]
 fn case_insensitive_globs_and_evaluated_members() {
     let d = project(&["t.ts", "m/a.ts", "m/B.ts"]);
     let file = d.0.join("t.ts");

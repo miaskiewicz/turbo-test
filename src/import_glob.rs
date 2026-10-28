@@ -9,20 +9,23 @@
 //! to `base`, else to the module for a relative pattern, else root-relative. As vite: the module
 //! itself, dot files and `node_modules` are skipped unless `exhaustive: true`. A pattern it
 //! cannot anchor fails the module with vite's "Invalid glob" error (thrown on its first line).
-//! The options literal is evaluated as vite's `evalValue` does (spreads, computed keys, `!`,
-//! `+`; turbo-test#190) and checked as its parseGlobOptions does: arguments or options vite
-//! rejects fail the module the same way, with vite's message ("Invalid glob import syntax: …",
-//! `Unknown glob option …`, a `base` that is not anchored, a name that is "not static"). A call
-//! whose options this does not evaluate (a call, a member, a Node global, `caseSensitive: false`)
-//! is left alone and throws vitest's error at run time (runtime.js).
+//! The options literal is evaluated as vite's `evalValue` does (spreads, computed keys, template
+//! literals, `typeof`, arithmetic / comparison / logical operators, `?:`, member reads of objects,
+//! strings, `globalThis` and the `Math` / `Number` constants; turbo-test#190, #195) and checked as
+//! its parseGlobOptions does: arguments or options vite rejects fail the module the same way, with
+//! vite's message ("Invalid glob import syntax: …", `Unknown glob option …`, a wrong type, a `base`
+//! that is not anchored, a name that is "not static"). `caseSensitive: false` matches the patterns
+//! case-insensitively. A call whose options this does not evaluate (a call — vite fails its own
+//! parse on it —, a method, an array's `length`, a coercing `==`) is left alone and throws
+//! vitest's error at run time (runtime.js).
 //!
 //! The replacement keeps the call's line count and the eager imports go on the first line, so
 //! the module's line numbers (test locations, source maps) do not move.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrayExpressionElement, BinaryOperator, CallExpression, Expression, ObjectPropertyKind,
-    PropertyKey, PropertyKind, UnaryOperator,
+    ArrayExpressionElement, BinaryOperator, CallExpression, Expression, LogicalOperator,
+    ObjectPropertyKind, PropertyKey, PropertyKind, UnaryOperator,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
@@ -40,6 +43,8 @@ struct Call {
     /// the `?query` added to each import (`query`, or `as: X` -> `?X`)
     query: String,
     base: Option<String>,
+    /// `caseSensitive` (default true): false matches the patterns case-insensitively
+    case_sensitive: bool,
 }
 
 /// `src` (the module at `file`) with every replaceable `import.meta.glob` call expanded against
@@ -195,6 +200,8 @@ enum Value {
     Num(f64),
     Str(String),
     Object(Vec<(String, Value)>),
+    /// a Node global (by name): its type is known, not its contents
+    Global(String),
 }
 
 impl Value {
@@ -205,6 +212,8 @@ impl Value {
             Value::Num(_) => "number",
             Value::Str(_) => "string",
             Value::Null | Value::Object(_) => "object",
+            Value::Global(name) if OBJECT_GLOBALS.contains(&name.as_str()) => "object",
+            Value::Global(_) => "function",
         }
     }
 
@@ -214,7 +223,7 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Num(n) => *n != 0.0 && !n.is_nan(),
             Value::Str(s) => !s.is_empty(),
-            Value::Object(_) => true,
+            Value::Object(_) | Value::Global(_) => true,
         }
     }
 
@@ -226,7 +235,8 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Num(n) => js_number(*n),
             Value::Str(s) => s.clone(),
-            Value::Object(_) => "[object Object]".to_string(),
+            // (a global is never made a string: callers take it as unsupported first)
+            Value::Object(_) | Value::Global(_) => "[object Object]".to_string(),
         }
     }
 }
@@ -242,7 +252,7 @@ enum Eval {
 
 /// Node's global names (vitest 4.1.12 runs vite on Node), sorted: a bare reference to one in
 /// the options evaluates in vite, to a value this evaluator does not model.
-const NODE_GLOBALS: [&str; 134] = [
+const NODE_GLOBALS: [&str; 135] = [
     "AbortController",
     "AbortSignal",
     "AggregateError",
@@ -355,6 +365,7 @@ const NODE_GLOBALS: [&str; 134] = [
     "clearImmediate",
     "clearInterval",
     "clearTimeout",
+    "crypto",
     "decodeURI",
     "decodeURIComponent",
     "encodeURI",
@@ -378,6 +389,151 @@ const NODE_GLOBALS: [&str; 134] = [
     "structuredClone",
     "unescape",
 ];
+
+/// The Node globals that are objects (`typeof` "object"); the others are functions.
+const OBJECT_GLOBALS: [&str; 15] = [
+    "Atomics",
+    "Intl",
+    "JSON",
+    "Math",
+    "Reflect",
+    "Temporal",
+    "WebAssembly",
+    "console",
+    "crypto",
+    "global",
+    "globalThis",
+    "navigator",
+    "performance",
+    "process",
+    "sessionStorage",
+];
+
+/// Node's global `name` as vite's evaluation reads it off `globalThis` (`None`: no such global).
+fn global_value(name: &str) -> Option<Value> {
+    Some(match name {
+        "undefined" | "localStorage" => Value::Undefined,
+        "NaN" => Value::Num(f64::NAN),
+        "Infinity" => Value::Num(f64::INFINITY),
+        "console" | "global" | "process" => Value::Global(name.to_string()),
+        n if NODE_GLOBALS.binary_search(&n).is_ok() => Value::Global(name.to_string()),
+        _ => return None,
+    })
+}
+
+/// The members of Object.prototype (a plain object's inherited names).
+const OBJECT_PROTO: [&str; 12] = [
+    "__defineGetter__",
+    "__defineSetter__",
+    "__lookupGetter__",
+    "__lookupSetter__",
+    "__proto__",
+    "constructor",
+    "hasOwnProperty",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+    "toLocaleString",
+    "toString",
+    "valueOf",
+];
+
+/// `object[key]` as JS reads it, for the values this evaluator models.
+fn member(object: Value, key: &str) -> Result<Value, Eval> {
+    let constant = |n: f64| Ok(Value::Num(n));
+    let index = key.parse::<usize>().ok().filter(|i| i.to_string() == key);
+    match (object, key) {
+        // a TypeError in vite's evaluation
+        (Value::Undefined | Value::Null, _) => Err(Eval::NotStatic),
+        // (an array literal's `length` is not modelled)
+        (Value::Object(props), k) => match props.into_iter().find(|(n, _)| n == k) {
+            Some((_, v)) => Ok(v),
+            None if k == "length" || OBJECT_PROTO.contains(&k) => Err(Eval::Unsupported),
+            None => Ok(Value::Undefined),
+        },
+        (Value::Str(s), "length") => constant(s.encode_utf16().count() as f64),
+        (Value::Str(s), _) if s.is_ascii() && index.is_some() => Ok(index
+            .and_then(|i| s.get(i..i + 1))
+            .map_or(Value::Undefined, |c| Value::Str(c.to_string()))),
+        (Value::Global(g), k) => match (g.as_str(), k) {
+            ("globalThis", k) => Ok(global_value(k).unwrap_or(Value::Undefined)),
+            ("Math", "PI") => constant(std::f64::consts::PI),
+            ("Math", "E") => constant(std::f64::consts::E),
+            ("Math", "LN2") => constant(std::f64::consts::LN_2),
+            ("Math", "LN10") => constant(std::f64::consts::LN_10),
+            ("Math", "LOG2E") => constant(std::f64::consts::LOG2_E),
+            ("Math", "LOG10E") => constant(std::f64::consts::LOG10_E),
+            ("Math", "SQRT2") => constant(std::f64::consts::SQRT_2),
+            ("Math", "SQRT1_2") => constant(std::f64::consts::FRAC_1_SQRT_2),
+            ("Number", "MAX_SAFE_INTEGER") => constant(9007199254740991.0),
+            ("Number", "MIN_SAFE_INTEGER") => constant(-9007199254740991.0),
+            ("Number", "EPSILON") => constant(f64::EPSILON),
+            ("Number", "MAX_VALUE") => constant(f64::MAX),
+            ("Number", "MIN_VALUE") => constant(5e-324),
+            ("Number", "POSITIVE_INFINITY") => constant(f64::INFINITY),
+            ("Number", "NEGATIVE_INFINITY") => constant(f64::NEG_INFINITY),
+            ("Number", "NaN") => constant(f64::NAN),
+            _ => Err(Eval::Unsupported),
+        },
+        _ => Err(Eval::Unsupported),
+    }
+}
+
+/// `l === r` (`None`: an object's identity, not modelled).
+fn strict_equal(l: &Value, r: &Value) -> Option<bool> {
+    match (l, r) {
+        (Value::Object(_) | Value::Global(_), _) | (_, Value::Object(_) | Value::Global(_)) => None,
+        (a, b) => Some(a == b),
+    }
+}
+
+/// `l <op> r` for the operators and operand kinds this evaluator models.
+fn binary(op: BinaryOperator, l: Value, r: Value) -> Result<Value, Eval> {
+    use BinaryOperator as B;
+    let num = |n: f64| Ok(Value::Num(n));
+    let compare = |o: Option<std::cmp::Ordering>| {
+        Ok(Value::Bool(o.is_some_and(|o| match op {
+            B::LessThan => o.is_lt(),
+            B::LessEqualThan => o.is_le(),
+            B::GreaterThan => o.is_gt(),
+            _ => o.is_ge(),
+        })))
+    };
+    let relational = matches!(
+        op,
+        B::LessThan | B::LessEqualThan | B::GreaterThan | B::GreaterEqualThan
+    );
+    match (op, l, r) {
+        (B::Addition, Value::Num(a), Value::Num(b)) => num(a + b),
+        (B::Addition, l @ (Value::Str(_) | Value::Num(_)), r @ (Value::Str(_) | Value::Num(_))) => {
+            Ok(Value::Str(l.to_js_string() + &r.to_js_string()))
+        }
+        (B::Subtraction, Value::Num(a), Value::Num(b)) => num(a - b),
+        (B::Multiplication, Value::Num(a), Value::Num(b)) => num(a * b),
+        (B::Division, Value::Num(a), Value::Num(b)) => num(a / b),
+        (B::Remainder, Value::Num(a), Value::Num(b)) => num(a % b),
+        (_, Value::Num(a), Value::Num(b)) if relational => compare(a.partial_cmp(&b)),
+        (_, Value::Str(a), Value::Str(b)) if relational => {
+            compare(Some(a.encode_utf16().cmp(b.encode_utf16())))
+        }
+        (B::StrictEquality | B::StrictInequality, l, r) => {
+            let eq = strict_equal(&l, &r).ok_or(Eval::Unsupported)?;
+            Ok(Value::Bool(eq == (op == B::StrictEquality)))
+        }
+        (B::Equality | B::Inequality, l, r) => {
+            let nullish = |v: &Value| matches!(v, Value::Undefined | Value::Null);
+            let eq = if nullish(&l) || nullish(&r) {
+                nullish(&l) && nullish(&r)
+            } else if std::mem::discriminant(&l) == std::mem::discriminant(&r) {
+                strict_equal(&l, &r).ok_or(Eval::Unsupported)?
+            } else {
+                // a coercing comparison is not modelled
+                return Err(Eval::Unsupported);
+            };
+            Ok(Value::Bool(eq == (op == B::Equality)))
+        }
+        _ => Err(Eval::Unsupported),
+    }
+}
 
 /// JS `Number.prototype.toString()` of `n`.
 fn js_number(n: f64) -> String {
@@ -432,23 +588,33 @@ fn eval(e: &Expression) -> Result<Value, Eval> {
         Expression::NullLiteral(_) => Value::Null,
         Expression::NumericLiteral(n) => Value::Num(n.value),
         Expression::StringLiteral(s) => Value::Str(s.value.to_string()),
-        Expression::TemplateLiteral(t) if t.expressions.is_empty() => Value::Str(
-            t.quasis
-                .first()
-                .and_then(|q| q.value.cooked)
-                .ok_or(Eval::Unsupported)?
-                .to_string(),
-        ),
+        Expression::TemplateLiteral(t) => {
+            let mut out = String::new();
+            for (i, q) in t.quasis.iter().enumerate() {
+                out.push_str(q.value.cooked.ok_or(Eval::Unsupported)?.as_str());
+                if let Some(e) = t.expressions.get(i) {
+                    match eval(e)? {
+                        Value::Global(_) => return Err(Eval::Unsupported),
+                        v => out.push_str(&v.to_js_string()),
+                    }
+                }
+            }
+            Value::Str(out)
+        }
         Expression::Identifier(id) => match id.name.as_str() {
             // evalValue declares these (`var console, exports, …`)
             "undefined" | "console" | "exports" | "global" | "module" | "process" | "require" => {
                 Value::Undefined
             }
-            "NaN" => Value::Num(f64::NAN),
-            "Infinity" => Value::Num(f64::INFINITY),
-            n if NODE_GLOBALS.binary_search(&n).is_ok() => return Err(Eval::Unsupported),
-            _ => return Err(Eval::NotStatic),
+            n => global_value(n).ok_or(Eval::NotStatic)?,
         },
+        // `typeof` of an undeclared name is "undefined"
+        Expression::UnaryExpression(u) if u.operator == UnaryOperator::Typeof => {
+            match (u.argument.get_inner_expression(), eval(&u.argument)) {
+                (Expression::Identifier(_), Err(Eval::NotStatic)) => Value::Str("undefined".into()),
+                (_, v) => Value::Str(v?.type_of().to_string()),
+            }
+        }
         Expression::UnaryExpression(u) => {
             let v = eval(&u.argument)?;
             match (u.operator, v) {
@@ -459,13 +625,36 @@ fn eval(e: &Expression) -> Result<Value, Eval> {
                 _ => return Err(Eval::Unsupported),
             }
         }
-        Expression::BinaryExpression(b) if b.operator == BinaryOperator::Addition => {
-            match (eval(&b.left)?, eval(&b.right)?) {
-                (Value::Num(l), Value::Num(r)) => Value::Num(l + r),
-                (l @ (Value::Str(_) | Value::Num(_)), r @ (Value::Str(_) | Value::Num(_))) => {
-                    Value::Str(l.to_js_string() + &r.to_js_string())
-                }
-                _ => return Err(Eval::Unsupported),
+        Expression::BinaryExpression(b) => {
+            let l = eval(&b.left)?;
+            binary(b.operator, l, eval(&b.right)?)?
+        }
+        Expression::LogicalExpression(l) => {
+            let left = eval(&l.left)?;
+            let take_left = match l.operator {
+                LogicalOperator::And => !left.truthy(),
+                LogicalOperator::Or => left.truthy(),
+                LogicalOperator::Coalesce => !matches!(left, Value::Undefined | Value::Null),
+            };
+            if take_left {
+                left
+            } else {
+                eval(&l.right)?
+            }
+        }
+        Expression::ConditionalExpression(c) => {
+            if eval(&c.test)?.truthy() {
+                eval(&c.consequent)?
+            } else {
+                eval(&c.alternate)?
+            }
+        }
+        Expression::StaticMemberExpression(m) => member(eval(&m.object)?, &m.property.name)?,
+        Expression::ComputedMemberExpression(m) => {
+            let object = eval(&m.object)?;
+            match eval(&m.expression)? {
+                Value::Global(_) => return Err(Eval::Unsupported),
+                k => member(object, &k.to_js_string())?,
             }
         }
         Expression::ArrayExpression(a) => {
@@ -513,7 +702,10 @@ fn eval(e: &Expression) -> Result<Value, Eval> {
                             {
                                 return Err(Eval::Unsupported)
                             }
-                            k => eval(k.as_expression().ok_or(Eval::Unsupported)?)?.to_js_string(),
+                            k => match eval(k.as_expression().ok_or(Eval::Unsupported)?)? {
+                                Value::Global(_) => return Err(Eval::Unsupported),
+                                k => k.to_js_string(),
+                            },
                         };
                         let value = eval(&p.value)?;
                         define(&mut props, key, value);
@@ -598,8 +790,8 @@ const KNOWN_OPTIONS: [(&str, &[&str]); 7] = [
 ];
 
 /// The evaluated options checked and normalized as vite's parseGlobOptions does, into `call`;
-/// `Err` its message, `Ok(false)` options this transform does not take (`caseSensitive: false`).
-fn glob_options(opts: &[(String, Value)], call: &mut Call) -> Result<bool, String> {
+/// `Err` its message.
+fn glob_options(opts: &[(String, Value)], call: &mut Call) -> Result<(), String> {
     for (key, value) in own_keys(opts) {
         let Some((_, allowed)) = KNOWN_OPTIONS.iter().find(|(k, _)| k == key) else {
             return Err(format!("Unknown glob option \"{key}\""));
@@ -677,15 +869,13 @@ fn glob_options(opts: &[(String, Value)], call: &mut Call) -> Result<bool, Strin
     if !query.is_empty() && !query.starts_with('?') {
         query = format!("?{query}");
     }
-    if get("caseSensitive") == Some(&Value::Bool(false)) {
-        return Ok(false);
-    }
+    call.case_sensitive = get("caseSensitive") != Some(&Value::Bool(false));
     call.eager = get("eager") == Some(&Value::Bool(true));
     call.exhaustive = get("exhaustive") == Some(&Value::Bool(true));
     call.import = (!import.is_empty() && import != "*").then_some(import);
     call.query = query;
     call.base = (!base.is_empty()).then_some(base);
-    Ok(true)
+    Ok(())
 }
 
 /// One call as vite's import-glob plugin takes it (parseImportGlob): `None` when this transform
@@ -704,6 +894,7 @@ fn parse_call(it: &CallExpression) -> Option<Parsed> {
         exhaustive: false,
         query: String::new(),
         base: None,
+        case_sensitive: true,
     };
     let literals = "Could only use literals".to_string();
     match it.arguments[0]
@@ -755,10 +946,8 @@ fn parse_call(it: &CallExpression) -> Option<Parsed> {
             }
             _ => return None,
         };
-        match glob_options(&opts, &mut call) {
-            Ok(true) => {}
-            Ok(false) => return None,
-            Err(m) => return Some(Parsed::Error(m)),
+        if let Err(m) = glob_options(&opts, &mut call) {
+            return Some(Parsed::Error(m));
         }
     }
     Some(Parsed::Call(call))
@@ -794,6 +983,11 @@ fn matches(
         list.push(anchor(p, from, root, aliases)?);
     }
     let me = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+    // `caseSensitive: false`: tinyglobby's caseSensitiveMatch off (the keys keep the files' case)
+    let glob = |pattern: &str, path: &str| match call.case_sensitive {
+        true => crate::coverage::glob_matches(pattern, path),
+        false => crate::coverage::glob_matches(&pattern.to_lowercase(), &path.to_lowercase()),
+    };
     let mut found: Vec<(String, String)> = Vec::new();
     for (start, rest, relative) in &pos {
         let dots = call.exhaustive || rest.starts_with('.') || rest.contains("/.");
@@ -802,9 +996,9 @@ fn matches(
         for (rel, abs) in files {
             let excluded = neg.iter().any(|(nd, nrest, _)| {
                 abs.strip_prefix(nd)
-                    .is_ok_and(|r| crate::coverage::glob_matches(nrest, &r.to_string_lossy()))
+                    .is_ok_and(|r| glob(nrest, &r.to_string_lossy()))
             });
-            if !crate::coverage::glob_matches(rest, &rel)
+            if !glob(rest, &rel)
                 || excluded
                 || abs.canonicalize().unwrap_or_else(|_| abs.clone()) == me
             {

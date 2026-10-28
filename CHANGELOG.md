@@ -12,6 +12,17 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `getComputedStyle` reuse, turbo-test#125, which follows CSSOM edits across realms, turbo-dom#113; canvas, track, image and colour fixes). turbo-dom-v8
   stays on its candidate (e9b36c8).
 
+### Fixed — import.meta.glob caseSensitive and evaluated options, legacy setup mocks (turbo-test#195, #196)
+- `import.meta.glob(…, { caseSensitive: false })` matches case-insensitively (keys keep the
+  files' case), and the options' member reads (`globalThis.x`, `Math.PI`, `'ab'[1]`,
+  `{ e: true }.e`), `typeof`, arithmetic, comparison and logical operators, `?:` and template
+  literals evaluate as vite's; a member of `undefined` is vite's "not static". They were left to
+  throw vitest's "statically replaced" error at run time (turbo-test#195).
+- `TURBO_NO_MR`: a bundled setup file (top-level await) sees its own `vi.mock`, as on the module
+  runner (turbo-test#194); the legacy bundle rewrites only the import specifiers of an
+  externalized mock, no longer a string literal quoting it or the `vi.mock` argument (whose
+  missing-export message named the absolute path) (turbo-test#196).
+
 ### Fixed — import.meta.glob options, bundled setup mocks (turbo-test#190, #194)
 - `import.meta.glob`'s options literal is evaluated as vite does (spreads, computed keys, `!`,
   `+`), and the arguments / options vite rejects fail the module at transform with vite's
