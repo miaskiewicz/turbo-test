@@ -131,7 +131,7 @@ jobs:
   # profiles). macOS arm64 matches the platform the gate was measured on.
   coverage:
     name: coverage (tarpaulin, fail-under)
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -160,8 +160,8 @@ jobs:
   # deliberate toolchain bump rather than a red build.
   lint:
     name: clippy -D warnings, rustfmt --check
-    runs-on: macos-latest
-    # a lost/stalled macOS runner should fail fast, not hang (uncached clippy ~10 min)
+    runs-on: ubuntu-latest
+    # a stalled runner should fail fast, not hang (uncached clippy ~10 min)
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
