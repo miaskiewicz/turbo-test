@@ -47,6 +47,14 @@ A release where these disagree is a bug. Bump both in the same commit.
   read-only heap is process-wide, so a default-snapshot isolate alive alongside
   framework-snapshot ones aborts the test binary.
 
+## Complexity gates
+- CI jobs `complexity / rust (cc <= 15)` (`npm run complexity:rust`: turbo-html2pdf's `cc-check`,
+  installed from its home at the pinned rev in ci.yml, over every tracked `.rs` file) and
+  `complexity / js (cc <= 15)` (`npm run complexity:js`: oxlint `complexity` over cli.js,
+  index.js, src/runtime.js). One limit, no allow-list, no baseline.
+- Both are expected red (`continue-on-error`) until the post-coverage refactor clears the
+  backlog listed in README "Complexity gates". New code stays <= 15; never raise the limit.
+
 ## Where the DOM and V8 live
 - The DOM binding (window/document/CSSOM/forms/events, its probes, Chrome controls and
   tests) is the `turbo-dom-browser-env` crate in miaskiewicz/turbo-dom
