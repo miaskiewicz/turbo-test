@@ -8,7 +8,7 @@
 # tarpaulin load the coverage maps of those executables so bin-only code is attributed.
 #
 # The gate measures production code only: the #[path] unit-test modules under src/ are
-# excluded. 13353/13355 lines (99.99%) are covered. The two known uncovered lines:
+# excluded. 13375/13377 lines (99.99%) are covered. The two known uncovered lines:
 # - cli.rs tap_flatten's `TapNode::Failed` arm: a file that did not load is a top-level TAP node
 #   (render_tap), never a describe's child, but the match over the enum must name it;
 # - runner.rs resolve_callback's lazy `load_cjs` of an app module the module runner transforms:

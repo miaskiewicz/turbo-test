@@ -12,6 +12,14 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `getComputedStyle` reuse, turbo-test#125, which follows CSSOM edits across realms, turbo-dom#113; canvas, track, image and colour fixes). turbo-dom-v8
   stays on its candidate (e9b36c8).
 
+### Fixed — import.meta.glob: a call in the options (turbo-test#197)
+- A call inside `import.meta.glob`'s options (`{ eager: Boolean(1) }`) was left alone and threw
+  at run time; vitest 4.1.12 fails the module at transform, since vite cuts the options at the
+  call and fails its own parse. It now fails the same way with vite's message,
+  ``Parse failed with 1 error:`` / ``Expected `}` but found `EOF` `` (the closer of the object,
+  array, computed key or template the call sits in). vite's code frame of esbuild's reprinted
+  source is not reproduced.
+
 ### Fixed — import.meta.glob caseSensitive and evaluated options, legacy setup mocks (turbo-test#195, #196)
 - `import.meta.glob(…, { caseSensitive: false })` matches case-insensitively (keys keep the
   files' case), and the options' member reads (`globalThis.x`, `Math.PI`, `'ab'[1]`,

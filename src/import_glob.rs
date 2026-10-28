@@ -15,8 +15,9 @@
 //! its parseGlobOptions does: arguments or options vite rejects fail the module the same way, with
 //! vite's message ("Invalid glob import syntax: …", `Unknown glob option …`, a wrong type, a `base`
 //! that is not anchored, a name that is "not static"). `caseSensitive: false` matches the patterns
-//! case-insensitively. A call whose options this does not evaluate (a call — vite fails its own
-//! parse on it —, a method, an array's `length`, a coercing `==`) is left alone and throws
+//! case-insensitively. A call in the options fails the module with the first lines of vite's own
+//! parse error (vite cuts the options at the call; turbo-test#197). A call whose options this does
+//! not evaluate (a method, an array's `length`, a coercing `==`) is left alone and throws
 //! vitest's error at run time (runtime.js).
 //!
 //! The replacement keeps the call's line count and the eager imports go on the first line, so
@@ -24,8 +25,9 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrayExpressionElement, BinaryOperator, CallExpression, Expression, LogicalOperator,
-    ObjectPropertyKind, PropertyKey, PropertyKind, UnaryOperator,
+    ArrayExpression, ArrayExpressionElement, BinaryOperator, CallExpression, Expression,
+    LogicalOperator, ObjectExpression, ObjectPropertyKind, PropertyKey, PropertyKind,
+    TemplateLiteral, UnaryOperator,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
@@ -243,7 +245,7 @@ impl Value {
 
 /// Why an options literal does not evaluate here: vite's evaluation throws on it (a name that is
 /// neither declared there nor a Node global: "not static"), or this evaluator does not take it
-/// (calls, members, operators, a global's value — the call is left alone).
+/// (members, operators, a global's value — the call is left alone).
 #[derive(Debug, PartialEq)]
 enum Eval {
     NotStatic,
@@ -878,6 +880,46 @@ fn glob_options(opts: &[(String, Value)], call: &mut Call) -> Result<(), String>
     Ok(())
 }
 
+/// vite (4.1.12) cuts the options at the end of their first call and fails its own parse of the
+/// cut text: the closer it then expects is the one of the innermost `{…}`, `[…]` (array or
+/// computed key) or `${…}` the call sits in. `None` when the options hold no call.
+fn first_call_closer(opts: &Expression) -> Option<char> {
+    #[derive(Default)]
+    struct Finder {
+        open: Vec<char>,
+        found: Option<char>,
+    }
+    impl Finder {
+        fn within(&mut self, closer: char, f: impl FnOnce(&mut Self)) {
+            self.open.push(closer);
+            f(self);
+            self.open.pop();
+        }
+    }
+    impl<'a> Visit<'a> for Finder {
+        fn visit_call_expression(&mut self, _: &CallExpression<'a>) {
+            if self.found.is_none() {
+                self.found = self.open.last().copied();
+            }
+        }
+        fn visit_object_expression(&mut self, it: &ObjectExpression<'a>) {
+            self.within('}', |v| walk::walk_object_expression(v, it));
+        }
+        fn visit_array_expression(&mut self, it: &ArrayExpression<'a>) {
+            self.within(']', |v| walk::walk_array_expression(v, it));
+        }
+        fn visit_template_literal(&mut self, it: &TemplateLiteral<'a>) {
+            self.within('}', |v| walk::walk_template_literal(v, it));
+        }
+        fn visit_property_key(&mut self, it: &PropertyKey<'a>) {
+            self.within(']', |v| walk::walk_property_key(v, it));
+        }
+    }
+    let mut finder = Finder::default();
+    finder.visit_expression(opts);
+    finder.found
+}
+
 /// One call as vite's import-glob plugin takes it (parseImportGlob): `None` when this transform
 /// leaves it alone (options it does not evaluate).
 fn parse_call(it: &CallExpression) -> Option<Parsed> {
@@ -936,6 +978,11 @@ fn parse_call(it: &CallExpression) -> Option<Parsed> {
                     .to_string(),
             ),
         };
+        if let Some(closer) = first_call_closer(opts) {
+            return Some(Parsed::Error(format!(
+                "Parse failed with 1 error:\nExpected `{closer}` but found `EOF`"
+            )));
+        }
         let opts = match eval(opts) {
             Ok(Value::Object(o)) => o,
             Err(Eval::NotStatic) => {

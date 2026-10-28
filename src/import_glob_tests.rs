@@ -85,8 +85,7 @@ fn calls_it_cannot_replace_are_left_alone() {
         "const g = import.meta.glob; g('./*.ts')",
         "other.glob('./*.ts'); import.meta.url",
         "import.meta.glob('./*.ts'",
-        // options this transform does not evaluate (vite evaluates them; a call or a global)
-        "import.meta.glob('./*.ts', { eager: f() })",
+        // options this transform does not evaluate (vite evaluates them; a global's value)
         "import.meta.glob('./*.ts', { query: { a: [1].length } })",
         "import.meta.glob('./*.ts', { eager: a?.b })",
     ] {
