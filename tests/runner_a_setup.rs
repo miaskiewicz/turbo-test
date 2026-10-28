@@ -421,3 +421,49 @@ fn a_bundled_setup_file_imports_the_real_module_a_later_setup_mocks() {
     assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
     assert_eq!(r.code, Some(0), "{}", r.all());
 }
+
+/// turbo-test#196: turbo-test#194 on the legacy bundle path (`TURBO_NO_MR`, with and without
+/// esbuild): the bundled setup file (top-level await) sees its own vi.mock of a module it
+/// imports. vitest 4.1.12 on the same project: `['mocked', 'mocked']` (1 passed); turbo-test
+/// gave `['real', 'mocked']`.
+#[test]
+#[ignore = "turbo-test#196: fails until the fix"]
+fn a_bundled_setup_file_imports_its_own_vi_mock_without_the_module_runner() {
+    for esbuild in [true, false] {
+        let name = if esbuild {
+            "ra-setup-bundle-own-mock-legacy"
+        } else {
+            "ra-setup-bundle-own-mock-legacy-esm"
+        };
+        let p = Project::new(name);
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", &format!(r#"{{"name":"{name}","type":"module"}}"#));
+        p.file(
+            "vitest.config.ts",
+            "export default { test: { setupFiles: ['./setup.ts'] } };\n",
+        );
+        p.file("src/dep.ts", "export const v = 'real';\n");
+        p.file(
+            "setup.ts",
+            "import { vi } from 'vitest';\nimport { v } from './src/dep';\n\
+             vi.mock('./src/dep', () => ({ v: 'mocked' }));\nawait Promise.resolve();\n\
+             (globalThis as any).__setupV = v;\n",
+        );
+        p.file(
+            "a.test.ts",
+            "import { expect, it } from 'vitest';\nimport { v } from './src/dep';\n\
+             it('setup mock', () => { expect([(globalThis as any).__setupV, v]).toEqual(['mocked', 'mocked']); });\n",
+        );
+        for env in [&[][..], &[("TURBO_NO_MR", "1")][..]] {
+            let r = turbo_test(&p.dir, &[], env);
+            assert!(
+                r.stdout.contains("Tests  1 passed (1)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            assert_eq!(r.code, Some(0), "esbuild={esbuild} {env:?}\n{}", r.all());
+        }
+    }
+}
