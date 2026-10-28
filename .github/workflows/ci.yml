@@ -24,6 +24,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, aarch64-apple-darwin, x86_64-pc-windows-msvc]
+        # macOS runners are scarce: PR CI skips the darwin build; tag/main pushes (releases) keep it
+        exclude:
+          - target: ${{ github.event_name == 'pull_request' && 'aarch64-apple-darwin' || 'none' }}
         include:
           - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,   binname: turbo-test-linux-x64 }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,  binname: turbo-test-linux-arm64 }
