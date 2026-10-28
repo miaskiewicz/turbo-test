@@ -1069,6 +1069,92 @@ it('folds the options as vite evaluates them', async () => {
     }
 }
 
+/// turbo-test#195: `caseSensitive: false` globs match case-insensitively and the options'
+/// member reads evaluate, as vite's in vitest 4.1.12 (`globalThis.x` is `undefined`: vite's type
+/// error; a member of `undefined` throws: "not static"). turbo-test left these calls to throw
+/// vitest's "statically replaced" error. vitest on the same project:
+/// `Test Files  2 failed | 1 passed (3)`, `Tests  1 passed (1)`.
+#[test]
+#[ignore = "turbo-test#195: fails until the fix"]
+fn glob_case_insensitivity_and_option_members_are_vites() {
+    let other = "it('other test', () => { expect(1).toBe(1); });\n";
+    let files: [(&str, String); 6] = [
+        (
+            "package.json",
+            "{\"name\":\"rc-glob-evaluated\",\"type\":\"module\"}\n".into(),
+        ),
+        ("m/a.ts", "export const a = 'a';\n".into()),
+        ("m/B.ts", "export const b = 'b';\n".into()),
+        (
+            "ok.test.ts",
+            r#"import { expect, it } from 'vitest';
+it('evaluates members and matches case-insensitively', () => {
+  expect(Object.keys(import.meta.glob('./m/*.TS', { caseSensitive: false }))).toEqual(['./m/B.ts', './m/a.ts']);
+  expect(Object.keys(import.meta.glob(['./m/*.ts', '!./m/b.ts'], { caseSensitive: false }))).toEqual(['./m/a.ts']);
+  const g: any = import.meta.glob('./m/*.ts', { eager: { e: true }.e && Math.PI > 3, import: 'ab'[1] });
+  expect(g).toEqual({ './m/B.ts': 'b', './m/a.ts': undefined });
+});
+"#
+            .into(),
+        ),
+        (
+            "member.test.ts",
+            format!("import {{ expect, it }} from 'vitest';\n{other}it('member', () => {{ expect(import.meta.glob('./m/*.ts', {{ eager: (globalThis as any).x }})).toEqual({{}}); }});\n"),
+        ),
+        (
+            "nul.test.ts",
+            format!("import {{ expect, it }} from 'vitest';\n{other}it('member of undefined', () => {{ expect(import.meta.glob('./m/*.ts', {{ eager: (undefined as any).x }})).toEqual({{}}); }});\n"),
+        ),
+    ];
+    for esbuild in [true, false] {
+        let p = Project::new(if esbuild {
+            "rc-glob-evaluated"
+        } else {
+            "rc-glob-evaluated-esm"
+        });
+        if esbuild {
+            p.with_esbuild();
+        }
+        for (f, c) in &files {
+            p.file(f, c);
+        }
+        let envs: &[&[(&str, &str)]] = if esbuild {
+            &[
+                &[],
+                &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
+            ]
+        } else {
+            &[&[]]
+        };
+        for env in envs {
+            let r = turbo_test(&p.dir, &[], env);
+            assert_eq!(r.code, Some(1), "esbuild={esbuild} {env:?}\n{}", r.all());
+            assert!(
+                r.stdout.contains("Test Files  2 failed | 1 passed (3)")
+                    && r.stdout.contains("Tests  1 passed (1)"),
+                "esbuild={esbuild} {env:?}\n{}",
+                r.all()
+            );
+            for (file, message) in [
+                (
+                    "member.test.ts",
+                    "Expected glob option \"eager\" to be of type boolean, but got undefined",
+                ),
+                (
+                    "nul.test.ts",
+                    "Vite is unable to parse the glob options as the value is not static",
+                ),
+            ] {
+                assert!(
+                    load_error_line(&r, file).ends_with(&format!("(Error: {message})")),
+                    "esbuild={esbuild} {env:?}\n{}",
+                    r.all()
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn import_meta_keeps_coverage_line_mapping() {
     let p = esbuild_project("rc-import-meta-cov");

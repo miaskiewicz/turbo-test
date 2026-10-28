@@ -600,3 +600,68 @@ fn argument_node_types_and_glob_literals() {
         Some("throw new Error(\"Invalid glob import syntax: Could only use literals\");import.meta.glob(...p)".to_string())
     );
 }
+
+/// turbo-test#195: `caseSensitive: false` matches case-insensitively (keys keep the files'
+/// case), and the options' member reads, operators and `typeof` evaluate as vite's evalValue
+/// does. Rows recorded from vitest 4.1.12 (vite 8.3.5); turbo-test left these calls alone.
+#[test]
+#[ignore = "turbo-test#195: fails until the fix"]
+fn case_insensitive_globs_and_evaluated_members() {
+    let d = project(&["t.ts", "m/a.ts", "m/B.ts"]);
+    let file = d.0.join("t.ts");
+    let lazy = |files: &[&str], q: &str| {
+        let e: Vec<String> = files
+            .iter()
+            .map(|f| format!("\"./m/{f}\": () => import(\"./m/{f}{q}\")"))
+            .collect();
+        format!("({{{}}})", e.join(", "))
+    };
+    let eager = |pick: &str| {
+        format!(
+            "import * as __tt_glob_0_0 from \"./m/B.ts\";import * as __tt_glob_0_1 from \"./m/a.ts\";\
+             ({{\"./m/B.ts\": __tt_glob_0_0[\"{pick}\"], \"./m/a.ts\": __tt_glob_0_1[\"{pick}\"]}})"
+        )
+    };
+    let expanded: [(&str, String); 8] = [
+        ("import.meta.glob('./m/*.ts', { caseSensitive: false })", lazy(&["B.ts", "a.ts"], "")),
+        ("import.meta.glob('./m/*.TS', { caseSensitive: false })", lazy(&["B.ts", "a.ts"], "")),
+        ("import.meta.glob('./m/b.ts', { caseSensitive: false })", lazy(&["B.ts"], "")),
+        ("import.meta.glob(['./m/*.ts', '!./m/b.ts'], { caseSensitive: false })", lazy(&["a.ts"], "")),
+        ("import.meta.glob('./m/*.TS')", "({})".to_string()),
+        (
+            "import.meta.glob('./m/*.ts', { query: { a: Math.PI, b: Number.MAX_SAFE_INTEGER, c: globalThis.undefined ?? 'n', d: 2 * 3 - 1 } })",
+            lazy(&["B.ts", "a.ts"], "?a=3.141592653589793&b=9007199254740991&c=n&d=5"),
+        ),
+        (
+            "import.meta.glob('./m/*.ts', { eager: 1 > 0 && 'a' < 'b', import: typeof x === 'undefined' ? 'a' : 'b' })",
+            eager("a"),
+        ),
+        (
+            "import.meta.glob('./m/*.ts', { eager: { e: true }.e, import: 'ab'[1] })",
+            eager("b"),
+        ),
+    ];
+    for (src, want) in expanded {
+        assert_eq!(
+            expand(&file, src, &d.0, &[]).as_deref(),
+            Some(want.as_str()),
+            "{src}"
+        );
+    }
+    for (src, message) in [
+        ("import.meta.glob('./m/*.ts', { eager: globalThis.x })", "Expected glob option \"eager\" to be of type boolean, but got undefined"),
+        ("import.meta.glob('./m/*.ts', { eager: Boolean })", "Expected glob option \"eager\" to be of type boolean, but got function"),
+        ("import.meta.glob('./m/*.ts', { eager: Number.MAX_SAFE_INTEGER })", "Expected glob option \"eager\" to be of type boolean, but got number"),
+        ("import.meta.glob('./m/*.ts', { eager: 'x'.length })", "Expected glob option \"eager\" to be of type boolean, but got number"),
+        ("import.meta.glob('./m/*.ts', { query: { a: JSON } })", "Expected glob option \"query.a\" to be of type string, number, or boolean, but got object"),
+        ("import.meta.glob('./m/*.ts', { eager: undefined.x })", "Vite is unable to parse the glob options as the value is not static"),
+        ("import.meta.glob('./m/*.ts', { eager: y.x })", "Vite is unable to parse the glob options as the value is not static"),
+    ] {
+        let message = serde_json::to_string(message).unwrap();
+        assert_eq!(
+            expand(&file, src, &d.0, &[]),
+            Some(format!("throw new Error({message});{src}")),
+            "{src}"
+        );
+    }
+}
