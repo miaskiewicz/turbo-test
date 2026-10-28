@@ -374,9 +374,16 @@ fn a_bundled_setup_file_imports_its_own_vi_mock() {
         "import { expect, it } from 'vitest';\nimport { v } from './src/dep';\n\
          it('setup mock', () => { expect([(globalThis as any).__setupV, v]).toEqual(['mocked', 'mocked']); });\n",
     );
-    for env in [&[][..], &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")][..]] {
+    for env in [
+        &[][..],
+        &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")][..],
+    ] {
         let r = turbo_test(&p.dir, &[], env);
-        assert!(r.stdout.contains("Tests  1 passed (1)"), "{env:?}\n{}", r.all());
+        assert!(
+            r.stdout.contains("Tests  1 passed (1)"),
+            "{env:?}\n{}",
+            r.all()
+        );
         assert_eq!(r.code, Some(0), "{env:?}\n{}", r.all());
     }
 }

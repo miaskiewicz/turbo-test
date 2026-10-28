@@ -990,7 +990,6 @@ it('fine', () => { expect(Object.keys(import.meta.glob('./src/ok/*.ts'))).toEqua
 /// ran, so the files' other tests passed. vitest on the same project:
 /// `Test Files  3 failed | 1 passed (4)`, `Tests  1 passed (1)`.
 #[test]
-#[ignore = "turbo-test#190: fails until the fix"]
 fn glob_options_are_evaluated_and_rejected_as_vite_does() {
     let other = "it('other test', () => { expect(1).toBe(1); });\n";
     let files: [(&str, String); 7] = [
