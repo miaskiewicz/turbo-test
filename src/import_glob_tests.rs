@@ -354,11 +354,46 @@ fn vites_option_evaluation_and_errors() {
     // what this transform does not evaluate (calls, members, Node's globals) or does not take
     // (`caseSensitive: false`) is still left alone
     for src in [
-        "import.meta.glob('./*.ts', { eager: Boolean(1) })",
         "import.meta.glob('./*.ts', { eager: [].length })",
         "import.meta.glob('./*.ts', { eager: 1 & 1 })",
     ] {
         assert_eq!(expand(&file, src, &d.0, &[]), None, "{src}");
+    }
+}
+
+/// turbo-test#197: a call in the options fails the module as vite 4.1.12 does. vite cuts the
+/// options at the end of their first call and fails its own parse; the closer named is the one of
+/// the object or array the call sits in. vite's message goes on with a code frame of esbuild's
+/// reprint of the cut text (`1: import.meta.glob("./m/*.ts", { eager: Boolean(1)` and a caret),
+/// which this transform does not reproduce: the message here is its first two lines only.
+#[test]
+fn a_call_in_the_options_fails_the_parse_like_vite() {
+    let d = project(&["t.ts", "a.ts"]);
+    let file = d.0.join("t.ts");
+    let rows = [
+        // rows recorded from vitest 4.1.12
+        ("import.meta.glob('./*.ts', { eager: Boolean(1) })", '}'),
+        ("import.meta.glob('./*.ts', { eager: f() })", '}'),
+        ("import.meta.glob('./*.ts', { query: { a: f() } })", '}'),
+        ("import.meta.glob('./*.ts', { eager: f(g()) })", '}'),
+        ("import.meta.glob('./*.ts', { eager: [f()] })", ']'),
+        ("import.meta.glob('./*.ts', { eager: f(1, 2) })", '}'),
+        // the parse fails before any name is evaluated
+        (
+            "import.meta.glob('./*.ts', { eager: isEager, query: { a: [1, f()] } })",
+            ']',
+        ),
+        ("import.meta.glob('./*.ts', { [f()]: 1 })", ']'),
+        ("import.meta.glob('./*.ts', { eager: `${f()}` })", '}'),
+    ];
+    for (src, closer) in rows {
+        let message = format!("Parse failed with 1 error:\nExpected `{closer}` but found `EOF`");
+        let message = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            expand(&file, src, &d.0, &[]),
+            Some(format!("throw new Error({message});{src}")),
+            "{src}"
+        );
     }
 }
 
