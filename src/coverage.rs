@@ -304,6 +304,8 @@ fn simple_match(pat: &[u8], path: &[u8]) -> bool {
 pub fn slash_path(p: &Path) -> String {
     let s = p.to_string_lossy();
     if cfg!(windows) {
+        // vite's normalizePath: `C:/x/y` (a verbatim `\\?\` prefix is dropped)
+        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
         s.replace('\\', "/")
     } else {
         s.into_owned()

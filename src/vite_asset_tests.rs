@@ -47,7 +47,10 @@ fn values_follow_vite() {
     assert_eq!(v("a/lfs.svg").as_deref(), Some("/a/lfs.svg"));
     assert_eq!(
         value(&d.join("a/t.txt"), Path::new("/elsewhere")).unwrap(),
-        format!("/@fs{}/a/t.txt", d.display())
+        format!(
+            "/@fs/{}/a/t.txt",
+            crate::coverage::slash_path(&d).trim_start_matches('/')
+        )
     );
     assert!(is_asset_id(Path::new("/x/p.PNG")));
     assert!(is_asset_id(Path::new("/x/m.ts?raw")));

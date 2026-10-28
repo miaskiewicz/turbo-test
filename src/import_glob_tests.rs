@@ -150,7 +150,7 @@ fn base_query_as_aliases_and_a_hashbang() {
         .unwrap(),
         format!(
             "({{\"{}/x/l.ts\": () => import(\"../lib/x/l.ts\")}})",
-            aliases[0].1
+            crate::coverage::slash_path(Path::new(&aliases[0].1))
         )
     );
 }

@@ -107,7 +107,11 @@ pub fn value(id: &Path, root: &Path) -> Option<String> {
     };
     let path = match crate::coverage::native_path(file).strip_prefix(root) {
         Ok(rel) => format!("/{}", crate::coverage::slash_path(rel)),
-        Err(_) => format!("/@fs{}", crate::coverage::slash_path(Path::new(file))),
+        Err(_) => {
+            // vite's FS_PREFIX `/@fs/` + the normalised absolute path (`/@fs/C:/x` on Windows)
+            let abs = crate::coverage::slash_path(Path::new(file));
+            format!("/@fs/{}", abs.trim_start_matches('/'))
+        }
     };
     Some(format!("{path}{rest}"))
 }
