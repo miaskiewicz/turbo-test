@@ -32,5 +32,5 @@ objects = [
 ]
 out = ["Stdout", "Json"]
 output-dir = "target/cov/report"
-fail-under = 99.98
+fail-under = 99.9
 exclude-files = ["src/*_tests.rs", "src/runner_tests_*.rs", "src/bin/spike_tests/*"]

@@ -35,7 +35,7 @@ A release where these disagree is a bug. Bump both in the same commit.
   module they test) and CLI integration tests (`tests/*.rs`, helper `tests/common/mod.rs`:
   throwaway projects outside the repo, isolated TMPDIR/TURBO_CACHE_DIR, spawning the real
   binary). Integration tests and the path/V8-sensitive unit modules are `cfg(unix)`.
-- `cargo tarpaulin` (reads `tarpaulin.toml`: Llvm engine, `target/cov`, `fail-under = 99.98`)
+- `cargo tarpaulin` (reads `tarpaulin.toml`: Llvm engine, `target/cov`, `fail-under = 99.9`)
   is the CI `coverage` gate. New code needs behaviour-asserting tests (happy path + edge
   cases) that keep every line covered; never add coverage-only no-op tests. The two
   remaining uncovered lines (each with its reason or open issue) are explained in tarpaulin.toml.

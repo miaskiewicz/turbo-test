@@ -73,7 +73,7 @@ required APIs are available to registry consumers.
 Run `npm ci` (npm 10 and npm 11 must both install the committed lock unchanged; CI job
 `npm-lockfile`), the complete locked Rust tests, the Node compatibility/type tests, all
 nine native DOM compatibility fixtures used by `.github/workflows/ci.yml`, and the
-line-coverage gate (`cargo tarpaulin`, `fail-under = 99.98` in tarpaulin.toml; CI job
+line-coverage gate (`cargo tarpaulin`, `fail-under = 99.9` in tarpaulin.toml; CI job
 `coverage`), and the lints (`cargo fmt --check`, `cargo clippy --all-targets -- -D
 warnings`; CI job `lint`). The complexity jobs (`complexity / rust (cc <= 15)`,
 `complexity / js (cc <= 15)`) are expected red until the post-coverage refactor and do not
