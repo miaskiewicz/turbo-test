@@ -343,3 +343,40 @@ fn a_bundled_setup_file_shares_the_test_files_package_instances() {
     assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
     assert_eq!(r.code, Some(0), "{}", r.all());
 }
+
+/// turbo-test#194: a bundled setup file (top-level await) sees its own vi.mock of a module it
+/// imports, as vitest 4.1.12 hoists the setup's vi.mock above its imports: vitest on the same
+/// project gives `['mocked', 'mocked']` (1 passed). turbo-test lazy-loaded the bundle's
+/// externalized `./src/dep` (the real module) before draining the setup's mocks: `['real',
+/// 'mocked']`.
+#[test]
+#[ignore = "turbo-test#194: fails until the fix"]
+fn a_bundled_setup_file_imports_its_own_vi_mock() {
+    let p = Project::new("ra-setup-bundle-own-mock");
+    p.with_esbuild();
+    p.file(
+        "package.json",
+        r#"{"name":"ra-setup-bundle-own-mock","type":"module"}"#,
+    );
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { setupFiles: ['./setup.ts'] } };\n",
+    );
+    p.file("src/dep.ts", "export const v = 'real';\n");
+    p.file(
+        "setup.ts",
+        "import { vi } from 'vitest';\nimport { v } from './src/dep';\n\
+         vi.mock('./src/dep', () => ({ v: 'mocked' }));\nawait Promise.resolve();\n\
+         (globalThis as any).__setupV = v;\n",
+    );
+    p.file(
+        "a.test.ts",
+        "import { expect, it } from 'vitest';\nimport { v } from './src/dep';\n\
+         it('setup mock', () => { expect([(globalThis as any).__setupV, v]).toEqual(['mocked', 'mocked']); });\n",
+    );
+    for env in [&[][..], &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")][..]] {
+        let r = turbo_test(&p.dir, &[], env);
+        assert!(r.stdout.contains("Tests  1 passed (1)"), "{env:?}\n{}", r.all());
+        assert_eq!(r.code, Some(0), "{env:?}\n{}", r.all());
+    }
+}
