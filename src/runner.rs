@@ -1796,6 +1796,15 @@ fn run_setup_file(
         );
         return err.map_or(Ok(()), failed);
     }
+    // vitest hoists the setup's vi.mock calls above its imports here too (turbo-test#194): the
+    // mock prepass registers them before the bundle's externalized imports load
+    if mr_enabled() {
+        run_entry_mocks(scope, file).or_else(failed)?;
+        run_js(
+            scope,
+            "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;",
+        );
+    }
     // reset the pending-mock queue before this setup file runs
     {
         let global = scope.get_current_context().global(scope);

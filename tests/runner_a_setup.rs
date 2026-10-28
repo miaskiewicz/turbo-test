@@ -350,7 +350,6 @@ fn a_bundled_setup_file_shares_the_test_files_package_instances() {
 /// externalized `./src/dep` (the real module) before draining the setup's mocks: `['real',
 /// 'mocked']`.
 #[test]
-#[ignore = "turbo-test#194: fails until the fix"]
 fn a_bundled_setup_file_imports_its_own_vi_mock() {
     let p = Project::new("ra-setup-bundle-own-mock");
     p.with_esbuild();

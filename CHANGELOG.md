@@ -12,6 +12,19 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `getComputedStyle` reuse, turbo-test#125, which follows CSSOM edits across realms, turbo-dom#113; canvas, track, image and colour fixes). turbo-dom-v8
   stays on its candidate (e9b36c8).
 
+### Fixed — import.meta.glob options, bundled setup mocks (turbo-test#190, #194)
+- `import.meta.glob`'s options literal is evaluated as vite does (spreads, computed keys, `!`,
+  `+`), and the arguments / options vite rejects fail the module at transform with vite's
+  message (`Invalid glob import syntax: …`, `Unknown glob option "x"`, a wrong option type,
+  `Option "base" must start with '/', './' or '../', …`, `as` with `query`, a name that is "not
+  static"); they were left to throw vitest's "statically replaced" error at run time. As vite:
+  only `as: 'raw' | 'url'` defaults `import` to `default`, `import: '*'` is the namespace, an
+  empty query value is the key alone, an alias `base` is rejected, `[]` and array holes are
+  taken (turbo-test#190).
+- A bundled setup file (top-level await) sees its own `vi.mock` of a module it imports, as
+  vitest hoists the setup's `vi.mock` above its imports; the bundle loaded the real module
+  (turbo-test#194).
+
 ### Fixed — found by the coverage step (turbo-test#187–#189, #191–#193)
 - `TextDecoder#decode` of a text longer than V8's string limit throws Node's `Error` with
   `code: 'ERR_STRING_TOO_LONG'` ("Cannot create a string longer than 0x1fffffe8 characters") for
