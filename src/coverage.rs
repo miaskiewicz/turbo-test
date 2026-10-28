@@ -299,6 +299,26 @@ fn simple_match(pat: &[u8], path: &[u8]) -> bool {
     pi == pat.len()
 }
 
+/// A path as a vite/vitest module id: `/` separators. Only Windows rewrites `\\` (on POSIX a
+/// backslash is a legal file-name character).
+pub fn slash_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
+    }
+}
+
+/// The file-system form of a `/`-separated id path (Windows verbatim `\\?\` paths reject `/`).
+pub fn native_path(s: &str) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(s.replace('/', "\\"))
+    } else {
+        PathBuf::from(s)
+    }
+}
+
 /// Whether a file passes the configured include/exclude globs. Matched against the file's
 /// cwd-relative POSIX path (how vitest interprets `coverage.include`).
 fn passes_globs(file: &Path) -> bool {

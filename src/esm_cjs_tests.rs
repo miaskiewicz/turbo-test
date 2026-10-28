@@ -592,7 +592,12 @@ fn module_map_is_offset_past_the_preamble_and_prefix() {
 
 #[test]
 fn script_map_starts_at_line_zero_and_escapes_the_file_name() {
-    let name = "we\"ird\\na\tme.ts";
+    // a literal backslash cannot be in a Windows file name (it is the separator there)
+    let name = if cfg!(windows) {
+        "we\"ird na\tme.ts"
+    } else {
+        "we\"ird\\na\tme.ts"
+    };
     let o = emit_inner(
         Path::new(name),
         "const y: number = 1;\nmodule.exports = y;\n",

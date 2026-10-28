@@ -77,14 +77,17 @@ pub fn value(id: &Path, root: &Path) -> Option<String> {
     let id = id.to_string_lossy();
     let (file, query) = split(&id);
     if has_flag(query, "raw") {
-        return Some(String::from_utf8_lossy(&std::fs::read(file).ok()?).into_owned());
+        return Some(
+            String::from_utf8_lossy(&std::fs::read(crate::coverage::native_path(file)).ok()?)
+                .into_owned(),
+        );
     }
     let url_flag = has_flag(query, "url");
     if !url_flag && !known(file) {
         return None;
     }
     if file.ends_with(".svg") && !has_flag(query, "no-inline") && !id.contains('#') {
-        let content = std::fs::read(file).ok()?;
+        let content = std::fs::read(crate::coverage::native_path(file)).ok()?;
         if content.len() < INLINE_LIMIT
             && !content.starts_with(b"version https://git-lfs.github.com")
         {
@@ -100,9 +103,9 @@ pub fn value(id: &Path, root: &Path) -> Option<String> {
     } else {
         format!("?{}", rest.join("&"))
     };
-    let path = match Path::new(file).strip_prefix(root) {
-        Ok(rel) => format!("/{}", rel.to_string_lossy()),
-        Err(_) => format!("/@fs{file}"),
+    let path = match crate::coverage::native_path(file).strip_prefix(root) {
+        Ok(rel) => format!("/{}", crate::coverage::slash_path(rel)),
+        Err(_) => format!("/@fs{}", crate::coverage::slash_path(Path::new(file))),
     };
     Some(format!("{path}{rest}"))
 }

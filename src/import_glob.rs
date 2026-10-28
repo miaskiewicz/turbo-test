@@ -1043,7 +1043,7 @@ fn matches(
         for (rel, abs) in files {
             let excluded = neg.iter().any(|(nd, nrest, _)| {
                 abs.strip_prefix(nd)
-                    .is_ok_and(|r| glob(nrest, &r.to_string_lossy()))
+                    .is_ok_and(|r| glob(nrest, &crate::coverage::slash_path(r)))
             });
             if !glob(rest, &rel)
                 || excluded
@@ -1055,8 +1055,8 @@ fn matches(
                 Some(b) => relative_spec(b, &abs),
                 None if *relative => relative_spec(dir, &abs),
                 None => match normal(&abs).strip_prefix(normal(root)) {
-                    Ok(r) => format!("/{}", r.to_string_lossy()),
-                    Err(_) => abs.to_string_lossy().into_owned(),
+                    Ok(r) => format!("/{}", crate::coverage::slash_path(r)),
+                    Err(_) => crate::coverage::slash_path(&abs),
                 },
             };
             if found.iter().any(|(k, _)| *k == key) {
@@ -1087,7 +1087,7 @@ fn anchor(
             } else {
                 root.join(to)
             };
-            format!("{}{rest}", to.to_string_lossy())
+            format!("{}{rest}", crate::coverage::slash_path(&to))
         })
     });
     let (start, rest, relative) = match alias {
