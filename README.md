@@ -1,18 +1,37 @@
 # turbo-test
 
-**A blazing-fast native test runner — a drop-in replacement for [vitest](https://vitest.dev).**
+**A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
+(and, experimentally, jest).** Release **0.6.0**.
 
-Written in Rust on V8: per-file transforms via [oxc](https://oxc.rs)/esbuild, an **all-Rust DOM**
-([turbo-dom](https://crates.io/crates/turbo-dom)'s `rtdom`, bound natively to V8 — no jsdom, no
-Node), work-stealing parallelism, and an optional isolate-reuse mode. Runs your existing
-`*.test.ts(x)` files — same `describe`/`it`/`expect`/`vi`, same `@testing-library/react` + jest-dom —
-typically **~5–12× faster than vitest+jsdom**. Also runs **jest** suites (`jest` global + jest config
-+ `emitDecoratorMetadata`) — see [Jest compatibility](#jest-compatibility-experimental) (experimental).
+turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
+work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
+bound directly to V8 (no jsdom, no Node). It runs your existing `*.test.ts(x)` files with the same
+`describe` / `it` / `expect` / `vi`, `@testing-library/react` and jest-dom; the `vi`, mock and
+`jest` surface follows vitest 4.1.12 and jest 30.5.2.
 
-## Running it (drop-in for vitest)
+## Where it sits: turbo-dom is the shared base
 
-No config changes — turbo-test reads your existing `vitest.config.*` (include/exclude, environment,
-coverage thresholds) and runs the same test files:
+Since 0.6.0 the browser engine lives in one place,
+[miaskiewicz/turbo-dom](https://github.com/miaskiewicz/turbo-dom), and three products consume it:
+
+| turbo-dom crate | what it is | used by |
+|---|---|---|
+| `turbo-dom` | the Rust DOM (`rtdom`, html5ever), selector engine, CSSOM | turbo-test, turbo-html2pdf, turbo-surf |
+| `turbo-dom-browser-env` | `window` / `document` / CSSOM / forms / events bound to V8 | **turbo-test**, turbo-surf |
+| `turbo-dom-v8` (150.4.x) | turbo-dom's rusty_v8 fork (interceptor `ShouldThrowOnError` fix) | **turbo-test**, turbo-surf |
+| `turbo-dom-layout` | HTML/CSS layout | turbo-html2pdf, turbo-surf |
+| `turbo-dom-raster` | synthetic screenshots | turbo-surf |
+
+turbo-test links `turbo-dom-browser-env` 0.6.0 and `turbo-dom-v8 ~150.4` (under the local alias
+`v8`; `scripts/check-single-v8.sh` keeps exactly one V8 in the graph). This repository carries no
+copy of the binding or of V8: the binding, its probes and the Chrome-control collectors that
+record their oracles live in turbo-dom's
+[`crates/turbo-dom-browser-env`](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
+— fix DOM behaviour and recollect controls there. Until the turbo-dom 0.6.0 crates are on
+crates.io, `Cargo.toml` resolves them from git through a pre-publish `[patch.crates-io]` section
+that is dropped before the tag ([RELEASING.md](RELEASING.md)).
+
+## Install and run
 
 ```bash
 npm i -D @miaskiewicz/turbo-test
@@ -24,10 +43,9 @@ npx turbo-test --coverage            # native V8 coverage (honors the config's t
 npx turbo-test --reporter json       # default | verbose | json | junit | tap | dot
 ```
 
-The default and verbose reporters print vitest 4.1.12's output (under an AI agent, its agent
-reporter); `TURBO_LEGACY_REPORTER=1` keeps turbo-test's compact `PASS` / `FAIL` lines.
-
-Swap it into CI/scripts by replacing `vitest run` with `turbo-test`:
+No config changes: turbo-test reads your existing `vitest.config.*` (include/exclude,
+environment, setup files, isolate, aliases, coverage thresholds). Replace `vitest run` with
+`turbo-test` in your scripts:
 
 ```jsonc
 // package.json
@@ -37,56 +55,21 @@ Swap it into CI/scripts by replacing `vitest run` with `turbo-test`:
 }
 ```
 
-The DOM is on by default for `jsdom`/`happy-dom`/`turbo-dom` environments (and any file with a
-`// @vitest-environment jsdom` pragma); `environment: 'node'` files get clean globals, just like
-vitest. There is **no environment to install or configure** — the Rust DOM ships inside the binary.
+The default and verbose reporters print vitest 4.1.12's output (under an AI agent, its agent
+reporter); `TURBO_LEGACY_REPORTER=1` keeps turbo-test's compact `PASS` / `FAIL` lines.
 
-## The DOM binding and its Chrome controls
+The DOM is on for `jsdom` / `happy-dom` / `turbo-dom` environments (and any file with a
+`// @vitest-environment jsdom` pragma); `environment: 'node'` files get clean globals, as in
+vitest. There is no environment package to install — the DOM is linked into the binary.
 
-The DOM is [turbo-dom-browser-env](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
-(the rtdom <-> V8 browser environment, built in the
-[turbo-dom](https://github.com/miaskiewicz/turbo-dom) workspace and linked into the
-binary). Its probes, the Chrome-control collectors that record their oracles
-(`scripts/*-chrome-control.mjs`, `scripts/typed-om-registry.mjs`,
-`scripts/trusted-types-control/`), the live CSS host notes (`docs/live-css-host.md`)
-and the native DOM lifecycle behaviour they pin live in that crate; see its
-README's "Chrome controls" and "Native DOM lifecycle controls" sections. Fix DOM
-behaviour and recollect controls there, not in this repository.
+### Switches
 
-## Benchmarks
+turbo-test has no Cargo feature flags; behaviour switches are environment variables:
 
-Two real production app suites, **same machine, same session, identical pass counts** (Apple
-M-series, 8 workers), each the **median of repeated full-suite runs**. To keep it apples-to-apples
-we measured vitest two ways — with stock **jsdom** (the default most projects run) and with
-**turbo-dom** swapped in as the environment — so you can see the DOM's contribution separately from
-the runner's; turbo-test ran under its all-Rust DOM (`TURBO_RUST_DOM`):
-
-| Suite | Tests | vitest + jsdom | vitest + turbo-dom | **turbo-test** | vs jsdom | vs turbo-dom |
-|---|---|---|---|---|---|---|
-| **payroll-app** | 10,471 | ~252s | ~88s | **~20s** | **~12×** | ~4.4× |
-| **ui-design-components** | 7,062 | ~173s | ~142s | **~36s** | **~4.8×** | ~3.9× |
-
-`ui-design-components` also runs under turbo-test's optional **isolate-reuse** mode (see below).
-On a quieter box an earlier measurement landed it at **~1.5–1.6× over fresh isolation** vs the same
-jsdom baseline — reuse stays opt-in because it changes per-file `vi.mock` semantics for projects
-that mock node_modules (see [Isolate-reuse](#isolate-reuse-extra-speed-zero-config)).
-
-All configs pass 100% (**10,471/0** and **7,062/0** — both suites run green under turbo-test's
-all-Rust DOM). Two takeaways:
-
-- **The DOM matters.** Just swapping jsdom → turbo-dom under plain vitest already cuts wall time
-  ~2.1–2.7× (jsdom's `environment` setup alone was **718s cumulative** across workers on payroll
-  vs turbo-dom's **33s**). If you can't switch runners yet, switching the environment is free speed.
-- **The runner matters more.** turbo-test's native transform + per-package dep-bundling + V8
-  worker pool collapses vitest's `setup + import` cost (hundreds of seconds cumulative) and lands
-  **~5–12× faster than the jsdom baseline** — with zero config changes.
-
-> ⚠️ **Tentative numbers** — re-measured on the all-Rust-DOM build (`TURBO_RUST_DOM`) on a busy
-> long-uptime workstation (a background VM held ~20% CPU), so absolute seconds run high and variance
-> is large (±30%+ per run): the medians here are placeholders pending a clean-box interleaved re-run.
-> The **ratios** are what travel, and even compressed by contention turbo-test lands multiples ahead
-> of both baselines (the ui-design-components jsdom-vs-turbo-dom split is the noisiest cell — it
-> should be wider, as payroll shows). Each column is the median of the suite's runs.
+| variable | effect |
+|---|---|
+| `TURBO_REUSE_ISOLATE=1` / `TURBO_NO_REUSE=1` | force isolate reuse on / off (see below) |
+| `TURBO_LEGACY_REPORTER=1` | compact `PASS` / `FAIL` reporter instead of vitest's |
 
 ## Isolate-reuse (extra speed, zero config)
 
@@ -137,14 +120,12 @@ missing export. (The oxc fallback has no type information and still needs `impor
 npx turbo-test            # discovers *.spec.* too; reads jest config when no vitest config exists
 ```
 
-> **Status — experimental.** Validated against a NestJS + ts-jest backend (~7,150 tests). On that
-> suite turbo-test runs in **~60s vs jest's ~117s (~1.9×)** on a clean box. Pass coverage is
-> partial today (**~4,500 / 7,147 green, ~63%**): the jest *shim*, jest-config reading, decorator
-> metadata, and CommonJS-first resolution (sequelize-typescript, tslib, …) all work. The rest leans
-> on node-native modules that bare V8 can't run yet — the `mongodb` driver, real OpenSSL crypto
-> (`createCipheriv`/RSA), full ICU `Intl` time zones — which need a Node-compat native layer.
-> React/vitest suites (payroll-app 10006/0, ui-design 6189/0) are **unaffected** — CommonJS-first
-> resolution is scoped to jest projects with a node test environment.
+> **Status — experimental.** The jest shim, jest-config reading, decorator metadata and
+> CommonJS-first resolution work. Suites that lean on node-native modules bare V8 cannot run yet
+> (the `mongodb` driver, real OpenSSL crypto such as `createCipheriv`/RSA, full ICU `Intl` time
+> zones) need a Node-compat native layer. CommonJS-first resolution is scoped to jest projects
+> with a node test environment, so React/vitest suites are unaffected. The last measured jest
+> numbers (0.2.11) are in [docs/BENCHMARKS-history.md](docs/BENCHMARKS-history.md).
 
 ## How it works
 
@@ -339,73 +320,73 @@ import.meta.url))`, string concatenation (`__dirname + '/z'`, `path.resolve(__di
   `querystring`, `string_decoder`, `vm`, `worker_threads`, …) are runtime shims; what each one
   provides is listed in [vitest.compat.md](vitest.compat.md#node-built-in-modules).
 
+## Benchmarks — pending re-run
+
+0.6.0 has **not** been re-benchmarked yet. A re-run of all four repos (turbo-dom, turbo-test,
+turbo-html2pdf, turbo-surf) together, on a quiet machine, is planned after the release; this
+section will carry those numbers. The last measured numbers (turbo-test 0.2.x, June 2026,
+vs vitest + jsdom and vitest + turbo-dom) are kept, labelled with version, date and machine, in
+[docs/BENCHMARKS-history.md](docs/BENCHMARKS-history.md).
+
 ## Requirements
 
-`node >= 18`. Prebuilt binaries ship for macOS (arm64/x64), Linux (x64/arm64-gnu), and Windows x64.
-Other platforms: build from source with a Rust toolchain (`npm run build`).
+`node >= 18`. Prebuilt binaries ship for macOS arm64, Linux x64 and arm64 (glibc) and Windows
+x64. musl (Alpine) is not built — the prebuilt V8 is glibc-only; `cli.js` prints build-from-source
+instructions (`cargo build --release` in this repo, with a Rust toolchain) on platforms without a
+binary.
 
 ## Developing
 
-`npm ci` works with npm 10 and npm 11 (CI installs the committed `package-lock.json` with
-both and fails if either rewrites it). Run it before the Rust tests: the CLI integration
-tests in `tests/` link the repo's esbuild/typescript installs into throwaway fixture
-projects and spawn the real `turbo-test` binary against them.
+`npm ci` works with npm 10 and npm 11 (CI installs the committed `package-lock.json` with both and
+fails if either rewrites it). Run it before the Rust tests: the CLI integration tests in `tests/`
+link the repo's esbuild/typescript installs into throwaway fixture projects and spawn the real
+`turbo-test` binary against them.
 
 ```sh
 npm ci
 cargo test --locked          # unit + CLI integration tests
 npm test                     # node --test test/*.mjs (CLI compat + tsc type checks)
-cargo tarpaulin              # line-coverage gate (tarpaulin.toml), fails below 99.9%
+cargo tarpaulin              # line-coverage gate (tarpaulin.toml, fail-under = 99.9)
 cargo fmt --check            # CI job `lint`, with:
 cargo clippy --all-targets -- -D warnings
 npm run complexity:rust      # CI job `complexity / rust (cc <= 15)` (needs cc-check, below)
 npm run complexity:js        # CI job `complexity / js (cc <= 15)`
 ```
 
-The Rust crate is gated at **>= 99.9% line coverage** (9348/9349 lines; cargo-tarpaulin,
-Llvm engine; CI job `coverage`). Subprocess runs of the instrumented binaries are attributed through
-`tarpaulin.toml`'s `objects`; the `#[path]` unit-test modules are excluded from the figure.
+### Gates and CI
 
-### Complexity gates
+- **Pull requests** (`.github/workflows/ci.yml`): the `build` job builds and runs the Rust tests on
+  ubuntu (x64, arm64) and Windows x64, plus the smoke test, the CLI compatibility/type tests and
+  the native DOM compatibility fixtures on linux x64. The aarch64-apple-darwin build runs only on
+  `main` and `v*` tag pushes, i.e. in the release.
+- **Coverage — blocking.** `coverage` (ubuntu) runs `cargo tarpaulin` (Llvm engine) and fails
+  below `fail-under = 99.9` line coverage. Subprocess runs of the instrumented binaries are
+  attributed through `tarpaulin.toml`'s `objects`; the `#[path]` unit-test modules are excluded.
+- **Lint — blocking.** `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`;
+  `npm-lockfile` checks the lock under npm 10 and 11.
+- **Complexity — report-only until the post-0.6.0 refactor.** Every function should have
+  cyclomatic complexity <= 15 (one limit, no allow-list). The two jobs run with
+  `continue-on-error` and list the functions over the limit in their step summary; they become
+  blocking once the refactor clears that backlog. Rust uses turbo-html2pdf's `cc-check` over every
+  tracked `.rs` file, installed from its home at the rev CI pins:
 
-Every function's cyclomatic complexity must be <= 15: one limit for the whole repo, no
-allow-list, no baseline. Rust uses turbo-html2pdf's `cc-check` over every tracked `.rs` file
-(a `match` counts once; `if`/loops/`?`/`&&`/`||` add 1; closures are scored on their own),
-installed from its home rather than copied here:
+  ```sh
+  cargo install --locked --git https://github.com/miaskiewicz/turbo-html2pdf \
+    --rev 923c89f791f3a89cb089a59626a25cef0a9cbd5f cc-check
+  ```
 
-```sh
-cargo install --locked --git https://github.com/miaskiewicz/turbo-html2pdf \
-  --rev 923c89f791f3a89cb089a59626a25cef0a9cbd5f cc-check   # the rev CI pins
-```
+  JS uses oxlint's `complexity` rule (`oxlint@1.87.0` via npx; `.oxlintrc.complexity.json`) over
+  `cli.js`, `index.js` and `src/runtime.js`.
+- **Release** (`v*` tag): `release-guard` (no `[patch]`, no git sources, versions equal the tag),
+  then the npm and crates.io publish jobs ([RELEASING.md](RELEASING.md)).
 
-JS uses oxlint's ESLint-compatible `complexity` rule (`oxlint@1.87.0` via npx, no
-devDependency; `.oxlintrc.complexity.json`) over `cli.js`, `index.js` and `src/runtime.js`.
+## Status (0.6.0)
 
-Both CI jobs are **expected red** until the post-coverage refactor and run with
-`continue-on-error` meanwhile (red job, green workflow; not required checks yet). The limit was
-chosen from the distribution measured when the gate landed:
-
-| scope | functions | > 5 | > 10 | > 15 | > 20 | > 25 | > 30 | > 40 | max |
-|---|---|---|---|---|---|---|---|---|---|
-| Rust, all tracked `.rs` | 2673 | 161 | 44 | 24 | 14 | 9 | 5 | 2 | 44 |
-| JS (cli.js, index.js, src/runtime.js) | 1167 | 98 | 35 | 20 | 11 | 8 | 5 | 4 | 94 |
-
-At 15 the backlog is 44 functions; 10 would nearly double it (79) and reach into ordinary
-dispatch code, while 20 would leave a 16-20 band whose branch sets are already too large to
-test exhaustively. The backlog (`function:line=cc`; refactored only once unit-test coverage is
-complete, so the refactor cannot change behaviour silently):
-
-Rust (24):
-- `src/bin/m1_cjs.rs`: load_cjs:87=17
-- `src/bundler.rs`: bundle_capped:141=16
-- `src/cli.rs`: parse_args:168=19
-- `src/coverage.rs`: simple_match:236=17
-- `src/launcher.rs`: strip_comments:511=23, find_key_blocks:704=17, plan:1256=40
-- `src/mock_scope.rs`: bindings:30=16
-- `src/runner.rs`: esbuild_bundle_full:1019=25, run_entry_mocks:1649=25, esbuild_transform_cjs:2208=19, hoist_mock_setup_tracked:2366=29, shared_mock_lets:2609=18, used_in_shorthand:2678=17, strip_test_blocks:2747=29, replace_word:2876=28, read_transformed:3090=36, load_cjs_inner:3649=38, native_require:4159=44, install_natives:5296=24, coverage_accumulate:5700=18, run_test_file:5854=43, (closure):6181=26, drive_tests_bounded:6410=25
-
-JS (20; `function:<line>` is an anonymous function):
-- `src/runtime.js`: constructor:395=18, parse:1346=17, __utf8Decode:1369=20, _decode:1418=19, __deepEq:1455=70, function:1530=19, __matchesInner:1864=21, deepEqual:1895=17, __inlineSplice:2075=17, __snapFinish:2124=21, toThrow:2389=30, __automock:2615=19, __ttMock:2722=26, __inspectList:3030=23, __inspect:3078=64, __pfPrint:3257=68, __joinDiffs:3373=35, __vdiff:3457=20, __formatOne:3560=28, runSuite:3844=94
+- vitest suites: drop-in; the `vi` / mock / `expect` surface is vitest 4.1.12's
+  ([vitest.compat.md](vitest.compat.md) lists what is covered and what is approximated).
+- jest suites: experimental (see above).
+- DOM: turbo-dom-browser-env 0.6.0, Chrome 156-controlled in turbo-dom.
+- Open work is tracked as GitHub issues in this repository and in turbo-dom.
 
 ## License
 
