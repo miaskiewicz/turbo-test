@@ -2508,11 +2508,15 @@ function __inspectKey(key) {
   if (typeof key === 'symbol') return key.toString();
   return /^[a-zA-Z_][a-zA-Z_0-9]*$/.test(key) ? key : __strEscape(key);
 }
+function __isInstance(obj, fn) {
+  try { return Function.prototype[Symbol.hasInstance].call(fn, obj); } catch { return false; }
+}
 function __ctorName(obj) {
   let o = obj;
   while (o !== null && o !== undefined) {
     const d = Object.getOwnPropertyDescriptor(o, 'constructor');
-    if (d && typeof d.value === 'function' && d.value.name !== '') return d.value.name;
+    // as Node's getConstructorName: only a constructor `obj` is an instance of (`foo.prototype` is `{}`)
+    if (d && typeof d.value === 'function' && d.value.name !== '' && __isInstance(obj, d.value)) return d.value.name;
     o = Object.getPrototypeOf(o);
   }
   return null;
@@ -2590,7 +2594,7 @@ function __formatProperty(ctx, value, recurseTimes, key, type, desc) {
     str = __sty(ctx, 'undefined', 'undefined');
   }
   if (type === 1) return str; // an array element (2: an array's extra key)
-  if (typeof key === 'symbol') name = __sty(ctx, key.toString(), 'symbol');
+  if (typeof key === 'symbol') name = desc.enumerable === false ? `[${__sty(ctx, key.toString(), 'symbol')}]` : __sty(ctx, key.toString(), 'symbol');
   else if (desc.enumerable === false) name = `[${key}]`;
   else name = /^[a-zA-Z_][a-zA-Z_0-9]*$/.test(key) ? key : __sty(ctx, __strEscape(key), 'string');
   return `${name}: ${str}`;
@@ -2691,7 +2695,7 @@ function __formatRaw(ctx, value, recurseTimes, typedArray) {
     if (typeof tag === 'string' && tag !== '' && tag !== (ctor || fallback)) p = `${p.slice(0, -1)} [${tag}] `;
     return p;
   };
-  let keys = Object.keys(value).concat(Object.getOwnPropertySymbols(value).filter((s) => Object.prototype.propertyIsEnumerable.call(value, s)));
+  let keys = ctx.showHidden ? Reflect.ownKeys(value) : Object.keys(value).concat(Object.getOwnPropertySymbols(value).filter((s) => Object.prototype.propertyIsEnumerable.call(value, s)));
   let base = '';
   let braces;
   let extrasType = 0;
@@ -2826,6 +2830,7 @@ function __nodeInspect(value, opts) {
     if (typeof opts.breakLength === 'number') ctx.breakLength = opts.breakLength;
     if (opts.compact !== undefined) ctx.compact = opts.compact;
     if (opts.colors) ctx.colors = true;
+    if (opts.showHidden) ctx.showHidden = true;
   }
   return __formatValue(ctx, value, 0);
 }
@@ -2858,7 +2863,7 @@ function __nodeFormatWith(o, ...args) {
       case 'i': s = typeof a === 'bigint' ? `${a}n` : typeof a === 'symbol' ? 'NaN' : String(parseInt(a)); break;
       case 'f': s = typeof a === 'symbol' ? 'NaN' : String(parseFloat(a)); break;
       case 'j': try { s = JSON.stringify(a); } catch (e) { s = '[Circular]'; } break;
-      case 'o': s = __nodeInspect(a, { depth: 4, colors }); break;
+      case 'o': s = __nodeInspect(a, { depth: 4, colors, showHidden: true }); break;
       case 'O': s = __nodeInspect(a, { colors }); break;
       case 'c': s = ''; break;
     }
