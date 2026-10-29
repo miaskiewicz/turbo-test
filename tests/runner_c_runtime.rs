@@ -799,3 +799,51 @@ test('URL host setters', () => {
     p.file("a.test.js", test);
     assert_passes(&turbo_test(&p.dir, &["a.test.js"], &[]), 1);
 }
+
+#[test]
+fn url_scheme_userinfo_setters_and_invalid_hosts_match_node() {
+    // RV3: the scheme kept its case ("HTTP:"), protocol/username/password were plain fields
+    // (a set skipped validation, encoding and the default-port drop), and an out-of-range port
+    // or a forbidden host code point parsed instead of throwing.
+    // Rows: [base, field|null, value, href, protocol, username, password, origin] from Node 26
+    // ("THROW": new URL(base) throws a TypeError).
+    let test = r##"const ROWS = [["HTTP://Example.COM:80/a",null,null,"http://example.com/a","http:","","","http://example.com"],["FiLe:///x",null,null,"file:///x","file:","","","null"],["Foo://Ab/x",null,null,"foo://Ab/x","foo:","","","null"],["http://a:65536/",null,null,"THROW"],["http://a b/",null,null,"THROW"],["http://a<b/",null,null,"THROW"],["http://a:8x/",null,null,"THROW"],["http://a/","protocol","https","https://a/","https:","","","https://a"],["http://a/","protocol","HTTPS:","https://a/","https:","","","https://a"],["https://a:8080/","protocol","http:","http://a:8080/","http:","","","http://a:8080"],["https://a:80/x","protocol","http","http://a/x","http:","","","http://a"],["http://a/","protocol","foo","http://a/","http:","","","http://a"],["foo://a/","protocol","http","foo://a/","foo:","","","null"],["http://a/","protocol","1x","http://a/","http:","","","http://a"],["http://a/","protocol","wss:x","wss://a/","wss:","","","wss://a"],["http://u@a/","protocol","file","http://u@a/","http:","u","","http://a"],["http://a/","username","x y","http://x%20y@a/","http:","x%20y","","http://a"],["http://a/","password","p@ss:w","http://:p%40ss%3Aw@a/","http:","","p%40ss%3Aw","http://a"],["http://u:p@a/","username","","http://:p@a/","http:","","p","http://a"],["file:///x","username","u","file:///x","file:","","","null"],["mailto:x","password","p","mailto:x","mailto:","","","null"]];
+test('URL scheme and userinfo', () => {
+  for (const [base, field, v, ...want] of ROWS) {
+    let got;
+    try {
+      const u = new URL(base);
+      if (field) u[field] = v;
+      got = [u.href, u.protocol, u.username, u.password, u.origin];
+    } catch (e) { got = [e instanceof TypeError ? 'THROW' : String(e)]; }
+    expect(`${base} .${field}=${v} -> ${got}`).toBe(`${base} .${field}=${v} -> ${want}`);
+  }
+});
+"##;
+    let p = Project::new("rc-url-scheme");
+    p.file("package.json", r#"{"name":"rv3url","type":"module"}"#);
+    p.file("a.test.js", test);
+    assert_passes(&turbo_test(&p.dir, &["a.test.js"], &[]), 1);
+}
+
+#[test]
+fn node_path_posix_ops_match_node() {
+    // RV3: the node:path shim's join/normalize kept dot segments, resolve ignored a later
+    // absolute segment, relative returned its second argument, and format/basename/extname
+    // missed Node's edge cases. Rows: [fn, args, result] from Node 26 (absolute paths only,
+    // so the result does not depend on the cwd).
+    let test = r##"import path from 'node:path';
+const ROWS = [["join",["a","..","..","b"],"../b"],["join",["/a/","./b","../c/"],"/a/c/"],["join",[""],"."],["join",["a","","/b"],"a/b"],["normalize",["a//b/./c/.."],"a/b"],["normalize",["/../x"],"/x"],["normalize",[""],"."],["normalize",["./"],"./"],["normalize",["a/.."],"."],["normalize",["//a//"],"/a/"],["resolve",["/a","/b","c"],"/b/c"],["resolve",["/a/b","../c","./d/"],"/a/c/d"],["resolve",["/x",""],"/x"],["relative",["/a/b/c","/a/d"],"../../d"],["relative",["/a","/a"],""],["relative",["/a/b","/a/b/c/d"],"c/d"],["relative",["/","/x"],"x"],["relative",["/x/y","/"],"../.."],["relative",["/foo/bar","/foo/barbaz"],"../barbaz"],["format",[{"root":"/","name":"f","ext":"txt"}],"/f.txt"],["format",[{"dir":"/d","base":"b"}],"/d/b"],["basename",["/a/b/"],"b"],["basename",["/a/b.js","b.js"],"b.js"],["extname",[".bashrc"],""],["extname",["a."],"."],["dirname",["a/b/"],"a"],["parse",["/x/.rc"],{"root":"/","dir":"/x","base":".rc","ext":"","name":".rc"}]];
+test('node:path', () => {
+  for (const [f, args, want] of ROWS) {
+    expect(`${f}(${JSON.stringify(args)}) -> ${JSON.stringify(path[f](...args))}`)
+      .toBe(`${f}(${JSON.stringify(args)}) -> ${JSON.stringify(want)}`);
+    expect(path.posix[f](...args)).toEqual(want);
+  }
+});
+"##;
+    let p = Project::new("rc-node-path");
+    p.file("package.json", r#"{"name":"rv3path","type":"module"}"#);
+    p.file("a.test.js", test);
+    assert_passes(&turbo_test(&p.dir, &["a.test.js"], &[]), 1);
+}
