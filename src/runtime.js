@@ -970,7 +970,7 @@ if (typeof globalThis.URL === 'undefined') {
     set username(v) { if (this._hierarchical && this._hostname !== '' && !this._isFile) this._username = URL._encode(String(v), URL._USERINFO); }
     get password() { return this._password; }
     set password(v) { if (this._hierarchical && this._hostname !== '' && !this._isFile) this._password = URL._encode(String(v), URL._USERINFO); }
-    get origin() { return !this._hierarchical || this._isFile ? 'null' : this.protocol + '//' + this.host; }
+    get origin() { return !this._special || this._isFile ? 'null' : this.protocol + '//' + this.host; }
     get _isFile() { return this.protocol.toLowerCase() === 'file:'; }
     get _special() { return /^(https?|wss?|ftp|file):$/i.test(this.protocol); }
     // WHATWG host parsing for the setters: the value ends at / ? # (and \ for a special
