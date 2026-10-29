@@ -777,3 +777,25 @@ it('posix is unchanged', () => {
     );
     assert_passes(&turbo_test(&p.dir, &[], &[]), 4);
 }
+
+#[test]
+fn url_host_hostname_and_port_setters_update_href_like_node() {
+    // turbo-test#201: host/hostname/port were plain fields; href and origin ignored a set.
+    // Rows: [base, field, value, href, origin, host, hostname, port] from Node 26.
+    let test = r##"const ROWS = [["file:///","hostname","srv","file://srv/","null","srv","srv",""],["file:///","host","a","file://a/","null","a","a",""],["http://a.com:8080/p?q#h","hostname","b.org","http://b.org:8080/p?q#h","http://b.org:8080","b.org:8080","b.org","8080"],["http://a.com:8080/p?q#h","host","c.net:81","http://c.net:81/p?q#h","http://c.net:81","c.net:81","c.net","81"],["http://a.com:8080/p","host","c.net","http://c.net:8080/p","http://c.net:8080","c.net:8080","c.net","8080"],["http://a.com/p","port","9000","http://a.com:9000/p","http://a.com:9000","a.com:9000","a.com","9000"],["http://a.com:9000/p","port","","http://a.com/p","http://a.com","a.com","a.com",""],["http://a.com/p","port","80","http://a.com/p","http://a.com","a.com","a.com",""],["https://a.com/p","port","443","https://a.com/p","https://a.com","a.com","a.com",""],["http://a.com/p","port","12abc","http://a.com:12/p","http://a.com:12","a.com:12","a.com","12"],["http://a.com/p","port","x","http://a.com/p","http://a.com","a.com","a.com",""],["http://a.com/p","hostname","B.ORG","http://b.org/p","http://b.org","b.org","b.org",""],["http://u:pw@a.com/p","host","z.io:7","http://u:pw@z.io:7/p","http://z.io:7","z.io:7","z.io","7"],["http://a.com/p","host","","http://a.com/p","http://a.com","a.com","a.com",""],["file:///x","port","5","file:///x","null","","",""],["http://a.com:1/p","hostname","q:9","http://a.com:1/p","http://a.com:1","a.com:1","a.com","1"]];
+test('URL host setters', () => {
+  for (const [base, field, v, ...want] of ROWS) {
+    const u = new URL(base);
+    u[field] = v;
+    expect(`${base} .${field}=${v} -> ${[u.href, u.origin, u.host, u.hostname, u.port]}`)
+      .toBe(`${base} .${field}=${v} -> ${want}`);
+    expect(String(u)).toBe(u.href);
+    expect(new URL(u.href).href).toBe(u.href);
+  }
+});
+"##;
+    let p = Project::new("rc-url-host");
+    p.file("package.json", r#"{"name":"r201","type":"module"}"#);
+    p.file("a.test.js", test);
+    assert_passes(&turbo_test(&p.dir, &["a.test.js"], &[]), 1);
+}
