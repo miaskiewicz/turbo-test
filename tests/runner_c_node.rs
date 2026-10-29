@@ -459,6 +459,36 @@ it('console.log', () => { console.log('two', { a: 1 }, [1, 'b']); });
     );
 }
 
+/// turbo-test#202: `%o` is `util.inspect` with `showHidden` (non-enumerables as `[key]`, an
+/// array's `[length]`) and depth 4; expected values from Node 26.
+#[test]
+fn util_format_o_shows_hidden_like_node() {
+    let p = Project::new("rc-format-o");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "a.test.ts",
+        r#"import util from 'node:util';
+import { it, expect } from 'vitest';
+const o = { a: 1 }; Object.defineProperty(o, 'h', { value: 2 });
+const p = { [Symbol('s')]: 1 }; Object.defineProperty(p, Symbol('hid'), { value: 3 });
+function foo(a, b) {}
+it('%o', () => {
+  expect([
+  util.format('%o', [1, 2]), util.format('%o', []), util.format('%o', o), util.format('%o', p),
+  util.format('%o', { x: [1] }), util.format('%o', { a: { b: { c: { d: { e: { f: 1 } } } } } }),
+  util.format('%o', foo), util.format('%O', [1]),
+]).toEqual([
+  '[ 1, 2, [length]: 2 ]', '[ [length]: 0 ]', '{ a: 1, [h]: 2 }', '{ Symbol(s): 1, [Symbol(hid)]: 3 }',
+  '{ x: [ 1, [length]: 1 ] }', '{\n  a: {\n    b: { c: { d: { e: [Object] } } }\n  }\n}',
+  "<ref *1> [Function: foo] {\n  [length]: 2,\n  [name]: 'foo',\n  [prototype]: { [constructor]: [Circular *1] }\n}", '[ 1 ]',
+]);
+});
+"#,
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+}
+
 #[test]
 fn process_env_is_the_host_environment() {
     // turbo-test#143: process.env was a fixed stub, so a variable the user exported was
