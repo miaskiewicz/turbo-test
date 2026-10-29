@@ -729,3 +729,49 @@ fn an_imported_markdown_file_is_parsed_as_javascript() {
         }
     }
 }
+
+/// turbo-test#199: on Windows the `node:url` helpers, `import.meta.url` and `import.meta.resolve`
+/// take native drive-letter / UNC paths, like Node's (values: Node 26 `{ windows: true }`). The
+/// runtime reads `process.platform` at call time, so the win32 branch runs on every OS here.
+#[test]
+fn file_url_helpers_handle_windows_paths() {
+    let p = Project::new("rc-file-url-win32");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "a.test.js",
+        r#"import { expect, it, afterEach } from 'vitest';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+const platform = globalThis.__ttPlatform;
+const cwd = process.cwd;
+const requireResolve = globalThis.__ttRequireResolve;
+afterEach(() => { globalThis.__ttPlatform = platform; process.cwd = cwd; globalThis.__ttRequireResolve = requireResolve; });
+const win = () => { globalThis.__ttPlatform = 'win32'; process.cwd = () => 'D:\\work\\proj'; };
+it('pathToFileURL', () => {
+  win();
+  expect(['C:\\proj\\a b.test.ts', 'C:/x/y#z', '\\\\srv\\share\\f.ts', 'C:\\a\\..\\b\\', 'c:\\€\\%', 'rel\\x.ts', '\\top\\y'].map((s) => pathToFileURL(s).href))
+    .toEqual(['file:///C:/proj/a%20b.test.ts', 'file:///C:/x/y%23z', 'file://srv/share/f.ts', 'file:///C:/b/', 'file:///c:/%E2%82%AC/%25', 'file:///D:/work/proj/rel/x.ts', 'file:///D:/top/y']);
+});
+it('fileURLToPath', () => {
+  win();
+  expect(['file:///C:/a%20b/c.ts', 'file://srv/share/x', 'file:///c:/'].map((s) => fileURLToPath(s))).toEqual(['C:\\a b\\c.ts', '\\\\srv\\share\\x', 'c:\\']);
+  const err = (s) => { try { fileURLToPath(s); return 'no throw'; } catch (e) { return [e.code, e.message]; } };
+  expect(err('file:///a')).toEqual(['ERR_INVALID_FILE_URL_PATH', 'File URL path must be absolute']);
+  expect(err('file:///C:/a%5Cb')).toEqual(['ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded \\ or / characters']);
+});
+it('import.meta.resolve', () => {
+  win();
+  const seen = [];
+  globalThis.__ttRequireResolve = (dir, spec) => { seen.push(dir); return spec === 'fs' ? 'node:fs' : 'C:\\proj\\node_modules\\pkg\\index.js'; };
+  expect(import.meta.resolve('pkg', 'file:///C:/proj/src/a.js')).toBe('file:///C:/proj/node_modules/pkg/index.js');
+  expect(import.meta.resolve('fs', 'file:///C:/proj/src/a.js')).toBe('node:fs');
+  expect(seen).toEqual(['C:\\proj\\src', 'C:\\proj\\src']);
+});
+it('posix is unchanged', () => {
+  expect(pathToFileURL('/a b').href).toBe('file:///a%20b');
+  expect(pathToFileURL('C:\\x').href).toBe('file://' + process.cwd() + '/C:%5Cx');
+  expect(fileURLToPath('file:///C:/a')).toBe('/C:/a');
+});
+"#,
+    );
+    assert_passes(&turbo_test(&p.dir, &[], &[]), 4);
+}
