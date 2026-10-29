@@ -322,7 +322,11 @@ fn parse_alias_list(raw: &str) -> oxc_resolver::Alias {
 }
 
 /// Cached node-resolution Resolver (oxc_resolver) for bare specifiers / node_modules.
-fn base_resolve_options(tsconfig: Option<PathBuf>, esm: bool) -> oxc_resolver::ResolveOptions {
+fn base_resolve_options(
+    tsconfig: Option<PathBuf>,
+    esm: bool,
+    require_fallback: bool,
+) -> oxc_resolver::ResolveOptions {
     let strs = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     // As Node resolves for vitest (which runs packages through Node, turbo-test#134): an `import`
     // matches a package's `import` condition, a `require()` its `require` condition; either reads
@@ -337,9 +341,13 @@ fn base_resolve_options(tsconfig: Option<PathBuf>, esm: bool) -> oxc_resolver::R
     // `const mod = await import(...)`), which esbuild cannot emit as --format=cjs. That bundle
     // then fails and falls back to a raw-.mjs CJS compile → "Unexpected token 'export'" load
     // errors. Dropping `node` makes the resolver pick the package's `default`/`browser` build,
-    // which is the right target for this env and CJS-compiles cleanly. ("require" stays as a
-    // last-resort condition of an import so require-only packages still resolve; a require()
-    // that resolves nothing retries as an import, `resolve_spec_as_uncached`.)
+    // which is the right target for this env and CJS-compiles cleanly.
+    //
+    // `require` is never a condition of an import (turbo-test#200): oxc matches the package's keys
+    // in ITS order, so `{ require, default }` would pick the CJS build where Node/vitest load
+    // `default`. Only an import that resolves nothing retries with `require` appended
+    // (`require_fallback`) so require-only packages still load; a require() that resolves nothing
+    // retries as an import (`resolve_spec_as_uncached`).
     //
     // A jest/node backend (NestJS, sequelize, ts-jest) is a CommonJS world: packages are
     // `require()`d, so their `require`/`node`/`default` export condition is the build that works
@@ -355,9 +363,14 @@ fn base_resolve_options(tsconfig: Option<PathBuf>, esm: bool) -> oxc_resolver::R
             &["require", "node", "default"],
             &["main", "module", "browser"],
         )
-    } else if esm {
+    } else if esm && require_fallback {
         (
             &["import", "module", "browser", "default", "require"],
+            &["browser", "main", "module"],
+        )
+    } else if esm {
+        (
+            &["import", "module", "browser", "default"],
             &["browser", "main", "module"],
         )
     } else {
@@ -465,11 +478,21 @@ fn is_esm_module_uncached(abs: &Path) -> bool {
 }
 
 /// The resolvers by (nearest tsconfig, ESM importer, CJS-first resolution).
-type ResolverCache = HashMap<(Option<PathBuf>, bool, bool), std::rc::Rc<oxc_resolver::Resolver>>;
+type ResolverCache =
+    HashMap<(Option<PathBuf>, bool, bool, bool), std::rc::Rc<oxc_resolver::Resolver>>;
 
 /// A resolver configured for the nearest tsconfig of `from_dir` + the importer's module kind
 /// (ESM vs CJS conditions), cached per (tsconfig, esm).
 fn resolver_for(from_dir: &Path, esm: bool) -> std::rc::Rc<oxc_resolver::Resolver> {
+    resolver_with(from_dir, esm, false)
+}
+
+/// `resolver_for`, optionally with the import conditions' `require` fallback (turbo-test#200).
+fn resolver_with(
+    from_dir: &Path,
+    esm: bool,
+    require_fallback: bool,
+) -> std::rc::Rc<oxc_resolver::Resolver> {
     thread_local! {
         static RESOLVERS: RefCell<ResolverCache> = RefCell::new(HashMap::new());
     }
@@ -478,6 +501,7 @@ fn resolver_for(from_dir: &Path, esm: bool) -> std::rc::Rc<oxc_resolver::Resolve
         nearest_tsconfig(from_dir),
         esm,
         CJS_FIRST_RESOLUTION.with(|c| c.get()),
+        require_fallback,
     );
     RESOLVERS.with(|m| {
         if let Some(r) = m.borrow().get(&key) {
@@ -486,6 +510,7 @@ fn resolver_for(from_dir: &Path, esm: bool) -> std::rc::Rc<oxc_resolver::Resolve
         let r = std::rc::Rc::new(oxc_resolver::Resolver::new(base_resolve_options(
             key.0.clone(),
             esm,
+            require_fallback,
         )));
         m.borrow_mut().insert(key, r.clone());
         r
@@ -670,7 +695,10 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
         .resolve(from_dir, spec)
         .or_else(|e| {
             if esm {
-                Err(e)
+                // an import of a require-only package (no import/default build): its `require`
+                resolver_with(from_dir, true, true)
+                    .resolve(from_dir, spec)
+                    .map_err(|_| e)
             } else {
                 resolver_for(from_dir, true).resolve(from_dir, spec)
             }
