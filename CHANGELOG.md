@@ -5,12 +5,32 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.6.0] — turbo-dom consolidation
+
+The browser binding and the V8 fork moved into the
+[turbo-dom](https://github.com/miaskiewicz/turbo-dom) workspace so turbo-test,
+turbo-surf and turbo-html2pdf share one DOM, one V8 fork and one release train
+instead of three diverging copies. turbo-test jumps from 0.4.8 to 0.6.0 to line up
+with the turbo-dom 0.6.0 crates it now links (turbo-dom-v8 keeps its upstream-V8
+150.4.x numbering). Requires `turbo-dom-browser-env` 0.6.0 and `turbo-dom-v8 ~150.4`
+from crates.io.
+
+### CI — PR runners and gates
+- PR CI builds and tests on ubuntu (x64, arm64) and Windows x64; the aarch64-apple-darwin
+  build runs only on `main` / `v*` tag pushes (the release). `coverage`, `lint` and the
+  complexity jobs run on ubuntu.
+- Coverage floor (`tarpaulin.toml` `fail-under`) 99.9 (was 99.98 when measured on macOS).
+- The complexity jobs (cc <= 15, Rust and JS) are report-only (`continue-on-error`) until
+  the post-0.6.0 refactor.
+
 ### Changed — turbo-dom pin
-- The pre-publish `[patch.crates-io]` pins turbo-dom and turbo-dom-browser-env to the final
-  consolidation head of miaskiewicz/turbo-dom (f860fea; was 4c473ef), which carries the
-  turbo-dom fixes of this round (DOM ownership bookkeeping linear on large trees, turbo-dom#112;
-  `getComputedStyle` reuse, turbo-test#125, which follows CSSOM edits across realms, turbo-dom#113; canvas, track, image and colour fixes). turbo-dom-v8
-  stays on its candidate (e9b36c8).
+- The pre-publish `[patch.crates-io]` pins turbo-dom and turbo-dom-browser-env to
+  miaskiewicz/turbo-dom 0189e4d (the consolidation head with the turbo-dom#183/#184
+  browser-env panic fixes; earlier repins: 4c473ef, f860fea, f0fb306, d660013, 443f4d8),
+  which carries the turbo-dom fixes of this round (DOM ownership bookkeeping linear on large
+  trees, turbo-dom#112; `getComputedStyle` reuse, turbo-test#125, which follows CSSOM edits
+  across realms, turbo-dom#113; canvas, track, image and colour fixes). turbo-dom-v8 stays on
+  its candidate (e9b36c8). The section is dropped before the tag (RELEASING.md).
 
 ### Fixed — import.meta.glob: a call in the options (turbo-test#197)
 - A call inside `import.meta.glob`'s options (`{ eager: Boolean(1) }`) was left alone and threw
@@ -829,15 +849,6 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   The coloured normalizer now checks each duration's colour against its measured value, then
   spells it the same whatever the colour.
 
-## [0.6.0] - 2026-10-26 — turbo-dom consolidation
-
-The browser binding and the V8 fork moved into the
-[turbo-dom](https://github.com/miaskiewicz/turbo-dom) workspace so turbo-test,
-turbo-surf and turbo-html2pdf share one DOM, one V8 fork and one release train
-instead of three diverging copies. turbo-test jumps from 0.4.8 to 0.6.0 to line up
-with the turbo-dom 0.6.0 crates it now links (turbo-dom-v8 keeps its upstream-V8
-150.4.x numbering). Requires `turbo-dom-browser-env` 0.6.0 and `turbo-dom-v8 ~150.4`
-from crates.io.
 
 ### Changed
 - turbo-dom consolidation: the browser binding and the V8 fork moved to
