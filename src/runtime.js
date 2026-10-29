@@ -1919,9 +1919,10 @@ globalThis.__pathToFileURL = (p) => {
   let host = '';
   let root = '';
   let path = String(p);
+  // Node keeps a trailing separator only when the given path ends in one ('' is the cwd)
+  const trailing = /\/$/.test(path) || (__ttWin() && path.endsWith('\\')) ? '/' : '';
   if (__ttWin()) [host, root, path] = __ttWinSplit(path);
   else if (!path.startsWith('/')) path = globalThis.process.cwd() + '/' + path;
-  const trailing = path.endsWith('/') ? '/' : '';
   const out = [];
   for (const seg of path.split('/')) { if (seg === '..') out.pop(); else if (seg && seg !== '.') out.push(seg); }
   const resolved = root + '/' + out.join('/') + (out.length ? trailing : '');
