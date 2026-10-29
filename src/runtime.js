@@ -1886,26 +1886,59 @@ if (typeof globalThis.requestAnimationFrame === 'undefined') {
 // ---- node builtin shims (so turbo-dom's loader reaches its native .node) ----
 // node:url's fileURLToPath / pathToFileURL (Node 26, posix; turbo-test#84)
 const __urlError = (code, message) => { const e = new TypeError(message); e.code = code; return e; };
+// win32 (turbo-test#199): native drive-letter / UNC paths, like Node's `{ windows: true }`; the
+// platform is read at call time.
+const __ttWin = () => globalThis.__ttPlatform === 'win32';
+globalThis.__ttIsAbsolutePath = (p) => (__ttWin() ? /^([a-zA-Z]:)?[\\/]/.test(p) : String(p).startsWith('/'));
 globalThis.__fileURLToPath = (u) => {
   const url = typeof u === 'string' ? new globalThis.URL(u) : u;
   if (url.protocol !== 'file:') throw __urlError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
+  if (__ttWin()) {
+    if (/%2f|%5c/i.test(url.pathname)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded \\ or / characters');
+    const path = decodeURIComponent(url.pathname).replace(/\//g, '\\');
+    if (url.hostname !== '') return `\\\\${url.hostname}${path}`;
+    if (!/^\\[a-zA-Z]:/.test(path)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must be absolute');
+    return path.slice(1);
+  }
   if (url.hostname !== '') throw __urlError('ERR_INVALID_FILE_URL_HOST', `File URL host must be "localhost" or empty on ${globalThis.__ttPlatform || 'darwin'}`);
   if (/%2f/i.test(url.pathname)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded / characters');
   return decodeURIComponent(url.pathname);
 };
+// win32: [host, root ('/C:' or ''), rest] with `/` separators, made absolute against the cwd
+const __ttWinSplit = (p) => {
+  let path = String(p).replace(/\\/g, '/');
+  const unc = /^\/\/([^/]+)(\/.*)?$/.exec(path);
+  if (unc) return [unc[1], '', unc[2] || '/'];
+  if (!/^[a-zA-Z]:\//.test(path)) {
+    const cwd = String(globalThis.process.cwd()).replace(/\\/g, '/');
+    path = path.startsWith('/') ? cwd.slice(0, 2) + path : cwd + '/' + path;
+  }
+  return ['', '/' + path.slice(0, 2), path.slice(2)];
+};
 globalThis.__pathToFileURL = (p) => {
+  let host = '';
+  let root = '';
   let path = String(p);
-  if (!path.startsWith('/')) path = globalThis.process.cwd() + '/' + path;
+  if (__ttWin()) [host, root, path] = __ttWinSplit(path);
+  else if (!path.startsWith('/')) path = globalThis.process.cwd() + '/' + path;
   const trailing = path.endsWith('/') ? '/' : '';
   const out = [];
   for (const seg of path.split('/')) { if (seg === '..') out.pop(); else if (seg && seg !== '.') out.push(seg); }
-  const resolved = '/' + out.join('/') + (out.length ? trailing : '');
-  const url = new globalThis.URL('file:///');
+  const resolved = root + '/' + out.join('/') + (out.length ? trailing : '');
+  const url = new globalThis.URL(`file://${host}/`);
   // Node's set: controls, space, "#%<>?[\]^`{|}~ and DEL (the setter encodes non-ASCII)
   url.pathname = resolved.replace(/[\x00-\x20"#%<>?[\\\]^`{|}~\x7f]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
   return url;
 };
-globalThis.__dirnameOf = (p) => { const s = String(p).replace(/\/+$/, ''); const i = s.lastIndexOf('/'); return i <= 0 ? '/' : s.slice(0, i); };
+globalThis.__dirnameOf = (p) => {
+  if (!__ttWin()) { const s = String(p).replace(/\/+$/, ''); const i = s.lastIndexOf('/'); return i <= 0 ? '/' : s.slice(0, i); }
+  // path.win32.dirname for drive paths: the root (`C:\`) is its own dirname
+  const s = String(p);
+  const rootLen = /^[a-zA-Z]:[\\/]/.test(s) ? 3 : /^[\\/]/.test(s) ? 1 : 0;
+  const t = s.replace(/[\\/]+$/, '');
+  const i = Math.max(t.lastIndexOf('/'), t.lastIndexOf('\\'));
+  return i < rootLen ? (rootLen ? s.slice(0, rootLen) : '.') : t.slice(0, i);
+};
 // import.meta (turbo-test#123): the module runner's CJS output (native emit + dep bundler, esbuild
 // transforms) calls __ttImportMeta(<module path>) where the source said `import.meta` — one object
 // per module path, like vitest's; the ESM graph's host callback fills V8's object with
@@ -1942,7 +1975,7 @@ const __ttMetaResolve = (specifier, parent) => {
   let from;
   try { from = globalThis.__fileURLToPath(parent); } catch (e) { from = String(parent); }
   const r = globalThis.__ttRequireResolve(globalThis.__dirnameOf(from), spec, true);
-  if (typeof r === 'string' && r.startsWith('/')) return globalThis.__pathToFileURL(r).href;
+  if (typeof r === 'string' && globalThis.__ttIsAbsolutePath(r)) return globalThis.__pathToFileURL(r).href;
   if (typeof r === 'string' && spec !== 'vitest' && spec !== '@jest/globals') return 'node:' + r.replace(/^node:/, '');
   const pkg = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0];
   const e = new Error(`Cannot find package '${pkg}' imported from ${from}`);
