@@ -1,3 +1,7 @@
+//! Isolate teardown retires slot-owned Weak handles before disposal (normal and
+//! snapshot-creator isolates). Consumer check: a copy of turbo-dom's
+//! crates/turbo-dom-v8/tests/release_v8_teardown.rs, run against the turbo-dom-v8
+//! this crate resolves.
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Once;

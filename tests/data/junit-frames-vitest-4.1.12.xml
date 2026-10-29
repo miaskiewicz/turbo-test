@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="10" failures="9" errors="0" time="T">
+    <testsuite name="a.test.ts" timestamp="S" hostname="H" tests="6" failures="5" errors="0" skipped="0" time="T">
+        <testcase classname="a.test.ts" name="str" time="T">
+            <failure message="expected &apos;x&apos; to be &apos;y&apos; // Object.is equality" type="AssertionError">
+AssertionError: expected &apos;x&apos; to be &apos;y&apos; // Object.is equality
+
+Expected: &quot;y&quot;
+Received: &quot;x&quot;
+
+ ❯ a.test.ts:3:31
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="multi" time="T">
+            <failure message="expected &apos;a\nb&apos; to be &apos;a\nc&apos; // Object.is equality" type="AssertionError">
+AssertionError: expected &apos;a\nb&apos; to be &apos;a\nc&apos; // Object.is equality
+
+- Expected
++ Received
+
+  a
+- c
++ b
+
+ ❯ a.test.ts:4:36
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="helper" time="T">
+            <failure message="from helper" type="RangeError">
+RangeError: from helper
+ ❯ helper h.ts:2:9
+ ❯ a.test.ts:5:22
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="cause" time="T">
+            <failure message="outer" type="Error">
+Error: outer
+ ❯ a.test.ts:6:27
+
+Caused by: TypeError: inner
+ ❯ a.test.ts:6:55
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="noshow" time="T">
+            <failure message="expected [ 1 ] to have a length of 2 but got 1" type="AssertionError">
+AssertionError: expected [ 1 ] to have a length of 2 but got 1
+
+- Expected
++ Received
+
+- 2
++ 1
+
+ ❯ a.test.ts:7:34
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="async" time="T">
+            <system-out>
+after await
+
+after timer
+
+            </system-out>
+        </testcase>
+    </testsuite>
+    <testsuite name="b.test.ts" timestamp="S" hostname="H" tests="4" failures="4" errors="0" skipped="0" time="T">
+        <testcase classname="b.test.ts" name="types" time="T">
+            <failure message="expected 1 to deeply equal &apos;1&apos;" type="AssertionError">
+AssertionError: expected 1 to deeply equal &apos;1&apos;
+
+- Expected:
+&quot;1&quot;
+
++ Received:
+1
+
+ ❯ b.test.ts:2:31
+            </failure>
+        </testcase>
+        <testcase classname="b.test.ts" name="empty" time="T">
+            <failure message="expected &apos;&apos; to be &apos;x&apos; // Object.is equality" type="AssertionError">
+AssertionError: expected &apos;&apos; to be &apos;x&apos; // Object.is equality
+
+- Expected
++ Received
+
+- x
+
+ ❯ b.test.ts:3:32
+            </failure>
+        </testcase>
+        <testcase classname="b.test.ts" name="quotes" time="T">
+            <failure message="expected &apos;a&quot;b&apos; to be &apos;a&quot;c&apos; // Object.is equality" type="AssertionError">
+AssertionError: expected &apos;a&quot;b&apos; to be &apos;a&quot;c&apos; // Object.is equality
+
+Expected: &quot;a&quot;c&quot;
+Received: &quot;a&quot;b&quot;
+
+ ❯ b.test.ts:4:36
+            </failure>
+        </testcase>
+        <testcase classname="b.test.ts" name="nodiff" time="T">
+            <failure message="expected 1 to be greater than 2" type="AssertionError">
+AssertionError: expected 1 to be greater than 2
+ ❯ b.test.ts:5:32
+            </failure>
+        </testcase>
+    </testsuite>
+</testsuites>

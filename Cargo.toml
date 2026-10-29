@@ -1,6 +1,6 @@
 [package]
 name = "turbo-test"
-version = "0.4.8"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
 description = "A blazing-fast native test runner — drop-in replacement for Vitest"
@@ -30,11 +30,14 @@ name = "m5-affected"
 path = "src/bin/m5_affected.rs"
 
 [dependencies]
-url = "2.5"
-# Public-suffix registry for document.domain's top-level-domain check (Blink
-# includes private registries such as github.io).
-psl = "2"
-v8 = { package = "turbo-surf-v8", version = "=149.3.0", path = "vendor/rusty_v8" }
+# V8 bindings for the runner, the Node-API host and the module loader: turbo-dom's
+# rusty_v8 fork (the interceptor ShouldThrowOnError fix). `~150.4` admits fork patch
+# releases only and must resolve to the same single turbo-dom-v8 that
+# turbo-dom-browser-env links (scripts/check-single-v8.sh).
+v8 = { package = "turbo-dom-v8", version = "~150.4" }
+# The browser environment (window, document, CSSOM, forms, events) the runner
+# installs into each test context.
+turbo-dom-browser-env = { version = "0.6.0" }
 oxc_allocator = "0.134"
 oxc_parser = "0.134"
 oxc_span = "0.134"
@@ -47,20 +50,35 @@ oxc_semantic = "0.134"
 oxc_resolver = "11.21.0"
 libloading = "0.9.0"
 serde_json = "1"
+# local time for the human reporters' `Start at` (vitest's toTimeString)
+libc = "0.2"
+# js-tokens' identifier classes, for vitest's code-frame highlighting
+unicode-id-start = "1.4"
 base64 = "0.22"
-# CSS Syntax, selector and declaration validation for the DOM's CSSOM facade.
-lightningcss = { version = "1.0.0-alpha.71", default-features = false }
-cssparser = "0.37"
-# Public native rtdom API only. The published0.5.7 release supplies custom
-# state selectors, bounded storage accounting and actual-context fragments.
-# Keep the existing turbo_dom_parser import name through the package alias.
-turbo-dom-parser = { package = "turbo-dom", version = "0.5.7" }
+# TextDecoder's legacy encodings (Shift_JIS, UTF-16, windows-125x, ...): the WHATWG Encoding
+# Standard implementation (turbo-test#119)
+encoding_rs = "0.8"
+# rolldown's diagnostic renderer (its ariadne fork, the version vite 8's rolldown links): a TS /
+# JSX module that does not transform fails with its report, as vite's oxc transform does
+# (turbo-test#113)
+ariadne = { package = "rolldown-ariadne", version = "=0.6.0" }
 
+# `cargo tarpaulin` builds with `--cfg tarpaulin` (napi_host's coverage flush before an abort).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tarpaulin)"] }
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
 
-[dev-dependencies]
-sha2 = "0.10"
+# Pre-publish only (turbo-dom consolidation): resolve the unreleased turbo-dom crates
+# from git. turbo-dom and turbo-dom-browser-env come from the refactor branch of
+# miaskiewicz/turbo-dom; turbo-dom-v8 is generated there and pushed to the orphan
+# candidate branch consolidation/turbo-dom-v8-candidate. Remove this whole section
+# and re-lock (`cargo update -p turbo-dom -p turbo-dom-browser-env -p turbo-dom-v8`)
+# once those versions are on crates.io, before tagging (RELEASING.md).
+[patch.crates-io]
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "223c4c894e698334a73bac52b292229dc2113025" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "223c4c894e698334a73bac52b292229dc2113025" }
+turbo-dom-v8 = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "e9b36c8733ef1cf1073f7053a8c5931381c978c5" }

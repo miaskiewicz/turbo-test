@@ -1,0 +1,37 @@
+[
+ [
+  "now",
+  "value",
+  "1000"
+ ],
+ [
+  "toFake",
+  "value",
+  "[true,true]"
+ ],
+ [
+  "loopLimit",
+  "throws",
+  "Error: Aborting after running 7 timers, assuming an infinite loop!"
+ ],
+ [
+  "argument merged over it",
+  "value",
+  "[12,\"Aborting after running 7 timers, assuming an infinite loop!\"]"
+ ],
+ [
+  "argument toFake replaces it",
+  "value",
+  "[true,false]"
+ ],
+ [
+  "setConfig over it",
+  "value",
+  "[1077,\"Aborting after running 1000 timers, assuming an infinite loop!\"]"
+ ],
+ [
+  "resetConfig back to it",
+  "value",
+  "1000"
+ ]
+]

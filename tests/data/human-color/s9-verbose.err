@@ -1,0 +1,25 @@
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22malways
+[31m[1mError[22m: nope 1[39m
+[36m [2m❯[22m a.test.ts:[2m5:42[22m[39m
+    [90m  3|[39m [35mlet[39m m [33m=[39m [34m0[39m[33m;[39m
+    [90m  4|[39m it('flaky', { retry: 2 }, () => { n++; if (n < 2) throw new Error('onc…
+    [90m  5|[39m it('always', { retry: 1 }, () => { throw new Error('nope ' + (++m)); }…
+    [90m   |[39m                                          [31m^[39m
+    [90m  6|[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22malways
+[31m[1mError[22m: nope 2[39m
+[36m [2m❯[22m a.test.ts:[2m5:42[22m[39m
+    [90m  3|[39m [35mlet[39m m [33m=[39m [34m0[39m[33m;[39m
+    [90m  4|[39m it('flaky', { retry: 2 }, () => { n++; if (n < 2) throw new Error('onc…
+    [90m  5|[39m it('always', { retry: 1 }, () => { throw new Error('nope ' + (++m)); }…
+    [90m   |[39m                                          [31m^[39m
+    [90m  6|[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯[22m[39m
+

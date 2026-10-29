@@ -106,4 +106,30 @@ void assertTrue;
 void expect.soft;
 void expect.unreachable;
 void expect.poll;
+// expect.poll / addSnapshotSerializer / a matcher's this.utils (turbo-test#161–#163)
+void expect.poll(() => 1, { interval: 10, timeout: 100, message: 'm' }).toBe(1);
+expect.addSnapshotSerializer({ test: (v) => v instanceof Date, serialize: (v, config, indentation, depth, refs, printer) => printer(v, config, indentation, depth, refs) });
+expect.addSnapshotSerializer({ test: () => false, print: (v, serialize) => serialize(v) });
+expect.extend({
+  toBeK5(received: unknown, expected: unknown) {
+    const hint: string = this.utils.matcherHint('toBeK5', undefined, undefined, { isNot: this.isNot, promise: this.promise });
+    return { pass: received === expected, message: () => `${hint}\n${this.utils.printExpected(expected)}\n${this.utils.printReceived(received)}` };
+  },
+});
 void expect.assertType;
+
+// ---- test.for / describe.for: the row is one argument, plus the test context ------------------
+test.for([[1, 2]] as const)('for %i %i', ([a, b], ctx) => {
+  const sum: number = a + b;
+  void sum;
+  void ctx.expect;
+});
+it.for(['x'])('for %s', (s) => {
+  const str: string = s;
+  void str;
+});
+test.for`a | b ${1} | ${2}`('tpl $a $b', (row) => void row);
+describe.for([{ n: 'x' }])('d $n', (row) => {
+  const n: string = row.n;
+  void n;
+});

@@ -37,6 +37,37 @@ function binaryPath() {
   return null;
 }
 
+// turbo-test's own esbuild (a dependency of this package), for projects that don't link one at
+// node_modules/.bin/esbuild — e.g. pnpm, where a transitive esbuild lives only under
+// node_modules/.pnpm. Without it the runner can't transform vi.mock factories (TS/JSX) and
+// evaluates them raw. The native binary prefers the project's own esbuild when it has one.
+function bundledEsbuild() {
+  try {
+    const dir = path.dirname(require.resolve('esbuild/package.json'));
+    const p =
+      process.platform === 'win32'
+        ? path.join(
+            path.dirname(require.resolve(`@esbuild/win32-${process.arch}/package.json`, { paths: [dir] })),
+            'esbuild.exe',
+          )
+        : path.join(dir, 'bin', 'esbuild');
+    return fs.existsSync(p) ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+// The `chai` this package depends on (turbo-test#160): vitest's expect(x) is a chai Assertion, so the
+// binary loads chai's ES-module build into its runtime. Without it the binary stops with an error.
+function chaiPath() {
+  try {
+    const p = path.join(path.dirname(require.resolve('chai/package.json')), 'index.js');
+    return fs.existsSync(p) ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 function main() {
   const bin = binaryPath();
   if (!bin) {
@@ -48,7 +79,16 @@ function main() {
   }
   // Forward argv verbatim; the binary's launcher (src/launcher.rs) does the rest. cwd is inherited
   // so the binary's discovery / config walk / git --changed all run relative to where the user is.
-  const res = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit' });
+  const env = { ...process.env };
+  if (!env.TURBO_ESBUILD) {
+    const esbuild = bundledEsbuild();
+    if (esbuild) env.TURBO_ESBUILD = esbuild;
+  }
+  if (!env.TURBO_CHAI) {
+    const chai = chaiPath();
+    if (chai) env.TURBO_CHAI = chai;
+  }
+  const res = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit', env });
   if (res.error) { console.error('turbo-test:', res.error.message); process.exit(1); }
   process.exit(res.status == null ? 1 : res.status);
 }

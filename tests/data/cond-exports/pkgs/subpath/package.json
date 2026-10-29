@@ -1,0 +1,15 @@
+{
+  "name": "subpath",
+  "exports": {
+    "./feature": {
+      "require": "./f.cjs",
+      "default": "./f.js"
+    },
+    "./u/*": {
+      "require": "./u/*.cjs",
+      "default": "./u/*.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "type": "module"
+}

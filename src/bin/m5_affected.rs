@@ -31,8 +31,19 @@ fn main() {
     let affected = affected_tests(&changed, &tests);
     let us = t.elapsed().as_secs_f64() * 1_000_000.0;
 
-    println!("changed: {}", changed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "));
-    println!("affected test files ({} of {}):", affected.len(), tests.len());
+    println!(
+        "changed: {}",
+        changed
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!(
+        "affected test files ({} of {}):",
+        affected.len(),
+        tests.len()
+    );
     for a in &affected {
         println!("  {}", a.display());
     }

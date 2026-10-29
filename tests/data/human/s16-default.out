@@ -1,0 +1,15 @@
+
+ RUN  v4.1.12 <root>
+
+ ❯ a.test.ts (5 tests | 5 failed) <ms>
+   × short strings <ms>
+   × lines <ms>
+   × arrays <ms>
+   × nested <ms>
+   × numbers <ms>
+
+ Test Files  1 failed (1)
+      Tests  5 failed (5)
+   Start at  <time>
+   Duration  <duration>
+

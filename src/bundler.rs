@@ -62,7 +62,9 @@ fn asset_stub(path: &Path) -> Option<&'static str> {
 fn make_resolver() -> oxc_resolver::Resolver {
     let strs = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     oxc_resolver::Resolver::new(oxc_resolver::ResolveOptions {
-        extensions: strs(&[".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".json", ".node"]),
+        extensions: strs(&[
+            ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".json", ".node",
+        ]),
         main_fields: strs(&["module", "browser", "main"]),
         condition_names: strs(&["import", "module", "browser", "default", "require"]),
         ..Default::default()
@@ -76,8 +78,8 @@ fn resolve_rel(resolver: &oxc_resolver::Resolver, importer: &Path, spec: &str) -
 }
 
 /// Collect static relative specifiers from a module's (TS-stripped) JS: import/export-from/`export
-/// *` sources + `require("…")` literals. Dynamic `import()` is intentionally excluded (left to
-/// runtime require, not bundled).
+/// *` sources + `require("…")` literals. Dynamic `import()` is intentionally excluded (not walked:
+/// left to a runtime require, unless its target is bundled via a static edge anyway).
 struct SpecCollector {
     specs: Vec<String>,
 }
@@ -119,17 +121,24 @@ fn collect_relative_specs(js: &str) -> Vec<String> {
     c.specs.into_iter().filter(|s| is_relative(s)).collect()
 }
 
-struct Module {
-    /// the (TS-stripped) JS, or `None` for an asset stub.
-    js: Option<String>,
+enum Module {
     /// stub body for an asset module.
-    stub: Option<&'static str>,
-    /// relative-import specifier → resolved absolute path (→ bundled-module id in pass 2).
-    edges: HashMap<String, PathBuf>,
+    Stub(&'static str),
+    Js {
+        /// the (TS-stripped) JS.
+        js: String,
+        /// relative-import specifier → resolved absolute path (→ bundled-module id in pass 2).
+        edges: HashMap<String, PathBuf>,
+    },
 }
 
 /// Bundle a node_modules package starting at `entry`. `None` → fall back to the esbuild bundle.
 pub fn bundle(entry: &Path) -> Option<String> {
+    bundle_capped(entry, MAX_MODULES)
+}
+
+/// `bundle` with the module cap injected (`MAX_MODULES` in production).
+fn bundle_capped(entry: &Path, max_modules: usize) -> Option<String> {
     let entry = entry.canonicalize().ok()?;
     let resolver = make_resolver();
 
@@ -144,14 +153,14 @@ pub fn bundle(entry: &Path) -> Option<String> {
         if id_of.contains_key(&p) {
             continue;
         }
-        if order.len() >= MAX_MODULES {
+        if order.len() >= max_modules {
             return None;
         }
         id_of.insert(p.clone(), order.len());
         order.push(p.clone());
 
         if let Some(stub) = asset_stub(&p) {
-            modules.push(Module { js: None, stub: Some(stub), edges: HashMap::new() });
+            modules.push(Module::Stub(stub));
             continue;
         }
 
@@ -172,37 +181,54 @@ pub fn bundle(entry: &Path) -> Option<String> {
             }
             // an unresolvable relative spec stays `External` (runtime require) — rare; harness gates.
         }
-        modules.push(Module { js: Some(js), stub: None, edges });
+        modules.push(Module::Js { js, edges });
     }
 
     // Pass 2: transform + wrap each module.
     let mut out = String::from(esm_cjs::PREAMBLE);
     for (idx, module) in modules.iter().enumerate() {
-        let module_text = if let Some(stub) = module.stub {
-            stub.to_string()
-        } else {
-            let js = module.js.as_ref()?;
-            let edges = &module.edges;
-            // relative spec → bundled module (require_<id>()); everything else external.
-            let resolve = |spec: &str| -> SourceRef {
-                if let Some(abs) = edges.get(spec) {
-                    if let Some(&tid) = id_of.get(abs) {
-                        return SourceRef::BundledCjs { id: format!("m{tid}") };
+        let module_text = match module {
+            Module::Stub(stub) => stub.to_string(),
+            Module::Js { js, edges } => {
+                // relative spec → bundled module (require_<id>()); everything else external.
+                let resolve = |spec: &str| -> SourceRef {
+                    if let Some(abs) = edges.get(spec) {
+                        if let Some(&tid) = id_of.get(abs) {
+                            return SourceRef::BundledCjs {
+                                id: format!("m{tid}"),
+                            };
+                        }
                     }
+                    SourceRef::External
+                };
+                let ctx = LowerCtx {
+                    exports_obj: "__tt_exports".to_string(),
+                    resolve: Some(&resolve),
+                    // the bundle runs in the entry's wrapper: each module names its own path
+                    module_path: Some(order[idx].to_string_lossy().into_owned()),
+                };
+                let parts = esm_cjs::transform_to_parts(js, &ctx)?;
+                if parts.has_module_syntax {
+                    esm_cjs::assemble_module(
+                        &parts.requires,
+                        &parts.re_exports,
+                        &parts.exports,
+                        &parts.body_code,
+                    )
+                } else {
+                    parts.body_code
                 }
-                SourceRef::External
-            };
-            let ctx = LowerCtx { exports_obj: "__tt_exports".to_string(), resolve: Some(&resolve) };
-            let parts = esm_cjs::transform_to_parts(js, &ctx)?;
-            if parts.has_module_syntax {
-                esm_cjs::assemble_module(&parts.requires, &parts.re_exports, &parts.exports, &parts.body_code)
-            } else {
-                parts.body_code
             }
         };
-        out.push_str(&format!("var require_m{idx} = __commonJS((exports, module) => {{\n{module_text}\n}});\n"));
+        out.push_str(&format!(
+            "var require_m{idx} = __commonJS((exports, module) => {{\n{module_text}\n}});\n"
+        ));
     }
-    let entry_id = *id_of.get(&entry)?;
-    out.push_str(&format!("module.exports = require_m{entry_id}();\n"));
+    // the entry is the first module walked, so its id is always 0.
+    out.push_str("module.exports = require_m0();\n");
     Some(out)
 }
+
+#[cfg(all(test, unix))]
+#[path = "bundler_tests.rs"]
+mod tests;

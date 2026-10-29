@@ -1,0 +1,28 @@
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.12 [39m[90m<root>[39m
+
+[90mstdout[2m | a.test.ts[2m > [22m[2mmore values
+[22m[39m[32m/[39m[33ma[39m[31m([39m[36mb[39m[32m|[39m[36mc[39m[31m)[39m[31m[[39m[33m^[39m[33md[39m[36m-[39m[33mf[39m[31m][39m[33m\d[39m[31m{[39m[36m2[39m[33m,[39m[36m3[39m[31m}[39m[35m?[39m[33mx[39m[35m*[39m[31m([39m[31m?:[39m[36my[39m[31m)[39m[31m([39m[31m?=[39m[36mq[39m[31m)[39m[31m([39m[31m?<[39m[33mn[39m[31m>[39m[36mz[39m[31m)[39m[32m\k<[39m[31mn[39m[32m>[39m[31m\u{[39m[33m41[39m[31m}[39m[31m\p{[39m[33mL[39m[31m}[39m[36m.[39m[35m^[39m[35m$[39m[35m|[39m[33mw[39m[31m{[39m[36m3[39m[33m,[39m[31m}[39m[32m/[39m[31mgu[39m [32m/[39m[31m[[39m[33m\x41[39m[36m-[39m[33m\x5A[39m[31m][39m[33me[39m[31m{[39m[33m,[39m[36m2[39m[31m}[39m[31m([39m[31m?<![39m[36mx[39m[31m)[39m[31m([39m[31m?![39m[36my[39m[31m)[39m[33m\1[39m[33m\x4/[39m[32m/[39m
+[36m<ref *1>[39m { name: [32m'c'[39m, self: [36m[Circular *1][39m } Uint8Array(2) [ [33m1[39m, [33m2[39m ] [33m[Number: 3][39m [32m[String: 's'][39m Promise { [36m<pending>[39m } WeakMap { [36m<items unknown>[39m }
+{
+  [32m'quoted-key'[39m: [33m1[39m,
+  g: [36m[Getter][39m,
+  s: [36m[Setter][39m,
+  arr: [
+      [33m0[39m, [33m100[39m,  [33m200[39m,  [33m300[39m,
+    [33m400[39m, [33m500[39m,  [33m600[39m,  [33m700[39m,
+    [33m800[39m, [33m900[39m, [33m1000[39m, [33m1100[39m
+  ],
+  [32mSymbol(sk)[39m: [32m'v'[39m
+}
+{
+  long: [32m'line one\nline two\nline three is a bit longer than the others to wrap'[39m
+} [ [90m<1 empty item>[39m, [33m1[39m, [90m<1 empty item>[39m ] [36m[class A][39m [32mSymbol(Symbol.iterator)[39m
+
+[33m[39m[32m·[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+<start>
+<duration>
+

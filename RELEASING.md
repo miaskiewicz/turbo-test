@@ -6,51 +6,80 @@ supported binary builds, their tests, and both registry publications.
 
 Before release, merge all reviewed stacked work into the final release PR. Bump
 `Cargo.toml`, the runner entry in `Cargo.lock`, `package.json` and both root
-versions in `package-lock.json` to the same next patch version. Move the complete
-unreleased changelog into that release's dated section. Preserve earlier versions
-and unrelated dependency versions.
+versions in `package-lock.json` to the same next version (normally the next patch;
+the turbo-dom consolidation release is 0.6.0, aligned with the turbo-dom 0.6.0
+crates). Move the complete unreleased changelog into that release's dated section.
+Preserve earlier versions and unrelated dependency versions.
 
 ## Native dependency provenance
 
-The runner uses the reviewed `turbo-surf-v8` 149.3.0 distribution through its local
-`v8` alias. Its numeric version, library name and official upstream prebuilt SDK
-URLs remain unchanged. The fork retains the Rust weak-handle teardown fix;
-falling back to the unpatched `v8` registry package is not equivalent.
+The runner links V8 through turbo-dom's rusty_v8 fork, the registry crate
+`turbo-dom-v8 ~150.4` (V8 15.0), under its local `v8` alias, and installs the
+browser environment from `turbo-dom-browser-env` 0.6.0. Both are built and
+published from [miaskiewicz/turbo-dom](https://github.com/miaskiewicz/turbo-dom):
+the fork's patches, pins and generator live in its `crates/turbo-dom-v8`, and the
+binding (formerly this repo's `src/browser_env*`) in `crates/turbo-dom-browser-env`.
+This repository carries no vendored V8 source and publishes no V8 crate.
+
+The fork carries the interceptor `ShouldThrowOnError` fix;
+`tests/interceptor_should_throw.rs`, `tests/release_v8_teardown.rs` and
+`tests/weak_teardown.rs` are consumer copies of turbo-dom-v8's own tests and run
+against the resolved fork. `scripts/check-single-v8.sh` (CI build job) requires
+exactly one `turbo-dom-v8` in the graph and no `v8`, `v8x` or `turbo-surf-v8`.
+
+Until those turbo-dom crates are on crates.io, `Cargo.toml` resolves them from
+git through a `[patch.crates-io]` section (pre-publish only: turbo-dom and
+turbo-dom-browser-env at a turbo-dom refactor-branch rev, turbo-dom-v8 at its
+candidate rev). The tag's publish jobs need the real registry crates, so `v0.6.0`
+cannot be tagged while that section exists. Publish turbo-dom `v0.6.0` first (its
+order: turbo-dom-v8 150.4.0 -> turbo-dom 0.6.0 -> turbo-dom-layout ->
+turbo-dom-raster -> turbo-dom-browser-env 0.6.0) and wait until crates.io lists
+turbo-dom-v8 and turbo-dom-browser-env. Then, on the release PR branch, delete the
+section (it is the tail of `Cargo.toml`, starting at the `# Pre-publish only`
+comment), re-lock only those packages and re-run the gates:
 
 ```sh
-python3 -B vendor/update-rusty-v8.py --check
-python3 -B vendor/test_release_rusty_v8.py
-python3 -B vendor/release-rusty-v8.py --out /tmp/reviewed-v8-package --offline
+for c in turbo-dom-v8:150.4.0 turbo-dom-browser-env:0.6.0; do   # both on crates.io
+  curl -sf "https://index.crates.io/tu/rb/${c%%:*}" | grep -q "\"vers\":\"${c#*:}\"" || echo "MISSING $c"
+done
+sed -i.bak '/^# Pre-publish only (turbo-dom consolidation)/,$d' Cargo.toml && rm Cargo.toml.bak
+! grep -n '^\[patch' Cargo.toml                      # section gone
+cargo update -p turbo-dom -p turbo-dom-browser-env -p turbo-dom-v8
+! grep -n 'git+https://github.com/miaskiewicz/turbo-dom' Cargo.lock   # registry sources only
+git diff --stat Cargo.lock                           # only those three entries change
+bash scripts/check-single-v8.sh
+cargo test --locked
+cargo package --locked -p turbo-test --allow-dirty   # verifies against crates.io
+git commit -am "Drop the pre-publish [patch.crates-io] section; lock turbo-dom crates from crates.io"
 ```
 
-The archive/patch reproducer uses the hash-pinned original archive from Cargo's
-cache, or its explicit `--archive` argument. Packaging works on an owned source
-copy, omitting only regenerated Cargo metadata. The actual package retains its
-license and reviewed source. Keep the actual prepared archive and independent
-normal/snapshot weak-teardown test evidence. A directory-source clean-consumer
-check before publication is useful preparation; it is not a claim that the new
-fork already exists on crates.io.
+Drop the matching pre-publish notes in `CLAUDE.md` ("Where the DOM and V8 live")
+and here in the same commit. The tag-only `release-guard` CI job fails a `v*` tag
+whose `Cargo.toml` still has a `[patch]` section, whose `Cargo.lock` still has git
+sources, or whose `Cargo.toml` / `package.json` version differs from the tag; both
+publish jobs depend on it. The Rust job verifies the normalized runner package
+against real registry dependencies (`cargo package --locked`) before publishing
+`turbo-test`; it also fails while git patches remain. Cargo publication
+verification remains enabled.
+The jobs use the existing `CARGO_REGISTRY_TOKEN` and `NPM_TOKEN` secrets; never
+record token values.
 
-The tagged workflow publishes the verified V8 fork before either runner
-publication. An existing fork version is accepted only if its package contents
-match exactly, apart from Cargo-generated lock/VCS metadata. After the fork is
-published, the Rust job verifies the normalized runner package against real
-registry dependencies before publishing `turbo-test`. Cargo publication
-verification remains enabled. The jobs use the existing `CARGO_REGISTRY_TOKEN`
-and `NPM_TOKEN` secrets; never record token values.
-
-Use a published compatible `turbo-dom` floor before the runner crate release.
+Use published compatible turbo-dom crates before the runner crate release.
 A Git-pinned development version with the same number does not prove that its
 required APIs are available to registry consumers.
 
 ## Gates and final merge tag
 
-Run the complete locked Rust tests, the Node compatibility/type tests, and all
-nine native DOM compatibility fixtures used by `.github/workflows/ci.yml`. Check
-formatting for changed Rust sources and report any additional Clippy checks with
-their actual outcomes rather than relabeling an older failing baseline. Keep the explicit unknown-pseudo CSSOM admission
-ignore and its separately executed Chrome-expected failure visible; do not count
-it as passing conformance. Check the actual normalized runner package from a
+Run `npm ci` (npm 10 and npm 11 must both install the committed lock unchanged; CI job
+`npm-lockfile`), the complete locked Rust tests, the Node compatibility/type tests, all
+nine native DOM compatibility fixtures used by `.github/workflows/ci.yml`, and the
+line-coverage gate (`cargo tarpaulin`, `fail-under = 99.9` in tarpaulin.toml; CI job
+`coverage`), and the lints (`cargo fmt --check`, `cargo clippy --all-targets -- -D
+warnings`; CI job `lint`). The complexity jobs (`complexity / rust (cc <= 15)`,
+`complexity / js (cc <= 15)`) are report-only until the post-0.6.0 refactor and do not
+block a release meanwhile (README "Gates and CI"). The binding's
+Chrome-parity tests (including the explicit unknown-pseudo CSSOM admission ignore
+and its Chrome-expected failure) now run in turbo-dom-browser-env, not here. Check the actual normalized runner package from a
 clean consumer and inspect the npm allowlist and staged platform binaries.
 
 Merge all open reviewed PRs with merge commits. Require the integrated final PR's
@@ -66,27 +95,3 @@ No separate Python tag exists here. Verify the tagged workflow and both actual
 registries after publication; do not infer success from a green build job or
 from an existing older package. Keep each failed attempt with its actual source
 identity. A tag is an irreversible publication request.
-
-## Recovering the immutable v0.4.7 dependency publication
-
-The original tagged run passed all four platform jobs and complete source
-reproduction, then stopped before publishing: an absent static crate object
-returned HTTP 403. Absence is now determined only by the official registry
-version API's 404 response. An API denial or a denied archive for an existing
-version remains a failure; full archive payload comparison is retained.
-
-Do not move or recreate `v0.4.7`. The manual `Recover tagged V8 dependency`
-workflow can publish or verify only `turbo-surf-v8` 149.3.0 from exact source
-`e178d4bc132bb6bc158d3d2bedf62891fe8c1c00`. It requires the reviewed publisher's
-full main commit SHA and the explicit confirmation shown in its dispatch form.
-It independently checks the clean tagged checkout and the remote annotated tag's
-peeled commit, reproduces every fork source, and keeps Cargo verification enabled.
-The publisher and tagged source are separate checkouts; no source overlay or
-local registry credential is used.
-
-After reviewing and merging the recovery PR, dispatch the workflow on `main`
-with that exact publisher commit. Verify the resulting registry archive before
-rerunning the failed jobs of original tagged run 39585126739. The original
-publisher must then verify the existing fork payload before allowing npm and
-runner-crate publication. This is one product release, not a second version or
-replacement tag. Preserve the original failed run and every recovery outcome.

@@ -36,4 +36,7 @@ export declare const beforeEach: HookFunction;
 export declare const afterEach: HookFunction;
 export declare const beforeAll: HookFunction;
 export declare const afterAll: HookFunction;
+// chai 6.3.0's assert / chai / should, as vitest exports them (turbo-test#160)
 export declare const assert: any;
+export declare const chai: any;
+export declare const should: any;

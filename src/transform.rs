@@ -21,6 +21,19 @@ pub fn needs_transform(path: &Path) -> bool {
     )
 }
 
+/// The `Scoping` oxc's `Transformer` must be given: a semantic pass WITH TS enum member
+/// evaluation. oxc's enum lowering reads the pre-computed member values from `Scoping`; without
+/// `with_enum_eval(true)` it debug-asserts (debug builds) or, in release, treats every member
+/// initializer as non-constant — so `enum E { A = 'a', B = A }` got a bogus reverse mapping
+/// (`E[E["B"] = E.A] = "B"`) instead of tsc's `E["B"] = "a"`.
+pub(crate) fn semantic_scoping(program: &oxc_ast::ast::Program) -> oxc_semantic::Scoping {
+    SemanticBuilder::new()
+        .with_enum_eval(true)
+        .build(program)
+        .semantic
+        .into_scoping()
+}
+
 /// Transform a TS/JSX source file to plain JS. Returns generated code.
 pub fn transform(path: &Path, src: &str) -> Result<String, String> {
     transform_with(path, src, false)
@@ -37,6 +50,22 @@ pub fn transform(path: &Path, src: &str) -> Result<String, String> {
 /// valid, runnable output with no esbuild/tsc dependency. The caller decides `legacy_decorators`
 /// (project has `experimentalDecorators` AND the file uses a decorator).
 pub fn transform_with(path: &Path, src: &str, legacy_decorators: bool) -> Result<String, String> {
+    emit(path, src, legacy_decorators, false).map(|(code, _)| code)
+}
+
+/// `transform` with a source map: the code and the map's `mappings` (test locations,
+/// location.rs).
+pub fn transform_mapped(path: &Path, src: &str) -> Result<(String, String), String> {
+    emit(path, src, false, true).map(|(code, map)| (code, map.unwrap_or_default()))
+}
+
+/// The `transform_with` pipeline; `with_map` also returns the codegen source map's `mappings`.
+fn emit(
+    path: &Path,
+    src: &str,
+    legacy_decorators: bool,
+    with_map: bool,
+) -> Result<(String, Option<String>), String> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path).map_err(|e| format!("source type: {e:?}"))?;
 
@@ -47,7 +76,7 @@ pub fn transform_with(path: &Path, src: &str, legacy_decorators: bool) -> Result
     let mut program = parsed.program;
 
     // semantic pass produces the scoping the transformer needs for correct renaming
-    let scoping = SemanticBuilder::new().build(&program).semantic.into_scoping();
+    let scoping = semantic_scoping(&program);
 
     let mut options = TransformOptions::default();
     if legacy_decorators {
@@ -64,7 +93,12 @@ pub fn transform_with(path: &Path, src: &str, legacy_decorators: bool) -> Result
         return Err(format!("transform errors: {:?}", ret.errors));
     }
 
-    Ok(Codegen::new().build(&program).code)
+    let options = oxc_codegen::CodegenOptions {
+        source_map_path: with_map.then(|| path.to_path_buf()),
+        ..Default::default()
+    };
+    let out = Codegen::new().with_options(options).build(&program);
+    Ok((out.code, out.map.map(|m| m.to_json().mappings)))
 }
 
 /// Transform a TS file lowering legacy decorators + `emitDecoratorMetadata` in-process via oxc
@@ -83,7 +117,7 @@ pub fn transform_decorators_with_metadata(path: &Path, src: &str) -> Result<Stri
         return Err(format!("parse errors: {:?}", parsed.errors));
     }
     let mut program = parsed.program;
-    let scoping = SemanticBuilder::new().build(&program).semantic.into_scoping();
+    let scoping = semantic_scoping(&program);
 
     let mut options = TransformOptions::default();
     // oxc 0.134's CommonJS module transform is a no-op, so we leave imports as ESM and let a
@@ -110,6 +144,49 @@ pub fn transform_decorators_with_metadata(path: &Path, src: &str) -> Result<Stri
     Ok(Codegen::new().build(&program).code)
 }
 
+/// `code` (the transformed mock prepass, a classic script) with each `import.meta` replaced by
+/// `import_meta_expr` (the entry's). Code that does not parse is returned unchanged.
+pub fn replace_import_meta(code: &str, import_meta_expr: &str) -> String {
+    use oxc_ast_visit::Visit;
+    struct Metas(Vec<(u32, u32)>);
+    impl<'a> Visit<'a> for Metas {
+        fn visit_meta_property(&mut self, it: &oxc_ast::ast::MetaProperty<'a>) {
+            if it.meta.name == "import" {
+                self.0.push((it.span.start, it.span.end));
+            }
+        }
+    }
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+    if !parsed.errors.is_empty() {
+        return code.to_string();
+    }
+    let mut metas = Metas(Vec::new());
+    metas.visit_program(&parsed.program);
+    let mut out = code.to_string();
+    for (start, end) in metas.0.into_iter().rev() {
+        out.replace_range(start as usize..end as usize, import_meta_expr);
+    }
+    out
+}
+
+/// Whether Node loads `src` (a `.js` file with no package.json `"type"`) as an ES module — its
+/// syntax detection: an `import` / `export` declaration or `import.meta`, or code that only
+/// parses as a module (top-level `await`). Anything else is CommonJS; words in comments and
+/// strings do not count.
+pub fn has_module_syntax(src: &str) -> bool {
+    let parses = |source_type: SourceType| {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, src, source_type.with_jsx(true)).parse();
+        (
+            parsed.module_record.has_module_syntax,
+            parsed.errors.is_empty(),
+        )
+    };
+    let (module_syntax, _) = parses(SourceType::unambiguous());
+    module_syntax || (!parses(SourceType::cjs()).1 && parses(SourceType::mjs()).1)
+}
+
 /// Transform only when needed; otherwise return source unchanged.
 pub fn maybe_transform(path: &Path, src: String) -> Result<String, String> {
     if needs_transform(path) {
@@ -118,3 +195,7 @@ pub fn maybe_transform(path: &Path, src: String) -> Result<String, String> {
         Ok(src)
     }
 }
+
+#[cfg(test)]
+#[path = "transform_tests.rs"]
+mod tests;

@@ -1,0 +1,1 @@
+export default { test: (v) => v && v.cur !== undefined, serialize: (v, config, indentation, depth, refs, printer) => `${v.n} ${v.cur}${v.note ? ' ' + printer(v.note, config, indentation, depth, refs) : ''}` }

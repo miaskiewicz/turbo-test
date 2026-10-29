@@ -1,0 +1,16 @@
+
+ RUN  v4.1.12 <root>
+
+stdout | a.test.ts
+top level
+
+stdout | a.test.ts > d
+in hook
+
+ ✓ a.test.ts > d > t <ms>
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  <time>
+   Duration  <duration>
+

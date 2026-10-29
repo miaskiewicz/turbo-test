@@ -35,22 +35,20 @@ impl<'a> Visit<'a> for Collector {
         //   - import / export* declarations      — module structure (the export-wrapped *value*
         //                                          declaration is counted separately, below)
         //   - TS type-only declarations          — erased at runtime, never executed
-        let skip = matches!(
-            s,
-            Statement::BlockStatement(_)
-                | Statement::EmptyStatement(_)
-                | Statement::FunctionDeclaration(_)
-                | Statement::ClassDeclaration(_)
-                | Statement::ImportDeclaration(_)
-                | Statement::ExportNamedDeclaration(_)
-                | Statement::ExportDefaultDeclaration(_)
-                | Statement::ExportAllDeclaration(_)
-                | Statement::TSTypeAliasDeclaration(_)
-                | Statement::TSInterfaceDeclaration(_)
-                | Statement::TSEnumDeclaration(_)
-                | Statement::TSModuleDeclaration(_)
-                | Statement::TSImportEqualsDeclaration(_)
-        );
+        // (one single-pattern `matches!` per line: or-pattern alternatives get no coverage counter)
+        let skip = matches!(s, Statement::BlockStatement(_))
+            || matches!(s, Statement::EmptyStatement(_))
+            || matches!(s, Statement::FunctionDeclaration(_))
+            || matches!(s, Statement::ClassDeclaration(_))
+            || matches!(s, Statement::ImportDeclaration(_))
+            || matches!(s, Statement::ExportNamedDeclaration(_))
+            || matches!(s, Statement::ExportDefaultDeclaration(_))
+            || matches!(s, Statement::ExportAllDeclaration(_))
+            || matches!(s, Statement::TSTypeAliasDeclaration(_))
+            || matches!(s, Statement::TSInterfaceDeclaration(_))
+            || matches!(s, Statement::TSEnumDeclaration(_))
+            || matches!(s, Statement::TSModuleDeclaration(_))
+            || matches!(s, Statement::TSImportEqualsDeclaration(_));
         if !skip {
             self.stmts.push(s.span().start);
         }
@@ -67,7 +65,11 @@ impl<'a> Visit<'a> for Collector {
             Some(a) => arms.push(a.span().start),
             None => arms.push(s.span.end), // implicit else (position only; taken derived)
         }
-        self.out.push(RawBranch { decision: s.span.start, arms, implicit_else });
+        self.out.push(RawBranch {
+            decision: s.span.start,
+            arms,
+            implicit_else,
+        });
         walk::walk_if_statement(self, s);
     }
 
@@ -93,7 +95,11 @@ impl<'a> Visit<'a> for Collector {
     fn visit_switch_statement(&mut self, s: &SwitchStatement<'a>) {
         let arms: Vec<u32> = s.cases.iter().map(|c| c.span.start).collect();
         if !arms.is_empty() {
-            self.out.push(RawBranch { decision: s.span.start, arms, implicit_else: false });
+            self.out.push(RawBranch {
+                decision: s.span.start,
+                arms,
+                implicit_else: false,
+            });
         }
         walk::walk_switch_statement(self, s);
     }
@@ -107,10 +113,17 @@ pub fn extract_all(file: &Path, source: &str) -> (Vec<RawBranch>, Vec<u32>) {
     let st = SourceType::from_path(file).unwrap_or_default();
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, st).parse();
-    let mut c = Collector { out: Vec::new(), stmts: Vec::new() };
+    let mut c = Collector {
+        out: Vec::new(),
+        stmts: Vec::new(),
+    };
     c.visit_program(&ret.program);
     (c.out, c.stmts)
 }
+
+#[cfg(test)]
+#[path = "coverage_branch_tests.rs"]
+mod unit_tests;
 
 #[cfg(test)]
 mod tests {

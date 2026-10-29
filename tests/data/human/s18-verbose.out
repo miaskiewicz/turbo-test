@@ -1,0 +1,21 @@
+
+ RUN  v4.1.12 <root>
+
+ × a.test.ts > aligned <ms>
+   → expected 'hello world\nsecond line\nthird' to be 'hello there\nsecond line\nthird!' // Object.is equality
+ × a.test.ts > long <ms>
+   → expected [ Array(30) ] to deeply equal [ Array(30) ]
+ × a.test.ts > json <ms>
+   → expected { toJSON: [Function toJSON], v: 1 } to deeply equal { toJSON: [Function toJSON], v: 2 }
+ × a.test.ts > types <ms>
+   → expected 1 to deeply equal '1'
+ × a.test.ts > trailing <ms>
+   → expected 'a  ' to be 'b  ' // Object.is equality
+ × a.test.ts > nothing common <ms>
+   → expected 'abc' to be 'xyz' // Object.is equality
+
+ Test Files  1 failed (1)
+      Tests  6 failed (6)
+   Start at  <time>
+   Duration  <duration>
+

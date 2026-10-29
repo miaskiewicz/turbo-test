@@ -1,0 +1,84 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`group > errors and mocks 1`] = `
+[MockFunction named] {
+  "calls": [
+    [
+      1,
+      {
+        "a": 2,
+      },
+    ],
+  ],
+  "results": [
+    {
+      "type": "return",
+      "value": undefined,
+    },
+  ],
+}
+`;
+
+exports[`group > errors and mocks 2`] = `[MockFunction]`;
+
+exports[`group > errors and mocks 3`] = `[Error: e]`;
+
+exports[`group > errors and mocks 4`] = `[TypeError: boom]`;
+
+exports[`group > values > hinted 1`] = `{}`;
+
+exports[`group > values 1`] = `
+{
+  "a": [
+    1,
+    "x",
+    null,
+    undefined,
+  ],
+  "b": 1,
+  "big": 10n,
+  "d": 1970-01-01T00:00:00.000Z,
+  "f": [Function],
+  "m": Map {
+    "k" => {
+      "z": 1,
+    },
+  },
+  "n": -0,
+  "nested": {
+    "deep": {
+      "deeper": [
+        true,
+      ],
+    },
+  },
+  "r": /x\\.y\\+/g,
+  "s": Set {
+    2,
+  },
+}
+`;
+
+exports[`group > values 2`] = `
+"multi
+line "q" \`t\` \${x} \\ end"
+`;
+
+exports[`group > values 3`] = `42`;
+
+exports[`group > values 4`] = `"one line"`;
+
+exports[`group > values 5`] = `[]`;
+
+exports[`group > values 6`] = `
+{
+  "id": Any<Number>,
+  "name": "n",
+}
+`;
+
+exports[`key with \`backtick\` and \${dollar} 1`] = `1`;
+
+exports[`t 9 1`] = `9`;
+
+exports[`t 10 1`] = `10`;

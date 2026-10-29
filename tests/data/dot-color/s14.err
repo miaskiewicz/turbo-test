@@ -1,0 +1,22 @@
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22mouter[2m > [22minner[2m > [22mfails
+[31m[1mAssertionError[22m: expected 1 to be 2 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 2[39m
+[31m+ 1[39m
+
+[36m [2m❯[22m a.test.ts:[2m7:62[22m[39m
+    [90m  5|[39m   [34mdescribe[39m([32m'inner'[39m[33m,[39m () [33m=>[39m {
+    [90m  6|[39m     [34mbeforeAll[39m(() [33m=>[39m { console[33m.[39m[34mlog[39m([32m'inner hook'[39m)[33m;[39m })[33m;[39m
+    [90m  7|[39m     it('fails', () => { console.log('in failing'); expect(1).toBe(2); …
+    [90m   |[39m                                                              [31m^[39m
+    [90m  8|[39m   })[33m;[39m
+    [90m  9|[39m   [34mdescribe[39m([32m'calm'[39m[33m,[39m () [33m=>[39m {
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+

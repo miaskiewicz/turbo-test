@@ -41,8 +41,9 @@ importing vitest:
    no-ops.
 3. **The DOM env** — `test.environment: jsdom | happy-dom` both map onto turbo-dom; `node` skips the
    DOM. A per-file `// @vitest-environment <env>` docblock overrides it.
-4. **Output** — `--reporter json` emits a vitest-ish summary (`numTotalTests`, `numPassedTests`,
-   per-file `testResults`); `junit`/`tap`/`verbose`/`dot`/`default` also supported.
+4. **Output** — `--reporter json` emits vitest's JSON report (suite / test counts, per-file
+   `testResults` with per-test `assertionResults`); `junit`/`tap`/`verbose`/`dot`/`default` also
+   supported.
 
 ## What's compatible (vitest surface)
 
@@ -55,15 +56,16 @@ Full matrix + quirks: `vitest.compat.md`. Summary:
 `run`/`watch`/`dev` accepted-and-stripped. Unknown flags warned + ignored (never treated as files).
 
 **Test / `vi` / `expect` API** ✅
-- `describe`/`it`/`test` + `.skip`/`.only`/`.todo`/`.each`/`.skipIf`/`.runIf`/`.concurrent`
+- `describe`/`it`/`test` + `.skip`/`.only`/`.todo`/`.each`/`.for`/`.skipIf`/`.runIf`/`.concurrent`
   (concurrent runs sequentially within a file), `it.fails`.
-- hooks `beforeAll`/`afterAll`/`beforeEach`/`afterEach`; per-test `{ timeout }`/`{ retry }`.
+- hooks `beforeAll`/`afterAll`/`beforeEach`/`afterEach`; per-test `{ timeout }`/`{ retry }`; the test
+  context (`task`, `skip`, `onTestFinished`/`onTestFailed`, `signal`, `expect`, `annotate`).
 - `expect` + a large matcher set, `expect.extend`, `.soft`, asymmetric matchers,
   `expect.assertions`/`hasAssertions` (enforced), `toMatchObject`/`toContainEqual`/`toSatisfy`/
   `toHaveBeenCalledOnce`/`toHaveBeenNthCalledWith`/…
 - `expect(...).toMatchSnapshot()` → `__snapshots__/<file>.snap`, `-u` to update.
 - `vi.fn`/`spyOn`/`mock`/`unmock`/`doMock`/`mocked`/`hoisted`/`waitFor`/`waitUntil`,
-  full fake-timers (`useFakeTimers` + advance/run/clear + `setSystemTime`), `stubGlobal`/`stubEnv`.
+  full fake-timers (`useFakeTimers` + advance/run/clear + `setSystemTime`; a fake timer fires only when the test moves the fake clock), `stubGlobal`/`stubEnv`.
 - `jest.*` alias shim.
 
 **Coverage** ✅ native V8 line/function + derived statement/branch coverage; lcov / json-summary /
@@ -75,7 +77,7 @@ text / html reporters; thresholds gate; include/exclude globs (auto-read from co
   `--coverage.*` flag form is not parsed (use the `--coverage-*` namespace).
 - `toMatchInlineSnapshot` / `toThrowErrorMatchingInlineSnapshot`: **compare-only**, no auto-write —
   pass the expected string explicitly.
-- `it.extend` fixtures: best-effort (no per-fixture teardown / `{ auto }` / `TestContext` extras).
+- `it.extend` fixtures: best-effort (no per-fixture teardown / `{ auto }`).
 - `bench()`: not implemented.
 - Config read is a regex scan: dynamic/`defineConfig`-computed config, plugins, aliases beyond
   tsconfig `paths`, and most `test.*` non-discovery options are not read from config.

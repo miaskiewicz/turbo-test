@@ -1,0 +1,3 @@
+stderr | a.test.ts > values
+n is 42 { x: 1 }
+

@@ -1,18 +1,18 @@
 /* Synthetic native (.node) addon for the segfault-hardening test.
- * Its module init calls napi_wrap — an N-API entrypoint turbo-test routes to a
- * catchable JS throw ("not implemented") rather than a null-pointer call. Used
- * to prove a misbehaving native addon can no longer SIGSEGV the whole run.
+ * It imports a Node-API function no host provides (napi_turbo_test_unknown_entrypoint) and
+ * calls it from its module init. turbo-test binds every import when the addon loads, so the
+ * require() fails with a catchable error naming the import instead of calling a null pointer.
+ * Used to prove a misbehaving native addon can no longer SIGSEGV the whole run.
  * Built at test time (see test/compat-napi.test.mjs); the .node is gitignored. */
 #include <stddef.h>
 typedef int napi_status;
 typedef void* napi_value;
 typedef void* napi_env;
-typedef void* napi_ref;
 extern napi_status napi_create_object(napi_env, napi_value*);
-extern napi_status napi_wrap(napi_env, napi_value, void*, void*, void*, napi_ref*);
+extern napi_status napi_turbo_test_unknown_entrypoint(napi_env, napi_value*);
 napi_value napi_register_module_v1(napi_env env, napi_value exports) {
-    napi_value obj;
-    napi_create_object(env, &obj);
-    napi_wrap(env, obj, (void*)1, 0, 0, 0);
+    napi_value out;
+    napi_create_object(env, &out);
+    napi_turbo_test_unknown_entrypoint(env, &out);
     return exports;
 }

@@ -93,14 +93,17 @@ test('--minWorkers is accepted (no-op) and does not flip exit code', () => {
 // ---- --silent ----
 
 test('--silent suppresses test console.* output', () => {
+  // with the JSON artifact on stdout, test console output is forwarded to stderr (turbo-test#32
+  // item 6) so stdout stays parseable
   const noisy = run(['--reporter', 'json', C('silent', 'console.test.ts')]);
-  assert.ok(/TURBO_SILENT_MARKER_LOG/.test(noisy.out), 'baseline prints console markers');
+  assert.ok(/TURBO_SILENT_MARKER_LOG/.test(noisy.err), 'baseline prints console markers');
+  assert.ok(!/TURBO_SILENT_MARKER/.test(noisy.out), `console output on the JSON stdout:\n${noisy.out}`);
 
-  const { code, out } = run(['--silent', '--reporter', 'json', C('silent', 'console.test.ts')]);
+  const { code, out, err } = run(['--silent', '--reporter', 'json', C('silent', 'console.test.ts')]);
   const j = parseJson(out);
   assert.equal(j.numPassedTests, 1, 'test still runs/passes under --silent');
   assert.equal(code, 0);
-  assert.ok(!/TURBO_SILENT_MARKER/.test(out), `console output leaked under --silent:\n${out}`);
+  assert.ok(!/TURBO_SILENT_MARKER/.test(out + err), `console output leaked under --silent:\n${out}${err}`);
 });
 
 // ---- --allowOnly / --no-allowOnly ----

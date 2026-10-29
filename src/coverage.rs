@@ -33,7 +33,9 @@ fn out_dir() -> PathBuf {
     if let Some(d) = OUT_DIR.lock().unwrap().clone() {
         return d;
     }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("coverage")
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("coverage")
 }
 
 // ---- report config: thresholds, reporters, include/exclude (M6 coverage gating) -------------
@@ -45,7 +47,7 @@ fn out_dir() -> PathBuf {
 // / html only.)
 
 // Per-metric minimum percentages (0..=100). None = not gated on that metric.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Thresholds {
     pub lines: Option<f64>,
     pub functions: Option<f64>,
@@ -58,10 +60,19 @@ static PER_FILE: AtomicBool = AtomicBool::new(false);
 /// Parse `lines=90,functions=80,branches=80,statements=90` (any subset, any order). Unknown
 /// keys ignored.
 pub fn set_thresholds(spec: &str) {
-    let mut t = THRESHOLDS.lock().unwrap().unwrap_or_default();
+    let t = THRESHOLDS.lock().unwrap().unwrap_or_default();
+    let t = parse_thresholds(t, spec);
+    *THRESHOLDS.lock().unwrap() = Some(t);
+}
+/// Apply a threshold spec on top of `t` (later keys win; malformed parts are skipped).
+fn parse_thresholds(mut t: Thresholds, spec: &str) -> Thresholds {
     for part in spec.split(',') {
-        let Some((k, v)) = part.split_once('=') else { continue };
-        let Ok(n) = v.trim().parse::<f64>() else { continue };
+        let Some((k, v)) = part.split_once('=') else {
+            continue;
+        };
+        let Ok(n) = v.trim().parse::<f64>() else {
+            continue;
+        };
         match k.trim() {
             "lines" => t.lines = Some(n),
             "functions" | "funcs" => t.functions = Some(n),
@@ -70,7 +81,7 @@ pub fn set_thresholds(spec: &str) {
             _ => {}
         }
     }
-    *THRESHOLDS.lock().unwrap() = Some(t);
+    t
 }
 pub fn set_per_file(on: bool) {
     PER_FILE.store(on, Ordering::Relaxed);
@@ -91,11 +102,13 @@ pub fn set_reporters(spec: &str) {
 fn reporters() -> Vec<String> {
     // Default set: lcov + json-summary + text. HTML is opt-in only (`--coverage-reporter html`)
     // since it writes a browsable site most CI runs don't need.
-    REPORTERS
-        .lock()
-        .unwrap()
-        .clone()
-        .unwrap_or_else(|| vec!["lcov".to_string(), "json-summary".to_string(), "text".to_string()])
+    REPORTERS.lock().unwrap().clone().unwrap_or_else(|| {
+        vec![
+            "lcov".to_string(),
+            "json-summary".to_string(),
+            "text".to_string(),
+        ]
+    })
 }
 
 // include/exclude globs (cwd-relative, vitest `coverage.include`/`coverage.exclude`). Empty
@@ -150,10 +163,19 @@ pub fn add_exclude(spec: &str) {
 // Files carrying a per-file ignore directive (P5) — excluded from the report + the gate.
 static IGNORED: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
 fn mark_ignored(file: &Path) {
-    IGNORED.lock().unwrap().get_or_insert_with(HashSet::new).insert(file.to_path_buf());
+    IGNORED
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashSet::new)
+        .insert(file.to_path_buf());
 }
 fn is_ignored(file: &Path) -> bool {
-    IGNORED.lock().unwrap().as_ref().map(|s| s.contains(file)).unwrap_or(false)
+    IGNORED
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.contains(file))
+        .unwrap_or(false)
 }
 
 /// Honor a magic comment in a source file's leading lines that exempts it from coverage
@@ -179,7 +201,9 @@ fn scan_ignore_directive(file: &Path, src: &str) {
 /// Expand single-level `{a,b,c}` alternations into concrete patterns (no nesting), then test each
 /// expansion. Sufficient for the globs vitest configs use (`src/**/*.{ts,tsx}`).
 fn glob_match(pat: &str, path: &str) -> bool {
-    expand_braces(pat).iter().any(|p| simple_match(p.as_bytes(), path.as_bytes()))
+    expand_braces(pat)
+        .iter()
+        .any(|p| simple_match(p.as_bytes(), path.as_bytes()))
 }
 
 /// Public reuse for the CLI launcher's vitest include/exclude discovery: vitest matches the same
@@ -190,8 +214,12 @@ pub fn glob_matches(pat: &str, path: &str) -> bool {
 }
 
 fn expand_braces(pat: &str) -> Vec<String> {
-    let Some(open) = pat.find('{') else { return vec![pat.to_string()] };
-    let Some(rel_close) = pat[open..].find('}') else { return vec![pat.to_string()] };
+    let Some(open) = pat.find('{') else {
+        return vec![pat.to_string()];
+    };
+    let Some(rel_close) = pat[open..].find('}') else {
+        return vec![pat.to_string()];
+    };
     let close = open + rel_close;
     let (pre, inner, post) = (&pat[..open], &pat[open + 1..close], &pat[close + 1..]);
     let mut out = Vec::new();
@@ -271,6 +299,28 @@ fn simple_match(pat: &[u8], path: &[u8]) -> bool {
     pi == pat.len()
 }
 
+/// A path as a vite/vitest module id: `/` separators. Only Windows rewrites `\\` (on POSIX a
+/// backslash is a legal file-name character).
+pub fn slash_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if cfg!(windows) {
+        // vite's normalizePath: `C:/x/y` (a verbatim `\\?\` prefix is dropped)
+        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
+    }
+}
+
+/// The file-system form of a `/`-separated id path (Windows verbatim `\\?\` paths reject `/`).
+pub fn native_path(s: &str) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(s.replace('/', "\\"))
+    } else {
+        PathBuf::from(s)
+    }
+}
+
 /// Whether a file passes the configured include/exclude globs. Matched against the file's
 /// cwd-relative POSIX path (how vitest interprets `coverage.include`).
 fn passes_globs(file: &Path) -> bool {
@@ -279,24 +329,35 @@ fn passes_globs(file: &Path) -> bool {
     let rel = rel.to_string_lossy().replace('\\', "/");
     let inc = INCLUDE.lock().unwrap();
     let exc = EXCLUDE.lock().unwrap();
-    if !inc.is_empty() && !inc.iter().any(|g| glob_match(g, &rel)) {
+    glob_filter(&rel, &inc, &exc)
+}
+
+/// Include/exclude decision for a cwd-relative POSIX path: empty include = everything.
+fn glob_filter(rel: &str, inc: &[String], exc: &[String]) -> bool {
+    if !inc.is_empty() && !inc.iter().any(|g| glob_match(g, rel)) {
         return false;
     }
-    if exc.iter().any(|g| glob_match(g, &rel)) {
+    if exc.iter().any(|g| glob_match(g, rel)) {
         return false;
     }
     true
 }
 
+/// Per-file coverage records: file -> (key -> value).
+type PerFile<K, V> = Mutex<Option<HashMap<PathBuf, HashMap<K, V>>>>;
+/// A branch: (block, branch).
+type BranchKey = (u32, u32);
+/// A branch's record: (line, reached, max taken).
+type BranchHit = (u32, bool, u64);
+
 // file -> (origLine -> max hit count). Presence of a line = it's executable; value > 0 = covered.
-static COV: Mutex<Option<HashMap<PathBuf, HashMap<u32, u64>>>> = Mutex::new(None);
+static COV: PerFile<u32, u64> = Mutex::new(None);
 // file -> ((origLine, fnName) -> max call count). Function coverage.
-static FN_COV: Mutex<Option<HashMap<PathBuf, HashMap<(u32, String), u64>>>> = Mutex::new(None);
+static FN_COV: PerFile<(u32, String), u64> = Mutex::new(None);
 // file -> ((block, branch) -> (line, reached, max taken)). Branch coverage.
-static BR_COV: Mutex<Option<HashMap<PathBuf, HashMap<(u32, u32), (u32, bool, u64)>>>> =
-    Mutex::new(None);
+static BR_COV: PerFile<BranchKey, BranchHit> = Mutex::new(None);
 // file -> (statement index -> (line, max hit count)). Statement coverage.
-static ST_COV: Mutex<Option<HashMap<PathBuf, HashMap<u32, (u32, u64)>>>> = Mutex::new(None);
+static ST_COV: PerFile<u32, (u32, u64)> = Mutex::new(None);
 
 /// Record one statement's hit count. Merges across the many test files exercising the same source
 /// (a statement is covered if any run hit it — max count).
@@ -356,16 +417,126 @@ struct BranchCC {
 }
 
 struct ScriptMeta {
-    line_start: Vec<usize>,        // UTF-16 line starts of the WRAPPED compiled source
-    genmap: HashMap<u32, u32>,     // gen line -> src line (first segment) — line coverage
+    line_start: Vec<usize>,    // UTF-16 line starts of the WRAPPED compiled source
+    genmap: HashMap<u32, u32>, // gen line -> src line (first segment) — line coverage
     segments: Vec<Vec<(u32, u32, u32)>>, // per gen line: (gen_col, src_line, src_col) — gen→orig
-    branches: Vec<BranchCC>,       // decision points in original (line, col)
-    statements: Vec<(u32, u32)>,   // executable statement starts in original (line, col)
+    branches: Vec<BranchCC>,   // decision points in original (line, col)
+    statements: Vec<(u32, u32)>, // executable statement starts in original (line, col)
+    /// gen lines `[0, header_end)` are esbuild's interop prologue (see `interop_header_end`)
+    header_end: usize,
+    /// wrapped offsets of the first and last mapped positions of the code (see `code_span`)
+    code_span: Option<(usize, usize)>,
+    /// per gen line, per segment: blank lead-in columns of its run (see `segment_leads`)
+    leads: Vec<Vec<u32>>,
+    /// per gen line: its first segment covers blanks only (see `blank_first_segments`)
+    blank_first: Vec<bool>,
 }
+
+impl ScriptMeta {
+    /// The 0-based WRAPPED line holding `off` when that line is generated source code — not the
+    /// wrapper line 0 and not esbuild's interop prologue (see `interop_header_end`).
+    fn code_line(&self, off: usize) -> Option<usize> {
+        let li = self
+            .line_start
+            .partition_point(|&s| s <= off)
+            .saturating_sub(1);
+        (li > self.header_end).then_some(li) // wrapped line li ↔ esbuild gen line li-1
+    }
+}
+
+/// esbuild's ESM→CJS interop prologue: the runtime helpers, `var x_exports = {};`, the
+/// `__export(x_exports, { name: () => name, … })` getter table and
+/// `module.exports = __toCommonJS(x_exports);`. esbuild maps every mapped line of it to source
+/// (0, 0) only, so it would otherwise read as code on source line 1 — and every export getter as
+/// a function there. Returns the number of leading generated lines it spans: up to the
+/// `module.exports = __toCommonJS(` line, provided nothing before it maps anywhere but (0, 0).
+/// 0 when there is none (a CommonJS source, or an ESM one without exports).
+fn interop_header_end(gen_lines: &[&str], segs: &Segments) -> usize {
+    for (i, (row, line)) in segs.iter().zip(gen_lines).enumerate() {
+        if row.iter().any(|s| (s.1, s.2) != (0, 0)) {
+            return 0;
+        }
+        if line.starts_with("module.exports = __toCommonJS(") {
+            return i + 1;
+        }
+    }
+    0
+}
+
+/// Wrapped offsets of the first and last mapped generated positions after the prologue (None
+/// when nothing is mapped). V8 ranges that open before / close after them are the module-wide
+/// ones — see `orig_ranges`.
+fn code_span(line_start: &[usize], segs: &Segments, header_end: usize) -> Option<(usize, usize)> {
+    let mut mapped = segs
+        .iter()
+        .enumerate()
+        .skip(header_end)
+        .filter_map(|(g, row)| {
+            let ls = *line_start.get(g + 1)?; // esbuild gen line g ↔ wrapped line g+1
+            Some((ls + row.first()?.0 as usize, ls + row.last()?.0 as usize))
+        });
+    let first = mapped.next()?;
+    let last = mapped.next_back().unwrap_or(first);
+    Some((first.0, last.1))
+}
+/// Per segment (same shape as `segs`): how many leading columns of its generated run are blanks
+/// that are not source text. esbuild often starts a segment on the indentation or on the space
+/// before the token it maps — `  if (c) throw …` maps gen col 0 to the `if` at source col 2 and
+/// gen col 8 (the space) to the `throw` at col 9 — so a plain 1:1 offset delta put every later
+/// column of the run that far right of its token (V8's range for the `throw` started a column
+/// past it). Only blanks in front of a non-blank source position count: there they cannot be
+/// part of the source run.
+fn segment_leads(gen_lines: &[&[u16]], orig_lines: &[&[u16]], segs: &Segments) -> Vec<Vec<u32>> {
+    let blank = |c: &u16| *c == 0x20 || *c == 0x09;
+    let mut out = Vec::with_capacity(segs.len());
+    for (g, row) in segs.iter().enumerate() {
+        let text = gen_lines.get(g).copied().unwrap_or_default();
+        let mut leads = Vec::with_capacity(row.len());
+        for (i, &(col, line, src_col)) in row.iter().enumerate() {
+            let end = row.get(i + 1).map_or(text.len(), |n| n.0 as usize);
+            let run = text.get(col as usize..end).unwrap_or_default();
+            let w = run.iter().take_while(|c| blank(c)).count() as u32;
+            let at = orig_lines
+                .get(line as usize)
+                .and_then(|t| t.get(src_col as usize));
+            leads.push(if at.is_some_and(|c| !blank(c)) { w } else { 0 });
+        }
+        out.push(leads);
+    }
+    out
+}
+
+/// Per gen line: whether its first segment's generated run is blank only. esbuild opens such a
+/// line (`    case "b":`, `    default:`, `  }`) with a segment for its indentation that points
+/// at where the PREVIOUS source token ended (`    default:` → the `2` of `return 2;` on the line
+/// before), and its code with a later segment. Line coverage attributes a generated line to its
+/// first segment's source line, sampled at the line start, so such a line used to credit the
+/// previous source line with a count taken outside every case range.
+fn blank_first_segments(gen_lines: &[&[u16]], segs: &Segments) -> Vec<bool> {
+    let blank = |c: &u16| *c == 0x20 || *c == 0x09;
+    let mut out = Vec::with_capacity(segs.len());
+    for (g, row) in segs.iter().enumerate() {
+        let text = gen_lines.get(g).copied().unwrap_or_default();
+        let run = match row.first() {
+            Some(first) => {
+                let end = row.get(1).map_or(text.len(), |n| n.0 as usize);
+                text.get(first.0 as usize..end).unwrap_or_default()
+            }
+            None => &[],
+        };
+        out.push(!run.is_empty() && run.iter().all(blank));
+    }
+    out
+}
+
 static META: Mutex<Option<HashMap<PathBuf, Option<Arc<ScriptMeta>>>>> = Mutex::new(None);
 
 pub fn has_meta(file: &Path) -> bool {
-    META.lock().unwrap().as_ref().map(|m| m.contains_key(file)).unwrap_or(false)
+    META.lock()
+        .unwrap()
+        .as_ref()
+        .map(|m| m.contains_key(file))
+        .unwrap_or(false)
 }
 
 /// Build + cache the static map data for a source file from its wrapped compiled source + the
@@ -386,7 +557,11 @@ pub fn register_meta(file: &Path, wrapped: &str, orig_source: &str) {
             .into_iter()
             .map(|b| BranchCC {
                 decision: byte_to_linecol(orig_source, b.decision),
-                arms: b.arms.iter().map(|&o| byte_to_linecol(orig_source, o)).collect(),
+                arms: b
+                    .arms
+                    .iter()
+                    .map(|&o| byte_to_linecol(orig_source, o))
+                    .collect(),
                 implicit_else: b.implicit_else,
             })
             .collect();
@@ -394,14 +569,37 @@ pub fn register_meta(file: &Path, wrapped: &str, orig_source: &str) {
             .into_iter()
             .map(|o| byte_to_linecol(orig_source, o))
             .collect();
-        Arc::new(ScriptMeta { line_start, genmap, segments, branches, statements })
+        let gen_lines: Vec<&str> = wrapped.split('\n').skip(1).collect();
+        let header_end = interop_header_end(&gen_lines, &segments);
+        let code_span = code_span(&line_start, &segments, header_end);
+        let gen16: Vec<&[u16]> = u16s.split(|&c| c == 0x0A).skip(1).collect();
+        let orig_u16: Vec<u16> = orig_source.encode_utf16().collect();
+        let orig16: Vec<&[u16]> = orig_u16.split(|&c| c == 0x0A).collect();
+        let leads = segment_leads(&gen16, &orig16, &segments);
+        let blank_first = blank_first_segments(&gen16, &segments);
+        Arc::new(ScriptMeta {
+            line_start,
+            genmap,
+            segments,
+            branches,
+            statements,
+            header_end,
+            code_span,
+            leads,
+            blank_first,
+        })
     });
     let mut g = META.lock().unwrap();
-    g.get_or_insert_with(HashMap::new).insert(file.to_path_buf(), meta);
+    g.get_or_insert_with(HashMap::new)
+        .insert(file.to_path_buf(), meta);
 }
 
 fn meta_for(file: &Path) -> Option<Arc<ScriptMeta>> {
-    META.lock().unwrap().as_ref().and_then(|m| m.get(file).cloned()).flatten()
+    META.lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(file).cloned())
+        .flatten()
 }
 
 /// Original-source byte offset → (line, UTF-16 column), both 0-based.
@@ -428,11 +626,7 @@ struct CovChannel {
     resp: Rc<RefCell<Option<String>>>,
 }
 impl v8::inspector::ChannelImpl for CovChannel {
-    fn send_response(
-        &self,
-        _call_id: i32,
-        message: v8::UniquePtr<v8::inspector::StringBuffer>,
-    ) {
+    fn send_response(&self, _call_id: i32, message: v8::UniquePtr<v8::inspector::StringBuffer>) {
         if let Some(m) = message.as_ref() {
             *self.resp.borrow_mut() = Some(format!("{}", m.string()));
         }
@@ -454,7 +648,11 @@ impl Collector {
     pub fn new(isolate: &mut v8::Isolate) -> Self {
         let client = v8::inspector::V8InspectorClient::new(Box::new(CovClient));
         let inspector = v8::inspector::V8Inspector::create(isolate, client);
-        Collector { inspector, session: None, resp: Rc::new(RefCell::new(None)) }
+        Collector {
+            inspector,
+            session: None,
+            resp: Rc::new(RefCell::new(None)),
+        }
     }
 
     /// Register the context with the inspector and begin precise coverage. Call once, right
@@ -466,7 +664,9 @@ impl Collector {
             v8::inspector::StringView::from(&b"turbo-test"[..]),
             v8::inspector::StringView::from(&b"{}"[..]),
         );
-        let channel = v8::inspector::Channel::new(Box::new(CovChannel { resp: self.resp.clone() }));
+        let channel = v8::inspector::Channel::new(Box::new(CovChannel {
+            resp: self.resp.clone(),
+        }));
         let session = self.inspector.connect(
             1,
             channel,
@@ -485,7 +685,10 @@ impl Collector {
     pub fn take(&mut self) -> Option<String> {
         let session = self.session.as_ref()?;
         self.resp.borrow_mut().take();
-        dispatch(session, br#"{"id":3,"method":"Profiler.takePreciseCoverage"}"#);
+        dispatch(
+            session,
+            br#"{"id":3,"method":"Profiler.takePreciseCoverage"}"#,
+        );
         self.resp.borrow_mut().take()
     }
 
@@ -518,6 +721,16 @@ fn decode_inline_map(transformed: &str) -> Option<(GenMap, Segments)> {
     let v: serde_json::Value = serde_json::from_slice(&json).ok()?;
     let mappings = v.get("mappings")?.as_str()?;
     Some(parse_mappings_full(mappings))
+}
+
+/// The per-generated-line segments of `code`'s inline source map (test locations, location.rs).
+pub(crate) fn inline_segments(code: &str) -> Option<Segments> {
+    decode_inline_map(code).map(|(_, segs)| segs)
+}
+
+/// The per-generated-line segments of a source map's `mappings` string.
+pub(crate) fn mappings_segments(mappings: &str) -> Segments {
+    parse_mappings_full(mappings).1
 }
 
 fn parse_mappings_full(mappings: &str) -> (GenMap, Segments) {
@@ -594,76 +807,108 @@ pub fn map_script(file: &Path, ranges: &[(usize, usize, i64)], funcs: &[(String,
     let line_start = &meta.line_start;
     let genmap = &meta.genmap;
 
-    // map a byte offset → original source line (via wrapped line → esbuild gen line → src line).
-    let off_to_src = |off: usize| -> Option<u32> {
-        // largest line index whose start is <= off
-        let li = line_start.partition_point(|&s| s <= off).saturating_sub(1);
-        if li == 0 {
-            return None; // wrapper line
-        }
-        genmap.get(&((li - 1) as u32)).map(|&sl| sl + 1)
-    };
+    // wrapped line `li` (>= 1) → original source line (1-based), via esbuild gen line li-1
+    let src_line_of = |li: usize| genmap.get(&((li - 1) as u32)).map(|&sl| sl + 1);
 
     // innermost covered range for an offset = the one with the largest start that still contains it.
-    let innermost = |off: usize| -> Option<i64> {
+    let innermost_gen = |off: usize| -> Option<i64> {
         let mut best: Option<(usize, i64)> = None;
         for &(s, e, c) in ranges {
-            if s <= off && off < e {
-                if best.map(|(bs, _)| s >= bs).unwrap_or(true) {
-                    best = Some((s, c));
-                }
+            if s <= off && off < e && best.map(|(bs, _)| s >= bs).unwrap_or(true) {
+                best = Some((s, c));
             }
         }
         best.map(|(_, c)| c)
     };
 
     // line coverage
-    for (li, &off) in line_start.iter().enumerate() {
-        if li == 0 {
-            continue; // wrapper line
-        }
-        let Some(count) = innermost(off) else { continue };
-        if let Some(src_line) = off_to_src(off) {
+    let oranges = orig_ranges(&meta, ranges);
+    for &off in line_start {
+        // the wrapper line and esbuild's interop prologue (mapped to (0, 0), so it would make
+        // even a blank or type-only line 1 look executable) are not source lines
+        let Some(li) = meta.code_line(off) else {
+            continue;
+        };
+        // A line whose first segment is only its indentation (a `case`/`default`/`}` line) is
+        // credited to the source token that segment points back to — the end of the previous
+        // line. Take that token's count: the line-start sample lies outside a case range that
+        // ends at that token, so it would read the enclosing count instead.
+        let count = if meta.blank_first.get(li - 1).copied().unwrap_or(false) {
+            let (_, line, col) = meta.segments[li - 1][0];
+            innermost(&oranges, (line, col)).map(|r| r.2)
+        } else {
+            innermost_gen(off)
+        };
+        let Some(count) = count else { continue };
+        if let Some(src_line) = src_line_of(li) {
             record(file, src_line, count.max(0) as u64);
         }
     }
 
-    // function coverage — each function's outer range start offset → its declaration line.
+    // function coverage — each function's outer range start offset → its declaration line. A
+    // function in esbuild's interop prologue (an export getter `name: () => name`) is not one of
+    // the source's functions.
     for (name, start, count) in funcs {
-        if let Some(src_line) = off_to_src(*start) {
-            let n = if name.is_empty() { "(anonymous)" } else { name.as_str() };
+        let Some(li) = meta.code_line(*start) else {
+            continue;
+        };
+        if let Some(src_line) = src_line_of(li) {
+            let n = if name.is_empty() {
+                "(anonymous)"
+            } else {
+                name.as_str()
+            };
             record_fn(file, src_line, n, (*count).max(0) as u64);
         }
     }
 }
 
 /// A WRAPPED generated byte offset → original (src_line, src_col), both 0-based, via the source map
-/// segments. Within a segment the offset delta is applied 1:1 (esbuild segments are identity runs).
+/// segments. Within a segment the offset delta is applied 1:1 (esbuild segments are identity runs)
+/// once past the segment's blank lead-in (see `segment_leads`); the lead-in itself maps to the
+/// segment's source position.
+/// Offsets on the wrapper line or in esbuild's interop prologue have no source position: the
+/// prologue's (0, 0) mappings would otherwise put e.g. an unused export getter's 0-count range
+/// over source line 1.
 fn gen_to_orig(meta: &ScriptMeta, off: usize) -> Option<(u32, u32)> {
-    let idx = meta.line_start.partition_point(|&s| s <= off);
-    if idx == 0 {
-        return None;
-    }
-    let li = idx - 1; // 0-based wrapped line
-    if li == 0 {
-        return None; // wrapper line
-    }
+    let li = meta.code_line(off)?;
     let gen_col = (off - meta.line_start[li]) as u32;
     let segs = meta.segments.get(li - 1)?; // wrapped line li → esbuild gen line li-1
-    if segs.is_empty() {
-        return None;
-    }
-    // largest segment whose gen_col <= ours (segments are sorted by gen_col within a line)
-    let mut chosen: Option<&(u32, u32, u32)> = None;
-    for s in segs {
-        if s.0 <= gen_col {
-            chosen = Some(s);
-        } else {
-            break;
-        }
-    }
-    let s = chosen?;
-    Some((s.1, s.2 + (gen_col - s.0)))
+                                           // largest segment whose gen_col <= ours (segments are sorted by gen_col within a line)
+    let i = segs.partition_point(|s| s.0 <= gen_col).checked_sub(1)?;
+    let (col, line, src_col) = segs[i];
+    let delta = (gen_col - col).saturating_sub(meta.leads[li - 1][i]);
+    Some((line, src_col + delta))
+}
+
+type OrigPos = (u32, u32);
+type OrigRange = (OrigPos, OrigPos, i64);
+
+/// V8's covered ranges in original (line, col) coordinates; empty and unmappable ones dropped.
+/// A range that opens before the first mapped generated position starts at (0, 0), and one that
+/// closes after the last mapped position ends at the end of the source. That keeps the
+/// module-wide ranges — the script and the CJS wrapper function, which open on wrapper line 0
+/// and close past the source-map comment — and they are V8's only count for top-level code. A
+/// runtime helper (it lies wholly before the first mapping) is still dropped.
+fn orig_ranges(meta: &ScriptMeta, ranges: &[(usize, usize, i64)]) -> Vec<OrigRange> {
+    let (first, last) = meta.code_span.unwrap_or((0, usize::MAX));
+    let start = |o: usize| gen_to_orig(meta, o).or((o < first).then_some((0, 0)));
+    let end = |o: usize| gen_to_orig(meta, o).or((o > last).then_some((u32::MAX, u32::MAX)));
+    ranges
+        .iter()
+        .filter_map(|&(gs, ge, c)| Some((start(gs)?, end(ge)?, c)))
+        .filter(|(s, e, _)| s < e)
+        .collect()
+}
+
+/// The innermost range containing `p`: the latest start and, among equal starts, the earliest
+/// end (a function at source (0, 0) starts where the module range does).
+fn innermost(oranges: &[OrigRange], p: OrigPos) -> Option<OrigRange> {
+    oranges
+        .iter()
+        .filter(|(s, e, _)| *s <= p && p < *e)
+        .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)))
+        .copied()
 }
 
 /// Branch coverage: map V8's generated block ranges into original (line, col) ranges, then look up
@@ -673,81 +918,29 @@ pub fn map_branches(file: &Path, ranges: &[(usize, usize, i64)]) {
     if meta.branches.is_empty() {
         return;
     }
-    // original-coordinate covered ranges
-    let mut oranges: Vec<((u32, u32), (u32, u32), i64)> = Vec::new();
-    for &(gs, ge, c) in ranges {
-        if let (Some(s), Some(e)) = (gen_to_orig(&meta, gs), gen_to_orig(&meta, ge)) {
-            if s < e {
-                oranges.push((s, e, c));
-            }
-        }
-    }
-    let count_at = |p: (u32, u32)| -> Option<i64> {
-        let mut best: Option<((u32, u32), i64)> = None;
-        for &(s, e, c) in &oranges {
-            if s <= p && p < e && best.map(|(bs, _)| s >= bs).unwrap_or(true) {
-                best = Some((s, c));
-            }
-        }
-        best.map(|(_, c)| c)
-    };
-    // The innermost covered range CONTAINING `p` (start, end, count) — gives the enclosing block.
-    let block_of = |p: (u32, u32)| -> Option<((u32, u32), (u32, u32), i64)> {
-        let mut best: Option<((u32, u32), (u32, u32), i64)> = None;
-        for &(s, e, c) in &oranges {
-            if s <= p && p < e && best.map(|(bs, _, _)| s >= bs).unwrap_or(true) {
-                best = Some((s, e, c));
-            }
-        }
-        best
-    };
-    // The covered range with the SMALLEST start within `[lo, hi)` — used to find a consequent's
-    // own block, which V8 may start a column or two past the AST keyword position (so plain
-    // point-containment at the keyword misses it and falls through to the parent count).
-    let first_range_in = |lo: (u32, u32), hi: (u32, u32)| -> Option<i64> {
-        oranges
-            .iter()
-            .filter(|(s, _, _)| *s >= lo && *s < hi)
-            .min_by_key(|(s, _, _)| *s)
-            .map(|(_, _, c)| *c)
-    };
+    let oranges = orig_ranges(&meta, ranges);
+    let count_at = |p: OrigPos| innermost(&oranges, p).map(|r| r.2).unwrap_or(0).max(0) as u64;
     for (block, br) in meta.branches.iter().enumerate() {
         let block_id = block as u32;
         let line = br.decision.0 + 1; // 1-based source line of the decision
-        let block_count = count_at(br.decision).unwrap_or(0).max(0) as u64;
+        let block_count = count_at(br.decision);
         let reached = block_count > 0;
         if br.implicit_else && br.arms.len() == 2 {
-            // `if` with no `else`. arms[0] = consequent start, arms[1] = if-statement end (the
-            // implicit-else position). Derive then/else from V8's sub-ranges rather than a single
-            // point sample — robust to the braceless `if (c) return X;` shape where V8 starts the
-            // consequent's range a column past the `return`/`throw` keyword.
-            let (then_taken, else_taken) =
-                if let Some(c) = first_range_in(br.arms[0], br.arms[1]) {
-                    // consequent has its own block (then taken sometimes-but-not-always): that
-                    // range's count IS the then-count; else = block − then.
-                    let t = c.max(0) as u64;
-                    (t, block_count.saturating_sub(t))
-                } else {
-                    // No distinct consequent range. Two cases, told apart by the continuation:
-                    //  - then ALWAYS taken → code after the `if` is unreachable → V8 emits a
-                    //    lower-count continuation range → else = that count (0), then = block.
-                    //  - then NEVER taken → continuation count == block (no distinct range) →
-                    //    then = 0, else = block.
-                    let block_end = block_of(br.decision).map(|(_, e, _)| e).unwrap_or((u32::MAX, 0));
-                    match first_range_in(br.arms[1], block_end) {
-                        Some(c) => {
-                            let e = c.max(0) as u64;
-                            (block_count.saturating_sub(e), e)
-                        }
-                        None => (0, block_count),
-                    }
-                };
+            // `if` with no `else`: arms[0] = consequent start; the implicit else has no code of
+            // its own, so its count is derived: else = (if-statement executions) − then.
+            // The then-count is sampled at the consequent like any other arm (as vitest's v8
+            // provider does). V8 keeps a consequent range only when its count differs from the
+            // enclosing range's: a never-run consequent keeps a 0-count range, but one that ALWAYS
+            // ran is dropped, so the enclosing count is then the then-count (then = block,
+            // else = 0). No continuation search is needed (or safe: the first range after the
+            // `if` may belong to a later nested function).
+            let then_taken = count_at(br.arms[0]);
+            let else_taken = block_count.saturating_sub(then_taken);
             record_branch(file, block_id, 0, line, reached, then_taken);
             record_branch(file, block_id, 1, line, reached, else_taken);
         } else {
             for (i, &arm) in br.arms.iter().enumerate() {
-                let taken = count_at(arm).unwrap_or(0).max(0) as u64;
-                record_branch(file, block_id, i as u32, line, reached, taken);
+                record_branch(file, block_id, i as u32, line, reached, count_at(arm));
             }
         }
     }
@@ -760,25 +953,9 @@ pub fn map_statements(file: &Path, ranges: &[(usize, usize, i64)]) {
     if meta.statements.is_empty() {
         return;
     }
-    // original-coordinate covered ranges (same construction as map_branches)
-    let mut oranges: Vec<((u32, u32), (u32, u32), i64)> = Vec::new();
-    for &(gs, ge, c) in ranges {
-        if let (Some(s), Some(e)) = (gen_to_orig(&meta, gs), gen_to_orig(&meta, ge)) {
-            if s < e {
-                oranges.push((s, e, c));
-            }
-        }
-    }
-    // innermost (smallest-start) range containing `p` gives that statement's hit count.
-    let count_at = |p: (u32, u32)| -> Option<i64> {
-        let mut best: Option<((u32, u32), i64)> = None;
-        for &(s, e, c) in &oranges {
-            if s <= p && p < e && best.map(|(bs, _)| s >= bs).unwrap_or(true) {
-                best = Some((s, c));
-            }
-        }
-        best.map(|(_, c)| c)
-    };
+    // the innermost range containing a statement's start gives its hit count
+    let oranges = orig_ranges(&meta, ranges);
+    let count_at = |p: OrigPos| innermost(&oranges, p).map(|r| r.2);
     for (idx, &pos) in meta.statements.iter().enumerate() {
         let line = pos.0 + 1; // 1-based source line of the statement
         let count = count_at(pos).unwrap_or(0).max(0) as u64;
@@ -789,6 +966,7 @@ pub fn map_statements(file: &Path, ranges: &[(usize, usize, i64)]) {
 // ---- report emission ------------------------------------------------------------------------
 
 /// Per-file coverage row used by every reporter + the gate.
+#[derive(Debug, Clone, PartialEq)]
 struct Row {
     path: PathBuf,
     lh: u64,
@@ -802,16 +980,32 @@ struct Row {
 }
 impl Row {
     fn lpct(&self) -> f64 {
-        if self.lf > 0 { 100.0 * self.lh as f64 / self.lf as f64 } else { 100.0 }
+        if self.lf > 0 {
+            100.0 * self.lh as f64 / self.lf as f64
+        } else {
+            100.0
+        }
     }
     fn fpct(&self) -> f64 {
-        if self.fnf > 0 { 100.0 * self.fnh as f64 / self.fnf as f64 } else { 100.0 }
+        if self.fnf > 0 {
+            100.0 * self.fnh as f64 / self.fnf as f64
+        } else {
+            100.0
+        }
     }
     fn bpct(&self) -> f64 {
-        if self.brf > 0 { 100.0 * self.brh as f64 / self.brf as f64 } else { 100.0 }
+        if self.brf > 0 {
+            100.0 * self.brh as f64 / self.brf as f64
+        } else {
+            100.0
+        }
     }
     fn spct(&self) -> f64 {
-        if self.sf > 0 { 100.0 * self.sh as f64 / self.sf as f64 } else { 100.0 }
+        if self.sf > 0 {
+            100.0 * self.sh as f64 / self.sf as f64
+        } else {
+            100.0
+        }
     }
 }
 
@@ -835,34 +1029,158 @@ pub fn report() -> bool {
         })
         .unwrap_or_default();
     if files.is_empty() {
-        eprintln!("\n  coverage ERROR: 0 source files instrumented.");
-        if nothing_collected {
-            eprintln!("    No instrumentable source was loaded under --coverage.");
-        } else {
-            let inc = INCLUDE.lock().unwrap();
-            eprintln!(
-                "    The coverage.include globs matched no loaded source: [{}]",
-                inc.join(", ")
-            );
-        }
-        eprintln!("    Refusing to report a vacuous 0/0 pass — check coverage.include / paths.");
+        let inc = INCLUDE.lock().unwrap();
+        eprint!("{}", zero_files_message(nothing_collected, &inc));
         return false;
     }
     files.sort_by(|a, b| a.0.cmp(b.0));
 
     let fn_g = FN_COV.lock().unwrap();
-    let fn_map = fn_g.as_ref();
     let br_g = BR_COV.lock().unwrap();
-    let br_map = br_g.as_ref();
     let st_g = ST_COV.lock().unwrap();
-    let st_map = st_g.as_ref();
+    let (lcov, rows, total) = build_rows(&files, fn_g.as_ref(), br_g.as_ref(), st_g.as_ref());
 
+    let out_dir = out_dir();
+    let _ = std::fs::create_dir_all(&out_dir);
+    let reporters = reporters();
+    let has = |r: &str| reporters.iter().any(|x| x == r);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // ---- lcov ----
+    let lcov_path = out_dir.join("lcov.info");
+    if has("lcov") {
+        let _ = std::fs::write(&lcov_path, &lcov);
+    }
+    // ---- json-summary (vitest/c8 shape; no `statements` — V8 has no statement metric) ----
+    if has("json-summary") || has("json") {
+        let json_path = out_dir.join("coverage-summary.json");
+        let _ = std::fs::write(&json_path, json_summary(&total, &rows));
+    }
+    // ---- html (browsable overview table) ----
+    if has("html") {
+        let html_path = out_dir.join("index.html");
+        let _ = std::fs::write(&html_path, html_summary(&total, &rows, &cwd));
+    }
+
+    // ---- text (terminal summary) — on by default, suppress only if reporters set without it ----
+    if has("text") {
+        let mut outs: Vec<String> = Vec::new();
+        if has("lcov") {
+            outs.push(lcov_path.display().to_string());
+        }
+        if has("json-summary") || has("json") {
+            outs.push(out_dir.join("coverage-summary.json").display().to_string());
+        }
+        if has("html") {
+            outs.push(out_dir.join("index.html").display().to_string());
+        }
+        print!("{}", text_summary(&total, &rows, &cwd, &outs));
+    }
+
+    // ---- threshold gate ----
+    gate(&total, &rows, &cwd)
+}
+
+/// Check global (and, under `--coverage-per-file`, per-file) thresholds. Prints each unmet metric
+/// and returns `false` if any failed. No thresholds configured → always `true`.
+fn gate(total: &Row, rows: &[Row], cwd: &Path) -> bool {
+    let Some(t) = *THRESHOLDS.lock().unwrap() else {
+        return true;
+    };
+    let failures = threshold_failures(&t, PER_FILE.load(Ordering::Relaxed), total, rows, cwd);
+    print!("{}", gate_message(&failures));
+    failures.is_empty()
+}
+
+/// Every unmet metric as `<label>: <metric> <pct>% < <min>%` — the total first, then (under
+/// `per_file`) each file by its cwd-relative path.
+fn threshold_failures(
+    t: &Thresholds,
+    per_file: bool,
+    total: &Row,
+    rows: &[Row],
+    cwd: &Path,
+) -> Vec<String> {
+    let mut failures: Vec<String> = Vec::new();
+
+    let check = |label: &str, fails: &mut Vec<String>, row: &Row| {
+        let metrics: [(Option<f64>, &str, f64); 4] = [
+            (t.lines, "lines", row.lpct()),
+            (t.functions, "functions", row.fpct()),
+            (t.branches, "branches", row.bpct()),
+            (t.statements, "statements", row.spct()),
+        ];
+        for (thr, name, pct) in metrics {
+            if let Some(min) = thr {
+                if pct + 1e-9 < min {
+                    fails.push(format!("{label}: {name} {pct:.2}% < {min}%"));
+                }
+            }
+        }
+    };
+
+    check("total", &mut failures, total);
+    if per_file {
+        for r in rows {
+            check(&short_path(&r.path, cwd), &mut failures, r);
+        }
+    }
+    failures
+}
+
+/// The gate's stdout block: a pass line, or the numbered list of failures.
+fn gate_message(failures: &[String]) -> String {
+    if failures.is_empty() {
+        return "  coverage thresholds met ✓\n".to_string();
+    }
+    let mut s = format!("\n  coverage threshold FAILURES ({}):\n", failures.len());
+    for f in failures {
+        s.push_str(&format!("    ✗ {f}\n"));
+    }
+    s
+}
+
+/// `path` relative to `cwd` when it lies under it, else the full path.
+fn short_path(path: &Path, cwd: &Path) -> String {
+    path.strip_prefix(cwd)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+}
+
+/// stderr explanation for the "0 instrumented files" hard failure.
+fn zero_files_message(nothing_collected: bool, inc: &[String]) -> String {
+    let mut s = String::from("\n  coverage ERROR: 0 source files instrumented.\n");
+    if nothing_collected {
+        s.push_str("    No instrumentable source was loaded under --coverage.\n");
+    } else {
+        s.push_str(&format!(
+            "    The coverage.include globs matched no loaded source: [{}]\n",
+            inc.join(", ")
+        ));
+    }
+    s.push_str("    Refusing to report a vacuous 0/0 pass — check coverage.include / paths.\n");
+    s
+}
+
+type LineHits = HashMap<u32, u64>;
+type FnHits = HashMap<PathBuf, HashMap<(u32, String), u64>>;
+type BrHits = HashMap<PathBuf, HashMap<(u32, u32), (u32, bool, u64)>>;
+type StHits = HashMap<PathBuf, HashMap<u32, (u32, u64)>>;
+
+/// Build the lcov text, the per-file rows and the totals row from the merged hit maps for the
+/// (already filtered + sorted) `files`.
+fn build_rows(
+    files: &[(&PathBuf, &LineHits)],
+    fn_map: Option<&FnHits>,
+    br_map: Option<&BrHits>,
+    st_map: Option<&StHits>,
+) -> (String, Vec<Row>, Row) {
     let mut lcov = String::new();
     let (mut tot_lf, mut tot_lh, mut tot_fnf, mut tot_fnh, mut tot_brf, mut tot_brh) =
         (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
     let (mut tot_sf, mut tot_sh) = (0u64, 0u64);
     let mut rows: Vec<Row> = Vec::new();
-    for (file, lines) in &files {
+    for (file, lines) in files {
         lcov.push_str(&format!("SF:{}\n", file.display()));
 
         // functions (FN/FNDA), sorted by line then name
@@ -886,15 +1204,22 @@ pub fn report() -> bool {
         // branches (BRDA), sorted by (block, branch)
         let (mut brf, mut brh) = (0u64, 0u64);
         if let Some(brs) = br_map.and_then(|m| m.get(*file)) {
-            let mut bv: Vec<(&(u32, u32), &(u32, bool, u64))> = brs.iter().collect();
+            let mut bv: Vec<(&BranchKey, &BranchHit)> = brs.iter().collect();
             bv.sort_by(|a, b| a.0.cmp(b.0));
             for ((block, branch), (line, reached, taken)) in &bv {
                 // lcov: taken is "-" when the containing block never executed.
-                let t = if *reached { taken.to_string() } else { "-".to_string() };
+                let t = if *reached {
+                    taken.to_string()
+                } else {
+                    "-".to_string()
+                };
                 lcov.push_str(&format!("BRDA:{},{},{},{}\n", line, block, branch, t));
             }
             brf = bv.len() as u64;
-            brh = bv.iter().filter(|(_, (_, reached, taken))| *reached && *taken > 0).count() as u64;
+            brh = bv
+                .iter()
+                .filter(|(_, (_, reached, taken))| *reached && *taken > 0)
+                .count() as u64;
             lcov.push_str(&format!("BRF:{brf}\nBRH:{brh}\n"));
         }
         tot_brf += brf;
@@ -921,7 +1246,17 @@ pub fn report() -> bool {
         tot_sf += sf;
         tot_sh += sh;
 
-        rows.push(Row { path: (*file).clone(), lh, lf, fnh, fnf, brh, brf, sh, sf });
+        rows.push(Row {
+            path: (*file).clone(),
+            lh,
+            lf,
+            fnh,
+            fnf,
+            brh,
+            brf,
+            sh,
+            sf,
+        });
     }
 
     let total = Row {
@@ -935,125 +1270,45 @@ pub fn report() -> bool {
         sh: tot_sh,
         sf: tot_sf,
     };
-
-    let out_dir = out_dir();
-    let _ = std::fs::create_dir_all(&out_dir);
-    let reporters = reporters();
-    let has = |r: &str| reporters.iter().any(|x| x == r);
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
-    // ---- lcov ----
-    let lcov_path = out_dir.join("lcov.info");
-    if has("lcov") {
-        let _ = std::fs::write(&lcov_path, &lcov);
-    }
-    // ---- json-summary (vitest/c8 shape; no `statements` — V8 has no statement metric) ----
-    if has("json-summary") || has("json") {
-        let json_path = out_dir.join("coverage-summary.json");
-        let _ = std::fs::write(&json_path, json_summary(&total, &rows));
-    }
-    // ---- html (browsable overview table) ----
-    if has("html") {
-        let html_path = out_dir.join("index.html");
-        let _ = std::fs::write(&html_path, html_summary(&total, &rows, &cwd));
-    }
-
-    // ---- text (terminal summary) — on by default, suppress only if reporters set without it ----
-    if has("text") {
-        println!("\n Coverage — {} files (lines | funcs | branches | stmts)", rows.len());
-        for r in &rows {
-            let short = r
-                .path
-                .strip_prefix(&cwd)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| r.path.to_string_lossy().into_owned());
-            println!(
-                "  {:>6.2}% ln  {:>6.2}% fn  {:>6.2}% br  {:>6.2}% st   {}",
-                r.lpct(),
-                r.fpct(),
-                r.bpct(),
-                r.spct(),
-                short
-            );
-        }
-        println!("  ------");
-        println!(
-            "  {:>6.2}% lines ({}/{})   {:>6.2}% fns ({}/{})   {:>6.2}% branches ({}/{})   {:>6.2}% stmts ({}/{})",
-            total.lpct(),
-            total.lh,
-            total.lf,
-            total.fpct(),
-            total.fnh,
-            total.fnf,
-            total.bpct(),
-            total.brh,
-            total.brf,
-            total.spct(),
-            total.sh,
-            total.sf
-        );
-        let mut outs: Vec<String> = Vec::new();
-        if has("lcov") {
-            outs.push(lcov_path.display().to_string());
-        }
-        if has("json-summary") || has("json") {
-            outs.push(out_dir.join("coverage-summary.json").display().to_string());
-        }
-        if has("html") {
-            outs.push(out_dir.join("index.html").display().to_string());
-        }
-        if !outs.is_empty() {
-            println!("  → {}", outs.join("  "));
-        }
-    }
-
-    // ---- threshold gate ----
-    gate(&total, &rows, &cwd)
+    (lcov, rows, total)
 }
 
-/// Check global (and, under `--coverage-per-file`, per-file) thresholds. Prints each unmet metric
-/// and returns `false` if any failed. No thresholds configured → always `true`.
-fn gate(total: &Row, rows: &[Row], cwd: &Path) -> bool {
-    let Some(t) = *THRESHOLDS.lock().unwrap() else { return true };
-    let mut failures: Vec<String> = Vec::new();
-
-    let check = |label: &str, fails: &mut Vec<String>, row: &Row| {
-        let metrics: [(Option<f64>, &str, f64); 4] = [
-            (t.lines, "lines", row.lpct()),
-            (t.functions, "functions", row.fpct()),
-            (t.branches, "branches", row.bpct()),
-            (t.statements, "statements", row.spct()),
-        ];
-        for (thr, name, pct) in metrics {
-            if let Some(min) = thr {
-                if pct + 1e-9 < min {
-                    fails.push(format!("{label}: {name} {pct:.2}% < {min}%"));
-                }
-            }
-        }
-    };
-
-    check("total", &mut failures, total);
-    if PER_FILE.load(Ordering::Relaxed) {
-        for r in rows {
-            let short = r
-                .path
-                .strip_prefix(cwd)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| r.path.to_string_lossy().into_owned());
-            check(&short, &mut failures, r);
-        }
+/// The `text` reporter's terminal summary; `outs` = the report files written (may be empty).
+fn text_summary(total: &Row, rows: &[Row], cwd: &Path, outs: &[String]) -> String {
+    let mut s = format!(
+        "\n Coverage — {} files (lines | funcs | branches | stmts)\n",
+        rows.len()
+    );
+    for r in rows {
+        s.push_str(&format!(
+            "  {:>6.2}% ln  {:>6.2}% fn  {:>6.2}% br  {:>6.2}% st   {}\n",
+            r.lpct(),
+            r.fpct(),
+            r.bpct(),
+            r.spct(),
+            short_path(&r.path, cwd)
+        ));
     }
-
-    if failures.is_empty() {
-        println!("  coverage thresholds met ✓");
-        return true;
+    s.push_str("  ------\n");
+    s.push_str(&format!(
+        "  {:>6.2}% lines ({}/{})   {:>6.2}% fns ({}/{})   {:>6.2}% branches ({}/{})   {:>6.2}% stmts ({}/{})\n",
+        total.lpct(),
+        total.lh,
+        total.lf,
+        total.fpct(),
+        total.fnh,
+        total.fnf,
+        total.bpct(),
+        total.brh,
+        total.brf,
+        total.spct(),
+        total.sh,
+        total.sf
+    ));
+    if !outs.is_empty() {
+        s.push_str(&format!("  → {}\n", outs.join("  ")));
     }
-    println!("\n  coverage threshold FAILURES ({}):", failures.len());
-    for f in &failures {
-        println!("    ✗ {f}");
-    }
-    false
+    s
 }
 
 /// vitest/c8 `coverage-summary.json`: a `total` block + one block per absolute file path. Each
@@ -1075,24 +1330,34 @@ fn json_summary(total: &Row, rows: &[Row]) -> String {
             metric(r.brh, r.brf, r.bpct())
         )
     }
-    let mut s = String::from("{\n");
-    s.push_str(&format!("  \"total\": {},\n", block(total)));
-    for (i, r) in rows.iter().enumerate() {
-        let key = r.path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
-        let comma = if i + 1 < rows.len() { "," } else { "" };
-        s.push_str(&format!("  \"{}\": {}{}\n", key, block(r), comma));
+    // One entry per line, comma-separated (never a trailing comma, even with zero file rows).
+    let mut entries = vec![format!("  \"total\": {}", block(total))];
+    for r in rows {
+        let key = r
+            .path
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        entries.push(format!("  \"{}\": {}", key, block(r)));
     }
-    s.push_str("}\n");
-    s
+    format!("{{\n{}\n}}\n", entries.join(",\n"))
 }
 
 /// Self-contained HTML overview table (c8/istanbul-style) — browsable `coverage/index.html`.
 fn html_summary(total: &Row, rows: &[Row], cwd: &Path) -> String {
     fn cls(pct: f64) -> &'static str {
-        if pct >= 90.0 { "high" } else if pct >= 75.0 { "med" } else { "low" }
+        if pct >= 90.0 {
+            "high"
+        } else if pct >= 75.0 {
+            "med"
+        } else {
+            "low"
+        }
     }
     fn esc(s: &str) -> String {
-        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
     }
     let mut body = String::new();
     let cell = |pct: f64, h: u64, f: u64| {
@@ -1105,11 +1370,7 @@ fn html_summary(total: &Row, rows: &[Row], cwd: &Path) -> String {
         )
     };
     for r in rows {
-        let short = r
-            .path
-            .strip_prefix(cwd)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| r.path.to_string_lossy().into_owned());
+        let short = short_path(&r.path, cwd);
         body.push_str(&format!(
             "<tr><td class=\"file\">{}</td>{}{}{}{}</tr>\n",
             esc(&short),
@@ -1141,6 +1402,10 @@ tfoot td{{font-weight:600;border-top:2px solid #ccc}}\
         cell(total.bpct(), total.brh, total.brf)
     )
 }
+
+#[cfg(all(test, unix))]
+#[path = "coverage_tests.rs"]
+mod unit_tests;
 
 #[cfg(test)]
 mod tests {

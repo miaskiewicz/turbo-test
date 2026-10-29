@@ -25,7 +25,14 @@ fn main() {
                 && !code.contains(": Greeting")
                 && code.contains("export");
             println!("--- check ---");
-            println!("{}", if ok { "==> M1.4 TRANSFORM PASS" } else { "==> M1.4 FAIL" });
+            println!(
+                "{}",
+                if ok {
+                    "==> M1.4 TRANSFORM PASS"
+                } else {
+                    "==> M1.4 FAIL"
+                }
+            );
             std::process::exit(if ok { 0 } else { 1 });
         }
         Err(e) => {

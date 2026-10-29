@@ -10,11 +10,21 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Kind {
     Esm,
     Cjs,
+}
+
+/// A graph request's view of a CommonJS module (`esm_cjs::graph_interop_rewrite`).
+#[derive(Clone, Copy, PartialEq)]
+enum Variant {
+    /// `?__tt_ns`: its default export is vitest's interop namespace object
+    Ns,
+    /// `?__tt_star`: that namespace's names (what `export *` re-exports)
+    Star,
+    /// `?__tt_node`: Node's namespace (default `module.exports`, `'module.exports'`, names)
+    Node,
 }
 
 #[derive(Default)]
@@ -28,6 +38,10 @@ struct Registry {
     real_exports: HashMap<PathBuf, v8::Global<v8::Value>>,
     cjs_export_names: HashMap<PathBuf, Vec<String>>,
     path_by_hash: HashMap<i32, PathBuf>,
+    /// The ES-module graph's synthetic modules of a CommonJS module's namespace (`?__tt_ns` /
+    /// `?__tt_star` / `?__tt_node` requests, turbo-test#133): module hash -> (module path, kind,
+    /// export names).
+    variant_by_hash: HashMap<i32, (PathBuf, Variant, Vec<String>)>,
     /// vi.mock interception: resolved path -> factory source. Consulted on load.
     mocks: HashMap<PathBuf, String>,
     /// CJS modules currently executing (path -> their `module` object). A circular require()
@@ -58,14 +72,15 @@ thread_local! {
     static FORCE_FRESH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Isolate-reuse (TURBO_REUSE_ISOLATE): one persistent isolate + context per worker thread,
     /// reused across files so node_modules barrels are evaluated once, not per file.
-    static REUSE_ISO: RefCell<Option<v8::OwnedIsolate>> = RefCell::new(None);
-    static REUSE_CTX: RefCell<Option<v8::Global<v8::Context>>> = RefCell::new(None);
+    static REUSE_ISO: RefCell<Option<v8::OwnedIsolate>> = const { RefCell::new(None) };
+    static REUSE_CTX: RefCell<Option<v8::Global<v8::Context>>> = const { RefCell::new(None) };
     static DOM_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// CommonJS-first module resolution (jest/node backend projects). Set once per run from the
     /// entry's project: a jest config with a node test environment resolves the `require` export
     /// condition (the build Node uses), so sequelize/tslib/lexical/etc. get their working CJS
-    /// build instead of an ESM build that breaks once bundled to CJS. Off (ESM-first) for
-    /// vitest/React projects so shared singletons (react/emotion/MUI) stay one instance.
+    /// build instead of an ESM build that breaks once bundled to CJS (imports too). Off (ESM-first:
+    /// Node's conditions, `import` for an import and `require` for a require(), turbo-test#134)
+    /// for vitest/React projects.
     static CJS_FIRST_RESOLUTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Set while resolve+drain of pending vi.mock factories is in progress. An async factory's
     /// `await import('<self>')` re-enters load_cjs(drain_mocks=true) for the real module; without
@@ -76,6 +91,9 @@ thread_local! {
     /// Mock targets registered by setup files (run once per worker) — kept across files in the
     /// reuse path so e.g. the analytics mock survives, while per-file test mocks are evicted.
     static SETUP_MOCKS: RefCell<std::collections::HashSet<PathBuf>> = RefCell::new(std::collections::HashSet::new());
+    /// The error of a setup file that threw when the reused isolate ran them (once per worker):
+    /// every file on that isolate fails with it, as each would under vitest.
+    static REUSE_SETUP_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
     /// Snapshot (shallow clone) of each setup-mock's exports taken after the first file. A test
     /// file that re-mocks a setup path mutates the shared exports in place (to preserve identity
     /// for cached importers); restoring from this snapshot before the next file undoes that, so
@@ -83,38 +101,56 @@ thread_local! {
     static SETUP_MOCK_SNAPSHOT: RefCell<HashMap<PathBuf, v8::Global<v8::Value>>> = RefCell::new(HashMap::new());
 }
 
+/// The registered CommonJS exports of the items' paths that have them: (path, item, exports).
+fn live_cjs_exports<T>(items: Vec<(PathBuf, T)>) -> Vec<(PathBuf, T, v8::Global<v8::Value>)> {
+    REGISTRY.with(|r| {
+        let reg = r.borrow();
+        let live = |(p, t): (PathBuf, T)| Some((reg.cjs_exports.get(&p)?.clone(), p, t));
+        items
+            .into_iter()
+            .filter_map(live)
+            .map(|(g, p, t)| (p, t, g))
+            .collect()
+    })
+}
+
 /// Shallow-clone each setup-mock's current exports into SETUP_MOCK_SNAPSHOT (called once, after
 /// the first file's setup runs).
 fn snapshot_setup_mocks(scope: &mut v8::PinScope) {
-    let paths: Vec<PathBuf> = SETUP_MOCKS.with(|s| s.borrow().iter().cloned().collect());
+    let paths: Vec<(PathBuf, ())> =
+        SETUP_MOCKS.with(|s| s.borrow().iter().map(|p| (p.clone(), ())).collect());
     let global = scope.get_current_context().global(scope);
-    for p in paths {
-        let Some(g) = REGISTRY.with(|r| r.borrow().cjs_exports.get(&p).cloned()) else { continue };
+    for (p, (), g) in live_cjs_exports(paths) {
         let obj = v8::Local::new(scope, &g);
-        let Some(o) = obj.to_object(scope) else { continue };
-        let names = object_keys(scope, global, obj);
-        let clone = v8::Object::new(scope);
-        for n in &names {
-            if let Some(k) = v8::String::new(scope, n) {
-                if let Some(v) = o.get(scope, k.into()) {
-                    clone.set(scope, k.into(), v);
+        // (exports that are not an object have nothing to snapshot)
+        if let Some(o) = obj.to_object(scope) {
+            let names = object_keys(scope, global, obj);
+            let clone = v8::Object::new(scope);
+            for n in &names {
+                if let Some(k) = v8::String::new(scope, n) {
+                    if let Some(v) = o.get(scope, k.into()) {
+                        clone.set(scope, k.into(), v);
+                    }
                 }
             }
+            let clone_val: v8::Local<v8::Value> = clone.into();
+            let cg = v8::Global::new(scope, clone_val);
+            SETUP_MOCK_SNAPSHOT.with(|s| s.borrow_mut().insert(p, cg));
         }
-        let clone_val: v8::Local<v8::Value> = clone.into();
-        let cg = v8::Global::new(scope, clone_val);
-        SETUP_MOCK_SNAPSHOT.with(|s| s.borrow_mut().insert(p, cg));
     }
 }
 
 /// Restore each setup-mock's exports from its snapshot (called before every file after the
 /// first), copying the saved props back onto the live (identity-preserved) exports object.
 fn restore_setup_mocks(scope: &mut v8::PinScope) {
-    let snaps: Vec<(PathBuf, v8::Global<v8::Value>)> =
-        SETUP_MOCK_SNAPSHOT.with(|s| s.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+    let snaps: Vec<(PathBuf, v8::Global<v8::Value>)> = SETUP_MOCK_SNAPSHOT.with(|s| {
+        s.borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    });
     let global = scope.get_current_context().global(scope);
-    for (p, cg) in snaps {
-        let Some(lg) = REGISTRY.with(|r| r.borrow().cjs_exports.get(&p).cloned()) else { continue };
+    for (_, cg, lg) in live_cjs_exports(snaps) {
         let live = v8::Local::new(scope, &lg);
         let clone = v8::Local::new(scope, &cg);
         if let (Some(dst), Some(src)) = (live.to_object(scope), clone.to_object(scope)) {
@@ -136,10 +172,22 @@ fn reuse_isolate_enabled() -> bool {
     REUSE_DECISION.get().copied().unwrap_or(false)
 }
 
+/// Whether the CURRENT file runs on the reuse path (the persistent isolate). Under the reuse
+/// switch some files still run on a fresh per-file isolate: the fresh-isolate retry
+/// (FORCE_FRESH) and every file under `--coverage` (run_test_file's dispatch). Mock
+/// registration's reuse-only behaviour (patching a re-mock into the existing exports object,
+/// mock-graph invalidation) must follow the path, not the switch.
+fn on_reuse_path() -> bool {
+    reuse_isolate_enabled() && !FORCE_FRESH.with(|f| f.get()) && !crate::coverage::enabled()
+}
+
 /// Mock-graph invalidation: when `target` is (re-)mocked, evict every app module that
 /// (transitively) require()d it, so each re-imports the new mock instead of the stale version it
 /// captured under a prior mock/real load. node_modules importers are NOT evicted (re-evaluating
 /// them would re-trigger the emotion/MUI singleton accumulation that keeping modules warm avoids).
+/// A MOCKED importer is neither evicted nor walked through: its exports are its mock, which does
+/// not depend on what it imports (evicting them left it "mocked but no exports", read as `{}`),
+/// and its importers already see that mock.
 fn invalidate_importers(target: &Path) {
     REGISTRY.with(|r| {
         let mut reg = r.borrow_mut();
@@ -149,7 +197,8 @@ fn invalidate_importers(target: &Path) {
         while let Some(m) = stack.pop() {
             let importers = reg.import_edges.get(&m).cloned().unwrap_or_default();
             for imp in importers {
-                if imp.to_string_lossy().contains("/node_modules/") {
+                if imp.to_string_lossy().contains("/node_modules/") || reg.mocks.contains_key(&imp)
+                {
                     continue;
                 }
                 if !seen.insert(imp.clone()) {
@@ -169,10 +218,35 @@ fn invalidate_importers(target: &Path) {
     });
 }
 
+/// The ES modules of the registry that a failed file left linked but never evaluated: a module
+/// that threw while the graph evaluated stops the modules after it, which stay bound to that
+/// file's mocks (turbo-test#79). Evaluating one in a later file would evaluate those stale
+/// links, so the reuse reset drops them and the next importer loads them afresh.
+fn unevaluated_modules(scope: &mut v8::PinScope) -> Vec<PathBuf> {
+    let modules: Vec<(PathBuf, v8::Global<v8::Module>)> = REGISTRY.with(|r| {
+        let reg = r.borrow();
+        reg.esm_by_path
+            .iter()
+            .map(|(p, m)| (p.clone(), m.clone()))
+            .collect()
+    });
+    modules
+        .into_iter()
+        .filter(|(_, m)| {
+            !matches!(
+                v8::Local::new(scope, m).get_status(),
+                v8::ModuleStatus::Evaluated | v8::ModuleStatus::Errored
+            )
+        })
+        .map(|(p, _)| p)
+        .collect()
+}
+
 /// Per-file registry reset for the reuse path: drop app modules + ALL mocks, but KEEP genuinely
 /// evaluated node_modules modules so the next file reuses them (the whole point). Any node_modules
-/// path that was MOCKED in the prior file is evicted too, so the next file gets the real module.
-fn reset_app_registry() {
+/// path that was MOCKED in the prior file is evicted too, so the next file gets the real module,
+/// and so is every module in `stale` (unevaluated_modules).
+fn reset_app_registry(stale: &[PathBuf]) {
     REGISTRY.with(|r| {
         let mut reg = r.borrow_mut();
         let setup_mocks = SETUP_MOCKS.with(|s| s.borrow().clone());
@@ -183,17 +257,26 @@ fn reset_app_registry() {
         // modules a TEST file mocked (not setup mocks), so the next file re-resolves the real
         // module (or applies its own mock). The entry test files are each loaded once (unique
         // path) so they never collide; their describe/it re-run because each is a fresh entry.
-        let test_mocked: Vec<PathBuf> =
-            reg.mocks.keys().filter(|p| !setup_mocks.contains(*p)).cloned().collect();
-        let evict = |p: &PathBuf| test_mocked.contains(p);
+        let test_mocked: Vec<PathBuf> = reg
+            .mocks
+            .keys()
+            .filter(|p| !setup_mocks.contains(*p))
+            .cloned()
+            .collect();
+        let evict = |p: &PathBuf| test_mocked.contains(p) || stale.contains(p);
         reg.cjs_exports.retain(|p, _| !evict(p));
         reg.cjs_synth_by_path.retain(|p, _| !evict(p));
         reg.cjs_export_names.retain(|p, _| !evict(p));
         reg.real_exports.retain(|p, _| !evict(p));
         reg.esm_by_path.retain(|p, _| !evict(p));
-        let live: std::collections::HashSet<PathBuf> =
-            reg.cjs_exports.keys().chain(reg.esm_by_path.keys()).cloned().collect();
+        let live: std::collections::HashSet<PathBuf> = reg
+            .cjs_exports
+            .keys()
+            .chain(reg.esm_by_path.keys())
+            .cloned()
+            .collect();
         reg.path_by_hash.retain(|_, p| live.contains(p));
+        reg.variant_by_hash.retain(|_, (p, _, _)| live.contains(p));
         // keep setup mocks in the mock registry; drop test-file mocks
         reg.mocks.retain(|p, _| setup_mocks.contains(p));
         reg.extra_exports.clear();
@@ -214,31 +297,44 @@ fn config_alias_list() -> oxc_resolver::Alias {
         }
         let parsed: oxc_resolver::Alias = std::env::var("TURBO_ALIAS")
             .ok()
-            .map(|raw| {
-                raw.split('\u{1e}')
-                    .filter_map(|rec| {
-                        let (k, v) = rec.split_once('\u{1f}')?;
-                        if k.is_empty() || v.is_empty() {
-                            return None;
-                        }
-                        Some((k.to_string(), vec![oxc_resolver::AliasValue::Path(v.to_string())]))
-                    })
-                    .collect()
-            })
+            .map(|raw| parse_alias_list(&raw))
             .unwrap_or_default();
         *c.borrow_mut() = Some(parsed.clone());
         parsed
     })
 }
 
+/// Parse the TURBO_ALIAS wire format: records separated by U+001E, each `key U+001F path`.
+/// Records with an empty key or path (or no separator) are dropped.
+fn parse_alias_list(raw: &str) -> oxc_resolver::Alias {
+    raw.split('\u{1e}')
+        .filter_map(|rec| {
+            let (k, v) = rec.split_once('\u{1f}')?;
+            if k.is_empty() || v.is_empty() {
+                return None;
+            }
+            Some((
+                k.to_string(),
+                vec![oxc_resolver::AliasValue::Path(v.to_string())],
+            ))
+        })
+        .collect()
+}
+
 /// Cached node-resolution Resolver (oxc_resolver) for bare specifiers / node_modules.
-fn base_resolve_options(tsconfig: Option<PathBuf>, esm: bool) -> oxc_resolver::ResolveOptions {
+fn base_resolve_options(
+    tsconfig: Option<PathBuf>,
+    esm: bool,
+    require_fallback: bool,
+) -> oxc_resolver::ResolveOptions {
     let strs = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    // ESM-FIRST for everything: resolving to a single (ESM) build per package keeps singletons
-    // (react, @mui ThemeContext, @emotion cache) as ONE instance — CJS-first would give CJS
-    // importers a separate CJS build → dual context. CJS-interop edges (e.g. recharts importing
-    // eventemitter3's default) are handled by the __toESM function-default fix, not by switching
-    // builds. (`esm` kept for signature compatibility.) (no "types" — .d.ts only.)
+    // As Node resolves for vitest (which runs packages through Node, turbo-test#134): an `import`
+    // matches a package's `import` condition, a `require()` its `require` condition; either reads
+    // `main` before `module` (Node ignores `module`; it stays the fallback of a package without
+    // `main`). A package without a dual build is then one instance for both; one with an
+    // `import` and a `require` build is two, as under Node (the dual-package hazard is the
+    // package's). `module` is not a condition (vitest 4.1.12 loads `{ module, default }`'s
+    // `default` build, as Node); the `module` main field still covers packages without `main`.
     //
     // NO "node" condition: turbo-test runs in a browser-like V8 (turbo-dom, esbuild
     // --platform=browser), and packages' `node` builds target the real Node runtime — they pull
@@ -246,26 +342,48 @@ fn base_resolve_options(tsconfig: Option<PathBuf>, esm: bool) -> oxc_resolver::R
     // `const mod = await import(...)`), which esbuild cannot emit as --format=cjs. That bundle
     // then fails and falls back to a raw-.mjs CJS compile → "Unexpected token 'export'" load
     // errors. Dropping `node` makes the resolver pick the package's `default`/`browser` build,
-    // which is the right target for this env and CJS-compiles cleanly. ("require" stays as a
-    // last-resort condition so require-only packages still resolve.)
-    let _ = esm;
+    // which is the right target for this env and CJS-compiles cleanly.
+    //
+    // `require` is never a condition of an import (turbo-test#200): oxc matches the package's keys
+    // in ITS order, so `{ require, default }` would pick the CJS build where Node/vitest load
+    // `default`. Only an import that resolves nothing retries with `require` appended
+    // (`require_fallback`) so require-only packages still load; a require() that resolves nothing
+    // retries as an import (`resolve_spec_as_uncached`).
+    //
     // A jest/node backend (NestJS, sequelize, ts-jest) is a CommonJS world: packages are
     // `require()`d, so their `require`/`node`/`default` export condition is the build that works
     // (sequelize's `lib/index.mjs` ESM build, picked by the `import` condition, loses
     // `DataTypes.ENUM` once bundled to CJS; `lib/index.js` is correct). Resolve CJS-first for such
-    // projects. React/vitest projects keep ESM-first (one shared ESM instance of react/emotion/MUI
-    // — switching them would risk dual-context). `node`/`default` cover packages that only ship
-    // ESM, and a CJS-first bundle of an ESM file still works (esbuild ESM->CJS).
+    // projects, imports included. `node`/`default` cover packages that only ship ESM, and a
+    // CJS-first bundle of an ESM file still works (esbuild ESM->CJS).
     // Condition matching is by the package's own key order against this SET — so to make `require`
     // win we must OMIT `import`/`module`/`browser`, not merely reorder. `node`/`default` still
     // cover packages without a `require` condition.
     let (conditions, mains): (&[&str], &[&str]) = if CJS_FIRST_RESOLUTION.with(|c| c.get()) {
-        (&["require", "node", "default"], &["main", "module", "browser"])
+        (
+            &["require", "node", "default"],
+            &["main", "module", "browser"],
+        )
+    } else if esm && require_fallback {
+        (
+            &["import", "browser", "default", "require"],
+            &["browser", "main", "module"],
+        )
+    } else if esm {
+        (
+            &["import", "browser", "default"],
+            &["browser", "main", "module"],
+        )
     } else {
-        (&["import", "module", "browser", "default", "require"], &["module", "browser", "main"])
+        (
+            &["require", "browser", "default"],
+            &["browser", "main", "module"],
+        )
     };
     oxc_resolver::ResolveOptions {
-        extensions: strs(&[".ts", ".tsx", ".mjs", ".js", ".jsx", ".cjs", ".json", ".node"]),
+        extensions: strs(&[
+            ".ts", ".tsx", ".mjs", ".js", ".jsx", ".cjs", ".json", ".node",
+        ]),
         condition_names: strs(conditions),
         main_fields: strs(mains),
         // vitest/vite `resolve.alias` + `test.alias` (launcher → TURBO_ALIAS). oxc matches an alias
@@ -311,7 +429,12 @@ fn nearest_tsconfig_uncached(dir: &Path) -> Option<PathBuf> {
         if tc.is_file() {
             return Some(tc);
         }
-        if cur.join("package.json").is_file() && cur.file_name().map(|n| n == "node_modules").unwrap_or(false) {
+        if cur.join("package.json").is_file()
+            && cur
+                .file_name()
+                .map(|n| n == "node_modules")
+                .unwrap_or(false)
+        {
             break;
         }
         d = cur.parent();
@@ -355,20 +478,41 @@ fn is_esm_module_uncached(abs: &Path) -> bool {
     }
 }
 
+/// The resolvers by (nearest tsconfig, ESM importer, CJS-first resolution).
+type ResolverCache =
+    HashMap<(Option<PathBuf>, bool, bool, bool), std::rc::Rc<oxc_resolver::Resolver>>;
+
 /// A resolver configured for the nearest tsconfig of `from_dir` + the importer's module kind
 /// (ESM vs CJS conditions), cached per (tsconfig, esm).
 fn resolver_for(from_dir: &Path, esm: bool) -> std::rc::Rc<oxc_resolver::Resolver> {
+    resolver_with(from_dir, esm, false)
+}
+
+/// `resolver_for`, optionally with the import conditions' `require` fallback (turbo-test#200).
+fn resolver_with(
+    from_dir: &Path,
+    esm: bool,
+    require_fallback: bool,
+) -> std::rc::Rc<oxc_resolver::Resolver> {
     thread_local! {
-        static RESOLVERS: RefCell<HashMap<(Option<PathBuf>, bool, bool), std::rc::Rc<oxc_resolver::Resolver>>> =
-            RefCell::new(HashMap::new());
+        static RESOLVERS: RefCell<ResolverCache> = RefCell::new(HashMap::new());
     }
     // CJS-first mode is part of the key so a flip rebuilds the resolver (it changes conditions).
-    let key = (nearest_tsconfig(from_dir), esm, CJS_FIRST_RESOLUTION.with(|c| c.get()));
+    let key = (
+        nearest_tsconfig(from_dir),
+        esm,
+        CJS_FIRST_RESOLUTION.with(|c| c.get()),
+        require_fallback,
+    );
     RESOLVERS.with(|m| {
         if let Some(r) = m.borrow().get(&key) {
             return r.clone();
         }
-        let r = std::rc::Rc::new(oxc_resolver::Resolver::new(base_resolve_options(key.0.clone(), esm)));
+        let r = std::rc::Rc::new(oxc_resolver::Resolver::new(base_resolve_options(
+            key.0.clone(),
+            esm,
+            require_fallback,
+        )));
         m.borrow_mut().insert(key, r.clone());
         r
     })
@@ -400,33 +544,38 @@ fn cjs_first_project(entry: &Path) -> bool {
 fn cjs_first_project_uncached(entry: &Path) -> bool {
     let mut dir = entry.parent();
     while let Some(d) = dir {
-        for v in ["vitest.config.ts", "vitest.config.mts", "vitest.config.js", "vitest.config.mjs", "vite.config.ts", "vite.config.js"] {
+        for v in VITEST_CONFIG_FILES {
             if d.join(v).is_file() {
                 return false; // vitest project → ESM-first
             }
         }
-        let jest_cfg = ["jest.config.js", "jest.config.cjs", "jest.config.mjs", "jest.config.ts", "jest.config.json"]
-            .iter()
-            .map(|n| d.join(n))
-            .find(|p| p.is_file());
-        let pkg_jest = std::fs::read_to_string(d.join("package.json")).ok()
-            .filter(|s| find_config_key(s, "jest").is_some());
-        if let Some(text) = jest_cfg.and_then(|p| std::fs::read_to_string(p).ok()).or(pkg_jest) {
+        let jest_cfg = [
+            "jest.config.js",
+            "jest.config.cjs",
+            "jest.config.mjs",
+            "jest.config.ts",
+            "jest.config.json",
+        ]
+        .iter()
+        .map(|n| d.join(n))
+        .find(|p| p.is_file());
+        let pkg_jest = std::fs::read_to_string(d.join("package.json"))
+            .ok()
+            .and_then(|s| package_json_jest_block(&s));
+        if let Some(text) = jest_cfg
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .or(pkg_jest)
+        {
             // node test env (jest's default) unless it explicitly asks for a DOM env.
             let env = config_string_value(&text, "testEnvironment");
-            return !matches!(env.as_deref(), Some("jsdom") | Some("happy-dom") | Some("jest-environment-jsdom"));
+            return !matches!(
+                env.as_deref(),
+                Some("jsdom") | Some("happy-dom") | Some("jest-environment-jsdom")
+            );
         }
         dir = d.parent();
     }
     false
-}
-
-/// Kind by extension only (unambiguous extensions).
-fn kind_of(path: &Path) -> Kind {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("cjs") => Kind::Cjs,
-        _ => Kind::Esm,
-    }
 }
 
 /// Nearest package.json `"type"` for a file (Node's module-determination rule).
@@ -470,7 +619,9 @@ fn nearest_pkg_type_uncached(path: &Path) -> Option<&'static str> {
 }
 
 /// Kind for a resolved file. `.mjs`/`.ts`/`.tsx` are ESM, `.cjs` is CJS; ambiguous `.js`
-/// follows the nearest package.json `"type"` (Node's rule), falling back to a syntax sniff.
+/// follows the nearest package.json `"type"` (Node's rule), falling back to Node's syntax
+/// detection: ES module syntax makes it ESM, anything else is CommonJS (turbo-test#79 item 5:
+/// a comment mentioning "import " no longer makes tsc's CJS output an ES module).
 fn detect_kind(path: &Path) -> Kind {
     match path.extension().and_then(|e| e.to_str()) {
         Some("cjs") => Kind::Cjs,
@@ -480,20 +631,10 @@ fn detect_kind(path: &Path) -> Kind {
             Some("commonjs") => Kind::Cjs,
             _ => {
                 let src = std::fs::read_to_string(path).unwrap_or_default();
-                let esm = src.contains("import ")
-                    || src.contains("import{")
-                    || src.contains("export ")
-                    || src.contains("export{")
-                    || src.contains("export*")
-                    || src.contains("export default");
-                let cjs = src.contains("module.exports")
-                    || src.contains("exports.")
-                    || src.contains("exports[")
-                    || src.contains("require(");
-                if cjs && !esm {
-                    Kind::Cjs
-                } else {
+                if crate::transform::has_module_syntax(&src) {
                     Kind::Esm
+                } else {
+                    Kind::Cjs
                 }
             }
         },
@@ -504,6 +645,9 @@ pub fn resolve_spec(spec: &str, from_dir: &Path) -> Option<PathBuf> {
     resolve_spec_as(spec, from_dir, true)
 }
 
+/// The resolutions by (specifier, importer dir, ESM importer, CJS-first resolution).
+type ResolveMemo = HashMap<(String, PathBuf, bool, bool), Option<PathBuf>>;
+
 /// Resolve with the importer's module kind (`esm`) selecting ESM vs CJS export conditions.
 pub fn resolve_spec_as(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
     // E12: memoize per (spec, from_dir, esm, cjs-first). native_require repeats the same
@@ -512,8 +656,7 @@ pub fn resolve_spec_as(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf
     // flips the resolver conditions (mirrors resolver_for's own cache key).
     if e12_enabled() {
         thread_local! {
-            static RES_MEMO: RefCell<HashMap<(String, PathBuf, bool, bool), Option<PathBuf>>> =
-                RefCell::new(HashMap::new());
+            static RES_MEMO: RefCell<ResolveMemo> = RefCell::new(HashMap::new());
         }
         let cjs = CJS_FIRST_RESOLUTION.with(|c| c.get());
         let key = (spec.to_string(), from_dir.to_path_buf(), esm, cjs);
@@ -547,7 +690,21 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
     // Unified Node resolution (relative + bare) via oxc_resolver — handles package.json
     // main/exports/imports, conditions, index files, and extensions uniformly. This is
     // what makes deep node_modules graphs (@mui internal "./styles" etc.) resolve.
-    if let Ok(res) = resolver_for(from_dir, esm).resolve(from_dir, spec) {
+    // a require() of a package with no `require` / `default` build: as an import (an ES-only
+    // package, which Node's require(esm) loads)
+    let resolved = resolver_for(from_dir, esm)
+        .resolve(from_dir, spec)
+        .or_else(|e| {
+            if esm {
+                // an import of a require-only package (no import/default build): its `require`
+                resolver_with(from_dir, true, true)
+                    .resolve(from_dir, spec)
+                    .map_err(|_| e)
+            } else {
+                resolver_for(from_dir, true).resolve(from_dir, spec)
+            }
+        });
+    if let Ok(res) = resolved {
         if let Ok(c) = std::fs::canonicalize(res.path()) {
             // oxc can resolve a bare `require("..")` / `require(".")` (a directory re-export, common
             // in NestJS package `index.js` → `require("./dist")` chains and `dist/utils/x.js →
@@ -650,10 +807,51 @@ fn is_asset(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
         Some(
-            "css" | "scss" | "sass" | "less" | "styl" | "svg" | "png" | "jpg" | "jpeg" | "gif"
-                | "webp" | "avif" | "ico" | "woff" | "woff2" | "ttf" | "eot" | "otf" | "mp4"
-                | "webm" | "wav" | "mp3" | "txt" | "md"
+            "css"
+                | "scss"
+                | "sass"
+                | "less"
+                | "styl"
+                | "svg"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "webp"
+                | "avif"
+                | "ico"
+                | "woff"
+                | "woff2"
+                | "ttf"
+                | "eot"
+                | "otf"
+                | "mp4"
+                | "webm"
+                | "wav"
+                | "mp3"
+                | "txt"
         )
+    )
+}
+
+/// The origin of a CommonJS module wrapper (a classic script) named `name`: as
+/// [`module_origin`]'s, not a module.
+fn script_origin<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    name: v8::Local<'s, v8::String>,
+) -> v8::ScriptOrigin<'s> {
+    v8::ScriptOrigin::new(
+        scope,
+        name.into(),
+        0,
+        0,
+        false,
+        123,
+        None,
+        false,
+        false,
+        false,
+        None,
     )
 }
 
@@ -661,7 +859,19 @@ fn module_origin<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     name: v8::Local<'s, v8::String>,
 ) -> v8::ScriptOrigin<'s> {
-    v8::ScriptOrigin::new(scope, name.into(), 0, 0, false, 123, None, false, false, true, None)
+    v8::ScriptOrigin::new(
+        scope,
+        name.into(),
+        0,
+        0,
+        false,
+        123,
+        None,
+        false,
+        false,
+        true,
+        None,
+    )
 }
 
 /// CJS modules get `__dirname`/`__filename` as wrapper-function params (see `load_cjs_inner`); a
@@ -738,7 +948,7 @@ fn is_ident_byte(b: u8) -> bool {
 
 /// Build a double-quoted JS string literal for `s` (escapes the metacharacters that appear in
 /// filesystem paths). Used to embed `__dirname`/`__filename` path constants in injected source.
-fn js_string_literal(s: &str) -> String {
+pub(crate) fn js_string_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -771,7 +981,10 @@ fn write_atomic(path: &Path, content: &str) {
 
 /// Cache hit-rate over this process (warm-run KPI, spec §8 >90%).
 pub fn transform_cache_stats() -> (u64, u64) {
-    (CACHE_HITS.load(Ordering::Relaxed), CACHE_MISSES.load(Ordering::Relaxed))
+    (
+        CACHE_HITS.load(Ordering::Relaxed),
+        CACHE_MISSES.load(Ordering::Relaxed),
+    )
 }
 
 const TRANSFORM_VERSION: &str = "oxc-0.134-v1";
@@ -802,7 +1015,10 @@ fn cache_key(abs: &Path, src: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     src.hash(&mut h);
-    abs.extension().and_then(|e| e.to_str()).unwrap_or("").hash(&mut h);
+    abs.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .hash(&mut h);
     TRANSFORM_VERSION.hash(&mut h);
     h.finish()
 }
@@ -836,7 +1052,34 @@ fn project_root_uncached(file: &Path) -> Option<PathBuf> {
         }
         d = dir.parent();
     }
+    // No project-local esbuild: pnpm keeps a transitive esbuild under node_modules/.pnpm and links
+    // no node_modules/.bin/esbuild, so every vi.mock factory used to fall back to raw (untransformed)
+    // evaluation. With turbo-test's own esbuild available (TURBO_ESBUILD, set by cli.js), the nearest
+    // ancestor that has node_modules is the root: bare imports resolve from there and the prepass
+    // writes into its node_modules.
+    if std::env::var_os("TURBO_ESBUILD").is_some() {
+        let mut d = file.parent();
+        while let Some(dir) = d {
+            if dir.join("node_modules").is_dir() {
+                return Some(dir.to_path_buf());
+            }
+            d = dir.parent();
+        }
+    }
     None
+}
+
+/// The esbuild binary for `root`: the project's own `node_modules/.bin/esbuild` when it has one,
+/// otherwise turbo-test's bundled esbuild (`TURBO_ESBUILD`, resolved by cli.js).
+fn esbuild_bin(root: &Path) -> PathBuf {
+    let local = root.join("node_modules/.bin/esbuild");
+    if local.exists() {
+        return local;
+    }
+    match std::env::var_os("TURBO_ESBUILD") {
+        Some(p) => PathBuf::from(p),
+        None => local,
+    }
 }
 
 /// Nearest ancestor with `node_modules/typescript` — the root `tsc_transform_esm` needs. Unlike
@@ -858,34 +1101,7 @@ fn tsc_root(file: &Path) -> Option<PathBuf> {
 /// load reliably instead of hand-rolling CJS/ESM interop across the whole dep tree. `vitest`
 /// is externalized (we provide it); CSS/assets get stub loaders. Returns the bundled path,
 /// or None to fall back to the native per-module loader. Cached by source path + mtime.
-/// Extract vi.mock("spec", ...) / vi.doMock(...) string-literal specifiers from a file.
-fn mock_specifiers(file: &Path) -> Vec<String> {
-    let Ok(src) = std::fs::read_to_string(file) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for kw in ["vi.mock(", "vi.doMock(", "jest.mock(", "jest.doMock("] {
-        let mut i = 0;
-        while let Some(p) = src[i..].find(kw) {
-            let start = i + p + kw.len();
-            i = start;
-            let rest = src[start..].trim_start();
-            let mut ch = rest.chars();
-            if let Some(q) = ch.next() {
-                if q == '"' || q == '\'' || q == '`' {
-                    if let Some(end) = rest[1..].find(q) {
-                        let spec = rest[1..1 + end].to_string();
-                        if !out.contains(&spec) {
-                            out.push(spec);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
+///
 /// Bundle a test/setup file. `externals` are vi.mock specifiers kept OUT of the bundle so the
 /// native loader (+ mock registry) intercepts them; after bundling they are rewritten from
 /// their (file-relative) form to the resolved ABSOLUTE path so they resolve correctly from
@@ -896,7 +1112,11 @@ fn esbuild_bundle(file: &Path, externals: &[String]) -> Option<PathBuf> {
 
 /// last path segment of a specifier (the module "basename"), e.g. "../../x/analytics" -> "analytics".
 fn spec_basename(spec: &str) -> String {
-    spec.trim_end_matches('/').rsplit('/').next().unwrap_or(spec).to_string()
+    spec.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(spec)
+        .to_string()
 }
 
 /// Bundle with externalized mock specifiers, rewriting each externalized import to the single
@@ -915,7 +1135,7 @@ fn esbuild_bundle_full(
         Some(r) => r.to_path_buf(),
         None => project_root(file)?,
     };
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
     let mtime = std::fs::metadata(file)
         .ok()
@@ -935,13 +1155,17 @@ fn esbuild_bundle_full(
         k.hash(&mut h);
         v.hash(&mut h);
     }
-    "esb-v4-react-ext".hash(&mut h);
+    "esb-v5-import-rewrite".hash(&mut h);
     mr_enabled().hash(&mut h);
     let out = cache_dir().join(format!("esb-{:016x}.mjs", h.finish()));
     // Record the source dir so resolve_callback can resolve this bundle's externalized bare
     // imports (the cache file has no node_modules of its own).
     if let Some(src_dir) = file.parent() {
-        REGISTRY.with(|r| r.borrow_mut().bundle_src_dir.insert(out.clone(), src_dir.to_path_buf()));
+        REGISTRY.with(|r| {
+            r.borrow_mut()
+                .bundle_src_dir
+                .insert(out.clone(), src_dir.to_path_buf())
+        });
     }
     if out.exists() {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
@@ -987,7 +1211,7 @@ fn esbuild_bundle_full(
     for e in externals {
         cmd.arg(format!("--external:{e}"));
     }
-    // Under the module-runner, this ESM bundle (setup files) must NOT inline node_modules
+    // Under the module-runner, this ESM bundle (setup-file fallback) must NOT inline node_modules
     // packages: the entry + its require-graph load every package via the shared CJS dep cache
     // (esbuild_bundle_dep_cjs uses --packages=external), so any package this bundle inlines
     // becomes a SECOND, separate instance. For a module-level singleton (react's dispatcher,
@@ -1035,9 +1259,15 @@ fn esbuild_bundle_full(
             for spec in externals {
                 if let Some(abs) = rewrite_map.get(&spec_basename(spec)) {
                     let abs_s = abs.to_string_lossy();
-                    for q in ['"', '\''] {
-                        let from = format!("{q}{spec}{q}");
-                        let to = format!("{q}{abs_s}{q}");
+                    // only the import specifiers esbuild writes (`from "x"`, `import "x"`,
+                    // `import("x")`): a string literal quoting the specifier (a `vi.mock` call's
+                    // argument, a message) keeps it (turbo-test#196)
+                    for (q, lead) in [('"', "from "), ('"', "import "), ('"', "import(")]
+                        .into_iter()
+                        .chain([('\'', "from "), ('\'', "import "), ('\'', "import(")])
+                    {
+                        let from = format!("{lead}{q}{spec}{q}");
+                        let to = format!("{lead}{q}{abs_s}{q}");
                         if text.contains(&from) {
                             text = text.replace(&from, &to);
                             changed = true;
@@ -1052,17 +1282,21 @@ fn esbuild_bundle_full(
     }
     // Publish atomically: `out` only ever becomes visible fully-written. A racing worker either
     // sees no `out` (and builds its own temp) or the complete file — never a partial one.
-    if std::fs::rename(&tmp, &out).is_err() {
-        // Rename can fail if another worker already published an identical `out`; fall back to it
-        // when present, else give up (and clean the temp).
-        let _ = std::fs::remove_file(&tmp);
-        if !out.exists() {
-            return None;
-        }
-    }
-    Some(out)
+    publish_bundle(&tmp, &out).then_some(out)
 }
 
+/// Rename the finished temp bundle onto its cache path. Rename can fail if another worker already
+/// published an identical `out`; fall back to it when present, else give up (and clean the temp).
+/// Returns whether `out` is usable.
+fn publish_bundle(tmp: &Path, out: &Path) -> bool {
+    if std::fs::rename(tmp, out).is_err() {
+        let _ = std::fs::remove_file(tmp);
+        if !out.exists() {
+            return false;
+        }
+    }
+    true
+}
 
 /// Parse a per-file `// @vitest-environment <env>` pragma (vitest honors a docblock comment at
 /// the top of a test file). Returns the lowercased environment name if present. We scan the
@@ -1076,14 +1310,65 @@ fn file_env_pragma(s: &str) -> Option<String> {
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect();
-    if name.is_empty() { None } else { Some(name.to_ascii_lowercase()) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_ascii_lowercase())
+    }
 }
 
 /// Resolve the effective environment for a file: a per-file `@vitest-environment` pragma wins,
 /// then the run-level `TURBO_ENV` (set by cli.js from `--environment` / config `test.environment`),
 /// else `None` (auto — fall back to the content heuristic). Recognized: node | jsdom | happy-dom.
 fn forced_env(s: &str) -> Option<String> {
-    file_env_pragma(s).or_else(|| std::env::var("TURBO_ENV").ok().map(|v| v.to_ascii_lowercase()))
+    file_env_pragma(s).or_else(|| {
+        std::env::var("TURBO_ENV")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+    })
+}
+
+thread_local! {
+    /// This worker thread's pool slot (0-based) and the run-wide sequence number of the file it
+    /// is running ([`set_worker_slot`]).
+    static WORKER_SLOT: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// Called by the worker pool before each file: `pool` is the worker's 0-based slot, `seq` the
+/// file's position in the run (vitest's VITEST_POOL_ID / VITEST_WORKER_ID, [`set_file_env`]).
+pub fn set_worker_slot(pool: usize, seq: usize) {
+    WORKER_SLOT.with(|w| w.set((pool, seq)));
+}
+
+/// The per-file part of vitest's process.env (turbo-test#123, #156): vite's `SSR` (`''` under a
+/// DOM environment — `jsdom` / `happy-dom`, configured or by pragma, vitest's web transform mode
+/// — else `'1'`), `VITEST_POOL_ID` (the worker, from 1) and `VITEST_WORKER_ID` (vitest numbers a
+/// fresh worker per file from 0; a reused isolate keeps its worker's). Also `expect.getState()`'s
+/// `environment`.
+fn set_file_env(scope: &mut v8::PinScope, file: &Path) {
+    let s = std::fs::read_to_string(file).unwrap_or_default();
+    let env = forced_env(&s);
+    let web = matches!(
+        env.as_deref(),
+        Some("jsdom") | Some("happy-dom") | Some("happydom")
+    );
+    let (pool, seq) = WORKER_SLOT.with(|w| w.get());
+    let worker = if on_reuse_path() { pool } else { seq };
+    run_js(
+        scope,
+        &format!(
+            "globalThis.process.env.SSR = '{}'; globalThis.process.env.VITEST_POOL_ID = '{}'; \
+             globalThis.process.env.VITEST_WORKER_ID = '{}'; globalThis.__ttEnvName = {};",
+            if web { "" } else { "1" },
+            pool + 1,
+            worker,
+            json_string(match env.as_deref() {
+                Some("happydom") => "happy-dom",
+                Some(e) => e,
+                None => "node",
+            }),
+        ),
+    );
 }
 
 /// Whether a file needs a DOM environment (so we don't impose one on pure-logic tests,
@@ -1100,7 +1385,10 @@ fn needs_dom(file: &Path) -> bool {
         Some("jsdom") | Some("happy-dom") | Some("happydom") => return true,
         _ => {}
     }
-    if matches!(file.extension().and_then(|e| e.to_str()), Some("tsx" | "jsx")) {
+    if matches!(
+        file.extension().and_then(|e| e.to_str()),
+        Some("tsx" | "jsx")
+    ) {
         return true;
     }
     s.contains("@testing-library")
@@ -1122,10 +1410,8 @@ fn vitest_isolate_false(entry: &Path) -> bool {
     let mut dir = entry.parent();
     while let Some(d) = dir {
         // any vitest config variant the project uses (dev/ci/coverage/shard commonly set isolate)
-        for cfg in [
-            "vitest.config.ts", "vitest.config.mts", "vitest.config.js",
-            "vitest.config.dev.ts", "vitest.config.ci.ts", "vite.config.ts",
-        ] {
+        let variants = ["vitest.config.dev.ts", "vitest.config.ci.ts"];
+        for cfg in VITEST_CONFIG_FILES.iter().chain(&variants) {
             if let Ok(s) = std::fs::read_to_string(d.join(cfg)) {
                 // strip `//` line comments first — a doc comment mentioning "isolate: false"
                 // must not be mistaken for the real setting.
@@ -1165,15 +1451,27 @@ fn reuse_decision(entry: &Path) -> bool {
 /// Find the project's vitest setupFiles (registers jest-dom matchers etc.) by parsing the
 /// nearest vitest/vite config. Returns resolved absolute paths.
 /// Find a config object key (e.g. `setupFiles`) — the occurrence actually used as a key
-/// (`key:`), skipping mentions inside `//` comments or prose (e.g. a doc comment that names
-/// `setupFiles`). Returns the byte offset of the key name.
+/// (`key:`, or the quoted JSON form `"key":` / `'key':`), skipping mentions inside `//`
+/// comments or prose (e.g. a doc comment that names `setupFiles`) and longer names that merely
+/// end in `key`. Returns the byte offset of the key name.
 fn find_config_key(s: &str, key: &str) -> Option<usize> {
     let mut search = 0;
     while let Some(i) = s[search..].find(key) {
         let at = search + i;
         search = at + key.len();
+        let before = s[..at].chars().next_back();
+        let mut after = &s[at + key.len()..];
+        // a quoted key: the same quote must close it
+        if let Some(q) = before.filter(|c| *c == '"' || *c == '\'') {
+            match after.strip_prefix(q) {
+                Some(rest) => after = rest,
+                None => continue,
+            }
+        } else if before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$') {
+            continue; // `myjest:` is not `jest:`
+        }
         // must be immediately followed (after optional whitespace) by ':'
-        if !s[at + key.len()..].trim_start().starts_with(':') {
+        if !after.trim_start().starts_with(':') {
             continue;
         }
         // skip if this line is a `//` comment
@@ -1206,10 +1504,12 @@ fn vitest_setup_files(entry: &Path) -> Vec<PathBuf> {
     vitest_setup_files_uncached(entry)
 }
 
+use crate::launcher::VITEST_CONFIG_FILES;
+
 fn vitest_setup_files_uncached(entry: &Path) -> Vec<PathBuf> {
     let mut dir = entry.parent();
     while let Some(d) = dir {
-        for cfg in ["vitest.config.ts", "vitest.config.mts", "vite.config.ts", "vitest.config.js"] {
+        for cfg in VITEST_CONFIG_FILES {
             let p = d.join(cfg);
             if let Ok(s) = std::fs::read_to_string(&p) {
                 if let Some(start) = find_config_key(&s, "setupFiles") {
@@ -1220,7 +1520,9 @@ fn vitest_setup_files_uncached(entry: &Path) -> Vec<PathBuf> {
                             let inner = &tail[lb + 1..lb + rb];
                             let mut out = Vec::new();
                             for part in inner.split(',') {
-                                let q = part.trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
+                                let q = part
+                                    .trim()
+                                    .trim_matches(|c| c == '\'' || c == '"' || c == '`');
                                 if q.is_empty() {
                                     continue;
                                 }
@@ -1246,14 +1548,162 @@ fn vitest_setup_files_uncached(entry: &Path) -> Vec<PathBuf> {
     Vec::new()
 }
 
+/// vitest's `snapshotSerializers` (turbo-test#167): the paths in the nearest vitest config,
+/// resolved against its directory (vitest resolves them against the root), memoized by the
+/// test file's directory as the setup files are.
+fn vitest_snapshot_serializers(entry: &Path) -> Vec<PathBuf> {
+    // (a test file's path always has a directory)
+    let dir = entry.parent().unwrap_or(entry);
+    thread_local! {
+        static SERIALIZERS_MEMO: RefCell<HashMap<PathBuf, Vec<PathBuf>>> = RefCell::new(HashMap::new());
+    }
+    if let Some(v) = SERIALIZERS_MEMO.with(|m| m.borrow().get(dir).cloned()) {
+        return v;
+    }
+    let v = vitest_snapshot_serializers_uncached(dir);
+    SERIALIZERS_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v.clone()));
+    v
+}
+
+fn vitest_snapshot_serializers_uncached(start: &Path) -> Vec<PathBuf> {
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        for cfg in VITEST_CONFIG_FILES {
+            if let Ok(s) = std::fs::read_to_string(d.join(cfg)) {
+                return config_string_list(&s, "snapshotSerializers")
+                    .into_iter()
+                    .map(|f| normalize_path(&d.join(f)))
+                    .collect();
+            }
+        }
+        dir = d.parent();
+    }
+    Vec::new()
+}
+
+/// The parts of the nearest vitest config the runtime reads (`__ttApplyConfig`), as a JS object
+/// literal, memoized by the test file's directory: `test.fakeTimers`' `{ ... }` source
+/// (turbo-test#180) and the `clearMocks` / `mockReset` / `restoreMocks` / `unstubEnvs` /
+/// `unstubGlobals` switches set to `true` (turbo-test#183).
+fn vitest_runtime_config(entry: &Path) -> Option<String> {
+    let dir = entry.parent()?;
+    thread_local! {
+        static RUNTIME_CONFIG_MEMO: RefCell<HashMap<PathBuf, Option<String>>> = RefCell::new(HashMap::new());
+    }
+    if let Some(v) = RUNTIME_CONFIG_MEMO.with(|m| m.borrow().get(dir).cloned()) {
+        return v;
+    }
+    let v = vitest_runtime_config_uncached(dir);
+    RUNTIME_CONFIG_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v.clone()));
+    v
+}
+
+fn vitest_runtime_config_uncached(start: &Path) -> Option<String> {
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        for cfg in VITEST_CONFIG_FILES {
+            if let Ok(s) = std::fs::read_to_string(d.join(cfg)) {
+                return runtime_config_literal(&s);
+            }
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// [`vitest_runtime_config`]'s literal from a config's text (`None` when it sets none of them).
+fn runtime_config_literal(s: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(ft) = config_object_literal(s, "fakeTimers") {
+        parts.push(format!("fakeTimers: {ft}"));
+    }
+    for key in [
+        "clearMocks",
+        "mockReset",
+        "restoreMocks",
+        "unstubEnvs",
+        "unstubGlobals",
+    ] {
+        if config_is_true(s, key) {
+            parts.push(format!("{key}: true"));
+        }
+    }
+    (!parts.is_empty()).then(|| format!("{{ {} }}", parts.join(", ")))
+}
+
+/// Whether a config key's value is `true`.
+fn config_is_true(s: &str, key: &str) -> bool {
+    find_config_key(s, key).is_some_and(|start| {
+        s[start..]
+            .split_once(':')
+            .is_some_and(|(_, v)| v.trim_start().starts_with("true"))
+    })
+}
+
+/// The `{ ... }` value of a config key, braces included (`None` when the key is absent or its
+/// value is not an object literal).
+fn config_object_literal(s: &str, key: &str) -> Option<String> {
+    let start = find_config_key(s, key)?;
+    let colon = start + s[start..].find(':')?;
+    let open = colon + 1 + s[colon + 1..].find(|c: char| !c.is_whitespace())?;
+    if s.as_bytes()[open] != b'{' {
+        return None;
+    }
+    let (inner, _) = crate::launcher::balanced_block_end(s, open)?;
+    Some(format!("{{{inner}}}"))
+}
+
+/// The quoted strings of a config key's `[...]` list: empty when the key is absent or its value
+/// is not a literal list (a variable's list is not another key's, turbo-test#191).
+fn config_string_list(s: &str, key: &str) -> Vec<String> {
+    let list = || {
+        let start = find_config_key(s, key)?;
+        let colon = start + s[start..].find(':')?;
+        let rest = s[colon + 1..].trim_start().strip_prefix('[')?;
+        Some(&rest[..rest.find(']')?])
+    };
+    list().map_or_else(Vec::new, |inner| {
+        inner
+            .split(',')
+            .map(|part| {
+                part.trim()
+                    .trim_matches(|c| c == '\'' || c == '"' || c == '`')
+                    .to_string()
+            })
+            .filter(|q| !q.is_empty())
+            .collect()
+    })
+}
+
+/// Add the config's snapshot serializers (`__ttLoadSnapshotSerializers` in runtime.js): a file
+/// whose module has no default object, or whose default cannot print, fails with vitest's error.
+fn load_snapshot_serializers(scope: &mut v8::PinScope, files: &[PathBuf]) -> Result<(), String> {
+    let list: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+    let js = format!(
+        "globalThis.__ttLoadSnapshotSerializers({})",
+        serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+    );
+    let tc = std::pin::pin!(v8::TryCatch::new(scope));
+    let tc = &mut tc.init();
+    if let Some(code) = v8::String::new(tc, &js) {
+        if let Some(script) = v8::Script::compile(tc, code, None) {
+            script.run(tc);
+        }
+    }
+    caught_message(tc, "snapshot serializers failed").map_or(Ok(()), Err)
+}
+
 /// Jest config parity: read `setupFiles` + `setupFilesAfterEnv` from a jest config in `dir`
 /// (`jest.config.{js,cjs,mjs,ts,json}` or a `"jest"` block in package.json), resolving Jest's
 /// `<rootDir>` token (rootDir defaults to the config dir). Returns None if no jest config here
 /// (so the caller keeps walking up); Some(possibly-empty) once a jest config is found.
 fn jest_setup_files(dir: &Path) -> Option<Vec<PathBuf>> {
     let names = [
-        "jest.config.js", "jest.config.cjs", "jest.config.mjs",
-        "jest.config.ts", "jest.config.json",
+        "jest.config.js",
+        "jest.config.cjs",
+        "jest.config.mjs",
+        "jest.config.ts",
+        "jest.config.json",
     ];
     let mut text: Option<String> = None;
     for n in &names {
@@ -1264,15 +1714,9 @@ fn jest_setup_files(dir: &Path) -> Option<Vec<PathBuf>> {
     }
     // package.json "jest" block (only if no standalone config file)
     if text.is_none() {
-        if let Ok(pkg) = std::fs::read_to_string(dir.join("package.json")) {
-            if let Some(start) = find_config_key(&pkg, "jest") {
-                if pkg[start..].trim_start().starts_with("jest")
-                    || pkg[start..].contains('{')
-                {
-                    text = Some(pkg);
-                }
-            }
-        }
+        text = std::fs::read_to_string(dir.join("package.json"))
+            .ok()
+            .and_then(|pkg| package_json_jest_block(&pkg));
     }
     let s = text?;
     // rootDir (default = config dir). Jest paths in setupFiles use `<rootDir>`.
@@ -1286,7 +1730,9 @@ fn jest_setup_files(dir: &Path) -> Option<Vec<PathBuf>> {
             if let Some(lb) = tail.find('[') {
                 if let Some(rb) = tail[lb..].find(']') {
                     for part in tail[lb + 1..lb + rb].split(',') {
-                        let q = part.trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
+                        let q = part
+                            .trim()
+                            .trim_matches(|c| c == '\'' || c == '"' || c == '`');
                         if q.is_empty() {
                             continue;
                         }
@@ -1326,12 +1772,23 @@ fn config_string_value(s: &str, key: &str) -> Option<String> {
     }
 }
 
+/// The top-level `"jest"` object of a package.json, re-serialized as JSON text (Jest reads its
+/// config from that key only; a `jest` key nested elsewhere, e.g. under `scripts`, is not it).
+/// None when package.json is not valid JSON or has no `"jest"` object.
+fn package_json_jest_block(pkg: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(pkg).ok()?;
+    let jest = v.get("jest")?;
+    jest.is_object().then(|| jest.to_string())
+}
+
 /// Normalize a path lexically (resolve `..`/`.`) without touching the filesystem.
 fn normalize_path(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in p.components() {
         match comp {
-            std::path::Component::ParentDir => { out.pop(); }
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
             std::path::Component::CurDir => {}
             other => out.push(other.as_os_str()),
         }
@@ -1339,14 +1796,49 @@ fn normalize_path(p: &Path) -> PathBuf {
     out
 }
 
-/// Run a setup module (bundled, with mock specifiers externalized) in the current context,
-/// then drain any vi.mock() calls it made (resolved relative to the setup file's dir).
+/// Run a setup module in the current context. Module-runner: like the test file itself (vitest
+/// runs setup files through the same module runner), so its vi.mock()s are hoisted above its own
+/// imports: the mock prepass registers them, then the setup module loads as CJS with its requires
+/// below its vi.mock calls. Otherwise (no esbuild CJS transform, e.g. top-level await): bundled,
+/// with mock specifiers externalized, then any vi.mock() calls it made are drained (resolved
+/// relative to the setup file's dir) — they reach the test files, not the setup's own imports.
 fn run_setup_file(
     scope: &mut v8::PinScope,
     file: &Path,
     externals: &[String],
     rewrite_map: &std::collections::HashMap<String, PathBuf>,
-) {
+) -> Result<(), String> {
+    // A setup file that throws fails every test file that uses it, with its error (vitest).
+    let failed = |e: String| Err(format!("setup file {}: {e}", file.display()));
+    if mr_enabled() && esbuild_transform_cjs(file, false).is_some() {
+        run_entry_mocks(scope, file).or_else(failed)?;
+        // the setup's vi.hoisted() calls re-hit the prepass cache by index; afterwards the cache
+        // is cleared so the test file's own vi.hoisted() calls never read the setup's values
+        run_js(scope, "globalThis.__hoistedIdx = 0;");
+        let err = {
+            let tc = std::pin::pin!(v8::TryCatch::new(scope));
+            let tc = &mut tc.init();
+            let loaded = load_cjs(tc, file, false).is_some();
+            if loaded {
+                tc.perform_microtask_checkpoint();
+            }
+            caught_message(tc, "load failed")
+                .or_else(|| (!loaded).then(|| "load failed".to_string()))
+        };
+        run_js(
+            scope,
+            "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;",
+        );
+        return err.map_or(Ok(()), failed);
+    }
+    // vitest hoists the setup's vi.mock calls above its imports here too (turbo-test#194): the
+    // mock prepass registers them before the bundle's externalized imports load (every loader
+    // path: turbo-test#196)
+    run_entry_mocks(scope, file).or_else(failed)?;
+    run_js(
+        scope,
+        "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;",
+    );
     // reset the pending-mock queue before this setup file runs
     {
         let global = scope.get_current_context().global(scope);
@@ -1357,35 +1849,113 @@ fn run_setup_file(
     }
     let target = esbuild_bundle_full(file, externals, rewrite_map, None)
         .unwrap_or_else(|| file.to_path_buf());
-    if let Some(module) = load_graph(scope, &target) {
-        let tc = std::pin::pin!(v8::TryCatch::new(scope));
-        let tc = &mut tc.init();
-        if module.instantiate_module(tc, resolve_callback) == Some(true) {
-            let _ = module.evaluate(tc);
-            tc.perform_microtask_checkpoint();
+    let err = match load_entry_graph(scope, &target) {
+        Err(e) => Some(e),
+        Ok(module) => {
+            let tc = std::pin::pin!(v8::TryCatch::new(scope));
+            let tc = &mut tc.init();
+            if module.instantiate_module(tc, resolve_callback) == Some(true) {
+                let ev = module.evaluate(tc);
+                tc.perform_microtask_checkpoint();
+                let caught = caught_message(tc, "unknown");
+                let exc = match module.get_status() {
+                    v8::ModuleStatus::Errored => Some(module.get_exception()),
+                    _ => tc.exception(),
+                };
+                note_load_error(tc, exc);
+                evaluate_error(caught, ev.is_some(), module.get_status(), || {
+                    module.get_exception().to_rust_string_lossy(tc)
+                })
+            } else {
+                Some(instantiate_error(caught_message(tc, "unknown")))
+            }
         }
-    }
+    };
     resolve_pending_mocks(scope);
     drain_pending_mocks(scope, file.parent().unwrap_or(Path::new(".")), true);
+    err.map_or(Ok(()), failed)
 }
 
-/// Extract `const/let/var ... = vi.hoisted(...)` declarations (full statements) so they can
-/// be replayed in the mock prepass — mock factories commonly close over hoisted vars.
+/// The ESM-graph mock prepass: run `first` (the hoisted declarations + the vi.mock calls), else
+/// `fallback` (the calls alone) when it throws or does not compile. A prepass that cannot
+/// compile at all fails the file with the SyntaxError: its mocks would otherwise fall through
+/// silently to the real modules (turbo-test#79 item 1). A factory that throws registers its
+/// error stand-in in runtime.js.
+fn run_prepass(scope: &mut v8::PinScope, first: &str, fallback: &str) -> Result<(), String> {
+    if run_js_ok(scope, first) {
+        return Ok(());
+    }
+    let tc = std::pin::pin!(v8::TryCatch::new(scope));
+    let tc = &mut tc.init();
+    let code = v8::String::new(tc, fallback).ok_or("prepass too long")?;
+    match v8::Script::compile(tc, code, None) {
+        Some(script) => {
+            let _ = script.run(tc);
+            Ok(())
+        }
+        None => Err(format!(
+            "{} (in the file's vi.mock factories)",
+            caught_message(tc, "SyntaxError").unwrap_or_default()
+        )),
+    }
+}
+
+/// Run `js` as a script; whether it completed without throwing (the exception is cleared).
+fn run_js_ok(scope: &mut v8::PinScope, js: &str) -> bool {
+    let tc = std::pin::pin!(v8::TryCatch::new(scope));
+    let tc = &mut tc.init();
+    v8::String::new(tc, js)
+        .and_then(|code| v8::Script::compile(tc, code, None))
+        .and_then(|s| s.run(tc))
+        .is_some()
+}
+
+/// Run a short framework snippet in the current context.
+fn run_js(scope: &mut v8::PinScope, js: &str) {
+    if let Some(code) = v8::String::new(scope, js) {
+        if let Some(s) = v8::Script::compile(scope, code, None) {
+            s.run(scope);
+        }
+    }
+}
+
+/// Extract the `vi.hoisted(...)` statements (full statements) so they can be replayed in the
+/// mock prepass — mock factories commonly close over hoisted vars. A declared call
+/// (`const|let|var <binding> = [await] vi.hoisted(...)`) is taken from its keyword; a bare call
+/// (`[await] vi.hoisted(...)`, also hoisted by vitest) from the call itself. A statement ends at
+/// the call's closing paren, plus a `;` that follows it.
 fn extract_hoisted(src: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes = src.as_bytes();
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
     let mut i = 0;
     while let Some(p) = src.get(i..).and_then(|s| s.find("vi.hoisted(")) {
         let at = i + p;
         i = at + "vi.hoisted(".len();
-        // statement start: nearest preceding `const `/`let `/`var ` on the way back
         let head = src.get(..at).unwrap_or("");
+        // `await` directly before the call belongs to it
+        let lead = head.trim_end();
+        let call_start = match lead.strip_suffix("await") {
+            Some(pre) if !pre.chars().next_back().is_some_and(ident) => pre.len(),
+            _ => at,
+        };
+        let before_call = src.get(..call_start).unwrap_or("").trim_end();
+        // declared: the nearest `const `/`let `/`var ` keyword whose text up to the call is just
+        // `<binding> =` (no statement boundary in between); otherwise a bare call
         let start = ["const ", "let ", "var "]
             .iter()
             .filter_map(|kw| head.rfind(kw))
-            .max();
-        let Some(start) = start else { continue };
-        // balance parens from vi.hoisted( to its close, then include up to ';'
+            .max()
+            .filter(|&kw| {
+                let between = src.get(kw..call_start).unwrap_or("");
+                !head[..kw].chars().next_back().is_some_and(ident)
+                    && before_call.ends_with('=')
+                    && !before_call.ends_with("==")
+                    && !between.contains(';')
+                    && !between.contains("vi.hoisted(")
+            })
+            .unwrap_or(call_start);
+        // balance parens from vi.hoisted( to its close, then include a following ';'
         let mut depth = 1i32;
         let mut k = i;
         while k < bytes.len() && depth > 0 {
@@ -1396,12 +1966,12 @@ fn extract_hoisted(src: &str) -> Vec<String> {
             }
             k += 1;
         }
-        // swallow a trailing semicolon if present
-        while k < bytes.len() && (bytes[k] as char).is_whitespace() {
-            k += 1;
+        let mut end = k;
+        while end < bytes.len() && (bytes[end] as char).is_whitespace() {
+            end += 1;
         }
-        if k < bytes.len() && bytes[k] as char == ';' {
-            k += 1;
+        if end < bytes.len() && bytes[end] as char == ';' {
+            k = end + 1;
         }
         out.push(src.get(start..k).unwrap_or("").to_string());
         i = k.max(at + 1);
@@ -1413,22 +1983,102 @@ fn extract_hoisted(src: &str) -> Vec<String> {
 /// emitted into a generated pre-pass module, bundled with esbuild (so JSX/import factories
 /// transform correctly), executed (factories run → __pendingMocks), then drained relative to
 /// the entry dir. This is how hoisted entry mocks work with bundling.
-fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
+fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String> {
     let src = std::fs::read_to_string(entry).unwrap_or_default();
+    let dir = entry.parent().unwrap_or(Path::new("."));
+    // The dir the entry's runtime vi.mock / vi.doMock calls resolve from when the module has no
+    // __ttDir (ESM graph): its hoisted calls' prepass keys (runtime.js __ttPrepassMocks) and
+    // immediate registration of a vi.doMock. Set for every entry (also one without vi.mock).
+    let entry_dir = js_string_literal(&dir.to_string_lossy());
+    run_js(scope, &format!("globalThis.__ttEntryDir = {entry_dir};"));
     let mocks = extract_mocks(&src);
     if mocks.is_empty() {
-        return;
+        return Ok(());
     }
-    let dir = entry.parent().unwrap_or(Path::new("."));
     let Some(root) = project_root(entry) else {
-        // No esbuild project (e.g. standalone fixtures): register self-contained factories
-        // directly (no JSX/transform available here).
-        for (spec, factory) in &mocks {
-            if let Some(abs) = resolve_spec(spec, dir) {
-                register_mock(scope, &abs, factory);
+        // No esbuild project (ESM graph): the runtime runs this file's prepass like the esbuild
+        // one, just untransformed — one script that replays the file's vi.hoisted declarations
+        // and then its vi.mock calls, so factories close over the hoisted values (vitest); async
+        // factories are awaited by the resolve + drain below. __ttDir is the entry dir only
+        // while it runs (automocks and importOriginal resolve from it). A throwing factory
+        // registers runtime.js's error stand-in, as the module's own call would. If the
+        // replayed declarations fail, the mocks are registered without them.
+        let hoisted = extract_hoisted(&src).join("\n");
+        // a jest.mock stays one: its factory is its own default (turbo-test#137)
+        let jest = extract_mock_calls(&src, ["jest.mock(", "jest.mock("]);
+        let calls: String = mocks
+            .iter()
+            .map(|(spec, factory)| {
+                let s = js_string_literal(spec);
+                let api = if jest.iter().any(|(j, f)| j == spec && f == factory) {
+                    "jest"
+                } else {
+                    "vi"
+                };
+                if factory.is_empty() {
+                    format!("{api}.mock({s});\n")
+                } else {
+                    format!("{api}.mock({s}, {factory});\n")
+                }
+            })
+            .collect();
+        run_js(
+            scope,
+            &format!(
+                "globalThis.__ttPrevDir = globalThis.__ttDir; globalThis.__ttDir = {entry_dir}; \
+                 globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;"
+            ),
+        );
+        // the factories see the file's top-level bindings through its scope (mock_scope.rs)
+        let bindings = factory_bindings(entry, &src, false);
+        // the factories (and hoisted declarations) get the file's own TS / JSX transform, as
+        // vitest transforms the whole file; in the script it becomes, `import.meta` is the
+        // entry's and `require` (the JSX runtime's) resolves from it (turbo-test#79 item 1)
+        let ext = entry.extension().and_then(|e| e.to_str()).unwrap_or("js");
+        let transform = crate::transform::needs_transform(entry);
+        let require = format!("globalThis.__mkRequire({entry_dir}, true)");
+        // (runtime.js __ttImportMeta: url / filename / dirname / env, turbo-test#123)
+        let meta = format!(
+            "globalThis.__ttImportMeta({})",
+            js_string_literal(&entry.to_string_lossy()),
+        );
+        let scoped = |code: String| {
+            let code = if transform {
+                crate::transform::transform(Path::new(&format!("prepass.{ext}")), &code)
+                    .unwrap_or(code)
+            } else {
+                code
+            };
+            let code = crate::transform::replace_import_meta(&code, &meta);
+            let code = if bindings.is_empty() {
+                code
+            } else {
+                crate::mock_scope::with_scope(&code, &bindings)
+            };
+            // the transform's own `require("react/jsx-runtime")` (a file without imports)
+            format!("((require) => {{\n{code}\n}})({require});")
+        };
+        let prepass = run_prepass(
+            scope,
+            &scoped(format!("(() => {{\n{hoisted}\n{calls}}})();")),
+            &scoped(format!("(() => {{\n{calls}}})();")),
+        );
+        run_js(scope, "globalThis.__ttDir = globalThis.__ttPrevDir;");
+        prepass?;
+        resolve_pending_mocks(scope);
+        drain_pending_mocks(scope, dir, false);
+        // These registrations are this file's prepass: the module's own vi.mock call keeps them
+        // instead of re-running the factory.
+        for (spec, _) in &mocks {
+            let Some(abs) = mock_key(spec, dir) else {
+                continue;
+            };
+            if REGISTRY.with(|r| r.borrow().mocks.contains_key(&abs)) {
+                let key = js_string_literal(&abs.to_string_lossy());
+                run_js(scope, &format!("__ttPrepassMocks.add({key});"));
             }
         }
-        return;
+        return Ok(());
     };
     // React is imported here too: mock factories commonly reference the test's module-scope
     // `React` (e.g. `React.useEffect` inside a returned component) which isn't in this prepass.
@@ -1477,7 +2127,15 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
         // empty mock (so the real module wins and named imports never rebind to the spies). The
         // flag makes load_cjs leave the queue alone until the outer drain runs here.
         let prev_resolving = RESOLVING_MOCKS.with(|f| f.replace(true));
+        set_mock_prepass(scope, true);
         if let Some(raw) = esbuild_transform_cjs(&p, false) {
+            // the factories see the file's top-level bindings through its scope (mock_scope.rs)
+            let bindings = factory_bindings(entry, &src, true);
+            let raw = if bindings.is_empty() {
+                raw
+            } else {
+                crate::mock_scope::with_scope(&raw, &bindings)
+            };
             let wrapped = format!(
                 "(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})"
             );
@@ -1485,7 +2143,10 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
                 let tc = std::pin::pin!(v8::TryCatch::new(scope));
                 let tc = &mut tc.init();
                 if let Some(script) = v8::Script::compile(tc, code, None) {
-                    if let Some(wf) = script.run(tc).and_then(|v| v8::Local::<v8::Function>::try_from(v).ok()) {
+                    if let Some(wf) = script
+                        .run(tc)
+                        .and_then(|v| v8::Local::<v8::Function>::try_from(v).ok())
+                    {
                         let exports_obj = v8::Object::new(tc);
                         let module_obj = v8::Object::new(tc);
                         if let Some(ek) = v8::String::new(tc, "exports") {
@@ -1499,17 +2160,36 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
                         }
                         // fresh vi.hoisted cache for this file; the prepass fills it (the entry
                         // reuses it by index so `const x = vi.hoisted(...)` is one shared object).
-                        if let Some(code) = v8::String::new(tc, "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;") {
-                            if let Some(s) = v8::Script::compile(tc, code, None) { s.run(tc); }
+                        if let Some(code) = v8::String::new(
+                            tc,
+                            "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;",
+                        ) {
+                            if let Some(s) = v8::Script::compile(tc, code, None) {
+                                s.run(tc);
+                            }
                         }
                         if let Some(req) = v8::String::new(tc, "__mkRequire")
                             .and_then(|k| g.get(tc, k.into()))
                             .and_then(|v| v8::Local::<v8::Function>::try_from(v).ok())
                         {
                             let undef = v8::undefined(tc).into();
-                            if let Some(require) = req.call(tc, undef, &[dir_str.into(), v8::Boolean::new(tc, true).into()]) {
+                            if let Some(require) = req.call(
+                                tc,
+                                undef,
+                                &[dir_str.into(), v8::Boolean::new(tc, true).into()],
+                            ) {
                                 let fname = v8::String::new(tc, &entry.to_string_lossy()).unwrap();
-                                wf.call(tc, undef, &[exports_obj.into(), module_obj.into(), require, fname.into(), dir_str.into()]);
+                                wf.call(
+                                    tc,
+                                    undef,
+                                    &[
+                                        exports_obj.into(),
+                                        module_obj.into(),
+                                        require,
+                                        fname.into(),
+                                        dir_str.into(),
+                                    ],
+                                );
                                 tc.perform_microtask_checkpoint();
                             }
                         }
@@ -1517,29 +2197,59 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) {
                 }
             }
         }
+        set_mock_prepass(scope, false);
         resolve_pending_mocks(scope);
         drain_pending_mocks(scope, entry.parent().unwrap_or(Path::new(".")), false);
         RESOLVING_MOCKS.with(|f| f.set(prev_resolving));
-        return;
+        return Ok(());
     }
     let bundled = esbuild_bundle(&p, &[]).unwrap_or_else(|| p.clone());
-    if let Some(module) = load_graph(scope, &bundled) {
+    set_mock_prepass(scope, true);
+    // the factories' relative specifiers (a factory-less mock's automock importActual, and
+    // vi.importActual / importOriginal inside factories) resolve from the entry dir, as on the
+    // module-runner branch above; the bundle itself lives in the cache dir
+    let global = scope.get_current_context().global(scope);
+    if let (Some(k), Some(v)) = (
+        v8::String::new(scope, "__ttDir"),
+        v8::String::new(scope, &dir.to_string_lossy()),
+    ) {
+        global.set(scope, k.into(), v.into());
+    }
+    {
+        // (a load error the prepass throws is the entry's own, reported when the entry loads)
         let tc = std::pin::pin!(v8::TryCatch::new(scope));
         let tc = &mut tc.init();
-        if module.instantiate_module(tc, resolve_callback) == Some(true) {
-            let _ = module.evaluate(tc);
-            tc.perform_microtask_checkpoint();
+        if let Some(module) = load_graph(tc, &bundled) {
+            if module.instantiate_module(tc, resolve_callback) == Some(true) {
+                let _ = module.evaluate(tc);
+                tc.perform_microtask_checkpoint();
+            }
         }
     }
+    set_mock_prepass(scope, false);
     resolve_pending_mocks(scope);
     drain_pending_mocks(scope, entry.parent().unwrap_or(Path::new(".")), false);
+    Ok(())
+}
+
+/// Mark the entry's mock prepass for runtime.js. The prepass runs the factories outside the
+/// module's scope (no imports or module-level bindings), so a factory that throws THERE is not a
+/// factory error: it is not registered, and the module's own `vi.mock` call (which re-runs the
+/// factory in scope) decides. Registering it would break the module's "needed" requires that load
+/// the mocked module before that call (e.g. for a later `vi.mocked(x)`).
+fn set_mock_prepass(scope: &mut v8::PinScope, on: bool) {
+    let global = scope.get_current_context().global(scope);
+    if let Some(k) = v8::String::new(scope, "__ttMockPrepass") {
+        let v = v8::Boolean::new(scope, on);
+        global.set(scope, k.into(), v.into());
+    }
 }
 
 /// Set up the DOM environment in the current context: bind the all-Rust DOM (rtdom) natively so
 /// document/window exist before the test evaluates. (The legacy JS turbo-dom bootstrap —
 /// installGlobals + the `.node` parser — was removed in v0.3.0; rtdom is the only DOM now.)
 fn setup_dom(scope: &mut v8::PinScope, _entry: &Path) {
-    crate::browser_env::install(scope);
+    turbo_dom_browser_env::browser_env::install(scope);
 }
 
 /// Transform a TS file to **ESM** JS using the PROJECT'S OWN TypeScript (`ts.transpileModule`),
@@ -1548,8 +2258,12 @@ fn setup_dom(scope: &mut v8::PinScope, _entry: &Path) {
 /// type aliases (`type Percentage = number` -> `Number`) so NestJS/Mongoose decorators get the
 /// right `design:type`. Module syntax is kept as ESM so the caller's esbuild ESM->CJS pass gives
 /// the same `var import_X = require(...)` shape the rest of the pipeline (vi.mock hoisting) needs.
+/// Imports used only in type positions are first moved onto a namespace import (TypeScript's own
+/// remedy for TS1272), so on the ESM graph an interface's metadata reads `ns.Iface` (undefined →
+/// `Object`) instead of naming an export that doesn't exist.
 /// Returns None if the project ships no `typescript` (caller falls back to oxc).
 fn tsc_transform_esm(file: &Path, root: &Path) -> Option<String> {
+    let src = read_app_source(file)?;
     let ts_dir = root.join("node_modules/typescript");
     if !ts_dir.join("package.json").is_file() {
         return None;
@@ -1560,9 +2274,90 @@ fn tsc_transform_esm(file: &Path, root: &Path) -> Option<String> {
 const ts = require(process.argv[1]);
 const fs = require('fs');
 const file = process.argv[2];
-const src = fs.readFileSync(file, 'utf8');
+const src = fs.readFileSync(0, 'utf8'); // the module's source (import.meta.glob expanded)
 const isTsx = file.endsWith('.tsx');
-const out = ts.transpileModule(src, {
+// isolatedModules + emitDecoratorMetadata: a value import of a name used only as a type (an
+// interface) is kept for its `design:type` reference and then fails ESM linking (no such export).
+// TypeScript's own remedy (TS1272) is a namespace import: `ns.Shape` reads as undefined -> Object.
+// So import bindings referenced only in type positions are moved to a namespace import and their
+// type references qualified with it. Names that are shadowed or used as values are left alone.
+function nsTypeOnlyImports(text) {
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, isTsx ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const binds = new Map();
+  for (const st of sf.statements) {
+    const ic = ts.isImportDeclaration(st) && st.importClause;
+    if (!ic || ic.isTypeOnly) continue;
+    const add = (local, imported, el) => binds.set(local.text, { st, el, imported, refs: [], ok: true });
+    if (ic.name) add(ic.name, 'default', ic);
+    if (ic.namedBindings && ts.isNamedImports(ic.namedBindings)) {
+      for (const el of ic.namedBindings.elements) {
+        const imp = el.propertyName || el.name;
+        if (!el.isTypeOnly && ts.isIdentifier(imp)) add(el.name, imp.text, el);
+      }
+    }
+  }
+  if (!binds.size) return text;
+  const declKinds = [ts.isVariableDeclaration, ts.isParameter, ts.isFunctionDeclaration, ts.isFunctionExpression,
+    ts.isClassDeclaration, ts.isClassExpression, ts.isInterfaceDeclaration, ts.isTypeAliasDeclaration,
+    ts.isEnumDeclaration, ts.isModuleDeclaration, ts.isTypeParameterDeclaration, ts.isBindingElement,
+    ts.isImportEqualsDeclaration, ts.isNamespaceImport, ts.isImportSpecifier, ts.isImportClause];
+  const typeUse = (id) => {
+    for (let n = id, q = id.parent; q; n = q, q = q.parent) {
+      if (ts.isTypeQueryNode(q) || ts.isComputedPropertyName(q)) return false;
+      if (ts.isExpressionWithTypeArguments(q)) {
+        const h = q.parent;
+        return ts.isHeritageClause(h) && (h.token === ts.SyntaxKind.ImplementsKeyword || ts.isInterfaceDeclaration(h.parent));
+      }
+      if (ts.isTypeNode(q)) return true;
+    }
+    return false;
+  };
+  const visit = (node) => {
+    const b = ts.isIdentifier(node) && binds.get(node.text);
+    if (b) {
+      const p = node.parent;
+      if (p === b.el) { /* the import binding itself */ }
+      else if (declKinds.some((k) => k(p)) && p.name === node) b.ok = false; // shadowed
+      else if (ts.isExportSpecifier(p)) b.ok = false; // re-exported: needs the binding
+      else if ((ts.isPropertyAccessExpression(p) && p.name === node) || (ts.isQualifiedName(p) && p.right === node)
+        || (p.propertyName === node) || (p.name === node && !ts.isShorthandPropertyAssignment(p))
+        || ts.isLabeledStatement(p) || ts.isBreakOrContinueStatement(p)) { /* a member name, not a reference */ }
+      else if (typeUse(node)) b.refs.push(node);
+      else b.ok = false; // a value reference
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  const edits = [];
+  const perDecl = new Map();
+  for (const b of binds.values()) {
+    if (!b.ok || !b.refs.length) continue;
+    if (!perDecl.has(b.st)) perDecl.set(b.st, { ns: '__tt_ns' + perDecl.size, moved: new Set() });
+    const d = perDecl.get(b.st);
+    d.moved.add(b.el);
+    for (const r of b.refs) edits.push([r.getStart(sf), r.end, d.ns + '.' + b.imported]);
+  }
+  for (const [st, d] of perDecl) {
+    const ic = st.importClause;
+    const nb = ic.namedBindings;
+    const keepDefault = ic.name && !d.moved.has(ic);
+    const keepNamed = nb && ts.isNamedImports(nb) ? nb.elements.filter((e) => !d.moved.has(e)) : [];
+    const from = st.moduleSpecifier.getText(sf);
+    const parts = [];
+    if (keepDefault) parts.push(ic.name.text);
+    if (nb && ts.isNamespaceImport(nb)) parts.push(nb.getText(sf));
+    if (keepNamed.length) parts.push('{ ' + keepNamed.map((e) => e.getText(sf)).join(', ') + ' }');
+    const clause = parts.length ? 'import ' + parts.join(', ') + ' from ' + from + '; ' : '';
+    edits.push([st.getStart(sf), st.end, clause + 'import * as ' + d.ns + ' from ' + from + ';']);
+  }
+  edits.sort((a, b) => b[0] - a[0]);
+  let out = text;
+  for (const [s, e, r] of edits) out = out.slice(0, s) + r + out.slice(e);
+  return out;
+}
+let input = src;
+try { input = nsTypeOnlyImports(src); } catch (e) {} // e.g. a typescript without the parser API
+const out = ts.transpileModule(input, {
   fileName: file,
   compilerOptions: {
     module: ts.ModuleKind.ESNext,
@@ -1578,12 +2373,24 @@ const out = ts.transpileModule(src, {
 });
 process.stdout.write(out.outputText);
 "#;
-    let out = std::process::Command::new("node")
+    let mut child = std::process::Command::new("node")
         .current_dir(root)
-        .args(["-e", SCRIPT, &ts_dir.to_string_lossy(), &file.to_string_lossy()])
+        .args([
+            "-e",
+            SCRIPT,
+            &ts_dir.to_string_lossy(),
+            &file.to_string_lossy(),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()
+        .spawn()
         .ok()?;
+    {
+        use std::io::Write;
+        child.stdin.take()?.write_all(src.as_bytes()).ok()?;
+    }
+    let out = child.wait_with_output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1600,7 +2407,7 @@ process.stdout.write(out.outputText);
 /// (TS/decorators lowered), so this is a pure format conversion.
 fn esbuild_format_cjs(root: &Path, js: &str) -> Option<String> {
     use std::io::Write;
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(root);
     let mut child = std::process::Command::new(&esbuild)
         .current_dir(root)
         .args([
@@ -1628,14 +2435,20 @@ fn decorator_metadata_enabled(file: &Path) -> bool {
     thread_local! {
         static CACHE: RefCell<HashMap<PathBuf, bool>> = RefCell::new(HashMap::new());
     }
-    let Some(tc) = nearest_tsconfig(file.parent().unwrap_or(Path::new("."))) else { return false };
+    let Some(tc) = nearest_tsconfig(file.parent().unwrap_or(Path::new("."))) else {
+        return false;
+    };
     if let Some(v) = CACHE.with(|c| c.borrow().get(&tc).copied()) {
         return v;
     }
     // Strip `//` line comments before scanning so a commented mention doesn't false-positive.
     let on = std::fs::read_to_string(&tc)
         .map(|s| {
-            let stripped: String = s.lines().map(|l| l.split("//").next().unwrap_or("")).collect::<Vec<_>>().join("\n");
+            let stripped: String = s
+                .lines()
+                .map(|l| l.split("//").next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n");
             let norm = stripped.replace(char::is_whitespace, "");
             norm.contains("\"emitDecoratorMetadata\":true")
         })
@@ -1653,7 +2466,11 @@ fn file_has_decorator(src: &str) -> bool {
     src.lines().any(|l| {
         let t = l.trim_start();
         let mut ch = t.chars();
-        ch.next() == Some('@') && ch.next().map(|c| c.is_ascii_alphabetic() || c == '_' || c == '$').unwrap_or(false)
+        ch.next() == Some('@')
+            && ch
+                .next()
+                .map(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+                .unwrap_or(false)
     })
 }
 
@@ -1665,11 +2482,17 @@ fn file_has_decorator(src: &str) -> bool {
 /// falls back to esbuild.
 fn native_transform_cjs(file: &Path) -> Option<String> {
     use std::hash::{Hash, Hasher};
-    let raw = std::fs::read_to_string(file).ok()?;
+    let raw = with_binder(file, read_app_source(file)?, true);
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
-    file.extension().and_then(|e| e.to_str()).unwrap_or("").hash(&mut h);
-    "native-cjs-v3".hash(&mut h);
+    file.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .hash(&mut h);
+    // v4: await_do_mocks_on_import; v5: import.meta (turbo-test#123); v6: `__toESM` is
+    // runtime.js's `__ttToESM` (turbo-test#122)
+    // v7: ES-module namespaces without `__esModule`, `export *` of the namespace (turbo-test#133)
+    "native-cjs-v7".hash(&mut h);
     // Legacy-decorator lowering happens inside esm_cjs::emit when the project enables
     // experimentalDecorators/emitDecoratorMetadata AND this file uses a decorator. Without it the
     // native emitter leaves `@Decorator` syntax intact (→ "Unexpected token 'export'") or lowers
@@ -1687,13 +2510,42 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
     }
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     let emitted = crate::esm_cjs::emit_with(file, &raw, legacy_decorators)?;
-    let mut code = hoist_mock_setup(&emitted);
+    let mut code = hoist_mock_setup(&await_do_mocks_on_import(emitted));
     let shared = shared_mock_lets(&raw);
     if !shared.is_empty() {
         code = rewrite_shared_lets(&code, &shared);
     }
     write_atomic(&cache, &code);
     Some(code)
+}
+
+/// `native_transform_cjs` for the test file under test locations (location.rs): the same code,
+/// built uncached with the emitter's source map, whose lines follow the mock hoisting and the
+/// shared-`let` prelude so the map stays aligned with the code that runs.
+fn native_transform_cjs_located(file: &Path) -> Option<String> {
+    let (code, segs, raw) = native_transform_cjs_mapped(file)?;
+    crate::location::set_map(file, segs, &raw);
+    Some(code)
+}
+
+/// `native_transform_cjs` with the map of its lines back to the source (and that source): the
+/// test file's for test locations, another app module's while failure frames are printed.
+fn native_transform_cjs_mapped(file: &Path) -> Option<(String, crate::location::Segments, String)> {
+    let raw = with_binder(file, read_app_source(file)?, true);
+    let legacy_decorators = decorator_metadata_enabled(file) && file_has_decorator(&raw);
+    let emitted = crate::esm_cjs::emit_mapped(file, &raw, legacy_decorators)?;
+    let map = crate::coverage::inline_segments(&emitted)?;
+    let (mut code, mut origins) = hoist_mock_setup_tracked(&await_do_mocks_on_import(emitted));
+    let shared = shared_mock_lets(&raw);
+    if !shared.is_empty() {
+        code = rewrite_shared_lets(&code, &shared);
+        origins.insert(0, None);
+    }
+    let segs = origins
+        .iter()
+        .map(|o| o.and_then(|i| map.get(i).cloned()).unwrap_or_default())
+        .collect();
+    Some((code, segs, raw))
 }
 
 /// Native (oxc) counterpart of `esbuild_bundle_dep_cjs` for node_modules files (P2b). Instead of
@@ -1708,8 +2560,17 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(file).ok()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
-    file.extension().and_then(|e| e.to_str()).unwrap_or("").hash(&mut h);
-    "native-dep-v3-bundle".hash(&mut h);
+    file.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .hash(&mut h);
+    // v4: import.meta (turbo-test#123); v5: `__toESM` is runtime.js's `__ttToESM` (turbo-test#122)
+    // v6: package interop `__ttToESMDep`, Node's for a package Node runs as ES modules
+    // (turbo-test#133)
+    // v7: package ES modules marked "pkg" (turbo-test#159)
+    "native-dep-v7-bundle".hash(&mut h);
+    let node = is_esm_module(file);
+    node.hash(&mut h);
     let cache = cache_dir().join(format!("ntvdep-{:016x}.cjs", h.finish()));
     if let Ok(c) = std::fs::read_to_string(&cache) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
@@ -1718,7 +2579,7 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     // Bundle the package's relative graph with lazy __commonJS init wrappers (circular-safe),
     // bare imports left external (shared via require cache). None → caller falls back to esbuild.
-    let code = crate::bundler::bundle(file)?;
+    let code = dep_interop(crate::bundler::bundle(file)?, node);
     write_atomic(&cache, &code);
     Some(code)
 }
@@ -1728,13 +2589,24 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
 /// esbuild's export getters to be CONFIGURABLE (so spyOn can redefine them). Cached.
 fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     let root = project_root(file)?;
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
-    let raw = std::fs::read_to_string(file).ok()?;
+    let raw = read_app_source(file)?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
-    file.extension().and_then(|e| e.to_str()).unwrap_or("").hash(&mut h);
-    "mr-cjs-v1".hash(&mut h);
+    file.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .hash(&mut h);
+    // v2: `import.meta` is filled in (fill_import_meta) instead of esbuild's empty object;
+    // v3: import() waits for a pending async vi.doMock (await_do_mocks_on_import);
+    // v4: import.meta.url is the percent-encoded file URL (turbo-test#87);
+    // v5: import.meta is runtime.js __ttImportMeta (env, one object per module; turbo-test#123)
+    // v6: `__toESM` is runtime.js's `__ttToESM`, `__toCommonJS` marks the module (turbo-test#122)
+    // v7: `export *` re-exports the importer's namespace (turbo-test#133); exports in source
+    // order (turbo-test#141)
+    // v8: __reExport's __toESMStar calls globalThis.__ttToESM (turbo-test#165)
+    "mr-cjs-v8".hash(&mut h);
     // esbuild can't emit decorator metadata. By default we DON'T pay that cost — only when a
     // decorator file actually threw at load (Mongoose @Prop / Sequelize @Column read design:type
     // at class-definition) does the loader retry with `prefer_metadata`, routing it through the
@@ -1772,8 +2644,8 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
             .and_then(|r| r.ok())
         });
         if let Some(cjs) = meta_esm.and_then(|esm| esbuild_format_cjs(&root, &esm)) {
-            let mut code = postprocess_mr_cjs(cjs);
-            code = hoist_mock_setup(&code);
+            let code = await_do_mocks_on_import(fill_import_meta(postprocess_mr_cjs(cjs), None));
+            let mut code = hoist_mock_setup(&code);
             let shared = shared_mock_lets(&raw);
             if !shared.is_empty() {
                 code = rewrite_shared_lets(&code, &shared);
@@ -1790,11 +2662,29 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
             tsconfig = Some(dir.join("tsconfig.json"));
             break;
         }
-        if dir == root { break; }
+        if dir == root {
+            break;
+        }
         d = dir.parent();
     }
+    // a module whose import.meta.glob calls were expanded (turbo-test#130) goes in on stdin
+    let expanded = std::fs::read_to_string(file).ok().as_deref() != Some(raw.as_str());
     let mut cmd = std::process::Command::new(&esbuild);
-    cmd.current_dir(&root).arg(file).args([
+    cmd.current_dir(&root);
+    if expanded {
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("js");
+        let loader = match ext {
+            "ts" | "mts" | "cts" => "ts",
+            "tsx" | "jsx" => ext,
+            _ => "jsx",
+        };
+        cmd.arg(format!("--sourcefile={}", file.display()))
+            .arg(format!("--loader={loader}"))
+            .stdin(std::process::Stdio::piped());
+    } else {
+        cmd.arg(file);
+    }
+    cmd.args([
         "--format=cjs",
         "--platform=browser",
         "--jsx=automatic",
@@ -1811,11 +2701,31 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     if let Some(tc) = &tsconfig {
         cmd.arg(format!("--tsconfig={}", tc.display()));
     }
-    let out = cmd.stderr(std::process::Stdio::null()).output().ok()?;
+    let out = if expanded {
+        use std::io::Write;
+        let mut child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        child.stdin.take()?.write_all(raw.as_bytes()).ok()?;
+        child.wait_with_output().ok()?
+    } else {
+        cmd.stderr(std::process::Stdio::null()).output().ok()?
+    };
     if !out.status.success() {
         return None;
     }
-    let mut code = postprocess_mr_cjs(String::from_utf8(out.stdout).ok()?);
+    let code = postprocess_mr_cjs(String::from_utf8(out.stdout).ok()?);
+    // esbuild sorts the exports; vitest's namespace lists them in source order (turbo-test#141)
+    let order = crate::transform::transform(file, &raw)
+        .ok()
+        .and_then(|js| crate::esm_cjs::export_order(&js));
+    let code = match order {
+        Some(order) => source_order_exports(code, &order),
+        None => code,
+    };
+    let mut code = await_do_mocks_on_import(fill_import_meta(code, None));
     // vitest-style vi.mock hoisting: move consumer requires below the vi.mock setup so the mock
     // is registered (immediately, in this module's scope) before the mocked module loads.
     code = hoist_mock_setup(&code);
@@ -1831,31 +2741,90 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     Some(code)
 }
 
+/// esbuild's `--format=cjs` turns `import.meta` into an empty object (`const import_meta = {};`,
+/// one per source module), so `import.meta.url` read as undefined. Give it the module's own
+/// import.meta instead, as vitest/Node do: runtime.js `__ttImportMeta(<path>)` (`url` — the
+/// percent-encoded file URL the ESM-graph callback gives too — `filename`, `dirname` and vitest's
+/// `env`, turbo-test#123). A per-file transform's module is the CJS wrapper's `__filename` at run
+/// time (the transform cache is content-keyed, so the same source in two places shares one
+/// output). In a dep bundle (`bundle_root`: esbuild's cwd) each module's code follows esbuild's
+/// `// <path relative to the cwd>` comment, which names it. Replaced on the same line, so the
+/// inline source map (coverage) keeps its line mapping.
+fn fill_import_meta(code: String, bundle_root: Option<&Path>) -> String {
+    if !code.contains("import_meta") {
+        return code;
+    }
+    let mut out = String::with_capacity(code.len() + 96);
+    let mut module: Option<String> = None;
+    for line in code.split_inclusive('\n') {
+        let body = line.trim_end_matches('\n');
+        if let (Some(root), Some(rel)) = (bundle_root, body.strip_prefix("// ")) {
+            let abs = root.join(rel);
+            if abs.is_file() {
+                module = Some(js_string_literal(&abs.to_string_lossy()));
+            }
+        }
+        let decl = body
+            .strip_prefix("const ")
+            .or_else(|| body.strip_prefix("var "))
+            .and_then(|r| r.strip_suffix(" = {};"))
+            .filter(|n| {
+                n.strip_prefix("import_meta")
+                    .is_some_and(|d| d.bytes().all(|b| b.is_ascii_digit()))
+            });
+        match decl {
+            Some(name) => {
+                let kw = &body[..body.find(' ').unwrap_or(0)];
+                let path = module.as_deref().unwrap_or("__filename");
+                out.push_str(&format!("{kw} {name} = globalThis.__ttImportMeta({path});"));
+                out.push_str(&line[body.len()..]);
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
 /// vitest-style vi.mock hoisting on esbuild CJS output: esbuild emits all `require(...)` at the
 /// top, then the body (module decls + vi.mock + tests). A vi.mock must be registered before the
 /// mocked module loads, so we move the requires NOT referenced by the mock-setup region (the
 /// "consumers" — incl. the modules being mocked) to AFTER that region. The setup's own decls run
 /// in-module-scope, so the factory shares the test's bindings (push, mockUseAuthInfo, etc.).
 fn hoist_mock_setup(code: &str) -> String {
+    hoist_mock_setup_tracked(code).0
+}
+
+/// `hoist_mock_setup`, also returning for each output line the input line it came from (`None` for
+/// a line it wrote: a mocked require's re-bind).
+fn hoist_mock_setup_tracked(code: &str) -> (String, Vec<Option<usize>>) {
+    let unchanged = || {
+        (
+            code.to_string(),
+            (0..code.split('\n').count()).map(Some).collect(),
+        )
+    };
     if !code.contains(".mock(") {
-        return code.to_string();
+        return unchanged();
     }
     let lines: Vec<&str> = code.lines().collect();
     let is_req = |l: &str| l.starts_with("var import_") && l.contains("require(");
     // contiguous require block
     let Some(req_start) = lines.iter().position(|l| is_req(l)) else {
-        return code.to_string();
+        return unchanged();
     };
     let mut req_end = req_start;
     while req_end + 1 < lines.len() && is_req(lines[req_end + 1]) {
         req_end += 1;
     }
     // end of the last top-level `.mock(` statement (balance parens from the call to its close + ;)
-    let Some(last_mock) = lines.iter().rposition(|l| l.contains(".mock(")) else {
-        return code.to_string();
-    };
+    // (`code` contains ".mock(" and that needle has no newline, so some line always matches; the
+    // 0 default would hit the `<= req_end` early return below anyway.)
+    let last_mock = lines
+        .iter()
+        .rposition(|l| l.contains(".mock("))
+        .unwrap_or(0);
     if last_mock <= req_end {
-        return code.to_string();
+        return unchanged();
     }
     let mut depth = 0i32;
     let mut started = false;
@@ -1863,7 +2832,10 @@ fn hoist_mock_setup(code: &str) -> String {
     'outer: for (i, l) in lines.iter().enumerate().skip(last_mock) {
         for ch in l.chars() {
             match ch {
-                '(' => { depth += 1; started = true; }
+                '(' => {
+                    depth += 1;
+                    started = true;
+                }
                 ')' => depth -= 1,
                 _ => {}
             }
@@ -1894,13 +2866,18 @@ fn hoist_mock_setup(code: &str) -> String {
             while k < tail.len() {
                 for ch in tail[k].chars() {
                     match ch {
-                        '(' => { depth += 1; started = true; }
+                        '(' => {
+                            depth += 1;
+                            started = true;
+                        }
                         ')' => depth -= 1,
                         _ => {}
                     }
                 }
                 k += 1;
-                if started && depth <= 0 { break; }
+                if started && depth <= 0 {
+                    break;
+                }
             }
             mock_stmts.extend_from_slice(&tail[start..k]);
         } else {
@@ -1914,13 +2891,20 @@ fn hoist_mock_setup(code: &str) -> String {
     // what makes `vi.mock` placed below the tests still intercept). We test references against the
     // setup region with test-callback bodies stripped, plus the factory bodies explicitly.
     let setup_text_full = setup.join("\n");
-    let setup_text = format!("{}\n{}", strip_test_blocks(&setup_text_full), mock_stmts.join("\n"));
+    let setup_text = format!(
+        "{}\n{}",
+        strip_test_blocks(&setup_text_full),
+        mock_stmts.join("\n")
+    );
     let mut needed = Vec::new();
     let mut consumers = Vec::new();
     for &l in &lines[req_start..=req_end] {
         // var import_NAME = ...
         let name = l.strip_prefix("var ").unwrap_or(l);
-        let name: String = name.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$').collect();
+        let name: String = name
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+            .collect();
         if !name.is_empty() && contains_word(&setup_text, &name) {
             needed.push(l);
         } else {
@@ -1966,27 +2950,85 @@ fn hoist_mock_setup(code: &str) -> String {
     if region_end + 1 < lines.len() {
         out.extend_from_slice(&lines[region_end + 1..]);
     }
-    out.join("\n")
+    // an output line that is one of the input's slices came from that line
+    let index: HashMap<usize, usize> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (l.as_ptr() as usize, i))
+        .collect();
+    let origins = out
+        .iter()
+        .map(|l| index.get(&(l.as_ptr() as usize)).copied())
+        .collect();
+    (out.join("\n"), origins)
 }
 
-/// Extract the first string literal ("..." or '...') from `s`.
+/// The value of the first string literal (`"..."`, `'...'` or `` `...` ``) in `s`, escape
+/// sequences decoded (an unterminated one runs to the end of `s`).
 fn extract_first_string_literal(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c == b'"' || c == b'\'' {
-            let quote = c;
-            let start = i + 1;
-            let mut j = start;
-            while j < bytes.len() && bytes[j] != quote {
-                j += 1;
-            }
-            return s.get(start..j).map(|x| x.to_string());
+    let at = s.find(['"', '\'', '`'])?;
+    Some(js_string_literal_at(&s[at..])?.0)
+}
+
+/// The JS string literal `s` starts with (`"..."`, `'...'`, or a template literal, read
+/// verbatim apart from its escapes): its value with the escape sequences decoded (`\"`, `\\`,
+/// `\n`, `\x41`, `\u0041`, `\u{1F600}`, line continuations; any other escaped character stands for
+/// itself), and its length in bytes through the closing quote, None when unterminated. None
+/// when `s` does not start with a quote.
+fn js_string_literal_at(s: &str) -> Option<(String, Option<usize>)> {
+    let quote = s.chars().next().filter(|c| matches!(c, '"' | '\'' | '`'))?;
+    let mut out = String::new();
+    let mut i = 1;
+    while let Some(c) = s[i..].chars().next() {
+        i += c.len_utf8();
+        if c == quote {
+            return Some((out, Some(i)));
         }
-        i += 1;
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let Some(e) = s[i..].chars().next() else {
+            break;
+        };
+        i += e.len_utf8();
+        // \xHH, \uHHHH, \u{H...}: the code point (a malformed one stands for its letter)
+        let hex = |digits: &str| {
+            let valid = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_hexdigit());
+            valid
+                .then(|| u32::from_str_radix(digits, 16).ok())
+                .flatten()
+                .and_then(char::from_u32)
+        };
+        let escaped = match e {
+            'n' => Some('\n'),
+            't' => Some('\t'),
+            'r' => Some('\r'),
+            'b' => Some('\u{8}'),
+            'f' => Some('\u{c}'),
+            'v' => Some('\u{b}'),
+            '0' => Some('\0'),
+            'x' => s.get(i..i + 2).and_then(hex).inspect(|_| i += 2),
+            'u' if s[i..].starts_with('{') => s[i + 1..].find('}').and_then(|n| {
+                let c = hex(&s[i + 1..i + 1 + n]);
+                c.inspect(|_| i += n + 2)
+            }),
+            'u' => s.get(i..i + 4).and_then(hex).inspect(|_| i += 4),
+            // a line continuation stands for nothing (\r\n is one line terminator)
+            '\r' => {
+                i += usize::from(s[i..].starts_with('\n'));
+                None
+            }
+            '\n' | '\u{2028}' | '\u{2029}' => None,
+            _ => Some(e),
+        };
+        match escaped {
+            Some(c) => out.push(c),
+            None if matches!(e, 'x' | 'u') => out.push(e),
+            None => {}
+        }
     }
-    None
+    Some((out, None))
 }
 
 /// From `var import_X = require("SPEC");` or `... = __toESM(require("SPEC"), 1);` -> "SPEC".
@@ -2002,15 +3044,28 @@ fn shared_mock_lets(src: &str) -> Vec<String> {
     if mocks.is_empty() {
         return Vec::new();
     }
-    let factories: String = mocks.iter().map(|(_, f)| f.as_str()).collect::<Vec<_>>().join("\n");
+    let factories: String = mocks
+        .iter()
+        .map(|(_, f)| f.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut out = Vec::new();
     for line in src.lines() {
         let t = line.trim_start();
-        let (kw, is_const) = if let Some(r) = t.strip_prefix("let ") { (Some(r), false) }
-            else if let Some(r) = t.strip_prefix("var ") { (Some(r), false) }
-            else if let Some(r) = t.strip_prefix("const ") { (Some(r), true) } else { (None, false) };
+        let (kw, is_const) = if let Some(r) = t.strip_prefix("let ") {
+            (Some(r), false)
+        } else if let Some(r) = t.strip_prefix("var ") {
+            (Some(r), false)
+        } else if let Some(r) = t.strip_prefix("const ") {
+            (Some(r), true)
+        } else {
+            (None, false)
+        };
         if let Some(rest) = kw {
-            let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$').collect();
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                .collect();
             if name.is_empty() || out.contains(&name) {
                 continue;
             }
@@ -2025,7 +3080,9 @@ fn shared_mock_lets(src: &str) -> Vec<String> {
                 // array accumulator only (`= []`), tolerating a TS type annotation whose `=>`
                 // would fool a naive split. len>=12: only long unique names; short ones (or mock
                 // fns used in shorthand/strings) risk corrupting other code.
-                let is_array = rest.contains("= []") || rest.contains("= [\n") || rest.trim_end().ends_with("= [");
+                let is_array = rest.contains("= []")
+                    || rest.contains("= [\n")
+                    || rest.trim_end().ends_with("= [");
                 name.len() >= 12 && is_array && contains_word(&factories, &name)
             } else {
                 // let/var: share when the factory REFERENCES the binding (reads or writes) and
@@ -2105,7 +3162,8 @@ fn assigns_word(text: &str, word: &str) -> bool {
             j += 1;
         }
         // `=` that is not part of ==, =>, etc.; and the char before `=` isn't !,<,>
-        if j < b.len() && b[j] == b'=' && b.get(j + 1) != Some(&b'=') && b.get(j + 1) != Some(&b'>') {
+        if j < b.len() && b[j] == b'=' && b.get(j + 1) != Some(&b'=') && b.get(j + 1) != Some(&b'>')
+        {
             return true;
         }
     }
@@ -2122,7 +3180,19 @@ fn assigns_word(text: &str, word: &str) -> bool {
 fn strip_test_blocks(text: &str) -> String {
     let b = text.as_bytes();
     let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
-    let kws = ["beforeEach", "beforeAll", "afterEach", "afterAll", "describe", "test", "it", "fit", "xit", "fdescribe", "xdescribe"];
+    let kws = [
+        "beforeEach",
+        "beforeAll",
+        "afterEach",
+        "afterAll",
+        "describe",
+        "test",
+        "it",
+        "fit",
+        "xit",
+        "fdescribe",
+        "xdescribe",
+    ];
     let mut out = String::with_capacity(text.len());
     let mut i = 0usize;
     while i < b.len() {
@@ -2150,8 +3220,14 @@ fn strip_test_blocks(text: &str) -> String {
             let mut found_paren = false;
             while j < b.len() {
                 let c = b[j];
-                if c == b'(' { found_paren = true; break; }
-                if c.is_ascii_whitespace() || c == b'.' || c == b')' || ident(c) { j += 1; continue; }
+                if c == b'(' {
+                    found_paren = true;
+                    break;
+                }
+                if c.is_ascii_whitespace() || c == b'.' || c == b')' || ident(c) {
+                    j += 1;
+                    continue;
+                }
                 break; // something else → not a call we recognize
             }
             if found_paren {
@@ -2161,13 +3237,38 @@ fn strip_test_blocks(text: &str) -> String {
                 while k < b.len() {
                     match b[k] {
                         b'(' => depth += 1,
-                        b')' => { depth -= 1; if depth == 0 { k += 1; break; } }
-                        b'\'' | b'"' | b'`' => {
-                            let q = b[k]; k += 1;
-                            while k < b.len() { if b[k] == b'\\' { k += 2; continue; } if b[k] == q { break; } k += 1; }
+                        b')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                k += 1;
+                                break;
+                            }
                         }
-                        b'/' if k + 1 < b.len() && b[k + 1] == b'/' => { while k < b.len() && b[k] != b'\n' { k += 1; } }
-                        b'/' if k + 1 < b.len() && b[k + 1] == b'*' => { k += 2; while k + 1 < b.len() && !(b[k] == b'*' && b[k + 1] == b'/') { k += 1; } k += 1; }
+                        b'\'' | b'"' | b'`' => {
+                            let q = b[k];
+                            k += 1;
+                            while k < b.len() {
+                                if b[k] == b'\\' {
+                                    k += 2;
+                                    continue;
+                                } else if b[k] == q {
+                                    break;
+                                }
+                                k += 1;
+                            }
+                        }
+                        b'/' if k + 1 < b.len() && b[k + 1] == b'/' => {
+                            while k < b.len() && b[k] != b'\n' {
+                                k += 1;
+                            }
+                        }
+                        b'/' if k + 1 < b.len() && b[k + 1] == b'*' => {
+                            k += 2;
+                            while k + 1 < b.len() && !(b[k] == b'*' && b[k + 1] == b'/') {
+                                k += 1;
+                            }
+                            k += 1;
+                        }
                         _ => {}
                     }
                     k += 1;
@@ -2288,19 +3389,155 @@ fn rewrite_shared_lets(code: &str, names: &[String]) -> String {
 
 /// Post-process esbuild CJS output for the module runner:
 /// - make export getters CONFIGURABLE so `spyOn` can redefine them (mutable live exports);
-/// - replace `__toESM` (which COPIES the namespace) with one that returns the SAME exports
-///   object (adding `default` for CJS interop) so `import * as ns` + `import {x}` share one
-///   object — `vi.spyOn(ns,'x')` is then seen by every importer (vitest semantics).
-fn postprocess_mr_cjs(mut code: String) -> String {
+/// - replace `__toESM` (which COPIES the namespace) with runtime.js's `__ttToESM`, which returns
+///   the SAME exports object (adding `default` for CJS interop), or a view of it (a package's
+///   CommonJS as Node's namespace, an ES module without `__esModule`), so `import * as ns` +
+///   `import {x}` share one object — `vi.spyOn(ns,'x')` is then seen by every importer (vitest
+///   semantics) — and `__toCommonJS` with one that marks the module;
+/// - `export * from` re-exports that namespace's names (turbo-test#133).
+fn postprocess_mr_cjs(code: String) -> String {
+    postprocess_esbuild_cjs(
+        code,
+        "var __toESM = (m) => globalThis.__ttToESM(m);",
+        // not `__toESM`: esbuild emits no such helper in a module that only re-exports
+        "globalThis.__ttToESM(m)",
+    )
+}
+
+/// `postprocess_mr_cjs` for a package's bundle: its `__toESM` is runtime.js's `__ttToESMDep`
+/// (esbuild passes Node's interop flag for a `.mjs` / `"type": "module"` file), its `export *`
+/// re-exports Node's namespace names when the package is one Node runs as ES modules (`node`).
+fn postprocess_mr_dep_cjs(code: String, node: bool) -> String {
+    package_esm_mark(postprocess_esbuild_cjs(
+        code,
+        "var __toESM = (m, n) => globalThis.__ttToESMDep(m, n);",
+        if node {
+            "globalThis.__ttToESMDep(m, 1)"
+        } else {
+            "m"
+        },
+    ))
+}
+
+/// A package's ES modules are marked `"pkg"` (runtime.js lists their namespace's names sorted,
+/// as Node's, which vitest imports a package through; turbo-test#159).
+fn package_esm_mark(code: String) -> String {
+    code.replacen(
+        "Symbol.for(\"turbo-test.esm\"), { value: true })",
+        "Symbol.for(\"turbo-test.esm\"), { value: \"pkg\" })",
+        1,
+    )
+}
+
+fn postprocess_esbuild_cjs(mut code: String, to_esm: &str, star: &str) -> String {
     code = code.replace(
         "var __defProp = Object.defineProperty;",
         "var __defProp = (o, k, d) => Object.defineProperty(o, k, Object.assign({ configurable: true }, d));",
     );
+    code = code.replace("var __toESM = ", &format!("{to_esm} var __toESM_unused = "));
+    // turbo-test's own ES modules are marked, so `__ttToESM` tells them from CommonJS
     code = code.replace(
-        "var __toESM = ",
-        "var __toESM = (m) => (m && m.__esModule ? m : (m && (typeof m === \"object\" || typeof m === \"function\") && !(\"default\" in m) && Object.defineProperty(m, \"default\", { value: m, configurable: true }), m)); var __toESM_unused = ",
+        "var __toCommonJS = (mod) => __copyProps(__defProp({}, \"__esModule\", { value: true }), mod);",
+        "var __toCommonJS = (mod) => __copyProps(__defProp(__defProp({}, \"__esModule\", { value: true }), Symbol.for(\"turbo-test.esm\"), { value: true }), mod);",
     );
-    code
+    code.replace(
+        "var __reExport = (target, mod, secondTarget) => (",
+        &format!(
+            "var __toESMStar = (m) => {star}; var __reExport = (target, mod, secondTarget) => (mod = __toESMStar(mod), "
+        ),
+    )
+}
+
+/// esbuild's export registration (`__export(x_exports, {\n  b: () => b,\n  a: () => a\n});`,
+/// sorted by name) with its entries in `order` (the module's source order); names `order` does
+/// not know keep their place after them.
+fn source_order_exports(code: String, order: &[String]) -> String {
+    let Some(start) = code
+        .find("_exports, {\n")
+        .map(|i| i + "_exports, {\n".len())
+    else {
+        return code;
+    };
+    if !code[..start]
+        .lines()
+        .last()
+        .is_some_and(|l| l.starts_with("__export("))
+    {
+        return code;
+    }
+    let Some(len) = code[start..].find("\n});") else {
+        return code;
+    };
+    let block = &code[start..start + len];
+    let key = |line: &str| {
+        let k = line.trim_start().split(": () =>").next().unwrap_or("");
+        serde_json::from_str::<String>(k).unwrap_or_else(|_| k.to_string())
+    };
+    let rank = |line: &str| {
+        let k = key(line);
+        order.iter().position(|o| *o == k).unwrap_or(order.len())
+    };
+    let mut lines: Vec<&str> = block.split('\n').map(|l| l.trim_end_matches(',')).collect();
+    lines.sort_by_key(|l| rank(l));
+    format!(
+        "{}{}{}",
+        &code[..start],
+        lines.join(",\n"),
+        &code[start + len..]
+    )
+}
+
+/// A package's native bundle (esm_cjs's preamble) with the dependency interop of
+/// `postprocess_mr_dep_cjs`: Node's for a package Node runs as ES modules (`node`).
+fn dep_interop(code: String, node: bool) -> String {
+    let n = if node { "1" } else { "0" };
+    package_esm_mark(code)
+        .replacen(
+            crate::esm_cjs::TO_ESM_HELPER,
+            &format!("var __toESM = (mod) => globalThis.__ttToESMDep(mod, {n});\n"),
+            1,
+        )
+        .replacen(
+            crate::esm_cjs::STAR_HELPER,
+            if node {
+                "var __toESMStar = (mod) => globalThis.__ttToESMDep(mod, 1);\n"
+            } else {
+                "var __toESMStar = (mod) => mod;\n"
+            },
+            1,
+        )
+}
+
+/// The module-runner's lowered `import()` (esbuild's and esm_cjs's
+/// `Promise.resolve().then(() => __toESM(require(SPEC)))`) waits for a pending async vi.doMock
+/// factory of its module, as vitest awaits it (turbo-test#42 item 6):
+/// `__ttImportReady(__dirname, SPEC)` (runtime.js) takes the place of `Promise.resolve()` for a
+/// literal SPEC or esm_cjs's already-evaluated `__tt_spec`. It is `Promise.resolve()` itself
+/// while nothing is pending, so the timing is unchanged. `__dirname` is the CJS wrapper's.
+fn await_do_mocks_on_import(code: String) -> String {
+    const LOWERED: &str = "Promise.resolve().then(() => __toESM(require(";
+    if !code.contains(LOWERED) {
+        return code;
+    }
+    let mut out = String::with_capacity(code.len() + 64);
+    let mut rest = code.as_str();
+    while let Some(at) = rest.find(LOWERED) {
+        out.push_str(&rest[..at]);
+        rest = &rest[at + LOWERED.len()..];
+        let literal = js_string_literal_at(rest).and_then(|(_, len)| len);
+        let spec = match literal {
+            Some(len) => Some(&rest[..len]),
+            None => rest.starts_with("__tt_spec)").then_some("__tt_spec"),
+        };
+        match spec {
+            Some(spec) => out.push_str(&format!(
+                "__ttImportReady(__dirname, {spec}).then(() => __toESM(require("
+            )),
+            None => out.push_str(LOWERED),
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Module-runner: is it enabled? (default on; TURBO_NO_MR disables → legacy bundle path)
@@ -2312,27 +3549,30 @@ fn mr_enabled() -> bool {
 // both suites (ui full −7.4%, payroll full −13.9%, identical pass/fail). Escape hatch TURBO_NO_E12
 // mirrors TURBO_NO_CODE_CACHE. (E6 transform-existence memo = neutral, E11 drain-loop hoist =
 // slightly slower — both measured no-help at the validated jobs=8 protocol and not shipped.)
-fn e12_enabled() -> bool { std::env::var("TURBO_NO_E12").is_err() }
-
-/// react family — bundled standalone (one instance) and externalized from every other
-/// node_modules bundle so all code shares the SAME react (fixes dual-react in mocks).
-fn is_react_family(spec_or_path: &str) -> bool {
-    let p = spec_or_path;
-    p.ends_with("/react") || p == "react"
-        || p.contains("/react/") || p.contains("react-dom") || p.contains("react/jsx")
-        || p.ends_with("/scheduler") || p == "scheduler"
+fn e12_enabled() -> bool {
+    std::env::var("TURBO_NO_E12").is_err()
 }
 
 /// Bundle a node_modules entry to CJS (one esbuild call per package entry), with react family
 /// externalized so it's shared. Returns the bundled code. Cached by entry+mtime.
 fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     let root = project_root(abs)?;
-    let esbuild = root.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
-    let mtime = std::fs::metadata(abs).ok().and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis()).unwrap_or(0);
+    let mtime = std::fs::metadata(abs)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    abs.hash(&mut h); mtime.hash(&mut h); "mr-dep-v1".hash(&mut h);
+    abs.hash(&mut h);
+    mtime.hash(&mut h);
+    // v2: import.meta filled (turbo-test#123); v3: `__toESM` is runtime.js's `__ttToESM`
+    // (turbo-test#122)
+    // v4: package interop `__ttToESMDep`, `export *` of Node's names (turbo-test#133)
+    // v5: package ES modules marked "pkg" (turbo-test#159)
+    "mr-dep-v5".hash(&mut h);
     let cache = cache_dir().join(format!("mrdep-{:016x}.cjs", h.finish()));
     if let Ok(c) = std::fs::read_to_string(&cache) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
@@ -2341,10 +3581,19 @@ fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     let mut cmd = std::process::Command::new(&esbuild);
     cmd.current_dir(&root).arg(abs).args([
-        "--bundle", "--format=cjs", "--platform=browser", "--jsx=automatic",
-        "--loader:.css=empty", "--loader:.scss=empty", "--loader:.svg=text",
-        "--loader:.png=dataurl", "--loader:.jpg=dataurl", "--loader:.gif=dataurl", "--loader:.webp=dataurl",
-        "--log-level=silent", "--define:process.env.NODE_ENV=globalThis.process.env.NODE_ENV",
+        "--bundle",
+        "--format=cjs",
+        "--platform=browser",
+        "--jsx=automatic",
+        "--loader:.css=empty",
+        "--loader:.scss=empty",
+        "--loader:.svg=text",
+        "--loader:.png=dataurl",
+        "--loader:.jpg=dataurl",
+        "--loader:.gif=dataurl",
+        "--loader:.webp=dataurl",
+        "--log-level=silent",
+        "--define:process.env.NODE_ENV=globalThis.process.env.NODE_ENV",
         "--supported:dynamic-import=false",
         // Externalize EVERY bare import (generic — no hardcoded library names): each package
         // bundles only its own (relative) files and require()s its dependencies. So every
@@ -2362,7 +3611,10 @@ fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     // `__toESM(require(x), 1)` (node interop for ESM `import default`) sets `.default` to the
     // whole module, so `import styled from '@emotion/styled'` yields the exports object instead
     // of the styled function (breaking flux-ui etc.).
-    let code = postprocess_mr_cjs(String::from_utf8(out.stdout).ok()?);
+    let code = fill_import_meta(
+        postprocess_mr_dep_cjs(String::from_utf8(out.stdout).ok()?, is_esm_module(abs)),
+        Some(&root),
+    );
     write_atomic(&cache, &code);
     Some(code)
 }
@@ -2382,7 +3634,7 @@ fn esbuild_cjs_fallback(abs: &Path, prefer_metadata: bool) -> Option<String> {
 fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<String> {
     // Module-runner: per-module CJS transform (app) / per-package CJS bundle (node_modules)
     // so imports are live + mockable and react is shared. Only on the CJS load path (the test
-    // entry + its require-graph); the legacy ESM path (DOM boot, setup files) stays oxc.
+    // entry, setup files + their require-graph); the legacy ESM path (DOM boot) stays oxc.
     if as_cjs && mr_enabled() {
         // App code: transform per-file (live bindings → spyOn/vi.mock work). node_modules:
         // bundle-per-package (fast), but the context-bearing packages (react, @mui/*, @emotion/*)
@@ -2410,14 +3662,19 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
             // imported INTERFACE (e.g. Sequelize/Mongoose `@Column() declare x: SomeIface`), it
             // emits `Reflect.metadata("design:type", SomeIface)` — referencing the type-only import
             // as a value, so it can't be elided. The interface has no runtime export, so V8 fails
-            // ESM instantiation with `does not provide an export named SomeIface`. tsc emits
-            // `Object` for non-value types (ts-jest parity). This fails at LINK time (before eval),
-            // so the eval-throw retry-on-load can't rescue it — hence routing here, up front.
+            // ESM instantiation with `does not provide an export named SomeIface`. tsc (no checker
+            // either, isolatedModules) emits a guarded read instead, `typeof SomeIface ===
+            // "function" ? SomeIface : Object`; after esbuild's ESM->CJS pass that is a property
+            // read of the required module, so a missing export gives `Object` (ts-jest parity).
+            // This fails at LINK time (before eval), so the eval-throw retry-on-load can't rescue
+            // it — hence routing here, up front.
             // node_modules excluded (ship pre-compiled JS); browser/React projects have no
             // emitDecoratorMetadata so this branch never fires for them.
             let needs_meta = !abs.components().any(|c| c.as_os_str() == "node_modules")
                 && decorator_metadata_enabled(abs)
-                && std::fs::read_to_string(abs).map(|s| file_has_decorator(&s)).unwrap_or(false);
+                && std::fs::read_to_string(abs)
+                    .map(|s| file_has_decorator(&s))
+                    .unwrap_or(false);
             if needs_meta && !crate::coverage::enabled() {
                 if let Some(code) = esbuild_transform_cjs(abs, true) {
                     return Some(code);
@@ -2431,6 +3688,18 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
             // (fewer per-token mappings), so coverage.rs under-attributes inner functions/lines —
             // not yet parity.
             if crate::esm_cjs::enabled() && !crate::coverage::enabled() && !prefer_metadata {
+                if crate::location::is_entry(abs) {
+                    if let Some(code) = native_transform_cjs_located(abs) {
+                        return Some(code);
+                    }
+                } else if crate::location::frames_enabled() {
+                    // failure frames (junit) in this module map back too; its code runs below
+                    // the CJS wrapper's first line
+                    if let Some((code, segs, _)) = native_transform_cjs_mapped(abs) {
+                        crate::location::set_module_map(abs, segs, 1);
+                        return Some(code);
+                    }
+                }
                 if let Some(code) = native_transform_cjs(abs) {
                     return Some(code);
                 }
@@ -2445,8 +3714,11 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
             }
         }
     }
-    let raw = std::fs::read_to_string(abs).ok()?;
+    let raw = with_binder(abs, read_app_source(abs)?, false);
     if !crate::transform::needs_transform(abs) {
+        if crate::location::is_entry(abs) {
+            crate::location::set_identity(abs);
+        }
         return Some(raw);
     }
     // App `.ts`/`.tsx` files load through this path as ESM (load_graph → maybe_transform), NOT the
@@ -2459,11 +3731,31 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
     let legacy_decorators = !abs.components().any(|c| c.as_os_str() == "node_modules")
         && decorator_metadata_enabled(abs)
         && file_has_decorator(&raw);
+    // The test file under test locations: transform with a source map (no cache).
+    if !legacy_decorators && crate::location::is_entry(abs) {
+        if let Ok((code, mappings)) = crate::transform::transform_mapped(abs, &raw) {
+            crate::location::set_map(abs, crate::coverage::mappings_segments(&mappings), &raw);
+            return Some(code);
+        }
+    }
+    // Another app module while failure frames are printed (junit): keep its map too.
+    if !legacy_decorators
+        && crate::location::frames_enabled()
+        && !abs.components().any(|c| c.as_os_str() == "node_modules")
+    {
+        if let Ok((code, mappings)) = crate::transform::transform_mapped(abs, &raw) {
+            let map = crate::coverage::mappings_segments(&mappings);
+            crate::location::set_module_map(abs, map, 0);
+            return Some(code);
+        }
+    }
     // content-addressed disk cache, shared across runs and workers. Key on the legacy-decorator
-    // decision so a config/file change can't serve stale (un-lowered) output.
+    // decision so a config/file change can't serve stale (un-lowered) output. The tag changes
+    // with the decorator transform (v2: tsc reads type-only imports through a namespace import),
+    // so output cached by an older binary is not served.
     let mut key = cache_key(abs, &raw);
     if legacy_decorators {
-        key ^= 0x9e37_79b9_7f4a_7c15;
+        key ^= 0x9e37_79b9_7f4a_7c16;
     }
     let path = cache_dir().join(format!("{:016x}.js", key));
     if let Ok(cached) = std::fs::read_to_string(&path) {
@@ -2475,10 +3767,13 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
     // not oxc. oxc has no type checker, so a decorated field typed as an imported INTERFACE
     // (`@Column() declare x: SomeIface`) makes it emit `Reflect.metadata("design:type", SomeIface)`
     // — the type-only import then can't be elided, and since the interface has no runtime export
-    // the ESM linker fails: `does not provide an export named SomeIface`. tsc emits `Object` for
-    // non-value types (ts-jest parity). It fails at LINK time, so the eval-throw retry-on-load can't
-    // rescue it — route here, on first load. oxc remains the fallback when the project ships no
-    // typescript (tsc_transform_esm → None).
+    // the ESM linker fails: `does not provide an export named SomeIface`. transpileModule has no
+    // checker either: it keeps such an import too (its guarded `typeof SomeIface` metadata read
+    // still names the binding), which only links because tsc_transform_esm first moves imports
+    // used solely as types onto a namespace import (`ns.SomeIface` → undefined → `Object`, as
+    // ts-jest gives). It fails at LINK time, so the eval-throw retry-on-load can't rescue it —
+    // route here, on first load. oxc remains the fallback when the project ships no typescript
+    // (tsc_transform_esm → None).
     if legacy_decorators {
         // Use a TYPESCRIPT-based root (not project_root, which requires esbuild) — tsc_transform_esm
         // only needs `node_modules/typescript`, and many backends (ts-jest projects) ship typescript
@@ -2492,7 +3787,11 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
         }
     }
     let out = crate::transform::transform_with(abs, &raw, legacy_decorators)
-        .map_err(|e| eprintln!("transform {}: {e}", abs.display()))
+        .map_err(|e| {
+            if loader_debug() {
+                eprintln!("transform {}: {e}", abs.display());
+            }
+        })
         .ok()?;
     let _ = std::fs::write(&path, &out);
     Some(out)
@@ -2504,40 +3803,57 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
 /// Returns (specifier, factory_source). Models vitest's hoisting: mocks are registered
 /// before the module graph instantiates. Dynamic specifiers/automock: M-later.
 fn extract_mocks(src: &str) -> Vec<(String, String)> {
+    // Match both `vi.mock(` (vitest) and `jest.mock(` (jest) — same hoisting semantics.
+    extract_mock_calls(src, ["vi.mock(", "jest.mock("])
+}
+
+/// The literal-specifier `vi.doMock` / `jest.doMock` calls of a file (not hoisted; they apply to
+/// later imports), as (spec, factory) like extract_mocks.
+fn extract_do_mocks(src: &str) -> Vec<(String, String)> {
+    extract_mock_calls(src, ["vi.doMock(", "jest.doMock("])
+}
+
+/// `(spec, factory)` of every call to either needle with a string-literal first argument, in
+/// source order: from the AST (mock_scope::mock_calls), or for source that does not parse by
+/// scanning the text (balanced parentheses).
+fn extract_mock_calls(src: &str, needles: [&str; 2]) -> Vec<(String, String)> {
+    let callees = needles.map(|n| n.trim_end_matches('('));
+    if let Some(calls) = crate::mock_scope::mock_calls(src, &callees) {
+        return calls;
+    }
     let mut out = Vec::new();
     let bytes = src.as_bytes();
     let mut i = 0;
-    // Match both `vi.mock(` (vitest) and `jest.mock(` (jest) — same hoisting semantics.
     while let Some((rel, needle_len)) = src.get(i..).and_then(|s| {
-        let a = s.find("vi.mock(").map(|p| (p, "vi.mock(".len()));
-        let b = s.find("jest.mock(").map(|p| (p, "jest.mock(".len()));
-        match (a, b) {
-            (Some(x), Some(y)) => Some(if x.0 <= y.0 { x } else { y }),
-            (Some(x), None) => Some(x),
-            (None, Some(y)) => Some(y),
-            (None, None) => None,
-        }
+        needles
+            .iter()
+            .filter_map(|n| s.find(n).map(|p| (p, n.len())))
+            .min_by_key(|&(p, _)| p)
     }) {
         let start = i + rel + needle_len;
         // parse first arg: a string literal
         let rest = src.get(start..).unwrap_or("");
         let q = rest.trim_start();
         let lead = rest.len() - q.len();
-        let Some(quote) = q.chars().next() else { break };
-        if quote != '"' && quote != '\'' && quote != '`' {
+        if q.is_empty() {
+            break;
+        }
+        // (escapes decoded: an escaped quote does not end the specifier, turbo-test#42 item 4)
+        let Some((spec, len)) = js_string_literal_at(q) else {
             i = start;
             continue;
-        }
-        let after_q = &q[1..];
-        let Some(end_q) = after_q.find(quote) else { break };
-        let spec = after_q[..end_q].to_string();
+        };
+        let Some(len) = len else { break };
         // find factory: from after the spec's closing quote to the balanced ')'
-        let mut j = start + lead + 1 + end_q + 1;
-        // skip to comma (factory) or ')' (no factory)
+        let mut j = start + lead + len;
+        // the next token after the specifier decides: ',' -> a factory follows, anything else
+        // (normally ')') -> no factory. A ',' further on belongs to later code (another call's
+        // factory, a test callback), never to this call.
         let tail = src.get(j..).unwrap_or("");
+        let ws = tail.len() - tail.trim_start().len();
         let mut factory = String::new();
-        if let Some(comma_rel) = tail.find(',') {
-            let fstart = j + comma_rel + 1;
+        if tail[ws..].starts_with(',') {
+            let fstart = j + ws + 1;
             // balance parens from fstart until matching close of vi.mock(
             let mut depth = 1i32; // we're inside vi.mock( ... )
             let mut k = fstart;
@@ -2575,13 +3891,22 @@ fn collect_named_imports(text: &str, abs: &str) -> Vec<String> {
         while let Some(pos) = text.get(search..).and_then(|s| s.find(needle.as_str())) {
             let at = search + pos;
             search = at + needle.len();
-            // look back for the `{ ... }` clause of this import statement
+            // look back for the `{ ... }` clause of THIS import statement only: a brace before
+            // the statement's own `import` keyword belongs to an earlier import (a default-only
+            // `import d from "<abs>"` has no clause of its own)
             let head = text.get(..at).unwrap_or("");
+            let head = head
+                .get(import_keyword_before(head).unwrap_or(0)..)
+                .unwrap_or("");
             if let Some(close) = head.rfind('}') {
                 if let Some(open) = head.get(..close).unwrap_or("").rfind('{') {
                     for part in head.get(open + 1..close).unwrap_or("").split(',') {
-                        let name = part.trim().split_whitespace().last().unwrap_or("").trim();
-                        if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$') {
+                        let name = part.split_whitespace().last().unwrap_or("").trim();
+                        if !name.is_empty()
+                            && name
+                                .chars()
+                                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+                        {
                             out.push(name.to_string());
                         }
                     }
@@ -2592,6 +3917,22 @@ fn collect_named_imports(text: &str, abs: &str) -> Vec<String> {
     out
 }
 
+/// Byte offset of the last `import` KEYWORD in `head` (not part of a longer identifier such as
+/// `importer`).
+fn import_keyword_before(head: &str) -> Option<usize> {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut end = head.len();
+    while let Some(at) = head[..end].rfind("import") {
+        let before = head[..at].chars().next_back();
+        let after = head[at + "import".len()..].chars().next();
+        if !before.is_some_and(ident) && !after.is_some_and(ident) {
+            return Some(at);
+        }
+        end = at;
+    }
+    None
+}
+
 fn register_mock_value<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     abs: &Path,
@@ -2599,26 +3940,56 @@ fn register_mock_value<'s>(
 ) -> Option<()> {
     let global = scope.get_current_context().global(scope);
     let mut names = object_keys(scope, global, exports_val);
+    // names an import may name although the mock lacks them (runtime.js __ttMockNames)
+    let extra = v8::String::new(scope, "__ttMockNames")
+        .and_then(|k| global.get(scope, k.into()))
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok())
+        .and_then(|f| {
+            let undefined = v8::undefined(scope).into();
+            f.call(scope, undefined, &[exports_val])
+        });
+    if let Some(extra) = extra.filter(|v| v.is_array()) {
+        let arr = v8::Local::<v8::Array>::try_from(extra).ok();
+        for i in 0..arr.map_or(0, |a| a.length()) {
+            if let Some(n) = arr.and_then(|a| a.get_index(scope, i)) {
+                let n = n.to_rust_string_lossy(scope);
+                if !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+        }
+    }
     // Isolate-reuse: if this path was ALREADY loaded (e.g. a setup mock, or a real module a
     // cached importer holds a reference to), a test file re-mocking it must NOT swap in a new
     // exports object — cached CJS importers hold the old object and read its props live, so they
     // would keep seeing the old mock (e.g. the analytics trackEvent the test spies on differs
     // from the one a cached hook calls → "0 calls"). Instead, mutate the existing object in
     // place: copy the new mock's props onto it. Identity is preserved; every importer sees the
-    // update. (Fresh mode reloads every module per file, so this only matters under reuse.)
-    if reuse_isolate_enabled() {
+    // update. (Fresh mode reloads every module per file, so this only matters on the reuse path;
+    // a fresh isolate under the reuse switch registers a new module, as vitest does.)
+    if on_reuse_path() {
         if let Some(existing_g) = REGISTRY.with(|r| r.borrow().cjs_exports.get(abs).cloned()) {
             let existing = v8::Local::new(scope, &existing_g);
             if existing.is_object() && exports_val.is_object() {
-                if let (Some(dst), Some(src)) = (existing.to_object(scope), exports_val.to_object(scope)) {
+                if let (Some(dst), Some(src)) =
+                    (existing.to_object(scope), exports_val.to_object(scope))
+                {
                     for n in &names {
                         if let Some(k) = v8::String::new(scope, n) {
+                            // (a __ttMockNames name the mock lacks is not copied)
+                            if !src.has(scope, k.into()).unwrap_or(false) {
+                                continue;
+                            }
                             if let Some(val) = src.get(scope, k.into()) {
                                 dst.set(scope, k.into(), val);
                             }
                         }
                     }
-                    REGISTRY.with(|r| r.borrow_mut().mocks.insert(abs.to_path_buf(), String::new()));
+                    REGISTRY.with(|r| {
+                        r.borrow_mut()
+                            .mocks
+                            .insert(abs.to_path_buf(), String::new())
+                    });
                     invalidate_importers(abs);
                     return Some(());
                 }
@@ -2643,28 +4014,53 @@ fn register_mock_value<'s>(
         let mut reg = r.borrow_mut();
         reg.cjs_exports.insert(abs.to_path_buf(), exports_global);
         reg.cjs_export_names.insert(abs.to_path_buf(), names);
-        reg.cjs_synth_by_path.insert(abs.to_path_buf(), synth_global);
+        reg.cjs_synth_by_path
+            .insert(abs.to_path_buf(), synth_global);
         reg.path_by_hash.insert(hash, abs.to_path_buf());
         reg.mocks.insert(abs.to_path_buf(), String::new());
     });
-    if reuse_isolate_enabled() {
+    if on_reuse_path() {
         invalidate_importers(abs);
     }
     Some(())
 }
 
-/// Register a mock by running its factory source (self-contained `() => (...)`).
-fn register_mock<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, factory_src: &str) -> Option<()> {
-    let exports_val = if factory_src.is_empty() {
-        v8::Object::new(scope).into()
-    } else {
-        let code = v8::String::new(scope, &format!("({factory_src})"))?;
-        let script = v8::Script::compile(scope, code, None)?;
-        let f = v8::Local::<v8::Function>::try_from(script.run(scope)?).ok()?;
-        let undef = v8::undefined(scope).into();
-        f.call(scope, undef, &[])?
-    };
+/// Register a synthetic module for `abs` by running a generated, self-contained factory source
+/// (`() => (...)`): the asset / JSON stubs load_dep serves. (Test-file mock factories are run by
+/// the runtime's vi.mock, which handles factory errors and async factories.)
+fn register_mock<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+    factory_src: &str,
+) -> Option<()> {
+    let code = v8::String::new(scope, &format!("({factory_src})"))?;
+    let script = v8::Script::compile(scope, code, None)?;
+    let f = v8::Local::<v8::Function>::try_from(script.run(scope)?).ok()?;
+    let undef = v8::undefined(scope).into();
+    let exports_val = f.call(scope, undef, &[])?;
     register_mock_value(scope, abs, exports_val)
+}
+
+/// When `abs` is mocked by a factory that threw, the error importing it must throw (runtime.js
+/// registered its error stand-in for it; `__ttMockFactoryError` maps that back to the error).
+fn mock_factory_error<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let g = REGISTRY.with(|r| {
+        let reg = r.borrow();
+        reg.mocks
+            .contains_key(abs)
+            .then(|| reg.cjs_exports.get(abs).cloned())
+            .flatten()
+    })?;
+    let exports = v8::Local::new(scope, &g);
+    let global = scope.get_current_context().global(scope);
+    let k = v8::String::new(scope, "__ttMockFactoryError")?;
+    let f = v8::Local::<v8::Function>::try_from(global.get(scope, k.into())?).ok()?;
+    let undef = v8::undefined(scope).into();
+    let err = f.call(scope, undef, &[exports])?;
+    (!err.is_undefined()).then_some(err)
 }
 
 /// Drain globalThis.__pendingMocks (filled by runtime vi.mock during a module's execution),
@@ -2726,24 +4122,31 @@ fn drain_pending_mocks(scope: &mut v8::PinScope, base_dir: &Path, skip_relative:
     // `vi.mocked(<named import>)` is undefined / points at the real export bug).
     let mut retained: Vec<v8::Local<v8::Value>> = Vec::new();
     for i in 0..arr.length() {
-        let Some(item_val) = arr.get_index(scope, i) else { continue };
-        let Some(item) = v8::Local::<v8::Object>::try_from(item_val).ok() else {
+        let item = arr
+            .get_index(scope, i)
+            .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok());
+        let Some(item) = item else {
             continue;
         };
-        let Some(spec) = item.get(scope, spec_key.into()).map(|v| v.to_rust_string_lossy(scope)) else {
+        let Some(spec) = item
+            .get(scope, spec_key.into())
+            .map(|v| v.to_rust_string_lossy(scope))
+        else {
             continue;
         };
         let _ = skip_relative;
-        let exports = item.get(scope, exp_key.into()).unwrap_or_else(|| v8::undefined(scope).into());
+        let exports = item
+            .get(scope, exp_key.into())
+            .unwrap_or_else(|| v8::undefined(scope).into());
         if exports.is_promise() || is_thenable(scope, exports) {
-            retained.push(item_val); // unresolved factory — defer to the outer drain
+            retained.push(item.into()); // unresolved factory — defer to the outer drain
             continue;
         }
         if exports.is_undefined() {
-            continue; // failed/async-rejected factory — fall back to the real module
+            continue; // a factory that returned nothing (a throwing one left its error stand-in)
         }
-        if let Some(abs) = resolve_spec(&spec, base_dir) {
-            register_mock_value(scope, &abs, exports);
+        if let Some(key) = mock_key(&spec, base_dir) {
+            register_mock_value(scope, &key, exports);
         }
     }
     // rebuild the queue with only the still-pending entries (cleared if none remain)
@@ -2757,9 +4160,12 @@ fn drain_pending_mocks(scope: &mut v8::PinScope, base_dir: &Path, skip_relative:
 /// True if `val` is a non-promise object exposing a callable `then` (a thenable). Promises are
 /// detected separately via `is_promise()`; both kinds must be deferred, not registered as mocks.
 fn is_thenable(scope: &mut v8::PinScope, val: v8::Local<v8::Value>) -> bool {
-    let Ok(obj) = v8::Local::<v8::Object>::try_from(val) else { return false };
-    let Some(k) = v8::String::new(scope, "then") else { return false };
-    obj.get(scope, k.into()).map(|v| v.is_function()).unwrap_or(false)
+    let Ok(obj) = v8::Local::<v8::Object>::try_from(val) else {
+        return false;
+    };
+    let then = v8::String::new(scope, "then");
+    then.and_then(|k| obj.get(scope, k.into()))
+        .is_some_and(|v| v.is_function())
 }
 
 // ---- CommonJS -------------------------------------------------------------
@@ -2806,7 +4212,11 @@ fn compile_cjs_cached<'s>(
         if !bytes.is_empty() {
             let cached = v8::CachedData::new(&bytes);
             let mut source = sc::Source::new_with_cached_data(code, None, cached);
-            let compiled = sc::compile(scope, &mut source, sc::CompileOptions::ConsumeCodeCache, sc::NoCacheReason::NoReason);
+            let (consume, reason) = (
+                sc::CompileOptions::ConsumeCodeCache,
+                sc::NoCacheReason::NoReason,
+            );
+            let compiled = sc::compile(scope, &mut source, consume, reason);
             // `bytes` stays alive through this block (Source borrowed it for the compile).
             if let Some(s) = compiled {
                 return Some(s);
@@ -2815,7 +4225,11 @@ fn compile_cjs_cached<'s>(
     }
     // Miss/reject: compile fresh and persist the bytecode for next time.
     let mut source = sc::Source::new(code, None);
-    let script = sc::compile(scope, &mut source, sc::CompileOptions::NoCompileOptions, sc::NoCacheReason::NoReason)?;
+    let (options, reason) = (
+        sc::CompileOptions::NoCompileOptions,
+        sc::NoCacheReason::NoReason,
+    );
+    let script = sc::compile(scope, &mut source, options, reason)?;
     if let Some(cc) = script.get_unbound_script(scope).create_code_cache() {
         write_atomic_bytes(&path, &cc);
     }
@@ -2826,12 +4240,26 @@ fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks: bool)
     load_cjs_inner(scope, abs, drain_mocks, false)
 }
 
-fn load_cjs_inner<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks: bool, prefer_metadata: bool) -> Option<()> {
+fn load_cjs_inner<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+    drain_mocks: bool,
+    prefer_metadata: bool,
+) -> Option<()> {
     if REGISTRY.with(|r| r.borrow().cjs_synth_by_path.contains_key(abs)) {
         return Some(());
     }
     let Some(raw) = read_transformed(abs, true, prefer_metadata) else {
-        eprintln!("  cjs read/transform failed: {}", abs.display());
+        if loader_debug() {
+            eprintln!("  cjs read/transform failed: {}", abs.display());
+        }
+        // a TypeScript / JSX module oxc does not transform: vite's error, the module's compile
+        // error (turbo-test#113)
+        if let Some(e) = vite_error_value(scope, abs) {
+            let g = v8::Global::new(scope, e);
+            COMPILE_EXC.with(|c| *c.borrow_mut() = Some((g, abs.to_path_buf())));
+            scope.throw_exception(e);
+        }
         return None;
     };
     let wrapped =
@@ -2839,13 +4267,21 @@ fn load_cjs_inner<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks:
     let code = v8::String::new(scope, &wrapped)?;
     // Under --coverage, give the script an origin named after the file so V8's precise-coverage
     // report carries a URL we can map back to source. Off by default (origin None) — zero change.
-    let script = {
+    // (compiled script, the compile error when neither the native output nor the esbuild retry
+    // compiles: re-thrown below, outside this TryCatch, as the load's cause)
+    let (script, compile_exc) = {
         let tc = std::pin::pin!(v8::TryCatch::new(scope));
         let tc = &mut tc.init();
-        let origin = if crate::coverage::enabled() {
-            v8::String::new(tc, &abs.to_string_lossy()).map(|name| {
-                v8::ScriptOrigin::new(tc, name.into(), 0, 0, false, 123, None, false, false, false, None)
-            })
+        // Test locations (location.rs) find the test file's frames by this name too.
+        let located = crate::location::is_entry(abs);
+        if located {
+            crate::location::set_offset(abs, 1);
+        }
+        // (failure frames name an app module's file too: junit, turbo-test#81)
+        let framed = crate::location::frames_enabled()
+            && !abs.components().any(|c| c.as_os_str() == "node_modules");
+        let origin = if crate::coverage::enabled() || located || framed {
+            v8::String::new(tc, &abs.to_string_lossy()).map(|name| script_origin(tc, name))
         } else {
             None
         };
@@ -2858,7 +4294,7 @@ fn load_cjs_inner<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks:
             }
         };
         match compiled {
-            Some(s) => Some(v8::Global::new(tc, s)),
+            Some(s) => (Some(v8::Global::new(tc, s)), None),
             None => {
                 // The native (oxc) emitter can occasionally produce JS that V8 rejects at compile —
                 // a transform edge the esbuild path handles cleanly. Because it fails at COMPILE
@@ -2867,12 +4303,13 @@ fn load_cjs_inner<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks:
                 // hard-load-erroring. esbuild is the proven fallback (same output read_transformed
                 // uses when native is disabled), so a file that only the native path mangled now
                 // loads; a genuinely-broken source still fails (esbuild can't compile it either).
-                let native_exc =
-                    tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_default();
+                let native_err = tc.exception().map(|e| v8::Global::new(tc, e));
+                let native_exc = tc
+                    .exception()
+                    .map(|e| e.to_rust_string_lossy(tc))
+                    .unwrap_or_default();
                 let fb = esbuild_cjs_fallback(abs, prefer_metadata).and_then(|src| {
-                    let wrapped_fb = format!(
-                        "(function (exports, module, require, __filename, __dirname) {{\n{src}\n}})"
-                    );
+                    let wrapped_fb = format!("(function (exports, module, require, __filename, __dirname) {{\n{src}\n}})");
                     if wrapped_fb == wrapped {
                         return None; // native wasn't the source (output identical) — no point retrying
                     }
@@ -2880,12 +4317,21 @@ fn load_cjs_inner<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks:
                     v8::Script::compile(tc, code_fb, None).map(|s| v8::Global::new(tc, s))
                 });
                 if fb.is_none() {
-                    eprintln!("  cjs compile failed: {} :: {native_exc}", abs.display());
+                    if loader_debug() {
+                        eprintln!("  cjs compile failed: {} :: {native_exc}", abs.display());
+                    }
+                    (None, native_err)
+                } else {
+                    (fb, None)
                 }
-                fb
             }
         }
     };
+    if let Some(e) = compile_exc {
+        COMPILE_EXC.with(|c| *c.borrow_mut() = Some((e.clone(), abs.to_path_buf())));
+        let e = v8::Local::new(scope, &e);
+        scope.throw_exception(e);
+    }
     let script = v8::Local::new(scope, &script?);
     let wrapper = v8::Local::<v8::Function>::try_from(script.run(scope)?).ok()?;
 
@@ -2904,39 +4350,62 @@ fn load_cjs_inner<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks:
     let filename = v8::String::new(scope, &abs.to_string_lossy())?;
     // pass this module's path as the require importer, so native_require can record the import
     // edge (imported <- importer) for mock-graph invalidation under isolate-reuse.
-    let require = mk.call(scope, undef, &[dir_str.into(), esm_flag.into(), filename.into()])?;
+    let require = mk.call(
+        scope,
+        undef,
+        &[dir_str.into(), esm_flag.into(), filename.into()],
+    )?;
     // expose this module's dir so runtime vi.mock() (hoisted above the requires) can resolve a
     // relative spec + register immediately, before the module's consumer requires run.
-    let prev_dir = if let Some(k) = v8::String::new(scope, "__ttDir") {
+    let prev_dir = v8::String::new(scope, "__ttDir").and_then(|k| {
         let prev = global.get(scope, k.into());
         global.set(scope, k.into(), dir_str.into());
         prev
-    } else {
-        None
-    };
+    });
     // mark in-progress (with its module object) so a circular require() returns live exports
     let module_global = v8::Global::new(scope, module_obj);
-    REGISTRY.with(|r| r.borrow_mut().loading.insert(abs.to_path_buf(), module_global));
-    let call_res = {
+    REGISTRY.with(|r| {
+        r.borrow_mut()
+            .loading
+            .insert(abs.to_path_buf(), module_global)
+    });
+    REQUIRE_STACK.with(|st| st.borrow_mut().push(abs.to_path_buf()));
+    // (body result, the body's exception: re-thrown below unless the decorator retry runs)
+    let (call_res, body_exc) = {
         let tc = std::pin::pin!(v8::TryCatch::new(scope));
         let tc = &mut tc.init();
         let r = wrapper.call(
             tc,
             undef,
-            &[exports_obj.into(), module_obj.into(), require, filename.into(), dir_str.into()],
+            &[
+                exports_obj.into(),
+                module_obj.into(),
+                require,
+                filename.into(),
+                dir_str.into(),
+            ],
         );
-        if r.is_none() && tc.has_caught() && std::env::var("TURBO_CJS_DEBUG").is_ok() {
-            let stk = tc.stack_trace().map(|s| s.to_rust_string_lossy(tc)).unwrap_or_default();
-            eprintln!(
-                "  cjs body threw: {} :: {} :: {}",
-                abs.display(),
-                tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_default(),
-                stk.lines().take(4).collect::<Vec<_>>().join(" | ")
-            );
+        if r.is_none() && tc.has_caught() && loader_debug() {
+            let stk = tc
+                .stack_trace()
+                .map(|s| s.to_rust_string_lossy(tc))
+                .unwrap_or_default();
+            let exc = tc
+                .exception()
+                .map(|e| e.to_rust_string_lossy(tc))
+                .unwrap_or_default();
+            let top = stk.lines().take(4).collect::<Vec<_>>().join(" | ");
+            eprintln!("  cjs body threw: {} :: {exc} :: {top}", abs.display());
         }
-        r
+        let exc = if r.is_none() {
+            tc.exception().map(|e| v8::Global::new(tc, e))
+        } else {
+            None
+        };
+        (r, exc)
     };
     REGISTRY.with(|r| r.borrow_mut().loading.remove(abs));
+    REQUIRE_STACK.with(|st| st.borrow_mut().pop());
     if let (Some(k), Some(prev)) = (v8::String::new(scope, "__ttDir"), prev_dir) {
         global.set(scope, k.into(), prev);
     }
@@ -2950,9 +4419,17 @@ fn load_cjs_inner<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks:
         if !prefer_metadata
             && !abs.components().any(|c| c.as_os_str() == "node_modules")
             && decorator_metadata_enabled(abs)
-            && std::fs::read_to_string(abs).map(|s| file_has_decorator(&s)).unwrap_or(false)
+            && std::fs::read_to_string(abs)
+                .map(|s| file_has_decorator(&s))
+                .unwrap_or(false)
         {
             return load_cjs_inner(scope, abs, drain_mocks, true);
+        }
+        // Re-throw the module's own error (Node/vitest: `require()` / the importing module /
+        // the entry load fail with it), instead of a generic "failed to load" with no cause.
+        if let Some(e) = body_exc {
+            let e = v8::Local::new(scope, &e);
+            scope.throw_exception(e);
         }
         return None;
     }
@@ -2981,6 +4458,7 @@ fn load_cjs_inner<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks:
     }
 
     let final_exports = module_obj.get(scope, exports_key.into())?;
+    mark_external_cjs(scope, global, abs, final_exports);
     let names = object_keys(scope, global, final_exports);
     let exports_global = v8::Global::new(scope, final_exports);
     let synth = make_synthetic(scope, &names)?;
@@ -2988,12 +4466,55 @@ fn load_cjs_inner<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks:
     let synth_global = v8::Global::new(scope, synth);
     REGISTRY.with(|r| {
         let mut reg = r.borrow_mut();
-        reg.real_exports.insert(abs.to_path_buf(), exports_global.clone());
+        reg.real_exports
+            .insert(abs.to_path_buf(), exports_global.clone());
         reg.cjs_exports.insert(abs.to_path_buf(), exports_global);
         reg.cjs_export_names.insert(abs.to_path_buf(), names);
-        reg.cjs_synth_by_path.insert(abs.to_path_buf(), synth_global);
+        reg.cjs_synth_by_path
+            .insert(abs.to_path_buf(), synth_global);
         reg.path_by_hash.insert(hash, abs.to_path_buf());
     });
+    Some(())
+}
+
+/// A package's CommonJS `module.exports` without `__esModule` goes into runtime.js's
+/// `__ttExternalCjs`: importing it gives Node's namespace of it (its default the whole
+/// `module.exports`, plus `'module.exports'`), as vitest imports an external through Node; an app
+/// CommonJS file's own `default` stays its default, as vitest's inlined-module interop gives it
+/// (turbo-test#122, #133).
+fn mark_external_cjs<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    global: v8::Local<'s, v8::Object>,
+    abs: &Path,
+    exports: v8::Local<'s, v8::Value>,
+) -> Option<()> {
+    if !abs.components().any(|c| c.as_os_str() == "node_modules") {
+        return None;
+    }
+    // an object (a primitive `module.exports` has no names to mark) without `__esModule`
+    let obj = v8::Local::<v8::Object>::try_from(exports).ok()?;
+    let ekey = v8::String::new(scope, "__esModule")?;
+    if obj.has(scope, ekey.into()).unwrap_or(true) {
+        return None;
+    }
+    let mkey = v8::String::new(scope, "__ttMarkExternalCjs")?;
+    let mark = v8::Local::<v8::Function>::try_from(global.get(scope, mkey.into())?).ok()?;
+    // the names Node's cjs-module-lexer finds where they differ from the object's own
+    let names = std::fs::read_to_string(abs)
+        .ok()
+        .and_then(|src| crate::esm_cjs::cjs_literal_export_names(&src));
+    let names: v8::Local<v8::Value> = match names {
+        Some(names) => {
+            let items: Vec<v8::Local<v8::Value>> = names
+                .iter()
+                .filter_map(|n| v8::String::new(scope, n).map(Into::into))
+                .collect();
+            v8::Array::new_with_elements(scope, &items).into()
+        }
+        None => v8::undefined(scope).into(),
+    };
+    let undefined = v8::undefined(scope).into();
+    mark.call(scope, undefined, &[exports, names]);
     Some(())
 }
 
@@ -3017,7 +4538,10 @@ fn object_keys(
         return vec![];
     };
     (0..arr.length())
-        .filter_map(|i| arr.get_index(scope, i).map(|v| v.to_rust_string_lossy(scope)))
+        .filter_map(|i| {
+            arr.get_index(scope, i)
+                .map(|v| v.to_rust_string_lossy(scope))
+        })
         .collect()
 }
 
@@ -3033,7 +4557,12 @@ fn make_synthetic<'s>(
         }
     }
     let mod_name = v8::String::new(scope, "<synthetic>")?;
-    Some(v8::Module::create_synthetic_module(scope, mod_name, &export_names, synth_eval))
+    Some(v8::Module::create_synthetic_module(
+        scope,
+        mod_name,
+        &export_names,
+        synth_eval,
+    ))
 }
 
 fn synth_eval<'s>(
@@ -3042,29 +4571,83 @@ fn synth_eval<'s>(
 ) -> Option<v8::Local<'s, v8::Value>> {
     v8::callback_scope!(unsafe scope, context);
     let hash = module.get_identity_hash().get();
-    let (exports_g, names) = REGISTRY.with(|r| {
+    let entry = REGISTRY.with(|r| {
         let reg = r.borrow();
         let path = reg.path_by_hash.get(&hash)?.clone();
-        Some((
-            reg.cjs_exports.get(&path)?.clone(),
-            reg.cjs_export_names.get(&path).cloned().unwrap_or_default(),
-        ))
-    })?;
+        let exports = reg.cjs_exports.get(&path)?.clone();
+        // JSON and asset stubs go through the mock table too, but their default is the value
+        let is_mock = reg.mocks.contains_key(&path)
+            && !is_asset(&path)
+            && path.extension().and_then(|e| e.to_str()) != Some("json");
+        let names = reg.cjs_export_names.get(&path).cloned().unwrap_or_default();
+        let app_cjs =
+            !path.components().any(|c| c.as_os_str() == "node_modules") && !path.starts_with("<");
+        Some((exports, names, is_mock, app_cjs))
+    });
+    // A module whose exports were dropped (a reused isolate's reset) fails its importer's
+    // evaluation: evaluation steps that return nothing without an exception abort V8
+    // (`Check failed: has_exception()`, turbo-test#79).
+    let (exports_g, names, is_mock, app_cjs) = entry.or_else(|| throw_none(scope, UNLOADED))?;
     let exports = v8::Local::new(scope, &exports_g);
     let dkey = v8::String::new(scope, "default")?;
-    module.set_synthetic_module_export(scope, dkey, exports)?;
+    // A mock's (factory result's / automock's) own `default` key IS its default export (vitest,
+    // and the module runner's interop). For CommonJS the whole `module.exports` is, except that
+    // vitest's interop (`interopModule`) takes `exports.default` of one marked `__esModule` (tsc /
+    // babel output) that has a `default` (turbo-test#122).
+    // An app CommonJS file (vitest inlines it) has its own `default` as its default either way.
+    let esm_marked = |scope: &mut v8::PinScope<'s, '_>, o: v8::Local<v8::Object>| {
+        let k = v8::String::new(scope, "__esModule").unwrap();
+        (app_cjs || o.has(scope, k.into()).unwrap_or(false))
+            && o.has(scope, dkey.into()).unwrap_or(false)
+    };
+    let default = v8::Local::<v8::Object>::try_from(exports)
+        .ok()
+        .filter(|o| {
+            if is_mock {
+                o.has_own_property(scope, dkey.into()).unwrap_or(false)
+            } else {
+                esm_marked(scope, *o)
+            }
+        })
+        .and_then(|o| o.get(scope, dkey.into()));
+    let default = match default {
+        Some(d) => d,
+        // a vi.mock factory without `default`: its use throws vitest's error (turbo-test#137)
+        None if is_mock => mock_default(scope, exports).unwrap_or(exports),
+        None => exports,
+    };
+    module.set_synthetic_module_export(scope, dkey, default)?;
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(exports) {
         for n in names {
             if n == "default" {
                 continue;
             }
             let k = v8::String::new(scope, &n)?;
+            // A name the object lacks (requested by an importer, missing from a mock factory)
+            // stays undefined without being read: an ES import binding is vitest-lenient at link
+            // time, and a strict mock's missing-export throw must not fire while linking.
+            if !obj.has(scope, k.into()).unwrap_or(false) {
+                continue;
+            }
             if let Some(v) = obj.get(scope, k.into()) {
                 module.set_synthetic_module_export(scope, k, v)?;
             }
         }
     }
     Some(v8::undefined(scope).into())
+}
+
+/// runtime.js's `__ttMockDefault(exports)`: the default export of a mock whose factory returned
+/// no `default` (a stand-in that throws vitest's error when used, turbo-test#137).
+fn mock_default<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    exports: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let global = scope.get_current_context().global(scope);
+    let k = v8::String::new(scope, "__ttMockDefault")?;
+    let f = v8::Local::<v8::Function>::try_from(global.get(scope, k.into())?).ok()?;
+    let undef = v8::undefined(scope).into();
+    f.call(scope, undef, &[exports])
 }
 
 // ---- Layer B: lazy module stubs -------------------------------------------
@@ -3143,13 +4726,15 @@ fn lazy_stub_factory_src(default_js: &str) -> String {
   return new Proxy({{}}, {{
     get: function(t, k) {{
       if (k === '__esModule') return false;
-      if (typeof k === 'symbol') return undefined;
+      // not a thenable: `await import(barrel)` resolves its promise WITH this namespace, and an
+      // answered `then` made promise resolution call it as a thenable and wait forever
+      if (typeof k === 'symbol' || k === 'then') return undefined;
       if (k === '__turboLazyStub') return true;
       if (k === 'default') return cache['__default'] || (cache['__default'] = make(DEFAULT_NAME || 'default'));
       return cache[k] || (cache[k] = make(k));
     }},
     set: function(t, k, v) {{ cache[k] = v; return true; }},
-    has: function() {{ return true; }},
+    has: function(t, k) {{ return k !== 'then'; }},
     defineProperty: function() {{ return true; }},
     deleteProperty: function() {{ return true; }},
     getOwnPropertyDescriptor: function() {{ return undefined; }},
@@ -3179,7 +4764,11 @@ fn ensure_lazy_stub<'s>(
     let script = v8::Script::compile(scope, code, None)?;
     let val = script.run(scope)?;
     let g = v8::Global::new(scope, val);
-    REGISTRY.with(|r| r.borrow_mut().lazy_stub_ns.insert(cache_key.to_string(), g.clone()));
+    REGISTRY.with(|r| {
+        r.borrow_mut()
+            .lazy_stub_ns
+            .insert(cache_key.to_string(), g.clone())
+    });
     Some(v8::Local::new(scope, &g))
 }
 
@@ -3210,6 +4799,65 @@ thread_local! {
     /// behavior — stubbing there would mask bugs AND turn a transient turbo-dom parser failure
     /// into a permanent DOM-less stub (mass "document is not defined").
     static ENTRY_LENIENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The test file this thread runs (its mock factories see its scope, mock_scope.rs).
+    static TEST_FILE: std::cell::RefCell<PathBuf> = const { std::cell::RefCell::new(PathBuf::new()) };
+}
+
+/// The test file's top-level bindings its `vi.mock` factories name (mock_scope.rs); the shared
+/// `let`s the module runner already routes through `globalThis.__ms` (`mr`) are left out.
+fn factory_bindings(entry: &Path, src: &str, mr: bool) -> Vec<crate::mock_scope::Binding> {
+    let mocks = extract_mocks(src);
+    if mocks.is_empty() {
+        return Vec::new();
+    }
+    let factories: String = mocks
+        .iter()
+        .map(|(_, f)| f.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let shared = if mr {
+        shared_mock_lets(src)
+    } else {
+        Vec::new()
+    };
+    crate::mock_scope::bindings(entry, src, &factories)
+        .into_iter()
+        .filter(|(n, _)| !shared.contains(n))
+        .collect()
+}
+
+/// `src` of the file `abs` as it loads: the test file gets the binder statement that hands its
+/// factories' bindings to the runtime, on a line of its own at the end (so no position moves).
+/// An app module's source as vite's transform sees it: `import.meta.glob` calls expanded against
+/// the file system (src/import_glob.rs, turbo-test#130, #145), the vitest root (the working
+/// directory) the base of `/` patterns, the config's `resolve.alias` (TURBO_ALIAS) its aliases. node_modules are read as they are (vitest externalizes them).
+fn read_app_source(file: &Path) -> Option<String> {
+    let src = std::fs::read_to_string(file).ok()?;
+    if file.components().any(|c| c.as_os_str() == "node_modules") {
+        return Some(src);
+    }
+    let root = std::env::current_dir().ok()?;
+    let aliases: Vec<(String, String)> = std::env::var("TURBO_ALIAS")
+        .map(|raw| {
+            raw.split('\u{1e}')
+                .filter_map(|r| r.split_once('\u{1f}'))
+                .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(crate::import_glob::expand(file, &src, &root, &aliases).unwrap_or(src))
+}
+
+fn with_binder(abs: &Path, src: String, mr: bool) -> String {
+    if !TEST_FILE.with(|f| *f.borrow() == abs) {
+        return src;
+    }
+    let bindings = factory_bindings(abs, &src, mr);
+    if bindings.is_empty() {
+        return src;
+    }
+    format!("{src}\n{}", crate::mock_scope::binder(&bindings))
 }
 
 /// Whether to stub a failed node_modules load for the CURRENT file. e2e entries only;
@@ -3228,7 +4876,11 @@ fn native_require(
     // importer module kind (ESM vs CJS) selects the export conditions for resolution
     let esm = {
         let a = args.get(2);
-        if a.is_undefined() { true } else { a.boolean_value(scope) }
+        if a.is_undefined() {
+            true
+        } else {
+            a.boolean_value(scope)
+        }
     };
     // node builtins (fs/path/module/...) -> shimmed module objects
     if is_node_builtin(&spec) {
@@ -3270,16 +4922,34 @@ fn native_require(
                 return;
             }
         }
-        throw(scope, &format!("cannot resolve {spec}"));
+        // the module runner's form of a static import: vitest's import error (turbo-test#108)
+        let importer = args.get(3);
+        let importer_path = (importer.is_string()).then(|| importer.to_rust_string_lossy(scope));
+        let imported = importer_path.as_ref().is_some_and(|f| {
+            std::fs::read_to_string(f)
+                .is_ok_and(|src| crate::parse_error::imports_statically(Path::new(f), &src, &spec))
+        });
+        if let (true, Some(f)) = (imported, &importer_path) {
+            let root = std::env::current_dir().unwrap_or_default();
+            let (message, code) = import_not_found(&spec, f, &root, true);
+            throw_with_code(scope, &message, code);
+        } else {
+            throw_module_not_found(scope, &spec, importer);
+        }
         return;
     };
+    let abs = query_mock_variant(&spec, abs);
     // Record the import edge (imported <- importer) for mock-graph invalidation under reuse.
     if reuse_isolate_enabled() {
         let importer = args.get(3);
         if !importer.is_undefined() {
             let imp = PathBuf::from(importer.to_rust_string_lossy(scope));
             REGISTRY.with(|r| {
-                r.borrow_mut().import_edges.entry(abs.clone()).or_default().insert(imp);
+                r.borrow_mut()
+                    .import_edges
+                    .entry(abs.clone())
+                    .or_default()
+                    .insert(imp);
             });
         }
     }
@@ -3293,8 +4963,12 @@ fn native_require(
         }
         return;
     }
-    // CSS/asset/JSON imports -> stub via load_dep (CSS-module proxy / parsed JSON value)
-    if is_asset(&abs) || abs.extension().and_then(|e| e.to_str()) == Some("json") {
+    // CSS/asset/JSON imports -> stub via load_dep (CSS-module proxy / vite's asset string / parsed
+    // JSON value)
+    if is_asset(&abs)
+        || crate::vite_asset::is_asset_id(&abs)
+        || abs.extension().and_then(|e| e.to_str()) == Some("json")
+    {
         load_dep(scope, &abs);
         if let Some(g) = REGISTRY.with(|r| r.borrow().cjs_exports.get(&abs).cloned()) {
             rv.set(v8::Local::new(scope, &g));
@@ -3316,7 +4990,9 @@ fn native_require(
                     // an arch mismatch) — stub it so an optional require() (chokidar's fsevents)
                     // doesn't take the file down.
                     if stub_failed_deps() && register_node_stub(scope, &abs).is_some() {
-                        if let Some(g) = REGISTRY.with(|r| r.borrow().cjs_exports.get(&abs).cloned()) {
+                        if let Some(g) =
+                            REGISTRY.with(|r| r.borrow().cjs_exports.get(&abs).cloned())
+                        {
                             rv.set(v8::Local::new(scope, &g));
                         }
                         return;
@@ -3329,23 +5005,81 @@ fn native_require(
         rv.set(v8::Local::new(scope, &g));
         return;
     }
-    // mocked?
-    let mocked = REGISTRY.with(|r| r.borrow().mocks.get(&abs).cloned());
-    if let Some(factory) = mocked {
-        if !REGISTRY.with(|r| r.borrow().cjs_exports.contains_key(&abs)) {
-            register_mock(scope, &abs, &factory);
+    // mocked? A registered mock is served from its cjs_exports below. Its exports stay while it
+    // is registered (invalidate_importers never evicts a mocked module, turbo-test#31 item 2);
+    // a mocks entry without them would load the real module rather than serve an empty `{}`.
+    // (an entry the test put into require.cache is served like a mock)
+    let put = CACHE_PUT.with(|c| c.borrow().contains(&abs));
+    // A package's own require() sees no vi.mock: vitest loads an external through Node, which
+    // never consults the mock registry (turbo-test#135).
+    if !put
+        && dir.contains("/node_modules/")
+        && REGISTRY.with(|r| r.borrow().mocks.contains_key(&abs))
+    {
+        if let Some(g) = actual_exports(scope, &abs) {
+            rv.set(v8::Local::new(scope, &g));
+            return;
         }
+    }
+    let mocked = REGISTRY.with(|r| {
+        let reg = r.borrow();
+        (put || reg.mocks.contains_key(&abs)) && reg.cjs_exports.contains_key(&abs)
+    });
+    if mocked {
+        // served below
     } else if mr_enabled() || detect_kind(&abs) == Kind::Cjs {
         // MR: load everything as CJS (esbuild --format=cjs) so imports are live + mockable.
-        if load_cjs(scope, &abs, true).is_none() {
+        let (loaded, cause) = {
+            let tc = std::pin::pin!(v8::TryCatch::new(scope));
+            let tc = &mut tc.init();
+            let ok = load_cjs(tc, &abs, true).is_some();
+            let cause = if ok {
+                None
+            } else {
+                tc.exception().map(|e| v8::Global::new(tc, e))
+            };
+            (ok, cause)
+        };
+        if !loaded {
             // A node_modules dep that can't load in the shimmed env -> stub it (don't crash the
             // importer). App modules still hard-fail (a real bug there must surface).
-            if abs.to_string_lossy().contains("/node_modules/") && stub_failed_deps()
+            if abs.to_string_lossy().contains("/node_modules/")
+                && stub_failed_deps()
                 && register_node_stub(scope, &abs).is_some()
             {
                 // fall through to return the stub
             } else {
-                throw(scope, &format!("failed to load {spec}"));
+                // The module's own error (body throw, compile error) propagates, as in Node; a
+                // load that failed without one (unreadable / untransformable) gets a generic error.
+                match cause {
+                    Some(e) => {
+                        let mut e = v8::Local::new(scope, &e);
+                        // a module that did not compile, imported statically: vitest's import
+                        // fails with vite's parse error, where a require() fails as Node's
+                        // (turbo-test#108)
+                        let compile = COMPILE_EXC.with(|c| c.borrow().clone());
+                        if let Some((c, _)) = compile.filter(|(_, m)| *m == abs) {
+                            let importer = args.get(3);
+                            let imported = importer.is_string() && {
+                                let f = importer.to_rust_string_lossy(scope);
+                                std::fs::read_to_string(&f).is_ok_and(|src| {
+                                    crate::parse_error::imports_statically(
+                                        Path::new(&f),
+                                        &src,
+                                        &spec,
+                                    )
+                                })
+                            };
+                            if imported && v8::Local::new(scope, &c).strict_equals(e) {
+                                e = vite_compile_error(scope, &abs, e);
+                                let g = v8::Global::new(scope, e);
+                                COMPILE_EXC.with(|c| *c.borrow_mut() = Some((g, abs.clone())));
+                            }
+                        }
+                        scope.throw_exception(e);
+                    }
+                    None => throw(scope, &format!("failed to load {spec}")),
+                }
                 return;
             }
         }
@@ -3353,7 +5087,8 @@ fn native_require(
         // require() of ESM (Node 22+ behavior): load + instantiate + evaluate, return the
         // module namespace as the require() result. Handles CJS->ESM requires (e.g. tslib).
         let Some(module) = load_graph(scope, &abs) else {
-            if abs.to_string_lossy().contains("/node_modules/") && stub_failed_deps()
+            if abs.to_string_lossy().contains("/node_modules/")
+                && stub_failed_deps()
                 && register_node_stub(scope, &abs).is_some()
             {
                 if let Some(g) = REGISTRY.with(|r| r.borrow().cjs_exports.get(&abs).cloned()) {
@@ -3377,6 +5112,11 @@ fn native_require(
         rv.set(module.get_module_namespace());
         return;
     }
+    // a mock factory that threw: the import fails with its error (vitest)
+    if let Some(e) = mock_factory_error(scope, &abs) {
+        scope.throw_exception(e);
+        return;
+    }
     if let Some(g) = REGISTRY.with(|r| r.borrow().cjs_exports.get(&abs).cloned()) {
         let local = v8::Local::new(scope, &g);
         rv.set(local);
@@ -3385,6 +5125,35 @@ fn native_require(
 
 /// __ttRegisterMock(dir, spec, exports): register a mock immediately (vi.mock hoisting). The
 /// factory ran in the calling module's scope, so `exports` already closes over the right vars.
+/// The mock-registry key for `spec` imported from `dir`: its resolved path, plus the `?query`
+/// when it has one. vitest keys mocks by module id, so `vi.mock('./x.js?raw', ...)` is a module
+/// of its own and must not replace `./x.js`'s mock (turbo-test#39 item 2) — resolution itself
+/// strips the query to find the file.
+fn mock_key(spec: &str, dir: &Path) -> Option<PathBuf> {
+    let abs = resolve_spec(spec, dir)?;
+    Some(match spec.split_once('?') {
+        Some((_, query)) => PathBuf::from(format!("{}?{query}", abs.display())),
+        None => abs,
+    })
+}
+
+/// The registry key an import of `spec` (resolved to `abs`) uses: the query-suffixed key when a
+/// mock is registered under it (see mock_key), else the module's own path.
+fn query_mock_variant(spec: &str, abs: PathBuf) -> PathBuf {
+    let Some((_, query)) = spec.split_once('?') else {
+        return abs;
+    };
+    let key = PathBuf::from(format!("{}?{query}", abs.display()));
+    // vite's `?raw` / `?url` / asset-with-query ids are modules of their own (turbo-test#148)
+    if REGISTRY.with(|r| r.borrow().mocks.contains_key(&key))
+        || crate::vite_asset::is_asset_id(&key)
+    {
+        key
+    } else {
+        abs
+    }
+}
+
 fn native_register_mock(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -3396,9 +5165,60 @@ fn native_register_mock(
     if exports.is_undefined() {
         return;
     }
-    if let Some(abs) = resolve_spec(&spec, Path::new(&dir)) {
-        register_mock_value(scope, &abs, exports);
+    if let Some(key) = mock_key(&spec, Path::new(&dir)) {
+        register_mock_value(scope, &key, exports);
     }
+}
+
+/// The REAL exports of `abs`, never a registered mock: vi.importActual / importOriginal, and a
+/// package's own require() of a mocked module (turbo-test#135).
+fn actual_exports(scope: &mut v8::PinScope, abs: &Path) -> Option<v8::Global<v8::Value>> {
+    // importActual/importOriginal returns the REAL module, NOT a registered mock (else a factory
+    // doing `mockImplementation(actual.fn)` points the spy at itself → infinite recursion).
+    // Prefer the genuine exports cached when the real module was loaded (no re-run → no dual
+    // instances of singletons like react-query). If never really loaded, load it once with the
+    // mock records temporarily removed, then restore them.
+    if let Some(g) = REGISTRY.with(|r| r.borrow().real_exports.get(abs).cloned()) {
+        return Some(g);
+    }
+    let saved = REGISTRY.with(|r| {
+        let mut reg = r.borrow_mut();
+        if reg.mocks.contains_key(abs) {
+            let m = reg.mocks.remove(abs);
+            let e = reg.cjs_exports.remove(abs);
+            let s = reg.cjs_synth_by_path.remove(abs);
+            let n = reg.cjs_export_names.remove(abs);
+            Some((m, e, s, n))
+        } else {
+            None
+        }
+    });
+    let _ = load_cjs(scope, abs, true);
+    let real = REGISTRY.with(|r| {
+        r.borrow()
+            .real_exports
+            .get(abs)
+            .cloned()
+            .or_else(|| r.borrow().cjs_exports.get(abs).cloned())
+    });
+    if let Some((m, e, s, n)) = saved {
+        REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            if let Some(m) = m {
+                reg.mocks.insert(abs.to_path_buf(), m);
+            }
+            if let Some(e) = e {
+                reg.cjs_exports.insert(abs.to_path_buf(), e);
+            }
+            if let Some(s) = s {
+                reg.cjs_synth_by_path.insert(abs.to_path_buf(), s);
+            }
+            if let Some(n) = n {
+                reg.cjs_export_names.insert(abs.to_path_buf(), n);
+            }
+        });
+    }
+    real
 }
 
 /// __ttImportActual(dir, spec): load the REAL module (for vi.importActual / importOriginal in
@@ -3419,42 +5239,28 @@ fn native_import_actual(
         }
         return;
     }
-    let Some(abs) = resolve_spec(&spec, Path::new(&dir)) else { return };
-    // importActual/importOriginal returns the REAL module, NOT a registered mock (else a factory
-    // doing `mockImplementation(actual.fn)` points the spy at itself → infinite recursion).
-    // Prefer the genuine exports cached when the real module was loaded (no re-run → no dual
-    // instances of singletons like react-query). If never really loaded, load it once with the
-    // mock records temporarily removed, then restore them.
-    if let Some(g) = REGISTRY.with(|r| r.borrow().real_exports.get(&abs).cloned()) {
-        rv.set(v8::Local::new(scope, &g));
+    let Some(abs) = resolve_spec(&spec, Path::new(&dir)) else {
         return;
-    }
-    let saved = REGISTRY.with(|r| {
-        let mut reg = r.borrow_mut();
-        if reg.mocks.contains_key(&abs) {
-            let m = reg.mocks.remove(&abs);
-            let e = reg.cjs_exports.remove(&abs);
-            let s = reg.cjs_synth_by_path.remove(&abs);
-            let n = reg.cjs_export_names.remove(&abs);
-            Some((m, e, s, n))
-        } else {
-            None
-        }
-    });
-    let _ = load_cjs(scope, &abs, true);
-    let real = REGISTRY.with(|r| r.borrow().real_exports.get(&abs).cloned()
-        .or_else(|| r.borrow().cjs_exports.get(&abs).cloned()));
-    if let Some((m, e, s, n)) = saved {
-        REGISTRY.with(|r| {
-            let mut reg = r.borrow_mut();
-            if let Some(m) = m { reg.mocks.insert(abs.clone(), m); }
-            if let Some(e) = e { reg.cjs_exports.insert(abs.clone(), e); }
-            if let Some(s) = s { reg.cjs_synth_by_path.insert(abs.clone(), s); }
-            if let Some(n) = n { reg.cjs_export_names.insert(abs.clone(), n); }
-        });
-    }
-    if let Some(g) = real {
+    };
+    if let Some(g) = actual_exports(scope, &abs) {
         rv.set(v8::Local::new(scope, &g));
+    }
+}
+
+/// __ttResolveSpec(dir, spec): the mock-registry key of `spec` from `dir` (its absolute path,
+/// `?query` kept; undefined when it does not resolve). runtime.js keys the entry prepass's
+/// once-only factories by it.
+fn native_resolve_spec(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let dir = args.get(0).to_rust_string_lossy(scope);
+    let spec = args.get(1).to_rust_string_lossy(scope);
+    if let Some(abs) = mock_key(&spec, Path::new(&dir)) {
+        if let Some(v) = v8::String::new(scope, &abs.to_string_lossy()) {
+            rv.set(v.into());
+        }
     }
 }
 
@@ -3467,7 +5273,7 @@ fn native_unmock(
 ) {
     let dir = args.get(0).to_rust_string_lossy(scope);
     let spec = args.get(1).to_rust_string_lossy(scope);
-    if let Some(abs) = resolve_spec(&spec, Path::new(&dir)) {
+    if let Some(abs) = mock_key(&spec, Path::new(&dir)) {
         REGISTRY.with(|r| {
             let mut reg = r.borrow_mut();
             reg.mocks.remove(&abs);
@@ -3511,13 +5317,258 @@ fn native_reset_modules(
     });
 }
 
+thread_local! {
+    /// The CJS modules executing on this thread, outermost first: Node's require stack.
+    static REQUIRE_STACK: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    /// The paths whose require.cache entry the test put there: require() serves them as is.
+    static CACHE_PUT: RefCell<std::collections::HashSet<PathBuf>> = RefCell::default();
+}
+
+/// Throw Node's MODULE_NOT_FOUND error for `spec` required by `importer` (runtime.js
+/// `__ttModuleNotFound` builds it: the message names the require stack).
+fn throw_module_not_found(scope: &mut v8::PinScope, spec: &str, importer: v8::Local<v8::Value>) {
+    let global = scope.get_current_context().global(scope);
+    let key = v8::String::new(scope, "__ttModuleNotFound").unwrap();
+    let spec = v8::String::new(scope, spec).unwrap();
+    let make = global.get(scope, key.into()).unwrap();
+    let make = v8::Local::<v8::Function>::try_from(make).unwrap();
+    let recv = v8::undefined(scope).into();
+    if let Some(err) = make.call(scope, recv, &[spec.into(), importer]) {
+        scope.throw_exception(err);
+    }
+}
+
+/// __ttRequireStack() -> the paths of the CJS modules executing, innermost first.
+fn native_require_stack(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let paths: Vec<v8::Local<v8::Value>> = REQUIRE_STACK.with(|st| {
+        st.borrow()
+            .iter()
+            .rev()
+            .map(|p| v8::String::new(scope, &p.to_string_lossy()).unwrap().into())
+            .collect()
+    });
+    rv.set(v8::Array::new_with_elements(scope, &paths).into());
+}
+
+/// __ttRequireResolve(dir, spec, esm) -> require.resolve(spec) from `dir`: the resolved path
+/// (a builtin or a test API module is its own name), undefined when nothing resolves.
+fn native_require_resolve(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let dir = args.get(0).to_rust_string_lossy(scope);
+    let spec = args.get(1).to_rust_string_lossy(scope);
+    let esm = args.get(2).boolean_value(scope);
+    let resolved = if is_node_builtin(&spec) {
+        Some(spec.clone())
+    } else {
+        resolve_spec_as(&spec, Path::new(&dir), esm)
+            .map(|p| p.to_string_lossy().into_owned())
+            .or_else(|| is_test_api_module(&spec).then(|| spec.clone()))
+    };
+    if let Some(r) = resolved {
+        rv.set(v8::String::new(scope, &r).unwrap().into());
+    }
+}
+
+/// require.cache, as Node's Module._cache: the loaded modules by path. `__ttCache(op, path,
+/// value)`: "keys" -> the paths of the modules loaded from files; "get" -> a module's exports
+/// (undefined when it is not loaded); "delete" -> drop it, so the next require() loads it
+/// again (a mock stays registered); "set" -> require() of the path gives `value`.
+fn native_require_cache(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let op = args.get(0).to_rust_string_lossy(scope);
+    let path = PathBuf::from(args.get(1).to_rust_string_lossy(scope));
+    match op.as_str() {
+        "keys" => {
+            let keys: Vec<PathBuf> = REGISTRY.with(|r| {
+                let reg = r.borrow();
+                let mut keys: Vec<PathBuf> = reg
+                    .cjs_exports
+                    .keys()
+                    .filter(|p| p.is_absolute())
+                    .cloned()
+                    .collect();
+                keys.sort();
+                keys
+            });
+            let keys: Vec<v8::Local<v8::Value>> = keys
+                .iter()
+                .map(|p| v8::String::new(scope, &p.to_string_lossy()).unwrap().into())
+                .collect();
+            rv.set(v8::Array::new_with_elements(scope, &keys).into());
+        }
+        "get" => {
+            if let Some(g) = REGISTRY.with(|r| r.borrow().cjs_exports.get(&path).cloned()) {
+                rv.set(v8::Local::new(scope, &g));
+            }
+        }
+        "delete" => REGISTRY.with(|r| {
+            CACHE_PUT.with(|c| c.borrow_mut().remove(&path));
+            let mut reg = r.borrow_mut();
+            reg.cjs_exports.remove(&path);
+            reg.real_exports.remove(&path);
+            reg.cjs_synth_by_path.remove(&path);
+            reg.cjs_export_names.remove(&path);
+            reg.esm_by_path.remove(&path);
+        }),
+        _ => {
+            let value = v8::Global::new(scope, args.get(2));
+            REGISTRY.with(|r| r.borrow_mut().cjs_exports.insert(path.clone(), value));
+            CACHE_PUT.with(|c| c.borrow_mut().insert(path));
+        }
+    }
+}
+
+const UNLOADED: &str = "turbo-test: an imported module was unloaded before it was evaluated";
+
+/// `throw` for an `Option`-returning V8 callback: throws `msg`, then None.
+fn throw_none<T>(scope: &mut v8::PinScope, msg: &str) -> Option<T> {
+    throw(scope, msg);
+    None
+}
+
 fn throw(scope: &mut v8::PinScope, msg: &str) {
     let m = v8::String::new(scope, msg).unwrap();
     let exc = v8::Exception::error(scope, m);
     scope.throw_exception(exc);
 }
 
+/// Throw an `Error` with `msg` and a `code` property.
+fn throw_with_code(scope: &mut v8::PinScope, msg: &str, code: &str) -> Option<()> {
+    let m = v8::String::new(scope, msg)?;
+    let k = v8::String::new(scope, "code")?;
+    let c = v8::String::new(scope, code)?;
+    let exc = v8::Exception::error(scope, m);
+    exc.cast::<v8::Object>().set(scope, k.into(), c.into());
+    scope.throw_exception(exc);
+    Some(())
+}
+
+/// The error a module `abs` that V8 did not compile (`exc`) fails with: vite's for a module that
+/// does not parse or transform (vite_error_value; turbo-test#108, #113), else V8's.
+fn vite_compile_error<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+    exc: v8::Local<'s, v8::Value>,
+) -> v8::Local<'s, v8::Value> {
+    vite_error_value(scope, abs).unwrap_or(exc)
+}
+
+/// vite's error for the module `abs` when it does not parse (JavaScript) or transform
+/// (TypeScript / JSX), crate::parse_error, as vitest's module runner throws it: an Error with
+/// vite's name and message whose `__vitest_rollup_error__` holds what vite's plugin container
+/// adds (plugin, id, loc, frame — vitest's reporters print them). None for a module oxc takes
+/// and for a dependency in node_modules (vitest leaves those to Node).
+fn vite_error_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+) -> Option<v8::Local<'s, v8::Value>> {
+    if abs.components().any(|c| c.as_os_str() == "node_modules") {
+        return None;
+    }
+    let root = std::env::current_dir().unwrap_or_default();
+    let src = std::fs::read_to_string(abs).ok()?;
+    let dir = abs.parent()?;
+    let resolve = |spec: &str| resolve_spec(spec, dir).filter(|p| p.is_file());
+    let vite = crate::parse_error::vite_error(abs, &src, &root, &resolve)?;
+    let message = v8::String::new(scope, &vite.message)?;
+    let e = v8::Exception::error(scope, message);
+    let o = e.cast::<v8::Object>();
+    fn set<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        o: v8::Local<'s, v8::Object>,
+        k: &str,
+        v: v8::Local<'s, v8::Value>,
+    ) {
+        if let Some(k) = v8::String::new(scope, k) {
+            o.set(scope, k.into(), v);
+        }
+    }
+    if vite.name != "Error" {
+        let name = v8::String::new(scope, vite.name)?;
+        set(scope, o, "name", name.into());
+    }
+    let details = v8::Object::new(scope);
+    if let Some(plugin) = vite.plugin {
+        let v = v8::String::new(scope, plugin)?;
+        set(scope, details, "plugin", v.into());
+    }
+    let id = v8::String::new(scope, &vite.id)?;
+    set(scope, details, "id", id.into());
+    if let Some((line, column)) = vite.loc {
+        let loc = v8::Object::new(scope);
+        let line = v8::Number::new(scope, line as f64);
+        set(scope, loc, "line", line.into());
+        let column = v8::Number::new(scope, column as f64);
+        set(scope, loc, "column", column.into());
+        set(scope, details, "loc", loc.into());
+    }
+    if let Some(frame) = &vite.frame {
+        let v = v8::String::new(scope, frame)?;
+        set(scope, details, "frame", v.into());
+    }
+    set(scope, o, "__vitest_rollup_error__", details.into());
+    Some(e)
+}
+
+/// TURBO_CJS_DEBUG: print the loaders' diagnostics (failed reads, transforms, compiles, module
+/// bodies that threw) to stderr; TURBO_NATIVE_CJS_STRICT (the native emitter's conformity
+/// measurement) prints them too. Otherwise stderr carries none of them (vitest prints none,
+/// turbo-test#113).
+fn loader_debug() -> bool {
+    std::env::var("TURBO_CJS_DEBUG").is_ok() || crate::esm_cjs::strict()
+}
+
 // ---- ESM graph ------------------------------------------------------------
+
+/// An app module importing the default of a mock whose `vi.mock` factory returned none: its
+/// source with every read of that binding guarded (mock_read.rs), so each throws vitest's error
+/// as on vitest's own module runner (turbo-test#151). `None` for every other module. A package
+/// is left alone: vitest loads it through Node, which never sees a mock (turbo-test#135).
+fn guard_mock_default_reads(scope: &mut v8::PinScope, abs: &Path, src: &str) -> Option<String> {
+    if abs.components().any(|c| c.as_os_str() == "node_modules") || !src.contains("import") {
+        return None;
+    }
+    let mocks: Vec<(PathBuf, v8::Global<v8::Value>)> = REGISTRY.with(|r| {
+        let reg = r.borrow();
+        reg.mocks
+            .keys()
+            .filter_map(|p| Some((p.clone(), reg.cjs_exports.get(p)?.clone())))
+            .collect()
+    });
+    if mocks.is_empty() {
+        return None;
+    }
+    let global = scope.get_current_context().global(scope);
+    let k = v8::String::new(scope, "__ttMockGuarded")?;
+    let f = v8::Local::<v8::Function>::try_from(global.get(scope, k.into())?).ok()?;
+    let undef: v8::Local<v8::Value> = v8::undefined(scope).into();
+    let guarded: std::collections::HashSet<PathBuf> = mocks
+        .into_iter()
+        .filter(|(_, g)| {
+            let exports = v8::Local::new(scope, g);
+            f.call(scope, undef, &[exports])
+                .is_some_and(|v| v.boolean_value(scope))
+        })
+        .map(|(p, _)| p)
+        .collect();
+    if guarded.is_empty() {
+        return None;
+    }
+    let dir = abs.parent()?;
+    crate::mock_read::guard_default_reads(src, &|spec| {
+        mock_key(spec, dir).is_some_and(|p| guarded.contains(&p))
+    })
+}
 
 fn load_graph<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -3526,7 +5577,38 @@ fn load_graph<'s>(
     if let Some(g) = REGISTRY.with(|r| r.borrow().esm_by_path.get(abs).cloned()) {
         return Some(v8::Local::new(scope, &g));
     }
-    let raw = read_transformed(abs, false, false)?;
+    let Some(raw) = read_transformed(abs, false, false) else {
+        // a TypeScript / JSX module oxc does not transform: vite's error (turbo-test#113)
+        if let Some(e) = vite_error_value(scope, abs) {
+            scope.throw_exception(e);
+        }
+        return None;
+    };
+    // reads of a no-default mock's default throw (turbo-test#151); first, so the spy rewrite
+    // below reads the guarded value through the overrides
+    let raw = guard_mock_default_reads(scope, abs, &raw).unwrap_or(raw);
+    // vi.spyOn on an app module's namespace reaches its importers (turbo-test#131, #146); test
+    // locations / failure frames map V8's columns back through the in-line edits
+    let raw = match abs.components().any(|c| c.as_os_str() == "node_modules") {
+        true => raw,
+        false => match crate::esm_spy::spyable(abs, &raw) {
+            Some((code, shifts)) => {
+                crate::location::set_shifts(abs, shifts);
+                code
+            }
+            None => {
+                crate::location::set_shifts(abs, Vec::new());
+                raw
+            }
+        },
+    };
+    // A generated bundle in the cache dir has no node_modules beside it; resolve its externalized
+    // bare imports relative to the recorded source dir (set by esbuild_bundle_full).
+    let dir = REGISTRY
+        .with(|r| r.borrow().bundle_src_dir.get(abs).cloned())
+        .or_else(|| abs.parent().map(|p| p.to_path_buf()))
+        .unwrap();
+    let raw = graph_interop(abs, &dir, &raw).unwrap_or(raw);
     // CJS gets __dirname/__filename via the wrapper params; a real ES module has neither in scope.
     // App code authored for the CJS world (NestJS seed runners, country-config loaders) reads them
     // at top level, so inject Node-CJS-equivalent module-local bindings when referenced.
@@ -3535,7 +5617,25 @@ fn load_graph<'s>(
     let name = v8::String::new(scope, &abs.to_string_lossy())?;
     let origin = module_origin(scope, name);
     let mut source = v8::script_compiler::Source::new(code, Some(&origin));
-    let module = v8::script_compiler::compile_module(scope, &mut source)?;
+    let compiled = {
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let tc = &mut tc.init();
+        match v8::script_compiler::compile_module(tc, &mut source) {
+            Some(m) => Ok(v8::Global::new(tc, m)),
+            None => Err(tc.exception().map(|e| v8::Global::new(tc, e))),
+        }
+    };
+    let module = match compiled {
+        Ok(m) => v8::Local::new(scope, &m),
+        Err(exc) => {
+            if let Some(exc) = exc {
+                let exc = v8::Local::new(scope, &exc);
+                let exc = vite_compile_error(scope, abs, exc);
+                scope.throw_exception(exc);
+            }
+            return None;
+        }
+    };
 
     let hash = module.get_identity_hash().get();
     let global = v8::Global::new(scope, module);
@@ -3546,14 +5646,9 @@ fn load_graph<'s>(
     });
 
     let requests = module.get_module_requests();
-    // A generated bundle in the cache dir has no node_modules beside it; resolve its externalized
-    // bare imports relative to the recorded source dir (set by esbuild_bundle_full).
-    let dir = REGISTRY
-        .with(|r| r.borrow().bundle_src_dir.get(abs).cloned())
-        .or_else(|| abs.parent().map(|p| p.to_path_buf()))
-        .unwrap();
     for i in 0..requests.length() {
-        let req = v8::Local::<v8::ModuleRequest>::try_from(requests.get(scope, i).unwrap()).unwrap();
+        let req =
+            v8::Local::<v8::ModuleRequest>::try_from(requests.get(scope, i).unwrap()).unwrap();
         let spec = req.get_specifier().to_rust_string_lossy(scope);
         if is_test_api_module(&spec) {
             ensure_vitest_builtin(scope)?;
@@ -3564,12 +5659,236 @@ fn load_graph<'s>(
             continue;
         }
         let Some(dep) = resolve_spec(&spec, &dir) else {
-            eprintln!("cannot resolve {spec} from {}", dir.display());
+            // vitest's error for a static import that does not resolve (turbo-test#108)
+            let root = std::env::current_dir().unwrap_or_default();
+            let (message, code) = import_not_found(&spec, &abs.to_string_lossy(), &root, true);
+            throw_with_code(scope, &message, code);
             return None;
         };
         load_dep(scope, &dep)?;
     }
     Some(module)
+}
+
+/// `esm_cjs::graph_interop_rewrite` of a graph module's source: its requests of a CommonJS module
+/// (not a builtin, asset or JSON) read vitest's interop namespace, or Node's in a package's ES
+/// module Node runs as one (turbo-test#133).
+fn graph_interop(abs: &Path, dir: &Path, src: &str) -> Option<String> {
+    let in_package = abs.components().any(|c| c.as_os_str() == "node_modules");
+    let node = in_package && is_esm_module(abs);
+    let target = |spec: &str| {
+        use crate::esm_cjs::Target;
+        if is_test_api_module(spec) || is_node_builtin(spec) || lazy_stub_match(spec).is_some() {
+            return Target::Other;
+        }
+        match resolve_spec(spec, dir) {
+            Some(p) if is_asset(&p) || p.extension().and_then(|e| e.to_str()) == Some("json") => {
+                Target::Other
+            }
+            Some(p) if detect_kind(&p) == Kind::Cjs => Target::Cjs,
+            Some(p) if !p.components().any(|c| c.as_os_str() == "node_modules") => Target::AppEsm,
+            _ => Target::Other,
+        }
+    };
+    crate::esm_cjs::graph_interop_rewrite(src, &target, node)
+}
+
+/// An app ES module's namespace as vitest lists it: its names in source order, tagged `Module`
+/// (runtime.js `__ttOrderedNs`, turbo-test#141).
+fn ordered_namespace<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+    ns: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let order = read_transformed(abs, false, false)
+        .and_then(|src| crate::esm_cjs::export_order(&src))
+        .unwrap_or_default();
+    let items: Vec<v8::Local<v8::Value>> = order
+        .iter()
+        .filter_map(|n| v8::String::new(scope, n).map(Into::into))
+        .collect();
+    let order = v8::Array::new_with_elements(scope, &items);
+    let global = scope.get_current_context().global(scope);
+    let key = v8::String::new(scope, "__ttOrderedNs")?;
+    let f = v8::Local::<v8::Function>::try_from(global.get(scope, key.into())?).ok()?;
+    let undefined = v8::undefined(scope).into();
+    f.call(scope, undefined, &[ns, order.into()])
+}
+
+/// The `?__tt_*` request kind of `spec`.
+fn variant_of(spec: &str) -> Option<Variant> {
+    use crate::esm_cjs::{NODE_QUERY, NS_QUERY, STAR_QUERY};
+    if spec.ends_with(NS_QUERY) {
+        Some(Variant::Ns)
+    } else if spec.ends_with(STAR_QUERY) {
+        Some(Variant::Star)
+    } else if spec.ends_with(NODE_QUERY) {
+        Some(Variant::Node)
+    } else {
+        None
+    }
+}
+
+/// runtime.js's view of the CommonJS exports `exports` for `kind`: vitest's interop namespace
+/// (`__ttToESM`), or Node's (`__ttToESMDep(m, 1)`).
+fn variant_view<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    exports: v8::Local<'s, v8::Value>,
+    kind: Variant,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let global = scope.get_current_context().global(scope);
+    let (name, args): (&str, Vec<v8::Local<v8::Value>>) = if kind == Variant::Node {
+        (
+            "__ttToESMDep",
+            vec![exports, v8::Boolean::new(scope, true).into()],
+        )
+    } else {
+        ("__ttToESM", vec![exports])
+    };
+    let key = v8::String::new(scope, name)?;
+    let f = v8::Local::<v8::Function>::try_from(global.get(scope, key.into())?).ok()?;
+    let undefined = v8::undefined(scope).into();
+    f.call(scope, undefined, &args)
+}
+
+/// A synthetic module of the CommonJS module `abs` (loaded: its exports registered) for a
+/// `kind` request; `None` when `abs` has no CommonJS exports.
+fn variant_module<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+    kind: Variant,
+) -> Option<v8::Local<'s, v8::Module>> {
+    let (exports, esm) = REGISTRY.with(|r| {
+        let reg = r.borrow();
+        // an ES module (not mocked): its namespace, read once it is evaluated
+        match reg.esm_by_path.get(abs) {
+            Some(_) if kind == Variant::Ns && !reg.mocks.contains_key(abs) => (None, true),
+            _ => (reg.cjs_exports.get(abs).cloned(), false),
+        }
+    });
+    // (no CommonJS exports and no ES module: not loaded yet, None)
+    let exports = match exports {
+        Some(e) => v8::Local::new(scope, &e),
+        None => esm.then(|| v8::undefined(scope).into())?,
+    };
+    let names = match kind {
+        Variant::Ns => vec!["default".to_string()],
+        Variant::Star | Variant::Node => {
+            let view = variant_view(scope, exports, kind)?;
+            let global = scope.get_current_context().global(scope);
+            let mut names = object_keys(scope, global, view);
+            // (Node's view names `default` for every CommonJS module, turbo-test#193)
+            if kind == Variant::Star {
+                names.retain(|n| n != "default");
+            }
+            names
+        }
+    };
+    let mut export_names = Vec::with_capacity(names.len());
+    for n in &names {
+        export_names.push(v8::String::new(scope, n)?);
+    }
+    let mod_name = v8::String::new(scope, "<synthetic>")?;
+    let module = v8::Module::create_synthetic_module(scope, mod_name, &export_names, variant_eval);
+    let hash = module.get_identity_hash().get();
+    REGISTRY.with(|r| {
+        r.borrow_mut()
+            .variant_by_hash
+            .insert(hash, (abs.to_path_buf(), kind, names))
+    });
+    Some(module)
+}
+
+fn variant_eval<'s>(
+    context: v8::Local<'s, v8::Context>,
+    module: v8::Local<v8::Module>,
+) -> Option<v8::Local<'s, v8::Value>> {
+    v8::callback_scope!(unsafe scope, context);
+    let hash = module.get_identity_hash().get();
+    let entry = REGISTRY.with(|r| {
+        let reg = r.borrow();
+        let (path, kind, names) = reg.variant_by_hash.get(&hash)?.clone();
+        if kind == Variant::Ns && !reg.mocks.contains_key(&path) {
+            if let Some(m) = reg.esm_by_path.get(&path) {
+                return Some((Err((m.clone(), path)), kind, names));
+            }
+        }
+        let exports = reg.cjs_exports.get(&path)?.clone();
+        Some((Ok(exports), kind, names))
+    });
+    // a module whose exports were dropped (a reused isolate's reset) fails its importer, as in
+    // synth_eval
+    let (exports, kind, names) = entry.or_else(|| throw_none(scope, UNLOADED))?;
+    let view = match exports {
+        Ok(exports) => {
+            let exports = v8::Local::new(scope, &exports);
+            variant_view(scope, exports, kind)?
+        }
+        Err((module, path)) => {
+            let module = v8::Local::new(scope, &module);
+            let ns = module.get_module_namespace();
+            ordered_namespace(scope, &path, ns)?
+        }
+    };
+    if kind == Variant::Ns {
+        let k = v8::String::new(scope, "default")?;
+        module.set_synthetic_module_export(scope, k, view)?;
+        return Some(v8::undefined(scope).into());
+    }
+    if let Ok(obj) = v8::Local::<v8::Object>::try_from(view) {
+        for n in names {
+            let k = v8::String::new(scope, &n)?;
+            // a name a mock lacks stays undefined without being read (see synth_eval)
+            if obj.has(scope, k.into()).unwrap_or(false) {
+                if let Some(v) = obj.get(scope, k.into()) {
+                    module.set_synthetic_module_export(scope, k, v)?;
+                }
+            }
+        }
+    }
+    Some(v8::undefined(scope).into())
+}
+
+thread_local! {
+    /// The last compile error a CommonJS load threw (the module runner's form of an import) and
+    /// the module it is of.
+    static COMPILE_EXC: RefCell<Option<(v8::Global<v8::Value>, PathBuf)>> =
+        const { RefCell::new(None) };
+}
+
+/// Load a file's entry module graph under a TryCatch: the error is the exception the load
+/// threw — a module of the graph that failed to compile gives V8's `SyntaxError: …`, as vitest
+/// reports it, where V8 printed an uncaught compile error to stdout (turbo-test#99) — else
+/// `graph load failed` (a specifier that does not resolve).
+fn load_entry_graph<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+) -> Result<v8::Local<'s, v8::Module>, String> {
+    let module = {
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let tc = &mut tc.init();
+        match load_graph(tc, abs) {
+            Some(m) => v8::Global::new(tc, m),
+            None => {
+                let exc = tc.exception();
+                note_load_error(tc, exc);
+                // the module the exception was thrown in (for a compile error, the one that
+                // did not compile)
+                let module = tc
+                    .message()
+                    .and_then(|m| m.get_script_resource_name(tc))
+                    .map(|n| PathBuf::from(n.to_rust_string_lossy(tc)));
+                LOAD_ERROR.with(|e| {
+                    if let Some(info) = e.borrow_mut().as_mut() {
+                        info.source = module;
+                    }
+                });
+                return Err(caught_message(tc, "graph load failed")
+                    .unwrap_or_else(|| "graph load failed".to_string()));
+            }
+        }
+    };
+    Ok(v8::Local::new(scope, &module))
 }
 
 /// Registry key for the built-in test-API module shim (named import surface).
@@ -3595,12 +5914,28 @@ fn ensure_vitest_builtin<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<()> {
     }
     let global = scope.get_current_context().global(scope);
     let obj = v8::Object::new(scope);
-    for n in [
-        "describe", "it", "test", "expect", "expectTypeOf", "assertType", "vi", "jest",
-        "beforeEach", "afterEach", "beforeAll", "afterAll", "assert",
+    // export name -> the global holding it (chai's assert / chai / should are kept on hidden
+    // globals, turbo-test#160)
+    for (n, g) in [
+        ("describe", "describe"),
+        ("it", "it"),
+        ("test", "test"),
+        ("expect", "expect"),
+        ("expectTypeOf", "expectTypeOf"),
+        ("assertType", "assertType"),
+        ("vi", "vi"),
+        ("jest", "jest"),
+        ("beforeEach", "beforeEach"),
+        ("afterEach", "afterEach"),
+        ("beforeAll", "beforeAll"),
+        ("afterAll", "afterAll"),
+        ("assert", "__ttVitestAssert"),
+        ("chai", "__ttVitestChai"),
+        ("should", "__ttVitestShould"),
     ] {
         let k = v8::String::new(scope, n)?;
-        if let Some(v) = global.get(scope, k.into()) {
+        let gk = v8::String::new(scope, g)?;
+        if let Some(v) = global.get(scope, gk.into()) {
             if !v.is_undefined() {
                 obj.set(scope, k.into(), v);
             }
@@ -3624,29 +5959,45 @@ fn ensure_vitest_builtin<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<()> {
 
 /// Load a dependency by path, honoring mocks and kind.
 fn load_dep<'s>(scope: &mut v8::PinScope<'s, '_>, dep: &Path) -> Option<()> {
-    let mocked = REGISTRY.with(|r| r.borrow().mocks.get(dep).cloned());
-    if let Some(factory) = mocked {
-        if !REGISTRY.with(|r| r.borrow().cjs_synth_by_path.contains_key(dep)) {
-            register_mock(scope, dep, &factory)?;
-        }
+    // a registered mock (its synthetic module is what importers link against; see native_require
+    // for why a mocked path always has one)
+    let mocked = REGISTRY.with(|r| {
+        let reg = r.borrow();
+        reg.mocks.contains_key(dep) && reg.cjs_synth_by_path.contains_key(dep)
+    });
+    if mocked {
         return Some(());
     }
-    // CSS/asset imports -> stub (CSS-module proxy: any class name -> its own string)
-    if is_asset(dep) {
-        if REGISTRY.with(|r| r.borrow().cjs_synth_by_path.contains_key(dep)) {
-            return Some(());
-        }
+    // vite's asset imports (turbo-test#148): `default` is the `?raw` text / the URL / the inline
+    // svg; any other name reads as itself, as the asset stub below
+    let root = std::env::current_dir().unwrap_or_default();
+    if let Some(v) = crate::vite_asset::value(dep, &root) {
+        let v = serde_json::to_string(&v).ok()?;
         return register_mock(
             scope,
             dep,
-            "() => new Proxy({}, { get: (t, p) => typeof p === 'string' ? p : undefined })",
+            &format!("() => new Proxy({{ default: {v} }}, {{ get: (t, p) => p in t ? t[p] : typeof p === 'string' ? p : undefined }})"),
+        );
+    }
+    // CSS/asset imports -> stub (CSS-module proxy: any class name -> its own string). Assets and
+    // JSON are registered via register_mock, i.e. recorded in `mocks`, so an already-loaded one
+    // is served by the mocked branch above; reaching here means it is not loaded yet.
+    // (every other asset type is one of vite's, served above)
+    if matches!(
+        dep.extension().and_then(|e| e.to_str()),
+        Some("css" | "scss" | "sass" | "less" | "styl")
+    ) {
+        // Stylesheets: the proxy is also its own `default` and is not `__esModule`, so the
+        // module-runner's CJS interop (`__toESM(require(..)).default`) reaches it too and
+        // `import s from './s.module.css'` gives `s.foo === 'foo'` on both paths.
+        return register_mock(
+            scope,
+            dep,
+            "() => { const s = new Proxy({}, { get: (t, p) => p === 'default' ? s : typeof p === 'string' && p !== '__esModule' ? p : undefined }); return s; }",
         );
     }
     // JSON imports -> module with default = parsed value + named keys
     if dep.extension().and_then(|e| e.to_str()) == Some("json") {
-        if REGISTRY.with(|r| r.borrow().cjs_synth_by_path.contains_key(dep)) {
-            return Some(());
-        }
         let txt = std::fs::read_to_string(dep).ok()?;
         return register_mock(scope, dep, &format!("() => ({txt})"));
     }
@@ -3685,7 +6036,18 @@ fn resolve_callback<'s>(
             resolve_spec(&spec, &base)
         })
     };
-    let abs = lookup?;
+    let abs = query_mock_variant(&spec, lookup?);
+    // a mock factory that threw: linking the importer fails with its error (vitest)
+    if let Some(e) = mock_factory_error(scope, &abs) {
+        scope.throw_exception(e);
+        return None;
+    }
+    // a CommonJS module's namespace view (graph_interop)
+    if let Some(kind) = variant_of(&spec) {
+        if let Some(m) = variant_module(scope, &abs, kind) {
+            return Some(m);
+        }
+    }
     // Already loaded?
     if let Some(g) = REGISTRY.with(|r| {
         let reg = r.borrow();
@@ -3724,12 +6086,21 @@ extern "C" fn import_meta_callback(
     v8::scope!(let scope, scope);
     let hash = module.get_identity_hash().get();
     let path = REGISTRY.with(|r| r.borrow().path_by_hash.get(&hash).cloned());
-    let url = path
-        .map(|p| format!("file://{}", p.display()))
-        .unwrap_or_else(|| "file:///<unknown>".to_string());
-    let k = v8::String::new(scope, "url").unwrap();
-    let v = v8::String::new(scope, &url).unwrap();
-    meta.create_data_property(scope, k.into(), v.into());
+    // vitest's members (filename / dirname / url / env / resolve / glob / main, the test file's
+    // `vitest`), as the CJS paths' __ttImportMeta: runtime.js fills V8's object (turbo-test#123,
+    // #130)
+    let global = context.global(scope);
+    let name = v8::String::new(scope, "__ttFillImportMeta").unwrap();
+    let fill = global
+        .get(scope, name.into())
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok());
+    // every module is registered by path when it is compiled (load_esm), before its code can
+    // reach import.meta, and runtime.js defines __ttFillImportMeta
+    if let (Some(p), Some(fill)) = (path, fill) {
+        let file = v8::String::new(scope, &p.to_string_lossy()).unwrap();
+        let undefined = v8::undefined(scope).into();
+        fill.call(scope, undefined, &[meta.into(), file.into()]);
+    }
 }
 
 fn dynamic_import_callback<'s>(
@@ -3738,6 +6109,128 @@ fn dynamic_import_callback<'s>(
     resource_name: v8::Local<'s, v8::Value>,
     specifier: v8::Local<'s, v8::String>,
     _import_attributes: v8::Local<'s, v8::FixedArray>,
+) -> Option<v8::Local<'s, v8::Promise>> {
+    // vitest awaits a vi.doMock's async factory before an import() of its module resolves
+    // (turbo-test#42 item 6): while one is pending (runtime.js __ttImportWait), the import runs
+    // once it is registered
+    let promise = match do_mock_wait(scope, resource_name, specifier) {
+        Some(wait) => {
+            let data = v8::Array::new_with_elements(scope, &[resource_name, specifier.into()]);
+            let then = v8::Function::builder(import_after_do_mock)
+                .data(data.into())
+                .build(scope)?;
+            wait.then(scope, then)?
+        }
+        None => dynamic_import(scope, resource_name, specifier)?,
+    };
+    track_import(scope, promise);
+    Some(promise)
+}
+
+/// Hand an import()'s promise to runtime.js `__ttTrackImport` (vi.dynamicImportSettled waits
+/// for the pending ones, turbo-test#79 item 2).
+fn track_import(scope: &mut v8::PinScope, promise: v8::Local<v8::Promise>) {
+    let global = scope.get_current_context().global(scope);
+    let track = v8::String::new(scope, "__ttTrackImport")
+        .and_then(|k| global.get(scope, k.into()))
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok());
+    if let Some(track) = track {
+        let undefined = v8::undefined(scope).into();
+        track.call(scope, undefined, &[promise.into()]);
+    }
+}
+
+/// The pending async vi.doMock registration an import() of `specifier` from the module
+/// `resource_name` waits for (runtime.js __ttImportWait), if any.
+fn do_mock_wait<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    resource_name: v8::Local<'s, v8::Value>,
+    specifier: v8::Local<'s, v8::String>,
+) -> Option<v8::Local<'s, v8::Promise>> {
+    let global = scope.get_current_context().global(scope);
+    let key = v8::String::new(scope, "__ttImportWait")?;
+    let wait: v8::Local<v8::Function> = global.get(scope, key.into())?.try_into().ok()?;
+    let referrer = resource_name.to_rust_string_lossy(scope);
+    let dir = Path::new(&referrer)
+        .parent()?
+        .to_string_lossy()
+        .into_owned();
+    let dir = v8::String::new(scope, &dir)?;
+    let undefined = v8::undefined(scope).into();
+    let pending = wait.call(scope, undefined, &[dir.into(), specifier.into()])?;
+    pending.try_into().ok()
+}
+
+/// The deferred import() of dynamic_import_callback: `[resource_name, specifier]` is its data.
+fn import_after_do_mock(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data = v8::Local::<v8::Array>::try_from(args.data()).ok();
+    let parts = data.and_then(|d| Some((d.get_index(scope, 0)?, d.get_index(scope, 1)?)));
+    let parts = parts.and_then(|(r, s)| Some((r, v8::Local::<v8::String>::try_from(s).ok()?)));
+    if let Some(promise) = parts.and_then(|(r, s)| dynamic_import(scope, r, s)) {
+        rv.set(promise.into());
+    }
+}
+
+/// The message and code of vitest's error for an import() of `spec` from `importer` that does
+/// not resolve (`root`: the project root): a relative specifier is named as vite resolved it,
+/// URL-resolved against the importer's root-relative path; an absolute one as written; a bare
+/// one is a missing package; an unknown `node:` one is not a built-in.
+fn import_not_found(
+    spec: &str,
+    importer: &str,
+    root: &Path,
+    as_written: bool,
+) -> (String, &'static str) {
+    if spec.starts_with("node:") {
+        return (
+            format!("No such built-in module: {spec}"),
+            "ERR_UNKNOWN_BUILTIN_MODULE",
+        );
+    }
+    let module = |id: &str| format!("Cannot find module '{id}' imported from {importer}");
+    // a static import names the module as written
+    if spec.starts_with('/') || (as_written && (spec.starts_with("./") || spec.starts_with("../")))
+    {
+        return (module(spec), "ERR_MODULE_NOT_FOUND");
+    }
+    if spec.starts_with("./") || spec.starts_with("../") {
+        let importer = Path::new(importer);
+        let dir = importer.strip_prefix(root).unwrap_or(importer).parent();
+        let mut id: Vec<String> = dir
+            .into_iter()
+            .flat_map(|d| d.components())
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        for segment in spec.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    id.pop();
+                }
+                s => id.push(s.to_string()),
+            }
+        }
+        return (
+            module(&format!("/{}", id.join("/"))),
+            "ERR_MODULE_NOT_FOUND",
+        );
+    }
+    (
+        format!("Cannot find package '{spec}' imported from {importer}"),
+        "ERR_MODULE_NOT_FOUND",
+    )
+}
+
+/// import() of `specifier` from the module `resource_name`: a promise for its namespace.
+fn dynamic_import<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    resource_name: v8::Local<'s, v8::Value>,
+    specifier: v8::Local<'s, v8::String>,
 ) -> Option<v8::Local<'s, v8::Promise>> {
     let resolver = v8::PromiseResolver::new(scope)?;
     let promise = resolver.get_promise(scope);
@@ -3761,16 +6254,26 @@ fn dynamic_import_callback<'s>(
         ensure_node_builtin(scope, &spec);
         (Some(PathBuf::from(format!("<node:{spec}>"))), true)
     } else {
-        (from_dir.as_deref().and_then(|d| resolve_spec(&spec, d)), false)
+        let abs = from_dir.as_deref().and_then(|d| resolve_spec(&spec, d));
+        (abs.map(|a| query_mock_variant(&spec, a)), false)
     };
     let Some(abs) = abs else {
-        let err = v8::String::new(scope, &format!("dynamic import cannot resolve {spec}"))?;
-        let exc = v8::Exception::error(scope, err);
+        let root = std::env::current_dir().unwrap_or_default();
+        let (message, code) = import_not_found(&spec, &referrer, &root, false);
+        let message = v8::String::new(scope, &message)?;
+        let exc = v8::Exception::error(scope, message);
+        let key = v8::String::new(scope, "code")?;
+        let code = v8::String::new(scope, code)?;
+        exc.cast::<v8::Object>().set(scope, key.into(), code.into());
         resolver.reject(scope, exc);
         return Some(promise);
     };
 
-    // load + instantiate + evaluate the target, then resolve with its namespace
+    // load + instantiate + evaluate the target, then resolve with its namespace. A load that
+    // throws (the module body, a compile error) rejects with that error, caught here so it is
+    // not left pending on the host callback.
+    let tc = std::pin::pin!(v8::TryCatch::new(scope));
+    let scope = &mut tc.init();
     let ns = (|| {
         if !is_builtin {
             // Module-runner: load app modules via the CJS transform path (live bindings, mocks,
@@ -3780,22 +6283,83 @@ fn dynamic_import_callback<'s>(
             } else {
                 load_dep(scope, &abs)?;
             }
+            // a mock factory that threw: the import rejects with its error (vitest)
+            if let Some(e) = mock_factory_error(scope, &abs) {
+                scope.throw_exception(e);
+                return None;
+            }
         }
+        // A mocked module's synthetic wins over a real ES module record of the same path (one
+        // imported before a vi.doMock): import() returns the mock (vitest).
         let module = REGISTRY.with(|r| {
             let reg = r.borrow();
-            reg.esm_by_path
-                .get(&abs)
-                .or_else(|| reg.cjs_synth_by_path.get(&abs))
-                .cloned()
+            let mocked = reg.mocks.contains_key(&abs);
+            let synth = reg.cjs_synth_by_path.get(&abs);
+            if mocked && synth.is_some() {
+                synth.cloned()
+            } else {
+                reg.esm_by_path.get(&abs).or(synth).cloned()
+            }
         })?;
         let module = v8::Local::new(scope, &module);
         if module.get_status() == v8::ModuleStatus::Uninstantiated {
             module.instantiate_module(scope, resolve_callback)?;
         }
-        if module.get_status() == v8::ModuleStatus::Instantiated {
-            module.evaluate(scope)?;
+        // evaluate() returns the module's evaluation promise (also for one already evaluated or
+        // still evaluating its top-level await): the import settles with it (turbo-test#82)
+        let evaluation = module.evaluate(scope)?;
+        let ns = module.get_module_namespace();
+        // a CommonJS module (not mocked, a builtin, an asset or JSON): vitest's interop
+        // namespace of it, as `import * as` reads it (turbo-test#133)
+        let cjs = (!is_builtin
+            && !is_asset(&abs)
+            && abs.extension().and_then(|e| e.to_str()) != Some("json"))
+        .then(|| {
+            REGISTRY.with(|r| {
+                let reg = r.borrow();
+                if reg.mocks.contains_key(&abs) || reg.esm_by_path.contains_key(&abs) {
+                    return None;
+                }
+                reg.cjs_exports.get(&abs).cloned()
+            })
+        })
+        .flatten();
+        let app_esm = !is_builtin
+            && !abs.components().any(|c| c.as_os_str() == "node_modules")
+            && REGISTRY.with(|r| {
+                let reg = r.borrow();
+                !reg.mocks.contains_key(&abs) && reg.esm_by_path.contains_key(&abs)
+            });
+        // a vi.mock factory's without `default`: the mock itself, whose `default` throws
+        // vitest's error on every read (turbo-test#158)
+        let guarded = REGISTRY
+            .with(|r| {
+                let reg = r.borrow();
+                reg.mocks
+                    .contains_key(&abs)
+                    .then(|| reg.cjs_exports.get(&abs).cloned())
+                    .flatten()
+            })
+            .map(|g| v8::Local::new(scope, &g))
+            .filter(|m| mock_guarded(scope, *m));
+        let ns = match cjs {
+            _ if guarded.is_some() => guarded?,
+            Some(g) => {
+                let exports = v8::Local::new(scope, &g);
+                variant_view(scope, exports, Variant::Ns)?
+            }
+            // an app ES module: its names in source order (turbo-test#141)
+            None if app_esm => ordered_namespace(scope, &abs, ns)?,
+            None => ns,
+        };
+        // (a synthetic module, e.g. a node builtin, evaluated before gives no promise)
+        match v8::Local::<v8::Promise>::try_from(evaluation) {
+            Ok(promise) => {
+                let namespace = v8::Function::builder(return_data).data(ns).build(scope)?;
+                promise.then(scope, namespace).map(Into::into)
+            }
+            Err(_) => Some(ns),
         }
-        Some(module.get_module_namespace())
     })();
 
     match ns {
@@ -3803,12 +6367,39 @@ fn dynamic_import_callback<'s>(
             resolver.resolve(scope, ns);
         }
         None => {
-            let err = v8::String::new(scope, &format!("dynamic import failed: {spec}"))?;
-            let exc = v8::Exception::error(scope, err);
+            let exc = match scope.exception() {
+                Some(e) => e,
+                None => {
+                    let err = v8::String::new(scope, &format!("dynamic import failed: {spec}"))?;
+                    v8::Exception::error(scope, err)
+                }
+            };
             resolver.reject(scope, exc);
         }
     }
     Some(promise)
+}
+
+/// Whether the registered mock `m` is a vi.mock factory's without `default` (runtime.js
+/// `__ttMockGuarded`).
+fn mock_guarded(scope: &mut v8::PinScope, m: v8::Local<v8::Value>) -> bool {
+    let global = scope.get_current_context().global(scope);
+    let f = v8::String::new(scope, "__ttMockGuarded")
+        .and_then(|k| global.get(scope, k.into()))
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok());
+    let Some(f) = f else { return false };
+    let undefined = v8::undefined(scope).into();
+    f.call(scope, undefined, &[m])
+        .is_some_and(|v| v.boolean_value(scope))
+}
+
+/// A function returning its data value (the namespace a dynamic import settles with).
+fn return_data(
+    _scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    rv.set(args.data());
 }
 
 // ---- bootstrap + public API ----------------------------------------------
@@ -3835,7 +6426,7 @@ const RUNTIME_JS: &str = include_str!("runtime.js");
 /// default context, serialized. Native callbacks (log/__nativeRequire) are NOT in the
 /// snapshot — V8 can't serialize native function pointers — so they are re-bound per
 /// context after deserialization (`install_natives`).
-fn framework_snapshot() -> &'static Vec<u8> {
+pub(crate) fn framework_snapshot() -> &'static Vec<u8> {
     static SNAP: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     SNAP.get_or_init(|| {
         let mut creator = v8::Isolate::snapshot_creator(None, None);
@@ -3847,22 +6438,9 @@ fn framework_snapshot() -> &'static Vec<u8> {
             // turbo-dom's index.js loader requires the matching prebuilt .node. Without this
             // the runtime reported 'darwin'/'arm64' everywhere and non-mac hosts loaded the
             // macOS .node -> dlopen fails -> "document is not defined".
-            let node_platform = match std::env::consts::OS {
-                "macos" => "darwin",
-                "windows" => "win32",
-                other => other, // "linux", "freebsd", ...
-            };
-            let node_arch = match std::env::consts::ARCH {
-                "x86_64" => "x64",
-                "aarch64" => "arm64",
-                other => other,
-            };
-            let os_type = match std::env::consts::OS {
-                "macos" => "Darwin",
-                "windows" => "Windows_NT",
-                "linux" => "Linux",
-                other => other,
-            };
+            let node_platform = node_platform(std::env::consts::OS);
+            let node_arch = node_arch(std::env::consts::ARCH);
+            let os_type = node_os_type(std::env::consts::OS);
             // isMusl() reads glibcVersionRuntime: truthy => gnu, falsy => musl.
             let glibc_runtime: &str = if cfg!(target_env = "musl") { "" } else { "2.39" };
             let prelude = format!(
@@ -3870,6 +6448,19 @@ fn framework_snapshot() -> &'static Vec<u8> {
             );
             let pcode = v8::String::new(scope, &prelude).unwrap();
             v8::Script::compile(scope, pcode, None).unwrap().run(scope).unwrap();
+            // chai (turbo-test#160): vitest's expect(x) is a chai Assertion; runtime.js loads it
+            // through the globalThis.__ttLoadChai this defines
+            let chai = chai_script();
+            {
+                let tc = std::pin::pin!(v8::TryCatch::new(scope));
+                let tc = &mut tc.init();
+                let ccode = v8::String::new(tc, &chai).unwrap();
+                let ran = v8::Script::compile(tc, ccode, None).and_then(|s| s.run(tc));
+                if ran.is_none() {
+                    let msg = caught_message(tc, "Error").unwrap_or_default();
+                    chai_missing(&format!("chai failed to load: {msg}"));
+                }
+            }
             let code = v8::String::new(scope, RUNTIME_JS).unwrap();
             let s = v8::Script::compile(scope, code, None).unwrap();
             s.run(scope).unwrap();
@@ -3892,27 +6483,213 @@ fn framework_snapshot() -> &'static Vec<u8> {
     })
 }
 
-/// Re-bind native callbacks into a fresh (snapshot-derived) context.
-fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
-    let log = |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue| {
-        let mut parts = Vec::new();
-        for i in 0..args.length() {
-            parts.push(args.get(i).to_rust_string_lossy(scope));
-        }
-        println!("[js] {}", parts.join(" "));
+/// Where chai's ES-module build is: `TURBO_CHAI` (cli.js sets it to the `chai` this npm package
+/// depends on); in this crate's unit tests, the repo's `node_modules/chai` (`npm ci`).
+fn chai_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("TURBO_CHAI") {
+        return Some(PathBuf::from(p));
+    }
+    if cfg!(test) {
+        return Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("node_modules/chai/index.js"));
+    }
+    None
+}
+
+/// No chai, no expect: say so and stop (never a silent fallback).
+fn chai_missing(why: &str) -> ! {
+    let msg = format!(
+        "turbo-test: {why}\nturbo-test needs the `chai` package it depends on (vitest's expect is chai): \
+         run it through its npm launcher (cli.js), which passes TURBO_CHAI, or set TURBO_CHAI to chai's index.js."
+    );
+    eprintln!("{msg}");
+    std::process::exit(1);
+}
+
+/// chai's `index.js` (an ES module) lowered to CommonJS by the native ESM→CJS emitter, wrapped
+/// into `globalThis.__ttLoadChai()`, which runtime.js calls once its EventTarget / Event exist
+/// (chai's plugin events need them) and which returns chai's exports.
+fn chai_script() -> String {
+    let Some(path) = chai_path() else {
+        chai_missing("TURBO_CHAI is not set");
     };
-    bind_fn(scope, global, "log", log);
+    let src = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| chai_missing(&format!("cannot read chai at {}: {e}", path.display())));
+    let cjs = crate::esm_cjs::emit_with(&path, &src, false).unwrap_or_else(|| {
+        chai_missing(&format!(
+            "cannot lower chai at {} to CommonJS",
+            path.display()
+        ))
+    });
+    format!(
+        "globalThis.__ttLoadChai = () => {{ const module = {{ exports: {{}} }}; (function (module, exports) {{\n{cjs}\n}})(module, module.exports); return module.exports; }};"
+    )
+}
+
+/// Node's `process.platform` for a Rust `std::env::consts::OS`.
+fn node_platform(os: &str) -> &str {
+    match os {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other, // "linux", "freebsd", ...
+    }
+}
+
+/// Node's `process.arch` for a Rust `std::env::consts::ARCH`.
+fn node_arch(arch: &str) -> &str {
+    match arch {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    }
+}
+
+/// Node's `os.type()` for a Rust `std::env::consts::OS`.
+fn node_os_type(os: &str) -> &str {
+    match os {
+        "macos" => "Darwin",
+        "windows" => "Windows_NT",
+        "linux" => "Linux",
+        other => other,
+    }
+}
+
+/// Where the test `console.*` forwarding (`[js] [log] …` lines, runtime.js `__emit` → native
+/// `log`) goes: stderr when set. The CLI sets it when a machine artifact (json/junit/tap) owns
+/// stdout, so test output can't corrupt the parsed artifact; human reporters keep it on stdout.
+pub static CONSOLE_TO_STDERR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// native `log(...parts)`: one `[js] <parts joined by spaces>` line (see [`CONSOLE_TO_STDERR`]).
+fn native_log(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let mut parts = Vec::new();
+    for i in 0..args.length() {
+        parts.push(args.get(i).to_rust_string_lossy(scope));
+    }
+    if CONSOLE_TO_STDERR.load(Ordering::Relaxed) {
+        eprintln!("[js] {}", parts.join(" "));
+    } else {
+        println!("[js] {}", parts.join(" "));
+    }
+}
+
+/// native `__ttWrite(fd, text)`: `process.stdout.write` / `process.stderr.write` (runtime.js) —
+/// the text as is, to stdout for fd 1 (stderr while [`CONSOLE_TO_STDERR`] is set, as console
+/// output) and to stderr otherwise (turbo-test#70).
+fn native_write(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    use std::io::Write;
+    let fd = args.get(0).int32_value(scope).unwrap_or(1);
+    let text = args.get(1).to_rust_string_lossy(scope);
+    if fd == 1 && !CONSOLE_TO_STDERR.load(Ordering::Relaxed) {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(text.as_bytes());
+        let _ = out.flush();
+    } else {
+        let _ = std::io::stderr().lock().write_all(text.as_bytes());
+    }
+}
+
+/// native `__ttCallSite()`: the original `[line, column]` of the innermost stack frame in the test
+/// file (location.rs), or `undefined` — where the runtime's `test(...)` was called from.
+fn native_call_site(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let site = v8::StackTrace::current_stack_trace(scope, 64).and_then(|trace| {
+        (0..trace.get_frame_count()).find_map(|i| {
+            let frame = trace.get_frame(scope, i)?;
+            let name = frame
+                .get_script_name(scope)
+                .map(|n| n.to_rust_string_lossy(scope))
+                .unwrap_or_default();
+            crate::location::resolve(&name, frame.get_line_number(), frame.get_column())
+        })
+    });
+    if let Some((line, col)) = site {
+        let items = [
+            v8::Integer::new(scope, line as i32).into(),
+            v8::Integer::new(scope, col as i32).into(),
+        ];
+        rv.set(v8::Array::new_with_elements(scope, &items).into());
+    }
+}
+
+/// Re-bind native callbacks into a fresh (snapshot-derived) context.
+/// os.tmpdir() as Node's: TMPDIR, else TMP, else TEMP, else /tmp, without a trailing slash.
+fn node_tmpdir(var: impl Fn(&str) -> Option<String>) -> String {
+    let dir = ["TMPDIR", "TMP", "TEMP"]
+        .iter()
+        .find_map(|k| var(k).filter(|v| !v.is_empty()))
+        .unwrap_or_else(|| "/tmp".to_string());
+    match dir.strip_suffix('/') {
+        Some(trimmed) if !trimmed.is_empty() => trimmed.to_string(),
+        _ => dir,
+    }
+}
+
+fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+    bind_fn(scope, global, "log", native_log);
+    bind_fn(scope, global, "__ttWrite", native_write);
+    bind_fn(scope, global, "__ttCallSite", native_call_site);
     bind_fn(scope, global, "__nativeRequire", native_require);
     bind_fn(scope, global, "__ttRegisterMock", native_register_mock);
     bind_fn(scope, global, "__ttImportActual", native_import_actual);
     bind_fn(scope, global, "__ttResetModules", native_reset_modules);
     bind_fn(scope, global, "__ttUnmock", native_unmock);
+    bind_fn(scope, global, "__ttResolveSpec", native_resolve_spec);
+    bind_fn(scope, global, "__ttRequireResolve", native_require_resolve);
+    bind_fn(scope, global, "__ttRequireStack", native_require_stack);
+    bind_fn(scope, global, "__ttCache", native_require_cache);
     bind_fn(scope, global, "__fs_existsSync", fs_exists_sync);
-    bind_fn(scope, global, "__fs_readFileSync", fs_read_file_sync);
-    bind_fn(scope, global, "__fs_writeFileSync", fs_write_file_sync);
-    bind_fn(scope, global, "__fs_mkdirSync", fs_mkdir_sync);
-    bind_fn(scope, global, "__fs_rmSync", fs_rm_sync);
-    bind_fn(scope, global, "__fs_readdirSync", fs_readdir_sync);
+    bind_fn(scope, global, "__fs_readdir", fs_readdir);
+    bind_fn(scope, global, "__fs_stat", fs_stat);
+    bind_fn(scope, global, "__fs_readFile", fs_read_file);
+    bind_fn(scope, global, "__fs_writeFile", fs_write_file);
+    bind_fn(scope, global, "__fs_mkdir", fs_mkdir);
+    bind_fn(scope, global, "__fs_remove", fs_remove);
+    bind_fn(scope, global, "__fs_symlinkSync", fs_symlink_sync);
+    // process.cwd(): the process's working directory, as vitest's workers report it; os.tmpdir()
+    // and os.homedir() as Node computes them
+    let cwd = std::env::current_dir().map(|d| d.to_string_lossy().into_owned());
+    for (name, value) in [
+        ("__ttProcessCwd", cwd.ok()),
+        ("__ttTmpdir", Some(node_tmpdir(|k| std::env::var(k).ok()))),
+        ("__ttHomedir", std::env::var("HOME").ok()),
+    ] {
+        if let Some(value) = value {
+            let key = v8::String::new(scope, name).unwrap();
+            let value = v8::String::new(scope, &value).unwrap();
+            global.set(scope, key.into(), value.into());
+        }
+    }
+    bind_fn(
+        scope,
+        global,
+        "__ttStructuredClone",
+        crate::structured_clone::native_structured_clone,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttTextEncoding",
+        crate::text_decoder::native_text_encoding,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttTextDecoderId",
+        crate::text_decoder::native_text_decoder_id,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttTextDecode",
+        crate::text_decoder::native_text_decode,
+    );
     if std::env::var("TURBO_STACK").is_ok() {
         if let Some(code) = v8::String::new(scope, "globalThis.__TT_STACK=true") {
             if let Some(s) = v8::Script::compile(scope, code, None) {
@@ -3923,6 +6700,10 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     // `-u/--update` → write/overwrite obsolete-or-missing snapshots instead of failing the
     // comparison (vitest's --update semantics). Plumbed via TURBO_UPDATE_SNAPSHOTS env (set by
     // the CLI) → globalThis.__TT_UPDATE_SNAPSHOTS, read by toMatchSnapshot in the runtime.
+    // On CI (vitest: std-env's isCI) a missing snapshot is not written: it fails (turbo-test#73).
+    if crate::ci::is_ci_env() {
+        run_js(scope, "globalThis.__TT_CI=true;");
+    }
     if std::env::var("TURBO_UPDATE_SNAPSHOTS").is_ok() {
         if let Some(code) = v8::String::new(scope, "globalThis.__TT_UPDATE_SNAPSHOTS=true") {
             if let Some(s) = v8::Script::compile(scope, code, None) {
@@ -3941,9 +6722,10 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         }
     }
     // Execution-control knobs from the CLI, plumbed to the runtime the same way as the name
-    // pattern: env (set by turbo_test.rs) → global the runtime reads. All optional.
+    // pattern: env (set by cli.rs) → global the runtime reads. All optional.
     //   --testTimeout → __TT_DEFAULT_TIMEOUT (ms), --retry → __TT_DEFAULT_RETRY,
-    //   --silent → __TT_SILENT, --no-allowOnly → __TT_FORBID_ONLY.
+    //   --silent → __TT_SILENT, --no-allowOnly → __TT_FORBID_ONLY,
+    //   --passWithNoTests → __TT_PASS_WITH_NO_TESTS.
     let mut prelude = String::new();
     if let Ok(v) = std::env::var("TURBO_TEST_TIMEOUT") {
         if let Ok(n) = v.parse::<u64>() {
@@ -3961,6 +6743,23 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     if std::env::var("TURBO_TEST_FORBID_ONLY").is_ok() {
         prelude.push_str("globalThis.__TT_FORBID_ONLY=true;");
     }
+    // --includeTaskLocation / test.includeTaskLocation → record each test's call site
+    if crate::location::enabled() {
+        prelude.push_str("globalThis.__TT_TASK_LOCATION=true;");
+    }
+    // --reporter junit → each test's console output goes to the report (turbo-test#81)
+    if std::env::var("TURBO_CAPTURE_LOGS").is_ok() {
+        prelude.push_str("globalThis.__TT_CAPTURE_LOGS=true;");
+    }
+    // vitest's human reporters with colours on (turbo-test#94) → console values and diffs are
+    // coloured as vitest's worker colours them
+    if std::env::var("TURBO_COLORS").is_ok() {
+        prelude.push_str("globalThis.__TT_COLORS=true;");
+    }
+    // --passWithNoTests (launcher) → a file with no tests at all passes instead of failing
+    if std::env::var("TURBO_PASS_WITH_NO_TESTS").is_ok() {
+        prelude.push_str("globalThis.__TT_PASS_WITH_NO_TESTS=true;");
+    }
     if !prelude.is_empty() {
         if let Some(code) = v8::String::new(scope, &prelude) {
             if let Some(s) = v8::Script::compile(scope, code, None) {
@@ -3968,6 +6767,39 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
             }
         }
     }
+    install_host_env(scope, global);
+}
+
+/// process.env as vitest's (turbo-test#143, #156): the environment turbo-test was started with, in
+/// its order (a non-UTF-8 name / value lossily decoded), then vitest's own variables. The host's
+/// NODE_ENV wins (vitest only defaults it to 'test'); runtime.js's TEST / VITEST / BASE_URL / MODE
+/// / VITEST_MODE / SSR / ... replace the host's; PROD is '1' (DEV '') under NODE_ENV=production;
+/// FORCE_TTY is 'true' when stdout is a terminal. The object is filled in place: `node:process`'s
+/// `env` and `import.meta.env` read this same object.
+fn install_host_env(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+    let host = v8::Object::new(scope);
+    for (k, v) in std::env::vars_os() {
+        // (a variable is far below V8's string limit: the environment is ARG_MAX-bounded)
+        if let (Some(k), Some(v)) = (
+            v8::String::new(scope, &k.to_string_lossy()),
+            v8::String::new(scope, &v.to_string_lossy()),
+        ) {
+            host.set(scope, k.into(), v.into());
+        }
+    }
+    let key = v8::String::new(scope, "__ttHostEnv").unwrap();
+    global.set(scope, key.into(), host.into());
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        run_js(scope, "globalThis.process.env.FORCE_TTY = 'true';");
+    }
+    run_js(
+        scope,
+        "(() => { const e = globalThis.process.env, h = globalThis.__ttHostEnv; delete globalThis.__ttHostEnv; \
+         const own = { ...e }; for (const k of Object.keys(e)) delete e[k]; Object.assign(e, h); \
+         if (h.NODE_ENV !== undefined) delete own.NODE_ENV; Object.assign(e, own); \
+         e.PROD = e.NODE_ENV === 'production' ? '1' : ''; e.DEV = e.PROD ? '' : '1'; })();",
+    );
 }
 
 /// Minimal JSON string encoder for embedding a Rust string as a JS string literal.
@@ -3999,82 +6831,337 @@ fn fs_exists_sync(
     rv.set_bool(Path::new(&p).exists());
 }
 
-/// native fs.readFileSync(path, enc) -> string (utf8) — enc ignored, always returns text
-fn fs_read_file_sync(
+/// The Node error code and description of an OS error (`EEXIST`, "file already exists"), as
+/// libuv names them; None for an error that is not one of these.
+fn errno_name(e: &std::io::Error) -> Option<(&'static str, &'static str)> {
+    const NAMES: [(i32, &str, &str); 6] = [
+        (2, "ENOENT", "no such file or directory"),
+        (13, "EACCES", "permission denied"),
+        (17, "EEXIST", "file already exists"),
+        (20, "ENOTDIR", "not a directory"),
+        (1, "EPERM", "operation not permitted"),
+        (21, "EISDIR", "illegal operation on a directory"),
+    ];
+    // ENOTEMPTY's number differs by OS (66 on macOS, 39 on Linux)
+    if e.kind() == std::io::ErrorKind::DirectoryNotEmpty {
+        return Some(("ENOTEMPTY", "directory not empty"));
+    }
+    let errno = e.raw_os_error()?;
+    NAMES
+        .iter()
+        .find(|(n, _, _)| *n == errno)
+        .map(|&(_, c, d)| (c, d))
+}
+
+/// native fs.symlinkSync(target, path): a symbolic link at `path` to `target`; a failure throws
+/// Node's error (`EEXIST: file already exists, symlink 'target' -> 'path'`, its `code`).
+fn fs_symlink_sync(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let target = args.get(0).to_rust_string_lossy(scope);
+    let path = args.get(1).to_rust_string_lossy(scope);
+    #[cfg(unix)]
+    let res = std::os::unix::fs::symlink(&target, &path);
+    #[cfg(not(unix))]
+    let res = std::os::windows::fs::symlink_file(&target, &path);
+    if let Err(e) = res {
+        let (code, desc) = errno_name(&e).unwrap_or(("EIO", "i/o error"));
+        let msg = format!("{code}: {desc}, symlink '{target}' -> '{path}'");
+        let msg = v8::String::new(scope, &msg).unwrap();
+        let err = v8::Exception::error(scope, msg);
+        if let Ok(obj) = v8::Local::<v8::Object>::try_from(err) {
+            for (k, v) in [
+                ("code", code),
+                ("syscall", "symlink"),
+                ("path", &target),
+                ("dest", &path),
+            ] {
+                let k = v8::String::new(scope, k).unwrap();
+                let v = v8::String::new(scope, v).unwrap();
+                obj.set(scope, k.into(), v.into());
+            }
+        }
+        scope.throw_exception(err);
+    }
+}
+
+/// Throw Node's error for a failed fs call: `ENOENT: no such file or directory, scandir '<path>'`
+/// with its `errno` (negative), `code`, `syscall` and `path`.
+fn throw_fs_error(scope: &mut v8::PinScope, e: &std::io::Error, syscall: &str, path: &str) {
+    throw_fs_error_at(scope, e, syscall, Some(path));
+}
+
+/// throw_fs_error for a call Node reports without a path (`EISDIR: …, read`).
+fn throw_fs_error_at(
+    scope: &mut v8::PinScope,
+    e: &std::io::Error,
+    syscall: &str,
+    path: Option<&str>,
+) {
+    let (code, desc) = errno_name(e).unwrap_or(("EIO", "i/o error"));
+    let msg = match path {
+        Some(path) => format!("{code}: {desc}, {syscall} '{path}'"),
+        None => format!("{code}: {desc}, {syscall}"),
+    };
+    let msg = v8::String::new(scope, &msg).unwrap();
+    let err = v8::Exception::error(scope, msg);
+    let obj = err.cast::<v8::Object>();
+    let errno = v8::Integer::new(scope, -e.raw_os_error().unwrap_or(5));
+    let key = v8::String::new(scope, "errno").unwrap();
+    obj.set(scope, key.into(), errno.into());
+    let fields = [
+        ("code", Some(code)),
+        ("syscall", Some(syscall)),
+        ("path", path),
+    ];
+    for (k, v) in fields.iter().filter_map(|(k, v)| Some((*k, (*v)?))) {
+        let k = v8::String::new(scope, k).unwrap();
+        let v = v8::String::new(scope, v).unwrap();
+        obj.set(scope, k.into(), v.into());
+    }
+    scope.throw_exception(err);
+}
+
+/// native fs.readFile(path, text): the file's contents (a string, else a Uint8Array); Node's
+/// `open` error, or `read` (no path) for a directory.
+fn fs_read_file(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use std::io::Read;
+    let p = args.get(0).to_rust_string_lossy(scope);
+    let mut file = match std::fs::File::open(&p) {
+        Ok(f) => f,
+        Err(e) => return throw_fs_error(scope, &e, "open", &p),
+    };
+    let mut bytes = Vec::new();
+    if let Err(e) = file.read_to_end(&mut bytes) {
+        return throw_fs_error_at(scope, &e, "read", None);
+    }
+    if args.get(1).boolean_value(scope) {
+        let text = v8::String::new(scope, &String::from_utf8_lossy(&bytes)).unwrap();
+        return rv.set(text.into());
+    }
+    let len = bytes.len();
+    let store = v8::ArrayBuffer::new_backing_store_from_vec(bytes).make_shared();
+    let buffer = v8::ArrayBuffer::with_backing_store(scope, &store);
+    rv.set(v8::Uint8Array::new(scope, buffer, 0, len).unwrap().into());
+}
+
+/// native fs.writeFile(path, data, append): write (or append) a string or a byte view; Node's
+/// `open` error (parents are not created).
+fn fs_write_file(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    use std::io::Write;
+    let p = args.get(0).to_rust_string_lossy(scope);
+    let data = args.get(1);
+    let bytes = match v8::Local::<v8::ArrayBufferView>::try_from(data) {
+        Ok(view) => {
+            let mut buf = vec![0; view.byte_length()];
+            view.copy_contents(&mut buf);
+            buf
+        }
+        Err(_) => data.to_rust_string_lossy(scope).into_bytes(),
+    };
+    let append = args.get(2).boolean_value(scope);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(append)
+        .truncate(!append)
+        .open(&p);
+    // (a failing write itself — a full disk — is reported as the open)
+    if let Err(e) = file.and_then(|mut f| f.write_all(&bytes)) {
+        throw_fs_error(scope, &e, "open", &p);
+    }
+}
+
+/// native fs.mkdir(path, recursive): Node's `mkdir` error; recursive returns the first
+/// directory it created, as given (`w/q` for `w/q/r/s`), or undefined.
+fn fs_mkdir(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
     let p = args.get(0).to_rust_string_lossy(scope);
-    match std::fs::read_to_string(&p) {
-        Ok(s) => {
-            if let Some(v) = v8::String::new(scope, &s) {
-                rv.set(v.into());
-            }
+    if !args.get(1).boolean_value(scope) {
+        if let Err(e) = std::fs::create_dir(&p) {
+            throw_fs_error(scope, &e, "mkdir", &p);
         }
-        Err(e) => throw(scope, &format!("readFileSync {p}: {e}")),
+        return;
+    }
+    let first = Path::new(&p)
+        .ancestors()
+        .take_while(|a| !a.as_os_str().is_empty() && !a.exists())
+        .last()
+        .map(|a| a.to_string_lossy().into_owned());
+    if let Err(e) = std::fs::create_dir_all(&p) {
+        return throw_fs_error(scope, &e, "mkdir", &p);
+    }
+    if let Some(first) = first {
+        rv.set(v8::String::new(scope, &first).unwrap().into());
     }
 }
 
-/// native fs.writeFileSync(path, data)
-fn fs_write_file_sync(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+/// native fs.rmdir / unlink / rm-tree(path, op): remove a directory (`rmdir`), a file
+/// (`unlink`) or a whole tree (`rm`), with Node's error for that syscall.
+fn fs_remove(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
     let p = args.get(0).to_rust_string_lossy(scope);
-    let data = args.get(1).to_rust_string_lossy(scope);
-    if let Some(parent) = Path::new(&p).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(e) = std::fs::write(&p, data) {
-        throw(scope, &format!("writeFileSync {p}: {e}"));
+    let op = args.get(1).to_rust_string_lossy(scope);
+    let res = match op.as_str() {
+        "rmdir" => std::fs::remove_dir(&p),
+        "unlink" => std::fs::remove_file(&p),
+        _ => std::fs::remove_dir_all(&p),
+    };
+    if let Err(e) = res {
+        throw_fs_error(scope, &e, &op, &p);
     }
 }
 
-/// native fs.mkdirSync(path, opts) — always recursive (safe)
-fn fs_mkdir_sync(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
-    let p = args.get(0).to_rust_string_lossy(scope);
-    let _ = std::fs::create_dir_all(&p);
+/// The `S_IFMT` bits of a file type (Node's Dirent / Stats kinds; 0 when unknown).
+fn file_type_bits(t: std::fs::FileType) -> u32 {
+    #[cfg(unix)]
+    use std::os::unix::fs::FileTypeExt;
+    #[cfg(unix)]
+    let special = [
+        (t.is_block_device(), 0o060000),
+        (t.is_char_device(), 0o020000),
+        (t.is_fifo(), 0o010000),
+        (t.is_socket(), 0o140000),
+    ];
+    #[cfg(not(unix))]
+    let special = [];
+    let kinds = [
+        (t.is_symlink(), 0o120000),
+        (t.is_dir(), 0o040000),
+        (t.is_file(), 0o100000),
+    ];
+    special
+        .iter()
+        .chain(&kinds)
+        .find(|k| k.0)
+        .map_or(0, |k| k.1)
 }
 
-/// native fs.rmSync / rmdirSync / unlinkSync(path) — best-effort remove
-fn fs_rm_sync(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+/// native fs.readdir(path) -> [name, S_IFMT bits][] in Node's (byte) order; a failure throws
+/// Node's `scandir` error (runtime.js builds names or Dirents from it).
+fn fs_readdir(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
     let p = args.get(0).to_rust_string_lossy(scope);
-    let path = Path::new(&p);
-    if path.is_dir() {
-        let _ = std::fs::remove_dir_all(path);
+    let entries = match std::fs::read_dir(&p) {
+        Ok(entries) => entries,
+        Err(e) => return throw_fs_error(scope, &e, "scandir", &p),
+    };
+    let mut list: Vec<(String, u32)> = entries
+        .flatten()
+        .map(|e| {
+            let bits = e.file_type().map(file_type_bits).unwrap_or(0);
+            (e.file_name().to_string_lossy().into_owned(), bits)
+        })
+        .collect();
+    list.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    let items: Vec<v8::Local<v8::Value>> = list
+        .iter()
+        .map(|(name, bits)| {
+            let name = v8::String::new(scope, name).unwrap().into();
+            let bits = v8::Integer::new_from_unsigned(scope, *bits).into();
+            v8::Array::new_with_elements(scope, &[name, bits]).into()
+        })
+        .collect();
+    rv.set(v8::Array::new_with_elements(scope, &items).into());
+}
+
+/// native fs.stat(path, lstat) -> Node's Stats fields in order (dev, mode, nlink, uid, gid, rdev,
+/// blksize, ino, size, blocks, atimeMs, mtimeMs, ctimeMs, birthtimeMs); a failure throws Node's
+/// `stat` / `lstat` error.
+fn fs_stat(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let p = args.get(0).to_rust_string_lossy(scope);
+    let lstat = args.get(1).boolean_value(scope);
+    let res = if lstat {
+        std::fs::symlink_metadata(&p)
     } else {
-        let _ = std::fs::remove_file(path);
-    }
+        std::fs::metadata(&p)
+    };
+    let m = match res {
+        Ok(m) => m,
+        Err(e) => return throw_fs_error(scope, &e, if lstat { "lstat" } else { "stat" }, &p),
+    };
+    let ms = |t: std::io::Result<std::time::SystemTime>| {
+        t.ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0.0, |d| d.as_secs_f64() * 1000.0)
+    };
+    #[cfg(unix)]
+    let fields = {
+        use std::os::unix::fs::MetadataExt;
+        let ctime = m.ctime() as f64 * 1000.0 + m.ctime_nsec() as f64 / 1e6;
+        [
+            m.dev() as f64,
+            m.mode() as f64,
+            m.nlink() as f64,
+            m.uid() as f64,
+            m.gid() as f64,
+            m.rdev() as f64,
+            m.blksize() as f64,
+            m.ino() as f64,
+            m.size() as f64,
+            m.blocks() as f64,
+            ms(m.accessed()),
+            ms(m.modified()),
+            ctime,
+            ms(m.created()),
+        ]
+    };
+    #[cfg(not(unix))]
+    let fields = {
+        let mode = if m.is_dir() { 0o040755 } else { 0o100644 };
+        let modified = ms(m.modified());
+        [
+            0.0,
+            mode as f64,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            4096.0,
+            0.0,
+            m.len() as f64,
+            0.0,
+            ms(m.accessed()),
+            modified,
+            modified,
+            ms(m.created()),
+        ]
+    };
+    let items: Vec<v8::Local<v8::Value>> = fields
+        .iter()
+        .map(|v| v8::Number::new(scope, *v).into())
+        .collect();
+    rv.set(v8::Array::new_with_elements(scope, &items).into());
 }
 
-/// native fs.readdirSync(path) -> string[] of entry names
-fn fs_readdir_sync(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
-    let p = args.get(0).to_rust_string_lossy(scope);
-    let arr = v8::Array::new(scope, 0);
-    if let Ok(entries) = std::fs::read_dir(&p) {
-        let mut i = 0;
-        for e in entries.flatten() {
-            if let Some(name) = e.file_name().to_str() {
-                if let Some(s) = v8::String::new(scope, name) {
-                    arr.set_index(scope, i, s.into());
-                    i += 1;
-                }
-            }
-        }
-    }
-    rv.set(arr.into());
-}
+/// Node builtin module names we shim; each has an entry in runtime.js `__nodeBuiltins` (a unit
+/// test checks that), served to `import` and `require` alike by `ensure_node_builtin`.
+#[rustfmt::skip]
+const NODE_BUILTINS: &[&str] = &[
+    "fs", "fs/promises", "path", "module", "os", "child_process", "url", "util", "events",
+    "stream", "assert", "assert/strict", "perf_hooks", "crypto", "buffer", "querystring",
+    "string_decoder", "timers", "timers/promises", "http", "http2", "https", "net", "tls", "zlib",
+    "dns", "dns/promises", "tty", "constants", "dgram", "readline", "v8", "diagnostics_channel",
+    "process", "async_hooks", "worker_threads", "vm", "inspector",
+];
 
-/// node builtin module names we shim.
 fn is_node_builtin(spec: &str) -> bool {
-    let s = spec.strip_prefix("node:").unwrap_or(spec);
-    matches!(
-        s,
-        "fs" | "fs/promises" | "path" | "module" | "os" | "child_process" | "url" | "util"
-            | "events" | "stream" | "assert" | "assert/strict" | "perf_hooks" | "crypto"
-            | "buffer" | "querystring" | "string_decoder" | "timers" | "timers/promises"
-            | "http" | "http2" | "https" | "net" | "tls" | "zlib" | "dns" | "dns/promises"
-            | "tty" | "constants" | "dgram" | "readline" | "v8" | "diagnostics_channel"
-            | "process" | "async_hooks" | "worker_threads" | "vm" | "inspector"
-    )
+    NODE_BUILTINS.contains(&spec.strip_prefix("node:").unwrap_or(spec))
 }
 
 /// Register a node builtin as a synthetic module sourced from globalThis.__nodeBuiltins[name].
@@ -4088,12 +7175,10 @@ fn ensure_node_builtin<'s>(scope: &mut v8::PinScope<'s, '_>, spec: &str) -> Opti
     let builtins = v8::Local::<v8::Object>::try_from(global.get(scope, bk.into())?).ok()?;
     let lookup_name = spec.strip_prefix("node:").unwrap_or(spec);
     let nk = v8::String::new(scope, lookup_name)?;
-    let exports_val = builtins.get(scope, nk.into())?;
-    let exports_val = if exports_val.is_undefined() {
-        v8::Object::new(scope).into()
-    } else {
-        exports_val
-    };
+    // every NODE_BUILTINS name has a shim; a missing one is a bug, not an empty module
+    let exports_val = builtins
+        .get(scope, nk.into())
+        .filter(|v| !v.is_undefined())?;
     let names = object_keys(scope, global, exports_val);
     let exports_global = v8::Global::new(scope, exports_val);
     let synth = make_synthetic(scope, &names)?;
@@ -4117,23 +7202,98 @@ pub struct TestReport {
     /// Per-test list (full `describe > it` name, status, duration ms) — drives the
     /// per-testcase reporters (junit/tap/verbose). Empty only if the file failed to load.
     pub tests: Vec<TestCase>,
+    /// One state per `describe` block: "pass" | "fail" | "skip" | "todo".
+    pub suites: Vec<String>,
+    /// The file's snapshot counts (`None`: it used no snapshot and has no snapshot file).
+    pub snapshot: Option<SnapshotResult>,
     /// Per-file environment setup time (isolate+context-from-snapshot+natives), µs.
     pub setup_us: f64,
+    /// The suites whose hooks failed, in vitest's suite order.
+    pub suite_errors: Vec<SuiteError>,
+    /// The describes without tasks (TAP tasks of their own, turbo-test#170): `index of the next
+    /// test`, mode (`run` / `skip` / `todo`), then the describe path, joined by U+001F.
+    pub empty_suites: Vec<String>,
+    /// The file's console output while captured: (stream, task name path, content).
+    pub logs: Vec<(String, String, String)>,
+    /// ms the drive loop's clock jumped while the tests ran (turbo-test#95).
+    pub waited_ms: f64,
 }
 
-#[derive(Debug, Clone)]
+/// A test file's snapshot outcome, as @vitest/snapshot's `SnapshotResult` (turbo-test#73).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SnapshotResult {
+    pub added: u32,
+    pub matched: u32,
+    pub unmatched: u32,
+    pub updated: u32,
+    /// Obsolete snapshots (0 when the emptied file was deleted) and their keys.
+    pub unchecked: u32,
+    pub unchecked_keys: Vec<String>,
+    /// The snapshot file was emptied (and, under -u, deleted).
+    pub file_deleted: bool,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct TestCase {
+    /// The `describe > test` label (junit/tap/verbose).
     pub name: String,
-    /// "passed" | "failed" | "skipped".
+    /// The test's own title and its enclosing `describe` names (vitest's `title` /
+    /// `ancestorTitles`).
+    pub title: String,
+    pub ancestors: Vec<String>,
+    /// "passed" | "failed" | "skipped" | "todo" | "pending" (a `.only` test inside describe.skip /
+    /// describe.todo, which vitest never runs: turbo-test#77).
     pub status: String,
     pub duration_ms: f64,
+    /// Real start time (epoch ms) of a test that ran; 0 otherwise.
+    pub start_ms: f64,
     /// Failure message (empty unless status == "failed").
     pub message: String,
+    /// The failure's error `stack` (else its `message`, else none: JSON `null`), as vitest's JSON
+    /// `failureMessages` (turbo-test#97).
+    pub failure_messages: Vec<Option<String>>,
+    /// Where the test was registered (`includeTaskLocation`): 1-based line and column.
+    pub location: Option<(u32, u32)>,
+    /// A failed test that never ran (a forbidden `.only`, turbo-test#76): no `duration`.
+    pub not_run: bool,
+    /// A passing `it.fails` test: vitest's `expected fail` in the summary footer (turbo-test#78).
+    pub expected_fail: bool,
+    /// How many times it was retried (vitest's `retryCount`, `(retry x1)`).
+    pub retry_count: u32,
+    /// Its console output (`stdout` / `stderr`, content) while logs are captured (junit).
+    pub logs: Vec<(String, String)>,
+    /// The error it failed with (junit's `<failure>`, turbo-test#81).
+    pub errors: Vec<crate::failure::ErrorInfo>,
+    /// The note of a test skipped at run time (`ctx.skip(note)`, turbo-test#96); empty for none.
+    pub note: String,
+    /// Its `ctx.annotate()` calls, in order (turbo-test#96).
+    pub annotations: Vec<Annotation>,
+}
+
+/// A test annotation (`ctx.annotate(message, type)`): where it was made in the test file
+/// (1-based line and column, 0 when unknown).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Annotation {
+    pub kind: String,
+    pub message: String,
+    pub line: u32,
+    pub col: u32,
+}
+
+/// A `describe` whose `beforeAll` / `afterAll` failed: a failed suite, reported by junit as a
+/// test case of its own (turbo-test#81).
+#[derive(Debug, Clone, Default)]
+pub struct SuiteError {
+    pub name: String,
+    pub duration_ms: f64,
+    pub errors: Vec<crate::failure::ErrorInfo>,
 }
 
 impl TestReport {
+    /// Nothing failed — no failed test and no file-level failure entry. A file whose tests were
+    /// all skipped / filtered out is ok (it counts as a passed file).
     pub fn ok(&self) -> bool {
-        self.failed == 0 && self.passed > 0
+        self.failed == 0 && self.failures.is_empty()
     }
 }
 
@@ -4142,14 +7302,20 @@ impl TestReport {
 /// files are skipped (test files get hoist-reordered so their maps are unreliable, and they don't
 /// belong in a coverage report anyway).
 fn coverage_accumulate(json: &str) {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return };
-    let Some(scripts) =
-        v.get("result").and_then(|r| r.get("result")).and_then(|x| x.as_array())
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return;
+    };
+    let Some(scripts) = v
+        .get("result")
+        .and_then(|r| r.get("result"))
+        .and_then(|x| x.as_array())
     else {
         return;
     };
     for s in scripts {
-        let Some(url) = s.get("url").and_then(|u| u.as_str()) else { continue };
+        let Some(url) = s.get("url").and_then(|u| u.as_str()) else {
+            continue;
+        };
         if url.is_empty() {
             continue;
         }
@@ -4183,7 +7349,11 @@ fn coverage_accumulate(json: &str) {
         let mut funcs: Vec<(String, usize, i64)> = Vec::new();
         if let Some(fns) = s.get("functions").and_then(|f| f.as_array()) {
             for f in fns {
-                let name = f.get("functionName").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                let name = f
+                    .get("functionName")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let rs = f.get("ranges").and_then(|r| r.as_array());
                 if let Some(rs) = rs {
                     for (i, r) in rs.iter().enumerate() {
@@ -4214,22 +7384,103 @@ fn coverage_accumulate(json: &str) {
     }
 }
 
+/// The caught exception's text (`fallback` when V8 has none to give), or None if nothing was
+/// caught.
+fn caught_message(
+    tc: &mut v8::PinnedRef<'_, v8::TryCatch<'_, '_, v8::HandleScope<'_>>>,
+    fallback: &str,
+) -> Option<String> {
+    if !tc.has_caught() {
+        return None;
+    }
+    Some(
+        tc.exception()
+            .map(|e| e.to_rust_string_lossy(tc))
+            .unwrap_or_else(|| fallback.to_string()),
+    )
+}
+
+/// Load-error text for an entry module whose `instantiate_module` did not succeed.
+fn instantiate_error(caught: Option<String>) -> String {
+    format!(
+        "instantiate: {}",
+        caught.unwrap_or_else(|| "instantiate failed".to_string())
+    )
+}
+
+/// Load-error text (if any) for an entry module after `evaluate` + a microtask checkpoint:
+/// a caught exception, an errored module (its exception, fetched lazily), or any other
+/// not-evaluated outcome.
+fn evaluate_error(
+    caught: Option<String>,
+    evaluated: bool,
+    status: v8::ModuleStatus,
+    exception: impl FnOnce() -> String,
+) -> Option<String> {
+    if let Some(e) = caught {
+        return Some(format!("evaluate threw: {e}"));
+    }
+    if evaluated && status == v8::ModuleStatus::Evaluated {
+        return None;
+    }
+    if status == v8::ModuleStatus::Errored {
+        Some(format!("module errored: {}", exception()))
+    } else {
+        Some(format!("evaluate failed: status={status:?}"))
+    }
+}
+
 /// Run a single test file end-to-end and return its pass/fail report.
+/// Whether a mock's target may be externalized from an esbuild bundle (setup mocks; entry mocks
+/// under TURBO_NO_MR) so the mock registry intercepts it. Not for (a) partial mocks (spread the
+/// real module via importOriginal/importActual) and (b) factories that build React elements —
+/// those must use the TEST's react instance, but a prepass/setup bundle has its own react
+/// (dual-react render fail). Both stay un-externalized so the real module bundles with the
+/// test's react. JSX is an arrow body starting with `<` (optionally parenthesized); an arrow
+/// returning a parenthesized object literal (`() => ({ ... })`, the common factory form) is
+/// not React.
+fn mock_externalizable(factory: &str) -> bool {
+    let is_partial = factory.contains("importOriginal") || factory.contains("importActual");
+    let jsx_arrow = factory.match_indices("=>").any(|(at, _)| {
+        let body = factory[at + 2..].trim_start();
+        body.strip_prefix('(')
+            .unwrap_or(body)
+            .trim_start()
+            .starts_with('<')
+    });
+    let builds_react = factory.contains("react/jsx")
+        || factory.contains("createElement")
+        || factory.contains("React.")
+        || jsx_arrow;
+    !is_partial && !builds_react
+}
+
 pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
+    LOAD_ERROR.with(|e| e.borrow_mut().take());
     // Per-file native-DOM lifecycle: reset the thread-local DOM (fresh document per file) and, when
     // debugging (TURBO_RUST_DOM_LOG), dump the missing-member access log — on ANY exit incl. a load
     // failure (the surface React/testing-library touched is recorded during the failed load).
+    // A file on the reuse path keeps the worker's document: it is installed once per worker, as
+    // vitest `isolate: false` keeps one environment (turbo-test#150), and dropped with the worker.
     struct DomGuard;
     impl Drop for DomGuard {
         fn drop(&mut self) {
-            if crate::browser_env::enabled() {
-                crate::browser_env::reset();
+            if on_reuse_path() && DOM_INSTALLED.with(|d| d.get()) {
+                return;
+            }
+            if turbo_dom_browser_env::browser_env::enabled() {
+                turbo_dom_browser_env::browser_env::reset();
             }
         }
     }
     let _dom_guard = DomGuard;
 
     let entry_abs = std::fs::canonicalize(entry).map_err(|e| format!("{e}"))?;
+    crate::location::begin(
+        &entry_abs,
+        &std::fs::read_to_string(&entry_abs).unwrap_or_default(),
+    );
+    TEST_FILE.with(|f| *f.borrow_mut() = entry_abs.clone());
     // e2e helper tests may import heavy Node-only deps they don't exercise — allow stubbing a
     // failed node_modules load for these files only (see stub_failed_deps).
     ENTRY_LENIENT.with(|c| c.set(entry_abs.components().any(|p| p.as_os_str() == "e2e")));
@@ -4243,30 +7494,24 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     // dangling external would fail the whole file — safer to leave them bundled.
     let setup_files = vitest_setup_files(&entry_abs);
     let mut externals: Vec<String> = Vec::new();
-    let mut mock_targets: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    let mut mock_targets: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
     for sf in &setup_files {
         let sf_dir = sf.parent().unwrap_or(Path::new("."));
         let sf_src = std::fs::read_to_string(sf).unwrap_or_default();
         for (s, factory) in extract_mocks(&sf_src) {
-            // skip glob/query mock specifiers (e.g. '*?url') — not real modules.
-            if s.contains('*') || s.contains('?') {
+            // a glob (e.g. '*?url') is not a module; a `?query` id is one of its own (mock_key
+            // keeps the query, so the rewritten import reaches that mock, not the plain
+            // module's: turbo-test#42 item 5), externalized only when its file exists
+            if s.contains('*') || !mock_externalizable(&factory) {
                 continue;
             }
-            // Skip: (a) partial mocks (spread the real module via importOriginal/importActual),
-            // and (b) factories that build React elements — those must use the TEST's react
-            // instance, but a prepass/setup bundle has its own react (dual-react render fail).
-            // For both, leave un-externalized so the real module bundles with the test's react.
-            let is_partial = factory.contains("importOriginal") || factory.contains("importActual");
-            let builds_react = factory.contains("react/jsx")
-                || factory.contains("createElement")
-                || factory.contains("React.")
-                || factory.contains("=> (")
-                || factory.contains("=> <");
-            if is_partial || builds_react {
-                continue;
-            }
-            if let Some(abs) = resolve_spec(&s, sf_dir) {
-                mock_targets.entry(spec_basename(&s)).or_insert(abs);
+            match mock_key(&s, sf_dir) {
+                Some(abs) => {
+                    mock_targets.entry(spec_basename(&s)).or_insert(abs);
+                }
+                None if s.contains('?') => continue,
+                None => {}
             }
             if !externals.contains(&s) {
                 externals.push(s);
@@ -4274,11 +7519,38 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         }
     }
 
-    // (Entry-file vi.mock is NOT externalized: a React-component mock factory must run in the
-    // TEST's react instance — a separate prepass/setup bundle has its own react (dual-react
-    // render failure) — and a failed externalized mock dangles the whole file. The real module
-    // bundles with the test's single react instead. Fully fixing entry component-mocks needs a
-    // vitest-style per-module runner. Only setup mocks are externalized.)
+    // TURBO_NO_MR (legacy bundle path): the ENTRY file's own mock targets are externalized the
+    // same way (turbo-test#31 item 15). Bundled into the entry, a mocked module was unreachable
+    // by the mock registry, so entry vi.mock/jest.mock never intercepted anything. Externalized
+    // and rewritten to its absolute path, the import resolves through the registry, where
+    // run_entry_mocks' prepass registered the mock before the bundle links. The same
+    // exclusions as for setup mocks apply (see mock_externalizable): React-building and
+    // partial (importOriginal/importActual) factories stay bundled, a documented limitation of
+    // this escape hatch; the default module-runner mocks every module per-module.
+    // (Module-runner mode loads no bundle, so nothing is externalized there.)
+    if !mr_enabled() {
+        let entry_dir = entry_abs.parent().unwrap_or(Path::new("."));
+        let entry_src = std::fs::read_to_string(&entry_abs).unwrap_or_default();
+        // vi.doMock targets too: a later `import()` of one must reach the registry, not a copy
+        // esbuild bundled into the entry (turbo-test#39 item 1)
+        let calls = extract_mocks(&entry_src)
+            .into_iter()
+            .chain(extract_do_mocks(&entry_src));
+        for (s, factory) in calls {
+            // a glob is not a module; a `?query` id is one of its own (mock_key keeps the query,
+            // so the rewritten import reaches that mock, not the plain module's)
+            if s.contains('*') || !mock_externalizable(&factory) {
+                continue;
+            }
+            let Some(abs) = mock_key(&s, entry_dir) else {
+                continue;
+            };
+            mock_targets.entry(spec_basename(&s)).or_insert(abs);
+            if !externals.contains(&s) {
+                externals.push(s);
+            }
+        }
+    }
 
     // Bundle deps with esbuild (Vite-style) so the whole dep tree loads as one clean ESM;
     // fall back to the native per-module loader if esbuild is unavailable or fails.
@@ -4287,7 +7559,8 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     let load_target = if mr_enabled() {
         entry_abs.clone()
     } else {
-        esbuild_bundle_full(&entry_abs, &externals, &mock_targets, None).unwrap_or_else(|| entry_abs.clone())
+        esbuild_bundle_full(&entry_abs, &externals, &mock_targets, None)
+            .unwrap_or_else(|| entry_abs.clone())
     };
 
     // Make mock synthetics lenient: collect the names the bundle imports from each mock so
@@ -4297,7 +7570,13 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
             for abs in mock_targets.values() {
                 let names = collect_named_imports(&btext, &abs.to_string_lossy());
                 if !names.is_empty() {
-                    REGISTRY.with(|r| r.borrow_mut().extra_exports.entry(abs.clone()).or_default().extend(names));
+                    REGISTRY.with(|r| {
+                        r.borrow_mut()
+                            .extra_exports
+                            .entry(abs.clone())
+                            .or_default()
+                            .extend(names)
+                    });
                 }
             }
         }
@@ -4310,7 +7589,13 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     // fresh path (one isolate per file) — that's where the inspector collector is wired, and it
     // keeps the byte-offset → source mapping unambiguous.
     if !FORCE_FRESH.with(|f| f.get()) && reuse_decision(&entry_abs) && !crate::coverage::enabled() {
-        return run_test_file_reused(&entry_abs, &setup_files, &externals, &mock_targets, &load_target);
+        return run_test_file_reused(
+            &entry_abs,
+            &setup_files,
+            &externals,
+            &mock_targets,
+            &load_target,
+        );
     }
 
     // All Global handles live in the thread-local REGISTRY; they MUST be dropped while
@@ -4321,12 +7606,11 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         // snapshot; Context::new yields the baked default context (framework already
         // present). We time setup (isolate+context+natives) — the M3/M0 guardrail.
         let setup_start = std::time::Instant::now();
-        let blob = framework_snapshot();
-        let params =
-            v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(blob.clone()));
-        let isolate = &mut v8::Isolate::new(params);
+        let isolate = &mut v8::Isolate::new(isolate_params());
         isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
         isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
+        crate::heap_guard::install(isolate);
+        crate::heap_guard::arm();
         // Coverage: attach an inspector to this isolate BEFORE entering scopes (needs &mut isolate).
         let mut collector =
             crate::coverage::enabled().then(|| crate::coverage::Collector::new(isolate));
@@ -4340,13 +7624,14 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         if let Some(c) = collector.as_mut() {
             c.start(context);
         }
-        // process.cwd(): the test's project root (nearest package.json outside node_modules) —
-        // some tests build absolute paths via `path.join(process.cwd(), 'node_modules/...')`.
+        // __cwd: the test's project root (nearest package.json outside node_modules), the
+        // runner's internal base (process.cwd() is the process's working directory, #54).
         {
             let mut root = entry_abs.parent();
             let mut found: Option<&Path> = None;
             while let Some(d) = root {
-                if d.join("package.json").is_file() && !d.to_string_lossy().contains("node_modules") {
+                if d.join("package.json").is_file() && !d.to_string_lossy().contains("node_modules")
+                {
                     found = Some(d);
                     break;
                 }
@@ -4363,6 +7648,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         }
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
 
+        set_file_env(scope, &entry_abs);
         let result = 'work: {
             // 0. DOM environment (turbo-dom) — only for files that need it, so pure-logic
             //    tests keep their clean globals (mirrors vitest per-file environment).
@@ -4370,16 +7656,36 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
                 setup_dom(scope, &entry_abs);
             }
 
+            // 0a. the config's test.fakeTimers (what vi.useFakeTimers() uses, turbo-test#180) and
+            //     mock / stub switches (turbo-test#183), for the setup files too (a literal that
+            //     does not evaluate is left out, as vitest would fail earlier)
+            if let Some(cfg) = vitest_runtime_config(&entry_abs) {
+                run_js(
+                    scope,
+                    &format!("try {{ globalThis.__ttApplyConfig(({cfg})); }} catch (e) {{}}"),
+                );
+            }
             // 0b. project setupFiles: register jest-dom matchers (expect.extend) AND any
             //     global vi.mock()s, draining each into the path-keyed mock registry.
             for sf in &setup_files {
-                run_setup_file(scope, sf, &externals, &mock_targets);
+                if let Err(e) = run_setup_file(scope, sf, &externals, &mock_targets) {
+                    break 'work Err(e);
+                }
+            }
+            // 0c. the config's snapshotSerializers (turbo-test#167), after the setup files
+            let serializers = vitest_snapshot_serializers(&entry_abs);
+            if !serializers.is_empty() {
+                if let Err(e) = load_snapshot_serializers(scope, &serializers) {
+                    break 'work Err(e);
+                }
             }
 
             // 1. entry-file vi.mock(): hoisted + registered before instantiation, via a
             //    transformed pre-pass (handles JSX/factory transforms), drained to the
             //    path-keyed mock registry. Its specifiers were externalized from the bundle.
-            run_entry_mocks(scope, &entry_abs);
+            if let Err(e) = run_entry_mocks(scope, &entry_abs) {
+                break 'work Err(e);
+            }
 
             // Reset the vi.hoisted index (keep the cache the prepass filled) so the entry's
             // `const x = vi.hoisted(...)` calls reuse the SAME objects the mock factories closed
@@ -4403,11 +7709,12 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
                     let tc = std::pin::pin!(v8::TryCatch::new(scope));
                     let tc = &mut tc.init();
                     if load_cjs(tc, &entry_abs, false).is_none() {
-                        Some(if tc.has_caught() {
-                            tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_else(|| "entry load failed".into())
-                        } else {
-                            "entry load failed".to_string()
-                        })
+                        let exc = tc.exception();
+                        note_load_error(tc, exc);
+                        Some(
+                            caught_message(tc, "entry load failed")
+                                .unwrap_or_else(|| "entry load failed".into()),
+                        )
                     } else {
                         tc.perform_microtask_checkpoint();
                         None
@@ -4422,27 +7729,25 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
                 if let Some(d) = entry_abs.parent() {
                     let js = format!("globalThis.__ttDir = {:?};", d.to_string_lossy());
                     if let Some(code) = v8::String::new(scope, &js) {
-                        if let Some(s) = v8::Script::compile(scope, code, None) { s.run(scope); }
+                        if let Some(s) = v8::Script::compile(scope, code, None) {
+                            s.run(scope);
+                        }
                     }
                 }
                 break 'work drive_tests(scope, global, &entry_abs);
             }
-            let Some(module) = load_graph(scope, &load_target) else {
-                break 'work Err("graph load failed".to_string());
+            let module = match load_entry_graph(scope, &load_target) {
+                Ok(m) => m,
+                Err(e) => break 'work Err(e),
             };
             {
                 let tc = std::pin::pin!(v8::TryCatch::new(scope));
                 let tc = &mut tc.init();
                 let ok = module.instantiate_module(tc, resolve_callback);
                 if ok != Some(true) {
-                    let msg = if tc.has_caught() {
-                        tc.exception()
-                            .map(|e| e.to_rust_string_lossy(tc))
-                            .unwrap_or_else(|| "unknown".into())
-                    } else {
-                        "instantiate failed".to_string()
-                    };
-                    break 'work Err(format!("instantiate: {msg}"));
+                    let exc = tc.exception();
+                    note_load_error(tc, exc);
+                    break 'work Err(instantiate_error(caught_message(tc, "unknown")));
                 }
             }
             let ev_err: Option<String> = {
@@ -4450,25 +7755,15 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
                 let tc = &mut tc.init();
                 let ev = module.evaluate(tc);
                 tc.perform_microtask_checkpoint();
-                if tc.has_caught() {
-                    Some(format!(
-                        "evaluate threw: {}",
-                        tc.exception()
-                            .map(|e| e.to_rust_string_lossy(tc))
-                            .unwrap_or_else(|| "unknown".into())
-                    ))
-                } else if ev.is_none() || module.get_status() != v8::ModuleStatus::Evaluated {
-                    if module.get_status() == v8::ModuleStatus::Errored {
-                        Some(format!(
-                            "module errored: {}",
-                            module.get_exception().to_rust_string_lossy(tc)
-                        ))
-                    } else {
-                        Some(format!("evaluate failed: status={:?}", module.get_status()))
-                    }
-                } else {
-                    None
-                }
+                let caught = caught_message(tc, "unknown");
+                let exc = match module.get_status() {
+                    v8::ModuleStatus::Errored => Some(module.get_exception()),
+                    _ => tc.exception(),
+                };
+                note_load_error(tc, exc);
+                evaluate_error(caught, ev.is_some(), module.get_status(), || {
+                    module.get_exception().to_rust_string_lossy(tc)
+                })
             };
             if let Some(e) = ev_err {
                 break 'work Err(e);
@@ -4478,6 +7773,19 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
             drive_tests(scope, global, &entry_abs)
         };
 
+        // A file that ran into the isolate's heap limit was terminated by the heap guard: report
+        // that, not whatever the half-unwound run happened to say.
+        let result = if crate::heap_guard::tripped() {
+            Err(crate::heap_guard::oom_error(
+                scope.get_heap_statistics().heap_size_limit(),
+            ))
+        } else {
+            result
+        };
+        if crate::heap_guard::log_enabled() {
+            log_heap(scope, &entry_abs, false);
+        }
+
         // Coverage: read out V8's precise counts for everything this file executed, then map the
         // byte ranges back to original source lines. Done before teardown (isolate still alive).
         if let Some(c) = collector.as_mut() {
@@ -4486,7 +7794,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
             }
             c.stop(context);
         }
-        collector = None; // drop the inspector while the isolate + scope are still alive
+        drop(collector); // drop the inspector while the isolate + scope are still alive
 
         // drop all Globals while the isolate is still alive
         clear_registry();
@@ -4496,6 +7804,37 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         })
     };
     outcome
+}
+
+/// Create params for a worker isolate: the framework snapshot, plus an explicit heap limit when
+/// `TURBO_MAX_HEAP_MB` is set.
+fn isolate_params() -> v8::CreateParams {
+    let blob = framework_snapshot();
+    let params = v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(blob.clone()));
+    match crate::heap_guard::max_heap_bytes() {
+        Some(max) => params.heap_limits(0, max),
+        None => params,
+    }
+}
+
+/// `TURBO_HEAP_LOG`: the isolate's heap after a full GC, one stderr line per file.
+fn log_heap(scope: &mut v8::PinScope, entry: &Path, recycled: bool) {
+    scope.low_memory_notification();
+    let st = scope.get_heap_statistics();
+    let modules = REGISTRY.with(|r| {
+        let r = r.borrow();
+        r.cjs_exports.len() + r.esm_by_path.len()
+    });
+    eprintln!(
+        "[heap] {:?} used={}MB total={}MB limit={}MB modules={} recycled={} {}",
+        std::thread::current().id(),
+        crate::heap_guard::mb(st.used_heap_size()),
+        crate::heap_guard::mb(st.total_heap_size()),
+        crate::heap_guard::mb(st.heap_size_limit()),
+        modules,
+        recycled,
+        entry.display()
+    );
 }
 
 /// Reuse path: run one file on this worker's persistent isolate+context. node_modules modules
@@ -4511,17 +7850,17 @@ fn run_test_file_reused(
     // init the persistent isolate once per worker
     REUSE_ISO.with(|iso_cell| {
         if iso_cell.borrow().is_none() {
-            let blob = framework_snapshot();
-            let params =
-                v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(blob.clone()));
-            let mut isolate = v8::Isolate::new(params);
+            let mut isolate = v8::Isolate::new(isolate_params());
             isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
             isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
+            crate::heap_guard::install(&mut isolate);
             *iso_cell.borrow_mut() = Some(isolate);
         }
     });
 
-    REUSE_ISO.with(|iso_cell| {
+    crate::heap_guard::arm();
+    // (result, replace this worker's isolate before the next file)
+    let (outcome, recycle) = REUSE_ISO.with(|iso_cell| {
         let mut iso_b = iso_cell.borrow_mut();
         let isolate = iso_b.as_mut().unwrap();
         v8::scope!(let scope, isolate);
@@ -4545,7 +7884,8 @@ fn run_test_file_reused(
         } else {
             // drop app modules + test-file mocks (keep node_modules evals + setup mocks), then
             // wipe per-file framework state (tests/spies/timers/mocks/hoist/stubs/DOM document).
-            reset_app_registry();
+            let stale = unevaluated_modules(scope);
+            reset_app_registry(&stale);
             // undo any prior file's re-mock of a setup path (analytics etc.)
             restore_setup_mocks(scope);
             if let Some(code) = v8::String::new(
@@ -4558,12 +7898,13 @@ fn run_test_file_reused(
             }
         }
 
-        // process.cwd(): the test's project root (nearest package.json outside node_modules).
+        // __cwd: the test's project root (nearest package.json outside node_modules).
         {
             let mut root = entry_abs.parent();
             let mut found: Option<&Path> = None;
             while let Some(d) = root {
-                if d.join("package.json").is_file() && !d.to_string_lossy().contains("node_modules") {
+                if d.join("package.json").is_file() && !d.to_string_lossy().contains("node_modules")
+                {
                     found = Some(d);
                     break;
                 }
@@ -4580,8 +7921,10 @@ fn run_test_file_reused(
         }
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
 
+        set_file_env(scope, entry_abs);
         let result: Result<TestReport, String> = 'work: {
-            // DOM: install once per worker; subsequent files reset it via env.reset() above.
+            // DOM: install once per worker and keep it across its files, as vitest `isolate: false`
+            // keeps one environment (turbo-test#150); a fresh-isolate run or a recycle reinstalls.
             if needs_dom(entry_abs) && !DOM_INSTALLED.with(|d| d.get()) {
                 setup_dom(scope, entry_abs);
                 DOM_INSTALLED.with(|d| d.set(true));
@@ -4590,9 +7933,10 @@ fn run_test_file_reused(
             // matchers and mocks persist across files. After the first run we snapshot the hook
             // baseline (restored each file) and the setup-registered mock paths (kept on reset).
             if first_file {
-                for sf in setup_files {
-                    run_setup_file(scope, sf, externals, mock_targets);
-                }
+                let setup_err = setup_files
+                    .iter()
+                    .find_map(|sf| run_setup_file(scope, sf, externals, mock_targets).err());
+                REUSE_SETUP_ERROR.with(|e| *e.borrow_mut() = setup_err);
                 SETUP_MOCKS.with(|s| {
                     *s.borrow_mut() = REGISTRY.with(|r| r.borrow().mocks.keys().cloned().collect());
                 });
@@ -4606,7 +7950,13 @@ fn run_test_file_reused(
                 }
                 snapshot_setup_mocks(scope);
             }
-            run_entry_mocks(scope, entry_abs);
+            // a setup file that threw (on this worker's first file) fails every file after it too
+            if let Some(e) = REUSE_SETUP_ERROR.with(|e| e.borrow().clone()) {
+                break 'work Err(e);
+            }
+            if let Err(e) = run_entry_mocks(scope, entry_abs) {
+                break 'work Err(e);
+            }
             {
                 let g = scope.get_current_context().global(scope);
                 if let Some(k) = v8::String::new(scope, "__hoistedIdx") {
@@ -4619,11 +7969,12 @@ fn run_test_file_reused(
                     let tc = std::pin::pin!(v8::TryCatch::new(scope));
                     let tc = &mut tc.init();
                     if load_cjs(tc, entry_abs, false).is_none() {
-                        Some(if tc.has_caught() {
-                            tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_else(|| "entry load failed".into())
-                        } else {
-                            "entry load failed".to_string()
-                        })
+                        let exc = tc.exception();
+                        note_load_error(tc, exc);
+                        Some(
+                            caught_message(tc, "entry load failed")
+                                .unwrap_or_else(|| "entry load failed".into()),
+                        )
                     } else {
                         tc.perform_microtask_checkpoint();
                         None
@@ -4642,20 +7993,18 @@ fn run_test_file_reused(
                 }
                 break 'work drive_tests(scope, global, entry_abs);
             }
-            let Some(module) = load_graph(scope, load_target) else {
-                break 'work Err("graph load failed".to_string());
+            let module = match load_entry_graph(scope, load_target) {
+                Ok(m) => m,
+                Err(e) => break 'work Err(e),
             };
             {
                 let tc = std::pin::pin!(v8::TryCatch::new(scope));
                 let tc = &mut tc.init();
                 let ok = module.instantiate_module(tc, resolve_callback);
                 if ok != Some(true) {
-                    let msg = if tc.has_caught() {
-                        tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_else(|| "unknown".into())
-                    } else {
-                        "instantiate failed".to_string()
-                    };
-                    break 'work Err(format!("instantiate: {msg}"));
+                    let exc = tc.exception();
+                    note_load_error(tc, exc);
+                    break 'work Err(instantiate_error(caught_message(tc, "unknown")));
                 }
             }
             let ev_err: Option<String> = {
@@ -4663,17 +8012,15 @@ fn run_test_file_reused(
                 let tc = &mut tc.init();
                 let ev = module.evaluate(tc);
                 tc.perform_microtask_checkpoint();
-                if tc.has_caught() {
-                    Some(format!("evaluate threw: {}", tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_else(|| "unknown".into())))
-                } else if ev.is_none() || module.get_status() != v8::ModuleStatus::Evaluated {
-                    if module.get_status() == v8::ModuleStatus::Errored {
-                        Some(format!("module errored: {}", module.get_exception().to_rust_string_lossy(tc)))
-                    } else {
-                        Some(format!("evaluate failed: status={:?}", module.get_status()))
-                    }
-                } else {
-                    None
-                }
+                let caught = caught_message(tc, "unknown");
+                let exc = match module.get_status() {
+                    v8::ModuleStatus::Errored => Some(module.get_exception()),
+                    _ => tc.exception(),
+                };
+                note_load_error(tc, exc);
+                evaluate_error(caught, ev.is_some(), module.get_status(), || {
+                    module.get_exception().to_rust_string_lossy(tc)
+                })
             };
             if let Some(e) = ev_err {
                 break 'work Err(e);
@@ -4681,13 +8028,44 @@ fn run_test_file_reused(
             drive_tests(scope, global, entry_abs)
         };
 
+        // Heap guard. A file that hit the limit was terminated mid-run: report the OOM and throw
+        // the isolate away. Otherwise a reused isolate only ever gets bigger (every file's module
+        // graph and DOM stays reachable by design, like vitest's `isolate: false`), so once its
+        // live heap passes the threshold after a full GC it is replaced and the next file boots a
+        // new one (re-running the setup files), instead of growing until V8 aborts the process.
+        let limit = scope.get_heap_statistics().heap_size_limit();
+        let tripped = crate::heap_guard::tripped();
+        let threshold = crate::heap_guard::recycle_threshold(limit);
+        let mut recycle = tripped;
+        if !tripped
+            && (crate::heap_guard::log_enabled()
+                || scope.get_heap_statistics().used_heap_size() > threshold / 2)
+        {
+            scope.low_memory_notification();
+            recycle = scope.get_heap_statistics().used_heap_size() > threshold;
+            if crate::heap_guard::log_enabled() {
+                log_heap(scope, entry_abs, recycle);
+            }
+        }
+        let result = if tripped {
+            Err(crate::heap_guard::oom_error(limit))
+        } else {
+            result
+        };
         // NOTE: no clear_registry() here — node_modules Globals stay alive for the next file;
         // app + mock entries are pruned at the top of the next file (reset_app_registry).
-        result.map(|mut r| {
-            r.setup_us = setup_us;
-            r
-        })
-    })
+        (
+            result.map(|mut r| {
+                r.setup_us = setup_us;
+                r
+            }),
+            recycle,
+        )
+    });
+    if recycle {
+        end_worker_reuse();
+    }
+    outcome
 }
 
 /// End-of-worker cleanup for the reuse path: drop registry Globals + the context while the
@@ -4698,6 +8076,13 @@ pub fn end_worker_reuse() {
         return;
     }
     clear_registry();
+    // Globals: drop them while the isolate is still alive (a recycled isolate is followed by more
+    // files on this thread, so a handle outliving its isolate would not stay harmless).
+    SETUP_MOCK_SNAPSHOT.with(|s| s.borrow_mut().clear());
+    // The worker's document (kept across its files, turbo-test#150) goes with its isolate.
+    if DOM_INSTALLED.with(|d| d.get()) && turbo_dom_browser_env::browser_env::enabled() {
+        turbo_dom_browser_env::browser_env::reset();
+    }
     REUSE_CTX.with(|c| {
         let _ = c.borrow_mut().take();
     });
@@ -4706,7 +8091,7 @@ pub fn end_worker_reuse() {
     });
     DOM_INSTALLED.with(|d| d.set(false));
     SETUP_MOCKS.with(|s| s.borrow_mut().clear());
-    SETUP_MOCK_SNAPSHOT.with(|s| s.borrow_mut().clear());
+    REUSE_SETUP_ERROR.with(|e| e.borrow_mut().take());
 }
 
 /// Whether isolate-reuse was selected for this run (env or vitest config). False until the first
@@ -4716,16 +8101,29 @@ pub fn is_reuse_enabled() -> bool {
 }
 
 /// Authoritative fresh-isolate retry: run `entry` on a FRESH per-file isolate even under reuse.
-/// A file that failed under reuse may have hit a cross-file leak artifact; re-running it in a
-/// clean isolate (which is 6189/0 territory) is the source of truth. The worker's reuse REGISTRY
+/// A file whose run under reuse is not final (`cli::reuse_result_is_final`, turbo-test#126: a
+/// test failing with something other than an assertion, a load error, a panic, an out-of-memory
+/// abort) may have hit the reused isolate's own state; re-running it in a clean isolate is the
+/// source of truth. The worker's reuse REGISTRY
 /// is swapped out for the duration so the fresh isolate's Globals don't clobber the persistent
 /// reuse module cache (the saved registry's Globals stay valid — the persistent isolate lives on).
 pub fn run_test_file_fresh(entry: &Path) -> Result<TestReport, String> {
+    run_fresh_with(entry, run_test_file)
+}
+
+/// `run_test_file_fresh` with the per-file runner injected (unit tests drive the panic path).
+fn run_fresh_with(
+    entry: &Path,
+    run: impl FnOnce(&Path) -> Result<TestReport, String>,
+) -> Result<TestReport, String> {
     let saved = REGISTRY.with(|r| std::mem::take(&mut *r.borrow_mut()));
     FORCE_FRESH.with(|f| f.set(true));
     // Panic-safe: a V8/loader panic must NOT lose the saved reuse registry or strand FORCE_FRESH.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_test_file(entry)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(entry)));
     FORCE_FRESH.with(|f| f.set(false));
+    // The fresh run installed (and dropped) its own document in this thread's DOM slot, which
+    // the worker's document shares: the next reused file installs the worker's document again.
+    DOM_INSTALLED.with(|d| d.set(false));
     // On success the fresh path already cleared its registry; on panic it may hold handles to the
     // now-dead fresh isolate. Either way, swap the saved reuse registry back in and FORGET the
     // fresh one (don't drop — its isolate is gone, dropping would assert).
@@ -4744,10 +8142,39 @@ fn drive_tests(
     global: v8::Local<v8::Object>,
     entry_abs: &Path,
 ) -> Result<TestReport, String> {
+    drive_tests_bounded(scope, global, entry_abs, 2_000_000)
+}
+
+/// vitest's `task.file.name` (turbo-test#96): the test file relative to the run's root (both
+/// canonical), as the reports name it; its canonical path for a file outside the root.
+pub fn task_file_name(entry: &Path, root: &Path) -> String {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let entry = canon(entry);
+    match entry.strip_prefix(canon(root)) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => entry.to_string_lossy().into_owned(),
+    }
+}
+
+/// `drive_tests` with the event-loop turn budget injected (unit tests use a tiny one).
+fn drive_tests_bounded(
+    scope: &mut v8::PinScope,
+    global: v8::Local<v8::Object>,
+    entry_abs: &Path,
+    max_turns: u32,
+) -> Result<TestReport, String> {
     // Expose the test file's absolute path to the runtime so toMatchSnapshot() can locate the
     // `__snapshots__/<basename>.snap` sibling (mirrors vitest's per-file snapshot resolution).
     {
-        let js = format!("globalThis.__ttFile = {:?};", entry_abs.to_string_lossy());
+        let root = std::env::var_os("TURBO_ROOT")
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        let js = format!(
+            "globalThis.__ttFile = {:?}; globalThis.__ttFileName = {}; globalThis.__ttMetaOfTestFile?.();",
+            entry_abs.to_string_lossy(),
+            json_string(&task_file_name(entry_abs, &root))
+        );
         if let Some(code) = v8::String::new(scope, &js) {
             if let Some(s) = v8::Script::compile(scope, code, None) {
                 s.run(scope);
@@ -4755,10 +8182,8 @@ fn drive_tests(
         }
     }
     let tt_key = v8::String::new(scope, "__tt").unwrap();
-    let tt = v8::Local::<v8::Object>::try_from(
-        global.get(scope, tt_key.into()).ok_or("no __tt")?,
-    )
-    .map_err(|_| "__tt not object")?;
+    let tt = v8::Local::<v8::Object>::try_from(global.get(scope, tt_key.into()).ok_or("no __tt")?)
+        .map_err(|_| "__tt not object")?;
     let run_key = v8::String::new(scope, "run").unwrap();
     let run = v8::Local::<v8::Function>::try_from(tt.get(scope, run_key.into()).ok_or("no run")?)
         .map_err(|_| "run not fn")?;
@@ -4771,7 +8196,7 @@ fn drive_tests(
     let mut guard = 0u32;
     loop {
         guard += 1;
-        if guard > 2_000_000 {
+        if guard > max_turns {
             return Err("event loop did not settle (possible infinite timers)".into());
         }
         loop {
@@ -4782,8 +8207,28 @@ fn drive_tests(
                 break;
             }
         }
+        // The task and its microtasks are done: settle the DOM ownership work a long run of
+        // mutating calls on a large tree deferred, so what the task detached is collectable
+        // before the next one (turbo-dom#112).
+        if turbo_dom_browser_env::browser_env::enabled() {
+            turbo_dom_browser_env::browser_env::flush_ownership(scope);
+        }
         if promise.state() != v8::PromiseState::Pending {
             break;
+        }
+        // Native addons' callbacks for this thread (async work done, threadsafe-function
+        // calls) run one per turn; while their work is in flight they keep the loop alive, as
+        // libuv's handles do: wait for one, up to the delay of the next timer.
+        if crate::napi_host::run_native_task(scope) {
+            continue;
+        }
+        if crate::napi_host::keeps_loop_alive(scope) {
+            let delay = call_global_number(scope, global, "__ttNextMacroDelay");
+            let timeout =
+                (delay >= 0.0).then(|| std::time::Duration::from_secs_f64(delay / 1000.0));
+            if crate::napi_host::wait_native_task(scope, timeout) {
+                continue;
+            }
         }
         if !call_global_bool(scope, global, "__stepMacro") {
             break;
@@ -4791,7 +8236,10 @@ fn drive_tests(
     }
     if promise.state() != v8::PromiseState::Fulfilled {
         let reason = if promise.state() == v8::PromiseState::Rejected {
-            format!("rejected: {}", promise.result(scope).to_rust_string_lossy(scope))
+            format!(
+                "rejected: {}",
+                promise.result(scope).to_rust_string_lossy(scope)
+            )
         } else {
             "still pending".to_string()
         };
@@ -4810,54 +8258,406 @@ fn drive_tests(
     let passed = get_num(scope, "passed");
     let failed = get_num(scope, "failed");
 
-    let mut failures = Vec::new();
-    let fkey = v8::String::new(scope, "failures").unwrap();
-    if let Some(arr) = summary
-        .get(scope, fkey.into())
-        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())
-    {
-        for i in 0..arr.length() {
-            if let Some(v) = arr.get_index(scope, i) {
-                failures.push(v.to_rust_string_lossy(scope));
-            }
-        }
-    }
-    // Per-test list (name/status/duration_ms/message) for the per-testcase reporters.
+    let failures = string_array(scope, summary, "failures");
+    // One state per describe block ('pass' / 'fail' / 'skip' / 'todo').
+    let suites = string_array(scope, summary, "suites");
+    // Per-test records (runtime.js `__testRecord`) for the per-testcase reporters.
     let mut tests = Vec::new();
     let tkey = v8::String::new(scope, "tests").unwrap();
     if let Some(arr) = summary
         .get(scope, tkey.into())
         .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())
     {
-        let get_str = |scope: &mut v8::PinScope, o: v8::Local<v8::Object>, key: &str| -> String {
-            let k = v8::String::new(scope, key).unwrap();
-            o.get(scope, k.into())
-                .filter(|v| !v.is_undefined() && !v.is_null())
-                .map(|v| v.to_rust_string_lossy(scope))
-                .unwrap_or_default()
-        };
-        let get_f64 = |scope: &mut v8::PinScope, o: v8::Local<v8::Object>, key: &str| -> f64 {
-            let k = v8::String::new(scope, key).unwrap();
-            o.get(scope, k.into()).and_then(|v| v.number_value(scope)).unwrap_or(0.0)
-        };
         for i in 0..arr.length() {
             if let Some(o) = arr
                 .get_index(scope, i)
                 .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
             {
+                let text = |scope: &mut v8::PinScope, key: &str| -> String {
+                    let k = v8::String::new(scope, key).unwrap();
+                    o.get(scope, k.into())
+                        .filter(|v| !v.is_undefined() && !v.is_null())
+                        .map(|v| v.to_rust_string_lossy(scope))
+                        .unwrap_or_default()
+                };
+                let num = |scope: &mut v8::PinScope, key: &str| -> f64 {
+                    let k = v8::String::new(scope, key).unwrap();
+                    o.get(scope, k.into())
+                        .filter(|v| !v.is_undefined())
+                        .and_then(|v| v.number_value(scope))
+                        .unwrap_or(0.0)
+                };
+                let flag = |scope: &mut v8::PinScope, key: &str| -> bool {
+                    let k = v8::String::new(scope, key).unwrap();
+                    o.get(scope, k.into()).is_some_and(|v| v.is_true())
+                };
                 tests.push(TestCase {
-                    name: get_str(scope, o, "name"),
-                    status: get_str(scope, o, "status"),
-                    duration_ms: get_f64(scope, o, "duration_ms"),
-                    message: get_str(scope, o, "message"),
+                    name: text(scope, "name"),
+                    title: text(scope, "title"),
+                    ancestors: string_array(scope, o, "ancestors"),
+                    status: text(scope, "status"),
+                    duration_ms: num(scope, "duration_ms"),
+                    start_ms: num(scope, "start_ms"),
+                    message: text(scope, "message"),
+                    failure_messages: js_array(scope, o, "failure_messages")
+                        .into_iter()
+                        .map(|v| (!v.is_null()).then(|| v.to_rust_string_lossy(scope)))
+                        .collect(),
+                    location: location_of(scope, o),
+                    not_run: flag(scope, "not_run"),
+                    expected_fail: flag(scope, "expected_fail"),
+                    retry_count: num(scope, "retry_count") as u32,
+                    logs: pairs_of(scope, o, "logs"),
+                    errors: errors_of(scope, o),
+                    note: text(scope, "note"),
+                    annotations: string_tuples(scope, o, "annotations")
+                        .into_iter()
+                        .map(|a| {
+                            let at = |i: usize| a.get(i).cloned().unwrap_or_default();
+                            Annotation {
+                                kind: at(0),
+                                message: at(1),
+                                line: at(2).parse().unwrap_or(0),
+                                col: at(3).parse().unwrap_or(0),
+                            }
+                        })
+                        .collect(),
                 });
             }
         }
     }
-    Ok(TestReport { passed, failed, failures, tests, setup_us: 0.0 })
+    let snapshot = snapshot_of(scope, summary);
+    let suite_errors = suite_errors_of(scope, summary);
+    let empty_suites = string_array(scope, summary, "empty_suites");
+    let logs = string_tuples(scope, summary, "logs")
+        .into_iter()
+        .map(|mut l| {
+            l.resize(3, String::new());
+            (l.remove(0), l.remove(0), l.remove(0))
+        })
+        .collect();
+    Ok(TestReport {
+        passed,
+        failed,
+        failures,
+        tests,
+        suites,
+        snapshot,
+        setup_us: 0.0,
+        suite_errors,
+        empty_suites,
+        logs,
+        waited_ms: f64::from(get_num(scope, "waited_ms")),
+    })
+}
+
+/// The items of the array `obj[key]` (none when it is not an array).
+fn js_array<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+    key: &str,
+) -> Vec<v8::Local<'s, v8::Value>> {
+    let k = v8::String::new(scope, key).unwrap();
+    let arr = obj
+        .get(scope, k.into())
+        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok());
+    arr.map(|a| {
+        (0..a.length())
+            .filter_map(|i| a.get_index(scope, i))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// The string items of the arrays in `obj[key]` (a test's `logs` pairs).
+fn string_tuples<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+    key: &str,
+) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for v in js_array(scope, obj, key) {
+        if let Ok(item) = v8::Local::<v8::Array>::try_from(v) {
+            let fields = (0..item.length())
+                .map(|i| {
+                    item.get_index(scope, i)
+                        .map(|v| v.to_rust_string_lossy(scope))
+                        .unwrap_or_default()
+                })
+                .collect();
+            out.push(fields);
+        }
+    }
+    out
+}
+
+/// `[a, b]` string pairs of the array `obj[key]` (a test's `logs`).
+fn pairs_of<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+    key: &str,
+) -> Vec<(String, String)> {
+    string_tuples(scope, obj, key)
+        .into_iter()
+        .map(|mut p| {
+            p.resize(2, String::new());
+            (p.remove(0), p.remove(0))
+        })
+        .collect()
+}
+
+/// The `errors` of a test record or a suite error (runtime.js `__errorInfo` objects).
+fn errors_of<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+) -> Vec<crate::failure::ErrorInfo> {
+    let mut out = Vec::new();
+    for v in js_array(scope, obj, "errors") {
+        if let Ok(o) = v8::Local::<v8::Object>::try_from(v) {
+            out.push(error_info_of(scope, o));
+        }
+    }
+    out
+}
+
+/// An `__errorInfo` object as an [`ErrorInfo`](crate::failure::ErrorInfo): its stack's frames
+/// in the test file are mapped back to the original source (location.rs).
+fn error_info_of<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    o: v8::Local<'s, v8::Object>,
+) -> crate::failure::ErrorInfo {
+    let text = |key: &str| {
+        let k = v8::String::new(scope, key).unwrap();
+        o.get(scope, k.into())
+            .filter(|v| !v.is_undefined() && !v.is_null())
+            .map(|v| v.to_rust_string_lossy(scope))
+            .unwrap_or_default()
+    };
+    let (name, message, diff, stack) = (text("name"), text("message"), text("diff"), text("stack"));
+    let flag = |scope: &mut v8::PinScope<'s, '_>, key: &str| {
+        let k = v8::String::new(scope, key).unwrap();
+        o.get(scope, k.into()).is_some_and(|v| v.is_true())
+    };
+    let (no_name, no_message) = (flag(scope, "no_name"), flag(scope, "no_message"));
+    let optional = |scope: &mut v8::PinScope<'s, '_>, key: &str| {
+        let k = v8::String::new(scope, key).unwrap();
+        o.get(scope, k.into())
+            .filter(|v| v.is_string())
+            .map(|v| v.to_rust_string_lossy(scope))
+    };
+    let (inspected, properties) = (optional(scope, "inspected"), optional(scope, "properties"));
+    let (actual, expected) = (optional(scope, "actual"), optional(scope, "expected"));
+    let show_diff = flag(scope, "show_diff");
+    let frames = crate::failure::parse_stack(&stack)
+        .into_iter()
+        .map(|mut f| {
+            let script = f.file.to_string_lossy().into_owned();
+            if let Some((line, col)) =
+                crate::location::resolve_frame(&script, f.line as usize, f.col as usize)
+            {
+                (f.line, f.col) = (line, col);
+            }
+            f
+        })
+        .collect();
+    let k = v8::String::new(scope, "cause").unwrap();
+    let cause = o
+        .get(scope, k.into())
+        .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
+        .map(|c| Box::new(error_info_of(scope, c)));
+    let k = v8::String::new(scope, "rollup").unwrap();
+    let rollup = o
+        .get(scope, k.into())
+        .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
+        .map(|r| {
+            let text = |key: &str| {
+                let k = v8::String::new(scope, key).unwrap();
+                r.get(scope, k.into())
+                    .map(|v| v.to_rust_string_lossy(scope))
+                    .unwrap_or_default()
+            };
+            crate::failure::RollupDetails {
+                plugin: text("plugin"),
+                id: text("id"),
+                loc: text("loc"),
+                frame: text("frame"),
+            }
+        });
+    crate::failure::ErrorInfo {
+        name,
+        message,
+        no_name,
+        no_message,
+        inspected,
+        properties,
+        diff,
+        frames,
+        cause,
+        source: None,
+        rollup,
+        show_diff,
+        actual,
+        expected,
+    }
+}
+
+/// The run summary's `suite_errors` (runtime.js `runSuite`; unfilled slots are suites that did
+/// not fail).
+fn suite_errors_of<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    summary: v8::Local<'s, v8::Object>,
+) -> Vec<SuiteError> {
+    let mut out = Vec::new();
+    for v in js_array(scope, summary, "suite_errors") {
+        if let Ok(o) = v8::Local::<v8::Object>::try_from(v) {
+            let k = v8::String::new(scope, "name").unwrap();
+            let name = o
+                .get(scope, k.into())
+                .map(|v| v.to_rust_string_lossy(scope))
+                .unwrap_or_default();
+            let k = v8::String::new(scope, "duration_ms").unwrap();
+            let duration_ms = o
+                .get(scope, k.into())
+                .and_then(|v| v.number_value(scope))
+                .unwrap_or(0.0);
+            out.push(SuiteError {
+                name,
+                duration_ms,
+                errors: errors_of(scope, o),
+            });
+        }
+    }
+    out
+}
+
+thread_local! {
+    /// The error the running file failed to load with (its entry, instantiation or evaluation),
+    /// for junit's synthetic test case (turbo-test#81).
+    static LOAD_ERROR: RefCell<Option<crate::failure::ErrorInfo>> = const { RefCell::new(None) };
+}
+
+/// Record the exception `exc` a file's load failed with (runtime.js `__ttErrorInfo` gives its
+/// name, message, diff and stack).
+fn note_load_error(scope: &mut v8::PinScope, exc: Option<v8::Local<v8::Value>>) {
+    let Some(exc) = exc else {
+        return;
+    };
+    let global = scope.get_current_context().global(scope);
+    let info = v8::String::new(scope, "__ttErrorInfo")
+        .and_then(|k| global.get(scope, k.into()))
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok())
+        .and_then(|f| {
+            let undefined = v8::undefined(scope).into();
+            f.call(scope, undefined, &[exc])
+        })
+        .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok());
+    if let Some(info) = info {
+        let mut info = error_info_of(scope, info);
+        // A module that failed to compile has no frame to show: vitest fails the import before
+        // the importer runs (its stack is the loader's own), where the module runner's require()
+        // of the module leaves the importer's frame (turbo-test#99).
+        let compile = COMPILE_EXC.with(|c| c.borrow_mut().take());
+        if let Some((c, module)) = compile {
+            if v8::Local::new(scope, &c).strict_equals(exc) {
+                info.frames.clear();
+                info.source = Some(module);
+            }
+        }
+        LOAD_ERROR.with(|e| *e.borrow_mut() = Some(info));
+    }
+}
+
+/// The error the last file run on this thread failed to load with, if any.
+pub fn take_load_error() -> Option<crate::failure::ErrorInfo> {
+    LOAD_ERROR.with(|e| e.borrow_mut().take())
+}
+
+/// The run summary's `snapshot` counts (runtime.js `__snapFinish`), when the file has any.
+fn snapshot_of<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    summary: v8::Local<'s, v8::Object>,
+) -> Option<SnapshotResult> {
+    let k = v8::String::new(scope, "snapshot").unwrap();
+    let o = summary
+        .get(scope, k.into())
+        .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())?;
+    let num = |key: &str| {
+        let k = v8::String::new(scope, key).unwrap();
+        o.get(scope, k.into())
+            .and_then(|v| v.uint32_value(scope))
+            .unwrap_or(0)
+    };
+    let (added, matched, unmatched, updated, unchecked) = (
+        num("added"),
+        num("matched"),
+        num("unmatched"),
+        num("updated"),
+        num("unchecked"),
+    );
+    let k = v8::String::new(scope, "file_deleted").unwrap();
+    let file_deleted = o
+        .get(scope, k.into())
+        .is_some_and(|v| v.boolean_value(scope));
+    Some(SnapshotResult {
+        added,
+        matched,
+        unmatched,
+        updated,
+        unchecked,
+        unchecked_keys: string_array(scope, o, "unchecked_keys"),
+        file_deleted,
+    })
+}
+
+/// A test record's `location` (`[line, column]`), when it has one.
+fn location_of<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+) -> Option<(u32, u32)> {
+    let k = v8::String::new(scope, "location").unwrap();
+    let arr = obj
+        .get(scope, k.into())
+        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())?;
+    let at = |i: u32| {
+        arr.get_index(scope, i)
+            .and_then(|v| v.uint32_value(scope))
+            .unwrap_or(0)
+    };
+    Some((at(0), at(1)))
+}
+
+/// The array `obj[key]` as strings (empty when it is not an array).
+fn string_array<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+    key: &str,
+) -> Vec<String> {
+    let k = v8::String::new(scope, key).unwrap();
+    obj.get(scope, k.into())
+        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())
+        .map(|arr| {
+            (0..arr.length())
+                .filter_map(|i| arr.get_index(scope, i))
+                .map(|v| v.to_rust_string_lossy(scope))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Call a no-arg global JS function and coerce its result to bool.
+/// Call the global function `name` with no arguments: its number result (-1 when it is
+/// missing, throws or returns no number).
+fn call_global_number(scope: &mut v8::PinScope, global: v8::Local<v8::Object>, name: &str) -> f64 {
+    let key = v8::String::new(scope, name).unwrap();
+    let recv = v8::undefined(scope).into();
+    global
+        .get(scope, key.into())
+        .and_then(|v| v8::Local::<v8::Function>::try_from(v).ok())
+        .and_then(|f| f.call(scope, recv, &[]))
+        .and_then(|v| v.number_value(scope))
+        .unwrap_or(-1.0)
+}
+
 fn call_global_bool(scope: &mut v8::PinScope, global: v8::Local<v8::Object>, name: &str) -> bool {
     let key = v8::String::new(scope, name).unwrap();
     let Some(f) = global
@@ -4896,6 +8696,7 @@ pub fn forget_registry() {
     DOM_INSTALLED.with(|d| d.set(false));
     SETUP_MOCKS.with(|s| s.borrow_mut().clear());
     SETUP_MOCK_SNAPSHOT.with(|s| s.borrow_mut().clear());
+    REUSE_SETUP_ERROR.with(|e| e.borrow_mut().take());
 }
 
 fn clear_registry() {
@@ -4907,6 +8708,7 @@ fn clear_registry() {
         reg.real_exports.clear();
         reg.cjs_export_names.clear();
         reg.path_by_hash.clear();
+        reg.variant_by_hash.clear();
         reg.mocks.clear();
         reg.extra_exports.clear();
         reg.loading.clear();
@@ -4946,18 +8748,30 @@ mod env_pragma_tests {
 
     #[test]
     fn parses_node_pragma() {
-        assert_eq!(file_env_pragma("// @vitest-environment node\nimport x;").as_deref(), Some("node"));
+        assert_eq!(
+            file_env_pragma("// @vitest-environment node\nimport x;").as_deref(),
+            Some("node")
+        );
     }
 
     #[test]
     fn parses_colon_and_jsdom() {
-        assert_eq!(file_env_pragma("/* @vitest-environment: jsdom */").as_deref(), Some("jsdom"));
-        assert_eq!(file_env_pragma("// @vitest-environment   happy-dom").as_deref(), Some("happy-dom"));
+        assert_eq!(
+            file_env_pragma("/* @vitest-environment: jsdom */").as_deref(),
+            Some("jsdom")
+        );
+        assert_eq!(
+            file_env_pragma("// @vitest-environment   happy-dom").as_deref(),
+            Some("happy-dom")
+        );
     }
 
     #[test]
     fn case_insensitive_value() {
-        assert_eq!(file_env_pragma("// @vitest-environment Node").as_deref(), Some("node"));
+        assert_eq!(
+            file_env_pragma("// @vitest-environment Node").as_deref(),
+            Some("node")
+        );
     }
 
     #[test]
@@ -4965,3 +8779,12 @@ mod env_pragma_tests {
         assert_eq!(file_env_pragma("import { it } from 'vitest';"), None);
     }
 }
+
+// Unit tests for the runner's helpers, split by source region (kept in their own files so
+// they are rustfmt-clean without reformatting this file).
+#[cfg(all(test, unix))]
+#[path = "runner_tests_a.rs"]
+mod tests_a;
+#[cfg(all(test, unix))]
+#[path = "runner_tests_b.rs"]
+mod tests_b;

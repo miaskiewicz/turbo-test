@@ -1,0 +1,1 @@
+{ "name": "module-cond", "exports": { "require": "./c.cjs", "module": "./m.mjs", "default": "./d.js" } }

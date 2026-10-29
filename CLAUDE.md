@@ -19,9 +19,52 @@ A release where these disagree is a bug. Bump both in the same commit.
 - `cli.js` prefers the prebuilt `bin/turbo-test-<platform>-<arch>` over `target/release`.
   After rebuilding, refresh it: `cp target/release/turbo-test bin/turbo-test-darwin-arm64`
   (or run `scripts/npm-build.sh`). Otherwise you'll test a stale binary.
+- The runtime is built on chai (vitest's expect is a chai 6.3.0 Assertion, turbo-test#160): the
+  binary loads the `chai` npm dependency into its snapshot from `TURBO_CHAI` (chai's `index.js`),
+  which `cli.js` sets. Running `target/release/turbo-test` directly needs
+  `TURBO_CHAI=$PWD/node_modules/chai/index.js` (after `npm ci`); without it the binary stops with
+  an error. The test harnesses (`tests/common`, unit tests) use the repo's `node_modules/chai`.
 - Coverage needs `node_modules/.bin/esbuild` in the project being tested (the module-runner
   CJS transform path emits the inline source map only via esbuild). A fixture without esbuild
   silently collects no coverage.
+
+## Tests and the coverage gate
+- `npm ci` first (npm 10 and npm 11 both supported; CI checks both against the committed
+  lock — regenerate it with npm 11 `npm install --package-lock-only` if deps change).
+- `cargo test --locked` runs unit tests (`src/*_tests.rs`, wired with `#[path]` from the
+  module they test) and CLI integration tests (`tests/*.rs`, helper `tests/common/mod.rs`:
+  throwaway projects outside the repo, isolated TMPDIR/TURBO_CACHE_DIR, spawning the real
+  binary). Integration tests and the path/V8-sensitive unit modules are `cfg(unix)`.
+- `cargo tarpaulin` (reads `tarpaulin.toml`: Llvm engine, `target/cov`, `fail-under = 99.9`)
+  is the CI `coverage` gate. New code needs behaviour-asserting tests (happy path + edge
+  cases) that keep every line covered; never add coverage-only no-op tests. The two
+  remaining uncovered lines (each with its reason or open issue) are explained in tarpaulin.toml.
+- CI detection (snapshot update mode `none` on CI) is std-env's `isCI`: `src/ci.rs` over the
+  provider table `src/ci_providers.json`. When vitest's std-env changes, re-check the table with
+  `node scripts/check-ci-detection.mjs <dir with vitest installed>` (0 mismatches). The test
+  harnesses (`tests/common`, `test/compat-api.test.mjs`) drop every variable of that table.
+- In-process V8 unit tests must boot isolates from `runner::framework_snapshot()`: the
+  read-only heap is process-wide, so a default-snapshot isolate alive alongside
+  framework-snapshot ones aborts the test binary.
+
+## Complexity gates
+- CI jobs `complexity / rust (cc <= 15)` (`npm run complexity:rust`: turbo-html2pdf's `cc-check`,
+  installed from its home at the pinned rev in ci.yml, over every tracked `.rs` file) and
+  `complexity / js (cc <= 15)` (`npm run complexity:js`: oxlint `complexity` over cli.js,
+  index.js, src/runtime.js). One limit, no allow-list, no baseline.
+- Both are report-only (`continue-on-error`; the step summary lists the functions over the
+  limit) until the post-0.6.0 refactor clears that backlog, then they become blocking (README
+  "Gates and CI"). New code stays <= 15; never raise the limit.
+
+## Where the DOM and V8 live
+- The DOM binding (window/document/CSSOM/forms/events, its probes, Chrome controls and
+  tests) is the `turbo-dom-browser-env` crate in miaskiewicz/turbo-dom
+  (`crates/turbo-dom-browser-env`); the runner only calls
+  `turbo_dom_browser_env::browser_env::{install, enabled, reset, flush_ownership}`. Fix DOM behaviour there.
+- V8 is turbo-dom's rusty_v8 fork `turbo-dom-v8` (aliased `v8`). No V8 source is vendored
+  here. `bash scripts/check-single-v8.sh` must pass (one turbo-dom-v8, no v8/v8x/turbo-surf-v8).
+- Pre-publish, `Cargo.toml`'s `[patch.crates-io]` pins those crates to git revs; drop it
+  before release (RELEASING.md).
 
 ## Coverage CLI (v0.2.3+)
 `--coverage` `--coverage-dir DIR` `--coverage-thresholds lines=,functions=,branches=,statements=`
@@ -38,3 +81,11 @@ comma only — commas inside `{ts,tsx}` are NOT split (v0.2.7 fix; the canonical
 `src/**/*.{ts,tsx}` is forwarded comma-joined and was being torn into malformed globs).
 Under `--coverage`, 0 instrumented files is a hard FAIL (non-zero exit), never a vacuous 0/0
 green — guards against a misconfigured include silently covering nothing.
+Mapping V8 ranges back through esbuild's inline map (src/coverage.rs) must respect three things
+(turbo-test#34; expected values = vitest's v8 provider, checked against node's V8):
+the ESM->CJS interop prologue (export getters + `module.exports = __toCommonJS(...)`) maps to
+(0, 0) and is NOT source code (no FN/DA/ranges on line 1 from it); top-level code is counted
+only by the module-wide ranges, which open on the wrapper line and close past the map comment
+(clamped to the source start/end); and segments often begin with blank columns (indentation,
+the space before a token) — skip that lead-in before applying the 1:1 column delta, and credit
+a line whose first segment is blank only with the count of the token it points back to.

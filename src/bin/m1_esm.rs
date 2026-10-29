@@ -100,15 +100,11 @@ fn load_graph<'s>(
     let requests = module.get_module_requests();
     let dir = abs_path.parent().unwrap().to_path_buf();
     for i in 0..requests.length() {
-        let req = v8::Local::<v8::ModuleRequest>::try_from(requests.get(scope, i).unwrap()).unwrap();
+        let req =
+            v8::Local::<v8::ModuleRequest>::try_from(requests.get(scope, i).unwrap()).unwrap();
         let spec = req.get_specifier().to_rust_string_lossy(scope);
-        if let Some(dep) = resolve_spec(&spec, &dir) {
-            if load_graph(scope, &dep).is_none() {
-                return None;
-            }
-        } else {
-            return None;
-        }
+        let dep = resolve_spec(&spec, &dir)?;
+        load_graph(scope, &dep)?;
     }
 
     Some(module)
@@ -157,13 +153,16 @@ fn module_origin<'s>(
 /// Minimal `log(...)` binding so fixtures can emit, proving real execution.
 fn install_log(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let key = v8::String::new(scope, "log").unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue| {
-        let mut parts = Vec::new();
-        for i in 0..args.length() {
-            parts.push(args.get(i).to_rust_string_lossy(scope));
-        }
-        println!("[js] {}", parts.join(" "));
-    });
+    let tmpl = v8::FunctionTemplate::new(
+        scope,
+        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue| {
+            let mut parts = Vec::new();
+            for i in 0..args.length() {
+                parts.push(args.get(i).to_rust_string_lossy(scope));
+            }
+            println!("[js] {}", parts.join(" "));
+        },
+    );
     let func = tmpl.get_function(scope).unwrap();
     global.set(scope, key.into(), func.into());
 }
@@ -213,17 +212,13 @@ fn main() {
         // 3. evaluate + settle microtasks
         let result = module.evaluate(scope);
         scope.perform_microtask_checkpoint();
-        if result.is_none() || module.get_status() != v8::ModuleStatus::Evaluated {
-            eprintln!("evaluate failed: status={:?}", module.get_status());
-            std::process::exit(1);
-        }
-
         // module evaluation returns a promise; confirm it fulfilled
-        if let Ok(promise) = v8::Local::<v8::Promise>::try_from(result.unwrap()) {
-            if promise.state() == v8::PromiseState::Rejected {
-                eprintln!("module promise rejected");
-                std::process::exit(1);
-            }
+        let promise_state = result
+            .and_then(|r| v8::Local::<v8::Promise>::try_from(r).ok())
+            .map(|p| p.state());
+        if let Err(msg) = check_evaluation(result.is_some(), module.get_status(), promise_state) {
+            eprintln!("{msg}");
+            std::process::exit(1);
         }
         println!("evaluated: status={:?}", module.get_status());
 
@@ -234,7 +229,14 @@ fn main() {
         let expected = "9";
         println!("\nglobalThis.__result = {got}  (expected {expected})");
         let pass = got == expected;
-        println!("{}", if pass { "==> M1.1 ESM PASS" } else { "==> M1.1 ESM FAIL" });
+        println!(
+            "{}",
+            if pass {
+                "==> M1.1 ESM PASS"
+            } else {
+                "==> M1.1 ESM FAIL"
+            }
+        );
         exit_code = if pass { 0 } else { 1 };
 
         // clear registry while isolate still alive (Global drop needs it)
@@ -246,3 +248,23 @@ fn main() {
     }
     std::process::exit(exit_code);
 }
+
+/// Outcome of `evaluate` + the microtask checkpoint: evaluation must have returned, the module
+/// must be `Evaluated`, and the evaluation promise (if any) must not be rejected.
+fn check_evaluation(
+    returned: bool,
+    status: v8::ModuleStatus,
+    promise: Option<v8::PromiseState>,
+) -> Result<(), String> {
+    if !returned || status != v8::ModuleStatus::Evaluated {
+        return Err(format!("evaluate failed: status={status:?}"));
+    }
+    if promise == Some(v8::PromiseState::Rejected) {
+        return Err("module promise rejected".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "spike_tests/m1_esm.rs"]
+mod tests;
