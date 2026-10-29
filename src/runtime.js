@@ -894,7 +894,7 @@ if (typeof globalThis.URL === 'undefined') {
       // protocol is the scheme up to the first ':' (works for opaque schemes like
       // javascript:/data:/mailto: that have no '//' authority).
       const scheme = /^([a-z][a-z0-9+.-]*:)/i.exec(url);
-      this.protocol = scheme ? scheme[1] : 'http:';
+      this._protocol = scheme ? scheme[1].toLowerCase() : 'http:';
       const m = /^([a-z][a-z0-9+.-]*:)\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/i.exec(url);
       let searchStr;
       if (m) {
@@ -904,8 +904,13 @@ if (typeof globalThis.URL === 'undefined') {
         const info = at < 0 ? '' : m[2].slice(0, at);
         const hostport = at < 0 ? m[2] : m[2].slice(at + 1);
         const colon = info.indexOf(':');
-        this.username = URL._encode(colon < 0 ? info : info.slice(0, colon), URL._USERINFO);
-        this.password = colon < 0 ? '' : URL._encode(info.slice(colon + 1), URL._USERINFO);
+        this._username = URL._encode(colon < 0 ? info : info.slice(0, colon), URL._USERINFO);
+        this._password = colon < 0 ? '' : URL._encode(info.slice(colon + 1), URL._USERINFO);
+        // a special host takes no forbidden code point, and a port is digits up to 65535 (WHATWG)
+        const hp = /^(\[[^\]]*\]|[^:]*)(?::(.*))?$/.exec(hostport);
+        if (this._special && !this._isFile && (!hp || /[\x00-\x20#/:<>?@[\\\]^|]/.test(hp[1].replace(/^\[.*\]$/, '')) || (hp[2] && !/^\d+$/.test(hp[2])) || (hp[2] && Number(hp[2]) > 65535))) {
+          throw new TypeError('Invalid URL: ' + url);
+        }
         // a file URL's `localhost` host is the empty host (WHATWG)
         this._hostname = '';
         this._port = '';
@@ -916,7 +921,7 @@ if (typeof globalThis.URL === 'undefined') {
       } else {
         // opaque URL (no authority): everything after the scheme is the path (sans query/hash).
         this._hierarchical = false;
-        this.username = ''; this.password = '';
+        this._username = ''; this._password = '';
         this._hostname = ''; this._port = '';
         const rest = url.slice(this.protocol.length);
         const qi = rest.indexOf('?'); const hi = rest.indexOf('#');
@@ -948,6 +953,23 @@ if (typeof globalThis.URL === 'undefined') {
       if (v === '') { this._port = ''; return; }
       this._setPort(v);
     }
+    // protocol/username/password are views too: a set is validated and encoded (WHATWG setters)
+    get protocol() { return this._protocol; }
+    set protocol(v) {
+      const m = /^([a-z][a-z0-9+.-]*)(?::|$)/i.exec(String(v));
+      if (!m) return;
+      const next = m[1].toLowerCase() + ':';
+      const special = (p) => /^(https?|wss?|ftp|file):$/.test(p);
+      if (special(next) !== special(this._protocol)) return;
+      if (next === 'file:' && (this._userinfo || this._port)) return;
+      if (this._isFile && this._hostname === '') return;
+      this._protocol = next;
+      if (this._port) this._setPort(this._port);
+    }
+    get username() { return this._username; }
+    set username(v) { if (this._hierarchical && this._hostname !== '' && !this._isFile) this._username = URL._encode(String(v), URL._USERINFO); }
+    get password() { return this._password; }
+    set password(v) { if (this._hierarchical && this._hostname !== '' && !this._isFile) this._password = URL._encode(String(v), URL._USERINFO); }
     get origin() { return !this._hierarchical || this._isFile ? 'null' : this.protocol + '//' + this.host; }
     get _isFile() { return this.protocol.toLowerCase() === 'file:'; }
     get _special() { return /^(https?|wss?|ftp|file):$/i.test(this.protocol); }
@@ -1017,7 +1039,7 @@ if (typeof globalThis.URL === 'undefined') {
       const auth = this._hierarchical ? this.protocol + '//' + this._userinfo + this.host : this.protocol;
       return auth + this._path + (this._query === null ? '' : '?' + this._query) + this._hash;
     }
-    set href(v) { const u = new globalThis.URL(v); this.protocol = u.protocol; this.username = u.username; this.password = u.password; this._hostname = u._hostname; this._port = u._port; this._path = u._path; this._hash = u._hash; this._hierarchical = u._hierarchical; this._query = u._query; this._sp._ = u._sp._; }
+    set href(v) { const u = new globalThis.URL(v); this._protocol = u._protocol; this._username = u._username; this._password = u._password; this._hostname = u._hostname; this._port = u._port; this._path = u._path; this._hash = u._hash; this._hierarchical = u._hierarchical; this._query = u._query; this._sp._ = u._sp._; }
     toString() { return this.href; }
     // JSON.stringify and pretty-format (vitest's diffs) show the href, as Node's URL
     toJSON() { return this.href; }
@@ -2059,18 +2081,67 @@ const __os = {
   userInfo: () => ({ username: 'user', uid: -1, gid: -1, shell: null, homedir: '/' }), availableParallelism: () => 4,
   constants: { signals: {}, errno: {} },
 };
+// Node's posix path (lib/path.js): `..`/`.` collapse, resolve against the cwd from the right,
+// relative by common segments, and Node's basename/extname/format edge cases.
+const __normStr = (p, absolute) => {
+  const out = [];
+  for (const seg of p.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { if (out.length && out[out.length - 1] !== '..') out.pop(); else if (!absolute) out.push('..'); } else out.push(seg);
+  }
+  return out.join('/');
+};
+const __normalize = (p) => {
+  p = String(p);
+  if (p === '') return '.';
+  const abs = p.startsWith('/');
+  let r = __normStr(p, abs);
+  if (r === '' && !abs) r = '.';
+  if (r !== '' && p.endsWith('/')) r += '/';
+  return abs ? '/' + r : r;
+};
+const __resolve = (...a) => {
+  let r = '';
+  for (let i = a.length - 1; i >= -1 && !r.startsWith('/'); i--) {
+    const seg = i >= 0 ? String(a[i]) : String(globalThis.process && globalThis.process.cwd ? globalThis.process.cwd() : '/');
+    if (seg === '') continue;
+    r = seg + (r ? '/' + r : '');
+  }
+  return '/' + __normStr(r, true);
+};
+const __extname = (p) => { const b = __basename(p); const i = b.lastIndexOf('.'); return i <= 0 ? '' : b.slice(i); };
+const __basename = (p, ext) => {
+  let b = String(p).replace(/\/+$/, '');
+  b = b.slice(b.lastIndexOf('/') + 1);
+  if (ext !== undefined && b !== ext && b.endsWith(ext)) b = b.slice(0, -ext.length);
+  return b;
+};
 const __path = {
   sep: '/',
-  join: (...a) => a.filter((x) => x != null && x !== '').join('/').replace(/\/+/g, '/'),
-  resolve: (...a) => { let p = a.filter(Boolean).join('/').replace(/\/+/g, '/'); return p.startsWith('/') ? p : '/' + p; },
+  join: (...a) => { const j = a.map(String).filter((x) => x !== '').join('/'); return j === '' ? '.' : __normalize(j); },
+  resolve: __resolve,
   dirname: (p) => globalThis.__dirnameOf(p),
-  basename: (p, ext) => { let b = String(p).split('/').pop(); if (ext && b.endsWith(ext)) b = b.slice(0, -ext.length); return b; },
-  extname: (p) => { const m = /\.[^./]+$/.exec(String(p)); return m ? m[0] : ''; },
+  basename: __basename,
+  extname: __extname,
   isAbsolute: (p) => String(p).startsWith('/'),
-  relative: (_f, t) => String(t),
-  normalize: (p) => String(p).replace(/\/+/g, '/'),
-  parse: (p) => { const s = String(p); const dir = globalThis.__dirnameOf(s); const base = s.split('/').pop() || ''; const m = /\.[^./]+$/.exec(base); const ext = m ? m[0] : ''; return { root: s.startsWith('/') ? '/' : '', dir, base, ext, name: ext ? base.slice(0, -ext.length) : base }; },
-  format: (o) => { o = o || {}; if (o.dir) return (o.dir + '/' + (o.base || ((o.name || '') + (o.ext || '')))).replace(/\/+/g, '/'); return o.base || ((o.name || '') + (o.ext || '')); },
+  relative: (f, t) => {
+    f = __resolve(f); t = __resolve(t);
+    if (f === t) return '';
+    const fs = f === '/' ? [] : f.slice(1).split('/');
+    const ts = t === '/' ? [] : t.slice(1).split('/');
+    let i = 0;
+    while (i < fs.length && i < ts.length && fs[i] === ts[i]) i++;
+    return [...fs.slice(i).map(() => '..'), ...ts.slice(i)].join('/');
+  },
+  normalize: __normalize,
+  parse: (p) => { const s = String(p); const dir = globalThis.__dirnameOf(s); const base = __basename(s); const ext = __extname(base); return { root: s.startsWith('/') ? '/' : '', dir, base, ext, name: ext ? base.slice(0, -ext.length) : base }; },
+  format: (o) => {
+    o = o || {};
+    const dir = o.dir || o.root;
+    const base = o.base || ((o.name || '') + (o.ext ? (o.ext.startsWith('.') ? '' : '.') + o.ext : ''));
+    if (!dir) return base;
+    return dir === o.root ? dir + base : dir + '/' + base;
+  },
   delimiter: ':',
 };
 // glob-parent and others reach for path.posix / path.win32; expose both (posix is our default).
