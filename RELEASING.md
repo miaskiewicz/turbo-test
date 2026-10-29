@@ -76,8 +76,8 @@ nine native DOM compatibility fixtures used by `.github/workflows/ci.yml`, and t
 line-coverage gate (`cargo tarpaulin`, `fail-under = 99.9` in tarpaulin.toml; CI job
 `coverage`), and the lints (`cargo fmt --check`, `cargo clippy --all-targets -- -D
 warnings`; CI job `lint`). The complexity jobs (`complexity / rust (cc <= 15)`,
-`complexity / js (cc <= 15)`) are expected red until the post-coverage refactor and do not
-block a release meanwhile (README "Complexity gates"). The binding's
+`complexity / js (cc <= 15)`) are report-only until the post-0.6.0 refactor and do not
+block a release meanwhile (README "Gates and CI"). The binding's
 Chrome-parity tests (including the explicit unknown-pseudo CSSOM admission ignore
 and its Chrome-expected failure) now run in turbo-dom-browser-env, not here. Check the actual normalized runner package from a
 clean consumer and inspect the npm allowlist and staged platform binaries.
