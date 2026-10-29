@@ -25,8 +25,8 @@ from crates.io.
 
 ### Changed — turbo-dom pin
 - The pre-publish `[patch.crates-io]` pins turbo-dom and turbo-dom-browser-env to
-  miaskiewicz/turbo-dom 03a856d (the final consolidation head, with the turbo-dom#183/#184
-  browser-env panic fixes and turbo-dom#222, which moves the engine namespace off `globalThis[Symbol.for('ts')]` into a V8 private; earlier repins: c9f991c, 0189e4d, 4c473ef, f860fea, f0fb306, d660013, 443f4d8),
+  miaskiewicz/turbo-dom 223c4c8 (the final consolidation head, with the turbo-dom#183/#184
+  browser-env panic fixes and turbo-dom#222, which moves the engine namespace off `globalThis[Symbol.for('ts')]` into a V8 private, and the Document namespace-lookup fix; earlier repins: 03a856d, c9f991c, 0189e4d, 4c473ef, f860fea, f0fb306, d660013, 443f4d8),
   which carries the turbo-dom fixes of this round (DOM ownership bookkeeping linear on large
   trees, turbo-dom#112; `getComputedStyle` reuse, turbo-test#125, which follows CSSOM edits
   across realms, turbo-dom#113; canvas, track, image and colour fixes). turbo-dom-v8 stays on
