@@ -907,18 +907,17 @@ if (typeof globalThis.URL === 'undefined') {
         this.username = URL._encode(colon < 0 ? info : info.slice(0, colon), URL._USERINFO);
         this.password = colon < 0 ? '' : URL._encode(info.slice(colon + 1), URL._USERINFO);
         // a file URL's `localhost` host is the empty host (WHATWG)
-        this.host = this.protocol.toLowerCase() === 'file:' && /^localhost$/i.test(hostport) ? '' : hostport;
-        this.hostname = this.host.split(':')[0];
-        this.port = hostport.split(':')[1] || '';
+        this._hostname = '';
+        this._port = '';
+        this._setHost(hostport, true);
         this.pathname = m[3] || '/';
         searchStr = m[4] || '';
         this.hash = m[5] || '';
-        this.origin = this.protocol.toLowerCase() === 'file:' ? 'null' : this.protocol + '//' + this.host;
       } else {
         // opaque URL (no authority): everything after the scheme is the path (sans query/hash).
         this._hierarchical = false;
         this.username = ''; this.password = '';
-        this.host = ''; this.hostname = ''; this.port = '';
+        this._hostname = ''; this._port = '';
         const rest = url.slice(this.protocol.length);
         const qi = rest.indexOf('?'); const hi = rest.indexOf('#');
         let cut = rest.length;
@@ -927,7 +926,7 @@ if (typeof globalThis.URL === 'undefined') {
         this._path = URL._encode(rest.slice(0, cut), URL._C0);
         const after = rest.slice(cut);
         const am = /^(\?[^#]*)?(#.*)?$/.exec(after) || [];
-        searchStr = am[1] || ''; this.hash = am[2] || ''; this.origin = 'null';
+        searchStr = am[1] || ''; this.hash = am[2] || '';
       }
       // the query as parsed, percent-encoded with the query set (null: none); searchParams is
       // parsed from it and writes back to it when changed (turbo-test#115)
@@ -935,6 +934,48 @@ if (typeof globalThis.URL === 'undefined') {
       this._sp = URL._params(this._query || '', this);
       // the parts live in non-enumerable slots: a real URL has no own enumerable keys
       for (const k of Object.keys(this)) Object.defineProperty(this, k, { enumerable: false });
+    }
+    // host, hostname and port are views of _hostname/_port, so a set reaches href and origin
+    // (WHATWG host/hostname/port setters, as Node; turbo-test#201)
+    get host() { return this._hostname + (this._port ? ':' + this._port : ''); }
+    set host(v) { if (this._hierarchical) this._setHost(String(v), true); }
+    get hostname() { return this._hostname; }
+    set hostname(v) { if (this._hierarchical) this._setHost(String(v), false); }
+    get port() { return this._port; }
+    set port(v) {
+      if (!this._hierarchical || this._isFile || this._hostname === '') return;
+      v = String(v);
+      if (v === '') { this._port = ''; return; }
+      this._setPort(v);
+    }
+    get origin() { return !this._hierarchical || this._isFile ? 'null' : this.protocol + '//' + this.host; }
+    get _isFile() { return this.protocol.toLowerCase() === 'file:'; }
+    get _special() { return /^(https?|wss?|ftp|file):$/i.test(this.protocol); }
+    // WHATWG host parsing for the setters: the value ends at / ? # (and \ for a special
+    // scheme); a special non-file URL keeps its host when the value is empty; `withPort` (host)
+    // also takes a `:port`, the hostname setter leaves the URL alone when the value has one.
+    _setHost(v, withPort) {
+      const end = v.search(this._special ? /[\/?#\\]/ : /[\/?#]/);
+      if (end >= 0) v = v.slice(0, end);
+      const m = /^(\[[^\]]*\]|[^:]*)(?::(.*))?$/.exec(v);
+      if (!m) return;
+      let name = m[1];
+      const port = m[2];
+      if (port !== undefined && (!withPort || this._isFile)) return;
+      if (name === '' && this._special && !this._isFile) return;
+      if (this._special) name = name.toLowerCase();
+      if (this._isFile && name === 'localhost') name = '';
+      this._hostname = name;
+      if (port !== undefined && port !== '') this._setPort(port);
+    }
+    // the leading digits of `v`; a scheme's default port serializes as no port
+    _setPort(v) {
+      const d = /^\d*/.exec(v)[0];
+      if (d === '') return;
+      const n = Number(d);
+      if (n > 65535) return;
+      const dflt = { 'http:': 80, 'https:': 443, 'ws:': 80, 'wss:': 443, 'ftp:': 21 }[this.protocol.toLowerCase()];
+      this._port = n === dflt ? '' : String(n);
     }
     // `user:pass@` in href (empty parts left out, as WHATWG serializes them)
     get _userinfo() { return this.username || this.password ? this.username + (this.password ? ':' + this.password : '') + '@' : ''; }
@@ -976,7 +1017,7 @@ if (typeof globalThis.URL === 'undefined') {
       const auth = this._hierarchical ? this.protocol + '//' + this._userinfo + this.host : this.protocol;
       return auth + this._path + (this._query === null ? '' : '?' + this._query) + this._hash;
     }
-    set href(v) { const u = new globalThis.URL(v); this.protocol = u.protocol; this.username = u.username; this.password = u.password; this.host = u.host; this.hostname = u.hostname; this.port = u.port; this._path = u._path; this._hash = u._hash; this.origin = u.origin; this._hierarchical = u._hierarchical; this._query = u._query; this._sp._ = u._sp._; }
+    set href(v) { const u = new globalThis.URL(v); this.protocol = u.protocol; this.username = u.username; this.password = u.password; this._hostname = u._hostname; this._port = u._port; this._path = u._path; this._hash = u._hash; this._hierarchical = u._hierarchical; this._query = u._query; this._sp._ = u._sp._; }
     toString() { return this.href; }
     // JSON.stringify and pretty-format (vitest's diffs) show the href, as Node's URL
     toJSON() { return this.href; }
