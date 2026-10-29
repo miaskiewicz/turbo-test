@@ -683,6 +683,7 @@ it('pathToFileURL', () => {
   expect(pathToFileURL('/t\tn').href).toBe('file:///t%09n');
   expect(pathToFileURL('rel/x').href).toBe('file://' + process.cwd() + '/rel/x');
   expect(pathToFileURL('/d/').href).toBe('file:///d/');
+  expect([pathToFileURL('').href, pathToFileURL('.').href, pathToFileURL('./').href]).toEqual(['file://' + process.cwd(), 'file://' + process.cwd(), 'file://' + process.cwd() + '/']);
   expect(url.pathToFileURL('/q r').href).toBe('file:///q%20r');
   expect(fileURLToPath(pathToFileURL('/r t/€'))).toBe('/r t/€');
   let ascii = '';
@@ -750,6 +751,7 @@ it('pathToFileURL', () => {
   win();
   expect(['C:\\proj\\a b.test.ts', 'C:/x/y#z', '\\\\srv\\share\\f.ts', 'C:\\a\\..\\b\\', 'c:\\€\\%', 'rel\\x.ts', '\\top\\y'].map((s) => pathToFileURL(s).href))
     .toEqual(['file:///C:/proj/a%20b.test.ts', 'file:///C:/x/y%23z', 'file://srv/share/f.ts', 'file:///C:/b/', 'file:///c:/%E2%82%AC/%25', 'file:///D:/work/proj/rel/x.ts', 'file:///D:/top/y']);
+  expect([pathToFileURL('').href, pathToFileURL('sub\\').href]).toEqual(['file:///D:/work/proj', 'file:///D:/work/proj/sub/']);
 });
 it('fileURLToPath', () => {
   win();
