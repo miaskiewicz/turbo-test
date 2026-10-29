@@ -124,22 +124,20 @@ describe('native DOM interface ownership', () => {
   });
 
   it('constructs native-backed class delegates with subclass state and new.target', () => {
-    const make=globalThis[Symbol.for('ts')].makeNativeFunction;
-    class State { value; target; constructor(value){if(value==='bad')throw new RangeError('bad');this.value=value;this.target=new.target;} }
-    const Wrapped=make(State,'State',1,true,true);
-    Wrapped.prototype=State.prototype;
-    class Child extends Wrapped {}
+    expect((globalThis as any)[Symbol.for('ts')]).toBe(undefined);
+    class Child extends CustomEvent<number> { target2: unknown; constructor(type: string, init?: CustomEventInit<number>){super(type,init);this.target2=new.target;} }
     const original=Reflect.construct;
     try{
       Reflect.construct=()=>{throw new Error('modified');};
-      const instance=new Child(7);
-      expect(instance.value).toBe(7);
-      expect(instance.target).toBe(Child);
+      const instance=new Child('ping',{detail:7});
+      expect(instance.type).toBe('ping');
+      expect(instance.detail).toBe(7);
+      expect(instance.target2).toBe(Child);
       expect(instance instanceof Child).toBe(true);
-      expect(instance instanceof Wrapped).toBe(true);
-      expect(instance instanceof State).toBe(true);
-      expect(()=>Wrapped(1)).toThrow();
-      expect(()=>new Wrapped('bad')).toThrow('bad');
+      expect(instance instanceof CustomEvent).toBe(true);
+      expect(instance instanceof Event).toBe(true);
+      expect(()=>(CustomEvent as any)('ping')).toThrow(TypeError);
+      expect(()=>new (CustomEvent as any)()).toThrow(TypeError);
     }finally{Reflect.construct=original;}
   });
 
