@@ -5,31 +5,33 @@ import { which as defaultFirst } from 'default-first';
 import { which as nested } from 'nested';
 import { which as feature } from 'subpath/feature';
 import { which as ua } from 'subpath/u/a';
+import { which as moduleCond } from 'module-cond';
 
 const require = createRequire(import.meta.url);
 const tail = (u: string) => u.slice(u.indexOf('/node_modules/') + '/node_modules/'.length);
 
 test('import picks the first matching key in exports order', () => {
-  expect([reqFirst, reqImport, defaultFirst, nested, feature, ua]).toEqual([
+  expect([reqFirst, reqImport, defaultFirst, nested, feature, ua, moduleCond]).toEqual([
     'req-first:js', 'req-import:mjs', 'default-first:default', 'nested:mjs',
-    'subpath/feature:js', 'subpath/u/a:js',
+    'subpath/feature:js', 'subpath/u/a:js', 'module-cond:default',
   ]);
 });
 test('dynamic import agrees', async () => {
   expect((await import('req-first')).which).toBe('req-first:js');
   expect((await import('subpath/u/a')).which).toBe('subpath/u/a:js');
+  expect((await import('module-cond')).which).toBe('module-cond:default');
 });
 test('import.meta.resolve uses the import conditions', () => {
-  expect(['req-first', 'req-import', 'default-first', 'nested', 'subpath/feature', 'subpath/u/a']
+  expect(['req-first', 'req-import', 'default-first', 'nested', 'subpath/feature', 'subpath/u/a', 'module-cond']
     .map((s) => tail(import.meta.resolve(s)))).toEqual([
     'req-first/dist/i.js', 'req-import/e.mjs', 'default-first/d.js', 'nested/m/i.mjs',
-    'subpath/f.js', 'subpath/u/a.js',
+    'subpath/f.js', 'subpath/u/a.js', 'module-cond/d.js',
   ]);
 });
 test('require() picks the require condition', () => {
-  expect(['req-first', 'req-import', 'default-first', 'nested', 'subpath/feature', 'subpath/u/a', 'req-only']
+  expect(['req-first', 'req-import', 'default-first', 'nested', 'subpath/feature', 'subpath/u/a', 'req-only', 'module-cond']
     .map((s) => require(s).which)).toEqual([
     'req-first:cjs', 'req-import:cjs', 'default-first:default', 'nested:cjs',
-    'subpath/feature:cjs', 'subpath/u/a:cjs', 'req-only:cjs',
+    'subpath/feature:cjs', 'subpath/u/a:cjs', 'req-only:cjs', 'module-cond:cjs',
   ]);
 });
