@@ -333,7 +333,8 @@ fn base_resolve_options(
     // `main` before `module` (Node ignores `module`; it stays the fallback of a package without
     // `main`). A package without a dual build is then one instance for both; one with an
     // `import` and a `require` build is two, as under Node (the dual-package hazard is the
-    // package's). `module` stays a condition of an import: bundler-only ES builds still load.
+    // package's). `module` is not a condition (vitest 4.1.12 loads `{ module, default }`'s
+    // `default` build, as Node); the `module` main field still covers packages without `main`.
     //
     // NO "node" condition: turbo-test runs in a browser-like V8 (turbo-dom, esbuild
     // --platform=browser), and packages' `node` builds target the real Node runtime — they pull
@@ -365,12 +366,12 @@ fn base_resolve_options(
         )
     } else if esm && require_fallback {
         (
-            &["import", "module", "browser", "default", "require"],
+            &["import", "browser", "default", "require"],
             &["browser", "main", "module"],
         )
     } else if esm {
         (
-            &["import", "module", "browser", "default"],
+            &["import", "browser", "default"],
             &["browser", "main", "module"],
         )
     } else {
