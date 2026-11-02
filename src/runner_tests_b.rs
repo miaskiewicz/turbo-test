@@ -802,9 +802,18 @@ fn the_shared_let_rewrite_skips_comments() {
         "{out}"
     );
     // a comment's own text is left as is
-    let out = rewrite_shared_lets("// currentEntity\n/* currentEntity */ currentEntity", &names);
-    assert!(out.ends_with("// currentEntity\n/* currentEntity */ globalThis.__ms.currentEntity"), "{out}");
+    let out = rewrite_shared_lets(
+        "// currentEntity\n/* currentEntity */ currentEntity",
+        &names,
+    );
+    assert!(
+        out.ends_with("// currentEntity\n/* currentEntity */ globalThis.__ms.currentEntity"),
+        "{out}"
+    );
     // `/` alone (division) is not a comment
     let out = rewrite_shared_lets("a / currentEntity / 2", &names);
-    assert!(out.ends_with("a / globalThis.__ms.currentEntity / 2"), "{out}");
+    assert!(
+        out.ends_with("a / globalThis.__ms.currentEntity / 2"),
+        "{out}"
+    );
 }

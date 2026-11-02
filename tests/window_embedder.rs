@@ -9,7 +9,10 @@ use common::{turbo_test, Project};
 #[test]
 fn a_dom_window_has_the_embedder_members() {
     let p = Project::new("window-embedder");
-    p.file("package.json", r#"{"name":"window-embedder","type":"module"}"#);
+    p.file(
+        "package.json",
+        r#"{"name":"window-embedder","type":"module"}"#,
+    );
     p.file(
         "vitest.config.ts",
         "export default { test: { environment: 'jsdom' } };\n",

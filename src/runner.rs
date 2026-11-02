@@ -2262,7 +2262,10 @@ fn set_mock_prepass(scope: &mut v8::PinScope, on: bool) {
 fn setup_dom(scope: &mut v8::PinScope, _entry: &Path) {
     turbo_dom_browser_env::browser_env::install(scope);
     // the embedder's window members: open / alert / print / postMessage … (turbo-test#208)
-    run_js(scope, "globalThis.__ttInstallWindowMembers && globalThis.__ttInstallWindowMembers();");
+    run_js(
+        scope,
+        "globalThis.__ttInstallWindowMembers && globalThis.__ttInstallWindowMembers();",
+    );
 }
 
 /// Transform a TS file to **ESM** JS using the PROJECT'S OWN TypeScript (`ts.transpileModule`),
@@ -3338,7 +3341,9 @@ fn replace_word(text: &str, word: &str, repl: &str) -> String {
             let end = if b[i + 1] == b'/' {
                 text[i..].find('\n').map_or(text.len(), |n| i + n)
             } else {
-                text[i + 2..].find("*/").map_or(text.len(), |n| i + 2 + n + 2)
+                text[i + 2..]
+                    .find("*/")
+                    .map_or(text.len(), |n| i + 2 + n + 2)
             };
             out.push_str(&text[i..end]);
             i = end;
