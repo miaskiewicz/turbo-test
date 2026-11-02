@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="19" failures="8" errors="0" time="T">
+    <testsuite name="after-all.test.ts" timestamp="S" hostname="H" tests="7" failures="3" errors="0" skipped="1" time="T">
+        <testcase classname="after-all.test.ts" name="afterAll throws &gt; t" time="T">
+        </testcase>
+        <testcase classname="after-all.test.ts" name="beforeAll throws &gt; t" time="T">
+            <skipped/>
+        </testcase>
+        <testcase classname="after-all.test.ts" name="beforeAll cleanup throws &gt; t" time="T">
+        </testcase>
+        <testcase classname="after-all.test.ts" name="ran what vitest runs" time="T">
+        </testcase>
+        <testcase classname="after-all.test.ts" name="afterAll throws" time="T">
+            <failure message="aa2 boom" type="Error">
+Error: aa2 boom
+ ❯ after-all.test.ts:9:26
+            </failure>
+        </testcase>
+        <testcase classname="after-all.test.ts" name="beforeAll throws" time="T">
+            <failure message="ba2 boom" type="Error">
+Error: ba2 boom
+ ❯ after-all.test.ts:14:27
+            </failure>
+        </testcase>
+        <testcase classname="after-all.test.ts" name="beforeAll cleanup throws" time="T">
+            <failure message="ba cleanup boom" type="Error">
+Error: ba cleanup boom
+ ❯ after-all.test.ts:19:33
+            </failure>
+        </testcase>
+    </testsuite>
+    <testsuite name="after-each.test.ts" timestamp="S" hostname="H" tests="9" failures="5" errors="0" skipped="0" time="T">
+        <testcase classname="after-each.test.ts" name="passing body &gt; fails with the afterEach error" time="T">
+            <failure message="ae boom" type="Error">
+Error: ae boom
+ ❯ after-each.test.ts:6:27
+            </failure>
+        </testcase>
+        <testcase classname="after-each.test.ts" name="failing body &gt; keeps both errors" time="T">
+            <system-out>
+ae1 runs first
+
+            </system-out>
+            <failure message="expected 1 to be 2 // Object.is equality" type="AssertionError">
+AssertionError: expected 1 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 1
+
+ ❯ after-each.test.ts:13:45
+            </failure>
+            <failure message="ae2 boom" type="Error">
+Error: ae2 boom
+ ❯ after-each.test.ts:11:27
+            </failure>
+        </testcase>
+        <testcase classname="after-each.test.ts" name="it.fails &gt; passing body" time="T">
+        </testcase>
+        <testcase classname="after-each.test.ts" name="it.fails &gt; throwing body" time="T">
+        </testcase>
+        <testcase classname="after-each.test.ts" name="cleanup throws &gt; fails with the cleanup error" time="T">
+            <failure message="cleanup boom" type="Error">
+Error: cleanup boom
+ ❯ after-each.test.ts:22:34
+            </failure>
+        </testcase>
+        <testcase classname="after-each.test.ts" name="beforeEach throws &gt; skips the body" time="T">
+            <system-out>
+afterEach after beforeEach throw
+
+            </system-out>
+            <failure message="be boom" type="Error">
+Error: be boom
+ ❯ after-each.test.ts:27:28
+            </failure>
+        </testcase>
+        <testcase classname="after-each.test.ts" name="only the throwing test &gt; one" time="T">
+            <failure message="first only" type="Error">
+Error: first only
+ ❯ after-each.test.ts:33:45
+            </failure>
+        </testcase>
+        <testcase classname="after-each.test.ts" name="only the throwing test &gt; two" time="T">
+        </testcase>
+        <testcase classname="after-each.test.ts" name="retry &gt; passes on the retry" time="T">
+        </testcase>
+    </testsuite>
+    <testsuite name="order.test.ts" timestamp="S" hostname="H" tests="3" failures="0" errors="0" skipped="0" time="T">
+        <testcase classname="order.test.ts" name="outer &gt; inner &gt; t1" time="T">
+            <system-out>
+outer be1
+
+outer be2
+
+outer be3 (no cleanup)
+
+inner be
+
+t1
+
+inner ae2
+
+inner ae1
+
+outer ae2
+
+outer ae1
+
+inner be cleanup
+
+outer be2 cleanup
+
+outer be1 cleanup
+
+            </system-out>
+        </testcase>
+        <testcase classname="order.test.ts" name="outer &gt; t2" time="T">
+            <system-out>
+outer be1
+
+outer be2
+
+outer be3 (no cleanup)
+
+t2
+
+outer ae2
+
+outer ae1
+
+outer be2 cleanup
+
+outer be1 cleanup
+
+            </system-out>
+        </testcase>
+        <testcase classname="order.test.ts" name="ran in vitest order" time="T">
+        </testcase>
+    </testsuite>
+</testsuites>

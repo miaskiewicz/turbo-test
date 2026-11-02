@@ -1,0 +1,17 @@
+
+ RUN  v4.1.12 <root>
+
+ × a.test.ts > string <ms>
+   → plain string
+ × a.test.ts > props <ms>
+   → with code
+ × a.test.ts > object <ms>
+   → undefined
+ × a.test.ts > null <ms>
+   → null
+
+ Test Files  1 failed (1)
+      Tests  4 failed (4)
+   Start at  <time>
+   Duration  <duration>
+

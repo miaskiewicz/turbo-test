@@ -1,0 +1,16 @@
+
+ RUN  v4.1.12 <root>
+
+··
+
+  Snapshots  2 obsolete
+             ↳ ./a.test.ts
+               · gone 1
+             ↳ ./b.test.ts
+               · old 1
+
+ Test Files  2 passed (2)
+      Tests  2 passed (2)
+   Start at  <time>
+   Duration  <duration>
+

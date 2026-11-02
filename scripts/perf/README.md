@@ -115,7 +115,7 @@ Both attack the same hotspot: per-file deps parse/compile. Pick by appetite.
    - init-time globals (`Date`, `process.env`, seeds) get frozen into the blob.
 
 Smaller combinable wins: GC (~6%, tune V8 heap flags via `TURBO_V8_FLAGS=--max-semi-space-size=…`),
-malloc (~6%, pool the per-node V8 wrapper allocations in `browser_env.rs`).
+malloc (~6%, pool the per-node V8 wrapper allocations in the binding's `browser_env.rs`, now in turbo-dom-browser-env).
 
 ## Files
 - `harness.sh` — the tool (canonical).

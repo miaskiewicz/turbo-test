@@ -1,0 +1,14 @@
+
+ RUN  v4.1.12 <root>
+
+stdout | a.test.ts > top <&> "q"
+out line
+two { a: 1 }
+
+·x--xx·
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 2 passed | 1 skipped | 1 todo (7)
+   Start at  <time>
+   Duration  <duration>
+

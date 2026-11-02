@@ -1,0 +1,3 @@
+["toEqual unaffected",["AssertionError","expected Money{ n: 1, cur: 'A' } to deeply equal Money{ n: 2, cur: 'A' }"]]
+["toBe unaffected",["AssertionError","expected { m: Money{ n: 1, cur: 'A' } } to be 1 // Object.is equality"]]
+["bad serializer",["PrettyFormatPluginError","plugin.print is not a function"]]

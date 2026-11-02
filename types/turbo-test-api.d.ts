@@ -79,6 +79,22 @@ export interface TestEachFunction {
   (...args: [TemplateStringsArray, ...any]): EachFunctionReturn<any[]>;
 }
 
+// `test.for` / `describe.for`: the row is ONE argument (not spread); a test also gets its context.
+export interface TestForFunctionReturn<Arg> {
+  (name: string | Function, fn: (arg: Arg, context: TestContext) => any): void;
+  (name: string | Function, options: TestOptions, fn: (arg: Arg, context: TestContext) => any): void;
+}
+
+export interface TestForFunction {
+  <T>(cases: ReadonlyArray<T>): TestForFunctionReturn<T>;
+  (strings: TemplateStringsArray, ...values: any[]): TestForFunctionReturn<any>;
+}
+
+export interface SuiteForFunction {
+  <T>(cases: ReadonlyArray<T>): (name: string | Function, fn: (arg: T) => any) => void;
+  (strings: TemplateStringsArray, ...values: any[]): (name: string | Function, fn: (arg: any) => any) => void;
+}
+
 export interface TestAPI {
   (name: string, fn?: TestFunction, timeout?: number | TestOptions): void;
   only: TestAPI;
@@ -87,6 +103,7 @@ export interface TestAPI {
   concurrent: TestAPI;
   fails: TestAPI;
   each: TestEachFunction;
+  for: TestForFunction;
 }
 
 export interface SuiteAPI {
@@ -96,6 +113,7 @@ export interface SuiteAPI {
   todo: (name: string) => void;
   concurrent: SuiteAPI;
   each: TestEachFunction;
+  for: SuiteForFunction;
 }
 
 // vitest's hooks pass a context (`beforeEach((ctx, suite) => …)`) and accept any return — a
@@ -111,9 +129,12 @@ export type HookFunction = (
 
 export interface MockContext<TArgs extends any[] = any[], TReturn = any> {
   calls: TArgs[];
-  results: Array<{ type: 'return' | 'throw'; value: any }>;
+  results: Array<{ type: 'return' | 'throw' | 'incomplete'; value: any }>;
+  settledResults: Array<{ type: 'fulfilled' | 'rejected' | 'incomplete'; value: any }>;
   instances: any[];
-  lastCall?: TArgs;
+  contexts: any[];
+  invocationCallOrder: number[];
+  readonly lastCall: TArgs | undefined;
 }
 
 // vitest-4 generic form: the type parameter is the mocked function's *signature*, not an args
@@ -136,7 +157,12 @@ export interface Mock<T extends (...args: any[]) => any = (...args: any[]) => an
   mockResolvedValueOnce(value: Awaited<ReturnType<T>>): this;
   mockRejectedValue(value: any): this;
   mockRejectedValueOnce(value: any): this;
+  mockThrow(value: any): this;
+  mockThrowOnce(value: any): this;
   getMockImplementation(): T | undefined;
+  // `fn` is the implementation while `callback` runs (until its promise settles)
+  withImplementation(fn: T, callback: () => void): this;
+  withImplementation(fn: T, callback: () => Promise<void>): Promise<this>;
 }
 
 // A mocked function keeps its original call signature AND gains the mock methods.
@@ -161,12 +187,64 @@ export interface Assertion {
   rejects: Assertion;
 }
 
+// a pretty-format plugin (expect.addSnapshotSerializer): `serialize`, or the older `print`
+export type SnapshotSerializer =
+  | {
+      test(val: any): boolean;
+      serialize(val: any, config: any, indentation: string, depth: number, refs: any[], printer: (val: any, config: any, indentation: string, depth: number, refs: any[]) => string): string;
+    }
+  | {
+      test(val: any): boolean;
+      print(val: any, serialize: (val: any) => string, indent: (str: string) => string, options: { edgeSpacing: string; min: boolean; spacing: string }, colors: any): string;
+    };
+
+// a custom matcher's `this.utils` (vitest's getMatcherUtils + diff / stringify / equalities)
+export interface MatcherUtils {
+  EXPECTED_COLOR(s: string): string;
+  RECEIVED_COLOR(s: string): string;
+  INVERTED_COLOR(s: string): string;
+  BOLD_WEIGHT(s: string): string;
+  DIM_COLOR(s: string): string;
+  diff(a: any, b: any, options?: { omitAnnotationLines?: boolean; aAnnotation?: string; bAnnotation?: string }): string | undefined;
+  matcherHint(
+    matcherName: string,
+    received?: string,
+    expected?: string,
+    options?: {
+      comment?: string;
+      isDirectExpectCall?: boolean;
+      isNot?: boolean;
+      promise?: string;
+      secondArgument?: string;
+      expectedColor?: (s: string) => string;
+      receivedColor?: (s: string) => string;
+      secondArgumentColor?: (s: string) => string;
+    },
+  ): string;
+  printReceived(object: any): string;
+  printExpected(value: any): string;
+  printDiffOrStringify(received: any, expected: any): string;
+  printWithType(name: string, value: any, print: (value: any) => string): string;
+  stringify(object: any, maxDepth?: number, options?: { maxLength?: number; [option: string]: any }): string;
+  iterableEquality(a: any, b: any, customTesters?: any[]): boolean | undefined;
+  subsetEquality(object: any, subset: any, customTesters?: any[]): boolean | undefined;
+}
+
+// `this` inside an expect.extend matcher
+export interface MatcherState {
+  [key: string]: any;
+  isNot: boolean | undefined;
+  promise: string;
+  equals(a: any, b: any, customTesters?: any[], strictCheck?: boolean): boolean;
+  utils: MatcherUtils;
+}
+
 export interface ExpectStatic {
   (actual: any, message?: string): Assertion;
-  // forward-compat: vitest exposes more statics (poll, unreachable, assertType,
-  // addSnapshotSerializer, getState/setState, …). Permit any `expect.X` rather than error.
+  // forward-compat: vitest exposes more statics (assert, and an expect.extend matcher's
+  // asymmetric form). Permit any `expect.X` rather than error.
   [key: string]: any;
-  extend(matchers: Record<string, (...args: any[]) => any>): void;
+  extend(matchers: Record<string, (this: MatcherState, ...args: any[]) => any>): void;
   assertions(count: number): void;
   hasAssertions(): void;
   fail(message?: string): never;
@@ -178,11 +256,27 @@ export interface ExpectStatic {
   stringContaining(expected: string): any;
   stringMatching(expected: string | RegExp): any;
   closeTo(expected: number, precision?: number): any;
+  schemaMatching(schema: any): any;
+  toBeOneOf(expected: any[] | Set<any>): any;
+  toSatisfy(predicate: (value: any) => boolean, message?: string): any;
+  addEqualityTesters(testers: Array<(this: { equals: (...args: any[]) => boolean }, a: any, b: any, customTesters: any[]) => boolean | undefined>): void;
+  unreachable(message?: string): never;
+  // each matcher re-runs `fn` until it passes or `timeout` (1000 ms) runs out, every `interval`
+  // (50 ms); the matchers return promises that must be awaited
+  poll(fn: () => any, options?: { interval?: number; timeout?: number; message?: string }): Assertion;
+  addSnapshotSerializer(plugin: SnapshotSerializer): void;
+  getState(): Record<string, any>;
+  setState(state: Record<string, any>): void;
   not: {
+    [key: string]: any;
     objectContaining(expected: any): any;
     arrayContaining(expected: any[]): any;
     stringContaining(expected: string): any;
     stringMatching(expected: string | RegExp): any;
+    closeTo(expected: number, precision?: number): any;
+    schemaMatching(schema: any): any;
+    toBeOneOf(expected: any[] | Set<any>): any;
+    toSatisfy(predicate: (value: any) => boolean, message?: string): any;
   };
 }
 
@@ -282,20 +376,27 @@ export type AssertType = <T>(value: T) => void;
 export interface ViAPI {
   fn(): Mock;
   fn<T extends (...args: any[]) => any>(impl?: T): Mock<T>;
-  spyOn(obj: any, method: any): Mock;
+  spyOn(obj: any, method: any, accessType?: 'get' | 'set'): Mock;
   // async factory: `importOriginal<T>()` returns the real module typed as T
   // (`vi.mock('x', async (importOriginal) => ({ ...await importOriginal<typeof X>() }))`).
   mock(path: string, factory: (importOriginal: ImportOriginal) => any): void;
   mock(path: string, factory?: (...args: any[]) => any): void;
   unmock(path: string): void;
-  doMock(path: string, factory: (importOriginal: ImportOriginal) => any): void;
-  doMock(path: string, factory?: (...args: any[]) => any): void;
+  doMock(path: string, factory: (importOriginal: ImportOriginal) => any): object;
+  doMock(path: string, factory?: (...args: any[]) => any): object;
   doUnmock(path: string): void;
   // vi.hoisted: run a factory above the module's imports; returns its value (used for shared mock refs).
   hoisted<T>(factory: () => T): T;
   // function → MockedFunction (exposes mockReturnValue/.mock/…); anything else → MockedObject.
   mocked<T extends (...args: any[]) => any>(item: T, deep?: boolean): MockedFunction<T>;
   mocked<T>(item: T, deep?: boolean): MockedObject<T>;
+  // the automocker on a value: a mocked deep copy, or (`spy: true`) the value with spies in place
+  mockObject<T>(value: T, options?: { spy?: boolean }): MockedObject<T>;
+  // a helper whose frames are left out of an error's location
+  defineHelper<F extends (...args: any[]) => any>(fn: F): F;
+  // vitest's runtime config (e.g. `{ fakeTimers }`); resetConfig puts the first setConfig's copy back
+  setConfig(config: Record<string, any>): void;
+  resetConfig(): void;
   importActual<T = any>(path: string): Promise<T>;
   importMock<T = any>(path: string): Promise<T>;
   clearAllMocks(): ViAPI;
@@ -314,26 +415,70 @@ export interface ViAPI {
   advanceTimersByTimeAsync(ms: number): Promise<ViAPI>;
   advanceTimersToNextTimer(): ViAPI;
   advanceTimersToNextTimerAsync(): Promise<ViAPI>;
+  advanceTimersToNextFrame(): ViAPI;
+  runAllTicks(): ViAPI;
   runAllTimers(): ViAPI;
   runAllTimersAsync(): Promise<ViAPI>;
   runOnlyPendingTimers(): ViAPI;
   runOnlyPendingTimersAsync(): Promise<ViAPI>;
   clearAllTimers(): ViAPI;
   getTimerCount(): number;
+  setTimerTickMode(mode: 'manual' | 'nextTimerAsync'): ViAPI;
+  setTimerTickMode(mode: 'interval', interval?: number): ViAPI;
   // env / globals
-  stubEnv(name: string, value: string): ViAPI;
+  stubEnv(name: string, value: string | boolean | undefined): ViAPI;
   unstubAllEnvs(): ViAPI;
   stubGlobal(name: string, value: any): ViAPI;
   unstubAllGlobals(): ViAPI;
   waitFor<T>(callback: () => T | Promise<T>, options?: any): Promise<T>;
   waitUntil<T>(callback: () => T | Promise<T>, options?: any): Promise<T>;
+  /** Wait for every pending dynamic `import()` (vitest's `waitForImportsToResolve`). */
+  dynamicImportSettled(): Promise<void>;
 }
 
 // jest's controller mirrors vi's surface (turbo-test backs both with the same implementation),
-// plus jest-only sync helpers.
-export interface JestAPI extends ViAPI {
+// plus jest-only helpers. Its timer functions return undefined and useFakeTimers takes jest's
+// options (turbo-test#181).
+type JestTimerKeys = 'useFakeTimers' | 'useRealTimers' | 'setSystemTime' | 'advanceTimersByTime' | 'advanceTimersByTimeAsync'
+  | 'advanceTimersToNextTimer' | 'advanceTimersToNextTimerAsync' | 'advanceTimersToNextFrame' | 'runAllTicks' | 'runAllTimers'
+  | 'runAllTimersAsync' | 'runOnlyPendingTimers' | 'runOnlyPendingTimersAsync' | 'clearAllTimers' | 'setTimerTickMode'
+  | 'clearAllMocks' | 'resetAllMocks' | 'restoreAllMocks';
+export interface JestFakeTimersConfig {
+  now?: number | Date;
+  doNotFake?: string[];
+  timerLimit?: number;
+  advanceTimers?: boolean | number;
+  legacyFakeTimers?: boolean;
+}
+export interface JestAPI extends Omit<ViAPI, JestTimerKeys> {
+  useFakeTimers(config?: JestFakeTimersConfig): JestAPI;
+  useRealTimers(): JestAPI;
+  setSystemTime(time?: number | Date): void;
+  advanceTimersByTime(ms: number): void;
+  advanceTimersByTimeAsync(ms: number): Promise<void>;
+  advanceTimersToNextTimer(steps?: number): void;
+  advanceTimersToNextTimerAsync(steps?: number): Promise<void>;
+  advanceTimersToNextFrame(): void;
+  runAllTicks(): void;
+  runAllTimers(): void;
+  runAllTimersAsync(): Promise<void>;
+  runOnlyPendingTimers(): void;
+  runOnlyPendingTimersAsync(): Promise<void>;
+  runAllImmediates(): void;
+  clearAllTimers(): void;
+  setTimerTickMode(config: { mode: 'manual' | 'nextAsync' } | { mode: 'interval'; delta?: number }): JestAPI;
+  clearAllMocks(): JestAPI;
+  resetAllMocks(): JestAPI;
+  restoreAllMocks(): JestAPI;
   requireActual<T = any>(path: string): T;
   requireMock<T = any>(path: string): T;
+  createMockFromModule<T = any>(path: string): T;
+  setMock(path: string, exports: any): JestAPI;
+  deepUnmock(path: string): JestAPI;
+  unstable_mockModule(path: string, factory: () => any): JestAPI;
+  unstable_unmockModule(path: string): JestAPI;
+  getSeed(): number;
+  isEnvironmentTornDown(): boolean;
   isolateModules(fn: () => void): void;
   isolateModulesAsync(fn: () => Promise<void>): Promise<void>;
   setTimeout(ms: number): JestAPI;

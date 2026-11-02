@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="18" failures="2" errors="0" time="T">
+    <testsuite name="a.test.ts" timestamp="S" hostname="H" tests="18" failures="2" errors="0" skipped="4" time="T">
+        <testcase classname="a.test.ts" name="noted" time="T">
+            <skipped/>
+        </testcase>
+        <testcase classname="a.test.ts" name="named" time="T">
+        </testcase>
+        <testcase classname="a.test.ts" name="hooks" time="T">
+            <system-out>
+finished
+
+            </system-out>
+        </testcase>
+        <testcase classname="a.test.ts" name="d &gt; task" time="T">
+            <system-out>
+annotate,fromBefore,onTestFailed,onTestFinished,signal,skip,task function 7
+annotations,artifacts,each,fails,file,fullName,fullTestName,id,meta,mode,name,repeats,result,retry,shuffle,suite,tags,timeout,type
+test run -2087029554_3_0 a.test.ts &gt; d &gt; task d &gt; task undefined 5000 [Object: null prototype] {} undefined undefined
+suite d -2087029554_3 a.test.ts &gt; d run undefined suite a.test.ts -2087029554 run
+run 0 0 [] []
+true false false function
+done() callback is deprecated, use promise instead
+
+ae task pass
+
+            </system-out>
+        </testcase>
+        <testcase classname="a.test.ts" name="d &gt; order" time="T">
+            <system-out>
+ae order pass
+
+fin2
+
+fin1 order pass
+
+            </system-out>
+        </testcase>
+        <testcase classname="a.test.ts" name="d &gt; fails" time="T">
+            <system-out>
+ae fails fail
+
+fin3
+
+onFailed fail 1 boom
+
+            </system-out>
+            <failure message="boom" type="Error">
+Error: boom
+ ❯ a.test.ts:27:11
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="d &gt; finthrow" time="T">
+            <system-out>
+ae finthrow pass
+
+            </system-out>
+            <failure message="in finished" type="Error">
+Error: in finished
+ ❯ a.test.ts:29:73
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="d &gt; nested" time="T">
+            <system-out>
+ae nested pass
+
+Cannot call &quot;onTestFinished&quot; inside a test hook.
+
+            </system-out>
+        </testcase>
+        <testcase classname="a.test.ts" name="d &gt; skipcond" time="T">
+            <system-out>
+after skip(false)
+
+ae skipcond skip
+
+            </system-out>
+            <skipped/>
+        </testcase>
+        <testcase classname="a.test.ts" name="d &gt; skipcatch" time="T">
+            <system-out>
+caught Error test is skipped; abort execution VITEST_PENDING
+
+ae skipcatch pass
+
+            </system-out>
+            <skipped/>
+        </testcase>
+        <testcase classname="a.test.ts" name="d &gt; ctxexpect" time="T">
+            <system-out>
+ae ctxexpect pass
+
+            </system-out>
+        </testcase>
+        <testcase classname="a.test.ts" name="d &gt; retried" time="T">
+            <system-out>
+try 0 2
+
+ae retried fail
+
+try 1 2
+
+ae retried pass
+
+            </system-out>
+        </testcase>
+        <testcase classname="a.test.ts" name="bs &gt; skipped by hook" time="T">
+            <skipped/>
+        </testcase>
+        <testcase classname="a.test.ts" name="top" time="T">
+            <system-out>
+undefined a.test.ts -2087029554_5
+
+            </system-out>
+        </testcase>
+        <testcase classname="a.test.ts" name="each 1" time="T">
+            <system-out>
+each 1 2 undefined
+
+            </system-out>
+        </testcase>
+        <testcase classname="a.test.ts" name="for 1" time="T">
+            <system-out>
+for [ 1, 2 ] for 1 function
+
+            </system-out>
+        </testcase>
+        <testcase classname="a.test.ts" name="fixture" time="T">
+            <system-out>
+fixture fixture fixture function
+
+            </system-out>
+        </testcase>
+        <testcase classname="a.test.ts" name="annotated" time="T">
+            <system-out>
+note one notice 45 54 true
+
+            </system-out>
+            <properties>
+                <property name="notice" value="note one">
+                </property>
+                <property name="warning" value="warn &lt;two&gt;">
+                </property>
+            </properties>
+        </testcase>
+    </testsuite>
+</testsuites>

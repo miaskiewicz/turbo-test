@@ -1,0 +1,25 @@
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  a.test.ts > always
+Error: nope 1
+ ❯ a.test.ts:5:42
+      3| let m = 0;
+      4| it('flaky', { retry: 2 }, () => { n++; if (n < 2) throw new Error('onc…
+      5| it('always', { retry: 1 }, () => { throw new Error('nope ' + (++m)); }…
+       |                                          ^
+      6|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  a.test.ts > always
+Error: nope 2
+ ❯ a.test.ts:5:42
+      3| let m = 0;
+      4| it('flaky', { retry: 2 }, () => { n++; if (n < 2) throw new Error('onc…
+      5| it('always', { retry: 1 }, () => { throw new Error('nope ' + (++m)); }…
+       |                                          ^
+      6|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+

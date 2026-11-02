@@ -6,3 +6,4 @@ src/*.json text eol=lf
 src/xpath_provider/xpath.js -text -whitespace
 src/xpath_provider/LICENSE -text -whitespace
 src/*.html text eol=lf
+tests/data/** text eol=lf

@@ -1,0 +1,1 @@
+{ "name": "req-import", "exports": { "require": "./c.cjs", "import": "./e.mjs" } }

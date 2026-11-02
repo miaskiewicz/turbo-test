@@ -1,0 +1,13 @@
+
+ RUN  v4.1.12 <root>
+
+ ❯ a.test.ts (3 tests | 3 failed) <ms>
+   × row 1 <ms>
+   × row 2 <ms>
+   × other <ms>
+
+ Test Files  1 failed (1)
+      Tests  3 failed (3)
+   Start at  <time>
+   Duration  <duration>
+

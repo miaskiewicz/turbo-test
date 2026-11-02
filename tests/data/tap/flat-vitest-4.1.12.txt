@@ -1,0 +1,116 @@
+TAP version 13
+1..29
+ok 1 - a.test.ts > passes # time=Tms
+not ok 2 - a.test.ts > numbers # time=Tms
+    ---
+    error:
+        name: "AssertionError"
+        message: "expected 1 to be 2 // Object.is equality"
+    at: "<ROOT>/a.test.ts:3:35"
+    actual: "1"
+    expected: "2"
+    ...
+not ok 3 - a.test.ts > objects # time=Tms
+    ---
+    error:
+        name: "AssertionError"
+        message: "expected { a: 1, b: [ 1, 'x' ] } to deeply equal { a: 2, b: [ 1, 'y' ] }"
+    at: "<ROOT>/a.test.ts:4:55"
+    actual: "{
+  \"a\": 1,
+  \"b\": [
+    1,
+    \"x\",
+  ],
+}"
+    expected: "{
+  \"a\": 2,
+  \"b\": [
+    1,
+    \"y\",
+  ],
+}"
+    ...
+not ok 4 - a.test.ts > strings "q" # time=Tms
+    ---
+    error:
+        name: "AssertionError"
+        message: "expected 'line1\nline2' to be 'line1\nLINE2' // Object.is equality"
+    at: "<ROOT>/a.test.ts:5:52"
+    actual: "line1
+line2"
+    expected: "line1
+LINE2"
+    ...
+not ok 5 - a.test.ts > thrown # time=Tms
+    ---
+    error:
+        name: "TypeError"
+        message: "bad \"thing\"
+second"
+    at: "<ROOT>/a.test.ts:6:30"
+    ...
+ok 6 - a.test.ts > skipped # SKIP
+ok 7 - a.test.ts > later # TODO
+ok 8 - a.test.ts > name \# with \\ backslash # time=Tms
+ok 9 - a.test.ts > annotated # time=Tms
+    # notice: a note
+    # warning: warn me
+ok 10 - a.test.ts > outer > inner pass # time=Tms
+not ok 11 - a.test.ts > outer > deeper > deep fail # time=Tms
+    ---
+    error:
+        name: "AssertionError"
+        message: "expected [ 1, 2 ] to strictly equal [ 1, 3 ]"
+    at: "<ROOT>/a.test.ts:14:44"
+    actual: "[
+  1,
+  2,
+]"
+    expected: "[
+  1,
+  3,
+]"
+    ...
+ok 12 - a.test.ts > outer > skipped suite > never # SKIP
+ok 13 - a.test.ts > all pass > one # time=Tms
+not ok 14 - a.test.ts > truthy # time=Tms
+    ---
+    error:
+        name: "AssertionError"
+        message: "expected +0 to be truthy"
+    at: "<ROOT>/a.test.ts:23:34"
+    actual: "0"
+    expected: "true"
+    ...
+not ok 15 - a.test.ts > non-error # time=Tms
+    ---
+    error:
+        name: "Unknown Error"
+        message: "plain string"
+    ...
+not ok 16 - b.test.ts
+    ---
+    error:
+        name: "Error"
+        message: "load \"fails\""
+    at: "<ROOT>/b.test.ts:2:7"
+    ...
+ok 17 - c.test.ts > hooked > a # SKIP
+ok 18 - c.test.ts > after # time=Tms
+ok 19 - d.test.ts > only skips > s1 # SKIP
+ok 20 - d.test.ts > only skips > s2 # SKIP
+ok 21 - d.test.ts > only todos > t1 # TODO
+ok 22 - d.test.ts > todo suite # TODO
+ok 23 - d.test.ts > mixed > s # SKIP
+ok 24 - d.test.ts > mixed > p # time=Tms
+ok 25 - d.test.ts > runtime skip # SKIP
+ok 26 - d.test.ts > nested skip parent > child > x # SKIP
+not ok 27 - e.test.ts > outer > empty inner # time=Tms
+    ---
+    error:
+        name: "Error"
+        message: "No test found in suite empty inner"
+    ...
+ok 28 - e.test.ts > outer > ok # time=Tms
+ok 29 - e.test.ts > outer > todo inner # TODO

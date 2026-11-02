@@ -1,0 +1,76 @@
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 9 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  a.test.ts > multi
+Unknown Error: line one
+line two
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/9]⎯
+
+ FAIL  a.test.ts > undef
+Unknown Error: undefined
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/9]⎯
+
+ FAIL  a.test.ts > number
+Unknown Error: 42
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/9]⎯
+
+ FAIL  a.test.ts > empty
+{ message: '', stacks: [] }
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/9]⎯
+
+ FAIL  a.test.ts > named
+Custom: msg
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { code: 7 }
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/9]⎯
+
+ FAIL  a.test.ts > nameonly
+{ name: 'OnlyName', list: [ 1, 'two' ], stacks: [] }
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { list: [ 1, 'two' ] }
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/9]⎯
+
+ FAIL  a.test.ts > class
+MyError: mine
+ ❯ a.test.ts:9:27
+      7| it('nameonly', () => { throw { name: 'OnlyName', list: [1, 'two'] }; }…
+      8| class MyError extends Error { constructor(m) { super(m); this.name = '…
+      9| it('class', () => { throw new MyError('mine'); });
+       |                           ^
+     10| it('cause props', () => { const c = new Error('inner'); c.code = 'C'; …
+     11| it('fn prop', () => { const e = new TypeError('typed'); e.fn = functio…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { when: 3, describe: 'Function<describe>' }
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/9]⎯
+
+ FAIL  a.test.ts > cause props
+Error: outer
+ ❯ a.test.ts:10:77
+      8| class MyError extends Error { constructor(m) { super(m); this.name = '…
+      9| it('class', () => { throw new MyError('mine'); });
+     10| it('cause props', () => { const c = new Error('inner'); c.code = 'C'; …
+       |                                                                             ^
+     11| it('fn prop', () => { const e = new TypeError('typed'); e.fn = functio…
+     12|
+
+Caused by: Error: inner
+ ❯ a.test.ts:10:37
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { code: 'C' }
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/9]⎯
+
+ FAIL  a.test.ts > fn prop
+TypeError: typed
+ ❯ a.test.ts:11:33
+      9| it('class', () => { throw new MyError('mine'); });
+     10| it('cause props', () => { const c = new Error('inner'); c.code = 'C'; …
+     11| it('fn prop', () => { const e = new TypeError('typed'); e.fn = functio…
+       |                                 ^
+     12|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { fn: 'Function<helper>', nested: { deep: { deeper: { deepest: 1 } } } }
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/9]⎯
+

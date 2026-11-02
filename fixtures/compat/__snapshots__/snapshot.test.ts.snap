@@ -1,12 +1,8 @@
-// turbo-test snapshot v1
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`snapshots > matches a primitive snapshot 1`] = `
-42
-`;
+exports[`snapshots > matches a primitive snapshot 1`] = `42`;
 
-exports[`snapshots > matches a thrown error snapshot 1`] = `
-"boom"
-`;
+exports[`snapshots > matches a thrown error snapshot 1`] = `[Error: boom]`;
 
 exports[`snapshots > matches an object snapshot 1`] = `
 {
@@ -22,10 +18,6 @@ exports[`snapshots > matches an object snapshot 1`] = `
 }
 `;
 
-exports[`snapshots > matches multiple snapshots in one test 1`] = `
-"first"
-`;
+exports[`snapshots > matches multiple snapshots in one test 1`] = `"first"`;
 
-exports[`snapshots > matches multiple snapshots in one test 2`] = `
-"second"
-`;
+exports[`snapshots > matches multiple snapshots in one test 2`] = `"second"`;

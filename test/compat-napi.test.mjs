@@ -1,13 +1,14 @@
 // Native-addon (.node / N-API) crash-hardening tests.
 //
 // Regression guard for the SIGSEGV-on-native-addon bug: a spec that require()s a
-// native addon which calls an N-API entrypoint turbo-test doesn't implement used to
+// native addon which calls an N-API entrypoint turbo-test doesn't provide used to
 // jump to a null function pointer (unresolved flat-namespace symbol under
 // -export_dynamic) -> SIGSEGV (exit 139), zero output, killing the ENTIRE run with no
-// diagnostic. The fix exports every N-API symbol real addons reference (implementing the
-// safe ones, routing the genuinely-unsupported ones to a catchable JS throw) and guards
-// the addon's module-init + callback FFI calls with catch_unwind. A misbehaving addon
-// must now surface as a normal catchable error and the rest of the run must survive.
+// diagnostic. turbo-test now exports every Node-API function up to version 10, binds an
+// addon's imports when it loads (RTLD_NOW: a missing one fails that require() with an error
+// naming it) and guards the addon's module-init + callback FFI calls with catch_unwind. A
+// misbehaving addon must surface as a normal catchable error and the rest of the run must
+// survive.
 //
 // The fixture .node is compiled here with `cc` (it's gitignored, never committed). If no
 // C compiler is available the test is skipped.

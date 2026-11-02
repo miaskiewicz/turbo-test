@@ -1,0 +1,28 @@
+
+ RUN  v4.1.12 <root>
+
+stdout | a.test.ts > more values
+/a(b|c)[^d-f]\d{2,3}?x*(?:y)(?=q)(?<n>z)\k<n>\u{41}\p{L}.^$|w{3,}/gu /[\x41-\x5A]e{,2}(?<!x)(?!y)\1\x4/
+<ref *1> { name: 'c', self: [Circular *1] } Uint8Array(2) [ 1, 2 ] [Number: 3] [String: 's'] Promise { <pending> } WeakMap { <items unknown> }
+{
+  'quoted-key': 1,
+  g: [Getter],
+  s: [Setter],
+  arr: [
+      0, 100,  200,  300,
+    400, 500,  600,  700,
+    800, 900, 1000, 1100
+  ],
+  Symbol(sk): 'v'
+}
+{
+  long: 'line one\nline two\nline three is a bit longer than the others to wrap'
+} [ <1 empty item>, 1, <1 empty item> ] [class A] Symbol(Symbol.iterator)
+
+ ✓ a.test.ts > more values <ms>
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  <time>
+   Duration  <duration>
+

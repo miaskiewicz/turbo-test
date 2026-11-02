@@ -49,3 +49,7 @@ Thumbs.db
 # git worktrees for parallel agent work (not tracked)
 .wt/
 .claude/worktrees/
+
+# Integration-test scratch dirs (tests/common/mod.rs: per-run TMPDIR / TURBO_CACHE_DIR)
+.tt-tmp/
+.tt-cache/

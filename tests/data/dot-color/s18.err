@@ -1,0 +1,129 @@
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 6 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22maligned
+[31m[1mAssertionError[22m: expected 'hello world\nsecond line\nthird' to be 'hello there\nsecond line\nthird!' // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- hello [7mthere[27m[39m
+[31m+ hello [7mworld[27m[39m
+[2m  second line[22m
+[32m- third[7m![27m[39m
+[31m+ third[39m
+
+[36m [2m❯[22m a.test.ts:[2m2:65[22m[39m
+    [90m  1|[39m [35mimport[39m { expect[33m,[39m it } [35mfrom[39m [32m'vitest'[39m[33m;[39m
+    [90m  2|[39m it('aligned', () => { expect('hello world\nsecond line\nthird').toBe('…
+    [90m   |[39m                                                                 [31m^[39m
+    [90m  3|[39m it('long', () => { const a = Array.from({ length: 30 }, (_, i) => i); …
+    [90m  4|[39m it('json', () => { expect({ toJSON: () => 1, v: 1 }).toEqual({ toJSON:…
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22mlong
+[31m[1mAssertionError[22m: expected [ Array(30) ] to deeply equal [ Array(30) ][39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[33m@@ -12,11 +12,11 @@[39m
+[2m    10,[22m
+[2m    11,[22m
+[2m    12,[22m
+[2m    13,[22m
+[2m    14,[22m
+[32m-   "x",[39m
+[31m+   15,[39m
+[2m    16,[22m
+[2m    17,[22m
+[2m    18,[22m
+[2m    19,[22m
+[2m    20,[22m
+
+[36m [2m❯[22m a.test.ts:[2m3:112[22m[39m
+    [90m  1|[39m [35mimport[39m { expect[33m,[39m it } [35mfrom[39m [32m'vitest'[39m[33m;[39m
+    [90m  2|[39m it('aligned', () => { expect('hello world\nsecond line\nthird').toBe('…
+    [90m  3|[39m it('long', () => { const a = Array.from({ length: 30 }, (_, i) => i); …
+    [90m   |[39m                                                                                                                [31m^[39m
+    [90m  4|[39m it('json', () => { expect({ toJSON: () => 1, v: 1 }).toEqual({ toJSON:…
+    [90m  5|[39m [34mit[39m([32m'types'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([34m1[39m)[33m.[39m[34mtoEqual[39m([32m'1'[39m)[33m;[39m })[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/6]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22mjson
+[31m[1mAssertionError[22m: expected { toJSON: [Function toJSON], v: 1 } to deeply equal { toJSON: [Function toJSON], v: 2 }[39m
+
+[2mCompared values serialize to the same structure.
+Printing internal object structure without calling `toJSON` instead.[22m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[2m    "toJSON": [Function toJSON],[22m
+[32m-   "v": 2,[39m
+[31m+   "v": 1,[39m
+[2m  }[22m
+
+[36m [2m❯[22m a.test.ts:[2m4:54[22m[39m
+    [90m  2|[39m it('aligned', () => { expect('hello world\nsecond line\nthird').toBe('…
+    [90m  3|[39m it('long', () => { const a = Array.from({ length: 30 }, (_, i) => i); …
+    [90m  4|[39m it('json', () => { expect({ toJSON: () => 1, v: 1 }).toEqual({ toJSON:…
+    [90m   |[39m                                                      [31m^[39m
+    [90m  5|[39m [34mit[39m([32m'types'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([34m1[39m)[33m.[39m[34mtoEqual[39m([32m'1'[39m)[33m;[39m })[33m;[39m
+    [90m  6|[39m [34mit[39m([32m'trailing'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([32m'a  '[39m)[33m.[39m[34mtoBe[39m([32m'b  '[39m)[33m;[39m })[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/6]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22mtypes
+[31m[1mAssertionError[22m: expected 1 to deeply equal '1'[39m
+
+[32m- Expected:[39m
+"1"
+
+[31m+ Received:[39m
+1
+
+[36m [2m❯[22m a.test.ts:[2m5:31[22m[39m
+    [90m  3|[39m it('long', () => { const a = Array.from({ length: 30 }, (_, i) => i); …
+    [90m  4|[39m it('json', () => { expect({ toJSON: () => 1, v: 1 }).toEqual({ toJSON:…
+    [90m  5|[39m [34mit[39m([32m'types'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([34m1[39m)[33m.[39m[34mtoEqual[39m([32m'1'[39m)[33m;[39m })[33m;[39m
+    [90m   |[39m                               [31m^[39m
+    [90m  6|[39m [34mit[39m([32m'trailing'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([32m'a  '[39m)[33m.[39m[34mtoBe[39m([32m'b  '[39m)[33m;[39m })[33m;[39m
+    [90m  7|[39m [34mit[39m([32m'nothing common'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([32m'abc'[39m)[33m.[39m[34mtoBe[39m([32m'xyz'[39m)[33m;[39m })[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/6]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22mtrailing
+[31m[1mAssertionError[22m: expected 'a  ' to be 'b  ' // Object.is equality[39m
+
+Expected: [32m"[7mb[27m  "[39m
+Received: [31m"[7ma[27m  "[39m
+
+[36m [2m❯[22m a.test.ts:[2m6:38[22m[39m
+    [90m  4|[39m it('json', () => { expect({ toJSON: () => 1, v: 1 }).toEqual({ toJSON:…
+    [90m  5|[39m [34mit[39m([32m'types'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([34m1[39m)[33m.[39m[34mtoEqual[39m([32m'1'[39m)[33m;[39m })[33m;[39m
+    [90m  6|[39m [34mit[39m([32m'trailing'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([32m'a  '[39m)[33m.[39m[34mtoBe[39m([32m'b  '[39m)[33m;[39m })[33m;[39m
+    [90m   |[39m                                      [31m^[39m
+    [90m  7|[39m [34mit[39m([32m'nothing common'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([32m'abc'[39m)[33m.[39m[34mtoBe[39m([32m'xyz'[39m)[33m;[39m })[33m;[39m
+    [90m  8|[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/6]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22mnothing common
+[31m[1mAssertionError[22m: expected 'abc' to be 'xyz' // Object.is equality[39m
+
+Expected: [32m"xyz"[39m
+Received: [31m"abc"[39m
+
+[36m [2m❯[22m a.test.ts:[2m7:44[22m[39m
+    [90m  5|[39m [34mit[39m([32m'types'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([34m1[39m)[33m.[39m[34mtoEqual[39m([32m'1'[39m)[33m;[39m })[33m;[39m
+    [90m  6|[39m [34mit[39m([32m'trailing'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([32m'a  '[39m)[33m.[39m[34mtoBe[39m([32m'b  '[39m)[33m;[39m })[33m;[39m
+    [90m  7|[39m [34mit[39m([32m'nothing common'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([32m'abc'[39m)[33m.[39m[34mtoBe[39m([32m'xyz'[39m)[33m;[39m })[33m;[39m
+    [90m   |[39m                                            [31m^[39m
+    [90m  8|[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/6]⎯[22m[39m
+

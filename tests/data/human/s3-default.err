@@ -1,0 +1,15 @@
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  b.test.ts > hooked
+Error: hook boom
+ ❯ b.test.ts:3:27
+      1| import { beforeAll, describe, it } from 'vitest';
+      2| describe('hooked', () => {
+      3|   beforeAll(() => { throw new Error('hook boom'); });
+       |                           ^
+      4|   it('never', () => {});
+      5| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+

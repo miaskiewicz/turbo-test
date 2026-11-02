@@ -1,0 +1,11 @@
+
+ RUN  v4.1.12 <root>
+
+ ✓ a.test.ts > one <ms>
+ ✓ a.test.ts > two <ms>
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  <time>
+   Duration  <duration>
+

@@ -1,0 +1,36 @@
+# Line-coverage gate for the turbo-test Rust crate (the runner, the launcher/CLI, the
+# Node-API host, transforms, coverage reporting and the milestone spike binaries).
+# Run: `cargo tarpaulin` (reads this file). CI: the `coverage` job in .github/workflows/ci.yml.
+#
+# Many tests drive the real CLI as a subprocess (tests/cli_*.rs spawn
+# CARGO_BIN_EXE_turbo-test against fixture projects). Those child processes are built
+# with the same LLVM instrumentation and write their own .profraw files; `objects` makes
+# tarpaulin load the coverage maps of those executables so bin-only code is attributed.
+#
+# The gate measures production code only: the #[path] unit-test modules under src/ are
+# excluded. 13375/13377 lines (99.99%) are covered. The two known uncovered lines:
+# - cli.rs tap_flatten's `TapNode::Failed` arm: a file that did not load is a top-level TAP node
+#   (render_tap), never a describe's child, but the match over the enum must name it;
+# - runner.rs resolve_callback's lazy `load_cjs` of an app module the module runner transforms:
+#   load_graph already loads every static import of a module (load_dep) before it links, so the
+#   lookup above it finds the module loaded; no known input reaches it (turbo-test#194's setup
+#   bundle, fixed, does not either: its mocked import is preloaded too).
+# (coverage_accumulate's "script with no ranges" guard, uncovered at 9348/9349, is covered in this
+# measurement.)
+[turbo-test]
+engine = "Llvm"
+target-dir = "target/cov"
+skip-clean = true
+timeout = "600s"
+objects = [
+    "target/cov/debug/turbo-test",
+    "target/cov/debug/m0-spike",
+    "target/cov/debug/m1-esm",
+    "target/cov/debug/m1-cjs",
+    "target/cov/debug/m1-transform",
+    "target/cov/debug/m5-affected",
+]
+out = ["Stdout", "Json"]
+output-dir = "target/cov/report"
+fail-under = 99.9
+exclude-files = ["src/*_tests.rs", "src/runner_tests_*.rs", "src/bin/spike_tests/*"]

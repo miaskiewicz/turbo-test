@@ -1,0 +1,16 @@
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.12 [39m[90m<root>[39m
+
+[90mstdout[2m | a.test.ts
+[22m[39mtop level
+
+[90mstdout[2m | a.test.ts[2m > [22m[2md
+[22m[39min hook
+
+ [32m✓[39m a.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m <n>[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+<start>
+<duration>
+

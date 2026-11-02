@@ -1,0 +1,18 @@
+
+ RUN  v4.1.12 <root>
+
+ ✓ a.test.ts > snap <ms>
+ ✓ b.test.ts > plain <ms>
+
+  Snapshots  1 files removed 
+             1 removed
+             ↳ ./a.test.ts
+               · gone 1
+             ↳ ./b.test.ts
+               · old 1
+
+ Test Files  2 passed (2)
+      Tests  2 passed (2)
+   Start at  <time>
+   Duration  <duration>
+

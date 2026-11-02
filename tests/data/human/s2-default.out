@@ -1,0 +1,21 @@
+
+ RUN  v4.1.12 <root>
+
+stdout | a.test.ts > top <&> "q"
+out line
+two { a: 1 }
+
+ ❯ a.test.ts (7 tests | 3 failed | 1 skipped | 1 todo) <ms>
+     ✓ passes <ms>
+       × fails <ms>
+       ↓ skipped
+     □ todo
+   × objects <ms>
+   × throws <ms>
+   ✓ top <&> "q" <ms>
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 2 passed | 1 skipped | 1 todo (7)
+   Start at  <time>
+   Duration  <duration>
+

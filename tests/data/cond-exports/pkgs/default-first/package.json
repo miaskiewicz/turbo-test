@@ -1,0 +1,1 @@
+{ "name": "default-first", "exports": { ".": { "default": "./d.js", "import": "./e.mjs", "require": "./c.cjs" } } }

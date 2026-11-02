@@ -65,6 +65,6 @@ v0.2.1 shipped **line coverage**; **v0.2.2 adds function + branch coverage** (`s
 ## Related
 
 - Line coverage impl: `src/coverage.rs`, wired in `src/runner.rs` (`coverage_accumulate`,
-  `run_test_file` collector hooks) + `src/bin/turbo_test.rs` (`--coverage` / `--coverage-dir`).
+  `run_test_file` collector hooks) + `src/cli.rs` (`--coverage` / `--coverage-dir`).
 - Perf: see the coverage speed work (per-worker collection + source-map memoization) — the
   execution overhead from `detailed:true` block coverage is the dominant cost.

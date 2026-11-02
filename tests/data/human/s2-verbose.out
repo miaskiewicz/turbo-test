@@ -1,0 +1,23 @@
+
+ RUN  v4.1.12 <root>
+
+stdout | a.test.ts > top <&> "q"
+out line
+two { a: 1 }
+
+ ✓ a.test.ts > outer > passes <ms>
+ × a.test.ts > outer > inner > fails <ms>
+   → expected 1 to be 2 // Object.is equality
+ ↓ a.test.ts > outer > inner > skipped
+ □ a.test.ts > outer > todo
+ × a.test.ts > objects <ms>
+   → expected { a: 1, b: [ 1, 2 ] } to deeply equal { a: 2, b: [ 1, 2 ] }
+ × a.test.ts > throws <ms>
+   → bad <thing> & "x"
+ ✓ a.test.ts > top <&> "q" <ms>
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 2 passed | 1 skipped | 1 todo (7)
+   Start at  <time>
+   Duration  <duration>
+

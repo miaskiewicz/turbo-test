@@ -1,0 +1,129 @@
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 6 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  a.test.ts > aligned
+AssertionError: expected 'hello world\nsecond line\nthird' to be 'hello there\nsecond line\nthird!' // Object.is equality
+
+- Expected
++ Received
+
+- hello there
++ hello world
+  second line
+- third!
++ third
+
+ ❯ a.test.ts:2:65
+      1| import { expect, it } from 'vitest';
+      2| it('aligned', () => { expect('hello world\nsecond line\nthird').toBe('…
+       |                                                                 ^
+      3| it('long', () => { const a = Array.from({ length: 30 }, (_, i) => i); …
+      4| it('json', () => { expect({ toJSON: () => 1, v: 1 }).toEqual({ toJSON:…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯
+
+ FAIL  a.test.ts > long
+AssertionError: expected [ Array(30) ] to deeply equal [ Array(30) ]
+
+- Expected
++ Received
+
+@@ -12,11 +12,11 @@
+    10,
+    11,
+    12,
+    13,
+    14,
+-   "x",
++   15,
+    16,
+    17,
+    18,
+    19,
+    20,
+
+ ❯ a.test.ts:3:112
+      1| import { expect, it } from 'vitest';
+      2| it('aligned', () => { expect('hello world\nsecond line\nthird').toBe('…
+      3| it('long', () => { const a = Array.from({ length: 30 }, (_, i) => i); …
+       |                                                                                                                ^
+      4| it('json', () => { expect({ toJSON: () => 1, v: 1 }).toEqual({ toJSON:…
+      5| it('types', () => { expect(1).toEqual('1'); });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/6]⎯
+
+ FAIL  a.test.ts > json
+AssertionError: expected { toJSON: [Function toJSON], v: 1 } to deeply equal { toJSON: [Function toJSON], v: 2 }
+
+Compared values serialize to the same structure.
+Printing internal object structure without calling `toJSON` instead.
+
+- Expected
++ Received
+
+  {
+    "toJSON": [Function toJSON],
+-   "v": 2,
++   "v": 1,
+  }
+
+ ❯ a.test.ts:4:54
+      2| it('aligned', () => { expect('hello world\nsecond line\nthird').toBe('…
+      3| it('long', () => { const a = Array.from({ length: 30 }, (_, i) => i); …
+      4| it('json', () => { expect({ toJSON: () => 1, v: 1 }).toEqual({ toJSON:…
+       |                                                      ^
+      5| it('types', () => { expect(1).toEqual('1'); });
+      6| it('trailing', () => { expect('a  ').toBe('b  '); });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/6]⎯
+
+ FAIL  a.test.ts > types
+AssertionError: expected 1 to deeply equal '1'
+
+- Expected:
+"1"
+
++ Received:
+1
+
+ ❯ a.test.ts:5:31
+      3| it('long', () => { const a = Array.from({ length: 30 }, (_, i) => i); …
+      4| it('json', () => { expect({ toJSON: () => 1, v: 1 }).toEqual({ toJSON:…
+      5| it('types', () => { expect(1).toEqual('1'); });
+       |                               ^
+      6| it('trailing', () => { expect('a  ').toBe('b  '); });
+      7| it('nothing common', () => { expect('abc').toBe('xyz'); });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/6]⎯
+
+ FAIL  a.test.ts > trailing
+AssertionError: expected 'a  ' to be 'b  ' // Object.is equality
+
+Expected: "b  "
+Received: "a  "
+
+ ❯ a.test.ts:6:38
+      4| it('json', () => { expect({ toJSON: () => 1, v: 1 }).toEqual({ toJSON:…
+      5| it('types', () => { expect(1).toEqual('1'); });
+      6| it('trailing', () => { expect('a  ').toBe('b  '); });
+       |                                      ^
+      7| it('nothing common', () => { expect('abc').toBe('xyz'); });
+      8|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/6]⎯
+
+ FAIL  a.test.ts > nothing common
+AssertionError: expected 'abc' to be 'xyz' // Object.is equality
+
+Expected: "xyz"
+Received: "abc"
+
+ ❯ a.test.ts:7:44
+      5| it('types', () => { expect(1).toEqual('1'); });
+      6| it('trailing', () => { expect('a  ').toBe('b  '); });
+      7| it('nothing common', () => { expect('abc').toBe('xyz'); });
+       |                                            ^
+      8|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/6]⎯
+

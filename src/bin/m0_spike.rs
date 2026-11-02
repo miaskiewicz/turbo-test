@@ -19,8 +19,8 @@ use std::time::Instant;
 
 /// Stand-in for the framework layer (expect/chai/snapshot/vi + turbo-dom).
 ///
-/// The real layer is heavy: @vitest/expect + chai + @vitest/snapshot + @vitest/spy
-/// + turbo-dom are hundreds of KB of JS that must be *evaluated* once per context.
+/// The real layer is heavy: @vitest/expect, chai, @vitest/snapshot, @vitest/spy and
+/// turbo-dom are hundreds of KB of JS that must be *evaluated* once per context.
 /// Without a snapshot every test file re-evaluates all of it; the snapshot bakes the
 /// post-evaluation heap so a fresh context skips it. The spike must therefore model a
 /// realistically heavy setup, not a 20-line toy — otherwise it measures nothing.
@@ -294,7 +294,11 @@ fn main() {
         bench_shared(&fw, 20);
 
         let rebuild = median((0..REPEATS).map(|_| bench_rebuild(&fw, ITERS)).collect());
-        let reuse = median((0..REPEATS).map(|_| bench_reuse_reset(&blob, ITERS)).collect());
+        let reuse = median(
+            (0..REPEATS)
+                .map(|_| bench_reuse_reset(&blob, ITERS))
+                .collect(),
+        );
         let snapshot = median((0..REPEATS).map(|_| bench_snapshot(&blob, ITERS)).collect());
         let shared = median((0..REPEATS).map(|_| bench_shared(&fw, ITERS)).collect());
 
@@ -340,16 +344,32 @@ fn main() {
     println!("\n--- isolation question ---");
     println!("  reuse+reset (leaky) saves only the ~context-creation delta vs snapshot,");
     println!("  which is sub-ms — negligible next to the {vitest_turbodom_env_ms:.0}ms+ env cost we remove.");
-    println!("  => Keep FULL per-file isolation (fresh context). No need to trade compat for speed.");
+    println!(
+        "  => Keep FULL per-file isolation (fresh context). No need to trade compat for speed."
+    );
 
     // PASS criterion, re-baselined against the real competitor (spec §8: >=5x vs Vitest).
-    let gate = (vitest_turbodom_env_ms / snap_ms) >= 5.0;
-    if gate {
-        println!("\n==> M0 PASS — snapshot fresh-context is >5x cheaper than even the FASTEST");
-        println!("    stock-vitest env path, with full isolation. Premise validated. Proceed to M1.");
-        std::process::exit(0);
+    let (code, verdict) = gate_verdict(vitest_turbodom_env_ms / snap_ms);
+    println!("{verdict}");
+    std::process::exit(code);
+}
+
+/// The M0 gate on the speedup vs the fastest stock-vitest env path: (exit code, verdict text).
+fn gate_verdict(speedup: f64) -> (i32, &'static str) {
+    if speedup >= 5.0 {
+        (
+            0,
+            "\n==> M0 PASS — snapshot fresh-context is >5x cheaper than even the FASTEST\n    \
+             stock-vitest env path, with full isolation. Premise validated. Proceed to M1.",
+        )
     } else {
-        println!("\n==> M0 FAIL — snapshot not >5x vs stock vitest env. Reconsider.");
-        std::process::exit(1);
+        (
+            1,
+            "\n==> M0 FAIL — snapshot not >5x vs stock vitest env. Reconsider.",
+        )
     }
 }
+
+#[cfg(test)]
+#[path = "spike_tests/m0.rs"]
+mod tests;

@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="12" failures="5" errors="0" time="T">
+    <testsuite name="a.test.ts" timestamp="S" hostname="H" tests="7" failures="3" errors="0" skipped="2" time="T">
+        <testcase classname="a.test.ts" name="outer &gt; passes" time="T">
+        </testcase>
+        <testcase classname="a.test.ts" name="outer &gt; inner &gt; fails" time="T">
+            <failure message="expected 1 to be 2 // Object.is equality" type="AssertionError">
+AssertionError: expected 1 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 1
+
+ ❯ a.test.ts:5:35
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="outer &gt; inner &gt; skipped" time="T">
+            <skipped/>
+        </testcase>
+        <testcase classname="a.test.ts" name="outer &gt; todo" time="T">
+            <skipped/>
+        </testcase>
+        <testcase classname="a.test.ts" name="objects" time="T">
+            <failure message="expected { a: 1, b: [ 1, 2 ] } to deeply equal { a: 2, b: [ 1, 2 ] }" type="AssertionError">
+AssertionError: expected { a: 1, b: [ 1, 2 ] } to deeply equal { a: 2, b: [ 1, 2 ] }
+
+- Expected
++ Received
+
+  {
+-   &quot;a&quot;: 2,
++   &quot;a&quot;: 1,
+    &quot;b&quot;: [
+      1,
+      2,
+    ],
+  }
+
+ ❯ a.test.ts:10:51
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="throws" time="T">
+            <failure message="bad &lt;thing&gt; &amp; &quot;x&quot;" type="TypeError">
+TypeError: bad &lt;thing&gt; &amp; &quot;x&quot;
+ ❯ a.test.ts:11:28
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="top &lt;&amp;&gt; &quot;q&quot;" time="T">
+            <system-out>
+out line
+two { a: 1 }
+
+            </system-out>
+            <system-err>
+err line
+
+            </system-err>
+        </testcase>
+    </testsuite>
+    <testsuite name="b.test.ts" timestamp="S" hostname="H" tests="3" failures="1" errors="0" skipped="1" time="T">
+        <testcase classname="b.test.ts" name="hooked &gt; never" time="T">
+            <skipped/>
+        </testcase>
+        <testcase classname="b.test.ts" name="b ok" time="T">
+        </testcase>
+        <testcase classname="b.test.ts" name="hooked" time="T">
+            <failure message="hook boom" type="Error">
+Error: hook boom
+ ❯ b.test.ts:3:27
+            </failure>
+        </testcase>
+    </testsuite>
+    <testsuite name="c.test.ts" timestamp="S" hostname="H" tests="1" failures="1" errors="0" skipped="0" time="T">
+        <testcase classname="c.test.ts" name="c.test.ts" time="T">
+            <failure message="load boom" type="Error">
+Error: load boom
+ ❯ c.test.ts:1:7
+            </failure>
+        </testcase>
+    </testsuite>
+    <testsuite name="d.test.ts" timestamp="S" hostname="H" tests="1" failures="0" errors="0" skipped="1" time="T">
+        <testcase classname="d.test.ts" name="only skipped" time="T">
+            <skipped/>
+        </testcase>
+    </testsuite>
+</testsuites>

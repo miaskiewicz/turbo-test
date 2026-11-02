@@ -1,0 +1,30 @@
+
+ RUN  v4.1.12 <root>
+
+stdout | a.test.ts
+file level
+
+stdout | a.test.ts > outer
+outer hook
+
+stdout | a.test.ts > outer > inner
+inner hook
+
+stdout | a.test.ts > outer > inner > fails
+in failing
+
+stdout | a.test.ts > outer > calm
+calm hook
+
+stdout | a.test.ts > outer > calm > passes
+in passing
+
+ × a.test.ts > outer > inner > fails <ms>
+   → expected 1 to be 2 // Object.is equality
+ ✓ a.test.ts > outer > calm > passes <ms>
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 1 passed (2)
+   Start at  <time>
+   Duration  <duration>
+

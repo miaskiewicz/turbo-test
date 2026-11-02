@@ -1,0 +1,256 @@
+[
+ [
+  "advance without fake",
+  "value",
+  "undefined",
+  [
+   "A function to advance timers was called but the timers APIs are not replaced with fake timers. Call `jest.useFakeTimers()` in this test file or enable fake timers for all tests by setting 'fakeTimers': {'enableGlobally': true} in Jest configuration file."
+  ]
+ ],
+ [
+  "runAllTimers without fake",
+  "value",
+  "undefined",
+  [
+   "A function to advance timers was called but the timers APIs are not replaced with fake timers. Call `jest.useFakeTimers()` in this test file or enable fake timers for all tests by setting 'fakeTimers': {'enableGlobally': true} in Jest configuration file."
+  ]
+ ],
+ [
+  "runOnlyPendingTimers without fake",
+  "value",
+  "undefined",
+  [
+   "A function to advance timers was called but the timers APIs are not replaced with fake timers. Call `jest.useFakeTimers()` in this test file or enable fake timers for all tests by setting 'fakeTimers': {'enableGlobally': true} in Jest configuration file."
+  ]
+ ],
+ [
+  "advanceTimersToNextTimer without fake",
+  "value",
+  "undefined",
+  [
+   "A function to advance timers was called but the timers APIs are not replaced with fake timers. Call `jest.useFakeTimers()` in this test file or enable fake timers for all tests by setting 'fakeTimers': {'enableGlobally': true} in Jest configuration file."
+  ]
+ ],
+ [
+  "advanceTimersByTimeAsync without fake",
+  "value",
+  "undefined",
+  [
+   "A function to advance timers was called but the timers APIs are not replaced with fake timers. Call `jest.useFakeTimers()` in this test file or enable fake timers for all tests by setting 'fakeTimers': {'enableGlobally': true} in Jest configuration file."
+  ]
+ ],
+ [
+  "runAllTimersAsync without fake",
+  "value",
+  "undefined",
+  [
+   "A function to advance timers was called but the timers APIs are not replaced with fake timers. Call `jest.useFakeTimers()` in this test file or enable fake timers for all tests by setting 'fakeTimers': {'enableGlobally': true} in Jest configuration file."
+  ]
+ ],
+ [
+  "runOnlyPendingTimersAsync without fake",
+  "value",
+  "undefined",
+  [
+   "A function to advance timers was called but the timers APIs are not replaced with fake timers. Call `jest.useFakeTimers()` in this test file or enable fake timers for all tests by setting 'fakeTimers': {'enableGlobally': true} in Jest configuration file."
+  ]
+ ],
+ [
+  "advanceTimersToNextTimerAsync without fake",
+  "value",
+  "undefined",
+  [
+   "A function to advance timers was called but the timers APIs are not replaced with fake timers. Call `jest.useFakeTimers()` in this test file or enable fake timers for all tests by setting 'fakeTimers': {'enableGlobally': true} in Jest configuration file."
+  ]
+ ],
+ [
+  "advanceTimersToNextFrame without fake",
+  "value",
+  "undefined",
+  [
+   "A function to advance timers was called but the timers APIs are not replaced with fake timers. Call `jest.useFakeTimers()` in this test file or enable fake timers for all tests by setting 'fakeTimers': {'enableGlobally': true} in Jest configuration file."
+  ]
+ ],
+ [
+  "runAllTicks without fake",
+  "value",
+  "undefined",
+  [
+   "A function to advance timers was called but the timers APIs are not replaced with fake timers. Call `jest.useFakeTimers()` in this test file or enable fake timers for all tests by setting 'fakeTimers': {'enableGlobally': true} in Jest configuration file."
+  ]
+ ],
+ [
+  "getTimerCount without fake",
+  "value",
+  "0",
+  [
+   "A function to advance timers was called but the timers APIs are not replaced with fake timers. Call `jest.useFakeTimers()` in this test file or enable fake timers for all tests by setting 'fakeTimers': {'enableGlobally': true} in Jest configuration file."
+  ]
+ ],
+ [
+  "clearAllTimers without fake",
+  "value",
+  "undefined",
+  []
+ ],
+ [
+  "setSystemTime without fake",
+  "value",
+  "true",
+  [
+   "A function to advance timers was called but the timers APIs are not replaced with fake timers. Call `jest.useFakeTimers()` in this test file or enable fake timers for all tests by setting 'fakeTimers': {'enableGlobally': true} in Jest configuration file."
+  ]
+ ],
+ [
+  "now without fake",
+  "value",
+  "true",
+  []
+ ],
+ [
+  "getRealSystemTime",
+  "value",
+  "true",
+  []
+ ],
+ [
+  "setTimerTickMode without fake",
+  "value",
+  "jest",
+  [
+   "A function to advance timers was called but the timers APIs are not replaced with fake timers. Call `jest.useFakeTimers()` in this test file or enable fake timers for all tests by setting 'fakeTimers': {'enableGlobally': true} in Jest configuration file."
+  ]
+ ],
+ [
+  "useFakeTimers returns",
+  "value",
+  "jest",
+  []
+ ],
+ [
+  "useRealTimers returns",
+  "value",
+  "jest",
+  []
+ ],
+ [
+  "now option",
+  "value",
+  "[1000,1000]",
+  []
+ ],
+ [
+  "now Date option",
+  "value",
+  "2000",
+  []
+ ],
+ [
+  "doNotFake Date",
+  "value",
+  "[true,true]",
+  []
+ ],
+ [
+  "doNotFake setTimeout",
+  "value",
+  "[1000,0,true]",
+  []
+ ],
+ [
+  "doNotFake performance",
+  "value",
+  "true",
+  []
+ ],
+ [
+  "timerLimit",
+  "throws",
+  "Error: Aborting after running 5 timers, assuming an infinite loop!",
+  []
+ ],
+ [
+  "default limit",
+  "throws",
+  "Error: Aborting after running 100000 timers, assuming an infinite loop!",
+  []
+ ],
+ [
+  "advanceTimers true",
+  "value",
+  "true",
+  []
+ ],
+ [
+  "advanceTimers number",
+  "value",
+  "[true,0]",
+  []
+ ],
+ [
+  "advanceTimers false",
+  "value",
+  "0",
+  []
+ ],
+ [
+  "toFake ignored",
+  "value",
+  "1000",
+  []
+ ],
+ [
+  "loopLimit ignored",
+  "throws",
+  "Error: Aborting after running 100000 timers, assuming an infinite loop!",
+  []
+ ],
+ [
+  "legacy",
+  "value",
+  "[1,true,\"function\"]",
+  []
+ ],
+ [
+  "runAllImmediates modern",
+  "throws",
+  "TypeError: `jest.runAllImmediates()` is only available when using legacy fake timers.",
+  []
+ ],
+ [
+  "getTimerCount",
+  "value",
+  "2",
+  []
+ ],
+ [
+  "advanceTimersToNextFrame",
+  "value",
+  "16",
+  []
+ ],
+ [
+  "setTimerTickMode",
+  "value",
+  "[true,5000]",
+  []
+ ],
+ [
+  "setTimerTickMode interval",
+  "value",
+  "true",
+  []
+ ],
+ [
+  "chain returns",
+  "value",
+  "[\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\"]",
+  []
+ ],
+ [
+  "chain returns async",
+  "value",
+  "[\"undefined\",\"undefined\",\"undefined\",\"undefined\"]",
+  []
+ ]
+]

@@ -15,7 +15,7 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    # musl (Alpine) is intentionally NOT built. turbo-test statically links V8 (rusty_v8),
+    # musl (Alpine) is intentionally NOT built. turbo-test statically links V8 (turbo-dom-v8, a rusty_v8 fork),
     # which ships only gnu/darwin prebuilt libs (no *-musl.a). The gnu V8 is deeply
     # glibc-coupled (__libc_stack_end, glibc struct stat/dirent64 layouts), so linking it
     # into a musl binary is ABI-unsound at runtime — investigated 2026-06-17. A correct
@@ -24,11 +24,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,   binname: turbo-test-linux-x64 }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,  binname: turbo-test-linux-arm64 }
-          - { os: macos-latest,   target: aarch64-apple-darwin,       binname: turbo-test-darwin-arm64 }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,     binname: turbo-test-win32-x64.exe }
+        # macOS runners are scarce: PR CI skips the darwin build; tag/main pushes (releases) keep it.
+        # (an `exclude` cannot drop an `include` entry, hence the two JSON lists)
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","binname":"turbo-test-linux-x64"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","binname":"turbo-test-linux-arm64"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","binname":"turbo-test-win32-x64.exe"}]' || '[{"os":"macos-latest","target":"aarch64-apple-darwin","binname":"turbo-test-darwin-arm64"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","binname":"turbo-test-linux-x64"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","binname":"turbo-test-linux-arm64"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","binname":"turbo-test-win32-x64.exe"}]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +46,12 @@ jobs:
       - name: Build
         run: cargo build --release --bin turbo-test --target ${{ matrix.target }}
 
+      # Exactly one V8 in the graph: turbo-dom's fork (turbo-dom-v8), shared with
+      # turbo-dom-browser-env; never upstream v8 / v8x / the retired turbo-surf-v8.
+      - name: Duplicate-V8 guard
+        shell: bash
+        run: bash scripts/check-single-v8.sh
+
       - name: Stage binary
         shell: bash
         run: |
@@ -55,31 +59,52 @@ jobs:
           ext=""; [[ "${{ matrix.target }}" == *windows* ]] && ext=".exe"
           cp "target/${{ matrix.target }}/release/turbo-test$ext" "bin/${{ matrix.binname }}"
 
+      # Before the smoke test (it runs the binary on the repo's chai) and the Rust tests (the CLI
+      # integration tests link the repo's esbuild/typescript/chai into their fixture projects).
+      - name: Install test dependencies
+        if: runner.os != 'Windows'
+        run: npm ci
+
       # Execute the freshly-built binary on natively-runnable legs so a binary that
       # crashes at startup never ships again (v0.2.3 linux-x64 segfaulted in ld.so:
-      # a macOS-only `-export_dynamic` linker flag zeroed e_entry). The cross-compiled
+      # a macOS-only `-export_dynamic` linker flag zeroed e_entry), and run one real test
+      # through it with the repo's chai (turbo-test#160: expect is chai, loaded into the
+      # runtime from TURBO_CHAI) so a broken chai load fails CI too. The cross-compiled
       # aarch64-linux leg can't run on the x64 host, so it's skipped.
-      - name: Smoke test (guard against startup crash)
+      - name: Smoke test (startup + one real test file)
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
         shell: bash
         run: |
+          bin="$PWD/bin/${{ matrix.binname }}"
+          dir="$(mktemp -d)"
+          echo '{ "type": "module" }' > "$dir/package.json"
+          cat > "$dir/smoke.test.js" <<'EOF'
+          import { test, expect, assert } from 'vitest'
+          test('smoke', () => { expect([1, 2]).to.have.lengthOf(2).and.include(2); expect(1).toBe(1); assert.strictEqual(1, 1) })
+          EOF
           set +e
-          "bin/${{ matrix.binname }}" </dev/null
+          out="$(cd "$dir" && TURBO_CHAI="$GITHUB_WORKSPACE/node_modules/chai/index.js" "$bin" smoke.test.js --reporter json </dev/null 2>&1)"
           rc=$?
+          set -e
+          echo "$out"
           echo "exit code = $rc"
-          # rc >= 128 means death by signal (139 = SIGSEGV). A clean run with no test
-          # files exits 0/1; either is fine. Anything signal-killed is a hard failure.
+          # rc >= 128 means death by signal (139 = SIGSEGV)
           if [ "$rc" -ge 128 ]; then
             echo "::error::bin/${{ matrix.binname }} crashed at startup (exit $rc)"; exit 1
+          fi
+          if [ "$rc" -ne 0 ] || ! grep -q '"numPassedTests":1' <<<"$out"; then
+            echo "::error::bin/${{ matrix.binname }} did not pass the smoke test file (exit $rc)"; exit 1
           fi
 
       - name: Rust tests
         run: cargo test --locked --target ${{ matrix.target }}
 
-      - name: Install test dependencies
-        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
-        run: npm ci
-
+      # Not on Windows (turbo-test#199): these suites spawn cli.js against fixture projects and
+      # compare posix-path output (paths, `/`-joined file names, shell-style env) byte-for-byte with
+      # real vitest, and the leg skips `npm ci`; porting them is a separate effort. Windows path
+      # handling is covered on every leg by the runtime's win32 branch tests in
+      # tests/runner_c_runtime.rs (file_url_helpers_handle_windows_paths), which flip
+      # process.platform at run time.
       - name: CLI compatibility and type tests
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
         run: npm test
@@ -104,28 +129,168 @@ jobs:
           path: bin/turbo-test-*
           if-no-files-found: error
 
-  # Registry consumers must retain the reviewed weak-handle teardown fix.
-  publish-v8:
-    name: publish-v8
-    needs: [build]
+  # ---- Line-coverage gate for the Rust crate (tarpaulin.toml: Llvm engine, fail-under) ----
+  # Unit tests plus the CLI integration tests, which spawn the instrumented turbo-test and
+  # spike binaries against fixture projects (tarpaulin.toml `objects` attributes their
+  # profiles). macOS arm64 matches the platform the gate was measured on.
+  coverage:
+    name: coverage (tarpaulin, fail-under)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
+      - name: Install test dependencies
+        run: npm ci
+      - name: cargo tarpaulin (fails below tarpaulin.toml fail-under)
+        run: cargo tarpaulin --locked
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: target/cov/report/
+          if-no-files-found: ignore
+
+  # ---- Lints: clippy with warnings as errors, and rustfmt (turbo-test#62) ----
+  # Pinned to the toolchain the crate was cleaned with, so a new stable's new lints land as a
+  # deliberate toolchain bump rather than a red build.
+  lint:
+    name: clippy -D warnings, rustfmt --check
+    runs-on: ubuntu-latest
+    # a stalled runner should fail fast, not hang (uncached clippy ~10 min)
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  # ---- Complexity: cyclomatic complexity <= 15 per function, no allow-list, no baseline ----
+  # EXPECTED RED until the post-coverage refactor: the functions above 15 when the gate landed
+  # are the refactor backlog (README "Complexity gates"); refactoring waits until unit-test
+  # coverage is complete so it cannot break behaviour silently. Never raise the limit or skip a
+  # file to turn it green. Rust: turbo-html2pdf's tools/cc-check installed from its home at a
+  # pinned rev (not copied here) over every tracked .rs file; JS: oxlint's `complexity` rule
+  # (.oxlintrc.complexity.json) over cli.js, index.js and src/runtime.js.
+  # `continue-on-error` keeps the red jobs from failing the workflow while the backlog exists;
+  # the failing job and its step summary list every function over the limit. Drop
+  # `continue-on-error` (and make both checks required) once the backlog is cleared.
+  complexity-rust:
+    name: complexity / rust (cc <= 15)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      CC_CHECK_REV: 923c89f791f3a89cb089a59626a25cef0a9cbd5f
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cc-check
+          key: cc-check-${{ runner.os }}-${{ env.CC_CHECK_REV }}
+      - name: Install cc-check (turbo-html2pdf tools/cc-check @ CC_CHECK_REV)
+        run: |
+          if [ ! -x "$HOME/.cc-check/bin/cc-check" ]; then
+            cargo install --locked --root "$HOME/.cc-check" \
+              --git https://github.com/miaskiewicz/turbo-html2pdf --rev "$CC_CHECK_REV" cc-check
+          fi
+          echo "$HOME/.cc-check/bin" >> "$GITHUB_PATH"
+      - name: cc-check --max 15 (every tracked .rs file)
+        shell: bash  # -eo pipefail: tee must not mask the gate's exit code
+        run: npm run -s complexity:rust 2>&1 | tee complexity.txt
+      - name: List the functions over the limit (refactor backlog)
+        if: failure()
+        run: |
+          { echo '### Rust functions above cc 15'; echo '```'; grep 'cyclomatic complexity' complexity.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  complexity-js:
+    name: complexity / js (cc <= 15)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: oxlint complexity max 15 (cli.js, index.js, src/runtime.js)
+        shell: bash  # -eo pipefail: tee must not mask the gate's exit code
+        run: npm run -s complexity:js 2>&1 | tee complexity.txt
+      - name: List the functions over the limit (refactor backlog)
+        if: failure()
+        run: |
+          { echo '### JS functions above cc 15'; echo '```'; grep 'complexity of' complexity.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---- The lockfile must install cleanly with npm 10 AND npm 11 (turbo-test#30) ----
+  # npm 11 rejects a lock that lacks the optional @esbuild/* platform entries
+  # (EUSAGE "Missing: @esbuild/aix-ppc64 from lock file") while npm 10 accepts it, so
+  # an npm-10-only CI stayed green while `npm ci` on a current npm failed and the two
+  # tsc tests silently skipped. Both majors must install the same tree from the
+  # committed lock without rewriting it.
+  npm-lockfile:
+    name: npm ${{ matrix.npm }} ci
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        npm: ['10', '11']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: npm ci (npm ${{ matrix.npm }})
+        run: npx -y npm@${{ matrix.npm }} ci
+      - name: Lockfile unchanged and installed tree complete
+        run: |
+          git diff --exit-code package-lock.json
+          npx -y npm@${{ matrix.npm }} ls --all
+          node_modules/.bin/tsc --version
+          node_modules/.bin/esbuild --version
+
+  # ---- Release guard (tags only): no pre-publish patches, versions match the tag ----
+  # Pre-publish, Cargo.toml's [patch.crates-io] resolves the unreleased turbo-dom crates
+  # from git (RELEASING.md). A tag must build against the published registry crates, so
+  # the section must be gone and Cargo.lock must hold no git sources; Cargo.toml and
+  # package.json must both carry the tag's version. Both publish jobs depend on this.
+  release-guard:
+    name: release guard
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Reproduce every fork source from the pinned archive and patch
+      - name: No [patch] section, no git sources, versions equal the tag
+        shell: bash
         run: |
-          curl --fail --location --retry 3 https://static.crates.io/crates/v8/v8-149.3.0.crate -o "$RUNNER_TEMP/upstream-v8-149.3.0.crate"
-          python3 -B vendor/update-rusty-v8.py --archive "$RUNNER_TEMP/upstream-v8-149.3.0.crate" --check
-      - name: Verify the reviewed source and distribution controls
-        run: python3 -B vendor/test_release_rusty_v8.py
-      - name: Publish or verify the exact patched V8 dependency
-        run: python3 -B vendor/release-rusty-v8.py --out "$RUNNER_TEMP/release-v8" --publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          fail=0
+          if grep -n '^\[patch' Cargo.toml; then
+            echo "::error::Cargo.toml still has a [patch] section (remove it before tagging: RELEASING.md)"; fail=1
+          fi
+          if grep -n '^source = "git+' Cargo.lock; then
+            echo "::error::Cargo.lock still resolves crates from git (re-lock from crates.io: RELEASING.md)"; fail=1
+          fi
+          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          npm_version=$(node -p "require('./package.json').version")
+          if [ "$cargo_version" != "$tag" ] || [ "$npm_version" != "$tag" ]; then
+            echo "::error::Cargo.toml $cargo_version / package.json $npm_version != tag $tag"; fail=1
+          fi
+          exit "$fail"
 
   # ---- Publish to npm on a version tag ----
   # One package containing every platform binary; cli.js picks the matching one at runtime
@@ -133,7 +298,7 @@ jobs:
   # Automation token allowed to publish the package).
   publish:
     name: publish
-    needs: [build, publish-v8]
+    needs: [build, release-guard]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -169,7 +334,7 @@ jobs:
   # cargo reads it from the environment natively.
   publish-crate:
     name: publish-crate
-    needs: [build, publish-v8]
+    needs: [build, release-guard]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

@@ -1,0 +1,22 @@
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  a.test.ts > d > f
+AssertionError: expected 1 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 1
+
+ ❯ a.test.ts:4:29
+      2| describe('d', () => {
+      3|   it('slow', async () => { await new Promise(r => setTimeout(r, 320));…
+      4|   it('f', () => { expect(1).toBe(2); });
+       |                             ^
+      5| });
+      6|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+

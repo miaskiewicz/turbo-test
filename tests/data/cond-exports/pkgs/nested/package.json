@@ -1,0 +1,1 @@
+{ "name": "nested", "exports": { ".": { "require": { "types": "./t.d.ts", "default": "./r/i.cjs" }, "import": { "types": "./t.d.ts", "default": "./m/i.mjs" } } } }

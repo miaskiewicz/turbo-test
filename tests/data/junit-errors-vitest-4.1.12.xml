@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="13" failures="13" errors="0" time="T">
+    <testsuite name="a.test.ts" timestamp="S" hostname="H" tests="4" failures="4" errors="0" skipped="0" time="T">
+        <testcase classname="a.test.ts" name="string" time="T">
+            <failure message="plain string">
+Unknown Error: plain string
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="props" time="T">
+            <failure message="with code" type="Error">
+Error: with code
+ ❯ a.test.ts:3:31
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { code: &apos;E_CODE&apos;, extra: { n: 1 } }
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="object" time="T">
+            <failure>
+{ a: 1, stacks: [] }
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { a: 1 }
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="null" time="T">
+            <failure message="null">
+Unknown Error: null
+            </failure>
+        </testcase>
+    </testsuite>
+    <testsuite name="b.test.ts" timestamp="S" hostname="H" tests="9" failures="9" errors="0" skipped="0" time="T">
+        <testcase classname="b.test.ts" name="multi" time="T">
+            <failure message="line one
+line two">
+Unknown Error: line one
+line two
+            </failure>
+        </testcase>
+        <testcase classname="b.test.ts" name="undef" time="T">
+            <failure message="undefined">
+Unknown Error: undefined
+            </failure>
+        </testcase>
+        <testcase classname="b.test.ts" name="number" time="T">
+            <failure message="42">
+Unknown Error: 42
+            </failure>
+        </testcase>
+        <testcase classname="b.test.ts" name="empty" time="T">
+            <failure message="">
+{ message: &apos;&apos;, stacks: [] }
+            </failure>
+        </testcase>
+        <testcase classname="b.test.ts" name="named" time="T">
+            <failure message="msg" type="Custom">
+Custom: msg
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { code: 7 }
+            </failure>
+        </testcase>
+        <testcase classname="b.test.ts" name="nameonly" time="T">
+            <failure type="OnlyName">
+{ name: &apos;OnlyName&apos;, list: [ 1, &apos;two&apos; ], stacks: [] }
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { list: [ 1, &apos;two&apos; ] }
+            </failure>
+        </testcase>
+        <testcase classname="b.test.ts" name="class" time="T">
+            <failure message="mine" type="MyError">
+MyError: mine
+ ❯ b.test.ts:9:27
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { when: 3, describe: &apos;Function&lt;describe&gt;&apos; }
+            </failure>
+        </testcase>
+        <testcase classname="b.test.ts" name="cause props" time="T">
+            <failure message="outer" type="Error">
+Error: outer
+ ❯ b.test.ts:10:77
+
+Caused by: Error: inner
+ ❯ b.test.ts:10:37
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { code: &apos;C&apos; }
+            </failure>
+        </testcase>
+        <testcase classname="b.test.ts" name="fn prop" time="T">
+            <failure message="typed" type="TypeError">
+TypeError: typed
+ ❯ b.test.ts:11:33
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { fn: &apos;Function&lt;helper&gt;&apos;, nested: { deep: { deeper: { deepest: 1 } } } }
+            </failure>
+        </testcase>
+    </testsuite>
+</testsuites>

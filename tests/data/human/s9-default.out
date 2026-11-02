@@ -1,0 +1,12 @@
+
+ RUN  v4.1.12 <root>
+
+ ❯ a.test.ts (2 tests | 1 failed) <ms>
+   ✓ flaky <ms> (retry x1)
+   × always <ms> (retry x1)
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 1 passed (2)
+   Start at  <time>
+   Duration  <duration>
+

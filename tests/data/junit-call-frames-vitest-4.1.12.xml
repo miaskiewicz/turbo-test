@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="5" failures="5" errors="0" time="T">
+    <testsuite name="a.test.ts" timestamp="S" hostname="H" tests="5" failures="5" errors="0" skipped="0" time="T">
+        <testcase classname="a.test.ts" name="x" time="T">
+            <failure message="helper boom" type="Error">
+Error: helper boom
+ ❯ boom h.ts:1:32
+ ❯ a.test.ts:4:27
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="y" time="T">
+            <failure message="helper boom" type="Error">
+Error: helper boom
+ ❯ boom h.ts:1:32
+ ❯ a.test.ts:5:31
+ ❯ a.test.ts:5:21
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="z" time="T">
+            <failure message="helper boom" type="Error">
+Error: helper boom
+ ❯ boom h.ts:1:32
+ ❯ a.test.ts:6:32
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="w" time="T">
+            <failure message="helper boom" type="Error">
+Error: helper boom
+ ❯ boom h.ts:1:32
+ ❯ a.test.ts:7:28
+            </failure>
+        </testcase>
+        <testcase classname="a.test.ts" name="v" time="T">
+            <failure message="helper boom" type="Error">
+Error: helper boom
+ ❯ boom h.ts:1:32
+ ❯ viaHelper h2.ts:2:41
+ ❯ a.test.ts:8:27
+            </failure>
+        </testcase>
+    </testsuite>
+</testsuites>

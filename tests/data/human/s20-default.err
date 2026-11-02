@@ -1,0 +1,25 @@
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  a.test.ts > d > fails
+AssertionError: expected 1 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 1
+
+ ❯ a.test.ts:7:85
+      5| describe('d', () => {
+      6|   it('annotated', async ({ annotate }) => { await annotate('note one')…
+      7|   it('fails', async ({ annotate }) => { await annotate('before failing…
+       |                                                                                     ^
+      8| });
+      9|
+
+ ❯ a.test.ts:7:47 notice
+   ↳ before failing
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+

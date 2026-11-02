@@ -1,6 +1,6 @@
 {
   "name": "@miaskiewicz/turbo-test",
-  "version": "0.4.8",
+  "version": "0.6.0",
   "description": "A blazing-fast native test runner — a drop-in replacement for vitest, ~5-12x faster vs jsdom. Rust + V8, oxc transform, all-Rust DOM (rtdom), native V8 coverage.",
   "license": "MIT",
   "main": "index.js",
@@ -33,7 +33,9 @@
   "scripts": {
     "build": "bash scripts/npm-build.sh",
     "test": "node --test 'test/*.mjs'",
-    "prepublishOnly": "bash scripts/npm-build.sh"
+    "prepublishOnly": "bash scripts/npm-build.sh",
+    "complexity:rust": "git ls-files -z '*.rs' | xargs -0 cc-check --max 15",
+    "complexity:js": "npx --yes oxlint@1.87.0 -c .oxlintrc.complexity.json cli.js index.js src/runtime.js"
   },
   "keywords": [
     "test",
@@ -60,7 +62,8 @@
     "node": ">=18"
   },
   "dependencies": {
-    "esbuild": "^0.21.0"
+    "chai": "6.3.0",
+    "esbuild": "^0.28.2"
   },
   "devDependencies": {
     "typescript": "^5.9.3"

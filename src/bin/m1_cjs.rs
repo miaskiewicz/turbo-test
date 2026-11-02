@@ -65,7 +65,19 @@ fn module_origin<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     name: v8::Local<'s, v8::String>,
 ) -> v8::ScriptOrigin<'s> {
-    v8::ScriptOrigin::new(scope, name.into(), 0, 0, false, 123, None, false, false, true, None)
+    v8::ScriptOrigin::new(
+        scope,
+        name.into(),
+        0,
+        0,
+        false,
+        123,
+        None,
+        false,
+        false,
+        true,
+        None,
+    )
 }
 
 // ---- CommonJS -------------------------------------------------------------
@@ -79,9 +91,8 @@ fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path) -> Option<()> {
 
     let raw = std::fs::read_to_string(abs).ok()?;
     // Classic wrapper: source compiled to a function, then called with the CJS locals.
-    let wrapped = format!(
-        "(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})"
-    );
+    let wrapped =
+        format!("(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})");
     let code = v8::String::new(scope, &wrapped)?;
     let script = v8::Script::compile(scope, code, None)?;
     let wrapper_val = script.run(scope)?;
@@ -107,7 +118,13 @@ fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path) -> Option<()> {
     wrapper.call(
         scope,
         undef,
-        &[exports_obj.into(), module_obj.into(), require, filename.into(), dir_str.into()],
+        &[
+            exports_obj.into(),
+            module_obj.into(),
+            require,
+            filename.into(),
+            dir_str.into(),
+        ],
     )?;
 
     // module.exports may have been reassigned — read it back.
@@ -125,7 +142,8 @@ fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path) -> Option<()> {
         let mut reg = r.borrow_mut();
         reg.cjs_exports.insert(abs.to_path_buf(), exports_global);
         reg.cjs_export_names.insert(abs.to_path_buf(), names);
-        reg.cjs_synth_by_path.insert(abs.to_path_buf(), synth_global);
+        reg.cjs_synth_by_path
+            .insert(abs.to_path_buf(), synth_global);
         reg.path_by_hash.insert(synth_hash, abs.to_path_buf());
     });
     Some(())
@@ -233,7 +251,10 @@ fn native_require(
         return;
     };
     if kind_of(&abs) != Kind::Cjs {
-        throw(scope, &format!("require() of ESM not supported (M1): {spec}"));
+        throw(
+            scope,
+            &format!("require() of ESM not supported (M1): {spec}"),
+        );
         return;
     }
     if load_cjs(scope, &abs).is_none() {
@@ -281,7 +302,8 @@ fn load_graph<'s>(
     let requests = module.get_module_requests();
     let dir = abs.parent().unwrap().to_path_buf();
     for i in 0..requests.length() {
-        let req = v8::Local::<v8::ModuleRequest>::try_from(requests.get(scope, i).unwrap()).unwrap();
+        let req =
+            v8::Local::<v8::ModuleRequest>::try_from(requests.get(scope, i).unwrap()).unwrap();
         let spec = req.get_specifier().to_rust_string_lossy(scope);
         let dep = resolve_spec(&spec, &dir)?;
         match kind_of(&dep) {
@@ -310,13 +332,12 @@ fn resolve_callback<'s>(
         let reg = r.borrow();
         let from = reg.path_by_hash.get(&ref_hash)?;
         let abs = resolve_spec(&spec, from.parent()?)?;
-        if let Some(g) = reg.esm_by_path.get(&abs) {
-            return Some(v8::Local::new(scope, g));
-        }
-        if let Some(g) = reg.cjs_synth_by_path.get(&abs) {
-            return Some(v8::Local::new(scope, g));
-        }
-        None
+        // load_graph registers every request (ESM or CJS synthetic) before instantiation.
+        let g = reg
+            .esm_by_path
+            .get(&abs)
+            .or_else(|| reg.cjs_synth_by_path.get(&abs))?;
+        Some(v8::Local::new(scope, g))
     })
 }
 
@@ -324,13 +345,14 @@ fn resolve_callback<'s>(
 
 fn install_helpers(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     // log
-    let f = |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue| {
-        let mut parts = Vec::new();
-        for i in 0..args.length() {
-            parts.push(args.get(i).to_rust_string_lossy(scope));
-        }
-        println!("[js] {}", parts.join(" "));
-    };
+    let f =
+        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue| {
+            let mut parts = Vec::new();
+            for i in 0..args.length() {
+                parts.push(args.get(i).to_rust_string_lossy(scope));
+            }
+            println!("[js] {}", parts.join(" "));
+        };
     bind_fn(scope, global, "log", f);
     bind_fn(scope, global, "__nativeRequire", native_require);
 
@@ -406,12 +428,22 @@ fn main() {
         }
 
         let key = v8::String::new(scope, "__out").unwrap();
-        let got = global.get(scope, key.into()).unwrap().to_rust_string_lossy(scope);
+        let got = global
+            .get(scope, key.into())
+            .unwrap()
+            .to_rust_string_lossy(scope);
         let expected = "hi esm|1.0.0|hi cjs v1.0.0";
         println!("\nglobalThis.__out = {got:?}");
         println!("expected         = {expected:?}");
         let pass = got == expected;
-        println!("{}", if pass { "==> M1.2/M1.3 INTEROP PASS" } else { "==> FAIL" });
+        println!(
+            "{}",
+            if pass {
+                "==> M1.2/M1.3 INTEROP PASS"
+            } else {
+                "==> FAIL"
+            }
+        );
         exit_code = if pass { 0 } else { 1 };
         clear_registry();
     }

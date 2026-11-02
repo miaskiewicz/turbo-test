@@ -1,0 +1,107 @@
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  a.test.ts > short strings
+AssertionError: expected 'hello world' to be 'hello there' // Object.is equality
+
+Expected: "hello there"
+Received: "hello world"
+
+ ❯ a.test.ts:2:51
+      1| import { expect, it } from 'vitest';
+      2| it('short strings', () => { expect('hello world').toBe('hello there');…
+       |                                                   ^
+      3| it('lines', () => { expect('a\nb\nc').toBe('a\nB\nc'); });
+      4| it('arrays', () => { expect([1, 2, 3]).toEqual([1, 3]); });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+ FAIL  a.test.ts > lines
+AssertionError: expected 'a\nb\nc' to be 'a\nB\nc' // Object.is equality
+
+- Expected
++ Received
+
+  a
+- B
++ b
+  c
+
+ ❯ a.test.ts:3:39
+      1| import { expect, it } from 'vitest';
+      2| it('short strings', () => { expect('hello world').toBe('hello there');…
+      3| it('lines', () => { expect('a\nb\nc').toBe('a\nB\nc'); });
+       |                                       ^
+      4| it('arrays', () => { expect([1, 2, 3]).toEqual([1, 3]); });
+      5| it('nested', () => { expect({ a: 'x', n: { m: [true, null] } }).toEqua…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/5]⎯
+
+ FAIL  a.test.ts > arrays
+AssertionError: expected [ 1, 2, 3 ] to deeply equal [ 1, 3 ]
+
+- Expected
++ Received
+
+  [
+    1,
++   2,
+    3,
+  ]
+
+ ❯ a.test.ts:4:40
+      2| it('short strings', () => { expect('hello world').toBe('hello there');…
+      3| it('lines', () => { expect('a\nb\nc').toBe('a\nB\nc'); });
+      4| it('arrays', () => { expect([1, 2, 3]).toEqual([1, 3]); });
+       |                                        ^
+      5| it('nested', () => { expect({ a: 'x', n: { m: [true, null] } }).toEqua…
+      6| it('numbers', () => { expect(0.1 + 0.2).toBe(0.3); });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/5]⎯
+
+ FAIL  a.test.ts > nested
+AssertionError: expected { a: 'x', n: { m: [ true, null ] } } to deeply equal { a: 'y', n: { m: [ false, null ] } }
+
+- Expected
++ Received
+
+  {
+-   "a": "y",
++   "a": "x",
+    "n": {
+      "m": [
+-       false,
++       true,
+        null,
+      ],
+    },
+  }
+
+ ❯ a.test.ts:5:65
+      3| it('lines', () => { expect('a\nb\nc').toBe('a\nB\nc'); });
+      4| it('arrays', () => { expect([1, 2, 3]).toEqual([1, 3]); });
+      5| it('nested', () => { expect({ a: 'x', n: { m: [true, null] } }).toEqua…
+       |                                                                 ^
+      6| it('numbers', () => { expect(0.1 + 0.2).toBe(0.3); });
+      7|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/5]⎯
+
+ FAIL  a.test.ts > numbers
+AssertionError: expected 0.30000000000000004 to be 0.3 // Object.is equality
+
+- Expected
++ Received
+
+- 0.3
++ 0.30000000000000004
+
+ ❯ a.test.ts:6:41
+      4| it('arrays', () => { expect([1, 2, 3]).toEqual([1, 3]); });
+      5| it('nested', () => { expect({ a: 'x', n: { m: [true, null] } }).toEqua…
+      6| it('numbers', () => { expect(0.1 + 0.2).toBe(0.3); });
+       |                                         ^
+      7|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/5]⎯
+

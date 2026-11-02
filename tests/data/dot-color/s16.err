@@ -1,0 +1,107 @@
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 5 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22mshort strings
+[31m[1mAssertionError[22m: expected 'hello world' to be 'hello there' // Object.is equality[39m
+
+Expected: [32m"hello [7mthere[27m"[39m
+Received: [31m"hello [7mworld[27m"[39m
+
+[36m [2m❯[22m a.test.ts:[2m2:51[22m[39m
+    [90m  1|[39m [35mimport[39m { expect[33m,[39m it } [35mfrom[39m [32m'vitest'[39m[33m;[39m
+    [90m  2|[39m it('short strings', () => { expect('hello world').toBe('hello there');…
+    [90m   |[39m                                                   [31m^[39m
+    [90m  3|[39m [34mit[39m([32m'lines'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([32m'a\nb\nc'[39m)[33m.[39m[34mtoBe[39m([32m'a\nB\nc'[39m)[33m;[39m })[33m;[39m
+    [90m  4|[39m [34mit[39m([32m'arrays'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([[34m1[39m[33m,[39m [34m2[39m[33m,[39m [34m3[39m])[33m.[39m[34mtoEqual[39m([[34m1[39m[33m,[39m [34m3[39m])[33m;[39m })[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22mlines
+[31m[1mAssertionError[22m: expected 'a\nb\nc' to be 'a\nB\nc' // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  a[22m
+[32m- B[39m
+[31m+ b[39m
+[2m  c[22m
+
+[36m [2m❯[22m a.test.ts:[2m3:39[22m[39m
+    [90m  1|[39m [35mimport[39m { expect[33m,[39m it } [35mfrom[39m [32m'vitest'[39m[33m;[39m
+    [90m  2|[39m it('short strings', () => { expect('hello world').toBe('hello there');…
+    [90m  3|[39m [34mit[39m([32m'lines'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([32m'a\nb\nc'[39m)[33m.[39m[34mtoBe[39m([32m'a\nB\nc'[39m)[33m;[39m })[33m;[39m
+    [90m   |[39m                                       [31m^[39m
+    [90m  4|[39m [34mit[39m([32m'arrays'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([[34m1[39m[33m,[39m [34m2[39m[33m,[39m [34m3[39m])[33m.[39m[34mtoEqual[39m([[34m1[39m[33m,[39m [34m3[39m])[33m;[39m })[33m;[39m
+    [90m  5|[39m it('nested', () => { expect({ a: 'x', n: { m: [true, null] } }).toEqua…
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/5]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22marrays
+[31m[1mAssertionError[22m: expected [ 1, 2, 3 ] to deeply equal [ 1, 3 ][39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  [[22m
+[2m    1,[22m
+[31m+   2,[39m
+[2m    3,[22m
+[2m  ][22m
+
+[36m [2m❯[22m a.test.ts:[2m4:40[22m[39m
+    [90m  2|[39m it('short strings', () => { expect('hello world').toBe('hello there');…
+    [90m  3|[39m [34mit[39m([32m'lines'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([32m'a\nb\nc'[39m)[33m.[39m[34mtoBe[39m([32m'a\nB\nc'[39m)[33m;[39m })[33m;[39m
+    [90m  4|[39m [34mit[39m([32m'arrays'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([[34m1[39m[33m,[39m [34m2[39m[33m,[39m [34m3[39m])[33m.[39m[34mtoEqual[39m([[34m1[39m[33m,[39m [34m3[39m])[33m;[39m })[33m;[39m
+    [90m   |[39m                                        [31m^[39m
+    [90m  5|[39m it('nested', () => { expect({ a: 'x', n: { m: [true, null] } }).toEqua…
+    [90m  6|[39m [34mit[39m([32m'numbers'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([34m0.1[39m [33m+[39m [34m0.2[39m)[33m.[39m[34mtoBe[39m([34m0.3[39m)[33m;[39m })[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/5]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22mnested
+[31m[1mAssertionError[22m: expected { a: 'x', n: { m: [ true, null ] } } to deeply equal { a: 'y', n: { m: [ false, null ] } }[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "a": "y",[39m
+[31m+   "a": "x",[39m
+[2m    "n": {[22m
+[2m      "m": [[22m
+[32m-       false,[39m
+[31m+       true,[39m
+[2m        null,[22m
+[2m      ],[22m
+[2m    },[22m
+[2m  }[22m
+
+[36m [2m❯[22m a.test.ts:[2m5:65[22m[39m
+    [90m  3|[39m [34mit[39m([32m'lines'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([32m'a\nb\nc'[39m)[33m.[39m[34mtoBe[39m([32m'a\nB\nc'[39m)[33m;[39m })[33m;[39m
+    [90m  4|[39m [34mit[39m([32m'arrays'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([[34m1[39m[33m,[39m [34m2[39m[33m,[39m [34m3[39m])[33m.[39m[34mtoEqual[39m([[34m1[39m[33m,[39m [34m3[39m])[33m;[39m })[33m;[39m
+    [90m  5|[39m it('nested', () => { expect({ a: 'x', n: { m: [true, null] } }).toEqua…
+    [90m   |[39m                                                                 [31m^[39m
+    [90m  6|[39m [34mit[39m([32m'numbers'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([34m0.1[39m [33m+[39m [34m0.2[39m)[33m.[39m[34mtoBe[39m([34m0.3[39m)[33m;[39m })[33m;[39m
+    [90m  7|[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/5]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m a.test.ts[2m > [22mnumbers
+[31m[1mAssertionError[22m: expected 0.30000000000000004 to be 0.3 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 0.3[39m
+[31m+ 0.30000000000000004[39m
+
+[36m [2m❯[22m a.test.ts:[2m6:41[22m[39m
+    [90m  4|[39m [34mit[39m([32m'arrays'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([[34m1[39m[33m,[39m [34m2[39m[33m,[39m [34m3[39m])[33m.[39m[34mtoEqual[39m([[34m1[39m[33m,[39m [34m3[39m])[33m;[39m })[33m;[39m
+    [90m  5|[39m it('nested', () => { expect({ a: 'x', n: { m: [true, null] } }).toEqua…
+    [90m  6|[39m [34mit[39m([32m'numbers'[39m[33m,[39m () [33m=>[39m { [34mexpect[39m([34m0.1[39m [33m+[39m [34m0.2[39m)[33m.[39m[34mtoBe[39m([34m0.3[39m)[33m;[39m })[33m;[39m
+    [90m   |[39m                                         [31m^[39m
+    [90m  7|[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/5]⎯[22m[39m
+

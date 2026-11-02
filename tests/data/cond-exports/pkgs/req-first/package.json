@@ -1,0 +1,10 @@
+{
+  "name": "req-first",
+  "exports": {
+    ".": {
+      "require": "./dist/i.cjs",
+      "default": "./dist/i.js"
+    }
+  },
+  "type": "module"
+}

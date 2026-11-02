@@ -1,0 +1,12 @@
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  c.test.ts [ c.test.ts ]
+Error: load boom
+ ❯ c.test.ts:1:7
+      1| throw new Error('load boom');
+       |       ^
+      2|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+

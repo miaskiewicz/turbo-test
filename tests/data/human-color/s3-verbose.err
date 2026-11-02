@@ -1,0 +1,15 @@
+
+[31m⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Suites 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m b.test.ts[2m > [22mhooked
+[31m[1mError[22m: hook boom[39m
+[36m [2m❯[22m b.test.ts:[2m3:27[22m[39m
+    [90m  1|[39m [35mimport[39m { beforeAll[33m,[39m describe[33m,[39m it } [35mfrom[39m [32m'vitest'[39m[33m;[39m
+    [90m  2|[39m [34mdescribe[39m([32m'hooked'[39m[33m,[39m () [33m=>[39m {
+    [90m  3|[39m   [34mbeforeAll[39m(() [33m=>[39m { [35mthrow[39m [35mnew[39m [33mError[39m([32m'hook boom'[39m)[33m;[39m })[33m;[39m
+    [90m   |[39m                           [31m^[39m
+    [90m  4|[39m   [34mit[39m([32m'never'[39m[33m,[39m () [33m=>[39m {})[33m;[39m
+    [90m  5|[39m })[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
