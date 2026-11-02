@@ -431,7 +431,11 @@ fn a_test_files_top_level_hooks_do_not_run_in_later_files() {
     }
     let r = turbo_test(&p.dir, &["--jobs", "1", "--reporter", "verbose"], &[]);
     assert_eq!(r.code, Some(0), "{}", r.all());
-    let mut ran: Vec<&str> = r.stdout.lines().filter_map(|l| l.split("RAN ").nth(1)).collect();
+    let mut ran: Vec<&str> = r
+        .stdout
+        .lines()
+        .filter_map(|l| l.split("RAN ").nth(1))
+        .collect();
     ran.sort();
     assert_eq!(ran.len(), 3, "{}", r.all());
     for (i, f) in ["h1", "h2", "h3"].iter().enumerate() {
