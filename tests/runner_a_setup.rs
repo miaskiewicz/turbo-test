@@ -498,3 +498,38 @@ fn the_legacy_bundle_rewrites_only_import_specifiers() {
     assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
     assert_eq!(r.code, Some(0), "{}", r.all());
 }
+
+/// turbo-test#203: chai's plugin `events` target was built from runtime.js's host EventTarget,
+/// whose prototype the DOM environment then took over, so `expect.extend` (chai's `addMethod`
+/// dispatches a plugin event on it) threw `Illegal invocation` under jsdom / happy-dom and every
+/// file using `@testing-library/jest-dom` failed to load. vitest 4.1.12: 2 passed per env (chai
+/// keeps its host-realm EventTarget, separate from the environment's).
+#[test]
+fn expect_extend_in_a_setup_file_works_under_dom_environments() {
+    for env in ["jsdom", "happy-dom"] {
+        let p = Project::new(&format!("ra-expect-extend-{env}"));
+        p.file("package.json", r#"{"name":"ra-expect-extend"}"#);
+        p.file(
+            "vitest.config.ts",
+            &format!(
+                "import {{ defineConfig }} from 'vitest/config';\nexport default defineConfig({{ test: {{ globals: true, environment: '{env}', setupFiles: ['./setup.ts'], include: ['*.test.ts'] }} }});\n"
+            ),
+        );
+        // jest-dom's shape: matchers that read DOM state through `this` / the received element
+        p.file(
+            "setup.ts",
+            "expect.extend({\n  toBeInTheDocument(el) { const pass = !!el && el.ownerDocument.contains(el); return { pass, message: () => `expected ${this.isNot ? 'not ' : ''}in document` }; },\n  toHaveTextContent(el, text) { const pass = el.textContent.includes(text); return { pass, message: () => 'text ' + el.textContent }; },\n});\n",
+        );
+        p.file(
+            "a.test.ts",
+            "it('matches the document', () => {\n  const d = document.createElement('div'); d.textContent = 'hello';\n  expect(d).not.toBeInTheDocument();\n  document.body.append(d);\n  expect(d).toBeInTheDocument();\n  expect(d).toHaveTextContent('ell');\n  expect(() => expect(d).toHaveTextContent('zz')).toThrow('text hello');\n});\nit('extends again inside a test', () => {\n  expect.extend({ toBeTwo(n) { return { pass: n === 2, message: () => 'two' }; } });\n  expect(2).toBeTwo();\n  const t = new EventTarget(); let hit = 0; t.addEventListener('x', () => hit++); t.dispatchEvent(new Event('x'));\n  expect(hit).toBe(1);\n});\n",
+        );
+        let r = turbo_test(&p.dir, &[], &[]);
+        assert!(
+            r.stdout.contains("Tests  2 passed (2)"),
+            "{env}: {}",
+            r.all()
+        );
+        assert_eq!(r.code, Some(0), "{env}: {}", r.all());
+    }
+}
