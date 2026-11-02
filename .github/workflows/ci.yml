@@ -24,9 +24,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Linux binaries build on the oldest supported image (glibc 2.35): a binary needs at least
+        # the glibc it was linked against, and ubuntu-latest (26.04, glibc 2.43) broke consumers
+        # on 24.04 in 0.6.0. The glibc guard step below enforces the ceiling.
         # macOS runners are scarce: PR CI skips the darwin build; tag/main pushes (releases) keep it.
         # (an `exclude` cannot drop an `include` entry, hence the two JSON lists)
-        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","binname":"turbo-test-linux-x64"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","binname":"turbo-test-linux-arm64"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","binname":"turbo-test-win32-x64.exe"}]' || '[{"os":"macos-latest","target":"aarch64-apple-darwin","binname":"turbo-test-darwin-arm64"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","binname":"turbo-test-linux-x64"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","binname":"turbo-test-linux-arm64"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","binname":"turbo-test-win32-x64.exe"}]') }}
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","binname":"turbo-test-linux-x64"},{"os":"ubuntu-22.04-arm","target":"aarch64-unknown-linux-gnu","binname":"turbo-test-linux-arm64"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","binname":"turbo-test-win32-x64.exe"}]' || '[{"os":"macos-latest","target":"aarch64-apple-darwin","binname":"turbo-test-darwin-arm64"},{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","binname":"turbo-test-linux-x64"},{"os":"ubuntu-22.04-arm","target":"aarch64-unknown-linux-gnu","binname":"turbo-test-linux-arm64"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","binname":"turbo-test-win32-x64.exe"}]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +51,14 @@ jobs:
 
       # Exactly one V8 in the graph: turbo-dom's fork (turbo-dom-v8), shared with
       # turbo-dom-browser-env; never upstream v8 / v8x / the retired turbo-surf-v8.
+      - name: glibc ceiling guard (linux binaries run on glibc >= 2.35)
+        if: contains(matrix.target, 'linux-gnu')
+        shell: bash
+        run: |
+          max=$(objdump -T target/${{ matrix.target }}/release/turbo-test | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "highest required: $max"
+          [ "$(printf '%s\nGLIBC_2.35\n' "$max" | sort -V | tail -1)" = GLIBC_2.35 ] || { echo "::error::binary requires $max (> GLIBC_2.35)"; exit 1; }
+
       - name: Duplicate-V8 guard
         shell: bash
         run: bash scripts/check-single-v8.sh

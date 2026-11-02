@@ -3,6 +3,14 @@
 All notable changes to `@miaskiewicz/turbo-test`. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.6.1] — 2026-11-02
+
+### Fixed
+- The Linux binaries run on glibc 2.35+ again. 0.6.0's linux-x64/arm64 binaries were built on
+  ubuntu-latest (26.04, glibc 2.43) and failed to start on Ubuntu 24.04/22.04
+  (`GLIBC_2.43' not found`). They now build on ubuntu-22.04, and a CI guard fails any Linux
+  binary that requires more than GLIBC_2.35.
+
 ## [Unreleased]
 
 ### Fixed (consumer regressions found validating 0.6.0)
