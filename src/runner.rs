@@ -344,6 +344,9 @@ fn base_resolve_options(
     // errors. Dropping `node` makes the resolver pick the package's `default`/`browser` build,
     // which is the right target for this env and CJS-compiles cleanly.
     //
+    // `development` is a condition (turbo-test#211): vitest runs in development mode and matches
+    // it, for an import and a require() alike (@emotion/sheet's development build).
+    //
     // `require` is never a condition of an import (turbo-test#200): oxc matches the package's keys
     // in ITS order, so `{ require, default }` would pick the CJS build where Node/vitest load
     // `default`. Only an import that resolves nothing retries with `require` appended
@@ -366,17 +369,17 @@ fn base_resolve_options(
         )
     } else if esm && require_fallback {
         (
-            &["import", "browser", "default", "require"],
+            &["development", "import", "browser", "default", "require"],
             &["browser", "main", "module"],
         )
     } else if esm {
         (
-            &["import", "browser", "default"],
+            &["development", "import", "browser", "default"],
             &["browser", "main", "module"],
         )
     } else {
         (
-            &["require", "browser", "default"],
+            &["development", "require", "browser", "default"],
             &["browser", "main", "module"],
         )
     };
