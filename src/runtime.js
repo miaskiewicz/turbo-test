@@ -8043,16 +8043,18 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
   const collect = (rules, el, out) => {
     for (const rule of rules) {
       try {
-        if (rule.selectorText !== undefined && rule.style) {
+        const head = () => String(rule.cssText || '').slice(0, String(rule.cssText || '').indexOf('{')).trim();
+        if (rule.type === 1 && rule.style) {
           if (el.matches(rule.selectorText)) out.push(rule.style);
-        } else if (rule.media && rule.cssRules) {
+        } else if (rule.type === 4 && rule.cssRules) {
           // jsdom applies an @media block only for a media-type list naming screen / all, no
           // feature queries (its window has no layout to query)
-          const m = (rule.media.mediaText || '').trim().toLowerCase();
+          const m = String((rule.media && rule.media.mediaText) || rule.conditionText || head().replace(/^@media/i, '')).trim().toLowerCase();
           if (!m || (!m.includes('(') && m.split(',').some((t) => /^(only\s+)?(screen|all)$/.test(t.trim())))) collect(rule.cssRules, el, out);
-        } else if (rule.cssRules && rule.conditionText === undefined) {
-          collect(rule.cssRules, el, out);
-        } else if (rule.cssRules && typeof CSS !== 'undefined' && CSS.supports && CSS.supports(rule.conditionText)) {
+        } else if (rule.type === 12 && rule.cssRules) {
+          const c = String(rule.conditionText || head().replace(/^@supports/i, '')).trim();
+          if (typeof CSS !== 'undefined' && CSS.supports && CSS.supports(c)) collect(rule.cssRules, el, out);
+        } else if (rule.cssRules) {
           collect(rule.cssRules, el, out);
         }
       } catch (e) {}
@@ -8077,12 +8079,21 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
     }
     return decl;
   };
+  let colorDoc;
   const value = (decl, name, scratch, cs) => {
     const d = decl.get(name);
     // a color reads as rgb(), as jsdom's cssstyle spells it: turbo-dom's computed one
-    if (d && /color$/.test(name) && !/var\(|currentcolor|inherit/i.test(d.value)) {
-      const c = cs.getPropertyValue(name);
-      if (c) return c;
+    if (d && /color$/.test(name) && !/var\(|currentcolor|inherit|initial|unset|revert/i.test(d.value)) {
+      try {
+        // in a document of its own: no mutation an observer of the page could see
+        if (!colorDoc) colorDoc = w.document.implementation.createHTMLDocument('');
+        const probe = colorDoc.createElement('span');
+        probe.style.setProperty(name, d.value);
+        colorDoc.body.appendChild(probe);
+        const c = Reflect.apply(real, w, [probe]).getPropertyValue(name);
+        probe.remove();
+        if (c) return c;
+      } catch (e) {}
     }
     if (d) return d.value;
     // a shorthand of declared longhands: the declaration block spells it
