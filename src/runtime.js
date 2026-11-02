@@ -551,7 +551,44 @@ function __ttFactoryErrorMock(e, vitest) {
   return stand;
 }
 globalThis.__ttFactoryErrorMock = __ttFactoryErrorMock;
-globalThis.__ttMockFactoryError = (m) => __ttMockErrors.get(m);
+// A module's own hoisted vi.mock whose factory reads a binding still in its temporal dead zone
+// (`const m = {...}` below the call: vitest hoists the call, but runs the factory on the first
+// import, turbo-test#205): the module is registered as this stand-in, which runs the factory on
+// its first use, as vitest does; a factory that still throws then throws vitest's error.
+const __ttLazyMocks = new WeakMap();
+function __ttLazyFactoryMock(run, vitest) {
+  let done = false;
+  let value;
+  const resolve = () => {
+    if (!done) {
+      try { value = run(); } catch (e) { throw __ttMockErrors.get(__ttFactoryErrorMock(e, vitest)); }
+      done = true;
+    }
+    return value;
+  };
+  const target = () => { const v = resolve(); return v !== null && typeof v === 'object' ? v : {}; };
+  const lazy = new Proxy({}, {
+    get: (_, k) => (typeof k === 'symbol' || k === 'then') && !done ? undefined : Reflect.get(target(), k),
+    has: (_, k) => k in target(),
+    ownKeys: () => { try { return Reflect.ownKeys(target()); } catch (e) { return []; } },
+    getOwnPropertyDescriptor: (_, k) => {
+      const d = Reflect.getOwnPropertyDescriptor(target(), k);
+      return d && { ...d, configurable: true };
+    },
+    set: (_, k, v) => Reflect.set(target(), k, v),
+    defineProperty: (_, k, d) => Reflect.defineProperty(target(), k, d),
+    deleteProperty: (_, k) => Reflect.deleteProperty(target(), k),
+  });
+  __ttLazyMocks.set(lazy, resolve);
+  return lazy;
+}
+globalThis.__ttMockFactoryError = (m) => {
+  const lazy = __ttLazyMocks.get(__ttStrictMocks.get(m)?.target ?? m);
+  if (lazy) {
+    try { lazy(); return undefined; } catch (e) { return e; }
+  }
+  return __ttMockErrors.get(m);
+};
 
 // await any async mock-factory results before the native loader drains them; a rejected factory
 // registers the error stand-in
@@ -5121,7 +5158,7 @@ If you need to partially mock a module, you can use "importOriginal" helper insi
       throw e;
     },
   });
-  __ttStrictMocks.set(proxy, { key, vitest: vitest !== false });
+  __ttStrictMocks.set(proxy, { key, vitest: vitest !== false, target: mod });
   return proxy;
 }
 // The ES-graph loader's default export of a mock without its own `default` (synth_eval). A
@@ -5382,7 +5419,11 @@ function __ttMock(spec, factory, vitest, isDoMock) {
       // The entry's mock prepass (__ttMockPrepass) runs factories outside the module's scope; a
       // throw there is not registered — the module's own vi.mock call re-runs it in scope.
       if (globalThis.__ttMockPrepass) return;
-      exports = __ttFactoryErrorMock(e, vitest);
+      // a hoisted call's factory reading a binding not initialised yet runs on first import
+      // (turbo-test#205); any other throw registers the error stand-in now
+      exports = !isDoMock && e instanceof ReferenceError && typeof factory === 'function'
+        ? __ttLazyFactoryMock(() => factory(importOriginal), vitest)
+        : __ttFactoryErrorMock(e, vitest);
     }
   }
   // Sync factory: register IMMEDIATELY in the calling module's dir (vi.mock is hoisted above
