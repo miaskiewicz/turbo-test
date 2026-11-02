@@ -66,7 +66,14 @@ fn make_resolver() -> oxc_resolver::Resolver {
             ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".json", ".node",
         ]),
         main_fields: strs(&["module", "browser", "main"]),
-        condition_names: strs(&["development", "import", "module", "browser", "default", "require"]),
+        condition_names: strs(&[
+            "development",
+            "import",
+            "module",
+            "browser",
+            "default",
+            "require",
+        ]),
         ..Default::default()
     })
 }

@@ -8060,10 +8060,46 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
       } catch (e) {}
     }
   };
+  // jsdom keeps a document's sheets in the order they were created or last re-parsed (a
+  // `<style>` whose text changes moves to the end), not in tree order: an observer of the
+  // document's style elements, read synchronously on each call, keeps that order.
+  const order = [];
+  let observer;
+  const isSheetOwner = (n) => n && n.nodeType === 1 && (n.localName === 'style' || (n.localName === 'link' && /stylesheet/i.test(n.rel || '')));
+  const touch = (n) => { const i = order.indexOf(n); if (i >= 0) order.splice(i, 1); order.push(n); };
+  let observed;
+  const track = (doc) => {
+    if (observer && observed !== doc) { observer.disconnect(); observer = undefined; order.length = 0; }
+    if (!observer && typeof w.MutationObserver === 'function') {
+      observed = doc;
+      for (const n of doc.querySelectorAll('style, link[rel~="stylesheet" i]')) order.push(n);
+      observer = new w.MutationObserver(() => {});
+      observer.observe(doc, { childList: true, subtree: true, characterData: true });
+    }
+    if (!observer) return;
+    for (const rec of observer.takeRecords()) {
+      if (rec.type === 'childList') {
+        if (isSheetOwner(rec.target)) touch(rec.target);
+        for (const n of rec.addedNodes) {
+          if (isSheetOwner(n)) touch(n);
+          else if (n.nodeType === 1 && n.querySelectorAll) for (const m of n.querySelectorAll('style, link')) if (isSheetOwner(m)) touch(m);
+        }
+      } else if (rec.type === 'characterData' && isSheetOwner(rec.target.parentNode)) {
+        touch(rec.target.parentNode);
+      }
+    }
+  };
+  const sheetsOf = (doc) => {
+    track(doc);
+    const tree = Array.from(doc.styleSheets || []);
+    if (!observer) return tree;
+    const ranked = order.filter((n) => n.isConnected && n.sheet && tree.includes(n.sheet)).map((n) => n.sheet);
+    return [...tree.filter((s) => !ranked.includes(s)), ...ranked];
+  };
   const declared = (el) => {
     const blocks = [];
     const doc = el.ownerDocument || w.document;
-    for (const sheet of [...(doc.styleSheets || []), ...(doc.adoptedStyleSheets || [])]) {
+    for (const sheet of [...sheetsOf(doc), ...(doc.adoptedStyleSheets || [])]) {
       try { if (!sheet.disabled) collect(sheet.cssRules, el, blocks); } catch (e) {}
     }
     if (el.style) blocks.push(el.style);
@@ -8134,6 +8170,8 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
       },
     });
   };
+  // watch the document's style elements from the start of the file
+  try { if (jsdomEnv() && w.document) track(w.document); } catch (e) {}
   try {
     Object.defineProperty(getComputedStyle, '__ttJsdom', { value: true });
     Object.defineProperty(w, 'getComputedStyle', { value: getComputedStyle, writable: true, configurable: true, enumerable: true });
