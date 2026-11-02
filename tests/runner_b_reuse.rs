@@ -401,3 +401,40 @@ fn a_file_left_half_linked_through_a_commonjs_namespace_does_not_abort_the_next_
     );
     assert!(line("b.test.ts").starts_with("PASS"), "{}", r.all());
 }
+
+/// turbo-test#214: under `isolate: false` a test file's top-level hooks belong to that file
+/// (vitest 4.1.12 scopes them to the file's suite): they must not run in the next file of the
+/// worker. The setup file's hooks still run for every file.
+#[test]
+fn a_test_files_top_level_hooks_do_not_run_in_later_files() {
+    let p = reuse_project("rb-reuse-hooks", false);
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { isolate: false, setupFiles: ['./setup.ts'] } };\n",
+    );
+    p.file(
+        "setup.ts",
+        "beforeEach(() => { globalThis.__ran = (globalThis.__ran || []).concat('setup'); });\n",
+    );
+    for f in ["h1", "h2", "h3"] {
+        p.file(
+            &format!("{f}.test.ts"),
+            &format!(
+                "globalThis.__ran = [];\nconst log = (k) => {{ globalThis.__ran = (globalThis.__ran || []).concat(k); }};\n\
+                 beforeAll(() => log('{f}:ba'));\nbeforeEach(() => log('{f}:be'));\n\
+                 afterEach(() => log('{f}:ae'));\nafterAll(() => log('{f}:aa'));\n\
+                 test('{f}', () => {{ const r = globalThis.__ran; globalThis.__ran = []; \
+                 console.log('RAN {f} ' + r.join(',')); \
+                 expect(r.filter((k) => !k.startsWith('{f}:'))).toEqual(['setup']); }});\n"
+            ),
+        );
+    }
+    let r = turbo_test(&p.dir, &["--jobs", "1", "--reporter", "verbose"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let mut ran: Vec<&str> = r.stdout.lines().filter_map(|l| l.split("RAN ").nth(1)).collect();
+    ran.sort();
+    assert_eq!(ran.len(), 3, "{}", r.all());
+    for (i, f) in ["h1", "h2", "h3"].iter().enumerate() {
+        assert_eq!(ran[i], format!("{f} {f}:ba,setup,{f}:be"), "{ran:?}");
+    }
+}

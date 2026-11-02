@@ -691,6 +691,37 @@ fn vitest_isolate_false_detection() {
     assert!(vitest_isolate_false(&p.join("nopkg/a.test.ts")));
 }
 
+/// turbo-test#215: vitest 4 removed `test.poolOptions` (it only warns) and keeps `isolate: true`,
+/// so an `isolate: false` inside poolOptions must not turn on reuse; a top-level one still does,
+/// also next to a poolOptions block.
+#[test]
+fn vitest_isolate_false_ignores_pool_options() {
+    let d = tmp("isolate-pool");
+    put(&d, "package.json", "{}");
+    put(
+        &d,
+        "vitest.config.ts",
+        "export default { test: { pool: 'threads', poolOptions: { threads: { maxThreads: 2, isolate: false, useAtomics: true } }, testTimeout: 1 } }",
+    );
+    assert!(!vitest_isolate_false(&d.join("a.test.ts")));
+    let f = tmp("isolate-pool-forks");
+    put(&f, "package.json", "{}");
+    put(
+        &f,
+        "vitest.config.ts",
+        "export default { test: { poolOptions: { forks: { isolate: false } } } }",
+    );
+    assert!(!vitest_isolate_false(&f.join("a.test.ts")));
+    let t = tmp("isolate-pool-top");
+    put(&t, "package.json", "{}");
+    put(
+        &t,
+        "vitest.config.ts",
+        "export default { test: { poolOptions: { threads: { isolate: true } }, isolate: false } }",
+    );
+    assert!(vitest_isolate_false(&t.join("a.test.ts")));
+}
+
 #[test]
 fn find_config_key_skips_comments_and_non_keys() {
     let s = "// setupFiles: ['x']\nconst setupFiles = 1;\n  setupFiles : ['./s.ts']";
