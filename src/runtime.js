@@ -7327,10 +7327,27 @@ globalThis.describe = describe;
 globalThis.it = it;
 globalThis.test = it;
 // beforeEach / afterEach hooks get the test's context (turbo-test#96)
-globalThis.beforeEach = (fn) => current.hooks.be.push(fn);
-globalThis.afterEach = (fn) => current.hooks.ae.push(fn);
-globalThis.beforeAll = (fn) => current.hooks.ba.push(fn);
-globalThis.afterAll = (fn) => current.hooks.aa.push(fn);
+// Under isolate reuse a hook the test file itself (or a project module it imports) registers on
+// the root suite belongs to that file, as vitest scopes it to the file's suite: it is recorded
+// here and dropped before the next file (turbo-test#214). Hooks from the setup files (registered
+// before the baseline is captured) and from node_modules (bundled, so their frames carry no file
+// name) stay on the root, as before.
+let __ttFileRootHooks = [];
+const __ttIsProjectCaller = () => {
+  const frames = String(new Error().stack).split('\n').slice(1);
+  const named = frames.find((l) => l.includes('/') && !l.includes('<anonymous>'));
+  return !!named && !named.includes('/node_modules/');
+};
+const __ttAddHook = (kind, fn) => {
+  current.hooks[kind].push(fn);
+  if (current === root && globalThis.__ttHookBaseline && __ttIsProjectCaller()) {
+    __ttFileRootHooks.push([kind, fn]);
+  }
+};
+globalThis.beforeEach = (fn) => __ttAddHook('be', fn);
+globalThis.afterEach = (fn) => __ttAddHook('ae', fn);
+globalThis.beforeAll = (fn) => __ttAddHook('ba', fn);
+globalThis.afterAll = (fn) => __ttAddHook('aa', fn);
 
 // ---- runner ----
 // One per-test record for the reporters (`summary.tests`): the `describe > test` label, the
@@ -7970,10 +7987,16 @@ globalThis.__ttResetForNextFile = () => {
   // startTests([file])) — so we must drop the prior file's collected tests/suites. Setup files
   // run once per worker, so root.hooks only holds setup hooks; leave them in place.
   root.tasks = [];
+  // the prior file's own root hooks (turbo-test#214); setup and node_modules hooks stay
+  for (const [kind, fn] of __ttFileRootHooks) {
+    const at = root.hooks[kind].lastIndexOf(fn);
+    if (at >= 0) root.hooks[kind].splice(at, 1);
+  }
+  __ttFileRootHooks = [];
   // Reset snapshot counters between files (keyed by test name; cleared to avoid cross-file drift).
   __snap.counters = Object.create(null);
   __snapState.loaded = false;
-  // NOTE: root.hooks is intentionally LEFT in place. Restoring it to a post-global-setup baseline
+  // NOTE: beyond the prior file's own hooks (above), root.hooks is LEFT in place. Restoring it to a post-global-setup baseline
   // drops @testing-library's auto-cleanup afterEach for most files (it registers during a test
   // file's first render, not during global setup) → DOM accumulates → mass failure. The downside
   // (a test-file-imported setup module's root afterEach leaking, e.g. marketing analytics-test-
