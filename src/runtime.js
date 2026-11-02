@@ -8033,16 +8033,19 @@ globalThis.__ttInstallWindowMembers = () => {
   });
 };
 
-// environment 'jsdom' / 'happy-dom' (turbo-test#210): jsdom's getComputedStyle reports a
+// OPT-IN jsdom quirks (TURBO_JSDOM_QUIRKS=1, turbo-test#210), off by default: under environment
+// 'jsdom' / 'happy-dom', jsdom's getComputedStyle reports a
 // property's cascaded declared value (the last matching rule in document order, then the inline
 // style) and the shorthands built from those, where turbo-dom resolves it as Chrome does
 // (`1.25rem` vs `20px`, `bold` vs `700`). A property nothing declares reads turbo-dom's computed
 // value. `turbo-dom` keeps Chrome's.
 globalThis.__ttInstallJsdomComputedStyle = () => {
+  if (globalThis.__ttJsdomQuirks !== true) return;
   const w = globalThis.window;
   if (!w || typeof w.getComputedStyle !== 'function' || w.getComputedStyle.__ttJsdom) return;
   const real = w.getComputedStyle;
-  const jsdomEnv = () => globalThis.__ttEnvName === 'jsdom' || globalThis.__ttEnvName === 'happy-dom';
+  // opt-in only (TURBO_JSDOM_QUIRKS=1): by default getComputedStyle stays Chrome's
+  const jsdomEnv = () => globalThis.__ttJsdomQuirks === true && (globalThis.__ttEnvName === 'jsdom' || globalThis.__ttEnvName === 'happy-dom');
   const kebab = (p) => p.startsWith('--') ? p : p.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()).replace(/^(webkit|moz|ms)-/, '-$1-');
   // the style rules that can apply, in cascade order (jsdom's @media / @supports handling);
   // re-flattened only when the sheets change

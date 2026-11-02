@@ -40,7 +40,8 @@ fn a_dom_window_has_the_embedder_members() {
     assert!(r.stdout.contains("Tests  2 passed (2)"), "{}", r.all());
 }
 
-/// turbo-test#210: under `environment: 'jsdom'`, getComputedStyle reports the cascaded declared
+/// turbo-test#210 (opt-in `TURBO_JSDOM_QUIRKS=1`; off by default getComputedStyle stays Chrome's):
+/// under `environment: 'jsdom'`, getComputedStyle reports the cascaded declared
 /// value of a property (the last matching rule, the inline style), and a shorthand built from
 /// them, as jsdom does: vitest 4.1.12 + jsdom passes this file. Under `turbo-dom`, Chrome's
 /// resolved values stay (`14px`, `700`).
@@ -60,7 +61,7 @@ fn jsdom_computed_style_reports_declared_values() {
         "b.test.js",
         "// @vitest-environment turbo-dom\nimport { expect, it } from 'vitest';\nit('chrome', () => { const el = document.createElement('div'); el.style.fontSize = '1.25rem'; el.style.fontWeight = 'bold'; document.body.append(el); expect([getComputedStyle(el).fontSize, getComputedStyle(el).fontWeight]).toEqual(['20px', '700']); });\n",
     );
-    let r = turbo_test(&p.dir, &[], &[]);
+    let r = turbo_test(&p.dir, &[], &[("TURBO_JSDOM_QUIRKS", "1")]);
     assert!(r.stdout.contains("Tests  2 passed (2)"), "{}", r.all());
 }
 
@@ -88,7 +89,7 @@ fn jsdom_computed_style_skips_feature_media_queries() {
            expect([getComputedStyle(el).display, getComputedStyle(el).color]).toEqual(['flex', 'rgb(255, 0, 0)']);\n\
          });\n",
     );
-    let r = turbo_test(&p.dir, &[], &[]);
+    let r = turbo_test(&p.dir, &[], &[("TURBO_JSDOM_QUIRKS", "1")]);
     assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
 }
 
@@ -118,7 +119,7 @@ fn jsdom_computed_style_orders_sheets_by_insertion() {
            expect(getComputedStyle(x).paddingLeft).toBe('3px');\n\
          });\n",
     );
-    let r = turbo_test(&p.dir, &[], &[]);
+    let r = turbo_test(&p.dir, &[], &[("TURBO_JSDOM_QUIRKS", "1")]);
     assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
 }
 
@@ -144,6 +145,33 @@ fn jsdom_computed_style_lets_a_later_rule_override_important() {
            const s = document.createElement('style'); s.textContent = '.i{padding-left:9px !important}.i{padding-left:12px}'; document.head.append(s);\n\
            const el = document.createElement('div'); el.className = 'i'; document.body.append(el);\n\
            expect(getComputedStyle(el).paddingLeft).toBe('12px');\n\
+         });\n",
+    );
+    let r = turbo_test(&p.dir, &[], &[("TURBO_JSDOM_QUIRKS", "1")]);
+    assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
+}
+
+/// turbo-test#210: without the opt-in, environment jsdom keeps Chrome's getComputedStyle
+/// (resolved `20px`, `700`, an `!important` declaration winning).
+#[test]
+fn jsdom_quirks_are_off_by_default() {
+    let p = Project::new("jsdom-quirks-off");
+    p.file(
+        "package.json",
+        r#"{"name":"jsdom-quirks-off","type":"module"}"#,
+    );
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { environment: 'jsdom' } };\n",
+    );
+    p.file(
+        "a.test.js",
+        "import { expect, it } from 'vitest';\n\
+         it('chrome', () => {\n\
+           const s = document.createElement('style'); s.textContent = '.i{padding-left:9px !important}.i{padding-left:12px}'; document.head.append(s);\n\
+           const el = document.createElement('div'); el.className = 'i'; el.style.fontSize = '1.25rem'; el.style.fontWeight = 'bold'; document.body.append(el);\n\
+           const cs = getComputedStyle(el);\n\
+           expect([cs.fontSize, cs.fontWeight, cs.paddingLeft]).toEqual(['20px', '700', '9px']);\n\
          });\n",
     );
     let r = turbo_test(&p.dir, &[], &[]);

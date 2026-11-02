@@ -2269,6 +2269,10 @@ fn setup_dom(scope: &mut v8::PinScope, _entry: &Path) {
         scope,
         "globalThis.__ttInstallWindowMembers && globalThis.__ttInstallWindowMembers();",
     );
+    // opt-in jsdom quirks (TURBO_JSDOM_QUIRKS=1, turbo-test#210): under environment jsdom,
+    // getComputedStyle reports jsdom's cascaded declared values; off (the default) it stays Chrome's
+    let quirks = std::env::var("TURBO_JSDOM_QUIRKS").is_ok_and(|v| v == "1" || v == "true");
+    run_js(scope, &format!("globalThis.__ttJsdomQuirks = {quirks};"));
 }
 
 /// Transform a TS file to **ESM** JS using the PROJECT'S OWN TypeScript (`ts.transpileModule`),

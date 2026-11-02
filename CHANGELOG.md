@@ -5,6 +5,18 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Fixed (consumer regressions found validating 0.6.0)
+- A setup file's `vi.mock` factories close over the setup file's own top-level bindings, and a hoisted factory that reads a binding still in its TDZ runs on first import, as vitest does (#205, #206).
+- The default transform cache is per turbo-test build (`turbo-test-cache/<version>-<build id>`) (#207).
+- A DOM window has the embedder's members: `open`, `alert`, `confirm`, `prompt`, `print`, `close`, `postMessage`, … (#208).
+- The shared-let rewrite copies comments as they are (#209).
+- Package `exports` match the `development` condition, as vitest does (#211).
+- A real `setTimeout(fn, 0)` is a 1 ms timer, as on Node: setImmediate and MessageChannel run first (#212).
+- turbo-dom repinned to main 0704575 (turbo-dom#224, stale node ids).
+
+### Added
+- `TURBO_JSDOM_QUIRKS=1` (opt-in, off by default): under `jsdom` / `happy-dom`, `getComputedStyle` reports jsdom's cascaded declared values (#210).
+
 ## [0.6.0] — turbo-dom consolidation
 
 The browser binding and the V8 fork moved into the
