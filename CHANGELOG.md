@@ -12,7 +12,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - The shared-let rewrite copies comments as they are (#209).
 - Package `exports` match the `development` condition, as vitest does (#211).
 - A real `setTimeout(fn, 0)` is a 1 ms timer, as on Node: setImmediate and MessageChannel run first (#212).
-- turbo-dom repinned to main d6da581 (turbo-dom#224 stale node ids, #226 inline `translateX`, #227 `box-shadow: none`, #228, #230; earlier: 01f66d0, 41b948c).
+- turbo-dom 0.6.0, turbo-dom-browser-env 0.6.0 and turbo-dom-v8 150.4.0 now come from crates.io; the pre-publish `[patch.crates-io]` git pins are gone (last pin: turbo-dom main d6da581 (turbo-dom#224 stale node ids, #226 inline `translateX`, #227 `box-shadow: none`, #228, #230; earlier: 01f66d0, 41b948c)).
 - Under isolate reuse a test file's own top-level hooks run only for that file, not for every later file of the worker (#214).
 - An `isolate: false` inside `test.poolOptions` no longer turns on isolate reuse: vitest 4 removed `poolOptions` and runs such a project isolated (#215).
 

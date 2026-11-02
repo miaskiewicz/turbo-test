@@ -71,14 +71,3 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tarpaulin)"] }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-
-# Pre-publish only (turbo-dom consolidation): resolve the unreleased turbo-dom crates
-# from git. turbo-dom and turbo-dom-browser-env come from the refactor branch of
-# miaskiewicz/turbo-dom; turbo-dom-v8 is generated there and pushed to the orphan
-# candidate branch consolidation/turbo-dom-v8-candidate. Remove this whole section
-# and re-lock (`cargo update -p turbo-dom -p turbo-dom-browser-env -p turbo-dom-v8`)
-# once those versions are on crates.io, before tagging (RELEASING.md).
-[patch.crates-io]
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "d6da581f1b5f186fa3444179f5bd6e85368c32e5" }
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "d6da581f1b5f186fa3444179f5bd6e85368c32e5" }
-turbo-dom-v8 = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "e9b36c8733ef1cf1073f7053a8c5931381c978c5" }

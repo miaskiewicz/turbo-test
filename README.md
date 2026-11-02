@@ -27,9 +27,8 @@ turbo-test links `turbo-dom-browser-env` 0.6.0 and `turbo-dom-v8 ~150.4` (under 
 copy of the binding or of V8: the binding, its probes and the Chrome-control collectors that
 record their oracles live in turbo-dom's
 [`crates/turbo-dom-browser-env`](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
-— fix DOM behaviour and recollect controls there. Until the turbo-dom 0.6.0 crates are on
-crates.io, `Cargo.toml` resolves them from git through a pre-publish `[patch.crates-io]` section
-that is dropped before the tag ([RELEASING.md](RELEASING.md)).
+— fix DOM behaviour and recollect controls there. They come from crates.io (turbo-dom 0.6.0,
+turbo-dom-v8 150.4.0).
 
 ## Install and run
 
