@@ -2660,7 +2660,8 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     let root = project_root(file)?;
     let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
-    let raw = read_app_source(file)?;
+    // the test / setup file's factory-scope binder (turbo-test#205, #222), as native_transform_cjs
+    let raw = with_binder(file, read_app_source(file)?, true);
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
     file.extension()
@@ -2736,22 +2737,31 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
         }
         d = dir.parent();
     }
-    // a module whose import.meta.glob calls were expanded (turbo-test#130) goes in on stdin
+    // A module whose source is not the file's (import.meta.glob expanded, turbo-test#130; the
+    // binder appended) is transformed from a copy beside the cache entry, not from stdin: esbuild
+    // rejects `--tsconfig` in stdin (transform) mode, so every such module failed the transform
+    // in a project with a tsconfig.json (turbo-test#223). Same extension, same loader; the
+    // appended binder is on a line of its own, so line numbers (coverage's map) do not move.
     let expanded = std::fs::read_to_string(file).ok().as_deref() != Some(raw.as_str());
+    let input = if expanded {
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("js");
+        // per process + call, so a parallel job transforming the same source never removes it
+        let seq = ATOMIC_SEQ.fetch_add(1, Ordering::Relaxed);
+        let copy = cache.with_extension(format!("src{}-{seq}.{ext}", std::process::id()));
+        std::fs::write(&copy, &raw).ok()?;
+        copy
+    } else {
+        file.to_path_buf()
+    };
     let mut cmd = std::process::Command::new(&esbuild);
     cmd.current_dir(&root);
+    cmd.arg(&input);
     if expanded {
+        // as the stdin loader was: a .js / unknown-extension module may hold JSX
         let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("js");
-        let loader = match ext {
-            "ts" | "mts" | "cts" => "ts",
-            "tsx" | "jsx" => ext,
-            _ => "jsx",
-        };
-        cmd.arg(format!("--sourcefile={}", file.display()))
-            .arg(format!("--loader={loader}"))
-            .stdin(std::process::Stdio::piped());
-    } else {
-        cmd.arg(file);
+        if !matches!(ext, "ts" | "mts" | "cts" | "tsx" | "jsx") {
+            cmd.arg(format!("--loader:.{ext}=jsx"));
+        }
     }
     cmd.args([
         "--format=cjs",
@@ -2770,18 +2780,11 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     if let Some(tc) = &tsconfig {
         cmd.arg(format!("--tsconfig={}", tc.display()));
     }
-    let out = if expanded {
-        use std::io::Write;
-        let mut child = cmd
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()?;
-        child.stdin.take()?.write_all(raw.as_bytes()).ok()?;
-        child.wait_with_output().ok()?
-    } else {
-        cmd.stderr(std::process::Stdio::null()).output().ok()?
-    };
+    let out = cmd.stderr(std::process::Stdio::null()).output();
+    if expanded {
+        let _ = std::fs::remove_file(&input);
+    }
+    let out = out.ok()?;
     if !out.status.success() {
         return None;
     }
@@ -3265,6 +3268,13 @@ fn strip_test_blocks(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0usize;
     while i < b.len() {
+        // a comment or a string literal is copied as it is: a keyword in it is no call
+        // (turbo-test#224)
+        if let Some(end) = comment_or_string_end(b, i) {
+            out.push_str(&text[i..end]);
+            i = end;
+            continue;
+        }
         // at an identifier boundary, see if a test keyword starts here
         let boundary = i == 0 || !ident(b[i - 1]);
         let mut matched = None;
@@ -3354,6 +3364,30 @@ fn strip_test_blocks(text: &str) -> String {
         i += ch_len;
     }
     out
+}
+
+/// The end (exclusive) of the `//` / `/* */` comment or `'` / `"` / `` ` `` string literal that
+/// starts at `i` in `b`, through the end of `b` when it is unterminated. None when none starts
+/// there. A string's backslash escapes are skipped.
+fn comment_or_string_end(b: &[u8], i: usize) -> Option<usize> {
+    let find = |from: usize, pat: &[u8]| {
+        b[from.min(b.len())..]
+            .windows(pat.len())
+            .position(|w| w == pat)
+            .map_or(b.len(), |p| from + p + pat.len())
+    };
+    match (b[i], b.get(i + 1)) {
+        (b'/', Some(b'/')) => Some(find(i + 2, b"\n")),
+        (b'/', Some(b'*')) => Some(find(i + 2, b"*/")),
+        (q @ (b'\'' | b'"' | b'`'), _) => {
+            let mut k = i + 1;
+            while k < b.len() && b[k] != q {
+                k += if b[k] == b'\\' { 2 } else { 1 };
+            }
+            Some((k + 1).min(b.len()))
+        }
+        _ => None,
+    }
 }
 
 fn contains_word(text: &str, word: &str) -> bool {
