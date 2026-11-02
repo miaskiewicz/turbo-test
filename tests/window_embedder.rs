@@ -63,3 +63,31 @@ fn jsdom_computed_style_reports_declared_values() {
     let r = turbo_test(&p.dir, &[], &[]);
     assert!(r.stdout.contains("Tests  2 passed (2)"), "{}", r.all());
 }
+
+/// turbo-test#210: jsdom applies an `@media` block to getComputedStyle only for a plain
+/// screen / all media list, never a feature query (vitest 4.1.12 + jsdom: 1 passed).
+#[test]
+fn jsdom_computed_style_skips_feature_media_queries() {
+    let p = Project::new("jsdom-computed-media");
+    p.file(
+        "package.json",
+        r#"{"name":"jsdom-computed-media","type":"module"}"#,
+    );
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { environment: 'jsdom' } };\n",
+    );
+    p.file(
+        "a.test.js",
+        "import { expect, it } from 'vitest';\n\
+         it('media', () => {\n\
+           const s = document.createElement('style');\n\
+           s.textContent = '.m{display:flex}@media (min-width:0px){.m{display:none}}@media screen{.m{color:red}}@media print{.m{color:blue}}';\n\
+           document.head.append(s);\n\
+           const el = document.createElement('div'); el.className = 'm'; document.body.append(el);\n\
+           expect([getComputedStyle(el).display, getComputedStyle(el).color]).toEqual(['flex', 'rgb(255, 0, 0)']);\n\
+         });\n",
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
+}
