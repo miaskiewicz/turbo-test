@@ -786,3 +786,25 @@ fn the_default_cache_dir_is_per_build() {
     );
     assert_eq!(env!("TT_BUILD_ID").len(), 16);
 }
+
+/// turbo-test#209: a quote or backtick inside a comment does not open a string for the
+/// shared-let rewrite. payroll-app's RegistrationFields.test.tsx has a JSX comment with
+/// `undefined` in backticks above its `useCurrentEntity: () => currentEntity` factory; the
+/// rewrite took the rest of the file for a template literal and left `currentEntity` alone
+/// (`ReferenceError: currentEntity is not defined`; vitest 4.1.12: 21 passed).
+#[test]
+fn the_shared_let_rewrite_skips_comments() {
+    let names = ["currentEntity".to_string()];
+    let code = "{/* emits `undefined` here */}\n// don't\nconst f = () => currentEntity; /* it's */ g(currentEntity);\n";
+    let out = rewrite_shared_lets(code, &names);
+    assert!(
+        out.ends_with("{/* emits `undefined` here */}\n// don't\nconst f = () => globalThis.__ms.currentEntity; /* it's */ g(globalThis.__ms.currentEntity);\n"),
+        "{out}"
+    );
+    // a comment's own text is left as is
+    let out = rewrite_shared_lets("// currentEntity\n/* currentEntity */ currentEntity", &names);
+    assert!(out.ends_with("// currentEntity\n/* currentEntity */ globalThis.__ms.currentEntity"), "{out}");
+    // `/` alone (division) is not a comment
+    let out = rewrite_shared_lets("a / currentEntity / 2", &names);
+    assert!(out.ends_with("a / globalThis.__ms.currentEntity / 2"), "{out}");
+}
