@@ -121,3 +121,31 @@ fn jsdom_computed_style_orders_sheets_by_insertion() {
     let r = turbo_test(&p.dir, &[], &[]);
     assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
 }
+
+/// turbo-test#210: jsdom's cascade sets each matching declaration in turn whatever its
+/// priority, so a later rule overrides an earlier `!important` one (MUI's LeftNavigation
+/// `.Mui-selected { padding-left: 9px !important }` then `padding-left: 12px`): vitest 4.1.12 +
+/// jsdom gives `12px`.
+#[test]
+fn jsdom_computed_style_lets_a_later_rule_override_important() {
+    let p = Project::new("jsdom-computed-important");
+    p.file(
+        "package.json",
+        r#"{"name":"jsdom-computed-important","type":"module"}"#,
+    );
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { environment: 'jsdom' } };\n",
+    );
+    p.file(
+        "a.test.js",
+        "import { expect, it } from 'vitest';\n\
+         it('important', () => {\n\
+           const s = document.createElement('style'); s.textContent = '.i{padding-left:9px !important}.i{padding-left:12px}'; document.head.append(s);\n\
+           const el = document.createElement('div'); el.className = 'i'; document.body.append(el);\n\
+           expect(getComputedStyle(el).paddingLeft).toBe('12px');\n\
+         });\n",
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
+}
