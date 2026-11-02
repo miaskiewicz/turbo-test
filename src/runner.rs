@@ -2261,6 +2261,8 @@ fn set_mock_prepass(scope: &mut v8::PinScope, on: bool) {
 /// installGlobals + the `.node` parser — was removed in v0.3.0; rtdom is the only DOM now.)
 fn setup_dom(scope: &mut v8::PinScope, _entry: &Path) {
     turbo_dom_browser_env::browser_env::install(scope);
+    // the embedder's window members: open / alert / print / postMessage … (turbo-test#208)
+    run_js(scope, "globalThis.__ttInstallWindowMembers && globalThis.__ttInstallWindowMembers();");
 }
 
 /// Transform a TS file to **ESM** JS using the PROJECT'S OWN TypeScript (`ts.transpileModule`),

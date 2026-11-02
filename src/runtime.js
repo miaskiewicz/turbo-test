@@ -7998,3 +7998,31 @@ globalThis.__ttResetForNextFile = () => {
   // re-applies a now-stale orig onto the shared analytics module — corrupting trackEvent for
   // every later file (asserts then see the wrong/old spy). Per-file restore is the test's job.
 };
+
+// The embedder's window members (turbo-test#208): turbo-dom leaves dialogs, window management,
+// printing and `open` to its embedder. jsdom's are no-ops returning undefined (it logs "Not
+// implemented", turbo-test does not); postMessage queues a `message` event. Own, non-enumerable
+// members of the window, as Chrome's [Global] Window operations are; a member the DOM already
+// has is kept.
+globalThis.__ttInstallWindowMembers = () => {
+  const w = globalThis.window;
+  if (!w || typeof w !== 'object' && typeof w !== 'function') return;
+  const def = (name, fn) => {
+    if (typeof w[name] === 'function') return;
+    Object.defineProperty(fn, 'name', { value: name });
+    try { Object.defineProperty(w, name, { value: fn, writable: true, configurable: true, enumerable: false }); } catch (e) {}
+  };
+  for (const name of ['alert', 'blur', 'close', 'confirm', 'focus', 'moveBy', 'moveTo', 'open', 'print', 'prompt', 'resizeBy', 'resizeTo', 'stop', 'captureEvents', 'releaseEvents']) {
+    def(name, function () { return undefined; });
+  }
+  def('scroll', function (...a) { return typeof w.scrollTo === 'function' ? w.scrollTo(...a) : undefined; });
+  def('scrollBy', function () { return undefined; });
+  def('postMessage', function (message) {
+    const data = typeof structuredClone === 'function' ? structuredClone(message) : message;
+    setTimeout(() => {
+      const Ev = w.MessageEvent;
+      const ev = typeof Ev === 'function' ? new Ev('message', { data, origin: '' }) : Object.assign(new w.Event('message'), { data });
+      w.dispatchEvent(ev);
+    }, 0);
+  });
+};
