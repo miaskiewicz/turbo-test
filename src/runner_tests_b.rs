@@ -771,3 +771,18 @@ fn extract_mocks_scans_the_text_of_source_that_does_not_parse() {
         pairs(&[("./x", "g")])
     );
 }
+
+/// turbo-test#207: the default transform cache is per build (`turbo-test-cache/<version>-<build
+/// id>`), so an entry another turbo-test build wrote is never served as a hit.
+#[test]
+fn the_default_cache_dir_is_per_build() {
+    let tmp = Path::new("/t");
+    let d = default_cache_dir(tmp);
+    assert_eq!(d.parent(), Some(Path::new("/t/turbo-test-cache")));
+    let leaf = d.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(
+        leaf,
+        format!("{}-{}", env!("CARGO_PKG_VERSION"), env!("TT_BUILD_ID"))
+    );
+    assert_eq!(env!("TT_BUILD_ID").len(), 16);
+}
