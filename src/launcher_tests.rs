@@ -1414,3 +1414,18 @@ fn config_true_reads_a_boolean_key() {
     ));
     assert!(!config_true("{ test: {} }", "includeTaskLocation"));
 }
+
+#[test]
+fn deps_inline_is_read_from_the_deps_block() {
+    // turbo-test#216: names, `true` (all) and nothing; an `inline` outside `deps` is not it
+    assert_eq!(
+        config_deps_inline("test: { server: { deps: { inline: ['a', \"@s/b\"] } } }"),
+        vec!["a", "@s/b"]
+    );
+    assert_eq!(
+        config_deps_inline("server: { deps: { inline: true } }"),
+        vec!["*"]
+    );
+    assert!(config_deps_inline("deps: { external: ['x'] }").is_empty());
+    assert!(config_deps_inline("inline: ['a']").is_empty());
+}

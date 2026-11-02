@@ -39,7 +39,7 @@ importing vitest:
 2. **Globals are always on** — `describe`/`it`/`expect`/`vi` are injected; you don't import them
    (importing from `'vitest'` also works as a no-op shim). `--globals`/`--no-globals` are accepted
    no-ops.
-3. **The DOM env** — `test.environment: jsdom | happy-dom` both map onto turbo-dom; `node` skips the
+3. **The DOM env** — `test.environment: jsdom | happy-dom | turbo-dom` all map onto turbo-dom (installed for every file); `node` skips the
    DOM. A per-file `// @vitest-environment <env>` docblock overrides it.
 4. **Output** — `--reporter json` emits vitest's JSON report (suite / test counts, per-file
    `testResults` with per-test `assertionResults`); `junit`/`tap`/`verbose`/`dot`/`default` also

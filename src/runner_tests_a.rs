@@ -1671,3 +1671,25 @@ fn a_serializers_variable_does_not_read_the_next_keys_list() {
         ["./a.js"]
     );
 }
+
+#[test]
+fn dom_env_names_and_inlined_packages() {
+    // turbo-test#217: turbo-dom is a DOM environment like jsdom / happy-dom
+    for e in ["jsdom", "happy-dom", "happydom", "turbo-dom"] {
+        assert!(is_dom_env(e), "{e}");
+    }
+    assert!(!is_dom_env("node") && !is_dom_env("edge-runtime"));
+    // turbo-test#216: the package after the last node_modules owns the dir (only this test sets
+    // TURBO_DEPS_INLINE in the unit binary)
+    std::env::remove_var("TURBO_DEPS_INLINE");
+    assert!(!inlined_dep(Path::new("/p/node_modules/a/dist")));
+    std::env::set_var("TURBO_DEPS_INLINE", "a\u{1f}@s/b");
+    assert!(inlined_dep(Path::new("/p/node_modules/a/dist")));
+    assert!(inlined_dep(Path::new("/p/node_modules/@s/b/esm/x")));
+    assert!(!inlined_dep(Path::new("/p/node_modules/@s/c")));
+    assert!(!inlined_dep(Path::new("/p/node_modules/a/node_modules/z")));
+    assert!(!inlined_dep(Path::new("/p/src")));
+    std::env::set_var("TURBO_DEPS_INLINE", "*");
+    assert!(inlined_dep(Path::new("/p/node_modules/z")));
+    std::env::remove_var("TURBO_DEPS_INLINE");
+}

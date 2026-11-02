@@ -1362,10 +1362,7 @@ pub fn set_worker_slot(pool: usize, seq: usize) {
 fn set_file_env(scope: &mut v8::PinScope, file: &Path) {
     let s = std::fs::read_to_string(file).unwrap_or_default();
     let env = forced_env(&s);
-    let web = matches!(
-        env.as_deref(),
-        Some("jsdom") | Some("happy-dom") | Some("happydom")
-    );
+    let web = env.as_deref().is_some_and(is_dom_env);
     let (pool, seq) = WORKER_SLOT.with(|w| w.get());
     let worker = if on_reuse_path() { pool } else { seq };
     run_js(
@@ -1385,6 +1382,12 @@ fn set_file_env(scope: &mut v8::PinScope, file: &Path) {
     );
 }
 
+/// Whether an environment name is a DOM one: vitest's `jsdom` / `happy-dom`, or `turbo-dom`, the
+/// name of the built-in DOM itself (turbo-test#217) — each installs the DOM for every file.
+fn is_dom_env(env: &str) -> bool {
+    matches!(env, "jsdom" | "happy-dom" | "happydom" | "turbo-dom")
+}
+
 /// Whether a file needs a DOM environment (so we don't impose one on pure-logic tests,
 /// which keeps their clean globals — mirrors vitest's per-file environment).
 ///
@@ -1396,7 +1399,7 @@ fn needs_dom(file: &Path) -> bool {
     match forced_env(&s).as_deref() {
         Some("node") => return false,
         // turbo-dom is our single DOM impl; jsdom/happy-dom both map onto it.
-        Some("jsdom") | Some("happy-dom") | Some("happydom") => return true,
+        Some(e) if is_dom_env(e) => return true,
         _ => {}
     }
     if matches!(
@@ -5096,6 +5099,7 @@ fn native_require(
     // never consults the mock registry (turbo-test#135).
     if !put
         && dir.contains("/node_modules/")
+        && !inlined_dep(Path::new(&dir))
         && REGISTRY.with(|r| r.borrow().mocks.contains_key(&abs))
     {
         if let Some(g) = actual_exports(scope, &abs) {
@@ -5250,6 +5254,27 @@ fn native_register_mock(
     if let Some(key) = mock_key(&spec, Path::new(&dir)) {
         register_mock_value(scope, &key, exports);
     }
+}
+
+/// Whether `dir` lies in a package the config's `server.deps.inline` names (TURBO_DEPS_INLINE,
+/// `*` = all): vitest runs such a package through its module runner, so its own imports see
+/// vi.mock like app code's (turbo-test#216). The owner is the package after the LAST
+/// `node_modules` (a scoped name takes two components).
+fn inlined_dep(dir: &Path) -> bool {
+    let Ok(list) = std::env::var("TURBO_DEPS_INLINE") else {
+        return false;
+    };
+    let s = dir.to_string_lossy();
+    let Some(i) = s.rfind("/node_modules/") else {
+        return false;
+    };
+    let mut parts = s[i + "/node_modules/".len()..].split('/');
+    let first = parts.next().unwrap_or_default();
+    let owner = match (first.starts_with('@'), parts.next()) {
+        (true, Some(name)) => format!("{first}/{name}"),
+        _ => first.to_string(),
+    };
+    list.split('\u{1f}').any(|n| n == "*" || n == owner)
 }
 
 /// The REAL exports of `abs`, never a registered mock: vi.importActual / importOriginal, and a
@@ -5617,7 +5642,9 @@ fn loader_debug() -> bool {
 /// as on vitest's own module runner (turbo-test#151). `None` for every other module. A package
 /// is left alone: vitest loads it through Node, which never sees a mock (turbo-test#135).
 fn guard_mock_default_reads(scope: &mut v8::PinScope, abs: &Path, src: &str) -> Option<String> {
-    if abs.components().any(|c| c.as_os_str() == "node_modules") || !src.contains("import") {
+    let external = abs.components().any(|c| c.as_os_str() == "node_modules")
+        && !abs.parent().is_some_and(inlined_dep);
+    if external || !src.contains("import") {
         return None;
     }
     let mocks: Vec<(PathBuf, v8::Global<v8::Value>)> = REGISTRY.with(|r| {

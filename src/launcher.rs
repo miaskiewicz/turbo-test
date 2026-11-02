@@ -255,6 +255,19 @@ fn config_true(text: &str, key: &str) -> bool {
     false
 }
 
+/// `server.deps.inline` (or the older `deps.inline`) from config text: its package names, or `*`
+/// for `inline: true` (turbo-test#216). RegExp entries are not read.
+fn config_deps_inline(text: &str) -> Vec<String> {
+    let Some(d) = text.find("deps") else {
+        return vec![];
+    };
+    let deps = &text[d..];
+    if config_true(deps, "inline") {
+        return vec!["*".to_string()];
+    }
+    scan_string_array(deps, "inline").unwrap_or_default()
+}
+
 /// Read `test.environment` (node|jsdom|happy-dom) from config text. Mirrors cli.js
 /// `configEnvironment`: `environment\s*:\s*['"`]([a-z-]+)['"`]`, lowercased.
 fn config_environment(text: &str) -> Option<String> {
@@ -1462,6 +1475,15 @@ pub fn plan(mut raw: Vec<String>, proc_cwd: &Path) -> Plan {
         .or_else(|| find_config(&cwd, forced.as_deref()).and_then(|c| config_environment(&c.text)));
     if let Some(e) = environment {
         env.push(("TURBO_ENV", e));
+    }
+
+    // `server.deps.inline` → TURBO_DEPS_INLINE: the packages whose own imports see vi.mock
+    // (vitest runs them through its module runner, turbo-test#216). `*` = `inline: true`.
+    let inline = find_config(&cwd, forced.as_deref())
+        .map(|c| config_deps_inline(&c.text))
+        .unwrap_or_default();
+    if !inline.is_empty() {
+        env.push(("TURBO_DEPS_INLINE", inline.join("\u{1f}")));
     }
 
     // `resolve.alias` / `test.alias` (incl. what plugins like vite-tsconfig-paths' non-tsconfig
