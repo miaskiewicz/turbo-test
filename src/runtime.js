@@ -7912,6 +7912,8 @@ globalThis.__tt = {
     return this._np;
   },
   async run() {
+    // the DOM's getComputedStyle exists by now (turbo-test#210)
+    if (globalThis.__ttInstallJsdomComputedStyle) globalThis.__ttInstallJsdomComputedStyle();
     // `suites`: one state per describe block ('pass' / 'fail' / 'skip' / 'todo'), for the JSON
     // reporter's suite counts.
     const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [], suites: [], skippedNames: [], suite_errors: [], empty_suites: [] };
@@ -8025,4 +8027,102 @@ globalThis.__ttInstallWindowMembers = () => {
       w.dispatchEvent(ev);
     }, 0);
   });
+};
+
+// environment 'jsdom' / 'happy-dom' (turbo-test#210): jsdom's getComputedStyle reports a
+// property's cascaded declared value (the last matching rule in document order, then the inline
+// style) and the shorthands built from those, where turbo-dom resolves it as Chrome does
+// (`1.25rem` vs `20px`, `bold` vs `700`). A property nothing declares reads turbo-dom's computed
+// value. `turbo-dom` keeps Chrome's.
+globalThis.__ttInstallJsdomComputedStyle = () => {
+  const w = globalThis.window;
+  if (!w || typeof w.getComputedStyle !== 'function' || w.getComputedStyle.__ttJsdom) return;
+  const real = w.getComputedStyle;
+  const jsdomEnv = () => globalThis.__ttEnvName === 'jsdom' || globalThis.__ttEnvName === 'happy-dom';
+  const kebab = (p) => p.startsWith('--') ? p : p.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()).replace(/^(webkit|moz|ms)-/, '-$1-');
+  const collect = (rules, el, out) => {
+    for (const rule of rules) {
+      try {
+        if (rule.selectorText !== undefined && rule.style) {
+          if (el.matches(rule.selectorText)) out.push(rule.style);
+        } else if (rule.media && rule.cssRules) {
+          const m = rule.media.mediaText || rule.conditionText || '';
+          if (!m || w.matchMedia(m).matches) collect(rule.cssRules, el, out);
+        } else if (rule.cssRules && rule.conditionText === undefined) {
+          collect(rule.cssRules, el, out);
+        } else if (rule.cssRules && typeof CSS !== 'undefined' && CSS.supports && CSS.supports(rule.conditionText)) {
+          collect(rule.cssRules, el, out);
+        }
+      } catch (e) {}
+    }
+  };
+  const declared = (el) => {
+    const blocks = [];
+    const doc = el.ownerDocument || w.document;
+    for (const sheet of [...(doc.styleSheets || []), ...(doc.adoptedStyleSheets || [])]) {
+      try { if (!sheet.disabled) collect(sheet.cssRules, el, blocks); } catch (e) {}
+    }
+    if (el.style) blocks.push(el.style);
+    const decl = new Map();
+    for (const block of blocks) {
+      for (let i = 0; i < block.length; i++) {
+        const name = block[i];
+        const important = block.getPropertyPriority(name) === 'important';
+        const prev = decl.get(name);
+        if (prev && prev.important && !important) continue;
+        decl.set(name, { value: block.getPropertyValue(name), important });
+      }
+    }
+    return decl;
+  };
+  const value = (decl, name, scratch, cs) => {
+    const d = decl.get(name);
+    // a color reads as rgb(), as jsdom's cssstyle spells it: turbo-dom's computed one
+    if (d && /color$/.test(name) && !/var\(|currentcolor|inherit/i.test(d.value)) {
+      const c = cs.getPropertyValue(name);
+      if (c) return c;
+    }
+    if (d) return d.value;
+    // a shorthand of declared longhands: the declaration block spells it
+    const v = scratch().getPropertyValue(name);
+    return v || undefined;
+  };
+  const getComputedStyle = function getComputedStyle(el, pseudo) {
+    const cs = Reflect.apply(real, w, arguments);
+    if (!jsdomEnv() || (pseudo !== undefined && pseudo !== null && pseudo !== '') || !el || el.nodeType !== 1) return cs;
+    const decl = declared(el);
+    if (!decl.size) return cs;
+    let block;
+    const scratch = () => {
+      if (!block) {
+        block = w.document.createElement('div').style;
+        for (const [name, d] of decl) block.setProperty(name, d.value);
+      }
+      return block;
+    };
+    return new Proxy(cs, {
+      get(target, key) {
+        if (key === 'getPropertyValue') {
+          return (name) => {
+            const v = typeof name === 'string' ? value(decl, kebab(String(name).trim()).toLowerCase(), scratch, target) : undefined;
+            return v !== undefined ? v : target.getPropertyValue(name);
+          };
+        }
+        if (typeof key === 'string' && key !== 'length' && key !== 'cssText' && !/^\d+$/.test(key) && /^-?-?[a-zA-Z][\w-]*$/.test(key)) {
+          const orig = Reflect.get(target, key, target);
+          if (typeof orig === 'string' || orig === undefined) {
+            const v = value(decl, kebab(key), scratch, target);
+            if (v !== undefined) return v;
+          }
+          return typeof orig === 'function' ? orig.bind(target) : orig;
+        }
+        const orig = Reflect.get(target, key, target);
+        return typeof orig === 'function' ? orig.bind(target) : orig;
+      },
+    });
+  };
+  try {
+    Object.defineProperty(getComputedStyle, '__ttJsdom', { value: true });
+    Object.defineProperty(w, 'getComputedStyle', { value: getComputedStyle, writable: true, configurable: true, enumerable: true });
+  } catch (e) {}
 };
