@@ -88,3 +88,41 @@ fn the_development_condition_is_matched_like_vitest() {
         );
     }
 }
+
+/// turbo-test#213: two installs of a package whose entry file is identical but whose inner
+/// modules differ (user-event 14.6.1 vs 14.6.8) each load their own bundle from a shared cache.
+#[test]
+fn a_package_bundle_is_cached_per_install() {
+    let cache = Project::new("dep-cache-shared");
+    for (name, inner) in [("dep-cache-a", "old"), ("dep-cache-b", "new")] {
+        let p = Project::new(name);
+        p.with_esbuild();
+        p.file("package.json", "{\"type\":\"module\"}\n");
+        p.file(
+            "node_modules/samepkg/package.json",
+            &format!("{{\"name\":\"samepkg\",\"version\":\"1.0.{}\",\"exports\":{{\".\":{{\"require\":\"./cjs.js\",\"default\":\"./index.js\"}}}}}}", inner.len()),
+        );
+        p.file(
+            "node_modules/samepkg/index.js",
+            "export { v } from './inner.js';\n",
+        );
+        p.file(
+            "node_modules/samepkg/inner.js",
+            &format!("export const v = '{inner}';\n"),
+        );
+        p.file(
+            "a.test.ts",
+            &format!("import {{ expect, it }} from 'vitest';\nimport {{ v }} from 'samepkg';\nit('own', () => {{ expect(v).toBe('{inner}'); }});\n"),
+        );
+        let r = turbo_test(
+            &p.dir,
+            &[],
+            &[("TURBO_CACHE_DIR", cache.dir.to_str().unwrap())],
+        );
+        assert!(
+            r.stdout.contains("Tests  1 passed (1)"),
+            "{name}\n{}",
+            r.all()
+        );
+    }
+}
