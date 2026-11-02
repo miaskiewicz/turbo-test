@@ -764,3 +764,69 @@ fn hoisted_factories_read_module_bindings_lazily_under_coverage_and_esbuild_cjs(
         assert_eq!(r.code, Some(0), "{args:?} {env:?}\n{}", r.all());
     }
 }
+
+/// turbo-test#224: a setup file whose top-level code between two vi.mock calls reads an import,
+/// below a comment that mentions a test keyword before a paren (payroll-app's
+/// `// … the page-seam test (it always renders`). The mock hoisting read the comment as a test
+/// call and dropped the code after it, so it moved that import's require below the code that
+/// reads it: `Cannot read properties of undefined (reading 'EXTRA')` failed every file. vitest
+/// 4.1.12 (`vitest run` and `vitest run --coverage`) on this project: 1 passed.
+#[test]
+fn setup_code_after_a_comment_naming_a_test_keyword_keeps_its_import() {
+    let p = Project::new("ra-setup-comment-keyword");
+    p.with_esbuild();
+    p.file(
+        "package.json",
+        r#"{"name":"ra-setup-comment-keyword","type":"module"}"#,
+    );
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { setupFiles: ['./src/setup.ts'], coverage: { include: ['src/**/*.ts'] } } };\n",
+    );
+    p.file(
+        "src/intl.ts",
+        "export const t = (_k: string): string => 'real';\n",
+    );
+    p.file("src/other.ts", "export const o = 'real';\n");
+    p.file("src/extra.ts", "export const EXTRA = { b: 'extra' };\n");
+    p.file(
+        "src/setup.ts",
+        "import { vi } from 'vitest';\nimport { EXTRA } from './extra';\n\
+         vi.mock('./other', () => ({ o: 'mocked' }));\n\
+         const TABLE: Record<string, string> = {\n  a: 'setup',\n\
+         \x20 // a stand-in for the page test (it always renders\n\
+         \x20 // \"(reverted N)\" only)\n  ...EXTRA,\n};\n\
+         (globalThis as any).TABLE = TABLE;\n\
+         vi.mock('./intl', () => ({ t: (k: string) => (globalThis as any).TABLE[k] }));\n",
+    );
+    p.file(
+        "src/a.test.ts",
+        "import { expect, it } from 'vitest';\nimport { t } from './intl';\n\
+         it('reads the setup table', () => { expect([t('a'), t('b')]).toEqual(['setup', 'extra']); });\n",
+    );
+    for (args, env) in [
+        (&["--reporter", "json"][..], &[][..]),
+        (
+            &["--reporter", "json"][..],
+            &[("TURBO_NATIVE_CJS", "0")][..],
+        ),
+        (
+            &[
+                "--reporter",
+                "json",
+                "--coverage",
+                "--coverage-reporter",
+                "lcov",
+            ][..],
+            &[][..],
+        ),
+    ] {
+        let r = turbo_test(&p.dir, args, env);
+        assert_eq!(
+            files(&r),
+            vec![f("a.test.ts", "passed", 1, 0)],
+            "{args:?} {env:?}\n{}",
+            r.all()
+        );
+    }
+}
