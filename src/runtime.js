@@ -8138,10 +8138,10 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
     for (const block of blocks) {
       for (let i = 0; i < block.length; i++) {
         const name = block[i];
-        const important = block.getPropertyPriority(name) === 'important';
-        const prev = decl.get(name);
-        if (prev && prev.important && !important) continue;
-        decl.set(name, { value: block.getPropertyValue(name), important });
+        // jsdom sets each declaration in turn, whatever its priority: the last one wins
+        const value = block.getPropertyValue(name);
+        if (value === 'unset') decl.delete(name);
+        else decl.set(name, { value });
       }
     }
     return decl;
