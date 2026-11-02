@@ -36,6 +36,9 @@ struct Registry {
     /// mock overwrites cjs_exports — so vi.importActual/importOriginal returns the real module
     /// without re-running it (avoids dual instances of singletons like react-query).
     real_exports: HashMap<PathBuf, v8::Global<v8::Value>>,
+    /// The REAL ES module record of a mocked path, linked by an external package's own `import`
+    /// (Node loads that package, never seeing vi.mock; turbo-test#218).
+    real_esm: HashMap<PathBuf, v8::Global<v8::Module>>,
     cjs_export_names: HashMap<PathBuf, Vec<String>>,
     path_by_hash: HashMap<i32, PathBuf>,
     /// The ES-module graph's synthetic modules of a CommonJS module's namespace (`?__tt_ns` /
@@ -268,6 +271,7 @@ fn reset_app_registry(stale: &[PathBuf]) {
         reg.cjs_synth_by_path.retain(|p, _| !evict(p));
         reg.cjs_export_names.retain(|p, _| !evict(p));
         reg.real_exports.retain(|p, _| !evict(p));
+        reg.real_esm.retain(|p, _| !evict(p));
         reg.esm_by_path.retain(|p, _| !evict(p));
         let live: std::collections::HashSet<PathBuf> = reg
             .cjs_exports
@@ -6151,6 +6155,10 @@ fn resolve_callback<'s>(
         scope.throw_exception(e);
         return None;
     }
+    // an external package's own ES import of a mocked ES module: the real one (turbo-test#218)
+    if let Some(m) = real_esm_for(scope, referrer, &abs) {
+        return Some(m);
+    }
     // a CommonJS module's namespace view (graph_interop)
     if let Some(kind) = variant_of(&spec) {
         if let Some(m) = variant_module(scope, &abs, kind) {
@@ -6180,6 +6188,75 @@ fn resolve_callback<'s>(
         reg.esm_by_path
             .get(&abs)
             .or_else(|| reg.cjs_synth_by_path.get(&abs))
+            .map(|g| v8::Local::new(scope, g))
+    })
+}
+
+/// The REAL module an external package's static `import` of a vi.mock'ed ES module links
+/// against: vitest leaves a package outside `server.deps.inline` to Node, which never sees a
+/// mock (turbo-test#135 for require(), #218 for import). Loaded once with the mock records set
+/// aside, kept in `real_esm` so the mock stays what app code (and an inlined package) gets.
+/// `None` for app / inlined importers, unmocked targets, and CommonJS / asset / JSON targets.
+fn real_esm_for<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    referrer: v8::Local<'s, v8::Module>,
+    abs: &Path,
+) -> Option<v8::Local<'s, v8::Module>> {
+    let hash = referrer.get_identity_hash().get();
+    let from = REGISTRY.with(|r| r.borrow().path_by_hash.get(&hash).cloned())?;
+    let dir = from.parent()?;
+    if !dir.to_string_lossy().contains("/node_modules/") || inlined_dep(dir) {
+        return None;
+    }
+    if !REGISTRY.with(|r| r.borrow().mocks.contains_key(abs))
+        || is_asset(abs)
+        || abs.extension().and_then(|e| e.to_str()) == Some("json")
+        || !matches!(detect_kind(abs), Kind::Esm)
+    {
+        return None;
+    }
+    if let Some(g) = REGISTRY.with(|r| r.borrow().real_esm.get(abs).cloned()) {
+        return Some(v8::Local::new(scope, &g));
+    }
+    let saved = REGISTRY.with(|r| {
+        let mut reg = r.borrow_mut();
+        (
+            reg.mocks.remove(abs),
+            reg.cjs_exports.remove(abs),
+            reg.cjs_synth_by_path.remove(abs),
+            reg.cjs_export_names.remove(abs),
+            reg.esm_by_path.remove(abs),
+        )
+    });
+    let loaded = load_graph(scope, abs);
+    REGISTRY.with(|r| {
+        let mut reg = r.borrow_mut();
+        let real = reg.esm_by_path.remove(abs);
+        let (m, e, s, n, esm) = saved;
+        let p = abs.to_path_buf();
+        if let Some(m) = m {
+            reg.mocks.insert(p.clone(), m);
+        }
+        if let Some(e) = e {
+            reg.cjs_exports.insert(p.clone(), e);
+        }
+        if let Some(s) = s {
+            reg.cjs_synth_by_path.insert(p.clone(), s);
+        }
+        if let Some(n) = n {
+            reg.cjs_export_names.insert(p.clone(), n);
+        }
+        if let Some(esm) = esm {
+            reg.esm_by_path.insert(p.clone(), esm);
+        }
+        if let Some(real) = real.filter(|_| loaded.is_some()) {
+            reg.real_esm.insert(p, real);
+        }
+    });
+    REGISTRY.with(|r| {
+        r.borrow()
+            .real_esm
+            .get(abs)
             .map(|g| v8::Local::new(scope, g))
     })
 }
@@ -8817,6 +8894,7 @@ fn clear_registry() {
         reg.cjs_synth_by_path.clear();
         reg.cjs_exports.clear();
         reg.real_exports.clear();
+        reg.real_esm.clear();
         reg.cjs_export_names.clear();
         reg.path_by_hash.clear();
         reg.variant_by_hash.clear();
