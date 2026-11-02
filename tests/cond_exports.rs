@@ -50,3 +50,41 @@ fn conditional_exports_follow_key_order_like_vitest() {
         }
     }
 }
+
+/// turbo-test#211: vitest resolves a package's `development` export condition (it runs in
+/// development mode), so @emotion/sheet loads its development build and appends text nodes to
+/// its `<style>` (ui-design-components' ArticleCard reads them). vitest 4.1.12: 1 passed under
+/// node and jsdom; turbo-test took the production build.
+#[test]
+fn the_development_condition_is_matched_like_vitest() {
+    for esbuild in [true, false] {
+        let p = Project::new(&format!("cond-development-{esbuild}"));
+        p.file("package.json", "{\"type\":\"module\"}\n");
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file(
+            "node_modules/devpkg/package.json",
+            r#"{"name":"devpkg","exports":{".":{"development":{"import":"./dev.mjs","default":"./dev.cjs"},"import":"./prod.mjs","default":"./prod.cjs"}}}"#,
+        );
+        for (f, v) in [
+            ("dev.mjs", "export const build = 'development';\n"),
+            ("prod.mjs", "export const build = 'production';\n"),
+            ("dev.cjs", "exports.build = 'development-cjs';\n"),
+            ("prod.cjs", "exports.build = 'production-cjs';\n"),
+        ] {
+            p.file(&format!("node_modules/devpkg/{f}"), v);
+        }
+        p.file(
+            "a.test.ts",
+            "import { expect, it } from 'vitest';\nimport { build } from 'devpkg';\nimport { createRequire } from 'node:module';\n\
+             it('dev', () => { expect([build, createRequire(import.meta.url)('devpkg').build]).toEqual(['development', 'development-cjs']); });\n",
+        );
+        let r = turbo_test(&p.dir, &[], &[]);
+        assert!(
+            r.stdout.contains("Tests  1 passed (1)"),
+            "esbuild={esbuild}\n{}",
+            r.all()
+        );
+    }
+}
