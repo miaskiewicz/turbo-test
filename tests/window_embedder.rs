@@ -91,3 +91,33 @@ fn jsdom_computed_style_skips_feature_media_queries() {
     let r = turbo_test(&p.dir, &[], &[]);
     assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
 }
+
+/// turbo-test#210: jsdom's cascade walks the style sheets in the order they were created or last
+/// re-parsed, not in tree order (emotion inserts its `<style>` tags before earlier ones):
+/// vitest 4.1.12 + jsdom gives `2px` here.
+#[test]
+fn jsdom_computed_style_orders_sheets_by_insertion() {
+    let p = Project::new("jsdom-computed-order");
+    p.file(
+        "package.json",
+        r#"{"name":"jsdom-computed-order","type":"module"}"#,
+    );
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { environment: 'jsdom' } };\n",
+    );
+    p.file(
+        "a.test.js",
+        "import { expect, it } from 'vitest';\n\
+         it('order', () => {\n\
+           const x = document.createElement('div'); x.className = 'x'; document.body.append(x);\n\
+           const a = document.createElement('style'); a.textContent = '.x{padding-left:1px}'; document.head.append(a);\n\
+           const b = document.createElement('style'); b.textContent = '.x{padding-left:2px}'; document.head.insertBefore(b, a);\n\
+           expect(getComputedStyle(x).paddingLeft).toBe('2px');\n\
+           a.textContent = '.x{padding-left:3px}';\n\
+           expect(getComputedStyle(x).paddingLeft).toBe('3px');\n\
+         });\n",
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
+}
