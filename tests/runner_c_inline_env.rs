@@ -88,10 +88,6 @@ fn an_inlined_package_sees_vi_mock_and_an_external_one_does_not() {
         .into_iter()
         .enumerate()
         {
-            // the ESM graph loader still hands a package's ES import the mock (turbo-test#218)
-            if !esbuild && body == REAL {
-                continue;
-            }
             let p = inline_project(&format!("rc-deps-inline-{esbuild}-{i}"), config, esbuild);
             p.file(file, body);
             let r = turbo_test(&p.dir, &[file], &[]);
