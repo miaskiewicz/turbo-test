@@ -2602,8 +2602,7 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     let root = project_root(file)?;
     let esbuild = esbuild_bin(&root);
     use std::hash::{Hash, Hasher};
-    // the test / setup file's factory-scope binder (turbo-test#205), as native_transform_cjs
-    let raw = with_binder(file, read_app_source(file)?, true);
+    let raw = read_app_source(file)?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
     file.extension()
