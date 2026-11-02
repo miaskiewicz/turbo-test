@@ -3,6 +3,28 @@
 All notable changes to `@miaskiewicz/turbo-test`. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.6.2] — 2026-11-02 — coverage-mode vi.mock hoisting
+
+0.6.0 and 0.6.1 broke two consumer suites only under `--coverage` (CI); the same suites passed without it.
+Under `--coverage` (and with `TURBO_NATIVE_CJS=0`) app files load through the esbuild CJS
+transform rather than the native one, and that path had two bugs. vitest 4.1.12 passes both
+reproductions with and without `--coverage`. Not Linux-specific, and `--shard` plays no part.
+
+### Fixed
+- Hoisted `vi.mock` factories read the test file's and the setup files' top-level bindings
+  under `--coverage` again. The esbuild CJS transform appended no factory-scope binder, so a
+  factory's closure that read a module binding (ui-design-components' DocumentViewer `PAGES`)
+  threw `Cannot access '<name>' before initialization` on every call (#222).
+- The esbuild CJS transform of a module whose source is not the file's (the binder appended, or
+  `import.meta.glob` expanded) reads a copy of it instead of stdin. esbuild rejects `--tsconfig`
+  on stdin, so in any project with a tsconfig.json that transform failed and the module fell back
+  to another load path (#223). It is why 0.6.0 had dropped the binder from that transform.
+- The `vi.mock` hoisting no longer takes a test keyword inside a comment or a string as a test
+  call. payroll-app's setup file had the comment `… page-seam test (it always renders` above
+  `...EMPLOYEE_PAY_DYNAMIC_TRANSLATIONS`. The hoisting dropped the code after the comment and
+  moved that import's require below its use, so the setup file failed every test file with
+  `Cannot read properties of undefined` (#224).
+
 ## [0.6.1] — 2026-11-02
 
 ### Fixed

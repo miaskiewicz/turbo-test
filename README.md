@@ -1,7 +1,7 @@
 # turbo-test
 
 **A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
-(and, experimentally, jest).** Release **0.6.1**.
+(and, experimentally, jest).** Release **0.6.2**.
 
 turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
 work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
@@ -380,7 +380,7 @@ npm run complexity:js        # CI job `complexity / js (cc <= 15)`
 - **Release** (`v*` tag): `release-guard` (no `[patch]`, no git sources, versions equal the tag),
   then the npm and crates.io publish jobs ([RELEASING.md](RELEASING.md)).
 
-## Status (0.6.1)
+## Status (0.6.2)
 
 - vitest suites: drop-in; the `vi` / mock / `expect` surface is vitest 4.1.12's
   ([vitest.compat.md](vitest.compat.md) lists what is covered and what is approximated).

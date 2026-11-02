@@ -1341,6 +1341,30 @@ fn assigns_word_cases() {
     assert!(!assigns_word("x = foo", "foo"));
 }
 
+/// turbo-test#224: a test keyword in a comment or a string is not a call. Read as one, the
+/// paren balancing ran on from inside the comment and dropped the code after it, so
+/// hoist_mock_setup took a require that code needs for a consumer (payroll-app's setup:
+/// `// … stand-in for the page-seam test (it always renders` above
+/// `...import_employeePayTranslations.X`).
+#[test]
+fn strip_test_blocks_ignores_keywords_in_comments_and_strings() {
+    let src = "// the page test (it renders\n// \"(reverted N)\" x\nconst T = { ...import_a.X };";
+    assert_eq!(strip_test_blocks(src), src);
+    let block = "/* a test (b */ const T = import_a.X;";
+    assert_eq!(strip_test_blocks(block), block);
+    let strs = "const s = 'it (' + \"test(\" + `describe(`; keep(import_a)";
+    assert_eq!(strip_test_blocks(strs), strs);
+    // a call after the comment is still stripped
+    assert_eq!(
+        strip_test_blocks("// it (x\nit('a', f) z"),
+        "// it (x\nit z"
+    );
+    // an unterminated comment / string runs to the end
+    assert_eq!(strip_test_blocks("/* it("), "/* it(");
+    assert_eq!(strip_test_blocks("'it("), "'it(");
+    assert_eq!(strip_test_blocks("'a\\'it(' z"), "'a\\'it(' z");
+}
+
 #[test]
 fn strip_test_blocks_drops_callback_bodies() {
     assert_eq!(

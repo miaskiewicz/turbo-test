@@ -686,3 +686,147 @@ fn a_setup_files_factory_reads_a_const_declared_below_its_hoisted_call() {
         r.all()
     );
 }
+
+/// turbo-test#222: under `--coverage` (and with the native CJS transform off) app files take the
+/// esbuild CJS transform, which got no factory-scope binder, so a hoisted factory's closure that
+/// reads a top-level binding once the module has run threw `Cannot access '<name>' before
+/// initialization` forever: the test file's own (ui-design-components' DocumentViewer `PAGES`)
+/// and a setup file's (payroll-app's next-intl mock reading translations spread from an import).
+/// A tsconfig.json is present (the transform of the bindered source must keep it: turbo-test#223).
+/// vitest 4.1.12
+/// (`vitest run` and `vitest run --coverage`) on this project: 2 passed.
+fn lazy_factory_reads(p: &Project) {
+    p.with_esbuild();
+    p.file(
+        "package.json",
+        r#"{"name":"ra-lazy-factory-reads","type":"module"}"#,
+    );
+    p.file(
+        "tsconfig.json",
+        r#"{"compilerOptions":{"target":"ES2022","module":"ESNext","jsx":"react-jsx","strict":true}}"#,
+    );
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { setupFiles: ['./src/setup.ts'], coverage: { include: ['src/**/*.ts'] } } };\n",
+    );
+    p.file("src/dep.ts", "export const pages = (): number => -1;\n");
+    p.file(
+        "src/intl.ts",
+        "export const t = (_k: string): string => 'real';\n",
+    );
+    p.file("src/other.ts", "export const o = 'real';\n");
+    p.file("src/extra.ts", "export const EXTRA = { b: 'extra' };\n");
+    p.file(
+        "src/setup.ts",
+        "import { vi } from 'vitest';\nimport { EXTRA } from './extra';\n\
+         vi.mock('./other', () => ({ o: 'mocked' }));\n\
+         const TABLE: Record<string, string> = { a: 'setup', ...EXTRA };\n\
+         vi.mock('./intl', () => ({ t: (k: string) => TABLE[k] }));\n",
+    );
+    p.file(
+        "src/a.test.ts",
+        "import { expect, it, vi } from 'vitest';\nimport { pages } from './dep';\nimport { t } from './intl';\n\
+         const PAGES = [['x'], ['y', 'z']];\n\
+         vi.mock('./dep', () => ({ pages: () => PAGES.length }));\n\
+         it('reads the test file binding', () => { expect(pages()).toBe(2); });\n\
+         it('reads the setup file binding', () => { expect([t('a'), t('b')]).toEqual(['setup', 'extra']); });\n",
+    );
+}
+
+#[test]
+fn hoisted_factories_read_module_bindings_lazily_under_coverage_and_esbuild_cjs() {
+    let p = Project::new("ra-lazy-factory-reads");
+    lazy_factory_reads(&p);
+    for (args, env) in [
+        (&["--reporter", "json"][..], &[][..]),
+        (
+            &["--reporter", "json"][..],
+            &[("TURBO_NATIVE_CJS", "0")][..],
+        ),
+        (
+            &[
+                "--reporter",
+                "json",
+                "--coverage",
+                "--coverage-reporter",
+                "lcov",
+            ][..],
+            &[][..],
+        ),
+    ] {
+        let r = turbo_test(&p.dir, args, env);
+        assert_eq!(
+            files(&r),
+            vec![f("a.test.ts", "passed", 2, 0)],
+            "{args:?} {env:?}\n{}",
+            r.all()
+        );
+        assert_eq!(r.code, Some(0), "{args:?} {env:?}\n{}", r.all());
+    }
+}
+
+/// turbo-test#224: a setup file whose top-level code between two vi.mock calls reads an import,
+/// below a comment that mentions a test keyword before a paren (payroll-app's
+/// `// … the page-seam test (it always renders`). The mock hoisting read the comment as a test
+/// call and dropped the code after it, so it moved that import's require below the code that
+/// reads it: `Cannot read properties of undefined (reading 'EXTRA')` failed every file. vitest
+/// 4.1.12 (`vitest run` and `vitest run --coverage`) on this project: 1 passed.
+#[test]
+fn setup_code_after_a_comment_naming_a_test_keyword_keeps_its_import() {
+    let p = Project::new("ra-setup-comment-keyword");
+    p.with_esbuild();
+    p.file(
+        "package.json",
+        r#"{"name":"ra-setup-comment-keyword","type":"module"}"#,
+    );
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { setupFiles: ['./src/setup.ts'], coverage: { include: ['src/**/*.ts'] } } };\n",
+    );
+    p.file(
+        "src/intl.ts",
+        "export const t = (_k: string): string => 'real';\n",
+    );
+    p.file("src/other.ts", "export const o = 'real';\n");
+    p.file("src/extra.ts", "export const EXTRA = { b: 'extra' };\n");
+    p.file(
+        "src/setup.ts",
+        "import { vi } from 'vitest';\nimport { EXTRA } from './extra';\n\
+         vi.mock('./other', () => ({ o: 'mocked' }));\n\
+         const TABLE: Record<string, string> = {\n  a: 'setup',\n\
+         \x20 // a stand-in for the page test (it always renders\n\
+         \x20 // \"(reverted N)\" only)\n  ...EXTRA,\n};\n\
+         (globalThis as any).TABLE = TABLE;\n\
+         vi.mock('./intl', () => ({ t: (k: string) => (globalThis as any).TABLE[k] }));\n",
+    );
+    p.file(
+        "src/a.test.ts",
+        "import { expect, it } from 'vitest';\nimport { t } from './intl';\n\
+         it('reads the setup table', () => { expect([t('a'), t('b')]).toEqual(['setup', 'extra']); });\n",
+    );
+    for (args, env) in [
+        (&["--reporter", "json"][..], &[][..]),
+        (
+            &["--reporter", "json"][..],
+            &[("TURBO_NATIVE_CJS", "0")][..],
+        ),
+        (
+            &[
+                "--reporter",
+                "json",
+                "--coverage",
+                "--coverage-reporter",
+                "lcov",
+            ][..],
+            &[][..],
+        ),
+    ] {
+        let r = turbo_test(&p.dir, args, env);
+        assert_eq!(
+            files(&r),
+            vec![f("a.test.ts", "passed", 1, 0)],
+            "{args:?} {env:?}\n{}",
+            r.all()
+        );
+    }
+}
