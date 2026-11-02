@@ -847,3 +847,39 @@ test('node:path', () => {
     p.file("a.test.js", test);
     assert_passes(&turbo_test(&p.dir, &["a.test.js"], &[]), 1);
 }
+
+/// turbo-test#212: Node's event loop order, which vitest runs on: a `setTimeout(fn, 0)` is a 1 ms
+/// timer, so a setImmediate and a MessageChannel message queued after it still run first
+/// (React's scheduler posts its render through them; RTL's `setTimeout(0)` drain after a
+/// user-event action then sees the committed update, as on vitest). vitest 4.1.12 (node, jsdom):
+/// `['micro', 'immediate', 'message', 'timeout0']`.
+#[test]
+fn timeout_zero_runs_after_immediates_and_messages_like_node() {
+    for env in ["node", "jsdom"] {
+        let p = Project::new(&format!("loop-order-{env}"));
+        p.file("package.json", r#"{"type":"module"}"#);
+        p.file(
+            "vitest.config.ts",
+            &format!("export default {{ test: {{ environment: '{env}' }} }};\n"),
+        );
+        p.file(
+            "a.test.js",
+            "import { expect, it } from 'vitest';\n\
+             it('order', async () => {\n\
+               const log = [];\n\
+               setTimeout(() => log.push('timeout0'), 0);\n\
+               setImmediate(() => log.push('immediate'));\n\
+               const ch = new MessageChannel(); ch.port1.onmessage = () => { log.push('message'); ch.port1.close(); }; ch.port2.postMessage(1);\n\
+               Promise.resolve().then(() => log.push('micro'));\n\
+               await new Promise((r) => setTimeout(r, 20));\n\
+               expect(log).toEqual(['micro', 'immediate', 'message', 'timeout0']);\n\
+             });\n",
+        );
+        let r = turbo_test(&p.dir, &[], &[]);
+        assert!(
+            r.stdout.contains("Tests  1 passed (1)"),
+            "{env}\n{}",
+            r.all()
+        );
+    }
+}
