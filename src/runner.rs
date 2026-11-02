@@ -3332,6 +3332,18 @@ fn replace_word(text: &str, word: &str, repl: &str) -> String {
         // escapes. (Template `${...}` expressions are skipped too — a missed interpolation would
         // surface as a visible ReferenceError, never the silent corruption of a rewritten string.)
         let c = b[i];
+        // comments are copied as they are: a quote or backtick in one opens no string, and a
+        // name in one is not a reference (turbo-test#209)
+        if c == b'/' && i + 1 < b.len() && (b[i + 1] == b'/' || b[i + 1] == b'*') {
+            let end = if b[i + 1] == b'/' {
+                text[i..].find('\n').map_or(text.len(), |n| i + n)
+            } else {
+                text[i + 2..].find("*/").map_or(text.len(), |n| i + 2 + n + 2)
+            };
+            out.push_str(&text[i..end]);
+            i = end;
+            continue;
+        }
         if c == b'"' || c == b'\'' || c == b'`' {
             out.push(c as char);
             i += 1;
