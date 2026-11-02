@@ -595,3 +595,94 @@ fn a_setup_files_mock_factory_reads_its_own_top_level_bindings_without_esbuild()
         r.all()
     );
 }
+
+/// turbo-test#205 on a reused isolate (`isolate: false`): the setup file runs once per worker,
+/// so its factory scope keeps the bindings the setup registered for every later test file
+/// (ui-design-components' `vi.mock('../analytics', () => analyticsMock)`). vitest 4.1.12 on this
+/// project gives 2 passed.
+#[test]
+fn a_setup_files_factory_scope_survives_isolate_reuse() {
+    let p = Project::new("ra-setup-factory-scope-reuse");
+    p.with_esbuild();
+    p.file(
+        "package.json",
+        r#"{"name":"ra-setup-factory-scope-reuse","type":"module"}"#,
+    );
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { isolate: false, setupFiles: ['./setup.ts'] } };\n",
+    );
+    p.file("src/dep.ts", "export const v = 'real';\n");
+    p.file(
+        "setup.ts",
+        "import { vi } from 'vitest';\nconst depMock = { v: 'mocked' };\nvi.mock('./src/dep', () => depMock);\n",
+    );
+    for name in ["a", "b"] {
+        p.file(
+            &format!("src/{name}.test.ts"),
+            "import { expect, it } from 'vitest';\nimport { v } from './dep';\nit('mocked', () => { expect(v).toBe('mocked'); });\n",
+        );
+    }
+    let r = turbo_test(
+        &p.dir,
+        &["--reporter", "json", "src/a.test.ts", "src/b.test.ts"],
+        &[("TURBO_JOBS", "1")],
+    );
+    assert_eq!(
+        files(&r),
+        vec![
+            f("a.test.ts", "passed", 1, 0),
+            f("b.test.ts", "passed", 1, 0)
+        ],
+        "{}",
+        r.all()
+    );
+}
+
+/// turbo-test#205: a setup file's hoisted `vi.mock('x', () => someConst)` whose const is declared
+/// below the call (ui-design-components' `analyticsMock`, after a loop that builds another mock)
+/// is resolved when the module is first imported, not when the call runs: vitest 4.1.12 on this
+/// project gives 1 passed. turbo-test ran the factory at the hoisted call and registered its
+/// `Cannot access 'analyticsMock' before initialization` stand-in.
+#[test]
+fn a_setup_files_factory_reads_a_const_declared_below_its_hoisted_call() {
+    let p = Project::new("ra-setup-factory-below");
+    p.with_esbuild();
+    p.file(
+        "package.json",
+        r#"{"name":"ra-setup-factory-below","type":"module"}"#,
+    );
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { globals: true, setupFiles: ['./src/test/setup.ts'], include: ['src/**/*.test.ts'] } };\n",
+    );
+    p.file(
+        "node_modules/fakeicons/package.json",
+        r#"{"name":"fakeicons","main":"i.js"}"#,
+    );
+    p.file("node_modules/fakeicons/i.js", "exports.A = 1;\n");
+    p.file(
+        "src/analytics/index.ts",
+        "export const trackEvent = () => 'real';\n",
+    );
+    p.file("src/lazy.ts", "export const t = () => 'real';\n");
+    p.file(
+        "src/test/setup.ts",
+        "import { vi } from 'vitest';\nconst names = ['A', 'B'];\nconst iconsMock: Record<string, unknown> = {};\n\
+         for (const name of names) {\n  iconsMock[name] = name;\n}\nvi.mock('fakeicons', () => iconsMock);\n\
+         const analyticsMock = { trackEvent: () => 'mocked' };\nvi.mock('../analytics', () => analyticsMock);\n\
+         const TABLE = { t: 'lazy' };\nvi.mock('../lazy', () => ({ t: () => TABLE.t }));\n",
+    );
+    p.file(
+        "src/x/y/a.test.ts",
+        "import { A } from 'fakeicons';\nimport { trackEvent } from '../../analytics';\nimport { t } from '../../lazy';\n\
+         it('m', () => { expect([A, trackEvent(), t()]).toEqual(['A', 'mocked', 'lazy']); });\n",
+    );
+    let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+    assert_eq!(
+        files(&r),
+        vec![f("a.test.ts", "passed", 1, 0)],
+        "{}",
+        r.all()
+    );
+}
