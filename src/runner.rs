@@ -2592,6 +2592,18 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
     // (turbo-test#133)
     // v7: package ES modules marked "pkg" (turbo-test#159)
     "native-dep-v7-bundle".hash(&mut h);
+    // the bundle inlines the package's whole relative graph, not just this file: two installs
+    // with the same entry file (user-event 14.6.1 / 14.6.8) differ inside, so the key names this
+    // install (its path) and its package.json (turbo-test#213)
+    file.hash(&mut h);
+    if let Some(manifest) = file
+        .ancestors()
+        .skip(1)
+        .map(|d| d.join("package.json"))
+        .find(|p| p.is_file())
+    {
+        std::fs::read(&manifest).unwrap_or_default().hash(&mut h);
+    }
     let node = is_esm_module(file);
     node.hash(&mut h);
     let cache = cache_dir().join(format!("ntvdep-{:016x}.cjs", h.finish()));
