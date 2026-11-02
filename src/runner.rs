@@ -1435,7 +1435,7 @@ fn vitest_isolate_false(entry: &Path) -> bool {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let flat: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-                if flat.contains("isolate:false") {
+                if strip_pool_options(&flat).contains("isolate:false") {
                     return true;
                 }
             }
@@ -1447,6 +1447,33 @@ fn vitest_isolate_false(entry: &Path) -> bool {
         dir = d.parent();
     }
     false
+}
+
+/// `flat` (a whitespace-free config) without its `poolOptions:{...}` blocks: vitest 4 removed
+/// `test.poolOptions` (it only logs a deprecation) and keeps `isolate: true`, so an `isolate`
+/// inside one is not the project's setting (turbo-test#215).
+fn strip_pool_options(flat: &str) -> String {
+    let mut out = String::with_capacity(flat.len());
+    let mut rest = flat;
+    while let Some(at) = rest.find("poolOptions:{") {
+        out.push_str(&rest[..at]);
+        let body = &rest[at + "poolOptions:".len()..];
+        let mut depth = 0usize;
+        let end = body
+            .char_indices()
+            .find_map(|(i, c)| {
+                match c {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+                (depth == 0).then_some(i + 1)
+            })
+            .unwrap_or(body.len());
+        rest = &body[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 static REUSE_DECISION: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

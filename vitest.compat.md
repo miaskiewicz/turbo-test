@@ -222,7 +222,7 @@ primitive, a missing property or a non-function; `vi.mocked` returns its argumen
 | `test.environment` | ✅ | string-scan; sets the run default env when `--environment` is absent → `TURBO_ENV`. Per-file pragma still wins. |
 | anything requiring evaluating the config (functions, `defineConfig` logic, env interpolation, plugins, `setupFiles` array beyond first, aliases) | 🟡/❌ | Pure regex scan — dynamic config is invisible. |
 | `test.setupFiles` | ✅ | read by the runner (`runner.rs`) from the nearest config, every name vitest resolves in its order (`vitest.config` then `vite.config`, each `.ts .mts .cts .js .mjs .cjs`); a jest config's `setupFiles` / `setupFilesAfterEnv` otherwise. |
-| `test.globals`, `test.testTimeout`, `test.retry`, `test.bail`, `test.pool`, `test.reporters` | ❌ | Not read from config. (`test.isolate:false` IS autodetected separately in `runner.rs`.) |
+| `test.globals`, `test.testTimeout`, `test.retry`, `test.bail`, `test.pool`, `test.reporters` | ❌ | Not read from config. (`test.isolate:false` IS autodetected separately in `runner.rs`; an `isolate` inside `test.poolOptions` is ignored, as vitest 4 removed `poolOptions`: turbo-test#215.) |
 
 ---
 
