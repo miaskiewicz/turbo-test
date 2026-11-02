@@ -8046,8 +8046,10 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
         if (rule.selectorText !== undefined && rule.style) {
           if (el.matches(rule.selectorText)) out.push(rule.style);
         } else if (rule.media && rule.cssRules) {
-          const m = rule.media.mediaText || rule.conditionText || '';
-          if (!m || w.matchMedia(m).matches) collect(rule.cssRules, el, out);
+          // jsdom applies an @media block only for a media-type list naming screen / all, no
+          // feature queries (its window has no layout to query)
+          const m = (rule.media.mediaText || '').trim().toLowerCase();
+          if (!m || (!m.includes('(') && m.split(',').some((t) => /^(only\s+)?(screen|all)$/.test(t.trim())))) collect(rule.cssRules, el, out);
         } else if (rule.cssRules && rule.conditionText === undefined) {
           collect(rule.cssRules, el, out);
         } else if (rule.cssRules && typeof CSS !== 'undefined' && CSS.supports && CSS.supports(rule.conditionText)) {
