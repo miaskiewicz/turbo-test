@@ -349,10 +349,14 @@ __loop.toFrame = function () {
 // for the fake-clock set and useRealTimers puts the real ones back (sinon's hijack /
 // uninstall), so a reference taken before (node:timers, a library's captured setImmediate)
 // stays on the real clock, as in vitest (turbo-test#168).
+const __nodeDelay = (d) => { const n = Number(d); return n >= 1 && n <= 2147483647 ? n : 1; };
 function __timerFns(fake) {
   return {
-    setTimeout: (cb, d, ...a) => __schedule(() => cb(...a), d, null, fake),
-    setInterval: (cb, d, ...a) => __schedule(() => cb(...a), d, Math.max(1, d | 0), fake),
+    // Node makes a real timer's delay below 1 ms (0, NaN, negative) 1 ms, so a setImmediate or a
+    // MessageChannel message queued after a setTimeout(fn, 0) runs first (turbo-test#212); the
+    // fake clock (sinon) keeps 0
+    setTimeout: (cb, d, ...a) => __schedule(() => cb(...a), fake ? d : __nodeDelay(d), null, fake),
+    setInterval: (cb, d, ...a) => __schedule(() => cb(...a), fake ? d : __nodeDelay(d), Math.max(1, d | 0), fake),
     setImmediate: (cb, ...a) => __schedule(() => cb(...a), 0, null, fake, true),
     clearTimeout: (id) => __clearTimer(id),
     clearInterval: (id) => __clearTimer(id),
@@ -1914,7 +1918,7 @@ if (typeof globalThis.MessageChannel === 'undefined') {
         postMessage(data) {
           const o = this._other;
           // a real-clock task: Node's MessagePort is not a faked timer
-          if (o) __realTimers.setTimeout(() => {
+          if (o) __realTimers.setImmediate(() => {
             const ev = { data };
             if (typeof o.onmessage === 'function') o.onmessage(ev);
             (o._listeners || []).forEach((f) => f(ev));
@@ -8040,41 +8044,46 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
   const real = w.getComputedStyle;
   const jsdomEnv = () => globalThis.__ttEnvName === 'jsdom' || globalThis.__ttEnvName === 'happy-dom';
   const kebab = (p) => p.startsWith('--') ? p : p.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()).replace(/^(webkit|moz|ms)-/, '-$1-');
-  const collect = (rules, el, out) => {
+  // the style rules that can apply, in cascade order (jsdom's @media / @supports handling);
+  // re-flattened only when the sheets change
+  const flatten = (rules, out) => {
     for (const rule of rules) {
       try {
         const head = () => String(rule.cssText || '').slice(0, String(rule.cssText || '').indexOf('{')).trim();
         if (rule.type === 1 && rule.style) {
-          if (el.matches(rule.selectorText)) out.push(rule.style);
+          out.push(rule);
         } else if (rule.type === 4 && rule.cssRules) {
           // jsdom applies an @media block only for a media-type list naming screen / all, no
           // feature queries (its window has no layout to query)
           const m = String((rule.media && rule.media.mediaText) || rule.conditionText || head().replace(/^@media/i, '')).trim().toLowerCase();
-          if (!m || (!m.includes('(') && m.split(',').some((t) => /^(only\s+)?(screen|all)$/.test(t.trim())))) collect(rule.cssRules, el, out);
+          if (!m || (!m.includes('(') && m.split(',').some((t) => /^(only\s+)?(screen|all)$/.test(t.trim())))) flatten(rule.cssRules, out);
         } else if (rule.type === 12 && rule.cssRules) {
           const c = String(rule.conditionText || head().replace(/^@supports/i, '')).trim();
-          if (typeof CSS !== 'undefined' && CSS.supports && CSS.supports(c)) collect(rule.cssRules, el, out);
+          if (typeof CSS !== 'undefined' && CSS.supports && CSS.supports(c)) flatten(rule.cssRules, out);
         } else if (rule.cssRules) {
-          collect(rule.cssRules, el, out);
+          flatten(rule.cssRules, out);
         }
       } catch (e) {}
     }
+    return out;
   };
   // jsdom keeps a document's sheets in the order they were created or last re-parsed (a
   // `<style>` whose text changes moves to the end), not in tree order: an observer of the
   // document's style elements, read synchronously on each call, keeps that order.
-  const order = [];
+  let order = [];
+  let version = 0;
   let observer;
-  const isSheetOwner = (n) => n && n.nodeType === 1 && (n.localName === 'style' || (n.localName === 'link' && /stylesheet/i.test(n.rel || '')));
-  const touch = (n) => { const i = order.indexOf(n); if (i >= 0) order.splice(i, 1); order.push(n); };
   let observed;
+  const isSheetOwner = (n) => n && n.nodeType === 1 && (n.localName === 'style' || (n.localName === 'link' && /stylesheet/i.test(n.rel || '')));
+  const touch = (n) => { const i = order.lastIndexOf(n); if (i >= 0) order.splice(i, 1); order.push(n); version++; };
   const track = (doc) => {
-    if (observer && observed !== doc) { observer.disconnect(); observer = undefined; order.length = 0; }
+    if (observer && observed !== doc) { observer.disconnect(); observer = undefined; order = []; }
     if (!observer && typeof w.MutationObserver === 'function') {
       observed = doc;
       for (const n of doc.querySelectorAll('style, link[rel~="stylesheet" i]')) order.push(n);
       observer = new w.MutationObserver(() => {});
       observer.observe(doc, { childList: true, subtree: true, characterData: true });
+      version++;
     }
     if (!observer) return;
     for (const rec of observer.takeRecords()) {
@@ -8084,23 +8093,45 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
           if (isSheetOwner(n)) touch(n);
           else if (n.nodeType === 1 && n.querySelectorAll) for (const m of n.querySelectorAll('style, link')) if (isSheetOwner(m)) touch(m);
         }
+        if (rec.removedNodes.length) version++;
       } else if (rec.type === 'characterData' && isSheetOwner(rec.target.parentNode)) {
         touch(rec.target.parentNode);
       }
     }
   };
-  const sheetsOf = (doc) => {
+  let cache = { key: '', rules: [] };
+  const rulesOf = (doc) => {
     track(doc);
     const tree = Array.from(doc.styleSheets || []);
-    if (!observer) return tree;
-    const ranked = order.filter((n) => n.isConnected && n.sheet && tree.includes(n.sheet)).map((n) => n.sheet);
-    return [...tree.filter((s) => !ranked.includes(s)), ...ranked];
+    const adopted = Array.from(doc.adoptedStyleSheets || []);
+    let count = 0;
+    for (const sh of tree) { try { count += sh.cssRules.length; } catch (e) {} }
+    for (const sh of adopted) { try { count += sh.cssRules.length; } catch (e) {} }
+    const key = version + ':' + tree.length + ':' + adopted.length + ':' + count;
+    if (cache.key === key && cache.doc === doc) return cache.rules;
+    let sheets = tree;
+    if (observer) {
+      const inTree = new Set(tree);
+      const ranked = [];
+      const seen = new Set();
+      for (const n of order) {
+        const sh = n.isConnected && n.sheet;
+        if (sh && inTree.has(sh) && !seen.has(sh)) { seen.add(sh); ranked.push(sh); }
+      }
+      sheets = [...tree.filter((sh) => !seen.has(sh)), ...ranked];
+    }
+    const rules = [];
+    for (const sh of [...sheets, ...adopted]) {
+      try { if (!sh.disabled) flatten(sh.cssRules, rules); } catch (e) {}
+    }
+    cache = { key, rules, doc };
+    return rules;
   };
   const declared = (el) => {
     const blocks = [];
     const doc = el.ownerDocument || w.document;
-    for (const sheet of [...sheetsOf(doc), ...(doc.adoptedStyleSheets || [])]) {
-      try { if (!sheet.disabled) collect(sheet.cssRules, el, blocks); } catch (e) {}
+    for (const rule of rulesOf(doc)) {
+      try { if (el.matches(rule.selectorText)) blocks.push(rule.style); } catch (e) {}
     }
     if (el.style) blocks.push(el.style);
     const decl = new Map();
