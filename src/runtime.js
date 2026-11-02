@@ -1905,31 +1905,32 @@ if (typeof globalThis.btoa === 'undefined') {
 }
 
 // ---- EventTarget/Event (turbo-dom's Node extends EventTarget) ----
-if (typeof globalThis.EventTarget === 'undefined') {
-  globalThis.EventTarget = class EventTarget {
-    constructor() { this.__listeners = Object.create(null); }
-    addEventListener(type, fn) { if (!fn) return; (this.__listeners[type] || (this.__listeners[type] = [])).push(fn); }
-    removeEventListener(type, fn) { const a = this.__listeners[type]; if (a) this.__listeners[type] = a.filter((x) => x !== fn); }
-    dispatchEvent(ev) {
-      ev.target = ev.target || this; ev.currentTarget = this;
-      (this.__listeners[ev.type] || []).slice().forEach((fn) => { try { (fn.handleEvent || fn).call(this, ev); } catch {} });
-      return !ev.defaultPrevented;
-    }
-  };
-}
+// A factory, so chai gets its own host classes (turbo-test#203): the DOM environment takes over
+// the global EventTarget / Event prototypes, as jsdom replaces them in vitest while chai keeps
+// Node's.
+const __hostEventTarget = () => class EventTarget {
+  constructor() { this.__listeners = Object.create(null); }
+  addEventListener(type, fn) { if (!fn) return; (this.__listeners[type] || (this.__listeners[type] = [])).push(fn); }
+  removeEventListener(type, fn) { const a = this.__listeners[type]; if (a) this.__listeners[type] = a.filter((x) => x !== fn); }
+  dispatchEvent(ev) {
+    ev.target = ev.target || this; ev.currentTarget = this;
+    (this.__listeners[ev.type] || []).slice().forEach((fn) => { try { (fn.handleEvent || fn).call(this, ev); } catch {} });
+    return !ev.defaultPrevented;
+  }
+};
+if (typeof globalThis.EventTarget === 'undefined') globalThis.EventTarget = __hostEventTarget();
 // FileReader is defined above EventTarget; make it one (turbo-test#139)
 if (globalThis.FileReader && !(globalThis.FileReader.prototype instanceof globalThis.EventTarget)) {
   Object.setPrototypeOf(globalThis.FileReader.prototype, globalThis.EventTarget.prototype);
   Object.setPrototypeOf(globalThis.FileReader, globalThis.EventTarget);
 }
-if (typeof globalThis.Event === 'undefined') {
-  globalThis.Event = class Event {
-    constructor(type, init) { init = init || {}; this.type = type; this.bubbles = !!init.bubbles; this.cancelable = !!init.cancelable; this.composed = !!init.composed; this.defaultPrevented = false; this.target = null; this.currentTarget = null; this.timeStamp = 0; }
-    preventDefault() { this.defaultPrevented = true; }
-    stopPropagation() {}
-    stopImmediatePropagation() {}
-  };
-}
+const __hostEvent = () => class Event {
+  constructor(type, init) { init = init || {}; this.type = type; this.bubbles = !!init.bubbles; this.cancelable = !!init.cancelable; this.composed = !!init.composed; this.defaultPrevented = false; this.target = null; this.currentTarget = null; this.timeStamp = 0; }
+  preventDefault() { this.defaultPrevented = true; }
+  stopPropagation() {}
+  stopImmediatePropagation() {}
+};
+if (typeof globalThis.Event === 'undefined') globalThis.Event = __hostEvent();
 // MessageEvent — postMessage-style events (Calendly/Stripe embeds, BroadcastChannel, web workers).
 // jsdom provides it; turbo-test didn't, so `new MessageEvent('message', { data })` / a component's
 // window 'message' listener threw "MessageEvent is not defined".
@@ -4608,7 +4609,7 @@ function __matcherState(isNot, promise) {
 // (runner.rs chai_script), loaded here. As vitest's JestChaiExpect does, every jest-style matcher is a method of
 // chai's Assertion, run on the assertion's flags; chai brings its BDD chain (`to`, `be`, `deep`,
 // `equal`, `include`, ...), its proxy (`Invalid Chai property`), `assert` and `should`.
-const __chai = globalThis.__ttLoadChai && globalThis.__ttLoadChai();
+const __chai = globalThis.__ttLoadChai && globalThis.__ttLoadChai(__hostEventTarget(), __hostEvent());
 delete globalThis.__ttLoadChai;
 if (!__chai || typeof __chai.Assertion !== 'function') throw new Error('turbo-test: chai is not loaded');
 const __cu = __chai.util;

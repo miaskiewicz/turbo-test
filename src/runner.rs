@@ -6506,8 +6506,9 @@ fn chai_missing(why: &str) -> ! {
 }
 
 /// chai's `index.js` (an ES module) lowered to CommonJS by the native ESM→CJS emitter, wrapped
-/// into `globalThis.__ttLoadChai()`, which runtime.js calls once its EventTarget / Event exist
-/// (chai's plugin events need them) and which returns chai's exports.
+/// into `globalThis.__ttLoadChai(EventTarget, Event)`, which runtime.js calls with private host
+/// classes (chai's plugin events need them, apart from the DOM environment's: turbo-test#203) and
+/// which returns chai's exports.
 fn chai_script() -> String {
     let Some(path) = chai_path() else {
         chai_missing("TURBO_CHAI is not set");
@@ -6521,7 +6522,7 @@ fn chai_script() -> String {
         ))
     });
     format!(
-        "globalThis.__ttLoadChai = () => {{ const module = {{ exports: {{}} }}; (function (module, exports) {{\n{cjs}\n}})(module, module.exports); return module.exports; }};"
+        "globalThis.__ttLoadChai = (EventTarget, Event) => {{ const module = {{ exports: {{}} }}; (function (module, exports) {{\n{cjs}\n}})(module, module.exports); return module.exports; }};"
     )
 }
 
