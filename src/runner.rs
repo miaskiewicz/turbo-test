@@ -989,13 +989,24 @@ pub fn transform_cache_stats() -> (u64, u64) {
 
 const TRANSFORM_VERSION: &str = "oxc-0.134-v1";
 
+/// The default transform cache under `tmp`: one directory per turbo-test build
+/// (`turbo-test-cache/<version>-<build id>`, build.rs), so an entry another build wrote (an older
+/// release, a pre-release, another worktree) is never served as a hit (turbo-test#207).
+fn default_cache_dir(tmp: &Path) -> PathBuf {
+    tmp.join("turbo-test-cache").join(format!(
+        "{}-{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("TT_BUILD_ID")
+    ))
+}
+
 fn cache_dir() -> PathBuf {
     // TURBO_CACHE_DIR overrides the shared temp cache — lets a test run against an isolated,
     // freshly-cleared cache without disturbing other concurrent turbo-test processes that share
     // the default location.
     let d = std::env::var_os("TURBO_CACHE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("turbo-test-cache"));
+        .unwrap_or_else(|| default_cache_dir(&std::env::temp_dir()));
     // create_dir_all runs on every call (9 call sites per module load) though the dir only needs
     // creating once. Memoize the (dir -> created) fact in a OnceLock keyed by the resolved path so
     // the syscall fires exactly once per distinct cache dir for the life of the process.

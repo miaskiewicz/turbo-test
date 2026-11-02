@@ -1,4 +1,38 @@
+/// A fingerprint of everything that shapes the runner's transforms (the sources and the locked
+/// dependency versions): the default transform cache is per build (turbo-test#207).
+fn build_id() -> String {
+    use std::hash::{Hash, Hasher};
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(std::path::Path::new("src"), &mut files);
+    files.push("Cargo.lock".into());
+    files.push("build.rs".into());
+    files.sort();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for f in &files {
+        f.hash(&mut h);
+        std::fs::read(f).unwrap_or_default().hash(&mut h);
+    }
+    format!("{:016x}", h.finish())
+}
+
 fn main() {
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=Cargo.lock");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rustc-env=TT_BUILD_ID={}", build_id());
     // Export the binary's dynamic symbols so dlopen'd native (.node) addons can resolve
     // their undefined `napi_*` imports against our Node-API host implementations.
     //
