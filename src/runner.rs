@@ -2053,7 +2053,7 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String>
             let code = if bindings.is_empty() {
                 code
             } else {
-                crate::mock_scope::with_scope(&code, &bindings)
+                crate::mock_scope::with_scope(&code, &bindings, entry)
             };
             // the transform's own `require("react/jsx-runtime")` (a file without imports)
             format!("((require) => {{\n{code}\n}})({require});")
@@ -2134,7 +2134,7 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String>
             let raw = if bindings.is_empty() {
                 raw
             } else {
-                crate::mock_scope::with_scope(&raw, &bindings)
+                crate::mock_scope::with_scope(&raw, &bindings, entry)
             };
             let wrapped = format!(
                 "(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})"
@@ -4801,6 +4801,8 @@ thread_local! {
     static ENTRY_LENIENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The test file this thread runs (its mock factories see its scope, mock_scope.rs).
     static TEST_FILE: std::cell::RefCell<PathBuf> = const { std::cell::RefCell::new(PathBuf::new()) };
+    /// The current test file's setup files, which get the factory-scope binder too (turbo-test#205).
+    static SCOPED_SETUP_FILES: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The test file's top-level bindings its `vi.mock` factories name (mock_scope.rs); the shared
@@ -4850,14 +4852,18 @@ fn read_app_source(file: &Path) -> Option<String> {
 }
 
 fn with_binder(abs: &Path, src: String, mr: bool) -> String {
-    if !TEST_FILE.with(|f| *f.borrow() == abs) {
+    // the test file and the setup files: each one's factories close over its own bindings
+    // (turbo-test#205)
+    if !TEST_FILE.with(|f| *f.borrow() == abs)
+        && !SCOPED_SETUP_FILES.with(|f| f.borrow().iter().any(|s| s == abs))
+    {
         return src;
     }
     let bindings = factory_bindings(abs, &src, mr);
     if bindings.is_empty() {
         return src;
     }
-    format!("{src}\n{}", crate::mock_scope::binder(&bindings))
+    format!("{src}\n{}", crate::mock_scope::binder(&bindings, abs))
 }
 
 /// Whether to stub a failed node_modules load for the CURRENT file. e2e entries only;
@@ -7494,6 +7500,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     // NOT externalized: their factories can fail to register (JSX/importOriginal), and a
     // dangling external would fail the whole file — safer to leave them bundled.
     let setup_files = vitest_setup_files(&entry_abs);
+    SCOPED_SETUP_FILES.with(|f| *f.borrow_mut() = setup_files.clone());
     let mut externals: Vec<String> = Vec::new();
     let mut mock_targets: std::collections::HashMap<String, PathBuf> =
         std::collections::HashMap::new();

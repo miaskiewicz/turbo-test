@@ -71,12 +71,12 @@ fn mentions_whole_identifiers_only() {
 fn binder_and_scope_text() {
     let b = [("a".to_string(), true), ("K".to_string(), false)];
     assert_eq!(
-        binder(&b),
-        "globalThis.__ttScopeBind({ a: () => a, K: () => K }, { a: (v) => { a = v; } });"
+        binder(&b, std::path::Path::new("/p/a.ts")),
+        "globalThis.__ttScopeBind(\"/p/a.ts\", { a: () => a, K: () => K }, { a: (v) => { a = v; } });"
     );
     assert_eq!(
-        with_scope("f()", &b),
-        "globalThis.__ttScopeNames([\"a\", \"K\"]);\nwith (globalThis.__ttScope) {\nf()\n}"
+        with_scope("f()", &b, std::path::Path::new("/p/a.ts")),
+        "globalThis.__ttScopeNames(\"/p/a.ts\", [\"a\", \"K\"]);\nwith (globalThis.__ttScopeOf(\"/p/a.ts\")) {\nf()\n}"
     );
 }
 

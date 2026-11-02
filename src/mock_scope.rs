@@ -5,8 +5,9 @@
 //! factories earlier, in a mock prepass outside the module. To give them the same bindings, the
 //! test file is loaded with a binder statement in front of its code ([`binder`]) that hands the
 //! runtime a getter (and, for a `let` / `var`, a setter) per top-level binding the factories name;
-//! the prepass runs inside `with (globalThis.__ttScope) { … }` ([`with_scope`]), a proxy that
-//! resolves those names through the getters (runtime.js `__ttScope`). A factory that reads one
+//! the prepass runs inside `with (globalThis.__ttScopeOf(file)) { … }` ([`with_scope`]), a proxy
+//! that resolves those names through the getters (runtime.js `__ttScopeOf`; one scope per file,
+//! setup files included: turbo-test#205). A factory that reads one
 //! before the module has run throws `Cannot access '<name>' before initialization`, as a read of
 //! a binding in its temporal dead zone does.
 
@@ -130,7 +131,7 @@ fn mentions(text: &str, name: &str) -> bool {
 
 /// The statement (no newline, so lines keep their numbers) that hands the runtime a getter — and
 /// for an assignable binding a setter — per binding.
-pub fn binder(bindings: &[Binding]) -> String {
+pub fn binder(bindings: &[Binding], file: &Path) -> String {
     let get: Vec<String> = bindings
         .iter()
         .map(|(n, _)| format!("{n}: () => {n}"))
@@ -141,21 +142,24 @@ pub fn binder(bindings: &[Binding]) -> String {
         .map(|(n, _)| format!("{n}: (v) => {{ {n} = v; }}"))
         .collect();
     format!(
-        "globalThis.__ttScopeBind({{ {} }}, {{ {} }});",
+        "globalThis.__ttScopeBind({}, {{ {} }}, {{ {} }});",
+        crate::runner::js_string_literal(&file.to_string_lossy()),
         get.join(", "),
         set.join(", ")
     )
 }
 
 /// `code` (sloppy-mode script text) run with the names of `bindings` resolved through the test
-/// file's scope; the runtime learns the names first.
-pub fn with_scope(code: &str, bindings: &[Binding]) -> String {
+/// file's scope; the runtime learns the names first. Each file (the test file, every setup file)
+/// has a scope of its own, keyed by its path (turbo-test#205).
+pub fn with_scope(code: &str, bindings: &[Binding], file: &Path) -> String {
     let names: Vec<String> = bindings
         .iter()
         .map(|(n, _)| crate::runner::js_string_literal(n))
         .collect();
+    let key = crate::runner::js_string_literal(&file.to_string_lossy());
     format!(
-        "globalThis.__ttScopeNames([{}]);\nwith (globalThis.__ttScope) {{\n{code}\n}}",
+        "globalThis.__ttScopeNames({key}, [{}]);\nwith (globalThis.__ttScopeOf({key})) {{\n{code}\n}}",
         names.join(", ")
     )
 }
