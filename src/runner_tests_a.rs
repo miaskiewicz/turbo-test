@@ -55,19 +55,25 @@ fn config_alias_list_is_empty_without_env() {
 fn base_resolve_options_esm_first_and_cjs_first() {
     CJS_FIRST_RESOLUTION.with(|c| c.set(false));
     let o = base_resolve_options(None, true, false);
-    assert_eq!(o.condition_names, vec!["import", "browser", "default"]);
+    assert_eq!(
+        o.condition_names,
+        vec!["development", "import", "browser", "default"]
+    );
     // an import's last resort: `require` appended (turbo-test#200)
     let o2 = base_resolve_options(None, true, true);
     assert_eq!(
         o2.condition_names,
-        vec!["import", "browser", "default", "require"]
+        vec!["development", "import", "browser", "default", "require"]
     );
     assert_eq!(o.main_fields, vec!["browser", "main", "module"]);
     assert!(o.tsconfig.is_none());
     assert!(o.extensions.contains(&".tsx".to_string()));
     // a require(): the `require` condition, `main` before `module` (turbo-test#134)
     let o = base_resolve_options(None, false, false);
-    assert_eq!(o.condition_names, vec!["require", "browser", "default"]);
+    assert_eq!(
+        o.condition_names,
+        vec!["development", "require", "browser", "default"]
+    );
     assert_eq!(o.main_fields, vec!["browser", "main", "module"]);
 
     CJS_FIRST_RESOLUTION.with(|c| c.set(true));
