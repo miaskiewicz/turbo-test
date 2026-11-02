@@ -533,3 +533,69 @@ fn expect_extend_in_a_setup_file_works_under_dom_environments() {
         assert_eq!(r.code, Some(0), "{env}: {}", r.all());
     }
 }
+
+/// turbo-test#205: a setup file's vi.mock factory reads the setup file's own top-level bindings
+/// once the setup has run, while the test file's factories read the test file's: vitest 4.1.12
+/// on this project gives 1 passed. turbo-test bound only the test file's scope (turbo-test#72),
+/// so the setup's factory threw `Cannot access 'TABLE' before initialization`.
+fn setup_and_entry_factory_scopes(p: &Project) {
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { setupFiles: ['./setup.ts'] } };\n",
+    );
+    p.file("src/dep.ts", "export const t = () => 'real';\n");
+    p.file("src/other.ts", "export const o = 'real';\n");
+    p.file(
+        "setup.ts",
+        "import { vi } from 'vitest';\nconst TABLE: Record<string, string> = { a: 'setup' };\n\
+         let count = 0;\nvi.mock('./src/dep', () => ({ t: () => { count += 1; return TABLE.a + count; } }));\n",
+    );
+    p.file(
+        "a.test.ts",
+        "import { expect, it, vi } from 'vitest';\nimport { t } from './src/dep';\nimport { o } from './src/other';\n\
+         const LOCAL = 'entry';\nvi.mock('./src/other', () => ({ get o() { return LOCAL; } }));\n\
+         it('scopes', () => { expect([t(), t(), o]).toEqual(['setup1', 'setup2', 'entry']); });\n",
+    );
+}
+
+#[test]
+fn a_setup_files_mock_factory_reads_its_own_top_level_bindings() {
+    let p = Project::new("ra-setup-factory-scope");
+    p.with_esbuild();
+    p.file(
+        "package.json",
+        r#"{"name":"ra-setup-factory-scope","type":"module"}"#,
+    );
+    setup_and_entry_factory_scopes(&p);
+    for env in [
+        &[][..],
+        &[("TURBO_NO_MR", "1")][..],
+        &[("TURBO_NO_MR", "1"), ("TURBO_NO_BUNDLE", "1")][..],
+    ] {
+        let r = turbo_test(&p.dir, &["--reporter", "json"], env);
+        assert_eq!(
+            files(&r),
+            vec![f("a.test.ts", "passed", 1, 0)],
+            "{env:?}\n{}",
+            r.all()
+        );
+    }
+}
+
+/// turbo-test#205 without an esbuild project (the ESM-graph prepass).
+#[test]
+fn a_setup_files_mock_factory_reads_its_own_top_level_bindings_without_esbuild() {
+    let p = Project::new("ra-setup-factory-scope-esm");
+    p.file(
+        "package.json",
+        r#"{"name":"ra-setup-factory-scope-esm","type":"module"}"#,
+    );
+    setup_and_entry_factory_scopes(&p);
+    let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+    assert_eq!(
+        files(&r),
+        vec![f("a.test.ts", "passed", 1, 0)],
+        "{}",
+        r.all()
+    );
+}
