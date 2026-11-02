@@ -8006,8 +8006,8 @@ globalThis.__ttResetForNextFile = () => {
 };
 
 // The embedder's window members (turbo-test#208): turbo-dom leaves dialogs, window management,
-// printing and `open` to its embedder. jsdom's are no-ops returning undefined (it logs "Not
-// implemented", turbo-test does not); postMessage queues a `message` event. Own, non-enumerable
+// printing and `open` to its embedder: Chrome's results without a user (jsdom has them too, as
+// no-ops returning undefined); postMessage queues a `message` event. Own, non-enumerable
 // members of the window, as Chrome's [Global] Window operations are; a member the DOM already
 // has is kept.
 globalThis.__ttInstallWindowMembers = () => {
@@ -8018,9 +8018,14 @@ globalThis.__ttInstallWindowMembers = () => {
     Object.defineProperty(fn, 'name', { value: name });
     try { Object.defineProperty(w, name, { value: fn, writable: true, configurable: true, enumerable: false }); } catch (e) {}
   };
-  for (const name of ['alert', 'blur', 'close', 'confirm', 'focus', 'moveBy', 'moveTo', 'open', 'print', 'prompt', 'resizeBy', 'resizeTo', 'stop', 'captureEvents', 'releaseEvents']) {
+  for (const name of ['alert', 'blur', 'close', 'focus', 'moveBy', 'moveTo', 'print', 'resizeBy', 'resizeTo', 'stop', 'captureEvents', 'releaseEvents']) {
     def(name, function () { return undefined; });
   }
+  // Chrome with no user to answer: a dialog is dismissed (confirm false, prompt null) and a
+  // popup is blocked (open null); jsdom returns undefined for all three
+  def('confirm', function () { return false; });
+  def('prompt', function () { return null; });
+  def('open', function () { return null; });
   def('scroll', function (...a) { return typeof w.scrollTo === 'function' ? w.scrollTo(...a) : undefined; });
   def('scrollBy', function () { return undefined; });
   def('postMessage', function (message) {

@@ -1,6 +1,7 @@
 //! The embedder's window members under a DOM environment (turbo-test#208): turbo-dom leaves
 //! dialogs, window management, printing and `open` to the embedder, and jsdom (vitest's DOM)
-//! has them, so `vi.spyOn(window, 'open')` works as on vitest 4.1.12.
+//! has them, so `vi.spyOn(window, 'open')` works as on vitest 4.1.12. Their results are Chrome's
+//! with no user (confirm false, prompt null, open null), where jsdom returns undefined.
 #![cfg(unix)]
 
 mod common;
@@ -23,7 +24,7 @@ fn a_dom_window_has_the_embedder_members() {
          const names = ['alert', 'blur', 'close', 'confirm', 'focus', 'moveBy', 'moveTo', 'open', 'print', 'prompt', 'resizeBy', 'resizeTo', 'scroll', 'scrollBy', 'stop', 'captureEvents', 'releaseEvents', 'postMessage'];\n\
          it('members', () => {\n\
            expect(names.filter((n) => typeof window[n] !== 'function')).toEqual([]);\n\
-           expect([window.alert('x'), window.confirm('x'), window.prompt('x'), window.open('/x'), window.print()]).toEqual([undefined, undefined, undefined, undefined, undefined]);\n\
+           expect([window.alert('x'), window.confirm('x'), window.prompt('x'), window.open('/x'), window.print()]).toEqual([undefined, false, null, null, undefined]);\n\
            expect(Object.keys(window).includes('open')).toBe(false);\n\
            const spy = vi.spyOn(window, 'open').mockReturnValue(null);\n\
            expect(window.open('/y')).toBe(null);\n\
