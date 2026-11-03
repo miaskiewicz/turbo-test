@@ -217,7 +217,9 @@ fn cjs_bytecode_cache_is_written_reused_and_survives_corruption() {
     let cold = turbo_test(&p.dir, &[], &[]);
     assert_eq!(cold.code, Some(0), "{}", cold.all());
     let files = code_cache_files(&p);
-    assert!(!files.is_empty(), "cold run persists bytecode");
+    // the test file and the app module too, though their scripts carry a named origin
+    // (failure frames and test locations)
+    assert_eq!(files.len(), 2, "cold run persists bytecode: {files:?}");
     let sizes: Vec<u64> = files.iter().map(|f| f.metadata().unwrap().len()).collect();
     assert!(sizes.iter().all(|&s| s > 0));
 
@@ -240,6 +242,51 @@ fn cjs_bytecode_cache_is_written_reused_and_survives_corruption() {
     }
     let junk = turbo_test(&p.dir, &[], &[]);
     assert_eq!(junk.code, Some(0), "{}", junk.all());
+    // ... and the rejected entries are rewritten, so later runs consume bytecode again
+    for f in &files {
+        assert_ne!(std::fs::read(f).unwrap(), b"definitely not v8 bytecode", "{f:?}");
+    }
+}
+
+/// The bytecode cache files (name -> size) after one run of `test` over the same `src/lib.ts`.
+fn cache_sizes(name: &str, test: &str) -> std::collections::BTreeMap<String, u64> {
+    let p = plain(name);
+    p.with_esbuild();
+    p.file(
+        "src/lib.ts",
+        "export function shape(n: number) {\n  const out = [];\n  for (let i = 0; i < n; i++) out.push({ i, sq: i * i, label: `item ${i}` });\n  return out.map((o) => o.label + ':' + o.sq).join(',');\n}\n",
+    );
+    p.file("cc.test.ts", test);
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    code_cache_files(&p)
+        .iter()
+        .map(|f| {
+            let name = f.file_name().unwrap().to_string_lossy().into_owned();
+            (name, f.metadata().unwrap().len())
+        })
+        .collect()
+}
+
+// V8 compiles functions lazily: a cache made right after the module's top-level compile has
+// none of them, and every later isolate parses and compiles them again. The cache is written
+// once the file ran, so it carries the functions the run called.
+#[test]
+fn cjs_bytecode_cache_holds_the_functions_the_run_called() {
+    let import = "import { shape } from './src/lib';\n";
+    let called = cache_sizes(
+        "rb-flags-cc-called",
+        &format!("{import}test('s', () => {{ expect(shape(2)).toBe('item 0:0,item 1:1'); }});\n"),
+    );
+    let uncalled = cache_sizes(
+        "rb-flags-cc-uncalled",
+        &format!("{import}test('s', () => {{ expect(typeof shape).toBe('function'); }});\n"),
+    );
+    // the lib's cache is the entry both runs share (same source, same key)
+    let shared: Vec<_> = called.keys().filter(|k| uncalled.contains_key(*k)).collect();
+    assert_eq!(shared.len(), 1, "{called:?} {uncalled:?}");
+    let (with, without) = (called[shared[0]], uncalled[shared[0]]);
+    assert!(with > without, "called {with} <= uncalled {without}");
 }
 
 #[test]
