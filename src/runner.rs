@@ -1676,7 +1676,31 @@ fn runtime_config_literal(s: &str) -> Option<String> {
             parts.push(format!("{key}: true"));
         }
     }
+    if let Some(on) = zero_delay_timers(s) {
+        parts.push(format!("zeroDelayTimers: {on}"));
+    }
     (!parts.is_empty()).then(|| format!("{{ {} }}", parts.join(", ")))
+}
+
+/// The zeroDelayTimers switch when something sets it (the runtime's default is on):
+/// `TURBO_ZERO_DELAY_TIMERS=0|1` (what `--[no-]zero-delay-timers` sets) wins over the config's
+/// `test.zeroDelayTimers: true|false`.
+fn zero_delay_timers(s: &str) -> Option<bool> {
+    zero_delay_timers_from(std::env::var("TURBO_ZERO_DELAY_TIMERS").ok().as_deref(), s)
+}
+
+fn zero_delay_timers_from(env: Option<&str>, s: &str) -> Option<bool> {
+    match env {
+        Some("0" | "false") => return Some(false),
+        Some("1" | "true") => return Some(true),
+        _ => {}
+    }
+    let start = find_config_key(s, "zeroDelayTimers")?;
+    let (_, v) = s[start..].split_once(':')?;
+    let v = v.trim_start();
+    v.starts_with("true")
+        .then_some(true)
+        .or_else(|| v.starts_with("false").then_some(false))
 }
 
 /// Whether a config key's value is `true`.

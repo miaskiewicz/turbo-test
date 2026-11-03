@@ -71,6 +71,19 @@ turbo-test has no Cargo feature flags; behaviour switches are environment variab
 |---|---|
 | `TURBO_REUSE_ISOLATE=1` / `TURBO_NO_REUSE=1` | force isolate reuse on / off (see below) |
 | `TURBO_LEGACY_REPORTER=1` | compact `PASS` / `FAIL` reporter instead of vitest's |
+| `TURBO_ZERO_DELAY_TIMERS=1` / `=0` | zero-delay timers on (default) / off (see below) |
+
+**Zero-delay timers** (on by default). A real `setTimeout(fn, 0)` (or any delay below 1 ms) waits
+0 ms, as in turbo-test 0.4.2: it fires before a setImmediate or MessageChannel message queued after
+it, which is faster for timer-heavy suites. Off, the delay is clamped to 1 ms as on Node and vitest
+(#212), so setImmediate and MessageChannel run first. Promise jobs run first in both modes, and
+fake timers are not affected.
+
+| source | on | off |
+|---|---|---|
+| CLI flag (wins) | `--zero-delay-timers` | `--no-zero-delay-timers` |
+| env var | `TURBO_ZERO_DELAY_TIMERS=1` | `TURBO_ZERO_DELAY_TIMERS=0` |
+| vitest config | `test: { zeroDelayTimers: true }` | `test: { zeroDelayTimers: false }` |
 
 ## Isolate-reuse (extra speed, zero config)
 

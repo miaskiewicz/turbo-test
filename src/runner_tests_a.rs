@@ -1717,3 +1717,27 @@ fn dom_env_names_and_inlined_packages() {
     assert!(inlined_dep(Path::new("/p/node_modules/z")));
     std::env::remove_var("TURBO_DEPS_INLINE");
 }
+
+#[test]
+fn zero_delay_timers_env_wins_over_the_config() {
+    let on = "test: { zeroDelayTimers: true }";
+    let off = "test: { zeroDelayTimers:false }";
+    assert_eq!(zero_delay_timers_from(None, on), Some(true));
+    assert_eq!(zero_delay_timers_from(None, off), Some(false));
+    assert_eq!(
+        zero_delay_timers_from(None, "test: { zeroDelayTimers: flag }"),
+        None
+    );
+    assert_eq!(zero_delay_timers_from(None, "test: {}"), None);
+    assert_eq!(zero_delay_timers_from(Some("0"), on), Some(false));
+    assert_eq!(zero_delay_timers_from(Some("false"), on), Some(false));
+    assert_eq!(zero_delay_timers_from(Some("1"), off), Some(true));
+    assert_eq!(zero_delay_timers_from(Some("true"), off), Some(true));
+    // an unknown env value leaves the config's
+    assert_eq!(zero_delay_timers_from(Some("yes"), off), Some(false));
+    // the runtime literal carries it
+    assert_eq!(
+        runtime_config_literal(off).as_deref(),
+        Some("{ zeroDelayTimers: false }")
+    );
+}

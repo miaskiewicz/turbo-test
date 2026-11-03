@@ -349,12 +349,16 @@ __loop.toFrame = function () {
 // for the fake-clock set and useRealTimers puts the real ones back (sinon's hijack /
 // uninstall), so a reference taken before (node:timers, a library's captured setImmediate)
 // stays on the real clock, as in vitest (turbo-test#168).
-const __nodeDelay = (d) => { const n = Number(d); return n >= 1 && n <= 2147483647 ? n : 1; };
+// zeroDelayTimers (on by default; --no-zero-delay-timers, TURBO_ZERO_DELAY_TIMERS=0 or
+// `test.zeroDelayTimers: false` turn it off): a real timer's delay below 1 ms stays 0 ms, as in
+// turbo-test 0.4.2 (faster for timer-heavy suites). Off, it is Node's 1 ms clamp (turbo-test#212).
+let __ttZeroDelay = true;
+const __nodeDelay = (d) => { const n = Number(d); return n >= 1 && n <= 2147483647 ? n : __ttZeroDelay ? 0 : 1; };
 function __timerFns(fake) {
   return {
     // Node makes a real timer's delay below 1 ms (0, NaN, negative) 1 ms, so a setImmediate or a
-    // MessageChannel message queued after a setTimeout(fn, 0) runs first (turbo-test#212); the
-    // fake clock (sinon) keeps 0
+    // MessageChannel message queued after a setTimeout(fn, 0) runs first (turbo-test#212); that
+    // clamp applies with zeroDelayTimers off (above). The fake clock (sinon) keeps 0
     setTimeout: (cb, d, ...a) => __schedule(() => cb(...a), fake ? d : __nodeDelay(d), null, fake),
     setInterval: (cb, d, ...a) => __schedule(() => cb(...a), fake ? d : __nodeDelay(d), Math.max(1, d | 0), fake),
     setImmediate: (cb, ...a) => __schedule(() => cb(...a), 0, null, fake, true),
@@ -412,7 +416,8 @@ let __ttConfig = __ttConfigDefaults();
 let __ttConfigSaved = null;
 globalThis.__ttApplyConfig = (cfg) => {
   if (!cfg || typeof cfg !== 'object') return;
-  const { fakeTimers, ...rest } = cfg;
+  const { fakeTimers, zeroDelayTimers, ...rest } = cfg;
+  if (typeof zeroDelayTimers === 'boolean') __ttZeroDelay = zeroDelayTimers;
   if (fakeTimers && typeof fakeTimers === 'object') __ttConfig.fakeTimers = Object.assign(__ttConfigDefaults().fakeTimers, fakeTimers);
   Object.assign(__ttConfig, rest);
 };

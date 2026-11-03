@@ -28,6 +28,20 @@ turbo-dom's engine scripts from source in each fresh isolate.
     reads. They used to classify the whole document each call. That made user-event plus MUI
     forms quadratic: payroll's EditExpenseModal spent 28-37% of its CPU there.
 
+- A cache hit is re-saved after the file ran when the run compiled functions the cache did not
+  hold (checked on a module's 1st, 2nd, 4th, 8th... hit per worker). A function first called by
+  a later test file was compiled lazily after its module's cache was written, so every later run
+  compiled it again. The cache format is unchanged (salt `cc-v2`).
+- Zero-delay timers are on by default: a real `setTimeout(fn, 0)` waits 0 ms again, as in 0.4.2,
+  instead of Node's 1 ms (#212), which made timer-heavy suites slower.
+
+### Added
+- `--zero-delay-timers` / `--no-zero-delay-timers`, `TURBO_ZERO_DELAY_TIMERS=1|0` and the vitest
+  config's `test.zeroDelayTimers: true|false` (flag over env over config) choose between 0 ms and
+  Node's 1 ms clamp for a real timer's delay below 1 ms. Off, the event loop order matches vitest
+  4.1.12 on Node (setImmediate and MessageChannel before `setTimeout 0`); on, `setTimeout 0` runs
+  before them. Promise jobs come first either way; fake timers keep sinon's 0.
+
 ### Changed
 - turbo-dom, turbo-dom-layout and turbo-dom-browser-env 0.7.0 are pinned to a git rev of
   turbo-dom#232 through `[patch.crates-io]` until turbo-dom 0.7.0 is published.
@@ -38,6 +52,13 @@ turbo-dom's engine scripts from source in each fresh isolate.
   `cjs_bytecode_cache_holds_the_functions_the_run_called` checks that a run which calls a
   module's function writes a larger cache for that module than a run which does not. Both fail
   on 0.6.2.
+- `cjs_bytecode_cache_picks_up_functions_first_called_in_a_later_file`: file 1 loads a module,
+  file 2 calls its function; the module's cache then holds it.
+- `timeout_zero_is_zero_ms_by_default`,
+  `timeout_zero_runs_after_immediates_and_messages_like_node_without_zero_delay` (checked against
+  vitest 4.1.12, node and jsdom) and `zero_delay_timers_from_config_env_and_cli`: the order of
+  `setTimeout 0`, setImmediate, MessageChannel and promises in both modes, and the switch's
+  precedence.
 
 ## [0.6.2] — 2026-11-02 — coverage-mode vi.mock hoisting
 
@@ -77,7 +98,7 @@ reproductions with and without `--coverage`. Not Linux-specific, and `--shard` p
 - A DOM window has the embedder's members: `open`, `alert`, `confirm`, `prompt`, `print`, `close`, `postMessage`, … (#208).
 - The shared-let rewrite copies comments as they are (#209).
 - Package `exports` match the `development` condition, as vitest does (#211).
-- A real `setTimeout(fn, 0)` is a 1 ms timer, as on Node: setImmediate and MessageChannel run first (#212).
+- A real `setTimeout(fn, 0)` is a 1 ms timer, as on Node: setImmediate and MessageChannel run first (#212). Since 0.7.0 that is the `--no-zero-delay-timers` mode; the default is 0 ms (see 0.7.0).
 - turbo-dom 0.6.0, turbo-dom-browser-env 0.6.0 and turbo-dom-v8 150.4.0 now come from crates.io; the pre-publish `[patch.crates-io]` git pins are gone (last pin: turbo-dom main d6da581 (turbo-dom#224 stale node ids, #226 inline `translateX`, #227 `box-shadow: none`, #228, #230; earlier: 01f66d0, 41b948c)).
 - Under isolate reuse a test file's own top-level hooks run only for that file, not for every later file of the worker (#214).
 - An `isolate: false` inside `test.poolOptions` no longer turns on isolate reuse: vitest 4 removed `poolOptions` and runs such a project isolated (#215).

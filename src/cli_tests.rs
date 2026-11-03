@@ -1750,3 +1750,18 @@ fn the_error_line_drops_the_load_phase_prefix() {
         assert_eq!(r.error_msg, e);
     }
 }
+
+#[test]
+fn zero_delay_timer_flags_set_the_env_switch() {
+    assert_eq!(
+        parse(&["--zero-delay-timers"]).env,
+        vec![("TURBO_ZERO_DELAY_TIMERS", "1".to_string())]
+    );
+    assert_eq!(
+        parse(&["--zero-delay-timers", "--no-zero-delay-timers"]).env,
+        vec![
+            ("TURBO_ZERO_DELAY_TIMERS", "1".to_string()),
+            ("TURBO_ZERO_DELAY_TIMERS", "0".to_string())
+        ]
+    );
+}
