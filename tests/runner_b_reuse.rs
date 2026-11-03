@@ -442,3 +442,39 @@ fn a_test_files_top_level_hooks_do_not_run_in_later_files() {
         assert_eq!(ran[i], format!("{f} {f}:ba,setup,{f}:be"), "{ran:?}");
     }
 }
+
+/// turbo-test#228 at a worker's end: the last file a worker runs fails to load after compiling a
+/// module (its bytecode cache is pending). The pending entries are discarded while the isolate
+/// lives, so the worker exits cleanly instead of aborting in a thread-local destructor.
+#[test]
+fn a_worker_whose_last_file_fails_to_load_exits_cleanly() {
+    for (name, isolate) in [
+        ("rb-last-fail-reuse", "false"),
+        ("rb-last-fail-fresh", "true"),
+    ] {
+        let p = Project::new(name);
+        p.file("package.json", r#"{"name":"lastfail"}"#);
+        p.file(
+            "vitest.config.js",
+            &format!("module.exports = {{ test: {{ globals: true, isolate: {isolate} }} }};\n"),
+        );
+        p.file("dep.js", "module.exports = function dep() { return 1; };\n");
+        p.file(
+            "a.test.js",
+            "import dep from './dep.js';\ntest('a', () => expect(dep()).toBe(1));\n",
+        );
+        p.file(
+            "z.test.js",
+            "import './dep.js';\nthrow new Error('boom at load');\n",
+        );
+        let cache = p.dir.join(".cache");
+        let r = turbo_test(
+            &p.dir,
+            &["--maxWorkers", "1"],
+            &[("TURBO_CACHE_DIR", cache.to_str().unwrap())],
+        );
+        assert_eq!(r.code, Some(1), "{name}\n{}", r.all());
+        assert!(r.all().contains("boom at load"), "{name}\n{}", r.all());
+        assert!(r.stdout.contains("1 passed"), "{name}\n{}", r.all());
+    }
+}

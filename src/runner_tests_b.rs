@@ -817,3 +817,35 @@ fn the_shared_let_rewrite_skips_comments() {
         "{out}"
     );
 }
+
+// turbo-test#228 at a worker's end: a file that fails to load after compiling a module leaves no
+// pending bytecode cache behind (its scripts belong to the isolate it ran in, which is gone once
+// run_test_file returns; the thread-local destructor would drop them after it).
+#[test]
+fn a_file_that_fails_to_load_leaves_no_pending_code_caches() {
+    let d = scratch("pending-cc-load-fail");
+    std::fs::write(d.join("package.json"), r#"{"name":"pendingcc"}"#).unwrap();
+    std::fs::write(
+        d.join("dep.js"),
+        format!(
+            "module.exports = function dep() {{ return {}; }};\n",
+            std::process::id()
+        ),
+    )
+    .unwrap();
+    let entry = d.join("z.test.js");
+    std::fs::write(
+        &entry,
+        "import './dep.js';\nthrow new Error('boom at load');\n",
+    )
+    .unwrap();
+    let e = std::thread::spawn(move || {
+        let r = run_test_file(&entry);
+        let pending = PENDING_CODE_CACHES.with(|p| p.borrow().len());
+        (r, pending)
+    })
+    .join()
+    .expect("the worker thread exits cleanly");
+    assert!(e.0.unwrap_err().contains("boom at load"));
+    assert_eq!(e.1, 0);
+}

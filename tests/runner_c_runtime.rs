@@ -931,7 +931,33 @@ fn zero_delay_timers_from_config_env_and_cli() {
     assert!(turbo_test(&on.dir, &[], &[])
         .stdout
         .contains("Tests  1 passed (1)"));
-    // env over config
+    // env over config: the order it selects passes, the other fails
+    let on_wants_node = loop_order_project("loop-cfg-on-node", "zeroDelayTimers: true", NODE_ORDER);
+    let r = turbo_test(&on_wants_node.dir, &[], &[("TURBO_ZERO_DELAY_TIMERS", "0")]);
+    assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
+    let off_wants_zero = loop_order_project(
+        "loop-cfg-off-zero",
+        "zeroDelayTimers: false",
+        ZERO_DELAY_ORDER,
+    );
+    let r = turbo_test(
+        &off_wants_zero.dir,
+        &[],
+        &[("TURBO_ZERO_DELAY_TIMERS", "1")],
+    );
+    assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
+    let r = turbo_test(
+        &off_wants_zero.dir,
+        &["--zero-delay-timers"],
+        &[("TURBO_ZERO_DELAY_TIMERS", "0")],
+    );
+    assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
+    let r = turbo_test(
+        &on_wants_node.dir,
+        &["--no-zero-delay-timers"],
+        &[("TURBO_ZERO_DELAY_TIMERS", "1")],
+    );
+    assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
     let r = turbo_test(&on.dir, &[], &[("TURBO_ZERO_DELAY_TIMERS", "0")]);
     assert!(r.stdout.contains("Tests  1 failed (1)"), "{}", r.all());
     let r = turbo_test(&off.dir, &[], &[("TURBO_ZERO_DELAY_TIMERS", "1")]);
@@ -948,5 +974,33 @@ fn zero_delay_timers_from_config_env_and_cli() {
         &["--no-zero-delay-timers"],
         &[("TURBO_ZERO_DELAY_TIMERS", "1")],
     );
+    assert!(r.stdout.contains("Tests  1 failed (1)"), "{}", r.all());
+}
+
+/// The flag and env var work without any vitest config file (the order each selects passes).
+#[test]
+fn zero_delay_timers_switch_without_a_config_file() {
+    let project = |name: &str, want: &str| {
+        let p = loop_order_project(name, "", want);
+        std::fs::remove_file(p.dir.join("vitest.config.ts")).unwrap();
+        p
+    };
+    let node = project("loop-nocfg-node", NODE_ORDER);
+    let zero = project("loop-nocfg-zero", ZERO_DELAY_ORDER);
+    for (p, args, env) in [
+        (&node, vec!["--no-zero-delay-timers"], vec![]),
+        (&node, vec![], vec![("TURBO_ZERO_DELAY_TIMERS", "0")]),
+        (&zero, vec!["--zero-delay-timers"], vec![]),
+        (&zero, vec![], vec![("TURBO_ZERO_DELAY_TIMERS", "1")]),
+        (&zero, vec![], vec![]),
+    ] {
+        let r = turbo_test(&p.dir, &args, &env);
+        assert!(
+            r.stdout.contains("Tests  1 passed (1)"),
+            "{args:?} {env:?}\n{}",
+            r.all()
+        );
+    }
+    let r = turbo_test(&node.dir, &[], &[("TURBO_ZERO_DELAY_TIMERS", "1")]);
     assert!(r.stdout.contains("Tests  1 failed (1)"), "{}", r.all());
 }
