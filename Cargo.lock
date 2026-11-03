@@ -2326,7 +2326,7 @@ dependencies = [
 [[package]]
 name = "turbo-dom"
 version = "0.7.0"
-source = "git+https://github.com/miaskiewicz/turbo-dom?rev=9e9328d8c11ce3720cba0761af4605692bd28f99#9e9328d8c11ce3720cba0761af4605692bd28f99"
+source = "git+https://github.com/miaskiewicz/turbo-dom?rev=cb1b799776b7fb6190488ddfb855db7ad945f60f#cb1b799776b7fb6190488ddfb855db7ad945f60f"
 dependencies = [
  "cssparser",
  "html5ever",
@@ -2341,7 +2341,7 @@ dependencies = [
 [[package]]
 name = "turbo-dom-browser-env"
 version = "0.7.0"
-source = "git+https://github.com/miaskiewicz/turbo-dom?rev=9e9328d8c11ce3720cba0761af4605692bd28f99#9e9328d8c11ce3720cba0761af4605692bd28f99"
+source = "git+https://github.com/miaskiewicz/turbo-dom?rev=cb1b799776b7fb6190488ddfb855db7ad945f60f#cb1b799776b7fb6190488ddfb855db7ad945f60f"
 dependencies = [
  "cssparser",
  "lightningcss",
@@ -2358,7 +2358,7 @@ dependencies = [
 [[package]]
 name = "turbo-dom-layout"
 version = "0.7.0"
-source = "git+https://github.com/miaskiewicz/turbo-dom?rev=9e9328d8c11ce3720cba0761af4605692bd28f99#9e9328d8c11ce3720cba0761af4605692bd28f99"
+source = "git+https://github.com/miaskiewicz/turbo-dom?rev=cb1b799776b7fb6190488ddfb855db7ad945f60f#cb1b799776b7fb6190488ddfb855db7ad945f60f"
 dependencies = [
  "core-foundation",
  "core-text",
@@ -2370,6 +2370,7 @@ dependencies = [
  "taffy",
  "thiserror",
  "turbo-dom",
+ "unicode-bidi",
  "unicode-linebreak",
 ]
 

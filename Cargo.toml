@@ -77,6 +77,6 @@ codegen-units = 1
 # cache and the subject-local form pseudo-classes. Replace with the crates.io release once
 # turbo-dom 0.7.0 is published.
 [patch.crates-io]
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "9e9328d8c11ce3720cba0761af4605692bd28f99" }
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "9e9328d8c11ce3720cba0761af4605692bd28f99" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "9e9328d8c11ce3720cba0761af4605692bd28f99" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "cb1b799776b7fb6190488ddfb855db7ad945f60f" }
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "cb1b799776b7fb6190488ddfb855db7ad945f60f" }
+turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "cb1b799776b7fb6190488ddfb855db7ad945f60f" }
