@@ -78,6 +78,6 @@ codegen-units = 1
 # rendered() walk, the per-version sheet list and snapshot_blob_with (#249). Replace with the
 # crates.io release once turbo-dom 0.7.0 is published.
 [patch.crates-io]
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "a030df152d9fc5a2431ddfb23b0a4025bb61bc93" }
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "a030df152d9fc5a2431ddfb23b0a4025bb61bc93" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "a030df152d9fc5a2431ddfb23b0a4025bb61bc93" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "e73446fc8bcd385f6b982defe2621203e9a8071c" }
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "e73446fc8bcd385f6b982defe2621203e9a8071c" }
+turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "e73446fc8bcd385f6b982defe2621203e9a8071c" }
