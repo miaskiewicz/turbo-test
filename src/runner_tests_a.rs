@@ -1741,3 +1741,63 @@ fn zero_delay_timers_env_wins_over_the_config() {
         Some("{ zeroDelayTimers: false }")
     );
 }
+
+// Wrapped CJS sources are shared by every isolate of the process (from alphajew420's #106): a
+// module loads from one copy, keyed by (path, mtime, size, decorator-metadata mode).
+#[test]
+fn module_sources_are_shared_across_isolates_and_threads() {
+    let d = tmp("modsrc-share");
+    let f = put(&d, "a.js", "module.exports = 'shared-marker';\n");
+    let first = module_source(&f, false).expect("loads");
+    assert!(first.wrapped.contains("shared-marker"), "{}", first.wrapped);
+    assert!(first
+        .wrapped
+        .starts_with("(function (exports, module, require, __filename, __dirname) {\n"));
+    assert!(std::ptr::eq(first, module_source(&f, false).unwrap()));
+    // another worker thread gets the same copy
+    let g = f.clone();
+    let other = std::thread::spawn(move || {
+        module_source(&g, false).unwrap() as *const ModuleSource as usize
+    })
+    .join()
+    .unwrap();
+    assert_eq!(other, first as *const ModuleSource as usize);
+    // the decorator-metadata mode is part of the key
+    assert!(!std::ptr::eq(first, module_source(&f, true).unwrap()));
+    assert!(module_source(&d.join("missing.js"), false).is_none());
+}
+
+#[test]
+fn module_sources_are_reloaded_when_the_file_changes() {
+    let d = tmp("modsrc-change");
+    let f = put(&d, "a.js", "module.exports = 'one';\n");
+    let one = module_source(&f, false).unwrap();
+    // a different size
+    std::fs::write(&f, "module.exports = 'second';\n").unwrap();
+    let two = module_source(&f, false).unwrap();
+    assert!(two.wrapped.contains("'second'"), "{}", two.wrapped);
+    assert!(!std::ptr::eq(one, two));
+    // the same size, a later mtime
+    std::fs::write(&f, "module.exports = 'thirds';\n").unwrap();
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&f)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    let three = module_source(&f, false).unwrap();
+    assert!(three.wrapped.contains("'thirds'"), "{}", three.wrapped);
+    assert!(!std::ptr::eq(two, three));
+}
+
+#[test]
+fn module_sources_are_one_byte_when_latin1() {
+    assert_eq!(latin1_bytes("ab"), Some(b"ab".to_vec()));
+    assert_eq!(
+        latin1_bytes("caf\u{e9}\u{ff}"),
+        Some(vec![b'c', b'a', b'f', 0xe9, 0xff])
+    );
+    assert_eq!(latin1_bytes("\u{100}"), None);
+    assert_eq!(latin1_bytes("\u{20ac}"), None);
+}
