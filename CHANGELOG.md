@@ -62,7 +62,10 @@ turbo-dom's engine scripts from source in each fresh isolate.
 - Under isolate reuse the config's runtime settings (`zeroDelayTimers`, `fakeTimers`,
   `clearMocks` / `mockReset` / `restoreMocks` / `unstubEnvs` / `unstubGlobals`) and the
   zero-delay flag and env var were never applied: each file now resets them to the defaults and
-  applies its config, as on the fresh path.
+  applies its config, as on the fresh path. The defaults it resets to are the worker's config
+  once its setup files ran, so a setup file's `vi.setConfig` holds for every file and a later
+  `vi.resetConfig()` returns to the config from before it, as vitest `isolate: false` (which
+  re-runs the setup files per file) does.
 - A file the heap guard stopped, or whose run errored, no longer serializes bytecode caches from
   its terminated isolate; its pending caches are dropped.
 - A `zeroDelayTimers` inside a `/* */` comment or after a `//` on the line is not read; an
@@ -99,7 +102,8 @@ turbo-dom's engine scripts from source in each fresh isolate.
   `shared_sources_leak_only_external_one_byte_text`,
   `code_cache_bytes_are_read_from_the_file_not_kept`,
   `zero_delay_timers_switch_applies_under_isolate_reuse`,
-  `a_file_past_the_heap_limit_writes_no_bytecode_cache`.
+  `a_file_past_the_heap_limit_writes_no_bytecode_cache`,
+  `setup_file_set_config_holds_for_every_reused_file` (checked against vitest 4.1.12).
 - `zero_delay_timers_switch_without_a_config_file`,
   `zero_delay_timers_env_applies_without_a_config_file`,
   `zero_delay_timers_ignore_commented_out_keys_and_warn_on_unknown_env`; the precedence test

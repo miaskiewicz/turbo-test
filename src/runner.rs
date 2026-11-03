@@ -8576,7 +8576,8 @@ fn run_test_file_reused(
                 });
                 if let Some(code) = v8::String::new(
                     scope,
-                    "globalThis.__ttCaptureHookBaseline && globalThis.__ttCaptureHookBaseline();",
+                    "globalThis.__ttCaptureHookBaseline && globalThis.__ttCaptureHookBaseline(); \
+                     globalThis.__ttCaptureConfigBaseline && globalThis.__ttCaptureConfigBaseline();",
                 ) {
                     if let Some(s) = v8::Script::compile(scope, code, None) {
                         s.run(scope);
