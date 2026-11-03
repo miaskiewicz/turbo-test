@@ -4340,13 +4340,11 @@ fn compile_cjs_cached<'s>(
             // A rejected cache (another V8 build or flag set) still compiles; rewrite it then so
             // later loads hit instead of recompiling from source forever.
             let rejected = source.get_cached_data().is_none_or(|c| c.rejected());
-            match compiled {
-                Some(s) if !rejected => return Some(s),
-                Some(s) => {
+            if let Some(s) = compiled {
+                if rejected {
                     defer_code_cache(scope, path, s);
-                    return Some(s);
                 }
-                None => {}
+                return Some(s);
             }
         }
     }
