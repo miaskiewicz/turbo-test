@@ -544,3 +544,49 @@ fn zero_delay_timers_switch_applies_under_isolate_reuse() {
     );
     assert!(r.stdout.contains("Tests  3 passed (3)"), "{}", r.all());
 }
+
+/// A setup file's `vi.setConfig` holds for every file of a reused isolate: vitest `isolate: false`
+/// re-runs setup files per file. And a later file's `vi.resetConfig()` goes back to the config
+/// from before the setup file's first `setConfig`, not to one an earlier file saved. Both checked
+/// against vitest 4.1.12 (isolate: false, one worker): all pass.
+#[test]
+fn setup_file_set_config_holds_for_every_reused_file() {
+    let p = Project::new("rb-setconfig-baseline");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "vitest.config.js",
+        "export default { test: { globals: true, setupFiles: ['./setup.js'] } };\n",
+    );
+    p.file("setup.js", "vi.setConfig({ restoreMocks: true });\n");
+    let restores = "const o = { f: () => 'orig' };\n\
+        test('mocked', () => { vi.spyOn(o, 'f').mockReturnValue('mocked'); expect(o.f()).toBe('mocked'); });\n\
+        test('restored before the next test', () => { expect(o.f()).toBe('orig'); });\n";
+    for f in ["a.test.js", "b.test.js", "c.test.js"] {
+        p.file(f, restores);
+    }
+    let r = turbo_test(
+        &p.dir,
+        &[],
+        &[("TURBO_REUSE_ISOLATE", "1"), ("TURBO_JOBS", "1")],
+    );
+    assert!(r.stdout.contains("Tests  6 passed (6)"), "{}", r.all());
+
+    // an earlier file's setConfig leaves no saved copy for a later file's resetConfig
+    p.file(
+        "a.test.js",
+        "test('a', () => { vi.setConfig({ clearMocks: true }); });\n",
+    );
+    p.file(
+        "b.test.js",
+        "const o = { f: () => 'orig' };\n\
+         test('reset', () => { vi.resetConfig(); vi.spyOn(o, 'f').mockReturnValue('mocked'); });\n\
+         test('the setup restoreMocks is undone', () => { expect(o.f()).toBe('mocked'); });\n",
+    );
+    std::fs::remove_file(p.dir.join("c.test.js")).unwrap();
+    let r = turbo_test(
+        &p.dir,
+        &[],
+        &[("TURBO_REUSE_ISOLATE", "1"), ("TURBO_JOBS", "1")],
+    );
+    assert!(r.stdout.contains("Tests  3 passed (3)"), "{}", r.all());
+}
