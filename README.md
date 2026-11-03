@@ -1,7 +1,7 @@
 # turbo-test
 
 **A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
-(and, experimentally, jest).** Release **0.6.2**.
+(and, experimentally, jest).** Release **0.7.0**.
 
 turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
 work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
@@ -27,8 +27,10 @@ turbo-test links `turbo-dom-browser-env` 0.6.0 and `turbo-dom-v8 ~150.4` (under 
 copy of the binding or of V8: the binding, its probes and the Chrome-control collectors that
 record their oracles live in turbo-dom's
 [`crates/turbo-dom-browser-env`](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
-— fix DOM behaviour and recollect controls there. They come from crates.io (turbo-dom 0.6.0,
-turbo-dom-v8 150.4.0).
+— fix DOM behaviour and recollect controls there. turbo-dom-v8 150.4.0 comes from crates.io;
+until turbo-dom 0.7.0 is published, turbo-dom / -layout / -browser-env 0.7.0 are pinned to a
+git rev of turbo-dom's release PR (`[patch.crates-io]` in Cargo.toml, which `release-guard`
+rejects: the pin must be gone before the tag).
 
 ## Install and run
 
@@ -380,12 +382,12 @@ npm run complexity:js        # CI job `complexity / js (cc <= 15)`
 - **Release** (`v*` tag): `release-guard` (no `[patch]`, no git sources, versions equal the tag),
   then the npm and crates.io publish jobs ([RELEASING.md](RELEASING.md)).
 
-## Status (0.6.2)
+## Status (0.7.0)
 
 - vitest suites: drop-in; the `vi` / mock / `expect` surface is vitest 4.1.12's
   ([vitest.compat.md](vitest.compat.md) lists what is covered and what is approximated).
 - jest suites: experimental (see above).
-- DOM: turbo-dom-browser-env 0.6.0, Chrome 156-controlled in turbo-dom.
+- DOM: turbo-dom-browser-env 0.7.0, Chrome 156-controlled in turbo-dom.
 - Open work is tracked as GitHub issues in this repository and in turbo-dom.
 
 ## License

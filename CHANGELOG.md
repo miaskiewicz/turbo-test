@@ -3,6 +3,42 @@
 All notable changes to `@miaskiewicz/turbo-test`. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.7.0] — performance: bytecode cache and turbo-dom 0.7.0
+
+0.6.x ran payroll-app's suite in ~220 s where 0.4.2 took ~15 s. Profiling with samply
+(payroll-app, release build with debug symbols; numbers in the PR) found three causes. Most of
+the wall time was one file whose form re-classified every element of the document in JS on
+each `matches(':disabled')`. Spread over every file came V8 recompiling module wrappers and
+turbo-dom's engine scripts from source in each fresh isolate.
+
+### Performance
+- The CJS bytecode cache covers every module. Scripts with a named origin (the test file and
+  each app module outside node_modules, named for failure frames and test locations) used to
+  skip it.
+- Cache data that V8 rejects (another V8 build, other flags) is rewritten. Before, it was
+  recompiled from source on every load, forever.
+- A new cache is written once the test file has run, so it holds the functions the file called.
+  A cache made right after the top-level compile has no function bodies, so every isolate
+  parsed and compiled each called function again. The cache key salt is now `cc-v2`, which drops
+  the old caches. On 147 payroll files these three changes cut user CPU by about 8% + 9%.
+- turbo-dom 0.7.0 (turbo-dom#232):
+  - A process-wide bytecode cache for the engine scripts each window install runs, which was
+    ~9% of CPU.
+  - `matches()` / `closest()` classify form pseudo-classes only for the elements their answer
+    reads. They used to classify the whole document each call. That made user-event plus MUI
+    forms quadratic: payroll's EditExpenseModal spent 28-37% of its CPU there.
+
+### Changed
+- turbo-dom, turbo-dom-layout and turbo-dom-browser-env 0.7.0 are pinned to a git rev of
+  turbo-dom#232 through `[patch.crates-io]` until turbo-dom 0.7.0 is published.
+
+### Tests
+- `cjs_bytecode_cache_is_written_reused_and_survives_corruption` also checks that the entry file
+  and app module are cached and that rejected data is rewritten.
+  `cjs_bytecode_cache_holds_the_functions_the_run_called` checks that a run which calls a
+  module's function writes a larger cache for that module than a run which does not. Both fail
+  on 0.6.2.
+
 ## [0.6.2] — 2026-11-02 — coverage-mode vi.mock hoisting
 
 0.6.0 and 0.6.1 broke two consumer suites only under `--coverage` (CI); the same suites passed without it.
