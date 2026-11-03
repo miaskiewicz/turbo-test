@@ -1792,17 +1792,6 @@ fn module_sources_are_reloaded_when_the_file_changes() {
 }
 
 #[test]
-fn module_sources_are_one_byte_when_latin1() {
-    assert_eq!(latin1_bytes("ab"), Some(b"ab".to_vec()));
-    assert_eq!(
-        latin1_bytes("caf\u{e9}\u{ff}"),
-        Some(vec![b'c', b'a', b'f', 0xe9, 0xff])
-    );
-    assert_eq!(latin1_bytes("\u{100}"), None);
-    assert_eq!(latin1_bytes("\u{20ac}"), None);
-}
-
-#[test]
 fn zero_delay_timers_ignore_commented_out_keys_and_warn_on_unknown_env() {
     assert_eq!(
         zero_delay_timers_from(None, "test: { /* zeroDelayTimers: false */ }"),

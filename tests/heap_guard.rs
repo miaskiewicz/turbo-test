@@ -264,6 +264,6 @@ fn a_file_past_the_heap_limit_writes_no_bytecode_cache() {
             .filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().starts_with("cc-"))
             .count();
-        assert!(written >= 2, "{name}: {written}\n{}", r.all());
+        assert!(written >= 1, "{name}: {written}\n{}", r.all());
     }
 }

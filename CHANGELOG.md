@@ -37,9 +37,11 @@ turbo-dom's engine scripts from source in each fresh isolate.
   source, hash it, read its bytecode cache file and copy the text into the V8 heap again. There is
   one entry per (path, decorator-metadata mode), replaced when the file's mtime, ctime, size or
   inode changes (or, for a file modified in the last 2 s, its content hash: a coarse-mtime
-  filesystem can give a same-size edit the same mtime). Latin-1 sources go to V8 as external
-  one-byte strings (no copy). The bytecode cache refresh above updates the shared copy too, and
-  never replaces a larger cache with a smaller one. Sources only one load uses (the test file,
+  filesystem can give a same-size edit the same mtime). node_modules ASCII sources go to V8 as
+  external one-byte strings (no copy, their text leaked); other text is owned and copied. At most
+  2048 app-module entries are kept (least recently used out). The bytecode cache bytes stay in
+  their file (read on each consume); a source keeps only the size of its richest cache, so a
+  refresh never replaces a larger cache with a smaller one. Sources only one load uses (the test file,
   setup files, app modules when failure frames are on, everything under `--coverage`) are owned
   and freed after the load instead of leaked.
 - Zero-delay timers are on by default: a real `setTimeout(fn, 0)` waits 0 ms again, as in 0.4.2,
@@ -57,6 +59,12 @@ turbo-dom's engine scripts from source in each fresh isolate.
   isolate was gone and the process crashed.
 - `--[no-]zero-delay-timers` and `TURBO_ZERO_DELAY_TIMERS` did nothing in a project without a
   vitest config file.
+- Under isolate reuse the config's runtime settings (`zeroDelayTimers`, `fakeTimers`,
+  `clearMocks` / `mockReset` / `restoreMocks` / `unstubEnvs` / `unstubGlobals`) and the
+  zero-delay flag and env var were never applied: each file now resets them to the defaults and
+  applies its config, as on the fresh path.
+- A file the heap guard stopped, or whose run errored, no longer serializes bytecode caches from
+  its terminated isolate; its pending caches are dropped.
 - A `zeroDelayTimers` inside a `/* */` comment or after a `//` on the line is not read; an
   unknown `TURBO_ZERO_DELAY_TIMERS` value is ignored with a warning.
 - A bytecode cache V8 rejects is cleared from the shared slot and its file at once, so other
@@ -86,14 +94,18 @@ turbo-dom's engine scripts from source in each fresh isolate.
   and `a_worker_whose_last_file_fails_to_load_exits_cleanly` (fresh and reused isolates).
 - `unshared_module_sources_are_freed`, `module_sources_keep_one_entry_per_path`,
   `module_sources_see_same_size_same_mtime_edits`, `code_cache_store_keeps_the_richer_cache`,
-  `a_rejected_code_cache_is_cleared`, `coverage_is_identical_cold_and_warm`.
+  `a_rejected_code_cache_is_cleared`, `coverage_is_identical_cold_and_warm`,
+  `source_stamps_hash_recent_files_only`, `shared_app_sources_are_capped_lru`,
+  `shared_sources_leak_only_external_one_byte_text`,
+  `code_cache_bytes_are_read_from_the_file_not_kept`,
+  `zero_delay_timers_switch_applies_under_isolate_reuse`,
+  `a_file_past_the_heap_limit_writes_no_bytecode_cache`.
 - `zero_delay_timers_switch_without_a_config_file`,
   `zero_delay_timers_env_applies_without_a_config_file`,
   `zero_delay_timers_ignore_commented_out_keys_and_warn_on_unknown_env`; the precedence test
   also checks that the order each source selects passes.
-- `module_sources_are_shared_across_isolates_and_threads`,
-  `module_sources_are_reloaded_when_the_file_changes` (size, then mtime) and
-  `module_sources_are_one_byte_when_latin1` (#106).
+- `module_sources_are_shared_across_isolates_and_threads` and
+  `module_sources_are_reloaded_when_the_file_changes` (size, then mtime) (#106).
 - `timeout_zero_is_zero_ms_by_default`,
   `timeout_zero_runs_after_immediates_and_messages_like_node_without_zero_delay` (checked against
   vitest 4.1.12, node and jsdom) and `zero_delay_timers_from_config_env_and_cli`: the order of

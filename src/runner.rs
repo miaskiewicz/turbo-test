@@ -4367,18 +4367,27 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8]) {
 /// (from alphajew420's #106). A fresh isolate per file loads react, the testing library and the
 /// app's modules again each time; each load read the transform cache, wrapped the source (a
 /// copy), hashed it for its bytecode cache, read that file and copied the text into the V8 heap.
-/// A shared entry's text is leaked on purpose: V8 uses it as an external one-byte string (no copy,
-/// not counted in the isolate's heap) that may outlive the entry. One entry per (path, mode): an
-/// edited file replaces its entry. A source only one load uses is owned and freed with its last
-/// user ([`module_source_for`]).
+/// A node_modules module's ASCII text is leaked on purpose: V8 uses it as an external one-byte
+/// string (no copy, not counted in the isolate's heap) that may outlive the entry; other text is
+/// owned ([`shared_module_source`]). One entry per (path, mode): an edited file replaces its
+/// entry, and app-module entries are capped (LRU). A source only one load uses is owned and freed
+/// with its last user ([`module_source_for`]).
 struct ModuleSource {
     wrapped: std::borrow::Cow<'static, str>,
-    /// The text as Latin-1 bytes (the UTF-8 bytes themselves when ASCII); `None` when a char is
-    /// past U+00FF.
+    /// The leaked ASCII text's bytes, for an external string; `None` for owned text.
     one_byte: Option<&'static [u8]>,
     cc_path: PathBuf,
-    /// The bytecode cache as last read or written by this process.
-    cc: std::sync::Mutex<Option<std::sync::Arc<[u8]>>>,
+    /// The size of the richest bytecode cache this process read or wrote for it (0: none or
+    /// rejected). The bytes themselves stay in the file, read on each consume.
+    cc: std::sync::Mutex<usize>,
+}
+
+#[cfg(test)]
+impl ModuleSource {
+    /// The size of the richest bytecode cache seen for it.
+    fn cc_len(&self) -> usize {
+        *self.cc.lock().unwrap()
+    }
 }
 
 /// (path, decorator-metadata mode)
@@ -4409,15 +4418,33 @@ fn source_stamp(abs: &Path) -> Option<SourceStamp> {
     #[cfg(not(unix))]
     let (ino, ctime) = (0, 0);
     let now = ns(Ok(std::time::SystemTime::now()));
+    stamp_from(mtime, ctime, meta.len(), ino, now, || {
+        std::fs::read(abs).ok()
+    })
+}
+
+/// A [`SourceStamp`] from a file's metadata, the time now (both in ns) and its bytes, read only
+/// for a file modified less than 2 s ago (or with a future mtime); `None` when that read fails.
+/// A stamp taken after the window has hash 0: an entry made inside the window then misses once
+/// and reloads, and an edit that keeps an older mtime and the size is still caught by ctime and
+/// inode, not by the hash.
+fn stamp_from(
+    mtime: u128,
+    ctime: u128,
+    len: u64,
+    ino: u64,
+    now: u128,
+    bytes: impl FnOnce() -> Option<Vec<u8>>,
+) -> Option<SourceStamp> {
     let hash = if now.saturating_sub(mtime) < 2_000_000_000 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        std::fs::read(abs).ok()?.hash(&mut h);
-        h.finish()
+        bytes()?.hash(&mut h);
+        h.finish() | 1
     } else {
         0
     };
-    Some((mtime, ctime, meta.len(), ino, hash))
+    Some((mtime, ctime, len, ino, hash))
 }
 
 const CJS_WRAPPER_OPEN: &str = "(function (exports, module, require, __filename, __dirname) {\n";
@@ -4452,32 +4479,65 @@ fn new_module_source(wrapped: String) -> Arc<ModuleSource> {
         cc_path: cc_path(&wrapped),
         wrapped: wrapped.into(),
         one_byte: None,
-        cc: std::sync::Mutex::new(None),
+        cc: std::sync::Mutex::new(0),
     })
 }
 
-/// A shared source: its text is leaked so V8 can use it as an external one-byte string.
-fn shared_module_source(wrapped: String) -> Arc<ModuleSource> {
+/// A shared source. A node_modules module's ASCII text is leaked so V8 can use it as an external
+/// one-byte string (no copy, outside the isolate's heap, and V8 may hold it past the entry); any
+/// other text is owned and copied into V8, so it is freed with its entry.
+fn shared_module_source(wrapped: String, external: bool) -> Arc<ModuleSource> {
     let cc_path = cc_path(&wrapped);
-    let wrapped: &'static str = Box::leak(wrapped.into_boxed_str());
-    let one_byte = if wrapped.is_ascii() {
-        Some(wrapped.as_bytes())
+    let (wrapped, one_byte): (std::borrow::Cow<'static, str>, _) = if external && wrapped.is_ascii()
+    {
+        let text: &'static str = Box::leak(wrapped.into_boxed_str());
+        (text.into(), Some(text.as_bytes()))
     } else {
-        latin1_bytes(wrapped).map(|b| &*Box::leak(b.into_boxed_slice()))
+        (wrapped.into(), None)
     };
     Arc::new(ModuleSource {
-        wrapped: wrapped.into(),
+        wrapped,
         one_byte,
         cc_path,
-        cc: std::sync::Mutex::new(None),
+        cc: std::sync::Mutex::new(0),
     })
 }
 
-type SourceMap = std::sync::Mutex<HashMap<SourceKey, (SourceStamp, Arc<ModuleSource>)>>;
+/// A shared entry: the file version it was made from, its source, when it was last used (a
+/// process-wide tick) and whether it is an app module (outside node_modules: capped).
+struct SharedSource {
+    stamp: SourceStamp,
+    source: Arc<ModuleSource>,
+    last_use: u64,
+    app: bool,
+}
+
+/// At most this many shared app-module entries; past it the least recently used goes.
+/// node_modules entries are not capped (a suite's dependency set is bounded).
+const MAX_SHARED_APP_SOURCES: usize = 2048;
+
+type SourceMap = std::sync::Mutex<HashMap<SourceKey, SharedSource>>;
 
 fn shared_sources() -> &'static SourceMap {
     static SOURCES: std::sync::OnceLock<SourceMap> = std::sync::OnceLock::new();
     SOURCES.get_or_init(Default::default)
+}
+
+/// Evict the least recently used app entries until at most `cap` are left.
+fn cap_app_sources(map: &mut HashMap<SourceKey, SharedSource>, cap: usize) {
+    let mut apps: Vec<(u64, SourceKey)> = map
+        .iter()
+        .filter(|(_, e)| e.app)
+        .map(|(k, e)| (e.last_use, k.clone()))
+        .collect();
+    if apps.len() <= cap {
+        return;
+    }
+    apps.sort_unstable_by_key(|(t, _)| *t);
+    let excess = apps.len() - cap;
+    for (_, k) in apps.into_iter().take(excess) {
+        map.remove(&k);
+    }
 }
 
 /// How many shared entries a path has (one per decorator-metadata mode at most).
@@ -4492,36 +4552,44 @@ fn module_source_entries(abs: &Path) -> usize {
 }
 
 fn module_source(abs: &Path, prefer_metadata: bool) -> Option<Arc<ModuleSource>> {
+    static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let stamp = source_stamp(abs)?;
     let key: SourceKey = (abs.to_path_buf(), prefer_metadata);
     let map = shared_sources();
-    let hit = |m: &HashMap<SourceKey, (SourceStamp, Arc<ModuleSource>)>| {
-        m.get(&key)
-            .filter(|(st, _)| *st == stamp)
-            .map(|(_, src)| Arc::clone(src))
+    let hit = |m: &mut HashMap<SourceKey, SharedSource>| {
+        let e = m.get_mut(&key).filter(|e| e.stamp == stamp)?;
+        e.last_use = TICK.fetch_add(1, Ordering::Relaxed);
+        Some(Arc::clone(&e.source))
     };
-    if let Some(src) = hit(&map.lock().unwrap()) {
+    if let Some(src) = hit(&mut map.lock().unwrap()) {
         return Some(src);
     }
     // transformed outside the lock (it can run esbuild); a racing thread's copy is dropped
     let raw = read_transformed(abs, true, prefer_metadata)?;
     let wrapped = format!("{CJS_WRAPPER_OPEN}{raw}\n}})");
     let mut map = map.lock().unwrap();
-    if let Some(src) = hit(&map) {
+    if let Some(src) = hit(&mut map) {
         return Some(src);
     }
-    let source = shared_module_source(wrapped);
-    // an edited file replaces its entry (its old text stays leaked: V8 may still use it)
-    map.insert(key, (stamp, Arc::clone(&source)));
+    let app = !abs.components().any(|c| c.as_os_str() == "node_modules");
+    let source = shared_module_source(wrapped, !app);
+    // an edited file replaces its entry (leaked external text stays: V8 may still use it)
+    map.insert(
+        key,
+        SharedSource {
+            stamp,
+            source: Arc::clone(&source),
+            last_use: TICK.fetch_add(1, Ordering::Relaxed),
+            app,
+        },
+    );
+    if app {
+        cap_app_sources(&mut map, MAX_SHARED_APP_SOURCES);
+    }
     Some(source)
 }
 
-/// `s` as Latin-1 bytes, `None` when a char does not fit one byte.
-fn latin1_bytes(s: &str) -> Option<Vec<u8>> {
-    s.chars().map(|c| u8::try_from(u32::from(c)).ok()).collect()
-}
-
-/// The module's source as a V8 string: external (no copy) when it is Latin-1.
+/// The module's source as a V8 string: external (no copy) for leaked ASCII text.
 fn source_string<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     source: &ModuleSource,
@@ -4532,16 +4600,14 @@ fn source_string<'s>(
     }
 }
 
-/// The module's bytecode cache: this process's copy, else the file's.
-fn module_code_cache(module: &ModuleSource) -> Option<std::sync::Arc<[u8]>> {
+/// The module's bytecode cache, read from its file (the slot keeps only the richest size).
+fn module_code_cache(module: &ModuleSource) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(&module.cc_path)
+        .ok()
+        .filter(|b| !b.is_empty())?;
     let mut slot = module.cc.lock().unwrap();
-    if slot.is_none() {
-        *slot = std::fs::read(&module.cc_path)
-            .ok()
-            .filter(|b| !b.is_empty())
-            .map(Into::into);
-    }
-    slot.clone()
+    *slot = (*slot).max(bytes.len());
+    Some(bytes)
 }
 
 /// Persist a new bytecode cache, for the process's other isolates too, unless it holds no more
@@ -4549,19 +4615,18 @@ fn module_code_cache(module: &ModuleSource) -> Option<std::sync::Arc<[u8]>> {
 /// lock, so a poorer cache never replaces a richer one.
 fn store_code_cache(module: &ModuleSource, bytes: &[u8], consumed: Option<usize>) {
     let mut slot = module.cc.lock().unwrap();
-    let current = slot.as_ref().map_or(0, |c| c.len());
-    if bytes.len() <= current.max(consumed.unwrap_or(0)) {
+    if bytes.len() <= (*slot).max(consumed.unwrap_or(0)) {
         return;
     }
     write_atomic_bytes(&module.cc_path, bytes);
-    *slot = Some(bytes.into());
+    *slot = bytes.len();
 }
 
 /// Forget a cache V8 rejected (another V8 build or flag set): the slot and its file, so no
 /// other isolate consumes it again.
 fn reject_code_cache(module: &ModuleSource) {
     let mut slot = module.cc.lock().unwrap();
-    *slot = None;
+    *slot = 0;
     let _ = std::fs::remove_file(&module.cc_path);
 }
 
@@ -8456,6 +8521,14 @@ fn run_test_file_reused(
                 }
             }
         }
+        // the config's runtime settings for this file (zeroDelayTimers, fakeTimers, mock / stub
+        // switches), as the fresh path applies them; the reset above restored the defaults
+        if let Some(cfg) = vitest_runtime_config(entry_abs) {
+            run_js(
+                scope,
+                &format!("try {{ globalThis.__ttApplyConfig(({cfg})); }} catch (e) {{}}"),
+            );
+        }
 
         // __cwd: the test's project root (nearest package.json outside node_modules).
         {
@@ -8705,7 +8778,12 @@ fn drive_tests(
     entry_abs: &Path,
 ) -> Result<TestReport, String> {
     let report = drive_tests_bounded(scope, global, entry_abs, 2_000_000);
-    flush_code_caches(scope);
+    // a run the heap guard stopped (its isolate is terminated) or that errored writes no cache
+    if report.is_err() || crate::heap_guard::tripped() {
+        drop_pending_code_caches();
+    } else {
+        flush_code_caches(scope);
+    }
     report
 }
 
