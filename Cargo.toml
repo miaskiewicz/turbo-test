@@ -73,11 +73,11 @@ lto = "thin"
 codegen-units = 1
 
 # Pre-publish only (turbo-test 0.7.0): turbo-dom 0.7.0 from its perf branch
-# (perf/0.7.0-parity, rebased on the release PR miaskiewicz/turbo-dom#232 at 7f63e99f), which
+# (perf/0.7.0-parity, rebased on the release PR miaskiewicz/turbo-dom#232 at a539d7cf), which
 # carries the engine bytecode cache, the subject-local form pseudo-classes, the linear
 # rendered() walk, the per-version sheet list and snapshot_blob_with (#249). Replace with the
 # crates.io release once turbo-dom 0.7.0 is published.
 [patch.crates-io]
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "39a537bc4c6aedc392525b54481d4befc1cef9b0" }
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "39a537bc4c6aedc392525b54481d4befc1cef9b0" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "39a537bc4c6aedc392525b54481d4befc1cef9b0" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "8fd0ac14991c625644bfe5710d67160e4d61cab9" }
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "8fd0ac14991c625644bfe5710d67160e4d61cab9" }
+turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "8fd0ac14991c625644bfe5710d67160e4d61cab9" }
