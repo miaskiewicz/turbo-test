@@ -4362,6 +4362,46 @@ type SourceKey = (PathBuf, bool, u128, u64);
 
 const CJS_WRAPPER_OPEN: &str = "(function (exports, module, require, __filename, __dirname) {\n";
 
+/// Whether a module's transform depends only on its file, so its wrapped source can be shared:
+/// not the test file or a setup file (their factories get a binder, turbo-test#205; the test
+/// file's transform also feeds test locations), not an app module whose source map failure
+/// frames keep, not under coverage. A module the shared cache skips loads as before, with the
+/// transform's per-file side effects.
+fn shareable_source(abs: &Path) -> bool {
+    let app = !abs.components().any(|c| c.as_os_str() == "node_modules");
+    !crate::coverage::enabled()
+        && !TEST_FILE.with(|f| *f.borrow() == abs)
+        && !SCOPED_SETUP_FILES.with(|f| f.borrow().iter().any(|s| s == abs))
+        && !(app && crate::location::frames_enabled())
+}
+
+/// The module's wrapped source: the process's shared copy when [`shareable_source`], else a
+/// fresh one of its own (leaked like the shared ones: V8 may still hold its text as an external
+/// string; about the size of the suite's test and setup files per run).
+fn module_source_for(abs: &Path, prefer_metadata: bool) -> Option<&'static ModuleSource> {
+    if shareable_source(abs) {
+        return module_source(abs, prefer_metadata);
+    }
+    let raw = read_transformed(abs, true, prefer_metadata)?;
+    Some(new_module_source(format!("{CJS_WRAPPER_OPEN}{raw}\n}})")))
+}
+
+fn new_module_source(wrapped: String) -> &'static ModuleSource {
+    let cc_path = cc_path(&wrapped);
+    let wrapped: &'static str = Box::leak(wrapped.into_boxed_str());
+    let one_byte = if wrapped.is_ascii() {
+        Some(wrapped.as_bytes())
+    } else {
+        latin1_bytes(wrapped).map(|b| &*Box::leak(b.into_boxed_slice()))
+    };
+    Box::leak(Box::new(ModuleSource {
+        wrapped,
+        one_byte,
+        cc_path,
+        cc: std::sync::Mutex::new(None),
+    }))
+}
+
 fn module_source(abs: &Path, prefer_metadata: bool) -> Option<&'static ModuleSource> {
     static SOURCES: std::sync::OnceLock<
         std::sync::Mutex<HashMap<SourceKey, &'static ModuleSource>>,
@@ -4384,19 +4424,7 @@ fn module_source(abs: &Path, prefer_metadata: bool) -> Option<&'static ModuleSou
     if let Some(hit) = map.get(&key) {
         return Some(*hit);
     }
-    let cc_path = cc_path(&wrapped);
-    let wrapped: &'static str = Box::leak(wrapped.into_boxed_str());
-    let one_byte = if wrapped.is_ascii() {
-        Some(wrapped.as_bytes())
-    } else {
-        latin1_bytes(wrapped).map(|b| &*Box::leak(b.into_boxed_slice()))
-    };
-    let source: &'static ModuleSource = Box::leak(Box::new(ModuleSource {
-        wrapped,
-        one_byte,
-        cc_path,
-        cc: std::sync::Mutex::new(None),
-    }));
+    let source = new_module_source(wrapped);
     map.insert(key, source);
     Some(source)
 }
@@ -4555,7 +4583,7 @@ fn load_cjs_inner<'s>(
     if REGISTRY.with(|r| r.borrow().cjs_synth_by_path.contains_key(abs)) {
         return Some(());
     }
-    let Some(module) = module_source(abs, prefer_metadata) else {
+    let Some(module) = module_source_for(abs, prefer_metadata) else {
         if loader_debug() {
             eprintln!("  cjs read/transform failed: {}", abs.display());
         }
