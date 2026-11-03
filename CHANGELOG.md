@@ -32,6 +32,12 @@ turbo-dom's engine scripts from source in each fresh isolate.
   hold (checked on a module's 1st, 2nd, 4th, 8th... hit per worker). A function first called by
   a later test file was compiled lazily after its module's cache was written, so every later run
   compiled it again. The cache format is unchanged (salt `cc-v2`).
+- Wrapped CJS sources and their bytecode caches are shared by every isolate of the process, from
+  alphajew420's #106. Each fresh isolate used to read the transform cache, wrap and copy the
+  source, hash it, read its bytecode cache file and copy the text into the V8 heap again. Entries
+  are keyed by (path, mtime, size, decorator-metadata mode), so an edited file loads anew, and
+  Latin-1 sources go to V8 as external one-byte strings (no copy). The bytecode cache refresh
+  above updates the shared copy too.
 - Zero-delay timers are on by default: a real `setTimeout(fn, 0)` waits 0 ms again, as in 0.4.2,
   instead of Node's 1 ms (#212), which made timer-heavy suites slower.
 
@@ -61,6 +67,9 @@ turbo-dom's engine scripts from source in each fresh isolate.
 - `cjs_bytecode_cache_picks_up_functions_first_called_in_a_later_file`: file 1 loads a module,
   file 2 calls its function; the module's cache then holds it.
 - `cjs_bytecode_cache_skips_the_scripts_of_a_file_that_failed_to_load` (#228).
+- `module_sources_are_shared_across_isolates_and_threads`,
+  `module_sources_are_reloaded_when_the_file_changes` (size, then mtime) and
+  `module_sources_are_one_byte_when_latin1` (#106).
 - `timeout_zero_is_zero_ms_by_default`,
   `timeout_zero_runs_after_immediates_and_messages_like_node_without_zero_delay` (checked against
   vitest 4.1.12, node and jsdom) and `zero_delay_timers_from_config_env_and_cli`: the order of

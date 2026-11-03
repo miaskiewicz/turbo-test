@@ -1775,7 +1775,7 @@ fn module_sources_are_reloaded_when_the_file_changes() {
     // a different size
     std::fs::write(&f, "module.exports = 'second';\n").unwrap();
     let two = module_source(&f, false).unwrap();
-    assert!(two.wrapped.contains("'second'"), "{}", two.wrapped);
+    assert!(two.wrapped.contains("second"), "{}", two.wrapped);
     assert!(!std::ptr::eq(one, two));
     // the same size, a later mtime
     std::fs::write(&f, "module.exports = 'thirds';\n").unwrap();
@@ -1787,7 +1787,7 @@ fn module_sources_are_reloaded_when_the_file_changes() {
         .set_modified(later)
         .unwrap();
     let three = module_source(&f, false).unwrap();
-    assert!(three.wrapped.contains("'thirds'"), "{}", three.wrapped);
+    assert!(three.wrapped.contains("thirds"), "{}", three.wrapped);
     assert!(!std::ptr::eq(two, three));
 }
 

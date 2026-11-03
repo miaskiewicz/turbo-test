@@ -4340,38 +4340,130 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8]) {
     }
 }
 
+/// A module's wrapped CJS source and its bytecode cache, shared by every isolate in the process
+/// (from alphajew420's #106). A fresh isolate per file loads react, the testing library and the
+/// app's modules again each time; each load read the transform cache, wrapped the source (a
+/// copy), hashed it for its bytecode cache, read that file and copied the text into the V8 heap.
+/// Entries are leaked on purpose: the process keeps them for its whole life, and V8 can then use
+/// the text as an external one-byte string (no copy, not counted in the isolate's heap). Stale
+/// entries of an edited file stay until exit (keyed by mtime and size).
+struct ModuleSource {
+    wrapped: &'static str,
+    /// The text as Latin-1 bytes (the UTF-8 bytes themselves when ASCII); `None` when a char is
+    /// past U+00FF.
+    one_byte: Option<&'static [u8]>,
+    cc_path: PathBuf,
+    /// The bytecode cache as last read or written by this process.
+    cc: std::sync::Mutex<Option<std::sync::Arc<[u8]>>>,
+}
+
+/// (path, decorator-metadata mode, mtime in ns, size)
+type SourceKey = (PathBuf, bool, u128, u64);
+
+const CJS_WRAPPER_OPEN: &str = "(function (exports, module, require, __filename, __dirname) {\n";
+
+fn module_source(abs: &Path, prefer_metadata: bool) -> Option<&'static ModuleSource> {
+    static SOURCES: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<SourceKey, &'static ModuleSource>>,
+    > = std::sync::OnceLock::new();
+    let meta = std::fs::metadata(abs).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    let key: SourceKey = (abs.to_path_buf(), prefer_metadata, mtime, meta.len());
+    let map = SOURCES.get_or_init(Default::default);
+    if let Some(hit) = map.lock().unwrap().get(&key) {
+        return Some(*hit);
+    }
+    // transformed outside the lock (it can run esbuild); a racing thread's copy is dropped
+    let raw = read_transformed(abs, true, prefer_metadata)?;
+    let wrapped = format!("{CJS_WRAPPER_OPEN}{raw}\n}})");
+    let mut map = map.lock().unwrap();
+    if let Some(hit) = map.get(&key) {
+        return Some(*hit);
+    }
+    let cc_path = cc_path(&wrapped);
+    let wrapped: &'static str = Box::leak(wrapped.into_boxed_str());
+    let one_byte = if wrapped.is_ascii() {
+        Some(wrapped.as_bytes())
+    } else {
+        latin1_bytes(wrapped).map(|b| &*Box::leak(b.into_boxed_slice()))
+    };
+    let source: &'static ModuleSource = Box::leak(Box::new(ModuleSource {
+        wrapped,
+        one_byte,
+        cc_path,
+        cc: std::sync::Mutex::new(None),
+    }));
+    map.insert(key, source);
+    Some(source)
+}
+
+/// `s` as Latin-1 bytes, `None` when a char does not fit one byte.
+fn latin1_bytes(s: &str) -> Option<Vec<u8>> {
+    s.chars().map(|c| u8::try_from(u32::from(c)).ok()).collect()
+}
+
+/// The module's source as a V8 string: external (no copy) when it is Latin-1.
+fn source_string<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    source: &'static ModuleSource,
+) -> Option<v8::Local<'s, v8::String>> {
+    match source.one_byte {
+        Some(b) => v8::String::new_external_onebyte_static(scope, b),
+        None => v8::String::new(scope, source.wrapped),
+    }
+}
+
+/// The module's bytecode cache: this process's copy, else the file's.
+fn module_code_cache(module: &ModuleSource) -> Option<std::sync::Arc<[u8]>> {
+    let mut slot = module.cc.lock().unwrap();
+    if slot.is_none() {
+        *slot = std::fs::read(&module.cc_path)
+            .ok()
+            .filter(|b| !b.is_empty())
+            .map(Into::into);
+    }
+    slot.clone()
+}
+
+/// Persist a new bytecode cache, for the process's other isolates too.
+fn store_code_cache(module: &ModuleSource, bytes: &[u8]) {
+    write_atomic_bytes(&module.cc_path, bytes);
+    *module.cc.lock().unwrap() = Some(bytes.into());
+}
+
 /// Compile the wrapped CJS source, consuming a persisted bytecode cache when present and
 /// producing one on a miss. Returns the bound Script. Falls back to a plain compile on any
 /// cache miss/reject (V8 recompiles internally and we keep that result).
 fn compile_cjs_cached<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     code: v8::Local<v8::String>,
-    wrapped: &str,
+    module: &'static ModuleSource,
     origin: Option<&v8::ScriptOrigin>,
 ) -> Option<v8::Local<'s, v8::Script>> {
     use v8::script_compiler as sc;
-    let path = cc_path(wrapped);
-    if let Ok(bytes) = std::fs::read(&path) {
-        if !bytes.is_empty() {
-            let cached = v8::CachedData::new(&bytes);
-            let mut source = sc::Source::new_with_cached_data(code, origin, cached);
-            let (consume, reason) = (
-                sc::CompileOptions::ConsumeCodeCache,
-                sc::NoCacheReason::NoReason,
-            );
-            let compiled = sc::compile(scope, &mut source, consume, reason);
-            // `bytes` stays alive through this block (Source borrowed it for the compile).
-            // A rejected cache (another V8 build or flag set) still compiles; rewrite it then so
-            // later loads hit instead of recompiling from source forever.
-            let rejected = source.get_cached_data().is_none_or(|c| c.rejected());
-            if let Some(s) = compiled {
-                if rejected {
-                    defer_code_cache(scope, path, s);
-                } else if refresh_due(&path) {
-                    defer_code_cache_refresh(scope, path, s, bytes.len());
-                }
-                return Some(s);
+    if let Some(bytes) = module_code_cache(module) {
+        let cached = v8::CachedData::new(&bytes);
+        let mut source = sc::Source::new_with_cached_data(code, origin, cached);
+        let (consume, reason) = (
+            sc::CompileOptions::ConsumeCodeCache,
+            sc::NoCacheReason::NoReason,
+        );
+        let compiled = sc::compile(scope, &mut source, consume, reason);
+        // `bytes` stays alive through this block (Source borrowed it for the compile).
+        // A rejected cache (another V8 build or flag set) still compiles; rewrite it then so
+        // later loads hit instead of recompiling from source forever.
+        let rejected = source.get_cached_data().is_none_or(|c| c.rejected());
+        if let Some(s) = compiled {
+            if rejected {
+                defer_code_cache(scope, module, s, None);
+            } else if refresh_due(&module.cc_path) {
+                defer_code_cache(scope, module, s, Some(bytes.len()));
             }
+            return Some(s);
         }
     }
     // Miss/reject: compile fresh and persist the bytecode for next time.
@@ -4381,7 +4473,7 @@ fn compile_cjs_cached<'s>(
         sc::NoCacheReason::NoReason,
     );
     let script = sc::compile(scope, &mut source, options, reason)?;
-    defer_code_cache(scope, path, script);
+    defer_code_cache(scope, module, script, None);
     Some(script)
 }
 
@@ -4395,7 +4487,11 @@ thread_local! {
     static CODE_CACHE_HITS: RefCell<HashMap<PathBuf, u32>> = RefCell::new(HashMap::new());
 }
 
-type PendingCodeCache = (PathBuf, v8::Global<v8::UnboundScript>, Option<usize>);
+type PendingCodeCache = (
+    &'static ModuleSource,
+    v8::Global<v8::UnboundScript>,
+    Option<usize>,
+);
 
 /// Whether this cache hit re-checks the cache for functions compiled since it was written: on
 /// the 1st, 2nd, 4th, 8th... hit of a path in this worker. A function first called by a later
@@ -4410,19 +4506,16 @@ fn refresh_due(path: &Path) -> bool {
     })
 }
 
-fn defer_code_cache(scope: &mut v8::PinScope, path: PathBuf, script: v8::Local<v8::Script>) {
-    let unbound = v8::Global::new(scope, script.get_unbound_script(scope));
-    PENDING_CODE_CACHES.with(|p| p.borrow_mut().push((path, unbound, None)));
-}
-
-fn defer_code_cache_refresh(
+/// Queue `script`'s cache for [`flush_code_caches`]: `consumed` is the size of the cache it
+/// was compiled from for a cache-hit refresh, `None` for a script compiled without a usable one.
+fn defer_code_cache(
     scope: &mut v8::PinScope,
-    path: PathBuf,
+    module: &'static ModuleSource,
     script: v8::Local<v8::Script>,
-    consumed: usize,
+    consumed: Option<usize>,
 ) {
     let unbound = v8::Global::new(scope, script.get_unbound_script(scope));
-    PENDING_CODE_CACHES.with(|p| p.borrow_mut().push((path, unbound, Some(consumed))));
+    PENDING_CODE_CACHES.with(|p| p.borrow_mut().push((module, unbound, consumed)));
 }
 
 /// Drop the pending caches a previous file left (it failed to load, so it never reached
@@ -4438,12 +4531,12 @@ fn discard_stale_code_caches() {
 /// after the top-level compile has none of them, so each later isolate would parse and compile
 /// them again.
 fn flush_code_caches(scope: &mut v8::PinScope) {
-    for (path, unbound, consumed) in
+    for (module, unbound, consumed) in
         PENDING_CODE_CACHES.with(|p| std::mem::take(&mut *p.borrow_mut()))
     {
         if let Some(cc) = v8::Local::new(scope, &unbound).create_code_cache() {
             if consumed.is_none_or(|n| cc.len() > n) {
-                write_atomic_bytes(&path, &cc);
+                store_code_cache(module, &cc);
             }
         }
     }
@@ -4462,7 +4555,7 @@ fn load_cjs_inner<'s>(
     if REGISTRY.with(|r| r.borrow().cjs_synth_by_path.contains_key(abs)) {
         return Some(());
     }
-    let Some(raw) = read_transformed(abs, true, prefer_metadata) else {
+    let Some(module) = module_source(abs, prefer_metadata) else {
         if loader_debug() {
             eprintln!("  cjs read/transform failed: {}", abs.display());
         }
@@ -4475,9 +4568,7 @@ fn load_cjs_inner<'s>(
         }
         return None;
     };
-    let wrapped =
-        format!("(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})");
-    let code = v8::String::new(scope, &wrapped)?;
+    let code = source_string(scope, module)?;
     // Under --coverage, give the script an origin named after the file so V8's precise-coverage
     // report carries a URL we can map back to source. Off by default (origin None) — zero change.
     // (compiled script, the compile error when neither the native output nor the esbuild retry
@@ -4501,7 +4592,7 @@ fn load_cjs_inner<'s>(
         // A named origin (the entry file, framed app modules) shares the bytecode cache: the
         // cached data does not depend on the script's name, and V8 rejects a mismatch safely.
         let compiled = if code_cache_enabled() {
-            compile_cjs_cached(tc, code, &wrapped, origin.as_ref())
+            compile_cjs_cached(tc, code, module, origin.as_ref())
         } else {
             match &origin {
                 Some(o) => v8::Script::compile(tc, code, Some(o)),
@@ -4525,7 +4616,7 @@ fn load_cjs_inner<'s>(
                     .unwrap_or_default();
                 let fb = esbuild_cjs_fallback(abs, prefer_metadata).and_then(|src| {
                     let wrapped_fb = format!("(function (exports, module, require, __filename, __dirname) {{\n{src}\n}})");
-                    if wrapped_fb == wrapped {
+                    if wrapped_fb == module.wrapped {
                         return None; // native wasn't the source (output identical) — no point retrying
                     }
                     let code_fb = v8::String::new(tc, &wrapped_fb)?;
