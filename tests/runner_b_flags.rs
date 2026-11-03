@@ -340,6 +340,39 @@ fn cjs_bytecode_cache_picks_up_functions_first_called_in_a_later_file() {
     assert_eq!(again.code, Some(0), "{}", again.all());
 }
 
+// A file that fails to load never reaches the post-run cache write: the scripts it compiled
+// belong to its disposed isolate, and the next file of the worker must not touch them.
+#[test]
+fn cjs_bytecode_cache_skips_the_scripts_of_a_file_that_failed_to_load() {
+    let p = plain("rb-flags-cc-load-error");
+    p.with_esbuild();
+    p.file(
+        "src/lib.ts",
+        "export const add = (a: number, b: number) => a + b;\n",
+    );
+    p.file(
+        "a.test.ts",
+        "import { add } from './src/lib';\nif (add(1, 1) === 2) throw new Error('load boom');\n",
+    );
+    p.file(
+        "b.test.ts",
+        "import { add } from './src/lib';\ntest('b', () => { expect(add(2, 3)).toBe(5); });\n",
+    );
+    p.file(
+        "c.test.ts",
+        "import { add } from './src/lib';\ntest('c', () => { expect(add(1, 3)).toBe(4); });\n",
+    );
+    for run in ["cold", "warm"] {
+        let r = turbo_test(&p.dir, &["--jobs", "1"], &[]);
+        assert!(!r.all().contains("panicked"), "{run}: {}", r.all());
+        assert!(
+            r.stdout.contains("Tests  2 passed (2)"),
+            "{run}: {}",
+            r.all()
+        );
+    }
+}
+
 #[test]
 fn only_is_forbidden_on_ci_unless_allow_only() {
     // turbo-test#75: vitest 4.1.12 defaults allowOnly to !isCI (std-env): on CI a stray `.only`
