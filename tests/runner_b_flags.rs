@@ -296,6 +296,50 @@ fn cjs_bytecode_cache_holds_the_functions_the_run_called() {
     assert!(with > without, "called {with} <= uncalled {without}");
 }
 
+// A function first called by a later test file is compiled after the module's cache was
+// written (the first file only loaded the module). A cache hit re-saves the cache when the run
+// compiled more of the module, so the next run gets that function as bytecode too.
+#[test]
+fn cjs_bytecode_cache_picks_up_functions_first_called_in_a_later_file() {
+    let import = "import { shape } from './src/lib';\n";
+    let uncalled = cache_sizes(
+        "rb-flags-cc-later-base",
+        &format!("{import}test('s', () => {{ expect(typeof shape).toBe('function'); }});\n"),
+    );
+    let p = plain("rb-flags-cc-later");
+    p.with_esbuild();
+    p.file(
+        "src/lib.ts",
+        "export function shape(n: number) {\n  const out = [];\n  for (let i = 0; i < n; i++) out.push({ i, sq: i * i, label: `item ${i}` });\n  return out.map((o) => o.label + ':' + o.sq).join(',');\n}\n",
+    );
+    p.file(
+        "a.test.ts",
+        &format!("{import}test('a', () => {{ expect(typeof shape).toBe('function'); }});\n"),
+    );
+    p.file(
+        "b.test.ts",
+        &format!("{import}test('b', () => {{ expect(shape(2)).toBe('item 0:0,item 1:1'); }});\n"),
+    );
+    // one worker: a.test.ts writes the lib's cache, b.test.ts consumes it and calls `shape`
+    let r = turbo_test(&p.dir, &["--jobs", "1"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let (name, now) = code_cache_files(&p)
+        .iter()
+        .map(|f| {
+            (
+                f.file_name().unwrap().to_string_lossy().into_owned(),
+                f.metadata().unwrap().len(),
+            )
+        })
+        .find(|(n, _)| uncalled.contains_key(n))
+        .expect("the lib's cache entry");
+    let before = uncalled[&name];
+    assert!(now > before, "cache {now} <= load-only cache {before}");
+    // the refreshed entry is consumed by the next run
+    let again = turbo_test(&p.dir, &["--jobs", "1"], &[]);
+    assert_eq!(again.code, Some(0), "{}", again.all());
+}
+
 #[test]
 fn only_is_forbidden_on_ci_unless_allow_only() {
     // turbo-test#75: vitest 4.1.12 defaults allowOnly to !isCI (std-env): on CI a stray `.only`
