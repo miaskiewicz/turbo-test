@@ -1684,7 +1684,7 @@ fn zero_delay_env_warning(env: Option<&str>) -> Option<String> {
 /// [`vitest_runtime_config`]'s literal from a config's text (`None` when it sets none of them).
 #[cfg(test)]
 fn runtime_config_literal(s: &str) -> Option<String> {
-    runtime_config_literal_with(s, std::env::var("TURBO_ZERO_DELAY_TIMERS").ok().as_deref())
+    runtime_config_literal_with(s, None)
 }
 
 fn runtime_config_literal_with(s: &str, env: Option<&str>) -> Option<String> {

@@ -1913,15 +1913,15 @@ fn module_sources_see_same_size_same_mtime_edits() {
 fn code_cache_store_keeps_the_richer_cache() {
     let m = new_module_source("(function(){ /* cc-richer */ })".to_string());
     store_code_cache(&m, &[1u8; 100], None);
-    assert_eq!(m.cc.lock().unwrap().as_ref().map(|c| c.len()), Some(100));
+    assert_eq!(m.cc_len(), 100);
     // a refresh larger than what it consumed but smaller than the current one
     store_code_cache(&m, &[2u8; 50], Some(10));
-    assert_eq!(m.cc.lock().unwrap().as_ref().map(|c| c.len()), Some(100));
+    assert_eq!(m.cc_len(), 100);
     assert_eq!(std::fs::read(&m.cc_path).unwrap().len(), 100);
     store_code_cache(&m, &[3u8; 60], None);
-    assert_eq!(m.cc.lock().unwrap().as_ref().map(|c| c.len()), Some(100));
+    assert_eq!(m.cc_len(), 100);
     store_code_cache(&m, &[4u8; 150], Some(100));
-    assert_eq!(m.cc.lock().unwrap().as_ref().map(|c| c.len()), Some(150));
+    assert_eq!(m.cc_len(), 150);
     assert_eq!(std::fs::read(&m.cc_path).unwrap(), vec![4u8; 150]);
 }
 
@@ -1932,10 +1932,10 @@ fn a_rejected_code_cache_is_cleared() {
     std::fs::write(&m.cc_path, b"garbage").unwrap();
     assert!(module_code_cache(&m).is_some());
     reject_code_cache(&m);
-    assert!(m.cc.lock().unwrap().is_none());
+    assert_eq!(m.cc_len(), 0);
     assert!(!m.cc_path.exists());
     store_code_cache(&m, &[9u8; 5], None);
-    assert_eq!(m.cc.lock().unwrap().as_ref().map(|c| c.len()), Some(5));
+    assert_eq!(m.cc_len(), 5);
 }
 
 // A `/*` or `//` inside a string (a glob, a URL) starts no comment: later keys are still read.
@@ -1963,4 +1963,97 @@ fn config_keys_after_comment_like_strings_are_found() {
         zero_delay_timers_from(None, "/* a */ test: { /* b */ zeroDelayTimers: false }"),
         Some(false)
     );
+}
+
+// The stamp's content hash: only for a file modified in the last 2 s, where it tells same-size,
+// same-mtime edits apart; 0 (and the bytes not read) outside that window.
+#[test]
+fn source_stamps_hash_recent_files_only() {
+    let s = 1_000_000_000u128;
+    let read = |b: &'static [u8]| move || Some(b.to_vec());
+    let a = stamp_from(10 * s, 10 * s, 3, 7, 11 * s, read(b"aaa")).unwrap();
+    let b = stamp_from(10 * s, 10 * s, 3, 7, 11 * s, read(b"bbb")).unwrap();
+    assert_ne!(a.4, 0);
+    assert_ne!(a, b, "a same-size same-mtime edit inside the window");
+    assert_eq!(a.0, 10 * s);
+    assert_eq!(a.1, 10 * s);
+    assert_eq!((a.2, a.3), (3, 7));
+    // just inside, just outside the window
+    assert_ne!(
+        stamp_from(10 * s, 0, 3, 7, 12 * s - 1, read(b"aaa"))
+            .unwrap()
+            .4,
+        0
+    );
+    let old = stamp_from(10 * s, 0, 3, 7, 12 * s, || {
+        panic!("read outside the window")
+    })
+    .unwrap();
+    assert_eq!(old.4, 0);
+    // a future mtime counts as recent
+    assert_ne!(
+        stamp_from(20 * s, 0, 3, 7, 11 * s, read(b"aaa")).unwrap().4,
+        0
+    );
+    // an unreadable recent file has no stamp
+    assert_eq!(stamp_from(10 * s, 0, 3, 7, 11 * s, || None), None);
+}
+
+// Shared app-module entries are capped: over the cap the least recently used app entry goes;
+// node_modules entries are never evicted.
+#[test]
+fn shared_app_sources_are_capped_lru() {
+    let mut m: HashMap<SourceKey, SharedSource> = HashMap::new();
+    let entry = |app: bool, last_use: u64| SharedSource {
+        stamp: (0, 0, 0, 0, 0),
+        source: new_module_source(String::new()),
+        last_use,
+        app,
+    };
+    let k = |n: &str| (PathBuf::from(n), false);
+    m.insert(k("/nm/a"), entry(false, 0));
+    m.insert(k("/app/old"), entry(true, 1));
+    m.insert(k("/app/mid"), entry(true, 5));
+    m.insert(k("/app/new"), entry(true, 9));
+    cap_app_sources(&mut m, 3);
+    assert_eq!(m.len(), 4);
+    cap_app_sources(&mut m, 2);
+    assert!(!m.contains_key(&k("/app/old")));
+    assert!(m.contains_key(&k("/app/mid")) && m.contains_key(&k("/app/new")));
+    assert!(m.contains_key(&k("/nm/a")));
+    cap_app_sources(&mut m, 0);
+    assert_eq!(m.keys().collect::<Vec<_>>(), vec![&k("/nm/a")]);
+}
+
+// Only node_modules one-byte text is leaked (V8 uses it as an external string): app modules and
+// text past Latin-1 are owned and freed with their entry.
+#[test]
+fn shared_sources_leak_only_external_one_byte_text() {
+    let ext = shared_module_source("(function(){ 'ascii' })".to_string(), true);
+    assert!(ext.one_byte.is_some());
+    let wide = shared_module_source("(function(){ '\u{20ac}' })".to_string(), true);
+    assert!(wide.one_byte.is_none());
+    let app = shared_module_source("(function(){ 'app' })".to_string(), false);
+    assert!(app.one_byte.is_none());
+    for src in [wide, app] {
+        let weak = Arc::downgrade(&src);
+        drop(src);
+        assert!(weak.upgrade().is_none());
+    }
+}
+
+// The bytecode cache is not kept in memory: each consume reads the file, the slot keeps only
+// the size of the richest cache seen.
+#[test]
+fn code_cache_bytes_are_read_from_the_file_not_kept() {
+    let m = new_module_source(format!(
+        "(function(){{ /* cc-file {} */ }})",
+        std::process::id()
+    ));
+    store_code_cache(&m, &[1u8; 40], None);
+    assert_eq!(m.cc_len(), 40);
+    std::fs::write(&m.cc_path, [7u8; 40]).unwrap();
+    assert_eq!(&*module_code_cache(&m).unwrap(), &[7u8; 40][..]);
+    std::fs::remove_file(&m.cc_path).unwrap();
+    assert!(module_code_cache(&m).is_none());
 }
