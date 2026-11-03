@@ -72,6 +72,15 @@ turbo-test has no Cargo feature flags; behaviour switches are environment variab
 | `TURBO_REUSE_ISOLATE=1` / `TURBO_NO_REUSE=1` | force isolate reuse on / off (see below) |
 | `TURBO_LEGACY_REPORTER=1` | compact `PASS` / `FAIL` reporter instead of vitest's |
 | `TURBO_ZERO_DELAY_TIMERS=1` / `=0` | zero-delay timers on (default) / off (see below) |
+| `TURBO_SNAPSHOT=0` | each DOM file runs turbo-dom's engine install instead of opening the window snapshot (see below) |
+
+**Window snapshot** (on by default for runs with at least 8 DOM-environment files). The worker
+isolates' startup blob holds the framework layer twice: alone, for `node`-environment files, and
+with turbo-dom's window bootstrapped over it (turbo-dom#249). A DOM file opens the second context,
+so its install rehydrates the window instead of running the engine scripts (about 20-30 ms per
+file). Building the blob costs about 170 ms once per process, so smaller runs skip it.
+`TURBO_SNAPSHOT=0` turns it off, and so does any `TURBO_V8_FLAGS` (code deserialized from the blob
+can conflict with custom V8 flags).
 
 **Zero-delay timers** (on by default). A real `setTimeout(fn, 0)` (or any delay below 1 ms) waits
 0 ms, as in turbo-test 0.4.2: it fires before a setImmediate or MessageChannel message queued after

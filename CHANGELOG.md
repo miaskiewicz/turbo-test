@@ -44,6 +44,17 @@ turbo-dom's engine scripts from source in each fresh isolate.
   refresh never replaces a larger cache with a smaller one. Sources only one load uses (the test file,
   setup files, app modules when failure frames are on, everything under `--coverage`) are owned
   and freed after the load instead of leaked.
+- turbo-dom's window startup snapshot (turbo-dom#249): for a run with at least 8 DOM files, the
+  worker blob carries the framework context alone (`node` files) and with the window bootstrapped
+  over it, so a DOM file's install rehydrates the window instead of running the engine scripts
+  (standalone-chat-app: about 10% less CPU; 40 small DOM files on one worker 2.1 s to 1.0 s).
+  The blob's one-time build (~170 ms) is why small runs skip it. `TURBO_SNAPSHOT=0` turns it off,
+  and so does any `TURBO_V8_FLAGS`.
+- turbo-dom perf/0.7.0-parity: a CSS transition / animation update's display:none ancestor
+  check resolves each ancestor once per read instead of once per ancestor per level (O(depth^2)
+  style lookups: 1978 at depth 40), and a cascade reads the document's sheet list once per tree
+  version. MUI TextareaAutosize in a Dialog reads its textarea's style between mutations:
+  standalone-chat-app FeedbackDialog CPU 5.2 s to 2.4 s.
 - Zero-delay timers are on by default: a real `setTimeout(fn, 0)` waits 0 ms again, as in 0.4.2,
   instead of Node's 1 ms (#212), which made timer-heavy suites slower. **This differs from
   vitest's order** (`micro, immediate, message, timeout0`): a test that drains React's scheduler

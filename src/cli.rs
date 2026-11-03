@@ -1806,6 +1806,7 @@ pub fn run(opts: Options) -> i32 {
         std::env::set_var("TURBO_ERROR_FRAMES", "1");
     }
 
+    runner::plan_window_snapshot(&files);
     runner::init_v8(); // builds the framework snapshot once, before workers spawn
 
     let hist_path = durations_path();

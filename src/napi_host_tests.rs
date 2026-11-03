@@ -13,8 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// ones (other unit tests run concurrently and use the framework snapshot).
 fn with_scope(f: impl FnOnce(&mut v8::PinScope)) {
     crate::runner::init_v8();
-    let blob = crate::runner::framework_snapshot();
-    let params = v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(blob.clone()));
+    let params = crate::runner::framework_snapshot().create_params();
     let isolate = &mut v8::Isolate::new(params);
     v8::scope!(let scope, isolate);
     let context = v8::Context::new(scope, Default::default());

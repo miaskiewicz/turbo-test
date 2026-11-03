@@ -7045,44 +7045,29 @@ const RUNTIME_JS: &str = include_str!("runtime.js");
 /// default context, serialized. Native callbacks (log/__nativeRequire) are NOT in the
 /// snapshot — V8 can't serialize native function pointers — so they are re-bound per
 /// context after deserialization (`install_natives`).
-pub(crate) fn framework_snapshot() -> &'static Vec<u8> {
-    static SNAP: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+pub(crate) fn framework_snapshot() -> &'static FrameworkSnapshot {
+    static SNAP: std::sync::OnceLock<FrameworkSnapshot> = std::sync::OnceLock::new();
     SNAP.get_or_init(|| {
+        if window_snapshot_enabled() {
+            // turbo-dom#249: the same framework context, plus a second one with the window
+            // bootstrapped over it, so a DOM file's install rehydrates instead of running the
+            // engine scripts (the default context stays window-free for node-environment files)
+            if let Some(blob) =
+                turbo_dom_browser_env::browser_env::snapshot_blob_with(framework_prelude)
+            {
+                turbo_dom_browser_env::browser_env::set_snapshot_install(true);
+                return FrameworkSnapshot {
+                    data: blob.data,
+                    references: Some(blob.references),
+                };
+            }
+        }
         let mut creator = v8::Isolate::snapshot_creator(None, None);
         {
             v8::scope!(let scope, &mut creator);
             let context = v8::Context::new(scope, Default::default());
             let scope = &mut v8::ContextScope::new(scope, context);
-            // Bake the REAL host platform/arch (compile-time target) into the snapshot so
-            // turbo-dom's index.js loader requires the matching prebuilt .node. Without this
-            // the runtime reported 'darwin'/'arm64' everywhere and non-mac hosts loaded the
-            // macOS .node -> dlopen fails -> "document is not defined".
-            let node_platform = node_platform(std::env::consts::OS);
-            let node_arch = node_arch(std::env::consts::ARCH);
-            let os_type = node_os_type(std::env::consts::OS);
-            // isMusl() reads glibcVersionRuntime: truthy => gnu, falsy => musl.
-            let glibc_runtime: &str = if cfg!(target_env = "musl") { "" } else { "2.39" };
-            let prelude = format!(
-                "globalThis.__ttPlatform={node_platform:?};globalThis.__ttArch={node_arch:?};globalThis.__ttOsType={os_type:?};globalThis.__ttGlibc={glibc_runtime:?};"
-            );
-            let pcode = v8::String::new(scope, &prelude).unwrap();
-            v8::Script::compile(scope, pcode, None).unwrap().run(scope).unwrap();
-            // chai (turbo-test#160): vitest's expect(x) is a chai Assertion; runtime.js loads it
-            // through the globalThis.__ttLoadChai this defines
-            let chai = chai_script();
-            {
-                let tc = std::pin::pin!(v8::TryCatch::new(scope));
-                let tc = &mut tc.init();
-                let ccode = v8::String::new(tc, &chai).unwrap();
-                let ran = v8::Script::compile(tc, ccode, None).and_then(|s| s.run(tc));
-                if ran.is_none() {
-                    let msg = caught_message(tc, "Error").unwrap_or_default();
-                    chai_missing(&format!("chai failed to load: {msg}"));
-                }
-            }
-            let code = v8::String::new(scope, RUNTIME_JS).unwrap();
-            let s = v8::Script::compile(scope, code, None).unwrap();
-            s.run(scope).unwrap();
+            framework_prelude(scope);
             scope.set_default_context(context);
         }
         // E5: bake the framework's compiled bytecode into the snapshot (Keep) instead of dropping
@@ -7095,11 +7080,127 @@ pub(crate) fn framework_snapshot() -> &'static Vec<u8> {
         } else {
             v8::FunctionCodeHandling::Clear
         };
-        creator
-            .create_blob(handling)
-            .expect("framework snapshot")
-            .to_vec()
+        let data = creator.create_blob(handling).expect("framework snapshot");
+        FrameworkSnapshot {
+            data: Box::leak(data.to_vec().into_boxed_slice()),
+            references: None,
+        }
     })
+}
+
+/// The worker isolates' startup blob ([`framework_snapshot`]): the framework layer, and with
+/// the window snapshot (`references` set) the window context at
+/// `turbo_dom_browser_env::browser_env::SNAPSHOT_WINDOW_CONTEXT` too.
+pub(crate) struct FrameworkSnapshot {
+    data: &'static [u8],
+    references: Option<&'static [v8::ExternalReference]>,
+}
+
+// SAFETY: the references are addresses of `extern "C"` functions (turbo-dom's table), immutable
+// and valid process-wide; the data is an immutable leaked byte slice.
+unsafe impl Send for FrameworkSnapshot {}
+unsafe impl Sync for FrameworkSnapshot {}
+
+impl FrameworkSnapshot {
+    /// Isolate parameters that deserialize this blob.
+    pub(crate) fn create_params(&self) -> v8::CreateParams {
+        let params = v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(self.data));
+        match self.references {
+            Some(references) => params.external_references(std::borrow::Cow::Borrowed(references)),
+            None => params,
+        }
+    }
+
+    /// A new context of an isolate made from this blob: the window context for a DOM file
+    /// when the blob has one, else the framework's default context.
+    pub(crate) fn new_context<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_, ()>,
+        dom: bool,
+    ) -> v8::Local<'s, v8::Context> {
+        if dom && self.references.is_some() {
+            let index = turbo_dom_browser_env::browser_env::SNAPSHOT_WINDOW_CONTEXT;
+            // invariant: a blob with references is a snapshot_blob_with one, which holds it
+            return v8::Context::from_snapshot(scope, index, Default::default())
+                .expect("the window blob holds the window context");
+        }
+        v8::Context::new(scope, Default::default())
+    }
+}
+
+/// Whether worker isolates come from the window snapshot (turbo-dom#249): `TURBO_SNAPSHOT=0`
+/// turns it off (the framework-only blob; each DOM file then runs the engine install).
+fn window_snapshot_enabled() -> bool {
+    WINDOW_SNAPSHOT_WANTED.load(std::sync::atomic::Ordering::Relaxed)
+        && window_snapshot_allowed(
+            std::env::var("TURBO_SNAPSHOT").ok().as_deref(),
+            std::env::var("TURBO_V8_FLAGS").ok().as_deref(),
+        )
+}
+
+/// `TURBO_SNAPSHOT=0` keeps the framework-only blob, and so do custom V8 flags
+/// (`TURBO_V8_FLAGS`, non-empty): code deserialized from the window blob can conflict with
+/// them (`--interpreted-frames-native-stack` aborts V8).
+fn window_snapshot_allowed(turbo_snapshot: Option<&str>, v8_flags: Option<&str>) -> bool {
+    turbo_snapshot != Some("0") && v8_flags.map_or(true, str::is_empty)
+}
+
+/// Cleared by [`plan_window_snapshot`] for a run too small to repay the window snapshot.
+static WINDOW_SNAPSHOT_WANTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// DOM files from which the window snapshot pays for itself: its one-time build (~170 ms on a
+/// quiet M5) against the engine install it saves each DOM file (~20-30 ms).
+const WINDOW_SNAPSHOT_MIN_DOM_FILES: usize = 8;
+
+/// Whether a run with `dom_files` DOM-environment files builds the window snapshot.
+fn window_snapshot_wanted(dom_files: usize) -> bool {
+    dom_files >= WINDOW_SNAPSHOT_MIN_DOM_FILES
+}
+
+/// Before [`init_v8`]: build the window snapshot only when the run has enough DOM files to repay
+/// it (a single-file or node-only run keeps the framework-only blob and its fast start).
+pub fn plan_window_snapshot(files: &[PathBuf]) {
+    let dom_files = files.iter().filter(|f| needs_dom(f)).take(WINDOW_SNAPSHOT_MIN_DOM_FILES).count();
+    WINDOW_SNAPSHOT_WANTED.store(
+        window_snapshot_wanted(dom_files),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The framework layer every worker context starts with: the host platform facts, chai and
+/// RUNTIME_JS, evaluated in the snapshot context.
+fn framework_prelude(scope: &mut v8::PinScope) {
+    // Bake the REAL host platform/arch (compile-time target) into the snapshot so
+    // turbo-dom's index.js loader requires the matching prebuilt .node. Without this
+    // the runtime reported 'darwin'/'arm64' everywhere and non-mac hosts loaded the
+    // macOS .node -> dlopen fails -> "document is not defined".
+    let node_platform = node_platform(std::env::consts::OS);
+    let node_arch = node_arch(std::env::consts::ARCH);
+    let os_type = node_os_type(std::env::consts::OS);
+    // isMusl() reads glibcVersionRuntime: truthy => gnu, falsy => musl.
+    let glibc_runtime: &str = if cfg!(target_env = "musl") { "" } else { "2.39" };
+    let prelude = format!(
+        "globalThis.__ttPlatform={node_platform:?};globalThis.__ttArch={node_arch:?};globalThis.__ttOsType={os_type:?};globalThis.__ttGlibc={glibc_runtime:?};"
+    );
+    let pcode = v8::String::new(scope, &prelude).unwrap();
+    v8::Script::compile(scope, pcode, None).unwrap().run(scope).unwrap();
+    // chai (turbo-test#160): vitest's expect(x) is a chai Assertion; runtime.js loads it
+    // through the globalThis.__ttLoadChai this defines
+    let chai = chai_script();
+    {
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let tc = &mut tc.init();
+        let ccode = v8::String::new(tc, &chai).unwrap();
+        let ran = v8::Script::compile(tc, ccode, None).and_then(|s| s.run(tc));
+        if ran.is_none() {
+            let msg = caught_message(tc, "Error").unwrap_or_default();
+            chai_missing(&format!("chai failed to load: {msg}"));
+        }
+    }
+    let code = v8::String::new(scope, RUNTIME_JS).unwrap();
+    let s = v8::Script::compile(scope, code, None).unwrap();
+    s.run(scope).unwrap();
 }
 
 /// Where chai's ES-module build is: `TURBO_CHAI` (cli.js sets it to the `chai` this npm package
@@ -8237,7 +8338,8 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
             crate::coverage::enabled().then(|| crate::coverage::Collector::new(isolate));
 
         v8::scope!(let scope, isolate);
-        let context = v8::Context::new(scope, Default::default());
+        let dom = needs_dom(&entry_abs);
+        let context = framework_snapshot().new_context(scope, dom);
         let scope = &mut v8::ContextScope::new(scope, context);
         let global = context.global(scope);
         install_natives(scope, global);
@@ -8275,7 +8377,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         let result = 'work: {
             // 0. DOM environment (turbo-dom) — only for files that need it, so pure-logic
             //    tests keep their clean globals (mirrors vitest per-file environment).
-            if needs_dom(&entry_abs) {
+            if dom {
                 setup_dom(scope, &entry_abs);
             }
 
@@ -8433,8 +8535,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
 /// Create params for a worker isolate: the framework snapshot, plus an explicit heap limit when
 /// `TURBO_MAX_HEAP_MB` is set.
 fn isolate_params() -> v8::CreateParams {
-    let blob = framework_snapshot();
-    let params = v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(blob.clone()));
+    let params = framework_snapshot().create_params();
     match crate::heap_guard::max_heap_bytes() {
         Some(max) => params.heap_limits(0, max),
         None => params,
@@ -8495,7 +8596,7 @@ fn run_test_file_reused(
             if let Some(g) = cb.as_ref() {
                 (v8::Local::new(scope, g), false)
             } else {
-                let ctx = v8::Context::new(scope, Default::default());
+                let ctx = framework_snapshot().new_context(scope, needs_dom(entry_abs));
                 *cb = Some(v8::Global::new(scope, ctx));
                 (ctx, true)
             }
