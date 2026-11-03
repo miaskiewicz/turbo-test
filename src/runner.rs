@@ -4425,6 +4425,13 @@ fn defer_code_cache_refresh(
     PENDING_CODE_CACHES.with(|p| p.borrow_mut().push((path, unbound, Some(consumed))));
 }
 
+/// Drop the pending caches a previous file left (it failed to load, so it never reached
+/// [`flush_code_caches`]). Their scripts may belong to a disposed isolate: touching or dropping
+/// those handles panics, so they are forgotten.
+fn discard_stale_code_caches() {
+    std::mem::forget(PENDING_CODE_CACHES.with(|p| std::mem::take(&mut *p.borrow_mut())));
+}
+
 /// Write the caches of the scripts this test file compiled from source, and refresh the cache
 /// hits that compiled more functions than their cache held. Produced after the run, a cache also
 /// holds every function the file called: V8 compiles functions lazily, and a cache made right
@@ -7961,6 +7968,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         }
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
 
+        discard_stale_code_caches();
         set_file_env(scope, &entry_abs);
         let result = 'work: {
             // 0. DOM environment (turbo-dom) — only for files that need it, so pure-logic
@@ -8234,6 +8242,7 @@ fn run_test_file_reused(
         }
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
 
+        discard_stale_code_caches();
         set_file_env(scope, entry_abs);
         let result: Result<TestReport, String> = 'work: {
             // DOM: install once per worker and keep it across its files, as vitest `isolate: false`

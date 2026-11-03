@@ -35,6 +35,12 @@ turbo-dom's engine scripts from source in each fresh isolate.
 - Zero-delay timers are on by default: a real `setTimeout(fn, 0)` waits 0 ms again, as in 0.4.2,
   instead of Node's 1 ms (#212), which made timer-heavy suites slower.
 
+### Fixed
+- A test file that failed to load left its compiled scripts queued for the bytecode cache write;
+  the next file of the worker touched them in their disposed isolate and panicked
+  (`attempt to access Handle hosted by disposed Isolate`). They are dropped at the start of each
+  file (#228).
+
 ### Added
 - `--zero-delay-timers` / `--no-zero-delay-timers`, `TURBO_ZERO_DELAY_TIMERS=1|0` and the vitest
   config's `test.zeroDelayTimers: true|false` (flag over env over config) choose between 0 ms and
@@ -54,6 +60,7 @@ turbo-dom's engine scripts from source in each fresh isolate.
   on 0.6.2.
 - `cjs_bytecode_cache_picks_up_functions_first_called_in_a_later_file`: file 1 loads a module,
   file 2 calls its function; the module's cache then holds it.
+- `cjs_bytecode_cache_skips_the_scripts_of_a_file_that_failed_to_load` (#228).
 - `timeout_zero_is_zero_ms_by_default`,
   `timeout_zero_runs_after_immediates_and_messages_like_node_without_zero_delay` (checked against
   vitest 4.1.12, node and jsdom) and `zero_delay_timers_from_config_env_and_cli`: the order of
