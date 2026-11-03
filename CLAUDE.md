@@ -64,7 +64,7 @@ A release where these disagree is a bug. Bump both in the same commit.
 - V8 is turbo-dom's rusty_v8 fork `turbo-dom-v8` (aliased `v8`). No V8 source is vendored
   here. `bash scripts/check-single-v8.sh` must pass (one turbo-dom-v8, no v8/v8x/turbo-surf-v8).
 - turbo-dom-v8 150.4.0 comes from crates.io. turbo-dom / -layout / -browser-env 0.7.0 are pinned
-  to a git rev of turbo-dom#232 (`[patch.crates-io]`) until turbo-dom 0.7.0 is on crates.io;
+  to a git rev of turbo-dom's perf/0.7.0-parity branch, on top of #232 (`[patch.crates-io]`) until turbo-dom 0.7.0 is on crates.io;
   `release-guard` fails a tag while the pin is there.
 
 ## Coverage CLI (v0.2.3+)

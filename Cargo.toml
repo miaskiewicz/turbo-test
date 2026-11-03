@@ -72,11 +72,12 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
-# Pre-publish only (turbo-test 0.7.0): turbo-dom 0.7.0 from its release PR branch
-# (miaskiewicz/turbo-dom#232, ci/ubuntu-2204-glibc-guard), which carries the engine bytecode
-# cache and the subject-local form pseudo-classes. Replace with the crates.io release once
-# turbo-dom 0.7.0 is published.
+# Pre-publish only (turbo-test 0.7.0): turbo-dom 0.7.0 from its perf branch
+# (perf/0.7.0-parity, on top of the release PR miaskiewicz/turbo-dom#232 at 55dd9d38), which
+# carries the engine bytecode cache, the subject-local form pseudo-classes, the linear
+# rendered() walk, the per-version sheet list and snapshot_blob_with (#249). Replace with the
+# crates.io release once turbo-dom 0.7.0 is published.
 [patch.crates-io]
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "cb1b799776b7fb6190488ddfb855db7ad945f60f" }
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "cb1b799776b7fb6190488ddfb855db7ad945f60f" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "cb1b799776b7fb6190488ddfb855db7ad945f60f" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "f2164c7b205b241bda21ceb922f83dc12441c062" }
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "f2164c7b205b241bda21ceb922f83dc12441c062" }
+turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "f2164c7b205b241bda21ceb922f83dc12441c062" }
