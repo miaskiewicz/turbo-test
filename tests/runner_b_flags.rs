@@ -244,7 +244,11 @@ fn cjs_bytecode_cache_is_written_reused_and_survives_corruption() {
     assert_eq!(junk.code, Some(0), "{}", junk.all());
     // ... and the rejected entries are rewritten, so later runs consume bytecode again
     for f in &files {
-        assert_ne!(std::fs::read(f).unwrap(), b"definitely not v8 bytecode", "{f:?}");
+        assert_ne!(
+            std::fs::read(f).unwrap(),
+            b"definitely not v8 bytecode",
+            "{f:?}"
+        );
     }
 }
 
@@ -283,7 +287,10 @@ fn cjs_bytecode_cache_holds_the_functions_the_run_called() {
         &format!("{import}test('s', () => {{ expect(typeof shape).toBe('function'); }});\n"),
     );
     // the lib's cache is the entry both runs share (same source, same key)
-    let shared: Vec<_> = called.keys().filter(|k| uncalled.contains_key(*k)).collect();
+    let shared: Vec<_> = called
+        .keys()
+        .filter(|k| uncalled.contains_key(*k))
+        .collect();
     assert_eq!(shared.len(), 1, "{called:?} {uncalled:?}");
     let (with, without) = (called[shared[0]], uncalled[shared[0]]);
     assert!(with > without, "called {with} <= uncalled {without}");
