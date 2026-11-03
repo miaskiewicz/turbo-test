@@ -4343,6 +4343,8 @@ fn compile_cjs_cached<'s>(
             if let Some(s) = compiled {
                 if rejected {
                     defer_code_cache(scope, path, s);
+                } else if refresh_due(&path) {
+                    defer_code_cache_refresh(scope, path, s, bytes.len());
                 }
                 return Some(s);
             }
@@ -4360,25 +4362,58 @@ fn compile_cjs_cached<'s>(
 }
 
 thread_local! {
-    /// Scripts compiled without a usable cache in this test file, with their cache paths: their
-    /// caches are written once the file ran ([`flush_code_caches`]).
-    static PENDING_CODE_CACHES: RefCell<Vec<(PathBuf, v8::Global<v8::UnboundScript>)>> =
-        const { RefCell::new(Vec::new()) };
+    /// Scripts whose caches are written once the test file ran ([`flush_code_caches`]), with
+    /// their cache paths and the size of the cache they consumed: `None` for a script compiled
+    /// without a usable cache (always written), `Some(n)` for a cache-hit refresh (written only
+    /// when the run compiled more of it, so the new cache is larger than `n`).
+    static PENDING_CODE_CACHES: RefCell<Vec<PendingCodeCache>> = const { RefCell::new(Vec::new()) };
+    /// Cache hits per cache path in this worker, for [`refresh_due`]'s backoff.
+    static CODE_CACHE_HITS: RefCell<HashMap<PathBuf, u32>> = RefCell::new(HashMap::new());
+}
+
+type PendingCodeCache = (PathBuf, v8::Global<v8::UnboundScript>, Option<usize>);
+
+/// Whether this cache hit re-checks the cache for functions compiled since it was written: on
+/// the 1st, 2nd, 4th, 8th... hit of a path in this worker. A function first called by a later
+/// test file is compiled lazily after the cache was made; without a refresh every later run
+/// compiles it again. The backoff bounds the serialization cost to log2(hits) per module.
+fn refresh_due(path: &Path) -> bool {
+    CODE_CACHE_HITS.with(|h| {
+        let mut h = h.borrow_mut();
+        let n = h.entry(path.to_path_buf()).or_insert(0);
+        *n += 1;
+        n.is_power_of_two()
+    })
 }
 
 fn defer_code_cache(scope: &mut v8::PinScope, path: PathBuf, script: v8::Local<v8::Script>) {
     let unbound = v8::Global::new(scope, script.get_unbound_script(scope));
-    PENDING_CODE_CACHES.with(|p| p.borrow_mut().push((path, unbound)));
+    PENDING_CODE_CACHES.with(|p| p.borrow_mut().push((path, unbound, None)));
 }
 
-/// Write the caches of the scripts this test file compiled from source. Produced after the run,
-/// a cache also holds every function the file called: V8 compiles functions lazily, and a cache
-/// made right after the top-level compile has none of them, so each later isolate would parse
-/// and compile them again.
+fn defer_code_cache_refresh(
+    scope: &mut v8::PinScope,
+    path: PathBuf,
+    script: v8::Local<v8::Script>,
+    consumed: usize,
+) {
+    let unbound = v8::Global::new(scope, script.get_unbound_script(scope));
+    PENDING_CODE_CACHES.with(|p| p.borrow_mut().push((path, unbound, Some(consumed))));
+}
+
+/// Write the caches of the scripts this test file compiled from source, and refresh the cache
+/// hits that compiled more functions than their cache held. Produced after the run, a cache also
+/// holds every function the file called: V8 compiles functions lazily, and a cache made right
+/// after the top-level compile has none of them, so each later isolate would parse and compile
+/// them again.
 fn flush_code_caches(scope: &mut v8::PinScope) {
-    for (path, unbound) in PENDING_CODE_CACHES.with(|p| std::mem::take(&mut *p.borrow_mut())) {
+    for (path, unbound, consumed) in
+        PENDING_CODE_CACHES.with(|p| std::mem::take(&mut *p.borrow_mut()))
+    {
         if let Some(cc) = v8::Local::new(scope, &unbound).create_code_cache() {
-            write_atomic_bytes(&path, &cc);
+            if consumed.is_none_or(|n| cc.len() > n) {
+                write_atomic_bytes(&path, &cc);
+            }
         }
     }
 }
