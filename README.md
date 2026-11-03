@@ -82,6 +82,10 @@ file). Building the blob costs about 170 ms once per process, so smaller runs sk
 `TURBO_SNAPSHOT=0` turns it off, and so does any `TURBO_V8_FLAGS` (code deserialized from the blob
 can conflict with custom V8 flags).
 
+The startup blob (window or framework-only) is saved in the build's cache directory and reused by
+later runs: a rebuilt blob is not byte-identical, and V8 rejects module bytecode caches made
+against another blob, so without it every run recompiled its modules.
+
 **Zero-delay timers** (on by default). A real `setTimeout(fn, 0)` (or any delay below 1 ms) waits
 0 ms, as in turbo-test 0.4.2: it fires before a setImmediate or MessageChannel message queued after
 it, which is faster for timer-heavy suites. Off, the delay is clamped to 1 ms as on Node and vitest

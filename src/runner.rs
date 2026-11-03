@@ -7048,19 +7048,17 @@ const RUNTIME_JS: &str = include_str!("runtime.js");
 pub(crate) fn framework_snapshot() -> &'static FrameworkSnapshot {
     static SNAP: std::sync::OnceLock<FrameworkSnapshot> = std::sync::OnceLock::new();
     SNAP.get_or_init(|| {
+        let chai = chai_script();
+        let flags = std::env::var("TURBO_V8_FLAGS").unwrap_or_default();
         if window_snapshot_enabled() {
-            // turbo-dom#249: the same framework context, plus a second one with the window
-            // bootstrapped over it, so a DOM file's install rehydrates instead of running the
-            // engine scripts (the default context stays window-free for node-environment files)
-            if let Some(blob) =
-                turbo_dom_browser_env::browser_env::snapshot_blob_with(framework_prelude)
-            {
+            if let Some(snap) = window_snapshot(&chai, &flags) {
                 turbo_dom_browser_env::browser_env::set_snapshot_install(true);
-                return FrameworkSnapshot {
-                    data: blob.data,
-                    references: Some(blob.references),
-                };
+                return snap;
             }
+        }
+        let path = saved_blob_path("framework", blob_key_from("framework", 0, &chai, &flags));
+        if let Some(data) = read_saved_blob(&path) {
+            return FrameworkSnapshot { data, references: None };
         }
         let mut creator = v8::Isolate::snapshot_creator(None, None);
         {
@@ -7081,11 +7079,89 @@ pub(crate) fn framework_snapshot() -> &'static FrameworkSnapshot {
             v8::FunctionCodeHandling::Clear
         };
         let data = creator.create_blob(handling).expect("framework snapshot");
+        save_blob(&path, &data);
         FrameworkSnapshot {
             data: Box::leak(data.to_vec().into_boxed_slice()),
             references: None,
         }
     })
+}
+
+/// The window startup blob (turbo-dom#249): the one a previous process saved for this build,
+/// reference table and inputs, else a new one, saved for the next process. A rebuilt blob is not
+/// byte-identical, and V8 rejects bytecode caches made against another blob, so keeping the
+/// blob is what lets every run reuse the on-disk module caches.
+fn window_snapshot(chai: &str, flags: &str) -> Option<FrameworkSnapshot> {
+    let (references, fingerprint) = turbo_dom_browser_env::browser_env::snapshot_references();
+    let path = saved_blob_path("window", blob_key_from("window", fingerprint, chai, flags));
+    if let Some(data) = read_saved_blob(&path) {
+        return Some(FrameworkSnapshot {
+            data,
+            references: Some(references),
+        });
+    }
+    let blob = turbo_dom_browser_env::browser_env::snapshot_blob_with(framework_prelude)?;
+    // saved only when built with the recorded table (the key's fingerprint)
+    let same = blob.references.len() == references.len()
+        && blob
+            .references
+            .iter()
+            .zip(references)
+            .all(|(a, b)| unsafe { a.pointer == b.pointer });
+    if same {
+        save_blob(&path, blob.data);
+    }
+    Some(FrameworkSnapshot {
+        data: blob.data,
+        references: Some(blob.references),
+    })
+}
+
+/// Where a startup blob of `kind` with `key` is kept: the build's cache dir (its name carries
+/// the build id, so another binary never reads it).
+fn saved_blob_path(kind: &str, key: u64) -> PathBuf {
+    cache_dir().join(format!("snapshot-{kind}-{key:016x}.bin"))
+}
+
+/// The key of a saved startup blob: what it was built from beyond the build itself (its kind,
+/// the reference table's fingerprint, chai's text and the V8 flags).
+fn blob_key_from(kind: &str, fingerprint: u64, chai: &str, flags: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (kind, fingerprint, chai, flags).hash(&mut h);
+    h.finish()
+}
+
+const SAVED_BLOB_MAGIC: &[u8; 8] = b"TTSNAP01";
+
+/// Save a startup blob: magic, length, content hash, bytes (written atomically).
+fn save_blob(path: &Path, data: &[u8]) {
+    let mut out = Vec::with_capacity(data.len() + 24);
+    out.extend_from_slice(SAVED_BLOB_MAGIC);
+    out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+    out.extend_from_slice(&blob_hash(data).to_le_bytes());
+    out.extend_from_slice(data);
+    write_atomic_bytes(path, &out);
+}
+
+/// A saved startup blob, leaked for the process, when it is intact (magic, length and hash
+/// match): V8 aborts on a damaged blob, so anything else reads as absent.
+fn read_saved_blob(path: &Path) -> Option<&'static [u8]> {
+    let bytes = std::fs::read(path).ok()?;
+    let (header, data) = bytes.split_at_checked(24)?;
+    let len = u64::from_le_bytes(header[8..16].try_into().ok()?);
+    let hash = u64::from_le_bytes(header[16..24].try_into().ok()?);
+    let intact = &header[..8] == SAVED_BLOB_MAGIC
+        && data.len() as u64 == len
+        && blob_hash(data) == hash;
+    intact.then(|| &*Box::leak(data.to_vec().into_boxed_slice()))
+}
+
+fn blob_hash(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut h);
+    h.finish()
 }
 
 /// The worker isolates' startup blob ([`framework_snapshot`]): the framework layer, and with

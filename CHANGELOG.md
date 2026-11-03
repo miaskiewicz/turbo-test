@@ -50,6 +50,11 @@ turbo-dom's engine scripts from source in each fresh isolate.
   (standalone-chat-app: about 10% less CPU; 40 small DOM files on one worker 2.1 s to 1.0 s).
   The blob's one-time build (~170 ms) is why small runs skip it. `TURBO_SNAPSHOT=0` turns it off,
   and so does any `TURBO_V8_FLAGS`.
+- The startup blob is saved in the build's cache directory and reused across runs. V8 rejects a
+  bytecode cache made against another startup blob, and the blob turbo-test builds at start-up
+  is not byte-identical from one process to the next, so every module cache a previous run
+  wrote was rejected (standalone-chat-app: ~53% hits, 15% rejects, 32% misses per run). Now
+  every module load after the first run hits (2626/2626); chat user CPU 10.0 s to 9.1 s.
 - turbo-dom perf/0.7.0-parity: a CSS transition / animation update's display:none ancestor
   check resolves each ancestor once per read instead of once per ancestor per level (O(depth^2)
   style lookups: 1978 at depth 40), and a cascade reads the document's sheet list once per tree
