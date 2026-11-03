@@ -4303,7 +4303,8 @@ fn cc_path(wrapped: &str) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     wrapped.hash(&mut h);
-    "cc-v1".hash(&mut h);
+    // v2: caches are produced after the test file ran (they carry its lazily compiled functions)
+    "cc-v2".hash(&mut h);
     cache_dir().join(format!("cc-{:016x}.bin", h.finish()))
 }
 
@@ -4322,35 +4323,66 @@ fn compile_cjs_cached<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     code: v8::Local<v8::String>,
     wrapped: &str,
+    origin: Option<&v8::ScriptOrigin>,
 ) -> Option<v8::Local<'s, v8::Script>> {
     use v8::script_compiler as sc;
     let path = cc_path(wrapped);
     if let Ok(bytes) = std::fs::read(&path) {
         if !bytes.is_empty() {
             let cached = v8::CachedData::new(&bytes);
-            let mut source = sc::Source::new_with_cached_data(code, None, cached);
+            let mut source = sc::Source::new_with_cached_data(code, origin, cached);
             let (consume, reason) = (
                 sc::CompileOptions::ConsumeCodeCache,
                 sc::NoCacheReason::NoReason,
             );
             let compiled = sc::compile(scope, &mut source, consume, reason);
             // `bytes` stays alive through this block (Source borrowed it for the compile).
-            if let Some(s) = compiled {
-                return Some(s);
+            // A rejected cache (another V8 build or flag set) still compiles; rewrite it then so
+            // later loads hit instead of recompiling from source forever.
+            let rejected = source.get_cached_data().is_none_or(|c| c.rejected());
+            match compiled {
+                Some(s) if !rejected => return Some(s),
+                Some(s) => {
+                    defer_code_cache(scope, path, s);
+                    return Some(s);
+                }
+                None => {}
             }
         }
     }
     // Miss/reject: compile fresh and persist the bytecode for next time.
-    let mut source = sc::Source::new(code, None);
+    let mut source = sc::Source::new(code, origin);
     let (options, reason) = (
         sc::CompileOptions::NoCompileOptions,
         sc::NoCacheReason::NoReason,
     );
     let script = sc::compile(scope, &mut source, options, reason)?;
-    if let Some(cc) = script.get_unbound_script(scope).create_code_cache() {
-        write_atomic_bytes(&path, &cc);
-    }
+    defer_code_cache(scope, path, script);
     Some(script)
+}
+
+thread_local! {
+    /// Scripts compiled without a usable cache in this test file, with their cache paths: their
+    /// caches are written once the file ran ([`flush_code_caches`]).
+    static PENDING_CODE_CACHES: RefCell<Vec<(PathBuf, v8::Global<v8::UnboundScript>)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn defer_code_cache(scope: &mut v8::PinScope, path: PathBuf, script: v8::Local<v8::Script>) {
+    let unbound = v8::Global::new(scope, script.get_unbound_script(scope));
+    PENDING_CODE_CACHES.with(|p| p.borrow_mut().push((path, unbound)));
+}
+
+/// Write the caches of the scripts this test file compiled from source. Produced after the run,
+/// a cache also holds every function the file called: V8 compiles functions lazily, and a cache
+/// made right after the top-level compile has none of them, so each later isolate would parse
+/// and compile them again.
+fn flush_code_caches(scope: &mut v8::PinScope) {
+    for (path, unbound) in PENDING_CODE_CACHES.with(|p| std::mem::take(&mut *p.borrow_mut())) {
+        if let Some(cc) = v8::Local::new(scope, &unbound).create_code_cache() {
+            write_atomic_bytes(&path, &cc);
+        }
+    }
 }
 
 fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks: bool) -> Option<()> {
@@ -4402,8 +4434,10 @@ fn load_cjs_inner<'s>(
         } else {
             None
         };
-        let compiled = if code_cache_enabled() && origin.is_none() {
-            compile_cjs_cached(tc, code, &wrapped)
+        // A named origin (the entry file, framed app modules) shares the bytecode cache: the
+        // cached data does not depend on the script's name, and V8 rejects a mismatch safely.
+        let compiled = if code_cache_enabled() {
+            compile_cjs_cached(tc, code, &wrapped, origin.as_ref())
         } else {
             match &origin {
                 Some(o) => v8::Script::compile(tc, code, Some(o)),
@@ -8364,7 +8398,9 @@ fn drive_tests(
     global: v8::Local<v8::Object>,
     entry_abs: &Path,
 ) -> Result<TestReport, String> {
-    drive_tests_bounded(scope, global, entry_abs, 2_000_000)
+    let report = drive_tests_bounded(scope, global, entry_abs, 2_000_000);
+    flush_code_caches(scope);
+    report
 }
 
 /// vitest's `task.file.name` (turbo-test#96): the test file relative to the run's root (both
