@@ -848,32 +848,67 @@ test('node:path', () => {
     assert_passes(&turbo_test(&p.dir, &["a.test.js"], &[]), 1);
 }
 
+/// The loop order probe: a `setTimeout(fn, 0)`, a setImmediate, a MessageChannel message and a
+/// promise, queued in that order; the test expects `want`.
+fn loop_order_project(name: &str, config: &str, want: &str) -> Project {
+    let p = Project::new(name);
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "vitest.config.ts",
+        &format!("export default {{ test: {{ {config} }} }};\n"),
+    );
+    p.file(
+        "a.test.js",
+        &format!(
+            "import {{ expect, it }} from 'vitest';\n\
+             it('order', async () => {{\n\
+               const log = [];\n\
+               setTimeout(() => log.push('timeout0'), 0);\n\
+               setImmediate(() => log.push('immediate'));\n\
+               const ch = new MessageChannel(); ch.port1.onmessage = () => {{ log.push('message'); ch.port1.close(); }}; ch.port2.postMessage(1);\n\
+               Promise.resolve().then(() => log.push('micro'));\n\
+               await new Promise((r) => setTimeout(r, 20));\n\
+               expect(log).toEqual({want});\n\
+             }});\n"
+        ),
+    );
+    p
+}
+
+const NODE_ORDER: &str = "['micro', 'immediate', 'message', 'timeout0']";
+const ZERO_DELAY_ORDER: &str = "['micro', 'timeout0', 'immediate', 'message']";
+
 /// turbo-test#212: Node's event loop order, which vitest runs on: a `setTimeout(fn, 0)` is a 1 ms
 /// timer, so a setImmediate and a MessageChannel message queued after it still run first
 /// (React's scheduler posts its render through them; RTL's `setTimeout(0)` drain after a
 /// user-event action then sees the committed update, as on vitest). vitest 4.1.12 (node, jsdom):
-/// `['micro', 'immediate', 'message', 'timeout0']`.
+/// `['micro', 'immediate', 'message', 'timeout0']`. That is turbo-test with zeroDelayTimers off.
 #[test]
-fn timeout_zero_runs_after_immediates_and_messages_like_node() {
+fn timeout_zero_runs_after_immediates_and_messages_like_node_without_zero_delay() {
     for env in ["node", "jsdom"] {
-        let p = Project::new(&format!("loop-order-{env}"));
-        p.file("package.json", r#"{"type":"module"}"#);
-        p.file(
-            "vitest.config.ts",
-            &format!("export default {{ test: {{ environment: '{env}' }} }};\n"),
+        let p = loop_order_project(
+            &format!("loop-order-{env}"),
+            &format!("environment: '{env}'"),
+            NODE_ORDER,
         );
-        p.file(
-            "a.test.js",
-            "import { expect, it } from 'vitest';\n\
-             it('order', async () => {\n\
-               const log = [];\n\
-               setTimeout(() => log.push('timeout0'), 0);\n\
-               setImmediate(() => log.push('immediate'));\n\
-               const ch = new MessageChannel(); ch.port1.onmessage = () => { log.push('message'); ch.port1.close(); }; ch.port2.postMessage(1);\n\
-               Promise.resolve().then(() => log.push('micro'));\n\
-               await new Promise((r) => setTimeout(r, 20));\n\
-               expect(log).toEqual(['micro', 'immediate', 'message', 'timeout0']);\n\
-             });\n",
+        let r = turbo_test(&p.dir, &["--no-zero-delay-timers"], &[]);
+        assert!(
+            r.stdout.contains("Tests  1 passed (1)"),
+            "{env}\n{}",
+            r.all()
+        );
+    }
+}
+
+/// zeroDelayTimers (the default): a `setTimeout(fn, 0)` is a 0 ms timer, as in 0.4.2. It still
+/// runs after the promise jobs, and the setImmediate and MessageChannel message keep their order.
+#[test]
+fn timeout_zero_is_zero_ms_by_default() {
+    for env in ["node", "jsdom"] {
+        let p = loop_order_project(
+            &format!("loop-zero-{env}"),
+            &format!("environment: '{env}'"),
+            ZERO_DELAY_ORDER,
         );
         let r = turbo_test(&p.dir, &[], &[]);
         assert!(
@@ -882,4 +917,36 @@ fn timeout_zero_runs_after_immediates_and_messages_like_node() {
             r.all()
         );
     }
+}
+
+/// The switch's sources: `test.zeroDelayTimers` in the config, `TURBO_ZERO_DELAY_TIMERS` over the
+/// config, and the CLI flag over both.
+#[test]
+fn zero_delay_timers_from_config_env_and_cli() {
+    let off = loop_order_project("loop-cfg-off", "zeroDelayTimers: false", NODE_ORDER);
+    assert!(turbo_test(&off.dir, &[], &[])
+        .stdout
+        .contains("Tests  1 passed (1)"));
+    let on = loop_order_project("loop-cfg-on", "zeroDelayTimers: true", ZERO_DELAY_ORDER);
+    assert!(turbo_test(&on.dir, &[], &[])
+        .stdout
+        .contains("Tests  1 passed (1)"));
+    // env over config
+    let r = turbo_test(&on.dir, &[], &[("TURBO_ZERO_DELAY_TIMERS", "0")]);
+    assert!(r.stdout.contains("Tests  1 failed (1)"), "{}", r.all());
+    let r = turbo_test(&off.dir, &[], &[("TURBO_ZERO_DELAY_TIMERS", "1")]);
+    assert!(r.stdout.contains("Tests  1 failed (1)"), "{}", r.all());
+    // the flag over env and config
+    let r = turbo_test(
+        &off.dir,
+        &["--zero-delay-timers"],
+        &[("TURBO_ZERO_DELAY_TIMERS", "0")],
+    );
+    assert!(r.stdout.contains("Tests  1 failed (1)"), "{}", r.all());
+    let r = turbo_test(
+        &on.dir,
+        &["--no-zero-delay-timers"],
+        &[("TURBO_ZERO_DELAY_TIMERS", "1")],
+    );
+    assert!(r.stdout.contains("Tests  1 failed (1)"), "{}", r.all());
 }
