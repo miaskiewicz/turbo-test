@@ -1744,7 +1744,7 @@ fn zero_delay_timers_env_wins_over_the_config() {
 }
 
 // Wrapped CJS sources are shared by every isolate of the process (from alphajew420's #106): a
-// module loads from one copy, keyed by (path, mtime, size, decorator-metadata mode).
+// module loads from one copy, one entry per (path, decorator-metadata mode) replaced on edit.
 #[test]
 fn module_sources_are_shared_across_isolates_and_threads() {
     let d = tmp("modsrc-share");
@@ -1936,4 +1936,31 @@ fn a_rejected_code_cache_is_cleared() {
     assert!(!m.cc_path.exists());
     store_code_cache(&m, &[9u8; 5], None);
     assert_eq!(m.cc.lock().unwrap().as_ref().map(|c| c.len()), Some(5));
+}
+
+// A `/*` or `//` inside a string (a glob, a URL) starts no comment: later keys are still read.
+#[test]
+fn config_keys_after_comment_like_strings_are_found() {
+    let cfg = "test: { include: ['src/**/*.test.ts'], url: 'http://x', setupFiles: ['./s.ts'] }";
+    assert_eq!(
+        config_string_list(cfg, "setupFiles"),
+        vec!["./s.ts".to_string()]
+    );
+    assert_eq!(
+        zero_delay_timers_from(
+            None,
+            "test: { include: [\"a/**/*.ts\"], zeroDelayTimers: false }"
+        ),
+        Some(false)
+    );
+    // an escaped quote does not end the string
+    assert_eq!(
+        zero_delay_timers_from(None, r"test: { a: 'it\'s /*', zeroDelayTimers: false }"),
+        Some(false)
+    );
+    // a real block comment closed before the key
+    assert_eq!(
+        zero_delay_timers_from(None, "/* a */ test: { /* b */ zeroDelayTimers: false }"),
+        Some(false)
+    );
 }

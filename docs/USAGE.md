@@ -54,7 +54,8 @@ Full matrix + quirks: `vitest.compat.md`. Summary:
 `--retry`, `--bail`, `-c/--config`, `--root`/`--dir`, `--environment`, `--isolate`/`--no-isolate`,
 `--changed [since]`, `--passWithNoTests`, `-u/--update`, the `--coverage*` family.
 turbo-test's own: `--zero-delay-timers` / `--no-zero-delay-timers` (`setTimeout(fn, 0)` waits 0 ms
-(default) or Node's 1 ms; also `TURBO_ZERO_DELAY_TIMERS=0|1` and `test.zeroDelayTimers`, README "Switches"). Leading
+(default, a known difference from vitest's order) or Node's 1 ms; also `TURBO_ZERO_DELAY_TIMERS=0|1`, preferred over
+`test.zeroDelayTimers`, which vitest's config type lacks; README "Switches"). Leading
 `run`/`watch`/`dev` accepted-and-stripped. Unknown flags warned + ignored (never treated as files).
 
 **Test / `vi` / `expect` API** ✅

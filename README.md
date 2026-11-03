@@ -79,6 +79,16 @@ it, which is faster for timer-heavy suites. Off, the delay is clamped to 1 ms as
 (#212), so setImmediate and MessageChannel run first. Promise jobs run first in both modes, and
 fake timers are not affected.
 
+> **Known difference from vitest.** With the default, `setTimeout(fn, 0)` runs before a
+> setImmediate or MessageChannel message queued after it; vitest runs `micro, immediate,
+> message, timeout0`. React's scheduler posts renders through MessageChannel, so a test that
+> waits for a render with `await new Promise((r) => setTimeout(r, 0))` (a common React Testing
+> Library pattern) can resume before the render. For vitest's order run
+> `turbo-test --no-zero-delay-timers` or set `TURBO_ZERO_DELAY_TIMERS=0`.
+
+Prefer the flag or the env var. `test.zeroDelayTimers` is not in vitest's `InlineConfig` type, so a
+typed config needs `// @ts-expect-error` above it.
+
 | source | on | off |
 |---|---|---|
 | CLI flag (wins) | `--zero-delay-timers` | `--no-zero-delay-timers` |

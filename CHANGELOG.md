@@ -34,18 +34,33 @@ turbo-dom's engine scripts from source in each fresh isolate.
   compiled it again. The cache format is unchanged (salt `cc-v2`).
 - Wrapped CJS sources and their bytecode caches are shared by every isolate of the process, from
   alphajew420's #106. Each fresh isolate used to read the transform cache, wrap and copy the
-  source, hash it, read its bytecode cache file and copy the text into the V8 heap again. Entries
-  are keyed by (path, mtime, size, decorator-metadata mode), so an edited file loads anew, and
-  Latin-1 sources go to V8 as external one-byte strings (no copy). The bytecode cache refresh
-  above updates the shared copy too.
+  source, hash it, read its bytecode cache file and copy the text into the V8 heap again. There is
+  one entry per (path, decorator-metadata mode), replaced when the file's mtime, ctime, size or
+  inode changes (or, for a file modified in the last 2 s, its content hash: a coarse-mtime
+  filesystem can give a same-size edit the same mtime). Latin-1 sources go to V8 as external
+  one-byte strings (no copy). The bytecode cache refresh above updates the shared copy too, and
+  never replaces a larger cache with a smaller one. Sources only one load uses (the test file,
+  setup files, app modules when failure frames are on, everything under `--coverage`) are owned
+  and freed after the load instead of leaked.
 - Zero-delay timers are on by default: a real `setTimeout(fn, 0)` waits 0 ms again, as in 0.4.2,
-  instead of Node's 1 ms (#212), which made timer-heavy suites slower.
+  instead of Node's 1 ms (#212), which made timer-heavy suites slower. **This differs from
+  vitest's order** (`micro, immediate, message, timeout0`): a test that drains React's scheduler
+  with `await new Promise(r => setTimeout(r, 0))` can now run before the render. Use
+  `--no-zero-delay-timers` or `TURBO_ZERO_DELAY_TIMERS=0` for vitest's order.
 
 ### Fixed
 - A test file that failed to load left its compiled scripts queued for the bytecode cache write;
   the next file of the worker touched them in their disposed isolate and panicked
   (`attempt to access Handle hosted by disposed Isolate`). They are dropped at the start of each
-  file (#228).
+  file (#228). They are now also dropped when the file ends, while its isolate is alive: when the
+  last file a worker ran failed to load, the thread-local destructor dropped them after the
+  isolate was gone and the process crashed.
+- `--[no-]zero-delay-timers` and `TURBO_ZERO_DELAY_TIMERS` did nothing in a project without a
+  vitest config file.
+- A `zeroDelayTimers` inside a `/* */` comment or after a `//` on the line is not read; an
+  unknown `TURBO_ZERO_DELAY_TIMERS` value is ignored with a warning.
+- A bytecode cache V8 rejects is cleared from the shared slot and its file at once, so other
+  isolates do not consume it again before the rewrite.
 
 ### Added
 - `--zero-delay-timers` / `--no-zero-delay-timers`, `TURBO_ZERO_DELAY_TIMERS=1|0` and the vitest
@@ -66,7 +81,16 @@ turbo-dom's engine scripts from source in each fresh isolate.
   on 0.6.2.
 - `cjs_bytecode_cache_picks_up_functions_first_called_in_a_later_file`: file 1 loads a module,
   file 2 calls its function; the module's cache then holds it.
-- `cjs_bytecode_cache_skips_the_scripts_of_a_file_that_failed_to_load` (#228).
+- `cjs_bytecode_cache_skips_the_scripts_of_a_file_that_failed_to_load` (#228);
+  `a_file_that_fails_to_load_leaves_no_pending_code_caches` (crashed with SIGSEGV before the fix)
+  and `a_worker_whose_last_file_fails_to_load_exits_cleanly` (fresh and reused isolates).
+- `unshared_module_sources_are_freed`, `module_sources_keep_one_entry_per_path`,
+  `module_sources_see_same_size_same_mtime_edits`, `code_cache_store_keeps_the_richer_cache`,
+  `a_rejected_code_cache_is_cleared`, `coverage_is_identical_cold_and_warm`.
+- `zero_delay_timers_switch_without_a_config_file`,
+  `zero_delay_timers_env_applies_without_a_config_file`,
+  `zero_delay_timers_ignore_commented_out_keys_and_warn_on_unknown_env`; the precedence test
+  also checks that the order each source selects passes.
 - `module_sources_are_shared_across_isolates_and_threads`,
   `module_sources_are_reloaded_when_the_file_changes` (size, then mtime) and
   `module_sources_are_one_byte_when_latin1` (#106).

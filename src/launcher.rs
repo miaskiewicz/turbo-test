@@ -521,7 +521,7 @@ fn split_top_level(inner: &str) -> Vec<String> {
 /// `}`/`]` inside a comment) can't corrupt the brace scanners, and a config regex like
 /// `p.replace(/^\/api\//, '/')` isn't mangled (its `\/` `/` must NOT read as a `//` comment).
 /// Newlines are preserved. Regex-vs-division is disambiguated by the previous significant char.
-fn strip_comments(s: &str) -> String {
+pub(crate) fn strip_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     let mut quote: Option<char> = None;

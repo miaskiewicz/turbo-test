@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Kind {
@@ -1522,9 +1523,9 @@ fn find_config_key(s: &str, key: &str) -> Option<usize> {
         if !after.trim_start().starts_with(':') {
             continue;
         }
-        // skip if this line is a `//` comment
-        let line_start = s[..at].rfind('\n').map(|n| n + 1).unwrap_or(0);
-        if s[line_start..at].trim_start().starts_with("//") {
+        // skip a key inside a `//` or `/* */` comment (strings and regexes start none): the
+        // comment stripper then drops the key itself
+        if !crate::launcher::strip_comments(&s[..at + key.len()]).ends_with(key) {
             continue;
         }
         return Some(at);
@@ -1647,20 +1648,46 @@ fn vitest_runtime_config(entry: &Path) -> Option<String> {
 }
 
 fn vitest_runtime_config_uncached(start: &Path) -> Option<String> {
+    let env = std::env::var("TURBO_ZERO_DELAY_TIMERS").ok();
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if let Some(w) = zero_delay_env_warning(env.as_deref()) {
+        WARNED.call_once(|| eprintln!("{w}"));
+    }
+    runtime_config_for(start, env.as_deref())
+}
+
+/// The runtime literal for files under `start`: the nearest config's settings, and the
+/// zeroDelayTimers env switch (what the CLI flag sets) with or without a config file.
+fn runtime_config_for(start: &Path, env: Option<&str>) -> Option<String> {
     let mut dir = Some(start);
     while let Some(d) = dir {
         for cfg in VITEST_CONFIG_FILES {
             if let Ok(s) = std::fs::read_to_string(d.join(cfg)) {
-                return runtime_config_literal(&s);
+                return runtime_config_literal_with(&s, env);
             }
         }
         dir = d.parent();
     }
-    None
+    runtime_config_literal_with("", env)
+}
+
+/// The warning for a `TURBO_ZERO_DELAY_TIMERS` value that is not `0|1|true|false` (ignored).
+fn zero_delay_env_warning(env: Option<&str>) -> Option<String> {
+    match env {
+        None | Some("0" | "1" | "true" | "false") => None,
+        Some(v) => Some(format!(
+            "turbo-test: ignoring TURBO_ZERO_DELAY_TIMERS={v:?} (expected 0, 1, true or false)"
+        )),
+    }
 }
 
 /// [`vitest_runtime_config`]'s literal from a config's text (`None` when it sets none of them).
+#[cfg(test)]
 fn runtime_config_literal(s: &str) -> Option<String> {
+    runtime_config_literal_with(s, std::env::var("TURBO_ZERO_DELAY_TIMERS").ok().as_deref())
+}
+
+fn runtime_config_literal_with(s: &str, env: Option<&str>) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(ft) = config_object_literal(s, "fakeTimers") {
         parts.push(format!("fakeTimers: {ft}"));
@@ -1676,7 +1703,7 @@ fn runtime_config_literal(s: &str) -> Option<String> {
             parts.push(format!("{key}: true"));
         }
     }
-    if let Some(on) = zero_delay_timers(s) {
+    if let Some(on) = zero_delay_timers_from(env, s) {
         parts.push(format!("zeroDelayTimers: {on}"));
     }
     (!parts.is_empty()).then(|| format!("{{ {} }}", parts.join(", ")))
@@ -1685,10 +1712,6 @@ fn runtime_config_literal(s: &str) -> Option<String> {
 /// The zeroDelayTimers switch when something sets it (the runtime's default is on):
 /// `TURBO_ZERO_DELAY_TIMERS=0|1` (what `--[no-]zero-delay-timers` sets) wins over the config's
 /// `test.zeroDelayTimers: true|false`.
-fn zero_delay_timers(s: &str) -> Option<bool> {
-    zero_delay_timers_from(std::env::var("TURBO_ZERO_DELAY_TIMERS").ok().as_deref(), s)
-}
-
 fn zero_delay_timers_from(env: Option<&str>, s: &str) -> Option<bool> {
     match env {
         Some("0" | "false") => return Some(false),
@@ -4344,11 +4367,12 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8]) {
 /// (from alphajew420's #106). A fresh isolate per file loads react, the testing library and the
 /// app's modules again each time; each load read the transform cache, wrapped the source (a
 /// copy), hashed it for its bytecode cache, read that file and copied the text into the V8 heap.
-/// Entries are leaked on purpose: the process keeps them for its whole life, and V8 can then use
-/// the text as an external one-byte string (no copy, not counted in the isolate's heap). Stale
-/// entries of an edited file stay until exit (keyed by mtime and size).
+/// A shared entry's text is leaked on purpose: V8 uses it as an external one-byte string (no copy,
+/// not counted in the isolate's heap) that may outlive the entry. One entry per (path, mode): an
+/// edited file replaces its entry. A source only one load uses is owned and freed with its last
+/// user ([`module_source_for`]).
 struct ModuleSource {
-    wrapped: &'static str,
+    wrapped: std::borrow::Cow<'static, str>,
     /// The text as Latin-1 bytes (the UTF-8 bytes themselves when ASCII); `None` when a char is
     /// past U+00FF.
     one_byte: Option<&'static [u8]>,
@@ -4357,8 +4381,44 @@ struct ModuleSource {
     cc: std::sync::Mutex<Option<std::sync::Arc<[u8]>>>,
 }
 
-/// (path, decorator-metadata mode, mtime in ns, size)
-type SourceKey = (PathBuf, bool, u128, u64);
+/// (path, decorator-metadata mode)
+type SourceKey = (PathBuf, bool);
+
+/// What identifies a version of a file: mtime and ctime in ns, size, inode, and for a file
+/// modified in the last 2 s (a coarse-mtime filesystem can give an edit the same mtime and size)
+/// a hash of its bytes.
+type SourceStamp = (u128, u128, u64, u64, u64);
+
+fn source_stamp(abs: &Path) -> Option<SourceStamp> {
+    let meta = std::fs::metadata(abs).ok()?;
+    let ns = |t: std::io::Result<std::time::SystemTime>| {
+        t.ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos())
+    };
+    let mtime = ns(meta.modified());
+    #[cfg(unix)]
+    let (ino, ctime) = {
+        use std::os::unix::fs::MetadataExt;
+        (
+            meta.ino(),
+            u128::try_from(meta.ctime()).unwrap_or(0) * 1_000_000_000
+                + u128::try_from(meta.ctime_nsec()).unwrap_or(0),
+        )
+    };
+    #[cfg(not(unix))]
+    let (ino, ctime) = (0, 0);
+    let now = ns(Ok(std::time::SystemTime::now()));
+    let hash = if now.saturating_sub(mtime) < 2_000_000_000 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::fs::read(abs).ok()?.hash(&mut h);
+        h.finish()
+    } else {
+        0
+    };
+    Some((mtime, ctime, meta.len(), ino, hash))
+}
 
 const CJS_WRAPPER_OPEN: &str = "(function (exports, module, require, __filename, __dirname) {\n";
 
@@ -4375,10 +4435,10 @@ fn shareable_source(abs: &Path) -> bool {
         && !(app && crate::location::frames_enabled())
 }
 
-/// The module's wrapped source: the process's shared copy when [`shareable_source`], else a
-/// fresh one of its own (leaked like the shared ones: V8 may still hold its text as an external
-/// string; about the size of the suite's test and setup files per run).
-fn module_source_for(abs: &Path, prefer_metadata: bool) -> Option<&'static ModuleSource> {
+/// The module's wrapped source: the process's shared copy when [`shareable_source`], else an
+/// owned one of its own, freed once its load and pending cache write are done (V8 copies its
+/// text, so nothing outlives it).
+fn module_source_for(abs: &Path, prefer_metadata: bool) -> Option<Arc<ModuleSource>> {
     if shareable_source(abs) {
         return module_source(abs, prefer_metadata);
     }
@@ -4386,7 +4446,18 @@ fn module_source_for(abs: &Path, prefer_metadata: bool) -> Option<&'static Modul
     Some(new_module_source(format!("{CJS_WRAPPER_OPEN}{raw}\n}})")))
 }
 
-fn new_module_source(wrapped: String) -> &'static ModuleSource {
+/// An owned source (its text is copied into V8).
+fn new_module_source(wrapped: String) -> Arc<ModuleSource> {
+    Arc::new(ModuleSource {
+        cc_path: cc_path(&wrapped),
+        wrapped: wrapped.into(),
+        one_byte: None,
+        cc: std::sync::Mutex::new(None),
+    })
+}
+
+/// A shared source: its text is leaked so V8 can use it as an external one-byte string.
+fn shared_module_source(wrapped: String) -> Arc<ModuleSource> {
     let cc_path = cc_path(&wrapped);
     let wrapped: &'static str = Box::leak(wrapped.into_boxed_str());
     let one_byte = if wrapped.is_ascii() {
@@ -4394,38 +4465,54 @@ fn new_module_source(wrapped: String) -> &'static ModuleSource {
     } else {
         latin1_bytes(wrapped).map(|b| &*Box::leak(b.into_boxed_slice()))
     };
-    Box::leak(Box::new(ModuleSource {
-        wrapped,
+    Arc::new(ModuleSource {
+        wrapped: wrapped.into(),
         one_byte,
         cc_path,
         cc: std::sync::Mutex::new(None),
-    }))
+    })
 }
 
-fn module_source(abs: &Path, prefer_metadata: bool) -> Option<&'static ModuleSource> {
-    static SOURCES: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<SourceKey, &'static ModuleSource>>,
-    > = std::sync::OnceLock::new();
-    let meta = std::fs::metadata(abs).ok()?;
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos());
-    let key: SourceKey = (abs.to_path_buf(), prefer_metadata, mtime, meta.len());
-    let map = SOURCES.get_or_init(Default::default);
-    if let Some(hit) = map.lock().unwrap().get(&key) {
-        return Some(*hit);
+type SourceMap = std::sync::Mutex<HashMap<SourceKey, (SourceStamp, Arc<ModuleSource>)>>;
+
+fn shared_sources() -> &'static SourceMap {
+    static SOURCES: std::sync::OnceLock<SourceMap> = std::sync::OnceLock::new();
+    SOURCES.get_or_init(Default::default)
+}
+
+/// How many shared entries a path has (one per decorator-metadata mode at most).
+#[cfg(test)]
+fn module_source_entries(abs: &Path) -> usize {
+    shared_sources()
+        .lock()
+        .unwrap()
+        .keys()
+        .filter(|k| k.0 == abs)
+        .count()
+}
+
+fn module_source(abs: &Path, prefer_metadata: bool) -> Option<Arc<ModuleSource>> {
+    let stamp = source_stamp(abs)?;
+    let key: SourceKey = (abs.to_path_buf(), prefer_metadata);
+    let map = shared_sources();
+    let hit = |m: &HashMap<SourceKey, (SourceStamp, Arc<ModuleSource>)>| {
+        m.get(&key)
+            .filter(|(st, _)| *st == stamp)
+            .map(|(_, src)| Arc::clone(src))
+    };
+    if let Some(src) = hit(&map.lock().unwrap()) {
+        return Some(src);
     }
     // transformed outside the lock (it can run esbuild); a racing thread's copy is dropped
     let raw = read_transformed(abs, true, prefer_metadata)?;
     let wrapped = format!("{CJS_WRAPPER_OPEN}{raw}\n}})");
     let mut map = map.lock().unwrap();
-    if let Some(hit) = map.get(&key) {
-        return Some(*hit);
+    if let Some(src) = hit(&map) {
+        return Some(src);
     }
-    let source = new_module_source(wrapped);
-    map.insert(key, source);
+    let source = shared_module_source(wrapped);
+    // an edited file replaces its entry (its old text stays leaked: V8 may still use it)
+    map.insert(key, (stamp, Arc::clone(&source)));
     Some(source)
 }
 
@@ -4437,11 +4524,11 @@ fn latin1_bytes(s: &str) -> Option<Vec<u8>> {
 /// The module's source as a V8 string: external (no copy) when it is Latin-1.
 fn source_string<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    source: &'static ModuleSource,
+    source: &ModuleSource,
 ) -> Option<v8::Local<'s, v8::String>> {
     match source.one_byte {
         Some(b) => v8::String::new_external_onebyte_static(scope, b),
-        None => v8::String::new(scope, source.wrapped),
+        None => v8::String::new(scope, &source.wrapped),
     }
 }
 
@@ -4457,10 +4544,25 @@ fn module_code_cache(module: &ModuleSource) -> Option<std::sync::Arc<[u8]>> {
     slot.clone()
 }
 
-/// Persist a new bytecode cache, for the process's other isolates too.
-fn store_code_cache(module: &ModuleSource, bytes: &[u8]) {
+/// Persist a new bytecode cache, for the process's other isolates too, unless it holds no more
+/// than the current one or (for a cache-hit refresh) the `consumed` one: checked under the slot's
+/// lock, so a poorer cache never replaces a richer one.
+fn store_code_cache(module: &ModuleSource, bytes: &[u8], consumed: Option<usize>) {
+    let mut slot = module.cc.lock().unwrap();
+    let current = slot.as_ref().map_or(0, |c| c.len());
+    if bytes.len() <= current.max(consumed.unwrap_or(0)) {
+        return;
+    }
     write_atomic_bytes(&module.cc_path, bytes);
-    *module.cc.lock().unwrap() = Some(bytes.into());
+    *slot = Some(bytes.into());
+}
+
+/// Forget a cache V8 rejected (another V8 build or flag set): the slot and its file, so no
+/// other isolate consumes it again.
+fn reject_code_cache(module: &ModuleSource) {
+    let mut slot = module.cc.lock().unwrap();
+    *slot = None;
+    let _ = std::fs::remove_file(&module.cc_path);
 }
 
 /// Compile the wrapped CJS source, consuming a persisted bytecode cache when present and
@@ -4469,7 +4571,7 @@ fn store_code_cache(module: &ModuleSource, bytes: &[u8]) {
 fn compile_cjs_cached<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     code: v8::Local<v8::String>,
-    module: &'static ModuleSource,
+    module: &Arc<ModuleSource>,
     origin: Option<&v8::ScriptOrigin>,
 ) -> Option<v8::Local<'s, v8::Script>> {
     use v8::script_compiler as sc;
@@ -4487,6 +4589,7 @@ fn compile_cjs_cached<'s>(
         let rejected = source.get_cached_data().is_none_or(|c| c.rejected());
         if let Some(s) = compiled {
             if rejected {
+                reject_code_cache(module);
                 defer_code_cache(scope, module, s, None);
             } else if refresh_due(&module.cc_path) {
                 defer_code_cache(scope, module, s, Some(bytes.len()));
@@ -4516,7 +4619,7 @@ thread_local! {
 }
 
 type PendingCodeCache = (
-    &'static ModuleSource,
+    Arc<ModuleSource>,
     v8::Global<v8::UnboundScript>,
     Option<usize>,
 );
@@ -4538,12 +4641,12 @@ fn refresh_due(path: &Path) -> bool {
 /// was compiled from for a cache-hit refresh, `None` for a script compiled without a usable one.
 fn defer_code_cache(
     scope: &mut v8::PinScope,
-    module: &'static ModuleSource,
+    module: &Arc<ModuleSource>,
     script: v8::Local<v8::Script>,
     consumed: Option<usize>,
 ) {
     let unbound = v8::Global::new(scope, script.get_unbound_script(scope));
-    PENDING_CODE_CACHES.with(|p| p.borrow_mut().push((module, unbound, consumed)));
+    PENDING_CODE_CACHES.with(|p| p.borrow_mut().push((Arc::clone(module), unbound, consumed)));
 }
 
 /// Drop the pending caches a previous file left (it failed to load, so it never reached
@@ -4551,6 +4654,22 @@ fn defer_code_cache(
 /// those handles panics, so they are forgotten.
 fn discard_stale_code_caches() {
     std::mem::forget(PENDING_CODE_CACHES.with(|p| std::mem::take(&mut *p.borrow_mut())));
+}
+
+/// Drop the caches a file left pending (it did not reach [`flush_code_caches`]) while its
+/// isolate is alive, so none is left for a later file or the thread-local destructor, which
+/// runs after the isolate is gone (turbo-test#228 at a worker's end). The guard covers an
+/// unwinding run: it forgets what is left instead.
+fn drop_pending_code_caches() {
+    drop(PENDING_CODE_CACHES.with(|p| std::mem::take(&mut *p.borrow_mut())));
+}
+
+struct PendingCodeCacheGuard;
+
+impl Drop for PendingCodeCacheGuard {
+    fn drop(&mut self) {
+        discard_stale_code_caches();
+    }
 }
 
 /// Write the caches of the scripts this test file compiled from source, and refresh the cache
@@ -4563,9 +4682,7 @@ fn flush_code_caches(scope: &mut v8::PinScope) {
         PENDING_CODE_CACHES.with(|p| std::mem::take(&mut *p.borrow_mut()))
     {
         if let Some(cc) = v8::Local::new(scope, &unbound).create_code_cache() {
-            if consumed.is_none_or(|n| cc.len() > n) {
-                store_code_cache(module, &cc);
-            }
+            store_code_cache(&module, &cc, consumed);
         }
     }
 }
@@ -4596,7 +4713,7 @@ fn load_cjs_inner<'s>(
         }
         return None;
     };
-    let code = source_string(scope, module)?;
+    let code = source_string(scope, &module)?;
     // Under --coverage, give the script an origin named after the file so V8's precise-coverage
     // report carries a URL we can map back to source. Off by default (origin None) — zero change.
     // (compiled script, the compile error when neither the native output nor the esbuild retry
@@ -4620,7 +4737,7 @@ fn load_cjs_inner<'s>(
         // A named origin (the entry file, framed app modules) shares the bytecode cache: the
         // cached data does not depend on the script's name, and V8 rejects a mismatch safely.
         let compiled = if code_cache_enabled() {
-            compile_cjs_cached(tc, code, module, origin.as_ref())
+            compile_cjs_cached(tc, code, &module, origin.as_ref())
         } else {
             match &origin {
                 Some(o) => v8::Script::compile(tc, code, Some(o)),
@@ -8088,6 +8205,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
 
         discard_stale_code_caches();
+        let _pending_guard = PendingCodeCacheGuard;
         set_file_env(scope, &entry_abs);
         let result = 'work: {
             // 0. DOM environment (turbo-dom) — only for files that need it, so pure-logic
@@ -8212,6 +8330,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
             // 3. drive the collected tests: __tt.run() -> Promise<summary>
             drive_tests(scope, global, &entry_abs)
         };
+        drop_pending_code_caches();
 
         // A file that ran into the isolate's heap limit was terminated by the heap guard: report
         // that, not whatever the half-unwound run happened to say.
@@ -8362,6 +8481,7 @@ fn run_test_file_reused(
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
 
         discard_stale_code_caches();
+        let _pending_guard = PendingCodeCacheGuard;
         set_file_env(scope, entry_abs);
         let result: Result<TestReport, String> = 'work: {
             // DOM: install once per worker and keep it across its files, as vitest `isolate: false`
@@ -8468,6 +8588,7 @@ fn run_test_file_reused(
             }
             drive_tests(scope, global, entry_abs)
         };
+        drop_pending_code_caches();
 
         // Heap guard. A file that hit the limit was terminated mid-run: report the OOM and throw
         // the isolate away. Otherwise a reused isolate only ever gets bigger (every file's module
