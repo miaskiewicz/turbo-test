@@ -2091,3 +2091,30 @@ fn code_cache_bytes_are_read_from_the_file_not_kept() {
     std::fs::remove_file(&m.cc_path).unwrap();
     assert!(module_code_cache(&m).is_none());
 }
+
+/// With failure frames on (junit, the human reporters), an app module still loads from the
+/// transform cache: its map back to the source is an uncached transform, built only when a
+/// frame in it is resolved (a passing run needs none), and it maps the code that ran.
+#[test]
+fn module_maps_for_failure_frames_are_built_on_demand() {
+    let d = tmp("lazymap");
+    let module = put(
+        &d,
+        "src/m.ts",
+        "import { x } from './x';\nexport function boom(): number {\n  throw new Error('m ' + x);\n}\n",
+    );
+    put(&d, "src/x.ts", "export const x = 1;\n");
+    crate::location::FRAMES_FOR_TEST.with(|f| f.set(true));
+    let before = MAPPED_TRANSFORMS.with(std::cell::Cell::get);
+    let code = read_transformed(&module, true, false).expect("the module transforms");
+    let again = read_transformed(&module, true, false).expect("the module transforms");
+    assert_eq!(code, again);
+    assert_eq!(MAPPED_TRANSFORMS.with(std::cell::Cell::get) - before, 0, "no map is built while the module loads");
+    let line = code.lines().position(|l| l.contains("throw new Error")).expect("the throw") + 1;
+    let column = code.lines().nth(line - 1).unwrap().find("throw").unwrap() + 1;
+    // the CJS wrapper puts one line before the code
+    let frame = crate::location::resolve_frame(&module.to_string_lossy(), line + 1, column);
+    crate::location::FRAMES_FOR_TEST.with(|f| f.set(false));
+    assert_eq!(MAPPED_TRANSFORMS.with(std::cell::Cell::get) - before, 1, "the first frame builds the map");
+    assert_eq!(frame.map(|(l, _)| l), Some(3), "the frame maps to the source line of the throw");
+}

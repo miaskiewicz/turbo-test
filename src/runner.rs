@@ -2703,7 +2703,14 @@ fn native_transform_cjs_located(file: &Path) -> Option<String> {
 
 /// `native_transform_cjs` with the map of its lines back to the source (and that source): the
 /// test file's for test locations, another app module's while failure frames are printed.
+#[cfg(test)]
+thread_local! {
+    /// Uncached mapped transforms on this thread (the gate in `runner_tests_a`).
+    static MAPPED_TRANSFORMS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 fn native_transform_cjs_mapped(file: &Path) -> Option<(String, crate::location::Segments, String)> {
+    #[cfg(test)]
+    MAPPED_TRANSFORMS.with(|n| n.set(n.get() + 1));
     let raw = with_binder(file, read_app_source(file)?, true);
     let legacy_decorators = decorator_metadata_enabled(file) && file_has_decorator(&raw);
     let emitted = crate::esm_cjs::emit_mapped(file, &raw, legacy_decorators)?;

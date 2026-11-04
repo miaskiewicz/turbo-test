@@ -100,7 +100,17 @@ fn unshift(script: &str, line: usize, col: usize) -> usize {
 /// Whether failure frames are printed (`--reporter junit` sets `TURBO_ERROR_FRAMES`): the
 /// loaders then keep a source map for every app module they transform.
 pub fn frames_enabled() -> bool {
+    #[cfg(test)]
+    if FRAMES_FOR_TEST.with(std::cell::Cell::get) {
+        return true;
+    }
     std::env::var_os("TURBO_ERROR_FRAMES").is_some()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Unit tests: failure frames on for this thread (the env switch is process-wide).
+    pub static FRAMES_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// `path`'s transformed code maps back through `map`; `offset` lines precede the code.
