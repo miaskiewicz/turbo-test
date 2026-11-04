@@ -47,11 +47,11 @@ implementations, not the reporter's branches.
   vitest 4.1.12. `window_embedder.rs`: the viewport metrics, and `style.transition`
   serialization pinned to Chrome 156 (`opacity 0.3s`, `opacity 300ms ease` → `opacity 300ms`).
 
-### Known gaps (turbo-dom)
-- The CSSOM lives in turbo-dom's browser-env. Two Chrome mismatches from #230 are routed there.
-  First, a custom property whose name ends in `color` (`--theme-color: #ff0000`) reads back as
-  `rgb(255, 0, 0)`. Second, `getComputedStyle` reports no custom properties. `matchMedia` is
-  still turbo-dom's stub, which never matches; Chrome evaluates the query against the viewport.
+### Changed
+- Built on turbo-dom 0.7.1: subtree-scoped style invalidation (turbo-dom#279), cheaper fresh
+  cascades (#308), cheaper transition updates (turbo-test#227 part 1, turbo-dom#302), Chrome's
+  computed defaults (#305), custom properties kept as authored and reported by
+  `getComputedStyle` (#285, #286), a real `MediaQueryList` evaluated against the viewport (#287).
 
 ## [0.7.0] — performance: bytecode cache and turbo-dom 0.7.0
 
