@@ -3,6 +3,16 @@
 All notable changes to `@miaskiewicz/turbo-test`. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [Unreleased] — 0.7.1
+
+### Fixed
+- Zero-delay timers keep vitest's event-loop order (#237). A real `setTimeout(fn, 0)` still takes
+  0 ms of the clock, but now runs where Node's 1 ms timer does: after a setImmediate or a
+  MessageChannel message queued alongside it. In 0.7.0 it ran first, so React's scheduler (which
+  commits through setImmediate outside `act`) had not rendered when RTL's `setTimeout(0)` drain
+  after a user-event action resumed the test: "disabled while in flight" and error-alert
+  assertions failed by default and passed with `--no-zero-delay-timers` and on vitest.
+
 ## [0.7.0] — performance: bytecode cache and turbo-dom 0.7.0
 
 0.6.x ran payroll-app's suite in ~220 s where 0.4.2 took ~15 s. Profiling with samply

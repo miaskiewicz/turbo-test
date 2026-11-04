@@ -165,13 +165,19 @@ function __hrtimeOf(ms, prev) {
 }
 function __realHrtime(prev) { return __hrtimeOf(__loop.elapsed() - __perfOrigin, prev); }
 __realHrtime.bigint = () => { const [s, n] = __realHrtime(); return BigInt(s) * 1000000000n + BigInt(n); };
-function __schedule(cb, delay, interval, fake, immediate) {
+function __schedule(cb, delay, interval, fake, immediate, clamped) {
   const id = __loop.seq++;
   // `immediate`: a setImmediate (jest's legacy runAllImmediates)
   if (fake) __loop.fmacro.push({ id, due: __loop.fnow + Math.max(0, delay | 0), cb, interval, gen: __loop.gen, immediate });
-  else __loop.macro.push({ id, due: __loop.now + Math.max(0, delay | 0), cb, interval, gen: __loop.gen });
+  else {
+    const due = __loop.now + Math.max(0, delay | 0);
+    // `ord`: where the timer runs. A zero-delay timer (`clamped`) is due now but runs where Node's
+    // 1 ms timer does, after the immediates and messages queued alongside it (turbo-test#237)
+    __loop.macro.push({ id, due, ord: clamped ? due + 1 : due, cb, interval, gen: __loop.gen });
+  }
   return id;
 }
+const __byOrd = (a, b) => a.ord - b.ord || a.id - b.id;
 // Isolate-reuse: drop timers left over from a PRIOR file (gen < current) WITHOUT running them.
 // A finished file's leaked setInterval / self-rescheduling setTimeout would otherwise fire in the
 // next file and re-arm itself → the loop never settles → the 2M guard spins (run crawls/hangs).
@@ -229,7 +235,7 @@ __loop.ticks = 0;
 __loop.stepMacro = function () {
   __loop.ticks++;
   __dropStaleTimers();
-  __loop.macro.sort((a, b) => a.due - b.due || a.id - b.id);
+  __loop.macro.sort(__byOrd);
   __loop.internal.sort((a, b) => a.due - b.due || a.id - b.id);
   const m = __loop.macro[0];
   const it = __loop.internal[0];
@@ -246,7 +252,7 @@ __loop.stepMacro = function () {
   }
   __loop.now = Math.max(__loop.now, m.due);
   if (m.interval == null) __clearTimer(m.id);
-  else m.due = __loop.now + m.interval;
+  else m.ord = m.due = __loop.now + m.interval;
   try { m.cb(); } catch (e) { __reportUncaught(e); }
   return true;
 };
@@ -350,17 +356,20 @@ __loop.toFrame = function () {
 // uninstall), so a reference taken before (node:timers, a library's captured setImmediate)
 // stays on the real clock, as in vitest (turbo-test#168).
 // zeroDelayTimers (on by default; --no-zero-delay-timers, TURBO_ZERO_DELAY_TIMERS=0 or
-// `test.zeroDelayTimers: false` turn it off): a real timer's delay below 1 ms stays 0 ms, as in
-// turbo-test 0.4.2 (faster for timer-heavy suites). Off, it is Node's 1 ms clamp (turbo-test#212).
+// `test.zeroDelayTimers: false` turn it off): a real timer's delay below 1 ms stays 0 ms of the
+// clock, as in turbo-test 0.4.2 (faster for timer-heavy suites), but keeps the order of Node's
+// 1 ms timer (turbo-test#237). Off, it is Node's 1 ms clamp (turbo-test#212).
 let __ttZeroDelay = true;
 const __nodeDelay = (d) => { const n = Number(d); return n >= 1 && n <= 2147483647 ? n : __ttZeroDelay ? 0 : 1; };
+// a real timer zeroDelayTimers took below Node's 1 ms clamp: it keeps Node's order (__schedule)
+const __clamped = (d) => __ttZeroDelay && !(Number(d) >= 1 && Number(d) <= 2147483647);
 function __timerFns(fake) {
   return {
     // Node makes a real timer's delay below 1 ms (0, NaN, negative) 1 ms, so a setImmediate or a
     // MessageChannel message queued after a setTimeout(fn, 0) runs first (turbo-test#212); that
     // clamp applies with zeroDelayTimers off (above). The fake clock (sinon) keeps 0
-    setTimeout: (cb, d, ...a) => __schedule(() => cb(...a), fake ? d : __nodeDelay(d), null, fake),
-    setInterval: (cb, d, ...a) => __schedule(() => cb(...a), fake ? d : __nodeDelay(d), Math.max(1, d | 0), fake),
+    setTimeout: (cb, d, ...a) => __schedule(() => cb(...a), fake ? d : __nodeDelay(d), null, fake, false, !fake && __clamped(d)),
+    setInterval: (cb, d, ...a) => __schedule(() => cb(...a), fake ? d : __nodeDelay(d), Math.max(1, d | 0), fake, false, !fake && __clamped(d)),
     setImmediate: (cb, ...a) => __schedule(() => cb(...a), 0, null, fake, true),
     clearTimeout: (id) => __clearTimer(id),
     clearInterval: (id) => __clearTimer(id),

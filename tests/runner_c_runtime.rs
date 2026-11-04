@@ -849,7 +849,8 @@ test('node:path', () => {
 }
 
 /// The loop order probe: a `setTimeout(fn, 0)`, a setImmediate, a MessageChannel message and a
-/// promise, queued in that order; the test expects `want`.
+/// promise, queued in that order, then the clock across 200 `setTimeout(fn, 0)` turns (`clamped`:
+/// at least 1 ms each, Node's clamp; `zero`: 0 ms each); the test expects `want`.
 fn loop_order_project(name: &str, config: &str, want: &str) -> Project {
     let p = Project::new(name);
     p.file("package.json", r#"{"type":"module"}"#);
@@ -868,6 +869,9 @@ fn loop_order_project(name: &str, config: &str, want: &str) -> Project {
                const ch = new MessageChannel(); ch.port1.onmessage = () => {{ log.push('message'); ch.port1.close(); }}; ch.port2.postMessage(1);\n\
                Promise.resolve().then(() => log.push('micro'));\n\
                await new Promise((r) => setTimeout(r, 20));\n\
+               const t0 = performance.now();\n\
+               for (let i = 0; i < 200; i++) await new Promise((r) => setTimeout(r, 0));\n\
+               log.push(performance.now() - t0 >= 200 ? 'clamped' : 'zero');\n\
                expect(log).toEqual({want});\n\
              }});\n"
         ),
@@ -875,8 +879,8 @@ fn loop_order_project(name: &str, config: &str, want: &str) -> Project {
     p
 }
 
-const NODE_ORDER: &str = "['micro', 'immediate', 'message', 'timeout0']";
-const ZERO_DELAY_ORDER: &str = "['micro', 'timeout0', 'immediate', 'message']";
+const NODE_ORDER: &str = "['micro', 'immediate', 'message', 'timeout0', 'clamped']";
+const ZERO_DELAY_ORDER: &str = "['micro', 'immediate', 'message', 'timeout0', 'zero']";
 
 /// turbo-test#212: Node's event loop order, which vitest runs on: a `setTimeout(fn, 0)` is a 1 ms
 /// timer, so a setImmediate and a MessageChannel message queued after it still run first
@@ -900,8 +904,9 @@ fn timeout_zero_runs_after_immediates_and_messages_like_node_without_zero_delay(
     }
 }
 
-/// zeroDelayTimers (the default): a `setTimeout(fn, 0)` is a 0 ms timer, as in 0.4.2. It still
-/// runs after the promise jobs, and the setImmediate and MessageChannel message keep their order.
+/// zeroDelayTimers (the default): a `setTimeout(fn, 0)` takes 0 ms of the clock, but keeps Node's
+/// order (turbo-test#237): it still runs after a setImmediate and a MessageChannel message queued
+/// after it, as vitest's 1 ms timer does.
 #[test]
 fn timeout_zero_is_zero_ms_by_default() {
     for env in ["node", "jsdom"] {
@@ -914,6 +919,55 @@ fn timeout_zero_is_zero_ms_by_default() {
         assert!(
             r.stdout.contains("Tests  1 passed (1)"),
             "{env}\n{}",
+            r.all()
+        );
+    }
+}
+
+/// turbo-test#237: the in-flight UI pattern. A click handler starts a save that never settles
+/// and commits its "saving" state through a setImmediate (React's scheduler outside `act`); the
+/// test then yields one `setTimeout(fn, 0)` (RTL's asyncWrapper drain after a user-event action)
+/// and reads the state. vitest's 1 ms timer runs after the setImmediate, so the state is
+/// committed; zeroDelayTimers must keep that, also for a timer queued inside another timer.
+#[test]
+fn zero_delay_timeout_runs_after_a_pending_immediate_for_in_flight_state() {
+    let p = Project::new("zdt-inflight");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "a.test.js",
+        "import { expect, it } from 'vitest';\n\
+         const drain = () => new Promise((r) => setTimeout(r, 0));\n\
+         function app() {\n\
+           const ui = { saving: false, resolve: null };\n\
+           ui.click = () => {\n\
+             setImmediate(() => { ui.saving = true; });\n\
+             return new Promise((r) => { ui.resolve = r; }).then(() => setImmediate(() => { ui.saving = false; }));\n\
+           };\n\
+           return ui;\n\
+         }\n\
+         it('shows the in-flight state after a drain', async () => {\n\
+           const ui = app();\n\
+           void ui.click();\n\
+           await drain();\n\
+           expect(ui.saving).toBe(true);\n\
+           ui.resolve();\n\
+           await drain();\n\
+           expect(ui.saving).toBe(false);\n\
+         });\n\
+         it('keeps the order for a timer queued inside a timer', async () => {\n\
+           const log = [];\n\
+           await new Promise((done) => setTimeout(() => {\n\
+             setTimeout(() => { log.push('timeout0'); done(); }, 0);\n\
+             setImmediate(() => log.push('immediate'));\n\
+           }, 5));\n\
+           expect(log).toEqual(['immediate', 'timeout0']);\n\
+         });\n",
+    );
+    for args in [vec![], vec!["--no-zero-delay-timers"]] {
+        let r = turbo_test(&p.dir, &args, &[]);
+        assert!(
+            r.stdout.contains("Tests  2 passed (2)"),
+            "{args:?}\n{}",
             r.all()
         );
     }

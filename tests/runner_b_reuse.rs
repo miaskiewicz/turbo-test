@@ -492,12 +492,16 @@ fn zero_delay_timers_switch_applies_under_isolate_reuse() {
                setImmediate(() => log.push('immediate'));\n\
                Promise.resolve().then(() => log.push('micro'));\n\
                await new Promise((r) => setTimeout(r, 20));\n\
+               const t0 = performance.now();\n\
+               for (let i = 0; i < 200; i++) await new Promise((r) => setTimeout(r, 0));\n\
+               log.push(performance.now() - t0 >= 200 ? 'clamped' : 'zero');\n\
                expect(log).toEqual({want});\n\
              }});\n"
         )
     };
-    let node = "['micro', 'immediate', 'timeout0']";
-    let zero = "['micro', 'timeout0', 'immediate']";
+    // the order is Node's either way (turbo-test#237); the switch changes the clock
+    let node = "['micro', 'immediate', 'timeout0', 'clamped']";
+    let zero = "['micro', 'immediate', 'timeout0', 'zero']";
     let project = |name: &str, want: &str| {
         let p = Project::new(name);
         p.file("package.json", r#"{"type":"module"}"#);
