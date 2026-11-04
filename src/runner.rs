@@ -2703,6 +2703,12 @@ fn native_transform_cjs_located(file: &Path) -> Option<String> {
 
 /// `native_transform_cjs` with the map of its lines back to the source (and that source): the
 /// test file's for test locations, another app module's while failure frames are printed.
+/// The map of an app module's `native_transform_cjs` lines back to its source, for a failure
+/// frame in it (`location::set_module_map_lazy`): the mapped transform emits the same code.
+fn native_module_segments(file: &Path) -> Option<crate::location::Segments> {
+    native_transform_cjs_mapped(file).map(|(_, segs, _)| segs)
+}
+
 #[cfg(test)]
 thread_local! {
     /// Uncached mapped transforms on this thread (the gate in `runner_tests_a`).
@@ -3933,15 +3939,14 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
                     if let Some(code) = native_transform_cjs_located(abs) {
                         return Some(code);
                     }
-                } else if crate::location::frames_enabled() {
-                    // failure frames (junit) in this module map back too; its code runs below
-                    // the CJS wrapper's first line
-                    if let Some((code, segs, _)) = native_transform_cjs_mapped(abs) {
-                        crate::location::set_module_map(abs, segs, 1);
-                        return Some(code);
-                    }
                 }
                 if let Some(code) = native_transform_cjs(abs) {
+                    if crate::location::frames_enabled() && !crate::location::is_entry(abs) {
+                        // failure frames (junit, the human reporters) in this module map back
+                        // too; its code runs below the CJS wrapper's first line. The map comes
+                        // from the same transform's lines, built only when a frame needs it.
+                        crate::location::set_module_map_lazy(abs, native_module_segments, 1);
+                    }
                     return Some(code);
                 }
                 // strict mode (conformity coverage measurement): do NOT fall back to esbuild on an
