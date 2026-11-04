@@ -1743,6 +1743,51 @@ fn zero_delay_timers_env_wins_over_the_config() {
     );
 }
 
+/// jsdom media is the default; `TURBO_CHROME_MEDIA=0|1` (what `--[no-]chrome-media` sets)
+/// wins over the config's `test.chromeMedia: true|false`.
+#[test]
+fn chrome_media_env_wins_over_the_config() {
+    let on = "test: { chromeMedia: true }";
+    let off = "test: { chromeMedia:false }";
+    assert!(!chrome_media_from(None, ""));
+    assert!(!chrome_media_from(None, "test: {}"));
+    assert!(!chrome_media_from(None, "test: { chromeMedia: flag }"));
+    assert!(chrome_media_from(None, on));
+    assert!(!chrome_media_from(None, off));
+    assert!(!chrome_media_from(Some("0"), on));
+    assert!(!chrome_media_from(Some("false"), on));
+    assert!(chrome_media_from(Some("1"), off));
+    assert!(chrome_media_from(Some("true"), off));
+    // an unknown env value leaves the config's, with a warning
+    assert!(chrome_media_from(Some("yes"), on));
+    assert!(!chrome_media_from(Some("yes"), off));
+    assert_eq!(
+        chrome_media_env_warning(Some("yes")).as_deref(),
+        Some("turbo-test: ignoring TURBO_CHROME_MEDIA=\"yes\" (expected 0, 1, true or false)")
+    );
+    for ok in [None, Some("0"), Some("1"), Some("true"), Some("false")] {
+        assert_eq!(chrome_media_env_warning(ok), None);
+    }
+}
+
+/// The nearest config decides per directory; no config file means the default (jsdom).
+#[test]
+fn chrome_media_reads_the_nearest_config() {
+    let d = tmp("chrome-media-cfg");
+    put(
+        &d,
+        "vitest.config.ts",
+        "export default { test: { chromeMedia: true } };\n",
+    );
+    let sub = d.join("src/deep");
+    std::fs::create_dir_all(&sub).unwrap();
+    assert!(chrome_media_for(&sub, None));
+    assert!(!chrome_media_for(&sub, Some("0")));
+    let bare = tmp("chrome-media-none");
+    assert!(!chrome_media_for(&bare, None));
+    assert!(chrome_media_for(&bare, Some("1")));
+}
+
 // Wrapped CJS sources are shared by every isolate of the process (from alphajew420's #106): a
 // module loads from one copy, one entry per (path, decorator-metadata mode) replaced on edit.
 #[test]

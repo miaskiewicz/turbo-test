@@ -1726,6 +1726,21 @@ fn zero_delay_timers_from(env: Option<&str>, s: &str) -> Option<bool> {
         .or_else(|| v.starts_with("false").then_some(false))
 }
 
+/// Whether files under `start` get Chrome's media (stub).
+fn chrome_media_for(_start: &Path, _env: Option<&str>) -> bool {
+    false
+}
+
+/// The chromeMedia switch (stub).
+fn chrome_media_from(_env: Option<&str>, _s: &str) -> bool {
+    false
+}
+
+/// The warning for an unknown `TURBO_CHROME_MEDIA` value (stub).
+fn chrome_media_env_warning(_env: Option<&str>) -> Option<String> {
+    None
+}
+
 /// Whether a config key's value is `true`.
 fn config_is_true(s: &str, key: &str) -> bool {
     find_config_key(s, key).is_some_and(|start| {

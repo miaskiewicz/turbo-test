@@ -78,6 +78,6 @@ codegen-units = 1
 # crates.io. turbo-dom-v8 150.4.0 stays on crates.io. Remove this section and re-lock before
 # tagging (RELEASING.md); the tag-only release guard fails while it is here.
 [patch.crates-io]
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "ad9702a34845be896a2f51a18e3c6d03bbe18157" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "ad9702a34845be896a2f51a18e3c6d03bbe18157" }
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "ad9702a34845be896a2f51a18e3c6d03bbe18157" }
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "fb4b1d231e656db59cad801d91e48d3e67dfadd5" }
+turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "fb4b1d231e656db59cad801d91e48d3e67dfadd5" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "fb4b1d231e656db59cad801d91e48d3e67dfadd5" }

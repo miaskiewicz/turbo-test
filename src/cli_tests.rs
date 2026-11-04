@@ -1752,6 +1752,21 @@ fn the_error_line_drops_the_load_phase_prefix() {
 }
 
 #[test]
+fn chrome_media_flags_set_the_env_switch() {
+    assert_eq!(
+        parse(&["--chrome-media"]).env,
+        vec![("TURBO_CHROME_MEDIA", "1".to_string())]
+    );
+    assert_eq!(
+        parse(&["--chrome-media", "--no-chrome-media"]).env,
+        vec![
+            ("TURBO_CHROME_MEDIA", "1".to_string()),
+            ("TURBO_CHROME_MEDIA", "0".to_string())
+        ]
+    );
+}
+
+#[test]
 fn zero_delay_timer_flags_set_the_env_switch() {
     assert_eq!(
         parse(&["--zero-delay-timers"]).env,
