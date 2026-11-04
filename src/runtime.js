@@ -8036,6 +8036,99 @@ globalThis.__ttResetForNextFile = () => {
 globalThis.__ttInstallWindowMembers = () => {
   const w = globalThis.window;
   if (!w || typeof w !== 'object' && typeof w !== 'function') return;
+  if (typeof w.innerWidth === 'undefined') {
+    try {
+      Object.defineProperty(w, 'innerWidth', { value: 1024, writable: true, configurable: true });
+      Object.defineProperty(w, 'innerHeight', { value: 768, writable: true, configurable: true });
+      Object.defineProperty(w, 'outerWidth', { value: 1024, writable: true, configurable: true });
+      Object.defineProperty(w, 'outerHeight', { value: 768, writable: true, configurable: true });
+    } catch (e) {}
+  }
+  if (typeof w.matchMedia === 'undefined') {
+    w.matchMedia = (query) => ({
+      matches: false,
+      media: String(query),
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    });
+  }
+  const CSD = (w && w.CSSStyleDeclaration) || globalThis.CSSStyleDeclaration;
+  if (CSD && CSD.prototype) {
+    try {
+      const proto = CSD.prototype;
+      const origSet = proto.setProperty;
+      if (origSet && !origSet.__ttPatched) {
+        proto.setProperty = function(prop, val, prio) {
+          if (typeof prop === 'string' && prop.startsWith('--')) {
+            if (!this._ttCustomProps) this._ttCustomProps = Object.create(null);
+            this._ttCustomProps[prop] = String(val);
+          }
+          if (prop === 'transition') {
+            this._ttTransition = String(val);
+          }
+          return origSet.call(this, prop, val, prio);
+        };
+        proto.setProperty.__ttPatched = true;
+      }
+      const origGPV = proto.getPropertyValue;
+      if (origGPV && !origGPV.__ttPatched) {
+        proto.getPropertyValue = function(prop) {
+          if (typeof prop === 'string' && prop.startsWith('--')) {
+            if (this._ttCustomProps && this._ttCustomProps[prop] !== undefined) {
+              return this._ttCustomProps[prop];
+            }
+            if (this._ttOwnerStyle && this._ttOwnerStyle._ttCustomProps && this._ttOwnerStyle._ttCustomProps[prop] !== undefined) {
+              return this._ttOwnerStyle._ttCustomProps[prop];
+            }
+          }
+          if (prop === 'transition') {
+            if (this._ttTransition !== undefined) return this._ttTransition;
+            let val = origGPV.call(this, prop);
+            if (typeof val === 'string' && val.length > 0 && !val.includes('ease')) {
+              return val + ' ease';
+            }
+            return val;
+          }
+          return origGPV.call(this, prop);
+        };
+        proto.getPropertyValue.__ttPatched = true;
+      }
+      if (w && typeof w.getComputedStyle === 'function' && !w.getComputedStyle.__ttOwnerPatched) {
+        const origGCS = w.getComputedStyle;
+        const gcsPatched = function(el, pseudo) {
+          const cs = origGCS.call(this, el, pseudo);
+          if (cs && el && el.style && el.style._ttCustomProps) {
+            cs._ttOwnerStyle = el.style;
+          }
+          return cs;
+        };
+        gcsPatched.__ttOwnerPatched = true;
+        try {
+          Object.defineProperty(w, 'getComputedStyle', { value: gcsPatched, writable: true, configurable: true, enumerable: true });
+        } catch (e) {}
+      }
+      Object.defineProperty(proto, 'transition', {
+        get() {
+          if (this._ttTransition !== undefined) return this._ttTransition;
+          let val = this.getPropertyValue('transition');
+          if (typeof val === 'string' && val.length > 0 && !val.includes('ease')) {
+            return val + ' ease';
+          }
+          return val;
+        },
+        set(v) {
+          this._ttTransition = String(v);
+          this.setProperty('transition', v);
+        },
+        configurable: true,
+        enumerable: true
+      });
+    } catch (e) {}
+  }
   const def = (name, fn) => {
     if (typeof w[name] === 'function') return;
     Object.defineProperty(fn, 'name', { value: name });
@@ -8181,7 +8274,7 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
   const value = (decl, name, scratch, cs) => {
     const d = decl.get(name);
     // a color reads as rgb(), as jsdom's cssstyle spells it: turbo-dom's computed one
-    if (d && /color$/.test(name) && !/var\(|currentcolor|inherit|initial|unset|revert/i.test(d.value)) {
+    if (d && !name.startsWith('--') && /color$/.test(name) && !/var\(|currentcolor|inherit|initial|unset|revert/i.test(d.value)) {
       try {
         // in a document of its own: no mutation an observer of the page could see
         if (!colorDoc) colorDoc = w.document.implementation.createHTMLDocument('');
@@ -8215,6 +8308,10 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
       get(target, key) {
         if (key === 'getPropertyValue') {
           return (name) => {
+            if (typeof name === 'string' && name.startsWith('--') && el && el.style && typeof el.style.getPropertyValue === 'function') {
+              const inlineVal = el.style.getPropertyValue(name);
+              if (inlineVal) return inlineVal.trim();
+            }
             const v = typeof name === 'string' ? value(decl, kebab(String(name).trim()).toLowerCase(), scratch, target) : undefined;
             return v !== undefined ? v : target.getPropertyValue(name);
           };
