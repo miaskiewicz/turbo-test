@@ -72,6 +72,7 @@ turbo-test has no Cargo feature flags; behaviour switches are environment variab
 | `TURBO_REUSE_ISOLATE=1` / `TURBO_NO_REUSE=1` | force isolate reuse on / off (see below) |
 | `TURBO_LEGACY_REPORTER=1` | compact `PASS` / `FAIL` reporter instead of vitest's |
 | `TURBO_ZERO_DELAY_TIMERS=1` / `=0` | zero-delay timers on (default) / off (see below) |
+| `TURBO_CHROME_MEDIA=1` / `=0` | Chrome's media / jsdom's (default) (see below) |
 | `TURBO_SNAPSHOT=0` | each DOM file runs turbo-dom's engine install instead of opening the window snapshot (see below) |
 
 **Window snapshot** (on by default for runs with at least 8 DOM-environment files). The worker
@@ -102,6 +103,28 @@ typed config needs `// @ts-expect-error` above it.
 | CLI flag (wins) | `--zero-delay-timers` | `--no-zero-delay-timers` |
 | env var | `TURBO_ZERO_DELAY_TIMERS=1` | `TURBO_ZERO_DELAY_TIMERS=0` |
 | vitest config | `test: { zeroDelayTimers: true }` | `test: { zeroDelayTimers: false }` |
+
+**Media: jsdom's by default, Chrome's on opt-in.** By default the DOM's media behaviour is
+jsdom 27's, as on vitest with `environment: 'jsdom'`: `window.matchMedia`, `MediaQueryList` and
+`MediaQueryListEvent` are undefined, and `getComputedStyle` applies an `@media` rule only when one
+of its media list items is exactly `screen` (an `@import` also with no media list). So
+breakpoint rules such as MUI's `sx={{ display: { xs: 'flex', md: 'none' } }}` never apply and
+both a mobile and a desktop layout stay in the accessibility tree, which is what tests written
+against vitest expect. Tests that need `matchMedia` mock it, as on jsdom.
+
+Chrome's media (turbo-dom's `MediaMode::Chrome`, the behaviour turbo-dom 0.7.1 has for every
+other embedder): `matchMedia` returns a live `MediaQueryList`, and `@media` / `@import` media
+lists are evaluated against the 1024x768 viewport, as in Chrome 156. MUI's `md` rules apply at
+that width, so mobile-only elements are `display: none`. In both modes a test's replacement
+`window.matchMedia` changes what `useMediaQuery` sees, never which CSS rules apply.
+
+| source | Chrome | jsdom (default) |
+|---|---|---|
+| CLI flag (wins) | `--chrome-media` | `--no-chrome-media` |
+| env var | `TURBO_CHROME_MEDIA=1` | `TURBO_CHROME_MEDIA=0` |
+| vitest config | `test: { chromeMedia: true }` | `test: { chromeMedia: false }` |
+
+`test.chromeMedia` is not in vitest's `InlineConfig` type either (`// @ts-expect-error`).
 
 ## Isolate-reuse (extra speed, zero config)
 

@@ -55,7 +55,10 @@ Full matrix + quirks: `vitest.compat.md`. Summary:
 `--changed [since]`, `--passWithNoTests`, `-u/--update`, the `--coverage*` family.
 turbo-test's own: `--zero-delay-timers` / `--no-zero-delay-timers` (`setTimeout(fn, 0)` takes 0 ms
 of the clock in Node's order (default) or Node's 1 ms; also `TURBO_ZERO_DELAY_TIMERS=0|1`, preferred over
-`test.zeroDelayTimers`, which vitest's config type lacks; README "Switches"). Leading
+`test.zeroDelayTimers`, which vitest's config type lacks; README "Switches"); `--chrome-media` /
+`--no-chrome-media` (`matchMedia` and `@media` evaluated against the 1024x768 viewport as in Chrome,
+or jsdom's media (default): no `matchMedia`, only `screen` media lists apply; also
+`TURBO_CHROME_MEDIA=0|1` and `test.chromeMedia`; README "Switches"). Leading
 `run`/`watch`/`dev` accepted-and-stripped. Unknown flags warned + ignored (never treated as files).
 
 **Test / `vi` / `expect` API** ✅

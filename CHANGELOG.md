@@ -9,6 +9,18 @@ Fixes parts 1–3 of #230, reported by nagisokyn-prog in #230 after running a 19
 monorepo suite (Vue 3, Pinia, TypeScript) on Windows 11. The fixes here are turbo-test's own
 implementations, not the reporter's branches.
 
+### Added
+- Media follows vitest's jsdom by default (turbo-dom#309): `window.matchMedia` is undefined and
+  `getComputedStyle` applies an `@media` rule only when a media list item is exactly `screen`.
+  turbo-dom 0.7.1 evaluates media against the 1024x768 viewport as Chrome does, which hid MUI's
+  mobile-only elements (`display: {xs: 'flex', md: 'none'}`) at 1024 px and failed 13
+  ui-design-components tests and payroll-app's TimeEntryCard delete test that pass on vitest
+  and 0.7.0. `--chrome-media`, `TURBO_CHROME_MEDIA=1` or `test.chromeMedia: true` (flag over env
+  over config) choose Chrome's media. Tests: `media_is_jsdom_by_default_and_chrome_on_opt_in`
+  (vitest 4.1.12 + jsdom 27.4.0 and Chrome 156 at 1024x768 as oracles),
+  `chrome_media_env_wins_over_the_config`, `chrome_media_reads_the_nearest_config`,
+  `chrome_media_flags_set_the_env_switch`.
+
 ### Fixed
 - Zero-delay timers keep vitest's event-loop order (#237). A real `setTimeout(fn, 0)` still takes
   0 ms of the clock, but now runs where Node's 1 ms timer does: after a setImmediate or a

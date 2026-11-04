@@ -237,6 +237,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             "--bail" => o.bail = value().and_then(|v| v.parse().ok()).unwrap_or(0),
             // `--silent` → suppress test console.* output; runtime reads __TT_SILENT.
             "--silent" => o.env.push(("TURBO_TEST_SILENT", "1".to_string())),
+            "--chrome-media" => o.env.push(("TURBO_CHROME_MEDIA", "1".to_string())),
+            "--no-chrome-media" => o.env.push(("TURBO_CHROME_MEDIA", "0".to_string())),
             "--zero-delay-timers" => o.env.push(("TURBO_ZERO_DELAY_TIMERS", "1".to_string())),
             "--no-zero-delay-timers" => o.env.push(("TURBO_ZERO_DELAY_TIMERS", "0".to_string())),
             // `--allowOnly` / `--no-allowOnly` → permit or forbid `.only` tests (default: !isCI).

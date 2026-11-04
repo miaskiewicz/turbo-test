@@ -74,7 +74,7 @@ codegen-units = 1
 
 
 # Pre-publish only (turbo-dom 0.7.1): turbo-dom, -layout and -browser-env come from turbo-dom's
-# 0.7.1 branch (miaskiewicz/turbo-dom#298, fix/0.7.1-surf-items) until turbo-dom 0.7.1 is on
+# 0.7.1 branch (miaskiewicz/turbo-dom#298, fix/0.7.1-surf-items; pinned to #309's head) until turbo-dom 0.7.1 is on
 # crates.io. turbo-dom-v8 150.4.0 stays on crates.io. Remove this section and re-lock before
 # tagging (RELEASING.md); the tag-only release guard fails while it is here.
 [patch.crates-io]
