@@ -79,7 +79,7 @@ pub fn transitive_imports(
 /// Given changed files, return the subset of `tests` transitively affected.
 /// Guaranteed superset of the truly-affected set.
 pub fn affected_tests(changed: &[PathBuf], tests: &[PathBuf]) -> Vec<PathBuf> {
-    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let canon = |p: &Path| crate::canon::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let changed: HashSet<PathBuf> = changed.iter().map(|p| canon(p)).collect();
     let mut memo = HashMap::new();
     let mut out = Vec::new();

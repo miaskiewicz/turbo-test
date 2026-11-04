@@ -713,7 +713,7 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
             }
         });
     if let Ok(res) = resolved {
-        if let Ok(c) = std::fs::canonicalize(res.path()) {
+        if let Ok(c) = crate::canon::canonicalize(res.path()) {
             // oxc can resolve a bare `require("..")` / `require(".")` (a directory re-export, common
             // in NestJS package `index.js` → `require("./dist")` chains and `dist/utils/x.js →
             // require("..")` self-references) to the DIRECTORY path rather than its index file. A
@@ -743,7 +743,7 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
             base.join("index.cjs"),
         ] {
             if c.is_file() {
-                return std::fs::canonicalize(c).ok();
+                return crate::canon::canonicalize(c).ok();
             }
         }
     }
@@ -791,7 +791,7 @@ fn svgr_stub_path(from_dir: &Path) -> Option<PathBuf> {
     if !path.exists() {
         write_atomic(&path, &src);
     }
-    std::fs::canonicalize(&path).ok()
+    crate::canon::canonicalize(&path).ok()
 }
 
 /// Body of the svgr `?react` stub; `__REACT_SPEC__` is replaced with the quoted react import spec.
@@ -8286,7 +8286,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     }
     let _dom_guard = DomGuard;
 
-    let entry_abs = std::fs::canonicalize(entry).map_err(|e| format!("{e}"))?;
+    let entry_abs = crate::canon::canonicalize(entry).map_err(|e| format!("{e}"))?;
     crate::location::begin(
         &entry_abs,
         &std::fs::read_to_string(&entry_abs).unwrap_or_default(),
@@ -8982,7 +8982,7 @@ fn drive_tests(
 /// vitest's `task.file.name` (turbo-test#96): the test file relative to the run's root (both
 /// canonical), as the reports name it; its canonical path for a file outside the root.
 pub fn task_file_name(entry: &Path, root: &Path) -> String {
-    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let canon = |p: &Path| crate::canon::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let entry = canon(entry);
     match entry.strip_prefix(canon(root)) {
         Ok(rel) => rel.to_string_lossy().into_owned(),

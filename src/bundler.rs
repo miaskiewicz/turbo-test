@@ -148,7 +148,7 @@ pub fn bundle(entry: &Path) -> Option<String> {
 
 /// `bundle` with the module cap injected (`MAX_MODULES` in production).
 fn bundle_capped(entry: &Path, max_modules: usize) -> Option<String> {
-    let entry = entry.canonicalize().ok()?;
+    let entry = crate::canon::canonicalize(entry).ok()?;
     let resolver = make_resolver();
 
     let mut order: Vec<PathBuf> = Vec::new();

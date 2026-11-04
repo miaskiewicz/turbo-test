@@ -19,7 +19,20 @@ pub fn canonicalize(p: impl AsRef<Path>) -> std::io::Result<PathBuf> {
 /// `\\srv\share\…`) prefix removed. Any other path, a verbatim device path (`\\?\Volume{…}`,
 /// `\\?\GLOBALROOT\…`) included, which has no plain spelling, comes back unchanged.
 pub fn strip_verbatim(p: PathBuf) -> PathBuf {
-    unimplemented!("{p:?}")
+    let Some(s) = p.to_str() else {
+        return p;
+    };
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        let b = rest.as_bytes();
+        let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
+        if drive && (b.len() == 2 || b[2] == b'\\') {
+            return PathBuf::from(rest);
+        }
+    }
+    p
 }
 
 #[cfg(test)]
