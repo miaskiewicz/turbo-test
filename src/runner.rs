@@ -9635,6 +9635,11 @@ fn clear_registry() {
     });
 }
 
+/// The V8 flags a run applies: `TURBO_V8_FLAGS` when set (empty: none), else the defaults.
+fn v8_flags(env: Option<&str>) -> String {
+    env.unwrap_or_default().to_string()
+}
+
 /// Initialize V8 once for the process.
 pub fn init_v8() {
     use std::sync::Once;
