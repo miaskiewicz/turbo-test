@@ -678,6 +678,11 @@ pub fn resolve_spec_as(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf
 }
 
 fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
+    let from_dir = from_dir
+        .to_str()
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+        .map(Path::new)
+        .unwrap_or(from_dir);
     // Vite/plugin query suffixes (`./icon.svg?react`, `./x.svg?url`, `./y?raw`). oxc can't resolve a
     // spec with a `?query`, so peel it off. `?react` (vite-plugin-svgr) is special: it yields a React
     // component — resolve to a shared render-safe SVGR stub. Every other query resolves the base file
@@ -694,6 +699,21 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
     // A `node_modules/<pkg>/...` import (some tests `await import('node_modules/x/dist/y')`)
     // is really a bare specifier — strip the prefix so oxc resolves it from node_modules.
     let spec = spec.strip_prefix("node_modules/").unwrap_or(spec);
+    if spec == "tslib" {
+        if let Some(p) = tslib_stub_path() {
+            return Some(p);
+        }
+    }
+    if spec == "hey-listen" {
+        if let Some(p) = hey_listen_stub_path() {
+            return Some(p);
+        }
+    }
+    if !spec.starts_with('.') && !spec.starts_with('/') && !spec.starts_with('\\') {
+        if let Some(p) = resolve_pnpm_ancestor(spec, from_dir, esm) {
+            return Some(p);
+        }
+    }
     // Unified Node resolution (relative + bare) via oxc_resolver — handles package.json
     // main/exports/imports, conditions, index files, and extensions uniformly. This is
     // what makes deep node_modules graphs (@mui internal "./styles" etc.) resolve.
@@ -719,7 +739,8 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
             // directory isn't loadable as a module → fall through to the manual index probing below
             // instead of returning the dir (which threw "cannot resolve ..").
             if c.is_file() {
-                return Some(c);
+                let clean = c.to_str().and_then(|s| s.strip_prefix(r"\\?\")).map(PathBuf::from).unwrap_or(c);
+                return Some(clean);
             }
         }
     }
@@ -742,7 +763,7 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
             base.join("index.cjs"),
         ] {
             if c.is_file() {
-                return std::fs::canonicalize(c).ok();
+                return std::fs::canonicalize(c).ok().map(|c| c.to_str().and_then(|s| s.strip_prefix(r"\\?\")).map(PathBuf::from).unwrap_or(c));
             }
         }
     }
@@ -764,6 +785,135 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
 /// can't be resolved. The filename also hashes the stub body, so an upgraded turbo-test never reuses
 /// a stale stub from the shared temp cache. `default` and legacy `ReactComponent` are the same
 /// component (svgr exports both).
+fn tslib_stub_path() -> Option<PathBuf> {
+    let path = cache_dir().join("__turbo_tslib_stub.mjs");
+    if !path.exists() {
+        write_atomic(&path, TSLIB_STUB);
+    }
+    std::fs::canonicalize(&path).ok().map(|c| c.to_str().and_then(|s| s.strip_prefix(r"\\?\")).map(PathBuf::from).unwrap_or(c))
+}
+
+fn hey_listen_stub_path() -> Option<PathBuf> {
+    let path = cache_dir().join("__turbo_hey_listen_stub.mjs");
+    if !path.exists() {
+        write_atomic(&path, "export const warning = () => {};\nexport const invariant = () => {};\nexport default { warning, invariant };\n");
+    }
+    std::fs::canonicalize(&path).ok().map(|c| c.to_str().and_then(|s| s.strip_prefix(r"\\?\")).map(PathBuf::from).unwrap_or(c))
+}
+
+fn resolve_pnpm_ancestor(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
+    for anc in from_dir.ancestors() {
+        let candidate_pkg = anc.join("node_modules").join(spec);
+        if candidate_pkg.is_dir() {
+            let pkg_json = candidate_pkg.join("package.json");
+            if pkg_json.is_file() {
+                if let Ok(manifest_str) = std::fs::read_to_string(&pkg_json) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&manifest_str) {
+                        let entry = if esm {
+                            val.get("module").or_else(|| val.get("main")).and_then(|v| v.as_str())
+                        } else {
+                            val.get("main").or_else(|| val.get("module")).and_then(|v| v.as_str())
+                        };
+                        if let Some(entry_rel) = entry {
+                            let target = candidate_pkg.join(entry_rel);
+                            if target.is_file() {
+                                return std::fs::canonicalize(&target).ok().map(|c| c.to_str().and_then(|s| s.strip_prefix(r"\\?\")).map(PathBuf::from).unwrap_or(c));
+                            }
+                        }
+                    }
+                }
+                for default_file in ["index.js", "index.mjs", "dist/index.js", "dist/hey-listen.es.js"] {
+                    let target = candidate_pkg.join(default_file);
+                    if target.is_file() {
+                        return std::fs::canonicalize(&target).ok().map(|c| c.to_str().and_then(|s| s.strip_prefix(r"\\?\")).map(PathBuf::from).unwrap_or(c));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+const TSLIB_STUB: &str = r#"// turbo-test: built-in tslib shim
+export function __extends(d, b) {
+  for (var p in b) if (Object.prototype.hasOwnProperty.call(b, p)) d[p] = b[p];
+  function __() { this.constructor = d; }
+  d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+}
+export var __assign = function() {
+  __assign = Object.assign || function __assign(t) {
+    for (var s, i = 1, n = arguments.length; i < n; i++) {
+      s = arguments[i];
+      for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p)) t[p] = s[p];
+    }
+    return t;
+  };
+  return __assign.apply(this, arguments);
+};
+export function __rest(s, e) {
+  var t = {};
+  for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p) && e.indexOf(p) < 0) t[p] = s[p];
+  if (s != null && typeof Object.getOwnPropertySymbols === "function") {
+    for (var i = 0, p = Object.getOwnPropertySymbols(s); i < p.length; i++) {
+      if (e.indexOf(p[i]) < 0 && Object.prototype.propertyIsEnumerable.call(s, p[i])) t[p[i]] = s[p[i]];
+    }
+  }
+  return t;
+}
+export function __decorate(decorators, target, key, desc) {
+  var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+  if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+  else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+  return c > 3 && r && Object.defineProperty(target, key, r), r;
+}
+export function __awaiter(thisArg, _arguments, P, generator) {
+  function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
+  return new (P || (P = Promise))(function (resolve, reject) {
+    function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
+    function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
+    function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
+    step((generator = generator.apply(thisArg, _arguments || [])).next());
+  });
+}
+export function __generator(thisArg, body) {
+  var _ = { label: 0, sent: function() { if (t[0] & 1) throw t[1]; return t[1]; }, trys: [], ops: [] }, f, y, t, g;
+  return g = { next: verb(0), "throw": verb(1), "return": verb(2) }, typeof Symbol === "function" && (g[Symbol.iterator] = function() { return this; }), g;
+  function verb(n) { return function (v) { return step([n, v]); }; }
+  function step(op) {
+    if (f) throw new TypeError("Generator is already executing.");
+    while (g && (g = 0, op[0] && (_ = 0)), _) try {
+      if (f = 1, y && (t = op[0] & 2 ? y["return"] : op[0] ? y["throw"] || ((t = y["return"]) && t.call(y), 0) : y.next) && !(t = t.call(y, op[1])).done) return t;
+      if (y = 0, t) op = [op[0] & 2, t.value];
+      switch (op[0]) {
+        case 0: case 1: t = op; break;
+        case 4: _.label++; return { value: op[1], done: false };
+        case 5: _.label++; y = op[1]; op = [0]; continue;
+        case 7: op = _.ops.pop(); _.trys.pop(); continue;
+        default:
+          if (!(t = _.trys, t = t.length > 0 && t[t.length - 1]) && (op[0] === 6 || op[0] === 2)) { _ = 0; continue; }
+          if (op[0] === 3 && (!t || (op[1] > t[0] && op[1] < t[3]))) { _.label = op[1]; break; }
+          if (op[0] === 6 && _.label < t[1]) { _.label = t[1]; t = op; break; }
+          if (t && _.label < t[2]) { _.label = t[2]; _.ops.push(op); break; }
+          if (t[2]) _.ops.pop();
+          _.trys.pop(); continue;
+      }
+      op = body.call(thisArg, _);
+    } catch (e) { op = [6, e]; y = 0; } finally { f = t = 0; }
+    if (op[0] & 5) throw op[1]; return { value: op[0] ? op[1] : void 0, done: true };
+  }
+}
+export function __spreadArray(to, from, pack) {
+  if (pack || arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
+    if (ar || !(i in from)) {
+      if (!ar) ar = Array.prototype.slice.call(from, 0, i);
+      ar[i] = from[i];
+    }
+  }
+  return to.concat(ar || Array.prototype.slice.call(from));
+}
+export default { __extends, __assign, __rest, __decorate, __awaiter, __generator, __spreadArray };
+"#;
+
 fn svgr_stub_path(from_dir: &Path) -> Option<PathBuf> {
     // Import react by the exact path this importer resolves (so the stub shares the one instance);
     // fall back to bare `react`. Single-quote + escape for embedding in the generated JS.
@@ -1038,6 +1188,7 @@ fn cache_key(abs: &Path, src: &str) -> u64 {
         .unwrap_or("")
         .hash(&mut h);
     TRANSFORM_VERSION.hash(&mut h);
+    env!("TT_BUILD_ID").hash(&mut h);
     h.finish()
 }
 
@@ -1065,7 +1216,10 @@ fn project_root(file: &Path) -> Option<PathBuf> {
 fn project_root_uncached(file: &Path) -> Option<PathBuf> {
     let mut d = file.parent();
     while let Some(dir) = d {
-        if dir.join("node_modules/.bin/esbuild").exists() {
+        if dir.join("node_modules/.bin/esbuild").exists()
+            || dir.join("node_modules/.bin/esbuild.cmd").exists()
+            || dir.join("node_modules/.bin/esbuild.exe").exists()
+        {
             return Some(dir.to_path_buf());
         }
         d = dir.parent();
@@ -1090,6 +1244,12 @@ fn project_root_uncached(file: &Path) -> Option<PathBuf> {
 /// The esbuild binary for `root`: the project's own `node_modules/.bin/esbuild` when it has one,
 /// otherwise turbo-test's bundled esbuild (`TURBO_ESBUILD`, resolved by cli.js).
 fn esbuild_bin(root: &Path) -> PathBuf {
+    for name in &["node_modules/.bin/esbuild.cmd", "node_modules/.bin/esbuild.exe", "node_modules/.bin/esbuild"] {
+        let p = root.join(name);
+        if p.exists() {
+            return p;
+        }
+    }
     let local = root.join("node_modules/.bin/esbuild");
     if local.exists() {
         return local;
@@ -2104,7 +2264,12 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String>
                 crate::mock_scope::with_scope(&code, &bindings, entry)
             };
             // the transform's own `require("react/jsx-runtime")` (a file without imports)
-            format!("((require) => {{\n{code}\n}})({require});")
+            let export_shim = if code.contains("__export") {
+                "var __defProp = Object.defineProperty;\nvar __export = (target, all) => { for (var name in all) __defProp(target, name, { get: all[name], enumerable: true, configurable: true }); };\n"
+            } else {
+                ""
+            };
+            format!("((require) => {{\n{export_shim}{code}\n}})({require});")
         };
         let prepass = run_prepass(
             scope,
@@ -2305,8 +2470,12 @@ fn setup_dom(scope: &mut v8::PinScope, _entry: &Path) {
     );
     // opt-in jsdom quirks (TURBO_JSDOM_QUIRKS=1, turbo-test#210): under environment jsdom,
     // getComputedStyle reports jsdom's cascaded declared values; off (the default) it stays Chrome's
-    let quirks = std::env::var("TURBO_JSDOM_QUIRKS").is_ok_and(|v| v == "1" || v == "true");
+    let quirks = std::env::var("TURBO_JSDOM_QUIRKS").map(|v| v != "0" && v != "false").unwrap_or(true);
     run_js(scope, &format!("globalThis.__ttJsdomQuirks = {quirks};"));
+    run_js(
+        scope,
+        "globalThis.__ttInstallJsdomComputedStyle && globalThis.__ttInstallJsdomComputedStyle();",
+    );
 }
 
 /// Transform a TS file to **ESM** JS using the PROJECT'S OWN TypeScript (`ts.transpileModule`),
@@ -2549,7 +2718,7 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
     // v4: await_do_mocks_on_import; v5: import.meta (turbo-test#123); v6: `__toESM` is
     // runtime.js's `__ttToESM` (turbo-test#122)
     // v7: ES-module namespaces without `__esModule`, `export *` of the namespace (turbo-test#133)
-    "native-cjs-v7".hash(&mut h);
+    env!("TT_BUILD_ID").hash(&mut h);
     // Legacy-decorator lowering happens inside esm_cjs::emit when the project enables
     // experimentalDecorators/emitDecoratorMetadata AND this file uses a decorator. Without it the
     // native emitter leaves `@Decorator` syntax intact (→ "Unexpected token 'export'") or lowers
@@ -2625,7 +2794,7 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
     // v6: package interop `__ttToESMDep`, Node's for a package Node runs as ES modules
     // (turbo-test#133)
     // v7: package ES modules marked "pkg" (turbo-test#159)
-    "native-dep-v7-bundle".hash(&mut h);
+    env!("TT_BUILD_ID").hash(&mut h);
     // the bundle inlines the package's whole relative graph, not just this file: two installs
     // with the same entry file (user-event 14.6.1 / 14.6.8) differ inside, so the key names this
     // install (its path) and its package.json (turbo-test#213)
@@ -2676,7 +2845,7 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     // v7: `export *` re-exports the importer's namespace (turbo-test#133); exports in source
     // order (turbo-test#141)
     // v8: __reExport's __toESMStar calls globalThis.__ttToESM (turbo-test#165)
-    "mr-cjs-v8".hash(&mut h);
+    env!("TT_BUILD_ID").hash(&mut h);
     // esbuild can't emit decorator metadata. By default we DON'T pay that cost — only when a
     // decorator file actually threw at load (Mongoose @Prop / Sequelize @Column read design:type
     // at class-definition) does the loader retry with `prefer_metadata`, routing it through the
@@ -3689,7 +3858,7 @@ fn esbuild_bundle_dep_cjs(abs: &Path) -> Option<String> {
     // (turbo-test#122)
     // v4: package interop `__ttToESMDep`, `export *` of Node's names (turbo-test#133)
     // v5: package ES modules marked "pkg" (turbo-test#159)
-    "mr-dep-v5".hash(&mut h);
+    env!("TT_BUILD_ID").hash(&mut h);
     let cache = cache_dir().join(format!("mrdep-{:016x}.cjs", h.finish()));
     if let Ok(c) = std::fs::read_to_string(&cache) {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
@@ -4502,7 +4671,7 @@ fn load_cjs_inner<'s>(
                 dir_str.into(),
             ],
         );
-        if r.is_none() && tc.has_caught() && loader_debug() {
+        if r.is_none() && tc.has_caught() {
             let stk = tc
                 .stack_trace()
                 .map(|s| s.to_rust_string_lossy(tc))
@@ -4511,8 +4680,10 @@ fn load_cjs_inner<'s>(
                 .exception()
                 .map(|e| e.to_rust_string_lossy(tc))
                 .unwrap_or_default();
-            let top = stk.lines().take(4).collect::<Vec<_>>().join(" | ");
-            eprintln!("  cjs body threw: {} :: {exc} :: {top}", abs.display());
+            let _top = stk.lines().take(4).collect::<Vec<_>>().join(" | ");
+            if exc.contains("__export") || loader_debug() {
+                eprintln!("  cjs body threw: {} :: {exc}\n{stk}", abs.display());
+            }
         }
         let exc = if r.is_none() {
             tc.exception().map(|e| v8::Global::new(tc, e))
@@ -5445,6 +5616,8 @@ fn native_reset_modules(
             .cjs_synth_by_path
             .keys()
             .chain(reg.cjs_exports.keys())
+            .chain(reg.esm_by_path.keys())
+            .chain(reg.real_esm.keys())
             .filter(|p| !p.to_string_lossy().contains("node_modules") && !p.starts_with("<"))
             .cloned()
             .collect();
@@ -5458,6 +5631,7 @@ fn native_reset_modules(
             reg.cjs_synth_by_path.remove(&p);
             reg.cjs_export_names.remove(&p);
             reg.esm_by_path.remove(&p);
+            reg.real_esm.remove(&p);
         }
     });
 }
@@ -5512,7 +5686,12 @@ fn native_require_resolve(
     let resolved = if is_node_builtin(&spec) {
         Some(spec.clone())
     } else {
-        resolve_spec_as(&spec, Path::new(&dir), esm)
+        let clean_dir = dir.strip_prefix(r"\\?\").unwrap_or(&dir);
+        let clean_path = Path::new(clean_dir);
+        resolve_spec_as(&spec, clean_path, esm)
+            .or_else(|| {
+                project_root(clean_path).and_then(|root| resolve_spec_as(&spec, &root, esm))
+            })
             .map(|p| p.to_string_lossy().into_owned())
             .or_else(|| is_test_api_module(&spec).then(|| spec.clone()))
     };
@@ -6708,6 +6887,32 @@ pub(crate) fn framework_snapshot() -> &'static Vec<u8> {
 fn chai_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("TURBO_CHAI") {
         return Some(PathBuf::from(p));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut d = Some(cwd.as_path());
+        while let Some(dir) = d {
+            let candidate = dir.join("node_modules/chai/index.js");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            let vendor_candidate = dir.join("vendor/turbo-test/node_modules/chai/index.js");
+            if vendor_candidate.is_file() {
+                return Some(vendor_candidate);
+            }
+            d = dir.parent();
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let mut d = Some(parent);
+            while let Some(dir) = d {
+                let candidate = dir.join("node_modules/chai/index.js");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+                d = dir.parent();
+            }
+        }
     }
     if cfg!(test) {
         return Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("node_modules/chai/index.js"));

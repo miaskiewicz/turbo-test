@@ -2039,7 +2039,7 @@ globalThis.__pathToFileURL = (p) => {
 globalThis.__dirnameOf = (p) => {
   if (!__ttWin()) { const s = String(p).replace(/\/+$/, ''); const i = s.lastIndexOf('/'); return i <= 0 ? '/' : s.slice(0, i); }
   // path.win32.dirname for drive paths: the root (`C:\`) is its own dirname
-  const s = String(p);
+  const s = String(p).replace(/^[\\/]{2}\?[\\/]/, '');
   const rootLen = /^[a-zA-Z]:[\\/]/.test(s) ? 3 : /^[\\/]/.test(s) ? 1 : 0;
   const t = s.replace(/[\\/]+$/, '');
   const i = Math.max(t.lastIndexOf('/'), t.lastIndexOf('\\'));
@@ -2158,37 +2158,132 @@ const __basename = (p, ext) => {
   if (ext !== undefined && b !== ext && b.endsWith(ext)) b = b.slice(0, -ext.length);
   return b;
 };
-const __path = {
+const __win32Normalize = (p) => {
+  p = String(p).replace(/^[\\/]{2}\?[\\/]/, '').replace(/\//g, '\\');
+  if (p === '') return '.';
+  const m = /^(?:[a-zA-Z]:\\|[a-zA-Z]:$|\\\\|\\)/.exec(p);
+  const root = m ? m[0] : '';
+  const rest = p.slice(root.length);
+  const out = [];
+  for (const seg of rest.split('\\')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') {
+      if (out.length && out[out.length - 1] !== '..') out.pop();
+      else if (!root) out.push('..');
+    } else {
+      out.push(seg);
+    }
+  }
+  let res = root + out.join('\\');
+  if (p.endsWith('\\') && !res.endsWith('\\')) res += '\\';
+  return res || (root ? root : '.');
+};
+const __win32Resolve = (...args) => {
+  let resolvedDevice = '';
+  let resolvedTail = '';
+  let resolvedAbsolute = false;
+  for (let i = args.length - 1; i >= -1; i--) {
+    let path;
+    if (i >= 0) {
+      path = String(args[i]);
+      if (!path) continue;
+    } else if (!resolvedDevice) {
+      path = globalThis.process && globalThis.process.cwd ? globalThis.process.cwd() : '\\';
+    } else {
+      path = globalThis.process && globalThis.process.cwd ? globalThis.process.cwd() : '\\';
+      if (!path.toLowerCase().startsWith(resolvedDevice.toLowerCase())) {
+        path = resolvedDevice + '\\';
+      }
+    }
+    path = path.replace(/^[\\/]{2}\?[\\/]/, '').replace(/\//g, '\\');
+    const len = path.length;
+    let rootEnd = 0;
+    let device = '';
+    let isAbsolute = false;
+    const first = path.charCodeAt(0);
+    if (len > 0) {
+      if (first === 47 || first === 92) {
+        rootEnd = 1;
+        isAbsolute = true;
+      } else if (len > 1 && path.charCodeAt(1) === 58) {
+        device = path.slice(0, 2);
+        rootEnd = 2;
+        if (len > 2 && (path.charCodeAt(2) === 47 || path.charCodeAt(2) === 92)) {
+          rootEnd = 3;
+          isAbsolute = true;
+        }
+      }
+    }
+    if (device) {
+      if (!resolvedDevice) resolvedDevice = device;
+      else if (resolvedDevice.toLowerCase() !== device.toLowerCase()) continue;
+    }
+    if (!resolvedAbsolute) {
+      resolvedTail = path.slice(rootEnd) + '\\' + resolvedTail;
+      resolvedAbsolute = isAbsolute;
+    }
+    if (resolvedDevice && resolvedAbsolute) break;
+  }
+  const out = [];
+  for (const seg of resolvedTail.split('\\')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') {
+      if (out.length) out.pop();
+    } else {
+      out.push(seg);
+    }
+  }
+  const result = (resolvedDevice || '') + (resolvedAbsolute ? '\\' : '') + out.join('\\');
+  return result || '.';
+};
+const __win32Join = (...args) => {
+  const parts = args.map(String).filter((x) => x !== '');
+  if (!parts.length) return '.';
+  return __win32Normalize(parts.join('\\'));
+};
+const __win32Path = {
+  sep: '\\',
+  delimiter: ';',
+  join: __win32Join,
+  resolve: __win32Resolve,
+  normalize: __win32Normalize,
+  isAbsolute: (p) => /^[a-zA-Z]:[\\/]|^[\\/]/.test(String(p)),
+  dirname: (p) => globalThis.__dirnameOf(p),
+  basename: (p, ext) => {
+    let b = String(p).replace(/[\\/]+$/, '');
+    const i = Math.max(b.lastIndexOf('/'), b.lastIndexOf('\\'));
+    b = i >= 0 ? b.slice(i + 1) : b;
+    if (ext !== undefined && b !== ext && b.endsWith(ext)) b = b.slice(0, -ext.length);
+    return b;
+  },
+  extname: __extname,
+  parse: (p) => { const s = String(p); const dir = globalThis.__dirnameOf(s); const base = __win32Path.basename(s); const ext = __extname(base); return { root: /^[a-zA-Z]:[\\/]/.test(s) ? s.slice(0, 3) : s.startsWith('\\') ? '\\' : '', dir, base, ext, name: ext ? base.slice(0, -ext.length) : base }; },
+  format: (o) => { o = o || {}; const dir = o.dir || o.root; const base = o.base || ((o.name || '') + (o.ext ? (o.ext.startsWith('.') ? '' : '.') + o.ext : '')); if (!dir) return base; return dir === o.root ? dir + base : dir + '\\' + base; },
+  relative: (f, t) => { f = __win32Resolve(f); t = __win32Resolve(t); return f === t ? '' : t; },
+  posix: null,
+  win32: null,
+};
+const __posixPath = {
   sep: '/',
+  delimiter: ':',
   join: (...a) => { const j = a.map(String).filter((x) => x !== '').join('/'); return j === '' ? '.' : __normalize(j); },
   resolve: __resolve,
   dirname: (p) => globalThis.__dirnameOf(p),
   basename: __basename,
   extname: __extname,
   isAbsolute: (p) => String(p).startsWith('/'),
-  relative: (f, t) => {
-    f = __resolve(f); t = __resolve(t);
-    if (f === t) return '';
-    const fs = f === '/' ? [] : f.slice(1).split('/');
-    const ts = t === '/' ? [] : t.slice(1).split('/');
-    let i = 0;
-    while (i < fs.length && i < ts.length && fs[i] === ts[i]) i++;
-    return [...fs.slice(i).map(() => '..'), ...ts.slice(i)].join('/');
-  },
   normalize: __normalize,
   parse: (p) => { const s = String(p); const dir = globalThis.__dirnameOf(s); const base = __basename(s); const ext = __extname(base); return { root: s.startsWith('/') ? '/' : '', dir, base, ext, name: ext ? base.slice(0, -ext.length) : base }; },
-  format: (o) => {
-    o = o || {};
-    const dir = o.dir || o.root;
-    const base = o.base || ((o.name || '') + (o.ext ? (o.ext.startsWith('.') ? '' : '.') + o.ext : ''));
-    if (!dir) return base;
-    return dir === o.root ? dir + base : dir + '/' + base;
-  },
-  delimiter: ':',
+  format: (o) => { o = o || {}; const dir = o.dir || o.root; const base = o.base || ((o.name || '') + (o.ext ? (o.ext.startsWith('.') ? '' : '.') + o.ext : '')); if (!dir) return base; return dir === o.root ? dir + base : dir + '/' + base; },
+  relative: (f, t) => { f = __resolve(f); t = __resolve(t); if (f === t) return ''; const fs = f === '/' ? [] : f.slice(1).split('/'); const ts = t === '/' ? [] : t.slice(1).split('/'); let i = 0; while (i < fs.length && i < ts.length && fs[i] === ts[i]) i++; return [...fs.slice(i).map(() => '..'), ...ts.slice(i)].join('/'); },
+  posix: null,
+  win32: null,
 };
-// glob-parent and others reach for path.posix / path.win32; expose both (posix is our default).
-__path.posix = __path;
-__path.win32 = Object.assign({}, __path, { sep: '\\', delimiter: ';' });
+__posixPath.posix = __posixPath;
+__posixPath.win32 = __win32Path;
+__win32Path.posix = __posixPath;
+__win32Path.win32 = __win32Path;
+const __path = __ttWin() ? __win32Path : __posixPath;
 // A path argument as Node takes it: a `file:` URL (fileURLToPath), a Buffer, or a string.
 const __fsPath = (p) => {
   if (p !== null && typeof p === 'object' && typeof p.href === 'string' && typeof p.protocol === 'string') return globalThis.__fileURLToPath(p);
