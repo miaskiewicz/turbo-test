@@ -242,3 +242,97 @@ test('entry mocks register without esbuild', () => expect(dep()).toBe('mocked'))
     );
     assert!(!r.stderr.contains("transform "), "{}", r.all());
 }
+
+/// pnpm's isolated layout (turbo-test#230): `node_modules/foo` links into the virtual store
+/// `node_modules/.pnpm/foo@1.0.0/node_modules/foo`, whose dependencies are its siblings there
+/// (themselves links to their own store entries), and an undeclared dependency is found in the
+/// store's hoisted `node_modules/.pnpm/node_modules`. Node resolves a package's bare imports from
+/// its real path, so it finds all three; vitest 4.1.12 passes this file. Both the ES module
+/// graph and the module runner's CommonJS path (a file with `vi.mock`) resolve them the same way.
+#[test]
+fn bare_imports_resolve_through_the_pnpm_virtual_store() {
+    let p = Project::new("ra-pnpm");
+    p.with_esbuild();
+    p.file(
+        "package.json",
+        r#"{ "name": "app", "dependencies": { "foo": "1.0.0", "bar": "1.0.0" } }"#,
+    );
+    let store = "node_modules/.pnpm";
+    // foo: an ES module package importing two declared dependencies and one hoisted one
+    p.file(
+        &format!("{store}/foo@1.0.0/node_modules/foo/package.json"),
+        r#"{ "name": "foo", "version": "1.0.0", "type": "module", "main": "index.js" }"#,
+    );
+    p.file(
+        &format!("{store}/foo@1.0.0/node_modules/foo/index.js"),
+        "import { __name } from 'tslib';\nimport { warning } from 'hey-listen';\nimport { h } from 'hoisted';\n\
+         export const all = [__name, warning(), h, import.meta.dirname.includes('.pnpm')].join(',');\n",
+    );
+    // bar: a CommonJS package requiring the same three
+    p.file(
+        &format!("{store}/bar@1.0.0/node_modules/bar/package.json"),
+        r#"{ "name": "bar", "version": "1.0.0", "main": "index.js" }"#,
+    );
+    p.file(
+        &format!("{store}/bar@1.0.0/node_modules/bar/index.js"),
+        "exports.all = [require('tslib').__name, require('hey-listen').warning(), require('hoisted').h, __dirname.includes('.pnpm')].join(',');\n",
+    );
+    p.file(
+        &format!("{store}/tslib@2.8.1/node_modules/tslib/package.json"),
+        r#"{ "name": "tslib", "version": "2.8.1", "main": "tslib.js" }"#,
+    );
+    p.file(
+        &format!("{store}/tslib@2.8.1/node_modules/tslib/tslib.js"),
+        "exports.__name = 'tslib';\n",
+    );
+    p.file(
+        &format!("{store}/hey-listen@1.0.8/node_modules/hey-listen/package.json"),
+        r#"{ "name": "hey-listen", "version": "1.0.8", "main": "dist/index.js" }"#,
+    );
+    p.file(
+        &format!("{store}/hey-listen@1.0.8/node_modules/hey-listen/dist/index.js"),
+        "exports.warning = () => 'hey';\n",
+    );
+    p.file(
+        &format!("{store}/node_modules/hoisted/package.json"),
+        r#"{ "name": "hoisted", "main": "i.js" }"#,
+    );
+    p.file(
+        &format!("{store}/node_modules/hoisted/i.js"),
+        "exports.h = 'hoisted';\n",
+    );
+    let link = |target: &str, at: &str| {
+        std::os::unix::fs::symlink(target, p.path(at)).unwrap();
+    };
+    for pkg in ["foo", "bar"] {
+        link(
+            "../../tslib@2.8.1/node_modules/tslib",
+            &format!("{store}/{pkg}@1.0.0/node_modules/tslib"),
+        );
+        link(
+            "../../hey-listen@1.0.8/node_modules/hey-listen",
+            &format!("{store}/{pkg}@1.0.0/node_modules/hey-listen"),
+        );
+        link(
+            &format!(".pnpm/{pkg}@1.0.0/node_modules/{pkg}"),
+            &format!("node_modules/{pkg}"),
+        );
+    }
+    let body = "test('pnpm', () => { expect(all).toBe('tslib,hey,hoisted,true'); expect(bar).toBe('tslib,hey,hoisted,true'); });\n";
+    p.file(
+        "a.test.js",
+        &format!("import {{ all }} from 'foo';\nimport {{ all as bar }} from 'bar';\n{body}"),
+    );
+    p.file(
+        "b.test.ts",
+        &format!("import {{ all }} from 'foo';\nimport {{ all as bar }} from 'bar';\nimport {{ n }} from './n';\nvi.mock('./n', () => ({{ n: 1 }}));\n{body}"),
+    );
+    p.file("n.ts", "export const n = 0;\n");
+    let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+    assert_eq!(
+        counts(&r),
+        (2, 0, vec!["passed".to_string(); 2]),
+        "{}",
+        r.all()
+    );
+}
