@@ -1058,3 +1058,65 @@ fn zero_delay_timers_switch_without_a_config_file() {
     let r = turbo_test(&node.dir, &[], &[("TURBO_ZERO_DELAY_TIMERS", "1")]);
     assert!(r.stdout.contains("Tests  1 failed (1)"), "{}", r.all());
 }
+
+/// A jsdom-environment project whose test reads MUI-style breakpoint rules
+/// (`display: {xs: 'flex', md: 'none'}` and `{xs: 'none', md: 'grid'}`), an `@media screen`
+/// rule and `typeof window.matchMedia`, and expects `want`.
+fn media_project(name: &str, config: &str, want: &str) -> Project {
+    let p = Project::new(name);
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "vitest.config.ts",
+        &format!("export default {{ test: {{ environment: 'jsdom', {config} }} }};\n"),
+    );
+    p.file(
+        "a.test.js",
+        &format!(
+            "import {{ expect, it }} from 'vitest';\n\
+             it('media', () => {{\n\
+             document.head.innerHTML = '<style>#m {{ display: block }} @media (min-width:0px) {{ #m {{ display: flex }} }} @media (min-width:900px) {{ #m {{ display: none }} }} #d {{ display: none }} @media (min-width:900px) {{ #d {{ display: grid }} }} @media screen {{ #s {{ color: rgb(0, 0, 2) }} }}</style>';\n\
+             document.body.innerHTML = '<div id=\"m\"></div><div id=\"d\"></div><div id=\"s\"></div>';\n\
+             const cs = (id) => getComputedStyle(document.getElementById(id));\n\
+             expect({{ matchMedia: typeof window.matchMedia, m: cs('m').display, d: cs('d').display, s: cs('s').color }}).toEqual({want});\n\
+             }});\n"
+        ),
+    );
+    p
+}
+
+/// vitest 4.1.12 with jsdom 27.4.0 (the default): no matchMedia, and only the `screen` rule
+/// applies, so the mobile box stays visible and the desktop one hidden.
+const JSDOM_MEDIA: &str = "{ matchMedia: 'undefined', m: 'block', d: 'none', s: 'rgb(0, 0, 2)' }";
+/// Chrome 156 headless shell at 1024x768: the md rules apply.
+const CHROME_MEDIA: &str = "{ matchMedia: 'function', m: 'none', d: 'grid', s: 'rgb(0, 0, 2)' }";
+
+/// jsdom media by default (vitest parity); Chrome's with `--chrome-media`,
+/// `TURBO_CHROME_MEDIA=1` or `test.chromeMedia: true` (flag over env over config).
+#[test]
+fn media_is_jsdom_by_default_and_chrome_on_opt_in() {
+    let jsdom = media_project("media-default", "", JSDOM_MEDIA);
+    assert_passes(&turbo_test(&jsdom.dir, &[], &[]), 1);
+    assert_passes(
+        &turbo_test(
+            &jsdom.dir,
+            &["--no-chrome-media"],
+            &[("TURBO_CHROME_MEDIA", "1")],
+        ),
+        1,
+    );
+    let r = turbo_test(&jsdom.dir, &["--chrome-media"], &[]);
+    assert!(r.stdout.contains("Tests  1 failed (1)"), "{}", r.all());
+    let chrome = media_project("media-flag", "", CHROME_MEDIA);
+    assert_passes(&turbo_test(&chrome.dir, &["--chrome-media"], &[]), 1);
+    assert_passes(
+        &turbo_test(&chrome.dir, &[], &[("TURBO_CHROME_MEDIA", "1")]),
+        1,
+    );
+    let config = media_project("media-config", "chromeMedia: true", CHROME_MEDIA);
+    assert_passes(&turbo_test(&config.dir, &[], &[]), 1);
+    let config_off = media_project("media-config-env", "chromeMedia: true", JSDOM_MEDIA);
+    assert_passes(
+        &turbo_test(&config_off.dir, &[], &[("TURBO_CHROME_MEDIA", "0")]),
+        1,
+    );
+}

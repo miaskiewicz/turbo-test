@@ -74,10 +74,10 @@ codegen-units = 1
 
 
 # Pre-publish only (turbo-dom 0.7.1): turbo-dom, -layout and -browser-env come from turbo-dom's
-# 0.7.1 branch (miaskiewicz/turbo-dom#298, fix/0.7.1-surf-items) until turbo-dom 0.7.1 is on
+# 0.7.1 branch (miaskiewicz/turbo-dom#298, fix/0.7.1-surf-items; pinned to #309's head) until turbo-dom 0.7.1 is on
 # crates.io. turbo-dom-v8 150.4.0 stays on crates.io. Remove this section and re-lock before
 # tagging (RELEASING.md); the tag-only release guard fails while it is here.
 [patch.crates-io]
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "ad9702a34845be896a2f51a18e3c6d03bbe18157" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "ad9702a34845be896a2f51a18e3c6d03bbe18157" }
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "ad9702a34845be896a2f51a18e3c6d03bbe18157" }
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "fb4b1d231e656db59cad801d91e48d3e67dfadd5" }
+turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "fb4b1d231e656db59cad801d91e48d3e67dfadd5" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "fb4b1d231e656db59cad801d91e48d3e67dfadd5" }

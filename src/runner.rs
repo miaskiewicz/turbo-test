@@ -1726,6 +1726,65 @@ fn zero_delay_timers_from(env: Option<&str>, s: &str) -> Option<bool> {
         .or_else(|| v.starts_with("false").then_some(false))
 }
 
+/// Whether `entry`'s DOM gets Chrome's media (turbo-dom `MediaMode::Chrome`: a live
+/// `matchMedia` and `@media` evaluated against the 1024x768 viewport) instead of jsdom's (the
+/// default, vitest parity: no `matchMedia`, only `screen` media lists apply), memoized by the
+/// test file's directory.
+fn chrome_media(entry: &Path) -> bool {
+    let Some(dir) = entry.parent() else {
+        return false;
+    };
+    thread_local! {
+        static CHROME_MEDIA_MEMO: RefCell<HashMap<PathBuf, bool>> = RefCell::new(HashMap::new());
+    }
+    if let Some(v) = CHROME_MEDIA_MEMO.with(|m| m.borrow().get(dir).copied()) {
+        return v;
+    }
+    let env = std::env::var("TURBO_CHROME_MEDIA").ok();
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if let Some(w) = chrome_media_env_warning(env.as_deref()) {
+        WARNED.call_once(|| eprintln!("{w}"));
+    }
+    let v = chrome_media_for(dir, env.as_deref());
+    CHROME_MEDIA_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v));
+    v
+}
+
+/// [`chrome_media`] for files under `start`: the nearest config's `test.chromeMedia`, or the
+/// env switch with or without a config file.
+fn chrome_media_for(start: &Path, env: Option<&str>) -> bool {
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        for cfg in VITEST_CONFIG_FILES {
+            if let Ok(s) = std::fs::read_to_string(d.join(cfg)) {
+                return chrome_media_from(env, &s);
+            }
+        }
+        dir = d.parent();
+    }
+    chrome_media_from(env, "")
+}
+
+/// `TURBO_CHROME_MEDIA=0|1` (what `--[no-]chrome-media` sets) wins over the config's
+/// `test.chromeMedia: true|false`; neither set means jsdom media.
+fn chrome_media_from(env: Option<&str>, s: &str) -> bool {
+    match env {
+        Some("0" | "false") => false,
+        Some("1" | "true") => true,
+        _ => config_is_true(s, "chromeMedia"),
+    }
+}
+
+/// The warning for a `TURBO_CHROME_MEDIA` value that is not `0|1|true|false` (ignored).
+fn chrome_media_env_warning(env: Option<&str>) -> Option<String> {
+    match env {
+        None | Some("0" | "1" | "true" | "false") => None,
+        Some(v) => Some(format!(
+            "turbo-test: ignoring TURBO_CHROME_MEDIA={v:?} (expected 0, 1, true or false)"
+        )),
+    }
+}
+
 /// Whether a config key's value is `true`.
 fn config_is_true(s: &str, key: &str) -> bool {
     find_config_key(s, key).is_some_and(|start| {
@@ -2343,8 +2402,18 @@ fn set_mock_prepass(scope: &mut v8::PinScope, on: bool) {
 /// Set up the DOM environment in the current context: bind the all-Rust DOM (rtdom) natively so
 /// document/window exist before the test evaluates. (The legacy JS turbo-dom bootstrap —
 /// installGlobals + the `.node` parser — was removed in v0.3.0; rtdom is the only DOM now.)
-fn setup_dom(scope: &mut v8::PinScope, _entry: &Path) {
+fn setup_dom(scope: &mut v8::PinScope, entry: &Path) {
     turbo_dom_browser_env::browser_env::install(scope);
+    // jsdom's media by default (vitest parity); Chrome's with --chrome-media,
+    // TURBO_CHROME_MEDIA=1 or test.chromeMedia: true
+    turbo_dom_browser_env::browser_env::set_media_mode(
+        scope,
+        if chrome_media(entry) {
+            turbo_dom_browser_env::browser_env::MediaMode::Chrome
+        } else {
+            turbo_dom_browser_env::browser_env::MediaMode::Jsdom
+        },
+    );
     // the embedder's window members: open / alert / print / postMessage … (turbo-test#208)
     run_js(
         scope,
