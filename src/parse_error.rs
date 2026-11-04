@@ -47,7 +47,7 @@ pub fn vite_error(
 ) -> Option<ViteError> {
     match path.extension().and_then(|e| e.to_str())? {
         "js" | "mjs" | "cjs" => vite_parse_error(path, src, root, resolve),
-        "ts" | "tsx" | "mts" | "cts" | "jsx" => vite_transform_error(path, src, root),
+        "ts" | "tsx" | "mts" | "cts" | "jsx" | "vue" => vite_transform_error(path, src, root),
         // vite's JSON plugin takes .json; any other module is JavaScript to it (turbo-test#192)
         "json" => None,
         _ => vite_parse_error(path, src, root, resolve),
@@ -134,9 +134,15 @@ fn vite_parse_error(
 /// semantic check rejects): `Transform failed with N error(s):` and each error as rolldown
 /// renders it (ariadne, coloured; the file named relative to the working directory `root`).
 fn vite_transform_error(path: &Path, src: &str, root: &Path) -> Option<ViteError> {
-    let source_type = SourceType::from_path(path).ok()?;
+    let is_vue = path.extension().and_then(|e| e.to_str()) == Some("vue");
+    let (compiled_src, source_type) = if is_vue {
+        (crate::vue::compile_vue_sfc(path, src).ok(), SourceType::ts())
+    } else {
+        (None, SourceType::from_path(path).ok()?)
+    };
+    let effective_src = compiled_src.as_deref().unwrap_or(src);
     let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, src, source_type).parse();
+    let parsed = Parser::new(&allocator, effective_src, source_type).parse();
     let errors = if parsed.errors.is_empty() {
         oxc_semantic::SemanticBuilder::new()
             .with_check_syntax_error(true)
@@ -271,8 +277,14 @@ fn relative(path: &Path, base: &Path) -> String {
 pub fn imports_statically(path: &Path, src: &str, spec: &str) -> bool {
     use oxc_ast::ast::Statement;
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
-    let parsed = Parser::new(&allocator, src, source_type).parse();
+    let is_vue = path.extension().and_then(|e| e.to_str()) == Some("vue");
+    let (compiled_src, source_type) = if is_vue {
+        (crate::vue::compile_vue_sfc(path, src).ok(), SourceType::ts())
+    } else {
+        (None, SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs()))
+    };
+    let effective_src = compiled_src.as_deref().unwrap_or(src);
+    let parsed = Parser::new(&allocator, effective_src, source_type).parse();
     parsed.program.body.iter().any(|st| match st {
         Statement::ImportDeclaration(d) => d.source.value == spec,
         Statement::ExportAllDeclaration(d) => d.source.value == spec,

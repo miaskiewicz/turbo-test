@@ -17,7 +17,7 @@ use oxc_transformer::{HelperLoaderMode, Module, TransformOptions, Transformer};
 pub fn needs_transform(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
-        Some("ts" | "tsx" | "jsx" | "mts" | "cts")
+        Some("ts" | "tsx" | "jsx" | "mts" | "cts" | "vue")
     )
 }
 
@@ -66,10 +66,17 @@ fn emit(
     legacy_decorators: bool,
     with_map: bool,
 ) -> Result<(String, Option<String>), String> {
-    let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path).map_err(|e| format!("source type: {e:?}"))?;
+    let is_vue = path.extension().and_then(|e| e.to_str()) == Some("vue");
+    let (effective_src, source_type) = if is_vue {
+        let compiled = crate::vue::compile_vue_sfc(path, src)?;
+        (compiled, SourceType::ts())
+    } else {
+        let st = SourceType::from_path(path).map_err(|e| format!("source type: {e:?}"))?;
+        (src.to_string(), st)
+    };
 
-    let parsed = Parser::new(&allocator, src, source_type).parse();
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, &effective_src, source_type).parse();
     if !parsed.errors.is_empty() {
         return Err(format!("parse errors: {:?}", parsed.errors));
     }
@@ -87,8 +94,13 @@ fn emit(
         options.decorator.strict_null_checks = false;
         options.helper_loader.mode = HelperLoaderMode::External;
     }
+    let transform_path = if is_vue {
+        path.with_extension("ts")
+    } else {
+        path.to_path_buf()
+    };
     let ret =
-        Transformer::new(&allocator, path, &options).build_with_scoping(scoping, &mut program);
+        Transformer::new(&allocator, &transform_path, &options).build_with_scoping(scoping, &mut program);
     if !ret.errors.is_empty() {
         return Err(format!("transform errors: {:?}", ret.errors));
     }
@@ -109,10 +121,17 @@ fn emit(
 /// `--format=cjs` pass to convert it for the module loader. Requires `reflect-metadata` loaded
 /// so `Reflect.metadata` exists.
 pub fn transform_decorators_with_metadata(path: &Path, src: &str) -> Result<String, String> {
-    let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path).map_err(|e| format!("source type: {e:?}"))?;
+    let is_vue = path.extension().and_then(|e| e.to_str()) == Some("vue");
+    let (effective_src, source_type) = if is_vue {
+        let compiled = crate::vue::compile_vue_sfc(path, src)?;
+        (compiled, SourceType::ts())
+    } else {
+        let st = SourceType::from_path(path).map_err(|e| format!("source type: {e:?}"))?;
+        (src.to_string(), st)
+    };
 
-    let parsed = Parser::new(&allocator, src, source_type).parse();
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, &effective_src, source_type).parse();
     if !parsed.errors.is_empty() {
         return Err(format!("parse errors: {:?}", parsed.errors));
     }
@@ -120,24 +139,19 @@ pub fn transform_decorators_with_metadata(path: &Path, src: &str) -> Result<Stri
     let scoping = semantic_scoping(&program);
 
     let mut options = TransformOptions::default();
-    // oxc 0.134's CommonJS module transform is a no-op, so we leave imports as ESM and let a
-    // second esbuild `--format=cjs` pass (in the runner) convert module syntax. oxc's job here is
-    // purely TS + legacy decorators + metadata lowering.
     let _ = Module::CommonJS;
     options.decorator.legacy = true;
     options.decorator.emit_decorator_metadata = true;
-    // Match TypeScript's metadata serialization: `T | null` / `T | undefined` (incl. optional
-    // `x?: T`) emit the constructor of `T`, not `Object`. With oxc's `strict_null_checks = true`
-    // those become `Object`, which breaks runtime type inference (Mongoose @Prop: "Cannot
-    // determine a type for the X field"). `false` elides null/undefined to mirror tsc/ts-jest.
     options.decorator.strict_null_checks = false;
-    // oxc 0.134 panics on Inline helper mode (`unreachable!`). Use External mode: the decorator
-    // helpers are emitted as `babelHelpers.decorate / decorateParam / decorateMetadata(...)`,
-    // which the runtime provides as a global `babelHelpers` object (standard tslib semantics).
     options.helper_loader.mode = HelperLoaderMode::External;
 
+    let transform_path = if is_vue {
+        path.with_extension("ts")
+    } else {
+        path.to_path_buf()
+    };
     let ret =
-        Transformer::new(&allocator, path, &options).build_with_scoping(scoping, &mut program);
+        Transformer::new(&allocator, &transform_path, &options).build_with_scoping(scoping, &mut program);
     if !ret.errors.is_empty() {
         return Err(format!("transform errors: {:?}", ret.errors));
     }

@@ -389,7 +389,7 @@ fn base_resolve_options(
     };
     oxc_resolver::ResolveOptions {
         extensions: strs(&[
-            ".ts", ".tsx", ".mjs", ".js", ".jsx", ".cjs", ".json", ".node",
+            ".ts", ".tsx", ".mjs", ".js", ".jsx", ".cjs", ".json", ".node", ".vue",
         ]),
         condition_names: strs(conditions),
         main_fields: strs(mains),
@@ -470,7 +470,7 @@ fn is_esm_module(abs: &Path) -> bool {
 
 fn is_esm_module_uncached(abs: &Path) -> bool {
     match abs.extension().and_then(|e| e.to_str()) {
-        Some("mjs" | "mts" | "ts" | "tsx" | "jsx") => true,
+        Some("mjs" | "mts" | "ts" | "tsx" | "jsx" | "vue") => true,
         Some("cjs" | "cts") => false,
         _ => {
             let mut d = abs.parent();
@@ -632,7 +632,7 @@ fn nearest_pkg_type_uncached(path: &Path) -> Option<&'static str> {
 fn detect_kind(path: &Path) -> Kind {
     match path.extension().and_then(|e| e.to_str()) {
         Some("cjs") => Kind::Cjs,
-        Some("mjs" | "mts" | "ts" | "tsx" | "jsx") => Kind::Esm,
+        Some("mjs" | "mts" | "ts" | "tsx" | "jsx" | "vue") => Kind::Esm,
         _ => match nearest_pkg_type(path) {
             Some("module") => Kind::Esm,
             Some("commonjs") => Kind::Cjs,
@@ -734,12 +734,14 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
             base.with_extension("ts"),
             base.with_extension("tsx"),
             base.with_extension("cjs"),
+            base.with_extension("vue"),
             base.join("index.mjs"),
             base.join("index.js"),
             base.join("index.ts"),
             base.join("index.tsx"),
             base.join("index.jsx"),
             base.join("index.cjs"),
+            base.join("index.vue"),
         ] {
             if c.is_file() {
                 return std::fs::canonicalize(c).ok();

@@ -150,11 +150,17 @@ fn glob_calls(file: &Path, src: &str) -> Vec<Parsed> {
         }
     }
     let allocator = Allocator::default();
-    let mut stype = SourceType::from_path(file).unwrap_or_default();
+    let is_vue = file.extension().and_then(|e| e.to_str()) == Some("vue");
+    let (compiled_src, mut stype) = if is_vue {
+        (crate::vue::compile_vue_sfc(file, src).ok(), SourceType::ts())
+    } else {
+        (None, SourceType::from_path(file).unwrap_or_default())
+    };
+    let effective_src = compiled_src.as_deref().unwrap_or(src);
     if !stype.is_typescript() {
         stype = stype.with_jsx(true);
     }
-    let parsed = Parser::new(&allocator, src, stype).parse();
+    let parsed = Parser::new(&allocator, effective_src, stype).parse();
     if !parsed.errors.is_empty() {
         return Vec::new();
     }

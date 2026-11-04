@@ -530,6 +530,23 @@ fn legacy_decorators_lower_with_metadata_only_when_asked() {
     assert!(!standard.contains("babelHelpers"), "{standard}");
 }
 
+#[test]
+fn vue_sfc_emits_commonjs_with_typescript_stripped() {
+    let sfc = r#"
+<template>
+  <div>{{ msg }}</div>
+</template>
+<script setup lang="ts">
+const raw = 'hello' as string;
+const msg: string = raw as any;
+</script>
+"#;
+    let out = emit_with(Path::new("VueCjsTest.vue"), sfc, false).unwrap();
+    assert!(!out.contains(" as string"), "TypeScript `as` must be stripped: {out}");
+    assert!(!out.contains(" as any"), "TypeScript `as` must be stripped: {out}");
+    assert!(out.contains("default: () => __tt_default"), "Must export default: {out}");
+}
+
 // ---- failure paths --------------------------------------------------------------------------
 
 #[test]

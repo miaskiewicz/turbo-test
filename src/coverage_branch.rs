@@ -110,9 +110,15 @@ impl<'a> Visit<'a> for Collector {
 /// feeds both metrics — keeping coverage's per-file AST cost flat as metrics are added. On a parse
 /// error, returns whatever was collected (best-effort).
 pub fn extract_all(file: &Path, source: &str) -> (Vec<RawBranch>, Vec<u32>) {
-    let st = SourceType::from_path(file).unwrap_or_default();
+    let is_vue = file.extension().and_then(|e| e.to_str()) == Some("vue");
+    let (compiled_src, st) = if is_vue {
+        (crate::vue::compile_vue_sfc(file, source).ok(), SourceType::ts())
+    } else {
+        (None, SourceType::from_path(file).unwrap_or_default())
+    };
+    let effective_source = compiled_src.as_deref().unwrap_or(source);
     let allocator = Allocator::default();
-    let ret = Parser::new(&allocator, source, st).parse();
+    let ret = Parser::new(&allocator, effective_source, st).parse();
     let mut c = Collector {
         out: Vec::new(),
         stmts: Vec::new(),

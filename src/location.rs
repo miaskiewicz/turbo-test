@@ -238,22 +238,28 @@ fn lookup(map: &Segments, line: usize, col: u32) -> Option<(u32, u32, bool)> {
 /// property start, any other call's `(`. 1-based lines and UTF-16 columns, sorted.
 pub fn call_positions(path: &Path, src: &str) -> Vec<(u32, u32)> {
     let alloc = Allocator::default();
-    let stype = SourceType::from_path(path).unwrap_or_default();
-    let parsed = Parser::new(&alloc, src, stype).parse();
+    let is_vue = path.extension().and_then(|e| e.to_str()) == Some("vue");
+    let (compiled_src, stype) = if is_vue {
+        (crate::vue::compile_vue_sfc(path, src).ok(), SourceType::ts())
+    } else {
+        (None, SourceType::from_path(path).unwrap_or_default())
+    };
+    let effective_src = compiled_src.as_deref().unwrap_or(src);
+    let parsed = Parser::new(&alloc, effective_src, stype).parse();
     let mut v = Calls {
-        src,
+        src: effective_src,
         offsets: Vec::new(),
     };
     v.visit_program(&parsed.program);
     let starts: Vec<usize> = std::iter::once(0)
-        .chain(src.match_indices('\n').map(|(i, _)| i + 1))
+        .chain(effective_src.match_indices('\n').map(|(i, _)| i + 1))
         .collect();
     let mut out: Vec<(u32, u32)> = v
         .offsets
         .iter()
         .map(|&off| {
             let line = starts.partition_point(|s| *s <= off);
-            let col = src[starts[line - 1]..off].encode_utf16().count() + 1;
+            let col = effective_src[starts[line - 1]..off].encode_utf16().count() + 1;
             (line as u32, col as u32)
         })
         .collect();

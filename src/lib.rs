@@ -29,3 +29,4 @@ pub mod structured_clone;
 pub mod text_decoder;
 pub mod transform;
 pub mod vite_asset;
+pub mod vue;

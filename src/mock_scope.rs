@@ -30,8 +30,14 @@ pub type Binding = (String, bool);
 /// the TypeScript transform elides) are left out.
 pub fn bindings(path: &Path, src: &str, factories: &str) -> Vec<Binding> {
     let alloc = Allocator::default();
-    let stype = SourceType::from_path(path).unwrap_or_default();
-    let parsed = Parser::new(&alloc, src, stype).parse();
+    let is_vue = path.extension().and_then(|e| e.to_str()) == Some("vue");
+    let (compiled_src, stype) = if is_vue {
+        (crate::vue::compile_vue_sfc(path, src).ok(), SourceType::ts())
+    } else {
+        (None, SourceType::from_path(path).unwrap_or_default())
+    };
+    let effective_src = compiled_src.as_deref().unwrap_or(src);
+    let parsed = Parser::new(&alloc, effective_src, stype).parse();
     let scoping = oxc_semantic::SemanticBuilder::new()
         .build(&parsed.program)
         .semantic

@@ -454,8 +454,15 @@ pub fn emit_mapped(path: &Path, src: &str, legacy_decorators: bool) -> Option<St
 /// `emit_with` with the coverage decision injected: `with_map = true` appends the inline source map.
 fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -> Option<String> {
     let alloc = Allocator::default();
-    let stype = SourceType::from_path(path).ok()?;
-    let parsed = Parser::new(&alloc, src, stype).parse();
+    let is_vue = path.extension().and_then(|e| e.to_str()) == Some("vue");
+    let (compiled_src, stype) = if is_vue {
+        let compiled = crate::vue::compile_vue_sfc(path, src).ok()?;
+        (Some(compiled), SourceType::ts())
+    } else {
+        (None, SourceType::from_path(path).ok()?)
+    };
+    let effective_src = compiled_src.as_deref().unwrap_or(src);
+    let parsed = Parser::new(&alloc, effective_src, stype).parse();
     if !parsed.errors.is_empty() {
         return None;
     }
@@ -475,7 +482,12 @@ fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -
             opts.decorator.strict_null_checks = false;
             opts.helper_loader.mode = HelperLoaderMode::External;
         }
-        let ret = Transformer::new(&alloc, path, &opts).build_with_scoping(scoping0, &mut program);
+        let transform_path = if is_vue {
+            path.with_extension("ts")
+        } else {
+            path.to_path_buf()
+        };
+        let ret = Transformer::new(&alloc, &transform_path, &opts).build_with_scoping(scoping0, &mut program);
         if !ret.errors.is_empty() {
             return None;
         }
@@ -495,7 +507,7 @@ fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -
         resolve: None,
         module_path: None,
     };
-    let map_src = if with_map { Some((path, src)) } else { None };
+    let map_src = if with_map { Some((path, effective_src)) } else { None };
     let (parts, mappings) = lower(ast, scoping, &ctx, &mut program, map_src)?;
 
     // No ESM module syntax → CJS/script: return the transformed body unwrapped (no preamble), with

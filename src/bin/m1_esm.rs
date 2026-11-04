@@ -52,9 +52,11 @@ fn resolve_spec(spec: &str, from_dir: &Path) -> Option<PathBuf> {
         base.with_extension("mts"),
         base.with_extension("ts"),
         base.with_extension("tsx"),
+        base.with_extension("vue"),
         base.join("index.mjs"),
         base.join("index.js"),
         base.join("index.ts"),
+        base.join("index.vue"),
     ];
     for c in candidates {
         if c.is_file() {

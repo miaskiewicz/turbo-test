@@ -5,7 +5,7 @@ use std::path::Path;
 
 #[test]
 fn needs_transform_by_extension() {
-    for f in ["a.ts", "a.tsx", "a.jsx", "a.mts", "a.cts", "dir.x/a.d.ts"] {
+    for f in ["a.ts", "a.tsx", "a.jsx", "a.mts", "a.cts", "dir.x/a.d.ts", "a.vue"] {
         assert!(needs_transform(Path::new(f)), "{f}");
     }
     for f in ["a.js", "a.mjs", "a.cjs", "a.json", "Makefile", "a.ts.bak"] {
@@ -256,3 +256,40 @@ fn import_meta_is_replaced_in_the_prepass() {
         "import.meta.url ("
     );
 }
+
+
+#[test]
+fn vue_sfc_transforms_to_component() {
+    let sfc = r#"
+<template>
+  <button @click="inc">{{ count }}</button>
+</template>
+<script setup lang="ts">
+import { ref } from 'vue';
+const count = ref<number>(0);
+function inc(): void { count.value++; }
+</script>
+"#;
+    let out = transform(Path::new("Counter.vue"), sfc).unwrap();
+    assert!(out.contains("export default _sfc_main"), "{out}");
+    assert!(out.contains("name: \"Counter\""), "{out}");
+    assert!(out.contains("const count = ref(0)"), "{out}");
+}
+
+#[test]
+fn vue_sfc_strips_typescript_as_casts_and_types() {
+    let sfc = r#"
+<template>
+  <input @input="e => update((e.target as HTMLInputElement).value)">
+</template>
+<script setup lang="ts">
+const raw = '123' as string;
+const num = (raw as any) as number;
+</script>
+"#;
+    let out = transform(Path::new("CastTest.vue"), sfc).unwrap();
+    assert!(!out.contains(" as string"), "TypeScript `as` must be stripped: {out}");
+    assert!(!out.contains(" as HTMLInputElement"), "Template `as` must be stripped: {out}");
+    assert!(out.contains("const raw = \"123\";"), "{out}");
+}
+
