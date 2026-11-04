@@ -158,6 +158,32 @@ pub(crate) struct ModuleParts {
     /// true if the body references `__toESM` (a lowered dynamic `import()`). Only the module
     /// preamble declares it, so a script without module syntax needs `TO_ESM_HELPER` prepended.
     pub uses_to_esm: bool,
+    /// [`BUNDLE_HELPERS`] the module declares at its top level other than with `var` / `function`
+    /// (`let`, `const`, `class`, an import): a closure parameter of the same name would be a
+    /// redeclaration, so the bundler leaves those to the module (turbo-test#230).
+    pub lexical_helpers: Vec<&'static str>,
+}
+
+/// The preamble helpers a bundled module's own text calls (its export registration, its
+/// `module.exports`, its lowered imports and `export *`). The bundler hands them to each module's
+/// `__commonJS` closure as parameters, so a module that declares one itself with `var` (an
+/// esbuild / tsup build's own `var __export = ...`, as pinia's and vue-router's) does not hoist an
+/// `undefined` over the bundle's (turbo-test#230): a `var` redeclaring a parameter keeps the
+/// parameter's value until its own assignment runs. Same order as `__commonJS`'s `cb` call.
+pub(crate) const BUNDLE_HELPERS: [&str; 4] = ["__export", "__toCommonJS", "__toESM", "__reExport"];
+
+/// The [`BUNDLE_HELPERS`] declared at the top level of `scoping`'s program other than with `var`
+/// or `function` (see `ModuleParts::lexical_helpers`).
+fn lexical_helpers(scoping: &Scoping) -> Vec<&'static str> {
+    BUNDLE_HELPERS
+        .into_iter()
+        .filter(|name| {
+            scoping.get_root_binding((*name).into()).is_some_and(|id| {
+                let flags = scoping.symbol_flags(id);
+                !flags.is_function_scoped_declaration() && !flags.is_function()
+            })
+        })
+        .collect()
 }
 
 struct EmitState<'a, 'r> {
@@ -556,6 +582,7 @@ fn lower<'a>(
     map_src: Option<(&Path, &'a str)>,
 ) -> Option<(ModuleParts, Option<String>)> {
     let stype = SourceType::mjs();
+    let lexical_helpers = lexical_helpers(&scoping);
     let p = plan(&ast, &scoping, ctx, program)?;
     let (requires, re_exports, exports) = (p.requires, p.re_exports, p.exports);
 
@@ -607,6 +634,7 @@ fn lower<'a>(
             body_code,
             has_module_syntax,
             uses_to_esm,
+            lexical_helpers,
         },
         mappings,
     ))
@@ -1126,7 +1154,7 @@ var __reExport = (target, mod, secondTarget) => (mod = __toESMStar(mod), __copyP
     to_esm_helper!(),
     star_helper!(),
     r#"var __toCommonJS = (mod) => __copyProps(__defProp(__defProp({}, "__esModule", { value: true, configurable: true }), Symbol.for("turbo-test.esm"), { value: true }), mod);
-var __commonJS = (cb) => { var mod; return () => (mod || (mod = { exports: {} }, cb(mod.exports, mod)), mod.exports); };
+var __commonJS = (cb) => { var mod; return () => (mod || (mod = { exports: {} }, cb(mod.exports, mod, __export, __toCommonJS, __toESM, __reExport)), mod.exports); };
 var __esm = (fn) => { var done, res; return () => (done || (done = 1, res = fn()), res); };
 "#
 );

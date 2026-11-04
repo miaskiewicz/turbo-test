@@ -2672,7 +2672,8 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
     // v6: package interop `__ttToESMDep`, Node's for a package Node runs as ES modules
     // (turbo-test#133)
     // v7: package ES modules marked "pkg" (turbo-test#159)
-    "native-dep-v7-bundle".hash(&mut h);
+    // v8: each module's closure takes the bundle's helpers as parameters (turbo-test#230)
+    "native-dep-v8-bundle".hash(&mut h);
     // the bundle inlines the package's whole relative graph, not just this file: two installs
     // with the same entry file (user-event 14.6.1 / 14.6.8) differ inside, so the key names this
     // install (its path) and its package.json (turbo-test#213)

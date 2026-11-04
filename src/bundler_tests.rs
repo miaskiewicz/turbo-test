@@ -26,7 +26,7 @@ fn modules_of(out: &str) -> Vec<String> {
     let mut mods = Vec::new();
     for (i, chunk) in out.split("var require_m").skip(1).enumerate() {
         let (id, rest) = chunk
-            .split_once(" = __commonJS((exports, module) => {\n")
+            .split_once(" = __commonJS((exports, module, __export, __toCommonJS, __toESM, __reExport) => {\n")
             .unwrap();
         assert_eq!(id, i.to_string(), "ids are dense and in order");
         let body = rest.rsplit_once("\n});\n").unwrap().0;
@@ -225,6 +225,43 @@ fn a_module_reached_by_two_specifiers_is_bundled_once() {
         "{}",
         mods[0]
     );
+}
+
+#[test]
+fn helpers_are_closure_params_except_those_a_module_declares_lexically() {
+    let dir = pkg(
+        "helpers",
+        &[
+            (
+                "main.js",
+                "require('./lex.js');\nrequire('./fn.js');\nvar __export = 1;\nmodule.exports = __export;\n",
+            ),
+            (
+                "lex.js",
+                "let __export = 1;\nconst __toESM = 2;\nclass __reExport {}\nvar __toCommonJS = 3;\n\
+                 module.exports = [__export, __toESM, __reExport, __toCommonJS];\n",
+            ),
+            ("fn.js", "import { __toESM } from 'x';\nfunction __export() {}\nexport { __export, __toESM };\n"),
+        ],
+    );
+    let out = bundle(&dir.join("main.js")).unwrap();
+    // `var` / `function` declarations keep the parameter (a redeclaration, not a new binding)
+    assert!(
+        out.contains("var require_m0 = __commonJS((exports, module, __export, __toCommonJS, __toESM, __reExport) => {\n"),
+        "{out}"
+    );
+    // a lexical declaration (let / const / class / import) would clash: a placeholder takes its
+    // place (the graph walk reaches fn.js, m1, before lex.js, m2)
+    assert!(
+        out.contains("var require_m2 = __commonJS((exports, module, __tt_helper0, __toCommonJS, __tt_helper2, __tt_helper3) => {\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("var require_m1 = __commonJS((exports, module, __export, __toCommonJS, __tt_helper2, __reExport) => {\n"),
+        "{out}"
+    );
+    // __commonJS hands them over in that order
+    assert!(out.contains("cb(mod.exports, mod, __export, __toCommonJS, __toESM, __reExport)"));
 }
 
 #[test]

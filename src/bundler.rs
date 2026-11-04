@@ -10,7 +10,9 @@
 //!     shared instance via the require cache, exactly like `--packages=external`);
 //!   - transform each module ESM→CJS via `esm_cjs::transform_to_parts`, rewriting relative
 //!     imports/`require`s to `require_<id>()` calls into the other bundled modules;
-//!   - wrap each module in `__commonJS((exports, module) => { ... })` — lazy, run-once. Because each
+//!   - wrap each module in `__commonJS((exports, module, <helpers>) => { ... })` — lazy, run-once
+//!     (the helpers are parameters so the module's own `var __export` cannot shadow them,
+//!     turbo-test#230). Because each
 //!     module sets `module.exports = __toCommonJS(__tt_exports)` EARLY (live getters), a re-entrant
 //!     `require_<id>()` during a cycle sees the partially-filled live exports object. This is
 //!     esbuild's circular-safety mechanism, reusing our proven per-file emit verbatim inside the
@@ -194,6 +196,7 @@ fn bundle_capped(entry: &Path, max_modules: usize) -> Option<String> {
     // Pass 2: transform + wrap each module.
     let mut out = String::from(esm_cjs::PREAMBLE);
     for (idx, module) in modules.iter().enumerate() {
+        let mut lexical: Vec<&str> = Vec::new();
         let module_text = match module {
             Module::Stub(stub) => stub.to_string(),
             Module::Js { js, edges } => {
@@ -215,6 +218,7 @@ fn bundle_capped(entry: &Path, max_modules: usize) -> Option<String> {
                     module_path: Some(order[idx].to_string_lossy().into_owned()),
                 };
                 let parts = esm_cjs::transform_to_parts(js, &ctx)?;
+                lexical = parts.lexical_helpers.clone();
                 if parts.has_module_syntax {
                     esm_cjs::assemble_module(
                         &parts.requires,
@@ -227,13 +231,32 @@ fn bundle_capped(entry: &Path, max_modules: usize) -> Option<String> {
                 }
             }
         };
+        let params = helper_params(&lexical);
         out.push_str(&format!(
-            "var require_m{idx} = __commonJS((exports, module) => {{\n{module_text}\n}});\n"
+            "var require_m{idx} = __commonJS((exports, module, {params}) => {{\n{module_text}\n}});\n"
         ));
     }
     // the entry is the first module walked, so its id is always 0.
     out.push_str("module.exports = require_m0();\n");
     Some(out)
+}
+
+/// A module closure's helper parameters, after `exports, module`: each of
+/// [`esm_cjs::BUNDLE_HELPERS`] by its own name (so the module's `var` of that name cannot shadow
+/// it, turbo-test#230), or a placeholder where the module declares the name lexically itself.
+fn helper_params(lexical: &[&str]) -> String {
+    esm_cjs::BUNDLE_HELPERS
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            if lexical.contains(name) {
+                format!("__tt_helper{i}")
+            } else {
+                (*name).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(all(test, unix))]
