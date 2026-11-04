@@ -2,6 +2,7 @@
 
 use super::*;
 use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 
 static DIR_SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -1716,4 +1717,332 @@ fn dom_env_names_and_inlined_packages() {
     std::env::set_var("TURBO_DEPS_INLINE", "*");
     assert!(inlined_dep(Path::new("/p/node_modules/z")));
     std::env::remove_var("TURBO_DEPS_INLINE");
+}
+
+#[test]
+fn zero_delay_timers_env_wins_over_the_config() {
+    let on = "test: { zeroDelayTimers: true }";
+    let off = "test: { zeroDelayTimers:false }";
+    assert_eq!(zero_delay_timers_from(None, on), Some(true));
+    assert_eq!(zero_delay_timers_from(None, off), Some(false));
+    assert_eq!(
+        zero_delay_timers_from(None, "test: { zeroDelayTimers: flag }"),
+        None
+    );
+    assert_eq!(zero_delay_timers_from(None, "test: {}"), None);
+    assert_eq!(zero_delay_timers_from(Some("0"), on), Some(false));
+    assert_eq!(zero_delay_timers_from(Some("false"), on), Some(false));
+    assert_eq!(zero_delay_timers_from(Some("1"), off), Some(true));
+    assert_eq!(zero_delay_timers_from(Some("true"), off), Some(true));
+    // an unknown env value leaves the config's
+    assert_eq!(zero_delay_timers_from(Some("yes"), off), Some(false));
+    // the runtime literal carries it
+    assert_eq!(
+        runtime_config_literal(off).as_deref(),
+        Some("{ zeroDelayTimers: false }")
+    );
+}
+
+// Wrapped CJS sources are shared by every isolate of the process (from alphajew420's #106): a
+// module loads from one copy, one entry per (path, decorator-metadata mode) replaced on edit.
+#[test]
+fn module_sources_are_shared_across_isolates_and_threads() {
+    let d = tmp("modsrc-share");
+    let f = put(&d, "a.js", "module.exports = 'shared-marker';\n");
+    let first = module_source(&f, false).expect("loads");
+    assert!(first.wrapped.contains("shared-marker"), "{}", first.wrapped);
+    assert!(first
+        .wrapped
+        .starts_with("(function (exports, module, require, __filename, __dirname) {\n"));
+    assert!(Arc::ptr_eq(&first, &module_source(&f, false).unwrap()));
+    // another worker thread gets the same copy
+    let g = f.clone();
+    let other =
+        std::thread::spawn(move || Arc::as_ptr(&module_source(&g, false).unwrap()) as usize)
+            .join()
+            .unwrap();
+    assert_eq!(other, Arc::as_ptr(&first) as usize);
+    // the decorator-metadata mode is part of the key
+    assert!(!Arc::ptr_eq(&first, &module_source(&f, true).unwrap()));
+    assert!(module_source(&d.join("missing.js"), false).is_none());
+}
+
+#[test]
+fn module_sources_are_reloaded_when_the_file_changes() {
+    let d = tmp("modsrc-change");
+    let f = put(&d, "a.js", "module.exports = 'one';\n");
+    let one = module_source(&f, false).unwrap();
+    // a different size
+    std::fs::write(&f, "module.exports = 'second';\n").unwrap();
+    let two = module_source(&f, false).unwrap();
+    assert!(two.wrapped.contains("second"), "{}", two.wrapped);
+    assert!(!Arc::ptr_eq(&one, &two));
+    // the same size, a later mtime
+    std::fs::write(&f, "module.exports = 'thirds';\n").unwrap();
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&f)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    let three = module_source(&f, false).unwrap();
+    assert!(three.wrapped.contains("thirds"), "{}", three.wrapped);
+    assert!(!Arc::ptr_eq(&two, &three));
+}
+
+#[test]
+fn zero_delay_timers_ignore_commented_out_keys_and_warn_on_unknown_env() {
+    assert_eq!(
+        zero_delay_timers_from(None, "test: { /* zeroDelayTimers: false */ }"),
+        None
+    );
+    assert_eq!(
+        zero_delay_timers_from(None, "test: { a: 1, // zeroDelayTimers: false\n }"),
+        None
+    );
+    assert_eq!(
+        zero_delay_timers_from(None, "test: { url: 'http://x', zeroDelayTimers: false }"),
+        Some(false)
+    );
+    assert_eq!(
+        zero_delay_timers_from(None, "/* x */ test: { zeroDelayTimers: false }"),
+        Some(false)
+    );
+    let w = zero_delay_env_warning(Some("yes")).expect("warns");
+    assert!(
+        w.contains("TURBO_ZERO_DELAY_TIMERS") && w.contains("\"yes\""),
+        "{w}"
+    );
+    for ok in ["0", "1", "true", "false"] {
+        assert_eq!(zero_delay_env_warning(Some(ok)), None, "{ok}");
+    }
+    assert_eq!(zero_delay_env_warning(None), None);
+}
+
+// The env var (what the CLI flag sets) reaches the runtime without any vitest config file.
+#[test]
+fn zero_delay_timers_env_applies_without_a_config_file() {
+    let d = tmp("zdt-noconfig");
+    assert_eq!(
+        runtime_config_for(&d, Some("0")).as_deref(),
+        Some("{ zeroDelayTimers: false }")
+    );
+    assert_eq!(
+        runtime_config_for(&d, Some("1")).as_deref(),
+        Some("{ zeroDelayTimers: true }")
+    );
+    assert_eq!(runtime_config_for(&d, None), None);
+    // with a config file the env still wins
+    put(
+        &d,
+        "vitest.config.ts",
+        "export default { test: { zeroDelayTimers: true } }\n",
+    );
+    assert_eq!(
+        runtime_config_for(&d, Some("0")).as_deref(),
+        Some("{ zeroDelayTimers: false }")
+    );
+}
+
+// A source only this load uses (test file, setup file, framed app module, coverage) is owned:
+// dropped once its last user is gone, not leaked per load.
+#[test]
+fn unshared_module_sources_are_freed() {
+    let d = tmp("modsrc-owned");
+    let f = put(&d, "a.test.js", "module.exports = 'owned';\n");
+    TEST_FILE.with(|t| *t.borrow_mut() = f.clone());
+    let src = module_source_for(&f, false).expect("loads");
+    TEST_FILE.with(|t| *t.borrow_mut() = PathBuf::new());
+    assert!(src.wrapped.contains("owned"));
+    assert!(
+        src.one_byte.is_none(),
+        "an owned source is never an external string"
+    );
+    let weak = Arc::downgrade(&src);
+    drop(src);
+    assert!(weak.upgrade().is_none(), "the owned source was leaked");
+}
+
+// An edited file replaces its entry instead of adding one per version.
+#[test]
+fn module_sources_keep_one_entry_per_path() {
+    let d = tmp("modsrc-replace");
+    let f = put(&d, "a.js", "module.exports = 1;\n");
+    module_source(&f, false).unwrap();
+    std::fs::write(&f, "module.exports = 22;\n").unwrap();
+    module_source(&f, false).unwrap();
+    std::fs::write(&f, "module.exports = 333;\n").unwrap();
+    module_source(&f, false).unwrap();
+    assert_eq!(module_source_entries(&f), 1);
+}
+
+// Same size, same mtime (a coarse-mtime filesystem): the edit is still seen.
+#[test]
+fn module_sources_see_same_size_same_mtime_edits() {
+    let d = tmp("modsrc-coarse");
+    let f = put(&d, "a.js", "module.exports = 'aaa';\n");
+    let mtime = std::fs::metadata(&f).unwrap().modified().unwrap();
+    let one = module_source(&f, false).unwrap();
+    std::fs::write(&f, "module.exports = 'bbb';\n").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&f)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    let two = module_source(&f, false).unwrap();
+    assert!(one.wrapped.contains("aaa"));
+    assert!(two.wrapped.contains("bbb"), "{}", two.wrapped);
+}
+
+// A refresh never replaces a richer cache with a poorer one, and a fresh compile only writes
+// when it holds more than what is there.
+#[test]
+fn code_cache_store_keeps_the_richer_cache() {
+    let m = new_module_source("(function(){ /* cc-richer */ })".to_string());
+    store_code_cache(&m, &[1u8; 100], None);
+    assert_eq!(m.cc_len(), 100);
+    // a refresh larger than what it consumed but smaller than the current one
+    store_code_cache(&m, &[2u8; 50], Some(10));
+    assert_eq!(m.cc_len(), 100);
+    assert_eq!(std::fs::read(&m.cc_path).unwrap().len(), 100);
+    store_code_cache(&m, &[3u8; 60], None);
+    assert_eq!(m.cc_len(), 100);
+    store_code_cache(&m, &[4u8; 150], Some(100));
+    assert_eq!(m.cc_len(), 150);
+    assert_eq!(std::fs::read(&m.cc_path).unwrap(), vec![4u8; 150]);
+}
+
+// A rejected cache leaves the shared slot (and its file) at once.
+#[test]
+fn a_rejected_code_cache_is_cleared() {
+    let m = new_module_source("(function(){ /* cc-reject */ })".to_string());
+    std::fs::write(&m.cc_path, b"garbage").unwrap();
+    assert!(module_code_cache(&m).is_some());
+    reject_code_cache(&m);
+    assert_eq!(m.cc_len(), 0);
+    assert!(!m.cc_path.exists());
+    store_code_cache(&m, &[9u8; 5], None);
+    assert_eq!(m.cc_len(), 5);
+}
+
+// A `/*` or `//` inside a string (a glob, a URL) starts no comment: later keys are still read.
+#[test]
+fn config_keys_after_comment_like_strings_are_found() {
+    let cfg = "test: { include: ['src/**/*.test.ts'], url: 'http://x', setupFiles: ['./s.ts'] }";
+    assert_eq!(
+        config_string_list(cfg, "setupFiles"),
+        vec!["./s.ts".to_string()]
+    );
+    assert_eq!(
+        zero_delay_timers_from(
+            None,
+            "test: { include: [\"a/**/*.ts\"], zeroDelayTimers: false }"
+        ),
+        Some(false)
+    );
+    // an escaped quote does not end the string
+    assert_eq!(
+        zero_delay_timers_from(None, r"test: { a: 'it\'s /*', zeroDelayTimers: false }"),
+        Some(false)
+    );
+    // a real block comment closed before the key
+    assert_eq!(
+        zero_delay_timers_from(None, "/* a */ test: { /* b */ zeroDelayTimers: false }"),
+        Some(false)
+    );
+}
+
+// The stamp's content hash: only for a file modified in the last 2 s, where it tells same-size,
+// same-mtime edits apart; 0 (and the bytes not read) outside that window.
+#[test]
+fn source_stamps_hash_recent_files_only() {
+    let s = 1_000_000_000u128;
+    let read = |b: &'static [u8]| move || Some(b.to_vec());
+    let a = stamp_from(10 * s, 10 * s, 3, 7, 11 * s, read(b"aaa")).unwrap();
+    let b = stamp_from(10 * s, 10 * s, 3, 7, 11 * s, read(b"bbb")).unwrap();
+    assert_ne!(a.4, 0);
+    assert_ne!(a, b, "a same-size same-mtime edit inside the window");
+    assert_eq!(a.0, 10 * s);
+    assert_eq!(a.1, 10 * s);
+    assert_eq!((a.2, a.3), (3, 7));
+    // just inside, just outside the window
+    assert_ne!(
+        stamp_from(10 * s, 0, 3, 7, 12 * s - 1, read(b"aaa"))
+            .unwrap()
+            .4,
+        0
+    );
+    let old = stamp_from(10 * s, 0, 3, 7, 12 * s, || {
+        panic!("read outside the window")
+    })
+    .unwrap();
+    assert_eq!(old.4, 0);
+    // a future mtime counts as recent
+    assert_ne!(
+        stamp_from(20 * s, 0, 3, 7, 11 * s, read(b"aaa")).unwrap().4,
+        0
+    );
+    // an unreadable recent file has no stamp
+    assert_eq!(stamp_from(10 * s, 0, 3, 7, 11 * s, || None), None);
+}
+
+// Shared app-module entries are capped: over the cap the least recently used app entry goes;
+// node_modules entries are never evicted.
+#[test]
+fn shared_app_sources_are_capped_lru() {
+    let mut m: HashMap<SourceKey, SharedSource> = HashMap::new();
+    let entry = |app: bool, last_use: u64| SharedSource {
+        stamp: (0, 0, 0, 0, 0),
+        source: new_module_source(String::new()),
+        last_use,
+        app,
+    };
+    let k = |n: &str| (PathBuf::from(n), false);
+    m.insert(k("/nm/a"), entry(false, 0));
+    m.insert(k("/app/old"), entry(true, 1));
+    m.insert(k("/app/mid"), entry(true, 5));
+    m.insert(k("/app/new"), entry(true, 9));
+    cap_app_sources(&mut m, 3);
+    assert_eq!(m.len(), 4);
+    cap_app_sources(&mut m, 2);
+    assert!(!m.contains_key(&k("/app/old")));
+    assert!(m.contains_key(&k("/app/mid")) && m.contains_key(&k("/app/new")));
+    assert!(m.contains_key(&k("/nm/a")));
+    cap_app_sources(&mut m, 0);
+    assert_eq!(m.keys().collect::<Vec<_>>(), vec![&k("/nm/a")]);
+}
+
+// Only node_modules one-byte text is leaked (V8 uses it as an external string): app modules and
+// text past Latin-1 are owned and freed with their entry.
+#[test]
+fn shared_sources_leak_only_external_one_byte_text() {
+    let ext = shared_module_source("(function(){ 'ascii' })".to_string(), true);
+    assert!(ext.one_byte.is_some());
+    let wide = shared_module_source("(function(){ '\u{20ac}' })".to_string(), true);
+    assert!(wide.one_byte.is_none());
+    let app = shared_module_source("(function(){ 'app' })".to_string(), false);
+    assert!(app.one_byte.is_none());
+    for src in [wide, app] {
+        let weak = Arc::downgrade(&src);
+        drop(src);
+        assert!(weak.upgrade().is_none());
+    }
+}
+
+// The bytecode cache is not kept in memory: each consume reads the file, the slot keeps only
+// the size of the richest cache seen.
+#[test]
+fn code_cache_bytes_are_read_from_the_file_not_kept() {
+    let m = new_module_source(format!(
+        "(function(){{ /* cc-file {} */ }})",
+        std::process::id()
+    ));
+    store_code_cache(&m, &[1u8; 40], None);
+    assert_eq!(m.cc_len(), 40);
+    std::fs::write(&m.cc_path, [7u8; 40]).unwrap();
+    assert_eq!(&*module_code_cache(&m).unwrap(), &[7u8; 40][..]);
+    std::fs::remove_file(&m.cc_path).unwrap();
+    assert!(module_code_cache(&m).is_none());
 }

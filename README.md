@@ -1,7 +1,7 @@
 # turbo-test
 
 **A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
-(and, experimentally, jest).** Release **0.6.2**.
+(and, experimentally, jest).** Release **0.7.0**.
 
 turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
 work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
@@ -27,8 +27,10 @@ turbo-test links `turbo-dom-browser-env` 0.6.0 and `turbo-dom-v8 ~150.4` (under 
 copy of the binding or of V8: the binding, its probes and the Chrome-control collectors that
 record their oracles live in turbo-dom's
 [`crates/turbo-dom-browser-env`](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
-— fix DOM behaviour and recollect controls there. They come from crates.io (turbo-dom 0.6.0,
-turbo-dom-v8 150.4.0).
+— fix DOM behaviour and recollect controls there. turbo-dom-v8 150.4.0 comes from crates.io;
+until turbo-dom 0.7.0 is published, turbo-dom / -layout / -browser-env 0.7.0 are pinned to a
+git rev of turbo-dom's release PR (`[patch.crates-io]` in Cargo.toml, which `release-guard`
+rejects: the pin must be gone before the tag).
 
 ## Install and run
 
@@ -69,6 +71,42 @@ turbo-test has no Cargo feature flags; behaviour switches are environment variab
 |---|---|
 | `TURBO_REUSE_ISOLATE=1` / `TURBO_NO_REUSE=1` | force isolate reuse on / off (see below) |
 | `TURBO_LEGACY_REPORTER=1` | compact `PASS` / `FAIL` reporter instead of vitest's |
+| `TURBO_ZERO_DELAY_TIMERS=1` / `=0` | zero-delay timers on (default) / off (see below) |
+| `TURBO_SNAPSHOT=0` | each DOM file runs turbo-dom's engine install instead of opening the window snapshot (see below) |
+
+**Window snapshot** (on by default for runs with at least 8 DOM-environment files). The worker
+isolates' startup blob holds the framework layer twice: alone, for `node`-environment files, and
+with turbo-dom's window bootstrapped over it (turbo-dom#249). A DOM file opens the second context,
+so its install rehydrates the window instead of running the engine scripts (about 20-30 ms per
+file). Building the blob costs about 170 ms once per process, so smaller runs skip it.
+`TURBO_SNAPSHOT=0` turns it off, and so does any `TURBO_V8_FLAGS` (code deserialized from the blob
+can conflict with custom V8 flags).
+
+The startup blob (window or framework-only) is saved in the build's cache directory and reused by
+later runs: a rebuilt blob is not byte-identical, and V8 rejects module bytecode caches made
+against another blob, so without it every run recompiled its modules.
+
+**Zero-delay timers** (on by default). A real `setTimeout(fn, 0)` (or any delay below 1 ms) waits
+0 ms, as in turbo-test 0.4.2: it fires before a setImmediate or MessageChannel message queued after
+it, which is faster for timer-heavy suites. Off, the delay is clamped to 1 ms as on Node and vitest
+(#212), so setImmediate and MessageChannel run first. Promise jobs run first in both modes, and
+fake timers are not affected.
+
+> **Known difference from vitest.** With the default, `setTimeout(fn, 0)` runs before a
+> setImmediate or MessageChannel message queued after it; vitest runs `micro, immediate,
+> message, timeout0`. React's scheduler posts renders through MessageChannel, so a test that
+> waits for a render with `await new Promise((r) => setTimeout(r, 0))` (a common React Testing
+> Library pattern) can resume before the render. For vitest's order run
+> `turbo-test --no-zero-delay-timers` or set `TURBO_ZERO_DELAY_TIMERS=0`.
+
+Prefer the flag or the env var. `test.zeroDelayTimers` is not in vitest's `InlineConfig` type, so a
+typed config needs `// @ts-expect-error` above it.
+
+| source | on | off |
+|---|---|---|
+| CLI flag (wins) | `--zero-delay-timers` | `--no-zero-delay-timers` |
+| env var | `TURBO_ZERO_DELAY_TIMERS=1` | `TURBO_ZERO_DELAY_TIMERS=0` |
+| vitest config | `test: { zeroDelayTimers: true }` | `test: { zeroDelayTimers: false }` |
 
 ## Isolate-reuse (extra speed, zero config)
 
@@ -380,12 +418,12 @@ npm run complexity:js        # CI job `complexity / js (cc <= 15)`
 - **Release** (`v*` tag): `release-guard` (no `[patch]`, no git sources, versions equal the tag),
   then the npm and crates.io publish jobs ([RELEASING.md](RELEASING.md)).
 
-## Status (0.6.2)
+## Status (0.7.0)
 
 - vitest suites: drop-in; the `vi` / mock / `expect` surface is vitest 4.1.12's
   ([vitest.compat.md](vitest.compat.md) lists what is covered and what is approximated).
 - jest suites: experimental (see above).
-- DOM: turbo-dom-browser-env 0.6.0, Chrome 156-controlled in turbo-dom.
+- DOM: turbo-dom-browser-env 0.7.0, Chrome 156-controlled in turbo-dom.
 - Open work is tracked as GitHub issues in this repository and in turbo-dom.
 
 ## License

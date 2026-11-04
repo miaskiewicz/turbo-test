@@ -16,8 +16,7 @@ fn scratch(name: &str) -> PathBuf {
 /// does), then drop every registry Global while the isolate is still alive.
 fn with_context<R>(f: impl FnOnce(&mut v8::PinScope, v8::Local<v8::Object>) -> R) -> R {
     init_v8();
-    let blob = framework_snapshot();
-    let params = v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(blob.clone()));
+    let params = crate::runner::framework_snapshot().create_params();
     let isolate = &mut v8::Isolate::new(params);
     v8::scope!(let scope, isolate);
     let context = v8::Context::new(scope, Default::default());
@@ -497,9 +496,7 @@ fn end_worker_reuse_and_forget_registry_drop_the_persistent_isolate() {
 
     init_v8();
     for forget in [false, true] {
-        let blob = framework_snapshot();
-        let params =
-            v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(blob.clone()));
+        let params = framework_snapshot().create_params();
         let mut isolate = v8::Isolate::new(params);
         {
             v8::scope!(let scope, &mut isolate);
@@ -816,4 +813,125 @@ fn the_shared_let_rewrite_skips_comments() {
         out.ends_with("a / globalThis.__ms.currentEntity / 2"),
         "{out}"
     );
+}
+
+// turbo-test#228 at a worker's end: a file that fails to load after compiling a module leaves no
+// pending bytecode cache behind (its scripts belong to the isolate it ran in, which is gone once
+// run_test_file returns; the thread-local destructor would drop them after it).
+#[test]
+fn a_file_that_fails_to_load_leaves_no_pending_code_caches() {
+    let d = scratch("pending-cc-load-fail");
+    std::fs::write(d.join("package.json"), r#"{"name":"pendingcc"}"#).unwrap();
+    std::fs::write(
+        d.join("dep.js"),
+        format!(
+            "module.exports = function dep() {{ return {}; }};\n",
+            std::process::id()
+        ),
+    )
+    .unwrap();
+    let entry = d.join("z.test.js");
+    std::fs::write(
+        &entry,
+        "import './dep.js';\nthrow new Error('boom at load');\n",
+    )
+    .unwrap();
+    let e = std::thread::spawn(move || {
+        let r = run_test_file(&entry);
+        let pending = PENDING_CODE_CACHES.with(|p| p.borrow().len());
+        (r, pending)
+    })
+    .join()
+    .expect("the worker thread exits cleanly");
+    assert!(e.0.unwrap_err().contains("boom at load"));
+    assert_eq!(e.1, 0);
+}
+
+/// turbo-dom#249: the worker blob carries the framework context (window-free, for node files)
+/// and a window context a DOM file opens with the document already bootstrapped; its install
+/// rehydrates the snapshotted window.
+#[test]
+fn framework_blob_opens_window_and_window_free_contexts() {
+    init_v8();
+    let snap = framework_snapshot();
+    let mut isolate = v8::Isolate::new(snap.create_params());
+    for (dom, expected) in [(false, "undefined,function"), (true, "object,function")] {
+        v8::scope!(let scope, &mut isolate);
+        let context = snap.new_context(scope, dom);
+        let scope = &mut v8::ContextScope::new(scope, context);
+        let got = eval_value(
+            scope,
+            "[typeof document, typeof globalThis.__ttApplyConfig].join()",
+        )
+        .to_rust_string_lossy(scope);
+        assert_eq!(got, expected, "dom={dom}");
+        if dom {
+            turbo_dom_browser_env::browser_env::install(scope);
+            let got = eval_value(
+                scope,
+                "document.body.appendChild(document.createElement('p')).tagName",
+            )
+            .to_rust_string_lossy(scope);
+            assert_eq!(got, "P");
+            turbo_dom_browser_env::browser_env::reset();
+        }
+    }
+}
+
+#[test]
+fn the_window_snapshot_is_built_only_for_enough_dom_files() {
+    assert!(!window_snapshot_wanted(0));
+    assert!(!window_snapshot_wanted(WINDOW_SNAPSHOT_MIN_DOM_FILES - 1));
+    assert!(window_snapshot_wanted(WINDOW_SNAPSHOT_MIN_DOM_FILES));
+}
+
+/// The window snapshot is the default; `TURBO_SNAPSHOT=0` turns it off, and so do custom V8
+/// flags (`TURBO_V8_FLAGS`): code deserialized from a blob can conflict with them
+/// (`--interpreted-frames-native-stack` aborts V8 on the window snapshot).
+#[test]
+fn custom_v8_flags_or_turbo_snapshot_0_keep_the_framework_only_blob() {
+    assert!(window_snapshot_allowed(None, None));
+    assert!(window_snapshot_allowed(Some("1"), None));
+    assert!(!window_snapshot_allowed(Some("0"), None));
+    assert!(!window_snapshot_allowed(
+        None,
+        Some("--interpreted-frames-native-stack")
+    ));
+    assert!(window_snapshot_allowed(None, Some("")));
+}
+
+/// A saved startup blob is served only intact: the magic, its length and its content hash
+/// must match, so a truncated or corrupted file (never handed to V8, which would abort)
+/// reads as absent and is rebuilt.
+#[test]
+fn saved_startup_blobs_are_served_only_intact() {
+    let dir = std::env::temp_dir().join(format!("tt-blob-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("snapshot.bin");
+    assert!(read_saved_blob(&path).is_none(), "missing");
+    save_blob(&path, b"blob bytes");
+    assert_eq!(read_saved_blob(&path), Some(&b"blob bytes"[..]));
+    let mut bytes = std::fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(read_saved_blob(&path).is_none(), "corrupted");
+    bytes.truncate(last);
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(read_saved_blob(&path).is_none(), "truncated");
+    std::fs::write(&path, b"short").unwrap();
+    assert!(read_saved_blob(&path).is_none(), "no header");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A saved blob is keyed on everything it was built from that the build id does not cover:
+/// its kind, the reference table's fingerprint, chai's text and the V8 flags.
+#[test]
+fn saved_blob_keys_follow_their_inputs() {
+    let base = blob_key_from("window", 1, "chai", "");
+    assert_eq!(base, blob_key_from("window", 1, "chai", ""));
+    assert_ne!(base, blob_key_from("framework", 1, "chai", ""));
+    assert_ne!(base, blob_key_from("window", 2, "chai", ""));
+    assert_ne!(base, blob_key_from("window", 1, "chai2", ""));
+    assert_ne!(base, blob_key_from("window", 1, "chai", "--predictable"));
 }

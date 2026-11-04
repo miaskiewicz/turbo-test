@@ -3,6 +3,142 @@
 All notable changes to `@miaskiewicz/turbo-test`. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.7.0] — performance: bytecode cache and turbo-dom 0.7.0
+
+0.6.x ran payroll-app's suite in ~220 s where 0.4.2 took ~15 s. Profiling with samply
+(payroll-app, release build with debug symbols; numbers in the PR) found three causes. Most of
+the wall time was one file whose form re-classified every element of the document in JS on
+each `matches(':disabled')`. Spread over every file came V8 recompiling module wrappers and
+turbo-dom's engine scripts from source in each fresh isolate.
+
+### Performance
+- The CJS bytecode cache covers every module. Scripts with a named origin (the test file and
+  each app module outside node_modules, named for failure frames and test locations) used to
+  skip it.
+- Cache data that V8 rejects (another V8 build, other flags) is rewritten. Before, it was
+  recompiled from source on every load, forever.
+- A new cache is written once the test file has run, so it holds the functions the file called.
+  A cache made right after the top-level compile has no function bodies, so every isolate
+  parsed and compiled each called function again. The cache key salt is now `cc-v2`, which drops
+  the old caches. On 147 payroll files these three changes cut user CPU by about 8% + 9%.
+- turbo-dom 0.7.0 (turbo-dom#232):
+  - A process-wide bytecode cache for the engine scripts each window install runs, which was
+    ~9% of CPU.
+  - `matches()` / `closest()` classify form pseudo-classes only for the elements their answer
+    reads. They used to classify the whole document each call. That made user-event plus MUI
+    forms quadratic: payroll's EditExpenseModal spent 28-37% of its CPU there.
+
+- A cache hit is re-saved after the file ran when the run compiled functions the cache did not
+  hold (checked on a module's 1st, 2nd, 4th, 8th... hit per worker). A function first called by
+  a later test file was compiled lazily after its module's cache was written, so every later run
+  compiled it again. The cache format is unchanged (salt `cc-v2`).
+- Wrapped CJS sources and their bytecode caches are shared by every isolate of the process, from
+  alphajew420's #106. Each fresh isolate used to read the transform cache, wrap and copy the
+  source, hash it, read its bytecode cache file and copy the text into the V8 heap again. There is
+  one entry per (path, decorator-metadata mode), replaced when the file's mtime, ctime, size or
+  inode changes (or, for a file modified in the last 2 s, its content hash: a coarse-mtime
+  filesystem can give a same-size edit the same mtime). node_modules ASCII sources go to V8 as
+  external one-byte strings (no copy, their text leaked); other text is owned and copied. At most
+  2048 app-module entries are kept (least recently used out). The bytecode cache bytes stay in
+  their file (read on each consume); a source keeps only the size of its richest cache, so a
+  refresh never replaces a larger cache with a smaller one. Sources only one load uses (the test file,
+  setup files, app modules when failure frames are on, everything under `--coverage`) are owned
+  and freed after the load instead of leaked.
+- turbo-dom's window startup snapshot (turbo-dom#249): for a run with at least 8 DOM files, the
+  worker blob carries the framework context alone (`node` files) and with the window bootstrapped
+  over it, so a DOM file's install rehydrates the window instead of running the engine scripts
+  (standalone-chat-app: about 10% less CPU; 40 small DOM files on one worker 2.1 s to 1.0 s).
+  The blob's one-time build (~170 ms) is why small runs skip it. `TURBO_SNAPSHOT=0` turns it off,
+  and so does any `TURBO_V8_FLAGS`.
+- The startup blob is saved in the build's cache directory and reused across runs. V8 rejects a
+  bytecode cache made against another startup blob, and the blob turbo-test builds at start-up
+  is not byte-identical from one process to the next, so every module cache a previous run
+  wrote was rejected (standalone-chat-app: ~53% hits, 15% rejects, 32% misses per run). Now
+  every module load after the first run hits (2626/2626); chat user CPU 10.0 s to 9.1 s.
+- turbo-dom perf/0.7.0-parity: an inline style write keeps other elements' computed styles
+  (keyed on the tree's selector version plus the element's own inline style, unless a rule can
+  read other elements' inline styles): MUI TextareaAutosize's hidden-textarea writes no longer
+  recompute the dialog's whole ancestor chain. Chat wall 1.59 s to 1.26 s.
+- turbo-dom perf/0.7.0-parity: the DOM ownership reconcile after a mutating call re-places
+  only the wrappers whose ownership component changed, instead of rewriting every live
+  wrapper's component edges (chat user CPU 8.5 s to 7.7 s).
+- turbo-dom perf/0.7.0-parity: a CSS transition / animation update's display:none ancestor
+  check resolves each ancestor once per read instead of once per ancestor per level (O(depth^2)
+  style lookups: 1978 at depth 40), and a cascade reads the document's sheet list once per tree
+  version. MUI TextareaAutosize in a Dialog reads its textarea's style between mutations:
+  standalone-chat-app FeedbackDialog CPU 5.2 s to 2.4 s.
+- Zero-delay timers are on by default: a real `setTimeout(fn, 0)` waits 0 ms again, as in 0.4.2,
+  instead of Node's 1 ms (#212), which made timer-heavy suites slower. **This differs from
+  vitest's order** (`micro, immediate, message, timeout0`): a test that drains React's scheduler
+  with `await new Promise(r => setTimeout(r, 0))` can now run before the render. Use
+  `--no-zero-delay-timers` or `TURBO_ZERO_DELAY_TIMERS=0` for vitest's order.
+
+### Fixed
+- A test file that failed to load left its compiled scripts queued for the bytecode cache write;
+  the next file of the worker touched them in their disposed isolate and panicked
+  (`attempt to access Handle hosted by disposed Isolate`). They are dropped at the start of each
+  file (#228). They are now also dropped when the file ends, while its isolate is alive: when the
+  last file a worker ran failed to load, the thread-local destructor dropped them after the
+  isolate was gone and the process crashed.
+- `--[no-]zero-delay-timers` and `TURBO_ZERO_DELAY_TIMERS` did nothing in a project without a
+  vitest config file.
+- Under isolate reuse the config's runtime settings (`zeroDelayTimers`, `fakeTimers`,
+  `clearMocks` / `mockReset` / `restoreMocks` / `unstubEnvs` / `unstubGlobals`) and the
+  zero-delay flag and env var were never applied: each file now resets them to the defaults and
+  applies its config, as on the fresh path. The defaults it resets to are the worker's config
+  once its setup files ran, so a setup file's `vi.setConfig` holds for every file and a later
+  `vi.resetConfig()` returns to the config from before it, as vitest `isolate: false` (which
+  re-runs the setup files per file) does.
+- A file the heap guard stopped, or whose run errored, no longer serializes bytecode caches from
+  its terminated isolate; its pending caches are dropped.
+- A `zeroDelayTimers` inside a `/* */` comment or after a `//` on the line is not read; an
+  unknown `TURBO_ZERO_DELAY_TIMERS` value is ignored with a warning.
+- A bytecode cache V8 rejects is cleared from the shared slot and its file at once, so other
+  isolates do not consume it again before the rewrite.
+
+### Added
+- `--zero-delay-timers` / `--no-zero-delay-timers`, `TURBO_ZERO_DELAY_TIMERS=1|0` and the vitest
+  config's `test.zeroDelayTimers: true|false` (flag over env over config) choose between 0 ms and
+  Node's 1 ms clamp for a real timer's delay below 1 ms. Off, the event loop order matches vitest
+  4.1.12 on Node (setImmediate and MessageChannel before `setTimeout 0`); on, `setTimeout 0` runs
+  before them. Promise jobs come first either way; fake timers keep sinon's 0.
+
+### Changed
+- turbo-dom, turbo-dom-layout and turbo-dom-browser-env 0.7.0 are pinned to a git rev of
+  turbo-dom#232 through `[patch.crates-io]` until turbo-dom 0.7.0 is published.
+
+### Tests
+- `cjs_bytecode_cache_is_written_reused_and_survives_corruption` also checks that the entry file
+  and app module are cached and that rejected data is rewritten.
+  `cjs_bytecode_cache_holds_the_functions_the_run_called` checks that a run which calls a
+  module's function writes a larger cache for that module than a run which does not. Both fail
+  on 0.6.2.
+- `cjs_bytecode_cache_picks_up_functions_first_called_in_a_later_file`: file 1 loads a module,
+  file 2 calls its function; the module's cache then holds it.
+- `cjs_bytecode_cache_skips_the_scripts_of_a_file_that_failed_to_load` (#228);
+  `a_file_that_fails_to_load_leaves_no_pending_code_caches` (crashed with SIGSEGV before the fix)
+  and `a_worker_whose_last_file_fails_to_load_exits_cleanly` (fresh and reused isolates).
+- `unshared_module_sources_are_freed`, `module_sources_keep_one_entry_per_path`,
+  `module_sources_see_same_size_same_mtime_edits`, `code_cache_store_keeps_the_richer_cache`,
+  `a_rejected_code_cache_is_cleared`, `coverage_is_identical_cold_and_warm`,
+  `source_stamps_hash_recent_files_only`, `shared_app_sources_are_capped_lru`,
+  `shared_sources_leak_only_external_one_byte_text`,
+  `code_cache_bytes_are_read_from_the_file_not_kept`,
+  `zero_delay_timers_switch_applies_under_isolate_reuse`,
+  `a_file_past_the_heap_limit_writes_no_bytecode_cache`,
+  `setup_file_set_config_holds_for_every_reused_file` (checked against vitest 4.1.12).
+- `zero_delay_timers_switch_without_a_config_file`,
+  `zero_delay_timers_env_applies_without_a_config_file`,
+  `zero_delay_timers_ignore_commented_out_keys_and_warn_on_unknown_env`; the precedence test
+  also checks that the order each source selects passes.
+- `module_sources_are_shared_across_isolates_and_threads` and
+  `module_sources_are_reloaded_when_the_file_changes` (size, then mtime) (#106).
+- `timeout_zero_is_zero_ms_by_default`,
+  `timeout_zero_runs_after_immediates_and_messages_like_node_without_zero_delay` (checked against
+  vitest 4.1.12, node and jsdom) and `zero_delay_timers_from_config_env_and_cli`: the order of
+  `setTimeout 0`, setImmediate, MessageChannel and promises in both modes, and the switch's
+  precedence.
+
 ## [0.6.2] — 2026-11-02 — coverage-mode vi.mock hoisting
 
 0.6.0 and 0.6.1 broke two consumer suites only under `--coverage` (CI); the same suites passed without it.
@@ -41,7 +177,7 @@ reproductions with and without `--coverage`. Not Linux-specific, and `--shard` p
 - A DOM window has the embedder's members: `open`, `alert`, `confirm`, `prompt`, `print`, `close`, `postMessage`, … (#208).
 - The shared-let rewrite copies comments as they are (#209).
 - Package `exports` match the `development` condition, as vitest does (#211).
-- A real `setTimeout(fn, 0)` is a 1 ms timer, as on Node: setImmediate and MessageChannel run first (#212).
+- A real `setTimeout(fn, 0)` is a 1 ms timer, as on Node: setImmediate and MessageChannel run first (#212). Since 0.7.0 that is the `--no-zero-delay-timers` mode; the default is 0 ms (see 0.7.0).
 - turbo-dom 0.6.0, turbo-dom-browser-env 0.6.0 and turbo-dom-v8 150.4.0 now come from crates.io; the pre-publish `[patch.crates-io]` git pins are gone (last pin: turbo-dom main d6da581 (turbo-dom#224 stale node ids, #226 inline `translateX`, #227 `box-shadow: none`, #228, #230; earlier: 01f66d0, 41b948c)).
 - Under isolate reuse a test file's own top-level hooks run only for that file, not for every later file of the worker (#214).
 - An `isolate: false` inside `test.poolOptions` no longer turns on isolate reuse: vitest 4 removed `poolOptions` and runs such a project isolated (#215).

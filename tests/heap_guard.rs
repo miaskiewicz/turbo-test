@@ -210,3 +210,60 @@ fn a_reused_isolate_is_kept_below_the_recycle_threshold_and_replaced_above_it() 
         .collect();
     assert_eq!(recycled, ["true", "true"], "{}", r.all());
 }
+
+/// A file the heap guard stopped writes no bytecode cache: its scripts' pending caches are
+/// dropped, not serialized from the terminated isolate.
+#[test]
+fn a_file_past_the_heap_limit_writes_no_bytecode_cache() {
+    for (name, mode) in [
+        ("hg-cc-fresh", "TURBO_NO_REUSE"),
+        ("hg-cc-reuse", "TURBO_REUSE_ISOLATE"),
+    ] {
+        let p = Project::new(name);
+        p.file("package.json", &format!(r#"{{"name":"{name}"}}"#));
+        p.file("dep.js", "module.exports = function dep() { return 1; };\n");
+        p.file(
+            "a-oom.test.js",
+            "import dep from './dep.js';\n\
+             test('grows', () => { dep(); const keep = []; for (;;) keep.push(new Array(100000).fill(keep.length)); });\n",
+        );
+        let cache = p.dir.join(".cache");
+        let r = turbo_test(
+            &p.dir,
+            &["a-oom.test.js"],
+            &[
+                ("TURBO_JOBS", "1"),
+                ("TURBO_MAX_HEAP_MB", "64"),
+                (mode, "1"),
+                ("TURBO_CACHE_DIR", cache.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(r.code, Some(1), "{name}\n{}", r.all());
+        let cc: Vec<_> = std::fs::read_dir(&cache)
+            .map(|d| {
+                d.filter_map(Result::ok)
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.starts_with("cc-"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(cc.is_empty(), "{name}: {cc:?}\n{}", r.all());
+        // control: a file that ends normally writes them
+        p.file(
+            "b-ok.test.js",
+            "import dep from './dep.js';\ntest('ok', () => expect(dep()).toBe(1));\n",
+        );
+        let r = turbo_test(
+            &p.dir,
+            &["b-ok.test.js"],
+            &[(mode, "1"), ("TURBO_CACHE_DIR", cache.to_str().unwrap())],
+        );
+        assert_eq!(r.code, Some(0), "{name}\n{}", r.all());
+        let written = std::fs::read_dir(&cache)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("cc-"))
+            .count();
+        assert!(written >= 1, "{name}: {written}\n{}", r.all());
+    }
+}

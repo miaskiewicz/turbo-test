@@ -217,7 +217,9 @@ fn cjs_bytecode_cache_is_written_reused_and_survives_corruption() {
     let cold = turbo_test(&p.dir, &[], &[]);
     assert_eq!(cold.code, Some(0), "{}", cold.all());
     let files = code_cache_files(&p);
-    assert!(!files.is_empty(), "cold run persists bytecode");
+    // the test file and the app module too, though their scripts carry a named origin
+    // (failure frames and test locations)
+    assert_eq!(files.len(), 2, "cold run persists bytecode: {files:?}");
     let sizes: Vec<u64> = files.iter().map(|f| f.metadata().unwrap().len()).collect();
     assert!(sizes.iter().all(|&s| s > 0));
 
@@ -240,6 +242,135 @@ fn cjs_bytecode_cache_is_written_reused_and_survives_corruption() {
     }
     let junk = turbo_test(&p.dir, &[], &[]);
     assert_eq!(junk.code, Some(0), "{}", junk.all());
+    // ... and the rejected entries are rewritten, so later runs consume bytecode again
+    for f in &files {
+        assert_ne!(
+            std::fs::read(f).unwrap(),
+            b"definitely not v8 bytecode",
+            "{f:?}"
+        );
+    }
+}
+
+/// The bytecode cache files (name -> size) after one run of `test` over the same `src/lib.ts`.
+fn cache_sizes(name: &str, test: &str) -> std::collections::BTreeMap<String, u64> {
+    let p = plain(name);
+    p.with_esbuild();
+    p.file(
+        "src/lib.ts",
+        "export function shape(n: number) {\n  const out = [];\n  for (let i = 0; i < n; i++) out.push({ i, sq: i * i, label: `item ${i}` });\n  return out.map((o) => o.label + ':' + o.sq).join(',');\n}\n",
+    );
+    p.file("cc.test.ts", test);
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    code_cache_files(&p)
+        .iter()
+        .map(|f| {
+            let name = f.file_name().unwrap().to_string_lossy().into_owned();
+            (name, f.metadata().unwrap().len())
+        })
+        .collect()
+}
+
+// V8 compiles functions lazily: a cache made right after the module's top-level compile has
+// none of them, and every later isolate parses and compiles them again. The cache is written
+// once the file ran, so it carries the functions the run called.
+#[test]
+fn cjs_bytecode_cache_holds_the_functions_the_run_called() {
+    let import = "import { shape } from './src/lib';\n";
+    let called = cache_sizes(
+        "rb-flags-cc-called",
+        &format!("{import}test('s', () => {{ expect(shape(2)).toBe('item 0:0,item 1:1'); }});\n"),
+    );
+    let uncalled = cache_sizes(
+        "rb-flags-cc-uncalled",
+        &format!("{import}test('s', () => {{ expect(typeof shape).toBe('function'); }});\n"),
+    );
+    // the lib's cache is the entry both runs share (same source, same key)
+    let shared: Vec<_> = called
+        .keys()
+        .filter(|k| uncalled.contains_key(*k))
+        .collect();
+    assert_eq!(shared.len(), 1, "{called:?} {uncalled:?}");
+    let (with, without) = (called[shared[0]], uncalled[shared[0]]);
+    assert!(with > without, "called {with} <= uncalled {without}");
+}
+
+// A function first called by a later test file is compiled after the module's cache was
+// written (the first file only loaded the module). A cache hit re-saves the cache when the run
+// compiled more of the module, so the next run gets that function as bytecode too.
+#[test]
+fn cjs_bytecode_cache_picks_up_functions_first_called_in_a_later_file() {
+    let import = "import { shape } from './src/lib';\n";
+    let uncalled = cache_sizes(
+        "rb-flags-cc-later-base",
+        &format!("{import}test('s', () => {{ expect(typeof shape).toBe('function'); }});\n"),
+    );
+    let p = plain("rb-flags-cc-later");
+    p.with_esbuild();
+    p.file(
+        "src/lib.ts",
+        "export function shape(n: number) {\n  const out = [];\n  for (let i = 0; i < n; i++) out.push({ i, sq: i * i, label: `item ${i}` });\n  return out.map((o) => o.label + ':' + o.sq).join(',');\n}\n",
+    );
+    p.file(
+        "a.test.ts",
+        &format!("{import}test('a', () => {{ expect(typeof shape).toBe('function'); }});\n"),
+    );
+    p.file(
+        "b.test.ts",
+        &format!("{import}test('b', () => {{ expect(shape(2)).toBe('item 0:0,item 1:1'); }});\n"),
+    );
+    // one worker: a.test.ts writes the lib's cache, b.test.ts consumes it and calls `shape`
+    let r = turbo_test(&p.dir, &["--jobs", "1"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let (name, now) = code_cache_files(&p)
+        .iter()
+        .map(|f| {
+            (
+                f.file_name().unwrap().to_string_lossy().into_owned(),
+                f.metadata().unwrap().len(),
+            )
+        })
+        .find(|(n, _)| uncalled.contains_key(n))
+        .expect("the lib's cache entry");
+    let before = uncalled[&name];
+    assert!(now > before, "cache {now} <= load-only cache {before}");
+    // the refreshed entry is consumed by the next run
+    let again = turbo_test(&p.dir, &["--jobs", "1"], &[]);
+    assert_eq!(again.code, Some(0), "{}", again.all());
+}
+
+// A file that fails to load never reaches the post-run cache write: the scripts it compiled
+// belong to its disposed isolate, and the next file of the worker must not touch them.
+#[test]
+fn cjs_bytecode_cache_skips_the_scripts_of_a_file_that_failed_to_load() {
+    let p = plain("rb-flags-cc-load-error");
+    p.with_esbuild();
+    p.file(
+        "src/lib.ts",
+        "export const add = (a: number, b: number) => a + b;\n",
+    );
+    p.file(
+        "a.test.ts",
+        "import { add } from './src/lib';\nif (add(1, 1) === 2) throw new Error('load boom');\n",
+    );
+    p.file(
+        "b.test.ts",
+        "import { add } from './src/lib';\ntest('b', () => { expect(add(2, 3)).toBe(5); });\n",
+    );
+    p.file(
+        "c.test.ts",
+        "import { add } from './src/lib';\ntest('c', () => { expect(add(1, 3)).toBe(4); });\n",
+    );
+    for run in ["cold", "warm"] {
+        let r = turbo_test(&p.dir, &["--jobs", "1"], &[]);
+        assert!(!r.all().contains("panicked"), "{run}: {}", r.all());
+        assert!(
+            r.stdout.contains("Tests  2 passed (2)"),
+            "{run}: {}",
+            r.all()
+        );
+    }
 }
 
 #[test]

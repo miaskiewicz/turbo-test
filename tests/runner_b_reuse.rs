@@ -442,3 +442,151 @@ fn a_test_files_top_level_hooks_do_not_run_in_later_files() {
         assert_eq!(ran[i], format!("{f} {f}:ba,setup,{f}:be"), "{ran:?}");
     }
 }
+
+/// turbo-test#228 at a worker's end: the last file a worker runs fails to load after compiling a
+/// module (its bytecode cache is pending). The pending entries are discarded while the isolate
+/// lives, so the worker exits cleanly instead of aborting in a thread-local destructor.
+#[test]
+fn a_worker_whose_last_file_fails_to_load_exits_cleanly() {
+    for (name, isolate) in [
+        ("rb-last-fail-reuse", "false"),
+        ("rb-last-fail-fresh", "true"),
+    ] {
+        let p = Project::new(name);
+        p.file("package.json", r#"{"name":"lastfail"}"#);
+        p.file(
+            "vitest.config.js",
+            &format!("module.exports = {{ test: {{ globals: true, isolate: {isolate} }} }};\n"),
+        );
+        p.file("dep.js", "module.exports = function dep() { return 1; };\n");
+        p.file(
+            "a.test.js",
+            "import dep from './dep.js';\ntest('a', () => expect(dep()).toBe(1));\n",
+        );
+        p.file(
+            "z.test.js",
+            "import './dep.js';\nthrow new Error('boom at load');\n",
+        );
+        let cache = p.dir.join(".cache");
+        let r = turbo_test(
+            &p.dir,
+            &["--maxWorkers", "1"],
+            &[("TURBO_CACHE_DIR", cache.to_str().unwrap())],
+        );
+        assert_eq!(r.code, Some(1), "{name}\n{}", r.all());
+        assert!(r.all().contains("boom at load"), "{name}\n{}", r.all());
+        assert!(r.stdout.contains("1 passed"), "{name}\n{}", r.all());
+    }
+}
+
+/// zeroDelayTimers under isolate reuse: the switch applies to every file of a reused isolate
+/// (config, env and flag), as on the fresh path.
+#[test]
+fn zero_delay_timers_switch_applies_under_isolate_reuse() {
+    let probe = |want: &str| {
+        format!(
+            "import {{ expect, it }} from 'vitest';\n\
+             it('order', async () => {{\n\
+               const log = [];\n\
+               setTimeout(() => log.push('timeout0'), 0);\n\
+               setImmediate(() => log.push('immediate'));\n\
+               Promise.resolve().then(() => log.push('micro'));\n\
+               await new Promise((r) => setTimeout(r, 20));\n\
+               expect(log).toEqual({want});\n\
+             }});\n"
+        )
+    };
+    let node = "['micro', 'immediate', 'timeout0']";
+    let zero = "['micro', 'timeout0', 'immediate']";
+    let project = |name: &str, want: &str| {
+        let p = Project::new(name);
+        p.file("package.json", r#"{"type":"module"}"#);
+        p.file(
+            "vitest.config.ts",
+            "export default { test: { isolate: false } };\n",
+        );
+        for f in ["a.test.js", "b.test.js", "c.test.js"] {
+            p.file(f, &probe(want));
+        }
+        p
+    };
+    let n = project("rb-zdt-node", node);
+    let z = project("rb-zdt-zero", zero);
+    for (p, args, env) in [
+        (&n, vec!["--no-zero-delay-timers"], vec![]),
+        (&n, vec![], vec![("TURBO_ZERO_DELAY_TIMERS", "0")]),
+        (&z, vec![], vec![]),
+        (
+            &z,
+            vec!["--zero-delay-timers"],
+            vec![("TURBO_ZERO_DELAY_TIMERS", "0")],
+        ),
+    ] {
+        let mut env = env;
+        env.push(("TURBO_JOBS", "1"));
+        let r = turbo_test(&p.dir, &args, &env);
+        assert!(
+            r.stdout.contains("Tests  3 passed (3)"),
+            "{args:?} {env:?}\n{}",
+            r.all()
+        );
+    }
+    // TURBO_REUSE_ISOLATE=1 without the config's isolate key
+    std::fs::write(
+        n.dir.join("vitest.config.ts"),
+        "export default { test: {} };\n",
+    )
+    .unwrap();
+    let r = turbo_test(
+        &n.dir,
+        &["--no-zero-delay-timers"],
+        &[("TURBO_REUSE_ISOLATE", "1"), ("TURBO_JOBS", "1")],
+    );
+    assert!(r.stdout.contains("Tests  3 passed (3)"), "{}", r.all());
+}
+
+/// A setup file's `vi.setConfig` holds for every file of a reused isolate: vitest `isolate: false`
+/// re-runs setup files per file. And a later file's `vi.resetConfig()` goes back to the config
+/// from before the setup file's first `setConfig`, not to one an earlier file saved. Both checked
+/// against vitest 4.1.12 (isolate: false, one worker): all pass.
+#[test]
+fn setup_file_set_config_holds_for_every_reused_file() {
+    let p = Project::new("rb-setconfig-baseline");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "vitest.config.js",
+        "export default { test: { globals: true, setupFiles: ['./setup.js'] } };\n",
+    );
+    p.file("setup.js", "vi.setConfig({ restoreMocks: true });\n");
+    let restores = "const o = { f: () => 'orig' };\n\
+        test('mocked', () => { vi.spyOn(o, 'f').mockReturnValue('mocked'); expect(o.f()).toBe('mocked'); });\n\
+        test('restored before the next test', () => { expect(o.f()).toBe('orig'); });\n";
+    for f in ["a.test.js", "b.test.js", "c.test.js"] {
+        p.file(f, restores);
+    }
+    let r = turbo_test(
+        &p.dir,
+        &[],
+        &[("TURBO_REUSE_ISOLATE", "1"), ("TURBO_JOBS", "1")],
+    );
+    assert!(r.stdout.contains("Tests  6 passed (6)"), "{}", r.all());
+
+    // an earlier file's setConfig leaves no saved copy for a later file's resetConfig
+    p.file(
+        "a.test.js",
+        "test('a', () => { vi.setConfig({ clearMocks: true }); });\n",
+    );
+    p.file(
+        "b.test.js",
+        "const o = { f: () => 'orig' };\n\
+         test('reset', () => { vi.resetConfig(); vi.spyOn(o, 'f').mockReturnValue('mocked'); });\n\
+         test('the setup restoreMocks is undone', () => { expect(o.f()).toBe('mocked'); });\n",
+    );
+    std::fs::remove_file(p.dir.join("c.test.js")).unwrap();
+    let r = turbo_test(
+        &p.dir,
+        &[],
+        &[("TURBO_REUSE_ISOLATE", "1"), ("TURBO_JOBS", "1")],
+    );
+    assert!(r.stdout.contains("Tests  3 passed (3)"), "{}", r.all());
+}

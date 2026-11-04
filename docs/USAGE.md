@@ -52,7 +52,10 @@ Full matrix + quirks: `vitest.compat.md`. Summary:
 **CLI flags** ✅ `<file globs>`, `-j/--jobs` (≈ `--maxWorkers`), `--shard i/n`, `--reporter`
 (json/junit/tap/verbose/dot/default) + `--outputFile`, `-t/--testNamePattern`, `--testTimeout`,
 `--retry`, `--bail`, `-c/--config`, `--root`/`--dir`, `--environment`, `--isolate`/`--no-isolate`,
-`--changed [since]`, `--passWithNoTests`, `-u/--update`, the `--coverage*` family. Leading
+`--changed [since]`, `--passWithNoTests`, `-u/--update`, the `--coverage*` family.
+turbo-test's own: `--zero-delay-timers` / `--no-zero-delay-timers` (`setTimeout(fn, 0)` waits 0 ms
+(default, a known difference from vitest's order) or Node's 1 ms; also `TURBO_ZERO_DELAY_TIMERS=0|1`, preferred over
+`test.zeroDelayTimers`, which vitest's config type lacks; README "Switches"). Leading
 `run`/`watch`/`dev` accepted-and-stripped. Unknown flags warned + ignored (never treated as files).
 
 **Test / `vi` / `expect` API** ✅

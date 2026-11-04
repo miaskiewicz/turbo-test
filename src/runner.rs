@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Kind {
@@ -1522,9 +1523,9 @@ fn find_config_key(s: &str, key: &str) -> Option<usize> {
         if !after.trim_start().starts_with(':') {
             continue;
         }
-        // skip if this line is a `//` comment
-        let line_start = s[..at].rfind('\n').map(|n| n + 1).unwrap_or(0);
-        if s[line_start..at].trim_start().starts_with("//") {
+        // skip a key inside a `//` or `/* */` comment (strings and regexes start none): the
+        // comment stripper then drops the key itself
+        if !crate::launcher::strip_comments(&s[..at + key.len()]).ends_with(key) {
             continue;
         }
         return Some(at);
@@ -1647,20 +1648,46 @@ fn vitest_runtime_config(entry: &Path) -> Option<String> {
 }
 
 fn vitest_runtime_config_uncached(start: &Path) -> Option<String> {
+    let env = std::env::var("TURBO_ZERO_DELAY_TIMERS").ok();
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if let Some(w) = zero_delay_env_warning(env.as_deref()) {
+        WARNED.call_once(|| eprintln!("{w}"));
+    }
+    runtime_config_for(start, env.as_deref())
+}
+
+/// The runtime literal for files under `start`: the nearest config's settings, and the
+/// zeroDelayTimers env switch (what the CLI flag sets) with or without a config file.
+fn runtime_config_for(start: &Path, env: Option<&str>) -> Option<String> {
     let mut dir = Some(start);
     while let Some(d) = dir {
         for cfg in VITEST_CONFIG_FILES {
             if let Ok(s) = std::fs::read_to_string(d.join(cfg)) {
-                return runtime_config_literal(&s);
+                return runtime_config_literal_with(&s, env);
             }
         }
         dir = d.parent();
     }
-    None
+    runtime_config_literal_with("", env)
+}
+
+/// The warning for a `TURBO_ZERO_DELAY_TIMERS` value that is not `0|1|true|false` (ignored).
+fn zero_delay_env_warning(env: Option<&str>) -> Option<String> {
+    match env {
+        None | Some("0" | "1" | "true" | "false") => None,
+        Some(v) => Some(format!(
+            "turbo-test: ignoring TURBO_ZERO_DELAY_TIMERS={v:?} (expected 0, 1, true or false)"
+        )),
+    }
 }
 
 /// [`vitest_runtime_config`]'s literal from a config's text (`None` when it sets none of them).
+#[cfg(test)]
 fn runtime_config_literal(s: &str) -> Option<String> {
+    runtime_config_literal_with(s, None)
+}
+
+fn runtime_config_literal_with(s: &str, env: Option<&str>) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(ft) = config_object_literal(s, "fakeTimers") {
         parts.push(format!("fakeTimers: {ft}"));
@@ -1676,7 +1703,27 @@ fn runtime_config_literal(s: &str) -> Option<String> {
             parts.push(format!("{key}: true"));
         }
     }
+    if let Some(on) = zero_delay_timers_from(env, s) {
+        parts.push(format!("zeroDelayTimers: {on}"));
+    }
     (!parts.is_empty()).then(|| format!("{{ {} }}", parts.join(", ")))
+}
+
+/// The zeroDelayTimers switch when something sets it (the runtime's default is on):
+/// `TURBO_ZERO_DELAY_TIMERS=0|1` (what `--[no-]zero-delay-timers` sets) wins over the config's
+/// `test.zeroDelayTimers: true|false`.
+fn zero_delay_timers_from(env: Option<&str>, s: &str) -> Option<bool> {
+    match env {
+        Some("0" | "false") => return Some(false),
+        Some("1" | "true") => return Some(true),
+        _ => {}
+    }
+    let start = find_config_key(s, "zeroDelayTimers")?;
+    let (_, v) = s[start..].split_once(':')?;
+    let v = v.trim_start();
+    v.starts_with("true")
+        .then_some(true)
+        .or_else(|| v.starts_with("false").then_some(false))
 }
 
 /// Whether a config key's value is `true`.
@@ -4303,7 +4350,8 @@ fn cc_path(wrapped: &str) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     wrapped.hash(&mut h);
-    "cc-v1".hash(&mut h);
+    // v2: caches are produced after the test file ran (they carry its lazily compiled functions)
+    "cc-v2".hash(&mut h);
     cache_dir().join(format!("cc-{:016x}.bin", h.finish()))
 }
 
@@ -4315,42 +4363,393 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8]) {
     }
 }
 
+/// A module's wrapped CJS source and its bytecode cache, shared by every isolate in the process
+/// (from alphajew420's #106). A fresh isolate per file loads react, the testing library and the
+/// app's modules again each time; each load read the transform cache, wrapped the source (a
+/// copy), hashed it for its bytecode cache, read that file and copied the text into the V8 heap.
+/// A node_modules module's ASCII text is leaked on purpose: V8 uses it as an external one-byte
+/// string (no copy, not counted in the isolate's heap) that may outlive the entry; other text is
+/// owned ([`shared_module_source`]). One entry per (path, mode): an edited file replaces its
+/// entry, and app-module entries are capped (LRU). A source only one load uses is owned and freed
+/// with its last user ([`module_source_for`]).
+struct ModuleSource {
+    wrapped: std::borrow::Cow<'static, str>,
+    /// The leaked ASCII text's bytes, for an external string; `None` for owned text.
+    one_byte: Option<&'static [u8]>,
+    cc_path: PathBuf,
+    /// The size of the richest bytecode cache this process read or wrote for it (0: none or
+    /// rejected). The bytes themselves stay in the file, read on each consume.
+    cc: std::sync::Mutex<usize>,
+}
+
+#[cfg(test)]
+impl ModuleSource {
+    /// The size of the richest bytecode cache seen for it.
+    fn cc_len(&self) -> usize {
+        *self.cc.lock().unwrap()
+    }
+}
+
+/// (path, decorator-metadata mode)
+type SourceKey = (PathBuf, bool);
+
+/// What identifies a version of a file: mtime and ctime in ns, size, inode, and for a file
+/// modified in the last 2 s (a coarse-mtime filesystem can give an edit the same mtime and size)
+/// a hash of its bytes.
+type SourceStamp = (u128, u128, u64, u64, u64);
+
+fn source_stamp(abs: &Path) -> Option<SourceStamp> {
+    let meta = std::fs::metadata(abs).ok()?;
+    let ns = |t: std::io::Result<std::time::SystemTime>| {
+        t.ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos())
+    };
+    let mtime = ns(meta.modified());
+    #[cfg(unix)]
+    let (ino, ctime) = {
+        use std::os::unix::fs::MetadataExt;
+        (
+            meta.ino(),
+            u128::try_from(meta.ctime()).unwrap_or(0) * 1_000_000_000
+                + u128::try_from(meta.ctime_nsec()).unwrap_or(0),
+        )
+    };
+    #[cfg(not(unix))]
+    let (ino, ctime) = (0, 0);
+    let now = ns(Ok(std::time::SystemTime::now()));
+    stamp_from(mtime, ctime, meta.len(), ino, now, || {
+        std::fs::read(abs).ok()
+    })
+}
+
+/// A [`SourceStamp`] from a file's metadata, the time now (both in ns) and its bytes, read only
+/// for a file modified less than 2 s ago (or with a future mtime); `None` when that read fails.
+/// A stamp taken after the window has hash 0: an entry made inside the window then misses once
+/// and reloads, and an edit that keeps an older mtime and the size is still caught by ctime and
+/// inode, not by the hash.
+fn stamp_from(
+    mtime: u128,
+    ctime: u128,
+    len: u64,
+    ino: u64,
+    now: u128,
+    bytes: impl FnOnce() -> Option<Vec<u8>>,
+) -> Option<SourceStamp> {
+    let hash = if now.saturating_sub(mtime) < 2_000_000_000 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes()?.hash(&mut h);
+        h.finish() | 1
+    } else {
+        0
+    };
+    Some((mtime, ctime, len, ino, hash))
+}
+
+const CJS_WRAPPER_OPEN: &str = "(function (exports, module, require, __filename, __dirname) {\n";
+
+/// Whether a module's transform depends only on its file, so its wrapped source can be shared:
+/// not the test file or a setup file (their factories get a binder, turbo-test#205; the test
+/// file's transform also feeds test locations), not an app module whose source map failure
+/// frames keep, not under coverage. A module the shared cache skips loads as before, with the
+/// transform's per-file side effects.
+fn shareable_source(abs: &Path) -> bool {
+    let app = !abs.components().any(|c| c.as_os_str() == "node_modules");
+    !crate::coverage::enabled()
+        && !TEST_FILE.with(|f| *f.borrow() == abs)
+        && !SCOPED_SETUP_FILES.with(|f| f.borrow().iter().any(|s| s == abs))
+        && !(app && crate::location::frames_enabled())
+}
+
+/// The module's wrapped source: the process's shared copy when [`shareable_source`], else an
+/// owned one of its own, freed once its load and pending cache write are done (V8 copies its
+/// text, so nothing outlives it).
+fn module_source_for(abs: &Path, prefer_metadata: bool) -> Option<Arc<ModuleSource>> {
+    if shareable_source(abs) {
+        return module_source(abs, prefer_metadata);
+    }
+    let raw = read_transformed(abs, true, prefer_metadata)?;
+    Some(new_module_source(format!("{CJS_WRAPPER_OPEN}{raw}\n}})")))
+}
+
+/// An owned source (its text is copied into V8).
+fn new_module_source(wrapped: String) -> Arc<ModuleSource> {
+    Arc::new(ModuleSource {
+        cc_path: cc_path(&wrapped),
+        wrapped: wrapped.into(),
+        one_byte: None,
+        cc: std::sync::Mutex::new(0),
+    })
+}
+
+/// A shared source. A node_modules module's ASCII text is leaked so V8 can use it as an external
+/// one-byte string (no copy, outside the isolate's heap, and V8 may hold it past the entry); any
+/// other text is owned and copied into V8, so it is freed with its entry.
+fn shared_module_source(wrapped: String, external: bool) -> Arc<ModuleSource> {
+    let cc_path = cc_path(&wrapped);
+    let (wrapped, one_byte): (std::borrow::Cow<'static, str>, _) = if external && wrapped.is_ascii()
+    {
+        let text: &'static str = Box::leak(wrapped.into_boxed_str());
+        (text.into(), Some(text.as_bytes()))
+    } else {
+        (wrapped.into(), None)
+    };
+    Arc::new(ModuleSource {
+        wrapped,
+        one_byte,
+        cc_path,
+        cc: std::sync::Mutex::new(0),
+    })
+}
+
+/// A shared entry: the file version it was made from, its source, when it was last used (a
+/// process-wide tick) and whether it is an app module (outside node_modules: capped).
+struct SharedSource {
+    stamp: SourceStamp,
+    source: Arc<ModuleSource>,
+    last_use: u64,
+    app: bool,
+}
+
+/// At most this many shared app-module entries; past it the least recently used goes.
+/// node_modules entries are not capped (a suite's dependency set is bounded).
+const MAX_SHARED_APP_SOURCES: usize = 2048;
+
+type SourceMap = std::sync::Mutex<HashMap<SourceKey, SharedSource>>;
+
+fn shared_sources() -> &'static SourceMap {
+    static SOURCES: std::sync::OnceLock<SourceMap> = std::sync::OnceLock::new();
+    SOURCES.get_or_init(Default::default)
+}
+
+/// Evict the least recently used app entries until at most `cap` are left.
+fn cap_app_sources(map: &mut HashMap<SourceKey, SharedSource>, cap: usize) {
+    let mut apps: Vec<(u64, SourceKey)> = map
+        .iter()
+        .filter(|(_, e)| e.app)
+        .map(|(k, e)| (e.last_use, k.clone()))
+        .collect();
+    if apps.len() <= cap {
+        return;
+    }
+    apps.sort_unstable_by_key(|(t, _)| *t);
+    let excess = apps.len() - cap;
+    for (_, k) in apps.into_iter().take(excess) {
+        map.remove(&k);
+    }
+}
+
+/// How many shared entries a path has (one per decorator-metadata mode at most).
+#[cfg(test)]
+fn module_source_entries(abs: &Path) -> usize {
+    shared_sources()
+        .lock()
+        .unwrap()
+        .keys()
+        .filter(|k| k.0 == abs)
+        .count()
+}
+
+fn module_source(abs: &Path, prefer_metadata: bool) -> Option<Arc<ModuleSource>> {
+    static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let stamp = source_stamp(abs)?;
+    let key: SourceKey = (abs.to_path_buf(), prefer_metadata);
+    let map = shared_sources();
+    let hit = |m: &mut HashMap<SourceKey, SharedSource>| {
+        let e = m.get_mut(&key).filter(|e| e.stamp == stamp)?;
+        e.last_use = TICK.fetch_add(1, Ordering::Relaxed);
+        Some(Arc::clone(&e.source))
+    };
+    if let Some(src) = hit(&mut map.lock().unwrap()) {
+        return Some(src);
+    }
+    // transformed outside the lock (it can run esbuild); a racing thread's copy is dropped
+    let raw = read_transformed(abs, true, prefer_metadata)?;
+    let wrapped = format!("{CJS_WRAPPER_OPEN}{raw}\n}})");
+    let mut map = map.lock().unwrap();
+    if let Some(src) = hit(&mut map) {
+        return Some(src);
+    }
+    let app = !abs.components().any(|c| c.as_os_str() == "node_modules");
+    let source = shared_module_source(wrapped, !app);
+    // an edited file replaces its entry (leaked external text stays: V8 may still use it)
+    map.insert(
+        key,
+        SharedSource {
+            stamp,
+            source: Arc::clone(&source),
+            last_use: TICK.fetch_add(1, Ordering::Relaxed),
+            app,
+        },
+    );
+    if app {
+        cap_app_sources(&mut map, MAX_SHARED_APP_SOURCES);
+    }
+    Some(source)
+}
+
+/// The module's source as a V8 string: external (no copy) for leaked ASCII text.
+fn source_string<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    source: &ModuleSource,
+) -> Option<v8::Local<'s, v8::String>> {
+    match source.one_byte {
+        Some(b) => v8::String::new_external_onebyte_static(scope, b),
+        None => v8::String::new(scope, &source.wrapped),
+    }
+}
+
+/// The module's bytecode cache, read from its file (the slot keeps only the richest size).
+fn module_code_cache(module: &ModuleSource) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(&module.cc_path)
+        .ok()
+        .filter(|b| !b.is_empty())?;
+    let mut slot = module.cc.lock().unwrap();
+    *slot = (*slot).max(bytes.len());
+    Some(bytes)
+}
+
+/// Persist a new bytecode cache, for the process's other isolates too, unless it holds no more
+/// than the current one or (for a cache-hit refresh) the `consumed` one: checked under the slot's
+/// lock, so a poorer cache never replaces a richer one.
+fn store_code_cache(module: &ModuleSource, bytes: &[u8], consumed: Option<usize>) {
+    let mut slot = module.cc.lock().unwrap();
+    if bytes.len() <= (*slot).max(consumed.unwrap_or(0)) {
+        return;
+    }
+    write_atomic_bytes(&module.cc_path, bytes);
+    *slot = bytes.len();
+}
+
+/// Forget a cache V8 rejected (another V8 build or flag set): the slot and its file, so no
+/// other isolate consumes it again.
+fn reject_code_cache(module: &ModuleSource) {
+    let mut slot = module.cc.lock().unwrap();
+    *slot = 0;
+    let _ = std::fs::remove_file(&module.cc_path);
+}
+
 /// Compile the wrapped CJS source, consuming a persisted bytecode cache when present and
 /// producing one on a miss. Returns the bound Script. Falls back to a plain compile on any
 /// cache miss/reject (V8 recompiles internally and we keep that result).
 fn compile_cjs_cached<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     code: v8::Local<v8::String>,
-    wrapped: &str,
+    module: &Arc<ModuleSource>,
+    origin: Option<&v8::ScriptOrigin>,
 ) -> Option<v8::Local<'s, v8::Script>> {
     use v8::script_compiler as sc;
-    let path = cc_path(wrapped);
-    if let Ok(bytes) = std::fs::read(&path) {
-        if !bytes.is_empty() {
-            let cached = v8::CachedData::new(&bytes);
-            let mut source = sc::Source::new_with_cached_data(code, None, cached);
-            let (consume, reason) = (
-                sc::CompileOptions::ConsumeCodeCache,
-                sc::NoCacheReason::NoReason,
-            );
-            let compiled = sc::compile(scope, &mut source, consume, reason);
-            // `bytes` stays alive through this block (Source borrowed it for the compile).
-            if let Some(s) = compiled {
-                return Some(s);
+    if let Some(bytes) = module_code_cache(module) {
+        let cached = v8::CachedData::new(&bytes);
+        let mut source = sc::Source::new_with_cached_data(code, origin, cached);
+        let (consume, reason) = (
+            sc::CompileOptions::ConsumeCodeCache,
+            sc::NoCacheReason::NoReason,
+        );
+        let compiled = sc::compile(scope, &mut source, consume, reason);
+        // `bytes` stays alive through this block (Source borrowed it for the compile).
+        // A rejected cache (another V8 build or flag set) still compiles; rewrite it then so
+        // later loads hit instead of recompiling from source forever.
+        let rejected = source.get_cached_data().is_none_or(|c| c.rejected());
+        if let Some(s) = compiled {
+            if rejected {
+                reject_code_cache(module);
+                defer_code_cache(scope, module, s, None);
+            } else if refresh_due(&module.cc_path) {
+                defer_code_cache(scope, module, s, Some(bytes.len()));
             }
+            return Some(s);
         }
     }
     // Miss/reject: compile fresh and persist the bytecode for next time.
-    let mut source = sc::Source::new(code, None);
+    let mut source = sc::Source::new(code, origin);
     let (options, reason) = (
         sc::CompileOptions::NoCompileOptions,
         sc::NoCacheReason::NoReason,
     );
     let script = sc::compile(scope, &mut source, options, reason)?;
-    if let Some(cc) = script.get_unbound_script(scope).create_code_cache() {
-        write_atomic_bytes(&path, &cc);
-    }
+    defer_code_cache(scope, module, script, None);
     Some(script)
+}
+
+thread_local! {
+    /// Scripts whose caches are written once the test file ran ([`flush_code_caches`]), with
+    /// their cache paths and the size of the cache they consumed: `None` for a script compiled
+    /// without a usable cache (always written), `Some(n)` for a cache-hit refresh (written only
+    /// when the run compiled more of it, so the new cache is larger than `n`).
+    static PENDING_CODE_CACHES: RefCell<Vec<PendingCodeCache>> = const { RefCell::new(Vec::new()) };
+    /// Cache hits per cache path in this worker, for [`refresh_due`]'s backoff.
+    static CODE_CACHE_HITS: RefCell<HashMap<PathBuf, u32>> = RefCell::new(HashMap::new());
+}
+
+type PendingCodeCache = (
+    Arc<ModuleSource>,
+    v8::Global<v8::UnboundScript>,
+    Option<usize>,
+);
+
+/// Whether this cache hit re-checks the cache for functions compiled since it was written: on
+/// the 1st, 2nd, 4th, 8th... hit of a path in this worker. A function first called by a later
+/// test file is compiled lazily after the cache was made; without a refresh every later run
+/// compiles it again. The backoff bounds the serialization cost to log2(hits) per module.
+fn refresh_due(path: &Path) -> bool {
+    CODE_CACHE_HITS.with(|h| {
+        let mut h = h.borrow_mut();
+        let n = h.entry(path.to_path_buf()).or_insert(0);
+        *n += 1;
+        n.is_power_of_two()
+    })
+}
+
+/// Queue `script`'s cache for [`flush_code_caches`]: `consumed` is the size of the cache it
+/// was compiled from for a cache-hit refresh, `None` for a script compiled without a usable one.
+fn defer_code_cache(
+    scope: &mut v8::PinScope,
+    module: &Arc<ModuleSource>,
+    script: v8::Local<v8::Script>,
+    consumed: Option<usize>,
+) {
+    let unbound = v8::Global::new(scope, script.get_unbound_script(scope));
+    PENDING_CODE_CACHES.with(|p| p.borrow_mut().push((Arc::clone(module), unbound, consumed)));
+}
+
+/// Drop the pending caches a previous file left (it failed to load, so it never reached
+/// [`flush_code_caches`]). Their scripts may belong to a disposed isolate: touching or dropping
+/// those handles panics, so they are forgotten.
+fn discard_stale_code_caches() {
+    std::mem::forget(PENDING_CODE_CACHES.with(|p| std::mem::take(&mut *p.borrow_mut())));
+}
+
+/// Drop the caches a file left pending (it did not reach [`flush_code_caches`]) while its
+/// isolate is alive, so none is left for a later file or the thread-local destructor, which
+/// runs after the isolate is gone (turbo-test#228 at a worker's end). The guard covers an
+/// unwinding run: it forgets what is left instead.
+fn drop_pending_code_caches() {
+    drop(PENDING_CODE_CACHES.with(|p| std::mem::take(&mut *p.borrow_mut())));
+}
+
+struct PendingCodeCacheGuard;
+
+impl Drop for PendingCodeCacheGuard {
+    fn drop(&mut self) {
+        discard_stale_code_caches();
+    }
+}
+
+/// Write the caches of the scripts this test file compiled from source, and refresh the cache
+/// hits that compiled more functions than their cache held. Produced after the run, a cache also
+/// holds every function the file called: V8 compiles functions lazily, and a cache made right
+/// after the top-level compile has none of them, so each later isolate would parse and compile
+/// them again.
+fn flush_code_caches(scope: &mut v8::PinScope) {
+    for (module, unbound, consumed) in
+        PENDING_CODE_CACHES.with(|p| std::mem::take(&mut *p.borrow_mut()))
+    {
+        if let Some(cc) = v8::Local::new(scope, &unbound).create_code_cache() {
+            store_code_cache(&module, &cc, consumed);
+        }
+    }
 }
 
 fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks: bool) -> Option<()> {
@@ -4366,7 +4765,7 @@ fn load_cjs_inner<'s>(
     if REGISTRY.with(|r| r.borrow().cjs_synth_by_path.contains_key(abs)) {
         return Some(());
     }
-    let Some(raw) = read_transformed(abs, true, prefer_metadata) else {
+    let Some(module) = module_source_for(abs, prefer_metadata) else {
         if loader_debug() {
             eprintln!("  cjs read/transform failed: {}", abs.display());
         }
@@ -4379,9 +4778,7 @@ fn load_cjs_inner<'s>(
         }
         return None;
     };
-    let wrapped =
-        format!("(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})");
-    let code = v8::String::new(scope, &wrapped)?;
+    let code = source_string(scope, &module)?;
     // Under --coverage, give the script an origin named after the file so V8's precise-coverage
     // report carries a URL we can map back to source. Off by default (origin None) — zero change.
     // (compiled script, the compile error when neither the native output nor the esbuild retry
@@ -4402,8 +4799,10 @@ fn load_cjs_inner<'s>(
         } else {
             None
         };
-        let compiled = if code_cache_enabled() && origin.is_none() {
-            compile_cjs_cached(tc, code, &wrapped)
+        // A named origin (the entry file, framed app modules) shares the bytecode cache: the
+        // cached data does not depend on the script's name, and V8 rejects a mismatch safely.
+        let compiled = if code_cache_enabled() {
+            compile_cjs_cached(tc, code, &module, origin.as_ref())
         } else {
             match &origin {
                 Some(o) => v8::Script::compile(tc, code, Some(o)),
@@ -4427,7 +4826,7 @@ fn load_cjs_inner<'s>(
                     .unwrap_or_default();
                 let fb = esbuild_cjs_fallback(abs, prefer_metadata).and_then(|src| {
                     let wrapped_fb = format!("(function (exports, module, require, __filename, __dirname) {{\n{src}\n}})");
-                    if wrapped_fb == wrapped {
+                    if wrapped_fb == module.wrapped {
                         return None; // native wasn't the source (output identical) — no point retrying
                     }
                     let code_fb = v8::String::new(tc, &wrapped_fb)?;
@@ -6646,44 +7045,30 @@ const RUNTIME_JS: &str = include_str!("runtime.js");
 /// default context, serialized. Native callbacks (log/__nativeRequire) are NOT in the
 /// snapshot — V8 can't serialize native function pointers — so they are re-bound per
 /// context after deserialization (`install_natives`).
-pub(crate) fn framework_snapshot() -> &'static Vec<u8> {
-    static SNAP: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+pub(crate) fn framework_snapshot() -> &'static FrameworkSnapshot {
+    static SNAP: std::sync::OnceLock<FrameworkSnapshot> = std::sync::OnceLock::new();
     SNAP.get_or_init(|| {
+        let chai = chai_script();
+        let flags = std::env::var("TURBO_V8_FLAGS").unwrap_or_default();
+        if window_snapshot_enabled() {
+            if let Some(snap) = window_snapshot(&chai, &flags) {
+                turbo_dom_browser_env::browser_env::set_snapshot_install(true);
+                return snap;
+            }
+        }
+        let path = saved_blob_path("framework", blob_key_from("framework", 0, &chai, &flags));
+        if let Some(data) = read_saved_blob(&path) {
+            return FrameworkSnapshot {
+                data,
+                references: None,
+            };
+        }
         let mut creator = v8::Isolate::snapshot_creator(None, None);
         {
             v8::scope!(let scope, &mut creator);
             let context = v8::Context::new(scope, Default::default());
             let scope = &mut v8::ContextScope::new(scope, context);
-            // Bake the REAL host platform/arch (compile-time target) into the snapshot so
-            // turbo-dom's index.js loader requires the matching prebuilt .node. Without this
-            // the runtime reported 'darwin'/'arm64' everywhere and non-mac hosts loaded the
-            // macOS .node -> dlopen fails -> "document is not defined".
-            let node_platform = node_platform(std::env::consts::OS);
-            let node_arch = node_arch(std::env::consts::ARCH);
-            let os_type = node_os_type(std::env::consts::OS);
-            // isMusl() reads glibcVersionRuntime: truthy => gnu, falsy => musl.
-            let glibc_runtime: &str = if cfg!(target_env = "musl") { "" } else { "2.39" };
-            let prelude = format!(
-                "globalThis.__ttPlatform={node_platform:?};globalThis.__ttArch={node_arch:?};globalThis.__ttOsType={os_type:?};globalThis.__ttGlibc={glibc_runtime:?};"
-            );
-            let pcode = v8::String::new(scope, &prelude).unwrap();
-            v8::Script::compile(scope, pcode, None).unwrap().run(scope).unwrap();
-            // chai (turbo-test#160): vitest's expect(x) is a chai Assertion; runtime.js loads it
-            // through the globalThis.__ttLoadChai this defines
-            let chai = chai_script();
-            {
-                let tc = std::pin::pin!(v8::TryCatch::new(scope));
-                let tc = &mut tc.init();
-                let ccode = v8::String::new(tc, &chai).unwrap();
-                let ran = v8::Script::compile(tc, ccode, None).and_then(|s| s.run(tc));
-                if ran.is_none() {
-                    let msg = caught_message(tc, "Error").unwrap_or_default();
-                    chai_missing(&format!("chai failed to load: {msg}"));
-                }
-            }
-            let code = v8::String::new(scope, RUNTIME_JS).unwrap();
-            let s = v8::Script::compile(scope, code, None).unwrap();
-            s.run(scope).unwrap();
+            framework_prelude(scope);
             scope.set_default_context(context);
         }
         // E5: bake the framework's compiled bytecode into the snapshot (Keep) instead of dropping
@@ -6696,11 +7081,217 @@ pub(crate) fn framework_snapshot() -> &'static Vec<u8> {
         } else {
             v8::FunctionCodeHandling::Clear
         };
-        creator
-            .create_blob(handling)
-            .expect("framework snapshot")
-            .to_vec()
+        let data = creator.create_blob(handling).expect("framework snapshot");
+        save_blob(&path, &data);
+        FrameworkSnapshot {
+            data: Box::leak(data.to_vec().into_boxed_slice()),
+            references: None,
+        }
     })
+}
+
+/// The window startup blob (turbo-dom#249): the one a previous process saved for this build,
+/// reference table and inputs, else a new one, saved for the next process. A rebuilt blob is not
+/// byte-identical, and V8 rejects bytecode caches made against another blob, so keeping the
+/// blob is what lets every run reuse the on-disk module caches.
+fn window_snapshot(chai: &str, flags: &str) -> Option<FrameworkSnapshot> {
+    let (references, fingerprint) = turbo_dom_browser_env::browser_env::snapshot_references();
+    let path = saved_blob_path("window", blob_key_from("window", fingerprint, chai, flags));
+    if let Some(data) = read_saved_blob(&path) {
+        return Some(FrameworkSnapshot {
+            data,
+            references: Some(references),
+        });
+    }
+    let blob = turbo_dom_browser_env::browser_env::snapshot_blob_with(framework_prelude)?;
+    // saved only when built with the recorded table (the key's fingerprint)
+    let same = blob.references.len() == references.len()
+        && blob
+            .references
+            .iter()
+            .zip(references)
+            .all(|(a, b)| unsafe { a.pointer == b.pointer });
+    if same {
+        save_blob(&path, blob.data);
+    }
+    Some(FrameworkSnapshot {
+        data: blob.data,
+        references: Some(blob.references),
+    })
+}
+
+/// Where a startup blob of `kind` with `key` is kept: the build's cache dir (its name carries
+/// the build id, so another binary never reads it).
+fn saved_blob_path(kind: &str, key: u64) -> PathBuf {
+    cache_dir().join(format!("snapshot-{kind}-{key:016x}.bin"))
+}
+
+/// The key of a saved startup blob: what it was built from beyond the build itself (its kind,
+/// the reference table's fingerprint, chai's text and the V8 flags).
+fn blob_key_from(kind: &str, fingerprint: u64, chai: &str, flags: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (kind, fingerprint, chai, flags).hash(&mut h);
+    h.finish()
+}
+
+const SAVED_BLOB_MAGIC: &[u8; 8] = b"TTSNAP01";
+
+/// Save a startup blob: magic, length, content hash, bytes (written atomically).
+fn save_blob(path: &Path, data: &[u8]) {
+    let mut out = Vec::with_capacity(data.len() + 24);
+    out.extend_from_slice(SAVED_BLOB_MAGIC);
+    out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+    out.extend_from_slice(&blob_hash(data).to_le_bytes());
+    out.extend_from_slice(data);
+    write_atomic_bytes(path, &out);
+}
+
+/// A saved startup blob, leaked for the process, when it is intact (magic, length and hash
+/// match): V8 aborts on a damaged blob, so anything else reads as absent.
+fn read_saved_blob(path: &Path) -> Option<&'static [u8]> {
+    let bytes = std::fs::read(path).ok()?;
+    let (header, data) = bytes.split_at_checked(24)?;
+    let len = u64::from_le_bytes(header[8..16].try_into().ok()?);
+    let hash = u64::from_le_bytes(header[16..24].try_into().ok()?);
+    let intact =
+        &header[..8] == SAVED_BLOB_MAGIC && data.len() as u64 == len && blob_hash(data) == hash;
+    intact.then(|| &*Box::leak(data.to_vec().into_boxed_slice()))
+}
+
+fn blob_hash(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut h);
+    h.finish()
+}
+
+/// The worker isolates' startup blob ([`framework_snapshot`]): the framework layer, and with
+/// the window snapshot (`references` set) the window context at
+/// `turbo_dom_browser_env::browser_env::SNAPSHOT_WINDOW_CONTEXT` too.
+pub(crate) struct FrameworkSnapshot {
+    data: &'static [u8],
+    references: Option<&'static [v8::ExternalReference]>,
+}
+
+// SAFETY: the references are addresses of `extern "C"` functions (turbo-dom's table), immutable
+// and valid process-wide; the data is an immutable leaked byte slice.
+unsafe impl Send for FrameworkSnapshot {}
+unsafe impl Sync for FrameworkSnapshot {}
+
+impl FrameworkSnapshot {
+    /// Isolate parameters that deserialize this blob.
+    pub(crate) fn create_params(&self) -> v8::CreateParams {
+        let params = v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(self.data));
+        match self.references {
+            Some(references) => params.external_references(std::borrow::Cow::Borrowed(references)),
+            None => params,
+        }
+    }
+
+    /// A new context of an isolate made from this blob: the window context for a DOM file
+    /// when the blob has one, else the framework's default context.
+    pub(crate) fn new_context<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_, ()>,
+        dom: bool,
+    ) -> v8::Local<'s, v8::Context> {
+        if dom && self.references.is_some() {
+            let index = turbo_dom_browser_env::browser_env::SNAPSHOT_WINDOW_CONTEXT;
+            // invariant: a blob with references is a snapshot_blob_with one, which holds it
+            return v8::Context::from_snapshot(scope, index, Default::default())
+                .expect("the window blob holds the window context");
+        }
+        v8::Context::new(scope, Default::default())
+    }
+}
+
+/// Whether worker isolates come from the window snapshot (turbo-dom#249): `TURBO_SNAPSHOT=0`
+/// turns it off (the framework-only blob; each DOM file then runs the engine install).
+fn window_snapshot_enabled() -> bool {
+    WINDOW_SNAPSHOT_WANTED.load(std::sync::atomic::Ordering::Relaxed)
+        && window_snapshot_allowed(
+            std::env::var("TURBO_SNAPSHOT").ok().as_deref(),
+            std::env::var("TURBO_V8_FLAGS").ok().as_deref(),
+        )
+}
+
+/// `TURBO_SNAPSHOT=0` keeps the framework-only blob, and so do custom V8 flags
+/// (`TURBO_V8_FLAGS`, non-empty): code deserialized from the window blob can conflict with
+/// them (`--interpreted-frames-native-stack` aborts V8).
+fn window_snapshot_allowed(turbo_snapshot: Option<&str>, v8_flags: Option<&str>) -> bool {
+    turbo_snapshot != Some("0") && v8_flags.is_none_or(str::is_empty)
+}
+
+/// Cleared by [`plan_window_snapshot`] for a run too small to repay the window snapshot.
+static WINDOW_SNAPSHOT_WANTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// DOM files from which the window snapshot pays for itself: its one-time build (~170 ms on a
+/// quiet M5) against the engine install it saves each DOM file (~20-30 ms).
+const WINDOW_SNAPSHOT_MIN_DOM_FILES: usize = 8;
+
+/// Whether a run with `dom_files` DOM-environment files builds the window snapshot.
+fn window_snapshot_wanted(dom_files: usize) -> bool {
+    dom_files >= WINDOW_SNAPSHOT_MIN_DOM_FILES
+}
+
+/// Before [`init_v8`]: build the window snapshot only when the run has enough DOM files to repay
+/// it (a single-file or node-only run keeps the framework-only blob and its fast start).
+pub fn plan_window_snapshot(files: &[PathBuf]) {
+    let dom_files = files
+        .iter()
+        .filter(|f| needs_dom(f))
+        .take(WINDOW_SNAPSHOT_MIN_DOM_FILES)
+        .count();
+    WINDOW_SNAPSHOT_WANTED.store(
+        window_snapshot_wanted(dom_files),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The framework layer every worker context starts with: the host platform facts, chai and
+/// RUNTIME_JS, evaluated in the snapshot context.
+/// glibcVersionRuntime baked into the snapshot: empty (falsy) on musl, a glibc version otherwise.
+#[cfg(target_env = "musl")]
+const GLIBC_RUNTIME: &str = "";
+#[cfg(not(target_env = "musl"))]
+const GLIBC_RUNTIME: &str = "2.39";
+
+fn framework_prelude(scope: &mut v8::PinScope) {
+    // Bake the REAL host platform/arch (compile-time target) into the snapshot so
+    // turbo-dom's index.js loader requires the matching prebuilt .node. Without this
+    // the runtime reported 'darwin'/'arm64' everywhere and non-mac hosts loaded the
+    // macOS .node -> dlopen fails -> "document is not defined".
+    let node_platform = node_platform(std::env::consts::OS);
+    let node_arch = node_arch(std::env::consts::ARCH);
+    let os_type = node_os_type(std::env::consts::OS);
+    // isMusl() reads glibcVersionRuntime: truthy => gnu, falsy => musl.
+    let glibc_runtime = GLIBC_RUNTIME;
+    let prelude = format!(
+        "globalThis.__ttPlatform={node_platform:?};globalThis.__ttArch={node_arch:?};globalThis.__ttOsType={os_type:?};globalThis.__ttGlibc={glibc_runtime:?};"
+    );
+    let pcode = v8::String::new(scope, &prelude).unwrap();
+    v8::Script::compile(scope, pcode, None)
+        .unwrap()
+        .run(scope)
+        .unwrap();
+    // chai (turbo-test#160): vitest's expect(x) is a chai Assertion; runtime.js loads it
+    // through the globalThis.__ttLoadChai this defines
+    let chai = chai_script();
+    {
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let tc = &mut tc.init();
+        let ccode = v8::String::new(tc, &chai).unwrap();
+        let ran = v8::Script::compile(tc, ccode, None).and_then(|s| s.run(tc));
+        if ran.is_none() {
+            let msg = caught_message(tc, "Error").unwrap_or_default();
+            chai_missing(&format!("chai failed to load: {msg}"));
+        }
+    }
+    let code = v8::String::new(scope, RUNTIME_JS).unwrap();
+    let s = v8::Script::compile(scope, code, None).unwrap();
+    s.run(scope).unwrap();
 }
 
 /// Where chai's ES-module build is: `TURBO_CHAI` (cli.js sets it to the `chai` this npm package
@@ -7838,7 +8429,8 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
             crate::coverage::enabled().then(|| crate::coverage::Collector::new(isolate));
 
         v8::scope!(let scope, isolate);
-        let context = v8::Context::new(scope, Default::default());
+        let dom = needs_dom(&entry_abs);
+        let context = framework_snapshot().new_context(scope, dom);
         let scope = &mut v8::ContextScope::new(scope, context);
         let global = context.global(scope);
         install_natives(scope, global);
@@ -7870,11 +8462,13 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
         }
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
 
+        discard_stale_code_caches();
+        let _pending_guard = PendingCodeCacheGuard;
         set_file_env(scope, &entry_abs);
         let result = 'work: {
             // 0. DOM environment (turbo-dom) — only for files that need it, so pure-logic
             //    tests keep their clean globals (mirrors vitest per-file environment).
-            if needs_dom(&entry_abs) {
+            if dom {
                 setup_dom(scope, &entry_abs);
             }
 
@@ -7994,6 +8588,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
             // 3. drive the collected tests: __tt.run() -> Promise<summary>
             drive_tests(scope, global, &entry_abs)
         };
+        drop_pending_code_caches();
 
         // A file that ran into the isolate's heap limit was terminated by the heap guard: report
         // that, not whatever the half-unwound run happened to say.
@@ -8031,8 +8626,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
 /// Create params for a worker isolate: the framework snapshot, plus an explicit heap limit when
 /// `TURBO_MAX_HEAP_MB` is set.
 fn isolate_params() -> v8::CreateParams {
-    let blob = framework_snapshot();
-    let params = v8::Isolate::create_params().snapshot_blob(v8::StartupData::from(blob.clone()));
+    let params = framework_snapshot().create_params();
     match crate::heap_guard::max_heap_bytes() {
         Some(max) => params.heap_limits(0, max),
         None => params,
@@ -8093,7 +8687,7 @@ fn run_test_file_reused(
             if let Some(g) = cb.as_ref() {
                 (v8::Local::new(scope, g), false)
             } else {
-                let ctx = v8::Context::new(scope, Default::default());
+                let ctx = framework_snapshot().new_context(scope, needs_dom(entry_abs));
                 *cb = Some(v8::Global::new(scope, ctx));
                 (ctx, true)
             }
@@ -8119,6 +8713,14 @@ fn run_test_file_reused(
                 }
             }
         }
+        // the config's runtime settings for this file (zeroDelayTimers, fakeTimers, mock / stub
+        // switches), as the fresh path applies them; the reset above restored the defaults
+        if let Some(cfg) = vitest_runtime_config(entry_abs) {
+            run_js(
+                scope,
+                &format!("try {{ globalThis.__ttApplyConfig(({cfg})); }} catch (e) {{}}"),
+            );
+        }
 
         // __cwd: the test's project root (nearest package.json outside node_modules).
         {
@@ -8143,6 +8745,8 @@ fn run_test_file_reused(
         }
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
 
+        discard_stale_code_caches();
+        let _pending_guard = PendingCodeCacheGuard;
         set_file_env(scope, entry_abs);
         let result: Result<TestReport, String> = 'work: {
             // DOM: install once per worker and keep it across its files, as vitest `isolate: false`
@@ -8164,7 +8768,8 @@ fn run_test_file_reused(
                 });
                 if let Some(code) = v8::String::new(
                     scope,
-                    "globalThis.__ttCaptureHookBaseline && globalThis.__ttCaptureHookBaseline();",
+                    "globalThis.__ttCaptureHookBaseline && globalThis.__ttCaptureHookBaseline(); \
+                     globalThis.__ttCaptureConfigBaseline && globalThis.__ttCaptureConfigBaseline();",
                 ) {
                     if let Some(s) = v8::Script::compile(scope, code, None) {
                         s.run(scope);
@@ -8249,6 +8854,7 @@ fn run_test_file_reused(
             }
             drive_tests(scope, global, entry_abs)
         };
+        drop_pending_code_caches();
 
         // Heap guard. A file that hit the limit was terminated mid-run: report the OOM and throw
         // the isolate away. Otherwise a reused isolate only ever gets bigger (every file's module
@@ -8364,7 +8970,14 @@ fn drive_tests(
     global: v8::Local<v8::Object>,
     entry_abs: &Path,
 ) -> Result<TestReport, String> {
-    drive_tests_bounded(scope, global, entry_abs, 2_000_000)
+    let report = drive_tests_bounded(scope, global, entry_abs, 2_000_000);
+    // a run the heap guard stopped (its isolate is terminated) or that errored writes no cache
+    if report.is_err() || crate::heap_guard::tripped() {
+        drop_pending_code_caches();
+    } else {
+        flush_code_caches(scope);
+    }
+    report
 }
 
 /// vitest's `task.file.name` (turbo-test#96): the test file relative to the run's root (both

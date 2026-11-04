@@ -981,3 +981,25 @@ fn always_taken_if_without_else_counts_the_then_arm() {
         ]
     );
 }
+
+/// Coverage never consumes the bytecode cache: a cold run and a warm run (same cache dir) report
+/// the same lcov.
+#[test]
+fn coverage_is_identical_cold_and_warm() {
+    let p = esbuild_project("cov-cold-warm");
+    p.file("src/c.js", CJS_JS);
+    p.file("c.test.ts", "const { twice } = require('./src/c.js');\ntest('c', () => { expect(twice(2)).toBe(4); });\n");
+    let cache = p.dir.join(".cache");
+    let env = [("TURBO_CACHE_DIR", cache.to_str().unwrap())];
+    let cold = turbo_test(&p.dir, &["--coverage"], &env);
+    assert_eq!(cold.code, Some(0), "{}", cold.all());
+    let cold_lcov = std::fs::read_to_string(p.dir.join("coverage/lcov.info")).unwrap();
+    let warm = turbo_test(&p.dir, &["--coverage"], &env);
+    assert_eq!(warm.code, Some(0), "{}", warm.all());
+    let warm_lcov = std::fs::read_to_string(p.dir.join("coverage/lcov.info")).unwrap();
+    assert!(
+        cold_lcov.contains("SF:") && cold_lcov.contains("DA:"),
+        "{cold_lcov}"
+    );
+    assert_eq!(cold_lcov, warm_lcov);
+}
