@@ -7131,7 +7131,8 @@ pub(crate) fn framework_snapshot() -> &'static FrameworkSnapshot {
     static SNAP: std::sync::OnceLock<FrameworkSnapshot> = std::sync::OnceLock::new();
     SNAP.get_or_init(|| {
         let chai = chai_script();
-        let flags = std::env::var("TURBO_V8_FLAGS").unwrap_or_default();
+        // the blob is keyed on the flags it was built under
+        let flags = run_v8_flags();
         if window_snapshot_enabled() {
             if let Some(snap) = window_snapshot(&chai, &flags) {
                 turbo_dom_browser_env::browser_env::set_snapshot_install(true);
@@ -9636,8 +9637,18 @@ fn clear_registry() {
 }
 
 /// The V8 flags a run applies: `TURBO_V8_FLAGS` when set (empty: none), else the defaults.
+/// `--single-threaded`: each worker's isolate compiles and collects on its own thread. With an
+/// isolate per core, V8's background compile and GC helpers (a platform pool as large as the
+/// machine, shared by every isolate) only contend with the other workers: payroll's full run
+/// takes about 9% less wall and CPU time, ui about the same, a run of a few dozen files at most
+/// a tenth of a second more.
 fn v8_flags(env: Option<&str>) -> String {
-    env.unwrap_or_default().to_string()
+    env.unwrap_or("--single-threaded").to_string()
+}
+
+/// This run's V8 flags ([`v8_flags`] of `TURBO_V8_FLAGS`).
+fn run_v8_flags() -> String {
+    v8_flags(std::env::var("TURBO_V8_FLAGS").ok().as_deref())
 }
 
 /// Initialize V8 once for the process.
@@ -9645,14 +9656,9 @@ pub fn init_v8() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        // V8 flag tuning for short-lived per-file isolates. Each test file gets a fresh isolate
-        // that allocates a burst then dies, so: (a) a larger young generation lets a whole file's
-        // allocation live in new-space (fewer scavenges, less promotion), and (b) concurrent
-        // marking/sweeping helper threads only add cross-thread overhead when 8 job-threads each
-        // spawn their own — the heaps are too small/short-lived to benefit from background GC.
-        // Overridable via TURBO_V8_FLAGS (empty string disables the defaults entirely) so the set
-        // is A/B-testable without a rebuild. Generic: helps any allocation-heavy short-lived run.
-        let flags = std::env::var("TURBO_V8_FLAGS").unwrap_or_default();
+        // V8 flags for an isolate per worker ([`v8_flags`]): overridable via TURBO_V8_FLAGS
+        // (an empty value runs none) so the set is A/B-testable without a rebuild.
+        let flags = run_v8_flags();
         if !flags.trim().is_empty() {
             v8::V8::set_flags_from_string(&flags);
         }
