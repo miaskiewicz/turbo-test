@@ -3,7 +3,7 @@
 All notable changes to `@miaskiewicz/turbo-test`. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
-## [0.7.1] — Windows paths, pnpm, bundled helper shadowing, window viewport
+## [0.7.1] — 2026-11-04 — Windows paths, timer order, pnpm, bundled helper shadowing, window viewport
 
 Fixes parts 1–3 of #230, reported by nagisokyn-prog in #230 after running a 196-file pnpm
 monorepo suite (Vue 3, Pinia, TypeScript) on Windows 11. The fixes here are turbo-test's own
