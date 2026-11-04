@@ -859,13 +859,19 @@ fn framework_blob_opens_window_and_window_free_contexts() {
         v8::scope!(let scope, &mut isolate);
         let context = snap.new_context(scope, dom);
         let scope = &mut v8::ContextScope::new(scope, context);
-        let got = eval_value(scope, "[typeof document, typeof globalThis.__ttApplyConfig].join()")
-            .to_rust_string_lossy(scope);
+        let got = eval_value(
+            scope,
+            "[typeof document, typeof globalThis.__ttApplyConfig].join()",
+        )
+        .to_rust_string_lossy(scope);
         assert_eq!(got, expected, "dom={dom}");
         if dom {
             turbo_dom_browser_env::browser_env::install(scope);
-            let got = eval_value(scope, "document.body.appendChild(document.createElement('p')).tagName")
-                .to_rust_string_lossy(scope);
+            let got = eval_value(
+                scope,
+                "document.body.appendChild(document.createElement('p')).tagName",
+            )
+            .to_rust_string_lossy(scope);
             assert_eq!(got, "P");
             turbo_dom_browser_env::browser_env::reset();
         }
@@ -887,7 +893,10 @@ fn custom_v8_flags_or_turbo_snapshot_0_keep_the_framework_only_blob() {
     assert!(window_snapshot_allowed(None, None));
     assert!(window_snapshot_allowed(Some("1"), None));
     assert!(!window_snapshot_allowed(Some("0"), None));
-    assert!(!window_snapshot_allowed(None, Some("--interpreted-frames-native-stack")));
+    assert!(!window_snapshot_allowed(
+        None,
+        Some("--interpreted-frames-native-stack")
+    ));
     assert!(window_snapshot_allowed(None, Some("")));
 }
 

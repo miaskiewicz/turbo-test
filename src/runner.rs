@@ -7058,7 +7058,10 @@ pub(crate) fn framework_snapshot() -> &'static FrameworkSnapshot {
         }
         let path = saved_blob_path("framework", blob_key_from("framework", 0, &chai, &flags));
         if let Some(data) = read_saved_blob(&path) {
-            return FrameworkSnapshot { data, references: None };
+            return FrameworkSnapshot {
+                data,
+                references: None,
+            };
         }
         let mut creator = v8::Isolate::snapshot_creator(None, None);
         {
@@ -7151,9 +7154,8 @@ fn read_saved_blob(path: &Path) -> Option<&'static [u8]> {
     let (header, data) = bytes.split_at_checked(24)?;
     let len = u64::from_le_bytes(header[8..16].try_into().ok()?);
     let hash = u64::from_le_bytes(header[16..24].try_into().ok()?);
-    let intact = &header[..8] == SAVED_BLOB_MAGIC
-        && data.len() as u64 == len
-        && blob_hash(data) == hash;
+    let intact =
+        &header[..8] == SAVED_BLOB_MAGIC && data.len() as u64 == len && blob_hash(data) == hash;
     intact.then(|| &*Box::leak(data.to_vec().into_boxed_slice()))
 }
 
@@ -7218,7 +7220,7 @@ fn window_snapshot_enabled() -> bool {
 /// (`TURBO_V8_FLAGS`, non-empty): code deserialized from the window blob can conflict with
 /// them (`--interpreted-frames-native-stack` aborts V8).
 fn window_snapshot_allowed(turbo_snapshot: Option<&str>, v8_flags: Option<&str>) -> bool {
-    turbo_snapshot != Some("0") && v8_flags.map_or(true, str::is_empty)
+    turbo_snapshot != Some("0") && v8_flags.is_none_or(str::is_empty)
 }
 
 /// Cleared by [`plan_window_snapshot`] for a run too small to repay the window snapshot.
@@ -7237,7 +7239,11 @@ fn window_snapshot_wanted(dom_files: usize) -> bool {
 /// Before [`init_v8`]: build the window snapshot only when the run has enough DOM files to repay
 /// it (a single-file or node-only run keeps the framework-only blob and its fast start).
 pub fn plan_window_snapshot(files: &[PathBuf]) {
-    let dom_files = files.iter().filter(|f| needs_dom(f)).take(WINDOW_SNAPSHOT_MIN_DOM_FILES).count();
+    let dom_files = files
+        .iter()
+        .filter(|f| needs_dom(f))
+        .take(WINDOW_SNAPSHOT_MIN_DOM_FILES)
+        .count();
     WINDOW_SNAPSHOT_WANTED.store(
         window_snapshot_wanted(dom_files),
         std::sync::atomic::Ordering::Relaxed,
@@ -7255,12 +7261,19 @@ fn framework_prelude(scope: &mut v8::PinScope) {
     let node_arch = node_arch(std::env::consts::ARCH);
     let os_type = node_os_type(std::env::consts::OS);
     // isMusl() reads glibcVersionRuntime: truthy => gnu, falsy => musl.
-    let glibc_runtime: &str = if cfg!(target_env = "musl") { "" } else { "2.39" };
+    let glibc_runtime: &str = if cfg!(target_env = "musl") {
+        ""
+    } else {
+        "2.39"
+    };
     let prelude = format!(
         "globalThis.__ttPlatform={node_platform:?};globalThis.__ttArch={node_arch:?};globalThis.__ttOsType={os_type:?};globalThis.__ttGlibc={glibc_runtime:?};"
     );
     let pcode = v8::String::new(scope, &prelude).unwrap();
-    v8::Script::compile(scope, pcode, None).unwrap().run(scope).unwrap();
+    v8::Script::compile(scope, pcode, None)
+        .unwrap()
+        .run(scope)
+        .unwrap();
     // chai (turbo-test#160): vitest's expect(x) is a chai Assertion; runtime.js loads it
     // through the globalThis.__ttLoadChai this defines
     let chai = chai_script();
