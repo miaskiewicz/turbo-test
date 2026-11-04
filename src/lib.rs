@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod bundler;
+pub mod canon;
 pub mod ci;
 pub mod cli;
 pub mod colors;
