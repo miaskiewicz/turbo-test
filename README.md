@@ -86,18 +86,13 @@ The startup blob (window or framework-only) is saved in the build's cache direct
 later runs: a rebuilt blob is not byte-identical, and V8 rejects module bytecode caches made
 against another blob, so without it every run recompiled its modules.
 
-**Zero-delay timers** (on by default). A real `setTimeout(fn, 0)` (or any delay below 1 ms) waits
-0 ms, as in turbo-test 0.4.2: it fires before a setImmediate or MessageChannel message queued after
-it, which is faster for timer-heavy suites. Off, the delay is clamped to 1 ms as on Node and vitest
-(#212), so setImmediate and MessageChannel run first. Promise jobs run first in both modes, and
-fake timers are not affected.
-
-> **Known difference from vitest.** With the default, `setTimeout(fn, 0)` runs before a
-> setImmediate or MessageChannel message queued after it; vitest runs `micro, immediate,
-> message, timeout0`. React's scheduler posts renders through MessageChannel, so a test that
-> waits for a render with `await new Promise((r) => setTimeout(r, 0))` (a common React Testing
-> Library pattern) can resume before the render. For vitest's order run
-> `turbo-test --no-zero-delay-timers` or set `TURBO_ZERO_DELAY_TIMERS=0`.
+**Zero-delay timers** (on by default). A real `setTimeout(fn, 0)` (or any delay below 1 ms) takes
+0 ms of the clock, as in turbo-test 0.4.2, which is faster for timer-heavy suites. It keeps the
+order of Node's 1 ms timer (#237): a setImmediate or MessageChannel message queued alongside it
+runs first, as on vitest, so a React render posted through the scheduler is committed when RTL's
+`setTimeout(0)` drain resumes the test. Off, the delay is clamped to 1 ms as on Node and vitest
+(#212), so `Date.now()` and `performance.now()` also move 1 ms per such timer. Promise jobs run
+first in both modes, and fake timers are not affected.
 
 Prefer the flag or the env var. `test.zeroDelayTimers` is not in vitest's `InlineConfig` type, so a
 typed config needs `// @ts-expect-error` above it.

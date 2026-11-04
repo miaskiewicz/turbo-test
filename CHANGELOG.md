@@ -10,6 +10,12 @@ monorepo suite (Vue 3, Pinia, TypeScript) on Windows 11. The fixes here are turb
 implementations, not the reporter's branches.
 
 ### Fixed
+- Zero-delay timers keep vitest's event-loop order (#237). A real `setTimeout(fn, 0)` still takes
+  0 ms of the clock, but now runs where Node's 1 ms timer does: after a setImmediate or a
+  MessageChannel message queued alongside it. In 0.7.0 it ran first, so React's scheduler (which
+  commits through setImmediate outside `act`) had not rendered when RTL's `setTimeout(0)` drain
+  after a user-event action resumed the test: "disabled while in flight" and error-alert
+  assertions failed by default and passed with `--no-zero-delay-timers` and on vitest.
 - Windows: `std::fs::canonicalize` returns extended-length paths (`\\?\C:\proj\a.ts`). They
   reached `node:path`, `URL`, `__dirname` and the module registry, which gave the same module two
   registry entries and broke resolution from pnpm's virtual store. Every canonical path now goes

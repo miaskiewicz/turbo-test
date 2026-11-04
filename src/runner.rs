@@ -7253,6 +7253,12 @@ pub fn plan_window_snapshot(files: &[PathBuf]) {
 
 /// The framework layer every worker context starts with: the host platform facts, chai and
 /// RUNTIME_JS, evaluated in the snapshot context.
+/// glibcVersionRuntime baked into the snapshot: empty (falsy) on musl, a glibc version otherwise.
+#[cfg(target_env = "musl")]
+const GLIBC_RUNTIME: &str = "";
+#[cfg(not(target_env = "musl"))]
+const GLIBC_RUNTIME: &str = "2.39";
+
 fn framework_prelude(scope: &mut v8::PinScope) {
     // Bake the REAL host platform/arch (compile-time target) into the snapshot so
     // turbo-dom's index.js loader requires the matching prebuilt .node. Without this
@@ -7262,11 +7268,7 @@ fn framework_prelude(scope: &mut v8::PinScope) {
     let node_arch = node_arch(std::env::consts::ARCH);
     let os_type = node_os_type(std::env::consts::OS);
     // isMusl() reads glibcVersionRuntime: truthy => gnu, falsy => musl.
-    let glibc_runtime: &str = if cfg!(target_env = "musl") {
-        ""
-    } else {
-        "2.39"
-    };
+    let glibc_runtime = GLIBC_RUNTIME;
     let prelude = format!(
         "globalThis.__ttPlatform={node_platform:?};globalThis.__ttArch={node_arch:?};globalThis.__ttOsType={os_type:?};globalThis.__ttGlibc={glibc_runtime:?};"
     );
