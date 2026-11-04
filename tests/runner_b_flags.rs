@@ -551,3 +551,46 @@ fn an_only_test_inside_a_skipped_or_todo_block_is_pending() {
         assert_eq!(counts, [4, 0, 0, 2, 0], "{j:#}");
     }
 }
+
+/// The window snapshot is built once and saved; a later run of the same binary reads the saved
+/// blob (its key must be stable across processes) instead of rebuilding it. A key that moved
+/// between runs rebuilt the blob every run, and one that did not follow the engine scripts
+/// served an older engine (turbo-dom#312).
+#[test]
+fn a_saved_window_blob_is_reused_by_the_next_run() {
+    let p = plain("saved-window-blob");
+    for i in 0..9 {
+        p.file(
+            &format!("d{i}.test.ts"),
+            "test('dom', () => { document.body.innerHTML = '<p>x</p>'; expect(document.querySelector('p')).not.toBeNull(); });\n",
+        );
+    }
+    let blobs = || {
+        let mut found: Vec<_> = std::fs::read_dir(p.dir.join(".tt-cache"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .starts_with("snapshot-window-")
+                    })
+                    .map(|e| (e.file_name(), e.metadata().and_then(|m| m.modified()).ok()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        found.sort();
+        found
+    };
+    let first = turbo_test(&p.dir, &[], &[]);
+    assert_eq!(first.code, Some(0), "{}", first.all());
+    let built = blobs();
+    assert_eq!(built.len(), 1, "one window blob saved: {built:?}");
+    let second = turbo_test(&p.dir, &[], &[]);
+    assert_eq!(second.code, Some(0), "{}", second.all());
+    assert_eq!(
+        blobs(),
+        built,
+        "the second run read the saved blob, not a rebuilt one"
+    );
+}

@@ -83,6 +83,11 @@ file). Building the blob costs about 170 ms once per process, so smaller runs sk
 `TURBO_SNAPSHOT=0` turns it off, and so does any `TURBO_V8_FLAGS` (code deserialized from the blob
 can conflict with custom V8 flags).
 
+**Single-threaded V8** (the default V8 flags). Each worker's isolate compiles and collects
+garbage on its own thread (`--single-threaded`): with an isolate per core, V8's background compile
+and GC helpers only contend with the other workers (payroll's full run: about 9% less wall and
+CPU time). `TURBO_V8_FLAGS` replaces the defaults (set it empty to run V8 with none).
+
 The startup blob (window or framework-only) is saved in the build's cache directory and reused by
 later runs: a rebuilt blob is not byte-identical, and V8 rejects module bytecode caches made
 against another blob, so without it every run recompiled its modules.
