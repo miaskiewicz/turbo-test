@@ -8075,6 +8075,20 @@ globalThis.__ttInstallWindowMembers = () => {
       w.dispatchEvent(ev);
     }, 0);
   });
+  // The viewport (turbo-test#230): 1024 x 768 at device pixel ratio 1, the size vitest's jsdom and
+  // happy-dom report (Chrome opened at that window size gives the same inner size). Each is
+  // Chrome's [Replaceable] accessor: assigning one (a test simulating a resize) replaces it with
+  // a data property holding the new value.
+  const metric = (name, value) => {
+    if (Object.getOwnPropertyDescriptor(w, name)) return;
+    const replace = (v) => Object.defineProperty(w, name, { value: v, writable: true, enumerable: true, configurable: true });
+    const get = { [`get ${name}`]() { return value; } }[`get ${name}`];
+    const set = { [`set ${name}`](v) { replace(v); } }[`set ${name}`];
+    try { Object.defineProperty(w, name, { get, set, enumerable: true, configurable: true }); } catch (e) {}
+  };
+  for (const [name, value] of [['innerWidth', 1024], ['innerHeight', 768], ['outerWidth', 1024], ['outerHeight', 768], ['devicePixelRatio', 1]]) {
+    metric(name, value);
+  }
 };
 
 // OPT-IN jsdom quirks (TURBO_JSDOM_QUIRKS=1, turbo-test#210), off by default: under environment
