@@ -1029,7 +1029,7 @@ fn matches(
         };
         list.push(anchor(p, from, root, aliases)?);
     }
-    let me = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+    let me = crate::canon::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
     // `caseSensitive: false`: tinyglobby's caseSensitiveMatch off (the keys keep the files' case)
     let glob = |pattern: &str, path: &str| match call.case_sensitive {
         true => crate::coverage::glob_matches(pattern, path),
@@ -1047,7 +1047,7 @@ fn matches(
             });
             if !glob(rest, &rel)
                 || excluded
-                || abs.canonicalize().unwrap_or_else(|_| abs.clone()) == me
+                || crate::canon::canonicalize(&abs).unwrap_or_else(|_| abs.clone()) == me
             {
                 continue;
             }

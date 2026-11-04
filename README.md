@@ -1,7 +1,7 @@
 # turbo-test
 
 **A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
-(and, experimentally, jest).** Release **0.7.0**.
+(and, experimentally, jest).** Release **0.7.1**.
 
 turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
 work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
@@ -352,6 +352,12 @@ import.meta.url))`, string concatenation (`__dirname + '/z'`, `path.resolve(__di
 - Node built-in modules (`node:buffer`, `fs/promises`, `assert/strict`, `timers/promises`,
   `querystring`, `string_decoder`, `vm`, `worker_threads`, …) are runtime shims; what each one
   provides is listed in [vitest.compat.md](vitest.compat.md#node-built-in-modules).
+- Under a DOM environment the window is a 1024 x 768 viewport at `devicePixelRatio` 1, the size
+  vitest's jsdom and happy-dom report; assigning `window.innerWidth` (a simulated resize) replaces
+  it, as in Chrome.
+- pnpm's isolated layout resolves as Node does: a package's bare imports from its real path in
+  `node_modules/.pnpm/<name>@<version>/node_modules/<name>`. On Windows, canonical paths are
+  spelled as Node spells them (`C:\...`, `\\server\share\...`), never with the `\\?\` prefix.
 
 ## Benchmarks — pending re-run
 
@@ -413,7 +419,7 @@ npm run complexity:js        # CI job `complexity / js (cc <= 15)`
 - **Release** (`v*` tag): `release-guard` (no `[patch]`, no git sources, versions equal the tag),
   then the npm and crates.io publish jobs ([RELEASING.md](RELEASING.md)).
 
-## Status (0.7.0)
+## Status (0.7.1)
 
 - vitest suites: drop-in; the `vi` / mock / `expect` surface is vitest 4.1.12's
   ([vitest.compat.md](vitest.compat.md) lists what is covered and what is approximated).

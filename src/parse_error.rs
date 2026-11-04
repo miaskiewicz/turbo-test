@@ -549,7 +549,7 @@ fn rewrite_imports(
     root: &Path,
     resolve: &dyn Fn(&str) -> Option<PathBuf>,
 ) -> String {
-    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let root = crate::canon::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let mut out = String::with_capacity(src.len());
     let mut at = 0;
     for span in imports {

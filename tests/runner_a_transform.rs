@@ -500,3 +500,64 @@ fn the_loader_debug_switch_names_a_module_that_does_not_transform() {
     assert_eq!(counts(&quiet), counts(&debug));
     assert_eq!(counts(&debug).2, ["error"], "{}", debug.all());
 }
+
+/// A tsup/esbuild-built ES module package declares esbuild's own helpers (`var __export`,
+/// `var __toESM`, ...) at its top level, as pinia's and vue-router's builds do. Bundled into a
+/// `__commonJS` closure, those `var`s are hoisted over the closure and are `undefined` when the
+/// module's export registration runs, unless the bundle's own helpers reach the module by a name
+/// the module cannot shadow (turbo-test#230). Node (and vitest) load the package fine.
+#[test]
+fn bundled_module_declaring_esbuild_helpers_does_not_shadow_the_bundles() {
+    let p = Project::new("ta-helper-shadow");
+    p.with_esbuild();
+    p.file("package.json", r#"{ "name": "shadow" }"#);
+    p.file(
+        "node_modules/tsupped/package.json",
+        r#"{ "name": "tsupped", "type": "module", "main": "index.js" }"#,
+    );
+    p.file(
+        "node_modules/tsupped/index.js",
+        r#"import { two } from "./two.js";
+import legacy from "./legacy.cjs";
+export * from "./star.js";
+var __defProp = Object.defineProperty;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all) __defProp(target, name, { get: all[name], enumerable: true });
+};
+var __toESM = (mod) => mod;
+var __reExport = (target, mod) => target;
+var __toCommonJS = (mod) => mod;
+var __commonJS = (cb) => cb;
+var api_exports = {};
+__export(api_exports, { one: () => one });
+function one() { return 1; }
+export { api_exports as api, two, legacy };
+"#,
+    );
+    p.file("node_modules/tsupped/two.js", "export const two = 2;\n");
+    p.file("node_modules/tsupped/star.js", "export const star = 4;\n");
+    p.file(
+        "node_modules/tsupped/legacy.cjs",
+        "module.exports = { l: 8 };\n",
+    );
+    p.file(
+        "a.test.ts",
+        r#"import { api, two, legacy, star } from 'tsupped';
+test('the package loads as under Node', () => {
+  expect([api.one(), two, star, legacy.l]).toEqual([1, 2, 4, 8]);
+});
+"#,
+    );
+    let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+    assert_eq!(counts(&r), passed(1, 1), "{}", r.all());
+    assert!(cached(&p, "ntvdep-") >= 1, "the native dep bundle ran");
+    // the esbuild dep bundle (TURBO_NATIVE_DEPS=0) agrees
+    let r = turbo_test(
+        &p.dir,
+        &["--reporter", "json"],
+        &[("TURBO_NATIVE_DEPS", "0")],
+    );
+    assert_eq!(counts(&r), passed(1, 1), "{}", r.all());
+}

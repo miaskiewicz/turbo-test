@@ -3,7 +3,11 @@
 All notable changes to `@miaskiewicz/turbo-test`. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
-## [Unreleased] — 0.7.1
+## [0.7.1] — Windows paths, pnpm, bundled helper shadowing, window viewport
+
+Fixes parts 1–3 of #230, reported by nagisokyn-prog in #230 after running a 196-file pnpm
+monorepo suite (Vue 3, Pinia, TypeScript) on Windows 11. The fixes here are turbo-test's own
+implementations, not the reporter's branches.
 
 ### Fixed
 - Zero-delay timers keep vitest's event-loop order (#237). A real `setTimeout(fn, 0)` still takes
@@ -12,6 +16,42 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   commits through setImmediate outside `act`) had not rendered when RTL's `setTimeout(0)` drain
   after a user-event action resumed the test: "disabled while in flight" and error-alert
   assertions failed by default and passed with `--no-zero-delay-timers` and on vitest.
+- Windows: `std::fs::canonicalize` returns extended-length paths (`\\?\C:\proj\a.ts`). They
+  reached `node:path`, `URL`, `__dirname` and the module registry, which gave the same module two
+  registry entries and broke resolution from pnpm's virtual store. Every canonical path now goes
+  through `canon::canonicalize`, which spells it as Node's `realpath` does (`C:\proj\a.ts`,
+  `\\server\share\a.ts`). A source scan test keeps other code from calling
+  `std::fs::canonicalize` directly.
+- `TypeError: __export is not a function` from packages built by tsup or esbuild (pinia,
+  vue-router). Such a module declares esbuild's helpers itself (`var __export = ...`). The native
+  dependency bundler wraps each module in a `__commonJS` closure, so that `var` was hoisted over
+  the bundle's helper and was `undefined` when the module's export registration ran. Each
+  closure now takes `__export` / `__toCommonJS` / `__toESM` / `__reExport` as parameters. A `var`
+  redeclaring a parameter keeps the parameter's value until its own assignment runs. A name the
+  module declares with `let` / `const` / `class` / `import` gets a placeholder parameter instead,
+  because a parameter of the same name would be a redeclaration error. The bundle cache key moves
+  to `native-dep-v8-bundle`. We did not add the reporter's suggested in-memory `tslib` /
+  `hey-listen` stubs. The real packages resolve now, and stubbing third-party code would vendor
+  it.
+- The DOM window had no `innerWidth` / `innerHeight` / `outerWidth` / `outerHeight` /
+  `devicePixelRatio`, so a bare `innerWidth` threw a `ReferenceError` and responsive components
+  failed. They are now 1024 / 768 / 1024 / 768 / 1, the values vitest's jsdom and happy-dom
+  report, each as Chrome's replaceable accessor.
+
+### Tests
+- `canon_tests.rs`: verbatim drive / UNC / device paths as Windows-style strings, so they run on
+  every CI leg including Windows. `runner_a_resolve.rs`: a pnpm virtual-store fixture (declared
+  siblings, the hoisted `.pnpm/node_modules`, ES module and CommonJS packages, the ES module
+  graph and the module runner); vitest 4.1.12 passes the same files. `runner_a_transform.rs` +
+  `bundler_tests.rs`: a tsup-style package declaring every helper, checked against Node and
+  vitest 4.1.12. `window_embedder.rs`: the viewport metrics, and `style.transition`
+  serialization pinned to Chrome 156 (`opacity 0.3s`, `opacity 300ms ease` → `opacity 300ms`).
+
+### Known gaps (turbo-dom)
+- The CSSOM lives in turbo-dom's browser-env. Two Chrome mismatches from #230 are routed there.
+  First, a custom property whose name ends in `color` (`--theme-color: #ff0000`) reads back as
+  `rgb(255, 0, 0)`. Second, `getComputedStyle` reports no custom properties. `matchMedia` is
+  still turbo-dom's stub, which never matches; Chrome evaluates the query against the viewport.
 
 ## [0.7.0] — performance: bytecode cache and turbo-dom 0.7.0
 

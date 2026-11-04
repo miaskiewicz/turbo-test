@@ -2397,7 +2397,7 @@ dependencies = [
 
 [[package]]
 name = "turbo-test"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "base64",
  "encoding_rs",

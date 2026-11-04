@@ -1552,7 +1552,7 @@ fn junit_root() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_default();
-    std::fs::canonicalize(&root).unwrap_or(root)
+    crate::canon::canonicalize(&root).unwrap_or(root)
 }
 
 /// Write `text` to the `--outputFile` `path`, creating missing parent dirs. Returns the stderr
