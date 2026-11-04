@@ -228,7 +228,7 @@ fn bundle_capped(entry: &Path, max_modules: usize) -> Option<String> {
             }
         };
         out.push_str(&format!(
-            "var require_m{idx} = __commonJS((exports, module) => {{\n{module_text}\n}});\n"
+            "var require_m{idx} = __commonJS((exports, module) => {{\nvar __defProp = Object.defineProperty;\nvar __export = (target, all) => {{ for (var name in all) __defProp(target, name, {{ get: all[name], enumerable: true, configurable: true }}); }};\n{module_text}\n}});\n"
         ));
     }
     // the entry is the first module walked, so its id is always 0.

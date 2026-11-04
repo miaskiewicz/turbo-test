@@ -1,4 +1,10 @@
 // Minimal test runtime injected before a test module loads.
+globalThis.__defProp = Object.defineProperty;
+globalThis.__export = (target, all) => {
+  for (var name in all) Object.defineProperty(target, name, { get: all[name], enumerable: true, configurable: true });
+};
+var __defProp = globalThis.__defProp;
+var __export = globalThis.__export;
 // PLACEHOLDER for the real @vitest/* framework, which gets baked into the V8 snapshot
 // at M3 (compatible-by-construction). This M1 version exists only to run the
 // non-timer/non-DOM logic subset of the gauntlet end-to-end and report pass/fail.

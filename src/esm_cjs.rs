@@ -501,8 +501,13 @@ fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -
     // No ESM module syntax → CJS/script: return the transformed body unwrapped (no preamble), with
     // just the `__toESM` helper prepended when a lowered `import()` calls it.
     if !parts.has_module_syntax {
+        let export_helper = if parts.body_code.contains("__export") {
+            "var __defProp = Object.defineProperty;\nvar __export = (target, all) => { for (var name in all) __defProp(target, name, { get: all[name], enumerable: true, configurable: true }); };\n"
+        } else {
+            ""
+        };
         let helper = if parts.uses_to_esm { TO_ESM_HELPER } else { "" };
-        let mut out = format!("{helper}{}", parts.body_code);
+        let mut out = format!("{export_helper}{helper}{}", parts.body_code);
         if let Some(m) = &mappings {
             append_inline_map(&mut out, path, helper.matches('\n').count(), m);
         }
@@ -1115,7 +1120,8 @@ pub(crate) const STAR_HELPER: &str = star_helper!();
 /// init ordering work (each module's body runs once, on first require, with its exports object
 /// already live).
 pub(crate) const PREAMBLE: &str = concat!(
-    r#"var __defProp = Object.defineProperty;
+    r#""use strict";
+var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
@@ -1144,6 +1150,7 @@ pub(crate) fn assemble_module(
     let mut out = String::with_capacity(body.len() + 512);
     out.push_str("var __tt_exports = {};\n");
     if !exports.is_empty() {
+        out.push_str("var __defProp = Object.defineProperty;\nvar __export = (target, all) => { for (var name in all) __defProp(target, name, { get: all[name], enumerable: true, configurable: true }); };\n");
         out.push_str("__export(__tt_exports, {\n");
         for e in exports {
             out.push_str(&format!(

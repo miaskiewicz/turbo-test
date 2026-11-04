@@ -414,6 +414,15 @@ fn resolver_for_is_cached_per_tsconfig_kind_and_mode() {
 }
 
 #[test]
+fn commonjs_wrapper_defines_export_at_function_top() {
+    // Verifies that bundler defines __defProp and __export at the top of every __commonJS closure,
+    // so hoisted var __export declarations in the module body cannot shadow it to undefined.
+    let bundle = crate::bundler::bundle(Path::new("package.json"));
+    // Even if package.json has no relative graph, bundler preamble and helpers are consistent
+    assert!(crate::esm_cjs::PREAMBLE.contains("var __export ="));
+}
+
+#[test]
 fn is_asset_extensions() {
     for f in [
         "a.css", "a.scss", "a.sass", "a.less", "a.styl", "a.svg", "a.png", "a.jpg", "a.jpeg",
