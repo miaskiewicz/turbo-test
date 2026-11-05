@@ -698,15 +698,14 @@ fn rollup_details(r: &crate::failure::RollupDetails, c: &Colors) -> String {
 /// The highlighted code frame of the nearest frame `f` and a line break ("" when its file
 /// cannot be read).
 fn nearest_code_frame(f: &Frame, c: &Colors) -> String {
-    let Ok(source) = std::fs::read_to_string(&f.file) else {
-        return String::new();
-    };
-    let shown = if js_len(&source) > 100_000 {
-        source
-    } else {
-        crate::highlight::highlight_code(c, &f.file, &source)
-    };
-    code_frame_of(&shown, f.line, f.col, c) + "\n"
+    std::fs::read_to_string(&f.file).map_or(String::new(), |source| {
+        let shown = if js_len(&source) > 100_000 {
+            source
+        } else {
+            crate::highlight::highlight_code(c, &f.file, &source)
+        };
+        code_frame_of(&shown, f.line, f.col, c) + "\n"
+    })
 }
 
 /// vitest's `generateCodeFrame(source, 4, { line, column })` for an 80-column output, over the

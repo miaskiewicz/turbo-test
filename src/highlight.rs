@@ -439,12 +439,9 @@ pub fn tokens<'a>(input: &'a str, jsx: bool) -> Vec<Token<'a>> {
     while lx.i < input.len() {
         let mode = *lx.stack.last().unwrap();
         let done = match mode.tag {
-            Tag::Js
-            | Tag::JsNonExpressionParen
-            | Tag::InterpolationInTemplate
-            | Tag::InterpolationInJsx => lx.js(mode),
             Tag::JsxOpen | Tag::JsxClose => lx.jsx_tag(mode),
             Tag::JsxChildren => lx.jsx_children(),
+            _ => lx.js(mode),
         };
         if !done && !lx.trivia() {
             lx.invalid(mode);
