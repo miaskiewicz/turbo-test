@@ -26,6 +26,13 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   different order. The runner now mirrors @vitest/runner's await structure turn for turn. Test:
   `tests/runner_c_microtask_order.rs`, five probes recorded from vitest 4.1.12 + jsdom 27.4.0,
   checked in fresh isolates and under isolate reuse.
+- `jest` mocks reset as jest-mock does (#254). turbo-test's `jest.fn` / `jest.spyOn` sat on
+  vitest 4's mock, whose `mockReset` goes back to `vi.fn(impl)`'s implementation (a spy to its
+  original), so after `mockReset()` / `jest.resetAllMocks()` / `mockRestore()` a jest project's
+  mocks kept returning the old values where jest 30 returns `undefined` — tests relying on a
+  reset to silence a mock passed on jest and not here. Jest mocks now drop the implementation
+  (and their `whenCalledWith` branches) on reset; `vi.fn` / `vi.spyOn` keep vitest's reset. Test:
+  `jest_mock_reset_is_jests` in `tests/runner_c_vi_surface.rs`, recorded with jest 30.5.2.
 
 ### Added
 - `jest.fn()` / `jest.spyOn()` mocks have `whenCalledWith(...matchers)` with jest-mock 30.5.2's
