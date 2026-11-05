@@ -525,17 +525,7 @@ pub(crate) fn strip_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     let mut quote: Option<char> = None;
-    // Previous significant (non-whitespace) char — updated for EVERY non-ws char, identifiers and
-    // `)`/`]` included, so a `/` after a value token reads as DIVISION (not a regex). `cur_word` is
-    // the identifier currently being read and `last_word` the one just completed (kept across a
-    // following space) so a keyword-led regex (`return /re/`) is still recognized.
-    let mut prev_sig = '\0';
-    let mut cur_word = String::new();
-    let mut last_word = String::new();
-    // Whether `cur_word` / `last_word` was reached by `.` property access (`obj.in`): a member NAME
-    // is never a keyword, so a `/` after it is division.
-    let mut cur_member = false;
-    let mut last_member = false;
+    let mut w = Words::default();
     while let Some(c) = chars.next() {
         if let Some(q) = quote {
             out.push(c);
@@ -552,9 +542,7 @@ pub(crate) fn strip_comments(s: &str) -> String {
             '\'' | '"' | '`' => {
                 quote = Some(c);
                 out.push(c);
-                prev_sig = c;
-                cur_word.clear();
-                last_word.clear();
+                w.reset(c);
             }
             '/' if chars.peek() == Some(&'/') => {
                 for n in chars.by_ref() {
@@ -579,79 +567,120 @@ pub(crate) fn strip_comments(s: &str) -> String {
             // copied verbatim — a regex body can contain `'`/`"`/`` ` `` (e.g. `/"/g`, `/'/g`), and
             // the downstream block scanners are quote-aware but NOT regex-aware, so a surviving quote
             // char would flip their string state and swallow the real `alias` block. Blanking keeps
-            // the regex out of their way entirely. Character classes `[...]` may hold an unescaped
-            // `/`, so track them to find the true closing `/`.
-            '/' if is_regex_context(prev_sig)
-                || keyword_before_slash(&cur_word, cur_member, &last_word, last_member) =>
-            {
+            // the regex out of their way entirely.
+            '/' if w.regex_starts() => {
                 out.push(' ');
-                let mut in_class = false;
-                while let Some(n) = chars.next() {
-                    match n {
-                        // A regex literal cannot contain a raw newline. Hitting one means this `/`
-                        // was actually division misjudged as a regex — stop blanking at the line end
-                        // so a stray `/` can't consume (and drop) the rest of the config.
-                        '\n' => {
-                            out.push('\n');
-                            break;
-                        }
-                        '\\' => {
-                            if chars.next().is_some() {
-                                out.push_str("  ");
-                            } else {
-                                out.push(' ');
-                            }
-                        }
-                        '[' => {
-                            in_class = true;
-                            out.push(' ');
-                        }
-                        ']' => {
-                            in_class = false;
-                            out.push(' ');
-                        }
-                        '/' if !in_class => {
-                            out.push(' ');
-                            break;
-                        }
-                        _ => out.push(' '),
-                    }
-                }
-                prev_sig = '/';
-                cur_word.clear();
-                last_word.clear();
+                blank_regex(&mut chars, &mut out);
+                w.reset('/');
             }
             _ => {
                 out.push(c);
-                if c.is_alphanumeric() || c == '_' || c == '$' {
-                    // Identifier/number char: it IS significant (a `/` after it is division), and it
-                    // extends the current word.
-                    if cur_word.is_empty() {
-                        cur_member = prev_sig == '.';
-                    }
-                    cur_word.push(c);
-                    prev_sig = c;
-                } else if c.is_whitespace() {
-                    // Finalize the current word but keep it as `last_word` across the space, so
-                    // `return /re/` still sees the keyword. prev_sig (last non-ws char) is unchanged.
-                    if !cur_word.is_empty() {
-                        last_word = std::mem::take(&mut cur_word);
-                        last_member = cur_member;
-                    }
-                } else {
-                    // Punctuation: significant, and it ends any pending word.
-                    if !cur_word.is_empty() {
-                        last_word = std::mem::take(&mut cur_word);
-                        last_member = cur_member;
-                    } else {
-                        last_word.clear();
-                    }
-                    prev_sig = c;
-                }
+                w.push(c);
             }
         }
     }
     out
+}
+
+/// The tokens before a `/` in [`strip_comments`], to tell a regex from division.
+#[derive(Default)]
+struct Words {
+    // Previous significant (non-whitespace) char — updated for EVERY non-ws char, identifiers and
+    // `)`/`]` included, so a `/` after a value token reads as DIVISION (not a regex). `cur_word` is
+    // the identifier currently being read and `last_word` the one just completed (kept across a
+    // following space) so a keyword-led regex (`return /re/`) is still recognized.
+    prev_sig: char,
+    cur_word: String,
+    last_word: String,
+    // Whether `cur_word` / `last_word` was reached by `.` property access (`obj.in`): a member NAME
+    // is never a keyword, so a `/` after it is division.
+    cur_member: bool,
+    last_member: bool,
+}
+
+impl Words {
+    /// After a string opener or a regex: `prev_sig` is `c`, no word pending.
+    fn reset(&mut self, c: char) {
+        self.prev_sig = c;
+        self.cur_word.clear();
+        self.last_word.clear();
+    }
+
+    fn regex_starts(&self) -> bool {
+        is_regex_context(self.prev_sig)
+            || keyword_before_slash(
+                &self.cur_word,
+                self.cur_member,
+                &self.last_word,
+                self.last_member,
+            )
+    }
+
+    /// Any other char `c` copied through.
+    fn push(&mut self, c: char) {
+        if c.is_alphanumeric() || c == '_' || c == '$' {
+            // Identifier/number char: it IS significant (a `/` after it is division), and it
+            // extends the current word.
+            if self.cur_word.is_empty() {
+                self.cur_member = self.prev_sig == '.';
+            }
+            self.cur_word.push(c);
+            self.prev_sig = c;
+        } else if c.is_whitespace() {
+            // Finalize the current word but keep it as `last_word` across the space, so
+            // `return /re/` still sees the keyword. prev_sig (last non-ws char) is unchanged.
+            if !self.cur_word.is_empty() {
+                self.last_word = std::mem::take(&mut self.cur_word);
+                self.last_member = self.cur_member;
+            }
+        } else {
+            // Punctuation: significant, and it ends any pending word.
+            if !self.cur_word.is_empty() {
+                self.last_word = std::mem::take(&mut self.cur_word);
+                self.last_member = self.cur_member;
+            } else {
+                self.last_word.clear();
+            }
+            self.prev_sig = c;
+        }
+    }
+}
+
+/// Blank a regex literal's body and flags-free close (after its opening `/`) into spaces.
+/// Character classes `[...]` may hold an unescaped `/`, so track them to find the true close.
+fn blank_regex(chars: &mut std::iter::Peekable<std::str::Chars>, out: &mut String) {
+    let mut in_class = false;
+    while let Some(n) = chars.next() {
+        match n {
+            // A regex literal cannot contain a raw newline. Hitting one means this `/`
+            // was actually division misjudged as a regex — stop blanking at the line end
+            // so a stray `/` can't consume (and drop) the rest of the config.
+            '\n' => {
+                out.push('\n');
+                break;
+            }
+            '\\' => {
+                if chars.next().is_some() {
+                    out.push_str("  ");
+                } else {
+                    out.push(' ');
+                }
+            }
+            '[' => {
+                in_class = true;
+                out.push(' ');
+            }
+            ']' => {
+                in_class = false;
+                out.push(' ');
+            }
+            '/' if !in_class => {
+                out.push(' ');
+                break;
+            }
+            _ => out.push(' '),
+        }
+    }
 }
 
 /// Keywords after which a `/` opens a regex literal, not division (`return /re/`, `typeof x || /re/`).
@@ -738,28 +767,37 @@ fn find_key_blocks(text: &str, key: &str) -> Vec<String> {
                 quote = Some(c);
                 i += 1;
             }
-            _ if b[i..].starts_with(kb) => {
-                let prev_ok = i == 0 || {
-                    let p = b[i - 1];
-                    p != b'.' && p != b'_' && p != b'$' && !p.is_ascii_alphanumeric()
-                };
-                let j = skip_ws(b, i + kb.len());
-                if prev_ok && j < b.len() && b[j] == b':' {
-                    let k = skip_ws(b, j + 1);
-                    if k < b.len() && (b[k] == b'{' || b[k] == b'[') {
-                        if let Some((inner, end)) = balanced_block_end(text, k) {
-                            out.push(inner);
-                            i = end + 1;
-                            continue;
-                        }
-                    }
+            _ if b[i..].starts_with(kb) => match key_block_at(text, i, kb.len()) {
+                Some((inner, end)) => {
+                    out.push(inner);
+                    i = end + 1;
                 }
-                i += 1;
-            }
+                None => i += 1,
+            },
             _ => i += 1,
         }
     }
     out
+}
+
+/// The block of the key (`len` bytes) at `i` when it is a whole name followed by `: {`/`: [`:
+/// (its inner text, the offset of its close).
+fn key_block_at(text: &str, i: usize, len: usize) -> Option<(String, usize)> {
+    let b = text.as_bytes();
+    let prev_ok = i == 0 || {
+        let p = b[i - 1];
+        p != b'.' && p != b'_' && p != b'$' && !p.is_ascii_alphanumeric()
+    };
+    let j = skip_ws(b, i + len);
+    if !(prev_ok && j < b.len() && b[j] == b':') {
+        return None;
+    }
+    let k = skip_ws(b, j + 1);
+    if k < b.len() && (b[k] == b'{' || b[k] == b'[') {
+        balanced_block_end(text, k)
+    } else {
+        None
+    }
 }
 
 /// Parse `resolve.alias` and `test.alias` into `(find, resolved-target)` pairs. Supports the object
@@ -1293,147 +1331,7 @@ pub fn plan(mut raw: Vec<String>, proc_cwd: &Path) -> Plan {
 
     let mut i = 0;
     while i < raw.len() {
-        let a = raw[i].clone();
-        // `--key=value` inline form for launcher value-flags.
-        let (key, inline_val): (&str, Option<String>) = if a.starts_with("--") {
-            if let Some(eq) = a.find('=') {
-                (&a[..eq], Some(a[eq + 1..].to_string()))
-            } else {
-                (a.as_str(), None)
-            }
-        } else {
-            (a.as_str(), None)
-        };
-        // take the value for a launcher value-flag: inline `=v`, else the next non-flag token.
-        let mut take_val = || -> Option<String> {
-            if let Some(v) = inline_val.clone() {
-                return Some(v);
-            }
-            if i + 1 < raw.len() && !raw[i + 1].starts_with('-') {
-                i += 1;
-                return Some(raw[i].clone());
-            }
-            None
-        };
-
-        match key {
-            "--passWithNoTests" => {
-                opts.pass_with_no_tests = true;
-                i += 1;
-                continue;
-            }
-            "-c" | "--config" => {
-                opts.config = take_val();
-                i += 1;
-                continue;
-            }
-            // vitest distinguishes --root (project root) from --dir (test scan dir); turbo-test
-            // scans the project root, so both override the discovery directory (last wins). Only
-            // --root moves the base the files are named from (vitest's root).
-            "--root" | "--dir" => {
-                opts.root = take_val();
-                if key == "--root" {
-                    opts.name_root = opts.root.clone();
-                }
-                i += 1;
-                continue;
-            }
-            "--environment" => {
-                opts.environment = take_val();
-                i += 1;
-                continue;
-            }
-            // `--changed`'s arg is OPTIONAL: a following non-flag token is the `since` ref.
-            "--changed" => {
-                opts.changed = Some(take_val().unwrap_or_else(|| "true".to_string()));
-                i += 1;
-                continue;
-            }
-            "--isolate" => {
-                opts.isolate = Some(true);
-                i += 1;
-                continue;
-            }
-            "--no-isolate" => {
-                opts.isolate = Some(false);
-                i += 1;
-                continue;
-            }
-            // Globals are ALWAYS on in turbo-test; accept both spellings as no-ops.
-            "--globals" | "--no-globals" => {
-                i += 1;
-                continue;
-            }
-            // vitest VALUE-taking flags with no effect on a native single-run runner. Consume the
-            // flag AND its value HERE (inline `=v` or the next non-flag token) and drop both, so the
-            // runner never sees them — the runner must NOT re-consume a value that may be absent
-            // (a trailing `--pool`) and swallow a real test-file arg instead. `--no-file-parallelism`
-            // is intentionally NOT here: it maps to real behavior (jobs=1) and is forwarded below.
-            "--pool" | "--mode" | "--project" | "--exclude" | "--maxConcurrency" => {
-                let _ = take_val();
-                i += 1;
-                continue;
-            }
-            // Boolean / no-effect vitest flags — dropped (NO value consumed, so a following test
-            // file isn't eaten).
-            "--run"
-            | "--watch"
-            | "-w"
-            | "--no-watch"
-            | "--logHeapUsage"
-            | "--hideSkippedTests"
-            | "--disableConsoleIntercept"
-            | "--dom"
-            | "--segfaultRetry"
-            | "--printConsoleTrace"
-            | "--color"
-            | "--no-color"
-            | "--inspect"
-            | "--inspect-brk" => {
-                i += 1;
-                continue;
-            }
-            _ => {}
-        }
-
-        // Dotted vitest flags with a value (`--sequence.seed 123`, `--browser.name chromium`): drop
-        // the flag and, when the next token is its value (a non-flag), that too — otherwise the
-        // orphaned value token would be mistaken for a test-file path and hard-fail the run. Covers
-        // both the `=`-inline and space forms.
-        if key.starts_with("--sequence")
-            || key.starts_with("--browser")
-            || key.starts_with("--inspect")
-        {
-            let _ = take_val();
-            i += 1;
-            continue;
-        }
-
-        if flag_takes_value(&a) {
-            // forward a value-flag's following value too (so it isn't seen as a file).
-            if i + 1 < raw.len() && !raw[i + 1].starts_with('-') {
-                forward.push(a.clone());
-                forward.push(raw[i + 1].clone());
-                i += 1;
-            } else {
-                // No value (last token, or another flag follows). Forwarded alone it would sit
-                // right before the appended test files and the runner would take the first FILE
-                // as its value (`a.test.js --reporter` → usage error; `-t` → the path became the
-                // name pattern). Drop it with a warning; a `--coverage-*` one still implies
-                // --coverage, as it does in the runner.
-                messages.push(format!("turbo-test: ignoring '{a}': missing value"));
-                if a.starts_with("--coverage") {
-                    forward.push("--coverage".to_string());
-                }
-            }
-        } else if a.starts_with('-') {
-            forward.push(a.clone());
-        } else if !a.is_empty() {
-            // skip empty args (e.g. a stray "" from a shell wrapper) — as a filter one would
-            // match every test file.
-            files.push(a.clone());
-        }
-        i += 1;
+        i = plan_arg(&raw, i, &mut opts, &mut forward, &mut files, &mut messages) + 1;
     }
 
     // Discovery root: --root/--dir override cwd.
@@ -1446,6 +1344,177 @@ pub fn plan(mut raw: Vec<String>, proc_cwd: &Path) -> Plan {
         .as_ref()
         .map(|f| absolute_in(proc_cwd, Path::new(f)));
 
+    config_env(&opts, proc_cwd, &cwd, forced.as_deref(), &mut env);
+    config_forward(&cwd, forced.as_deref(), &mut forward);
+
+    // Resolve the test file set: the discovered files, named relative to the process cwd as
+    // vitest's (root-relative) names. Positional arguments are filters, as vitest's: the
+    // discovered files whose root-relative path contains one (directories and file paths alike).
+    let mut test_files: Vec<PathBuf> = discover(&cwd, forced.as_deref())
+        .into_iter()
+        .filter(|t| files.is_empty() || files.iter().any(|f| filter_matches(&cwd, proc_cwd, f, t)))
+        .map(|t| t.strip_prefix(proc_cwd).map(Path::to_path_buf).unwrap_or(t))
+        .collect();
+    if test_files.is_empty() {
+        // vitest: exit 1 (0 with --passWithNoTests), the filters, include and exclude
+        let code = i32::from(!opts.pass_with_no_tests);
+        messages.push(no_files_message(code, &files, &cwd, forced.as_deref()));
+        return Plan {
+            env,
+            messages,
+            outcome: Err(code),
+        };
+    }
+
+    // `--changed [since]`: keep only discovered test files git reports changed. Direct changed-file
+    // filter (no import graph). Nothing changed → running zero tests is expected → exit 0.
+    if let Some(since) = &opts.changed {
+        if let Some(code) = keep_changed(since, &cwd, proc_cwd, &mut test_files, &mut messages) {
+            return Plan {
+                env,
+                messages,
+                outcome: Err(code),
+            };
+        }
+    }
+
+    // Effective argv for the runner loop: forwarded flags, then resolved files.
+    let mut out = forward;
+    out.extend(test_files.into_iter().map(|f| f.display().to_string()));
+    Plan {
+        env,
+        messages,
+        outcome: Ok(out),
+    }
+}
+
+/// `plan`'s handling of the argument at `i` (into `opts`, `forward`, `files`, `messages`); the
+/// index of the last token it consumed.
+fn plan_arg(
+    raw: &[String],
+    mut i: usize,
+    opts: &mut Opts,
+    forward: &mut Vec<String>,
+    files: &mut Vec<String>,
+    messages: &mut Vec<String>,
+) -> usize {
+    let a = raw[i].clone();
+    // `--key=value` inline form for launcher value-flags.
+    let (key, inline_val): (&str, Option<String>) = match a.find('=') {
+        Some(eq) if a.starts_with("--") => (&a[..eq], Some(a[eq + 1..].to_string())),
+        _ => (a.as_str(), None),
+    };
+    if launcher_flag(key, opts, &mut || take_val(raw, &mut i, &inline_val)) {
+        return i;
+    }
+    // Dotted vitest flags with a value (`--sequence.seed 123`, `--browser.name chromium`): drop
+    // the flag and, when the next token is its value (a non-flag), that too — otherwise the
+    // orphaned value token would be mistaken for a test-file path and hard-fail the run. Covers
+    // both the `=`-inline and space forms.
+    if key.starts_with("--sequence") || key.starts_with("--browser") || key.starts_with("--inspect")
+    {
+        let _ = take_val(raw, &mut i, &inline_val);
+        return i;
+    }
+    if !flag_takes_value(&a) {
+        if a.starts_with('-') {
+            forward.push(a);
+        } else if !a.is_empty() {
+            // skip empty args (e.g. a stray "" from a shell wrapper) — as a filter one would
+            // match every test file.
+            files.push(a);
+        }
+        return i;
+    }
+    // forward a value-flag's following value too (so it isn't seen as a file).
+    if i + 1 < raw.len() && !raw[i + 1].starts_with('-') {
+        forward.push(a);
+        forward.push(raw[i + 1].clone());
+        return i + 1;
+    }
+    // No value (last token, or another flag follows). Forwarded alone it would sit
+    // right before the appended test files and the runner would take the first FILE
+    // as its value (`a.test.js --reporter` → usage error; `-t` → the path became the
+    // name pattern). Drop it with a warning; a `--coverage-*` one still implies
+    // --coverage, as it does in the runner.
+    messages.push(format!("turbo-test: ignoring '{a}': missing value"));
+    if a.starts_with("--coverage") {
+        forward.push("--coverage".to_string());
+    }
+    i
+}
+
+/// The value of the launcher value-flag at `*i`: inline `=v`, else the next non-flag token
+/// (`*i` then moves onto it).
+fn take_val(raw: &[String], i: &mut usize, inline: &Option<String>) -> Option<String> {
+    if let Some(v) = inline.clone() {
+        return Some(v);
+    }
+    if *i + 1 < raw.len() && !raw[*i + 1].starts_with('-') {
+        *i += 1;
+        return Some(raw[*i].clone());
+    }
+    None
+}
+
+/// A launcher flag `key` applied to `opts` (its value from `take_val`); whether it was one.
+fn launcher_flag(key: &str, opts: &mut Opts, take_val: &mut dyn FnMut() -> Option<String>) -> bool {
+    match key {
+        "--passWithNoTests" => opts.pass_with_no_tests = true,
+        "-c" | "--config" => opts.config = take_val(),
+        // vitest distinguishes --root (project root) from --dir (test scan dir); turbo-test
+        // scans the project root, so both override the discovery directory (last wins). Only
+        // --root moves the base the files are named from (vitest's root).
+        "--root" | "--dir" => {
+            opts.root = take_val();
+            if key == "--root" {
+                opts.name_root = opts.root.clone();
+            }
+        }
+        "--environment" => opts.environment = take_val(),
+        // `--changed`'s arg is OPTIONAL: a following non-flag token is the `since` ref.
+        "--changed" => opts.changed = Some(take_val().unwrap_or_else(|| "true".to_string())),
+        "--isolate" => opts.isolate = Some(true),
+        "--no-isolate" => opts.isolate = Some(false),
+        // Globals are ALWAYS on in turbo-test; accept both spellings as no-ops.
+        "--globals" | "--no-globals" => {}
+        // vitest VALUE-taking flags with no effect on a native single-run runner. Consume the
+        // flag AND its value HERE (inline `=v` or the next non-flag token) and drop both, so the
+        // runner never sees them — the runner must NOT re-consume a value that may be absent
+        // (a trailing `--pool`) and swallow a real test-file arg instead. `--no-file-parallelism`
+        // is intentionally NOT here: it maps to real behavior (jobs=1) and is forwarded below.
+        "--pool" | "--mode" | "--project" | "--exclude" | "--maxConcurrency" => {
+            let _ = take_val();
+        }
+        // Boolean / no-effect vitest flags — dropped (NO value consumed, so a following test
+        // file isn't eaten).
+        "--run"
+        | "--watch"
+        | "-w"
+        | "--no-watch"
+        | "--logHeapUsage"
+        | "--hideSkippedTests"
+        | "--disableConsoleIntercept"
+        | "--dom"
+        | "--segfaultRetry"
+        | "--printConsoleTrace"
+        | "--color"
+        | "--no-color"
+        | "--inspect"
+        | "--inspect-brk" => {}
+        _ => return false,
+    }
+    true
+}
+
+/// The runner env `plan` derives from `opts` and the vitest config.
+fn config_env(
+    opts: &Opts,
+    proc_cwd: &Path,
+    cwd: &Path,
+    forced: Option<&Path>,
+    env: &mut Vec<(&'static str, String)>,
+) {
     // `--root`: the reports name the files relative to it (cli.rs `display_names`).
     if let Some(r) = &opts.name_root {
         env.push((
@@ -1472,14 +1541,14 @@ pub fn plan(mut raw: Vec<String>, proc_cwd: &Path) -> Plan {
     let environment = opts
         .environment
         .clone()
-        .or_else(|| find_config(&cwd, forced.as_deref()).and_then(|c| config_environment(&c.text)));
+        .or_else(|| find_config(cwd, forced).and_then(|c| config_environment(&c.text)));
     if let Some(e) = environment {
         env.push(("TURBO_ENV", e));
     }
 
     // `server.deps.inline` → TURBO_DEPS_INLINE: the packages whose own imports see vi.mock
     // (vitest runs them through its module runner, turbo-test#216). `*` = `inline: true`.
-    let inline = find_config(&cwd, forced.as_deref())
+    let inline = find_config(cwd, forced)
         .map(|c| config_deps_inline(&c.text))
         .unwrap_or_default();
     if !inline.is_empty() {
@@ -1489,7 +1558,7 @@ pub fn plan(mut raw: Vec<String>, proc_cwd: &Path) -> Plan {
     // `resolve.alias` / `test.alias` (incl. what plugins like vite-tsconfig-paths' non-tsconfig
     // fallback emit) → TURBO_ALIAS, read by the runner's module resolver. Serialized as
     // `find\x1ftarget` records joined by `\x1e`. tsconfig `paths` are handled separately (native).
-    let aliases = config_aliases(&cwd, forced.as_deref());
+    let aliases = config_aliases(cwd, forced);
     if !aliases.is_empty() {
         let ser = aliases
             .iter()
@@ -1498,122 +1567,104 @@ pub fn plan(mut raw: Vec<String>, proc_cwd: &Path) -> Plan {
             .join("\u{1e}");
         env.push(("TURBO_ALIAS", ser));
     }
+    // `test.includeTaskLocation: true` → test locations in the JSON report, like the
+    // `--includeTaskLocation` flag (which the runner reads itself).
+    if find_config(cwd, forced).is_some_and(|c| config_true(&c.text, "includeTaskLocation")) {
+        env.push(("TURBO_TASK_LOCATION", "1".to_string()));
+    }
+}
 
+/// The runner flags `plan` fills from the vitest config unless passed explicitly: coverage
+/// thresholds/include/exclude and the per-test timeout.
+fn config_forward(cwd: &Path, forced: Option<&Path>, forward: &mut Vec<String>) {
     // Coverage: fill thresholds/include/exclude from vitest config unless passed explicitly.
     let coverage_on = forward.iter().any(|f| f.starts_with("--coverage"));
     if coverage_on {
-        if let Some(cov) = vitest_coverage(&cwd, forced.as_deref()) {
-            if let Some(thr) = &cov.thresholds {
-                if !has_flag(&forward, "--coverage-thresholds")
-                    && !has_flag(&forward, "--coverage-threshold")
-                {
-                    forward.push("--coverage-thresholds".to_string());
-                    forward.push(thr.clone());
-                }
-            }
-            if !cov.include.is_empty() && !has_flag(&forward, "--coverage-include") {
-                forward.push("--coverage-include".to_string());
-                forward.push(cov.include.join(","));
-            }
-            if !cov.exclude.is_empty() && !has_flag(&forward, "--coverage-exclude") {
-                forward.push("--coverage-exclude".to_string());
-                forward.push(cov.exclude.join(","));
-            }
+        if let Some(cov) = vitest_coverage(cwd, forced) {
+            coverage_forward(&cov, forward);
         }
     }
-
     // Per-test timeout: honor the vitest config `test.testTimeout` unless the user passed
     // `--testTimeout` explicitly. Without this the binary falls back to vitest's 5000ms default,
     // so a project that raises testTimeout (e.g. 10000 for slow editor/auto-hide flows) spuriously
     // times out under turbo-test.
-    if !has_flag(&forward, "--testTimeout") {
-        if let Some(cfg) = find_config(&cwd, forced.as_deref()) {
-            if let Some(tt) = scan_number(&cfg.text, "testTimeout") {
-                forward.push("--testTimeout".to_string());
-                forward.push(tt);
-            }
+    if !has_flag(forward, "--testTimeout") {
+        if let Some(tt) = find_config(cwd, forced).and_then(|c| scan_number(&c.text, "testTimeout"))
+        {
+            forward.push("--testTimeout".to_string());
+            forward.push(tt);
         }
     }
+}
 
-    // `test.includeTaskLocation: true` → test locations in the JSON report, like the
-    // `--includeTaskLocation` flag (which the runner reads itself).
-    if find_config(&cwd, forced.as_deref())
-        .is_some_and(|c| config_true(&c.text, "includeTaskLocation"))
-    {
-        env.push(("TURBO_TASK_LOCATION", "1".to_string()));
+/// Coverage thresholds/include/exclude from the config `cov`, unless `forward` passes them.
+fn coverage_forward(cov: &CoverageCfg, forward: &mut Vec<String>) {
+    if let Some(thr) = &cov.thresholds {
+        if !has_flag(forward, "--coverage-thresholds") && !has_flag(forward, "--coverage-threshold")
+        {
+            forward.push("--coverage-thresholds".to_string());
+            forward.push(thr.clone());
+        }
     }
+    if !cov.include.is_empty() && !has_flag(forward, "--coverage-include") {
+        forward.push("--coverage-include".to_string());
+        forward.push(cov.include.join(","));
+    }
+    if !cov.exclude.is_empty() && !has_flag(forward, "--coverage-exclude") {
+        forward.push("--coverage-exclude".to_string());
+        forward.push(cov.exclude.join(","));
+    }
+}
 
-    // Resolve the test file set: the discovered files, named relative to the process cwd as
-    // vitest's (root-relative) names. Positional arguments are filters, as vitest's: the
-    // discovered files whose root-relative path contains one (directories and file paths alike).
-    let mut test_files: Vec<PathBuf> = discover(&cwd, forced.as_deref())
-        .into_iter()
-        .filter(|t| files.is_empty() || files.iter().any(|f| filter_matches(&cwd, proc_cwd, f, t)))
-        .map(|t| t.strip_prefix(proc_cwd).map(Path::to_path_buf).unwrap_or(t))
-        .collect();
+/// The "No test files found" report: the exit `code`, the filters, include and exclude.
+fn no_files_message(code: i32, files: &[String], cwd: &Path, forced: Option<&Path>) -> String {
+    let mut msg = format!("No test files found, exiting with code {code}\n\n");
+    if !files.is_empty() {
+        msg.push_str(&format!("filter: {}\n", files.join(", ")));
+    }
+    let pats = vitest_patterns(cwd, forced);
+    let list =
+        |l: Option<&Vec<String>>, default: &str| l.map_or(default.to_string(), |l| l.join(", "));
+    let include = list(
+        pats.as_ref().and_then(|p| p.include.as_ref()),
+        DEFAULT_INCLUDE,
+    );
+    let exclude = list(
+        pats.as_ref().and_then(|p| p.exclude.as_ref()),
+        DEFAULT_EXCLUDE,
+    );
+    msg.push_str(&format!("include: {include}\nexclude:  {exclude}"));
+    msg
+}
+
+/// `--changed [since]`: keep only discovered test files git reports changed. Direct changed-file
+/// filter (no import graph). Nothing changed → running zero tests is expected → `Some(0)`.
+fn keep_changed(
+    since: &str,
+    cwd: &Path,
+    proc_cwd: &Path,
+    test_files: &mut Vec<PathBuf>,
+    messages: &mut Vec<String>,
+) -> Option<i32> {
+    let Some(changed) = git_changed(since, cwd) else {
+        messages.push(
+            "turbo-test: --changed: git unavailable / not a repo — running all discovered tests."
+                .to_string(),
+        );
+        return None;
+    };
+    let before = test_files.len();
+    test_files.retain(|f| {
+        let abs = absolute_in(proc_cwd, f);
+        changed.contains(&abs)
+    });
     if test_files.is_empty() {
-        // vitest: exit 1 (0 with --passWithNoTests), the filters, include and exclude
-        let code = i32::from(!opts.pass_with_no_tests);
-        let mut msg = format!("No test files found, exiting with code {code}\n\n");
-        if !files.is_empty() {
-            msg.push_str(&format!("filter: {}\n", files.join(", ")));
-        }
-        let pats = vitest_patterns(&cwd, forced.as_deref());
-        let list = |l: Option<&Vec<String>>, default: &str| {
-            l.map_or(default.to_string(), |l| l.join(", "))
-        };
-        let include = list(
-            pats.as_ref().and_then(|p| p.include.as_ref()),
-            DEFAULT_INCLUDE,
-        );
-        let exclude = list(
-            pats.as_ref().and_then(|p| p.exclude.as_ref()),
-            DEFAULT_EXCLUDE,
-        );
-        msg.push_str(&format!("include: {include}\nexclude:  {exclude}"));
-        messages.push(msg);
-        return Plan {
-            env,
-            messages,
-            outcome: Err(code),
-        };
+        messages.push(format!(
+            "turbo-test: --changed: no changed test files (of {before}) — exiting 0."
+        ));
+        return Some(0);
     }
-
-    // `--changed [since]`: keep only discovered test files git reports changed. Direct changed-file
-    // filter (no import graph). Nothing changed → running zero tests is expected → exit 0.
-    if let Some(since) = &opts.changed {
-        match git_changed(since, &cwd) {
-            None => {
-                messages.push("turbo-test: --changed: git unavailable / not a repo — running all discovered tests.".to_string());
-            }
-            Some(changed) => {
-                let before = test_files.len();
-                test_files.retain(|f| {
-                    let abs = absolute_in(proc_cwd, f);
-                    changed.contains(&abs)
-                });
-                if test_files.is_empty() {
-                    messages.push(format!(
-                        "turbo-test: --changed: no changed test files (of {before}) — exiting 0."
-                    ));
-                    return Plan {
-                        env,
-                        messages,
-                        outcome: Err(0),
-                    };
-                }
-            }
-        }
-    }
-
-    // Effective argv for the runner loop: forwarded flags, then resolved files.
-    let mut out = forward;
-    out.extend(test_files.into_iter().map(|f| f.display().to_string()));
-    Plan {
-        env,
-        messages,
-        outcome: Ok(out),
-    }
+    None
 }
 
 #[cfg(all(test, unix))]
