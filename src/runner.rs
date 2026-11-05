@@ -8068,13 +8068,19 @@ fn install_runtime_flags(scope: &mut v8::PinScope) {
 fn runtime_prelude() -> String {
     // Execution-control knobs from the CLI, plumbed to the runtime the same way as the name
     // pattern: env (set by cli.rs) → global the runtime reads. All optional.
-    //   --testTimeout → __TT_DEFAULT_TIMEOUT (ms), --retry → __TT_DEFAULT_RETRY,
+    //   --testTimeout → __TT_DEFAULT_TIMEOUT (ms), --hookTimeout → __TT_HOOK_TIMEOUT (ms),
+    //   --retry → __TT_DEFAULT_RETRY,
     //   --silent → __TT_SILENT, --no-allowOnly → __TT_FORBID_ONLY,
     //   --passWithNoTests → __TT_PASS_WITH_NO_TESTS.
     let mut prelude = String::new();
     if let Ok(v) = std::env::var("TURBO_TEST_TIMEOUT") {
         if let Ok(n) = v.parse::<u64>() {
             prelude.push_str(&format!("globalThis.__TT_DEFAULT_TIMEOUT={n};"));
+        }
+    }
+    if let Ok(v) = std::env::var("TURBO_HOOK_TIMEOUT") {
+        if let Ok(n) = v.parse::<u64>() {
+            prelude.push_str(&format!("globalThis.__TT_HOOK_TIMEOUT={n};"));
         }
     }
     if let Ok(v) = std::env::var("TURBO_TEST_RETRY") {

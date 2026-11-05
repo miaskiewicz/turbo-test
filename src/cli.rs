@@ -219,6 +219,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             }
             // `--testTimeout N` → default per-test timeout (ms); runtime reads __TT_DEFAULT_TIMEOUT.
             "--testTimeout" => push_u64_env(&mut o.env, "TURBO_TEST_TIMEOUT", value()),
+            // `--hookTimeout N` → default hook timeout (ms): __TT_HOOK_TIMEOUT (turbo-test#255)
+            "--hookTimeout" => push_u64_env(&mut o.env, "TURBO_HOOK_TIMEOUT", value()),
             // `--retry N` → global default retry count; runtime reads __TT_DEFAULT_RETRY.
             "--retry" => push_u64_env(&mut o.env, "TURBO_TEST_RETRY", value()),
             // `--bail N` → stop the run after N failed tests total (cross-worker, file-granular).

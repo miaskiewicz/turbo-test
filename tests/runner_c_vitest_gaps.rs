@@ -22,6 +22,11 @@ const JSDOM: &str = "export default { test: { environment: 'jsdom' } };\n";
 /// Runs `probe` (in its own project) and returns (its ORDER log, its tests' [fullName, status],
 /// the run).
 fn run(probe: &Probe) -> (Value, Value, common::Run) {
+    run_with(probe, &[])
+}
+
+/// [`run`] with extra CLI arguments.
+fn run_with(probe: &Probe, args: &[&str]) -> (Value, Value, common::Run) {
     let p = Project::new(&format!("rc-gaps-{}", probe.name));
     p.file(
         "package.json",
@@ -32,13 +37,17 @@ fn run(probe: &Probe) -> (Value, Value, common::Run) {
     let r = turbo_test(
         &p.dir,
         &[
-            "--jobs",
-            "1",
-            "--reporter",
-            "json",
-            "--outputFile",
-            "r.json",
-        ],
+            &[
+                "--jobs",
+                "1",
+                "--reporter",
+                "json",
+                "--outputFile",
+                "r.json",
+            ],
+            args,
+        ]
+        .concat(),
         &[],
     );
     let tag = format!("ORDER {} ", probe.name);
@@ -163,4 +172,71 @@ fn repeats_show_in_the_verbose_reporter() {
         );
     }
     assert!(r.stdout.contains("→ repeat 2"), "{}", r.all());
+}
+
+const HOOK_HINT: &str = "If this is a long-running hook, pass a timeout value as the last argument or configure it globally with \"hookTimeout\".";
+
+/// turbo-test#255: a beforeAll / beforeEach / afterEach / afterAll (and a beforeEach's cleanup)
+/// that runs longer than its timeout fails with vitest's error: the per-hook timeout argument,
+/// else the config's `test.hookTimeout`. A beforeEach timing out fails its test (its afterEach
+/// still runs); an afterEach one aborts the test's signal; a beforeAll one skips the suite's
+/// tests and fails the suite, an afterAll one (or a beforeAll's cleanup) fails the suite. An
+/// onTestFinished handler times out the same way.
+#[test]
+fn hooks_time_out_as_vitest() {
+    let r = check(&Probe {
+        name: "hook",
+        src: include_str!("data/vitest-gaps/hook.test.js"),
+        want: include_str!("data/vitest-gaps/hook.vitest.json"),
+        config: "export default { test: { environment: 'jsdom', hookTimeout: 60 } };\n",
+    });
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    // the suites whose beforeAll / afterAll / beforeAll cleanup timed out fail with that error,
+    // as vitest's Failed Suites section prints them
+    let p = Project::new("rc-gaps-hook-suites");
+    p.file("package.json", r#"{"name":"hs","type":"module"}"#);
+    p.file(
+        "vitest.config.js",
+        "export default { test: { environment: 'jsdom', hookTimeout: 60 } };\n",
+    );
+    p.file(
+        "hook.test.js",
+        include_str!("data/vitest-gaps/hook.test.js"),
+    );
+    let r = turbo_test(
+        &p.dir,
+        &["--reporter", "verbose"],
+        &[("TURBO_LEGACY_REPORTER", "0"), ("NO_COLOR", "1")],
+    );
+    for (suite, ms) in [("ba", 20), ("aa", 25), ("ba-cleanup", 15)] {
+        let want =
+            format!(" FAIL  hook.test.js > {suite}\nError: Hook timed out in {ms}ms.\n{HOOK_HINT}");
+        assert!(r.all().contains(&want), "{want}\n{}", r.all());
+    }
+}
+
+/// vitest's default hookTimeout is 10 s (run on turbo-test's virtual clock: the test does not
+/// wait for it); `--hookTimeout` sets it, over the config's.
+#[test]
+fn hook_timeout_defaults_to_ten_seconds_and_follows_the_flag() {
+    let probe = Probe {
+        name: "hookdef",
+        src: include_str!("data/vitest-gaps/hookdef.test.js"),
+        want: include_str!("data/vitest-gaps/hookdef.vitest.json"),
+        config: JSDOM,
+    };
+    check(&probe);
+    let (order, _, r) = run_with(
+        &Probe {
+            config: "export default { test: { environment: 'jsdom', hookTimeout: 30000 } };\n",
+            ..probe
+        },
+        &["--hookTimeout", "50"],
+    );
+    assert_eq!(
+        order,
+        serde_json::json!([format!("fail Hook timed out in 50ms.\n{HOOK_HINT}")]),
+        "{}",
+        r.all()
+    );
 }

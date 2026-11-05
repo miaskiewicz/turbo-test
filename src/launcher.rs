@@ -48,7 +48,7 @@ pub const VITEST_CONFIG_FILES: [&str; 12] = [
 /// Runner flags that take a following value (so a file arg isn't mistaken for the value, and the
 /// value isn't mistaken for a file). Mirrors the value-flag set cli.js forwarded with their arg.
 /// `cli::parse_args` also accepts each `--` one in its inline `--flag=value` form.
-pub(crate) const VALUE_FLAGS: [&str; 21] = [
+pub(crate) const VALUE_FLAGS: [&str; 22] = [
     "-j",
     "--jobs",
     "--shard",
@@ -59,6 +59,7 @@ pub(crate) const VALUE_FLAGS: [&str; 21] = [
     "-t",
     "--testNamePattern",
     "--testTimeout",
+    "--hookTimeout",
     "--retry",
     "--bail",
     "--maxWorkers",
@@ -1588,11 +1589,15 @@ fn config_forward(cwd: &Path, forced: Option<&Path>, forward: &mut Vec<String>) 
     // `--testTimeout` explicitly. Without this the binary falls back to vitest's 5000ms default,
     // so a project that raises testTimeout (e.g. 10000 for slow editor/auto-hide flows) spuriously
     // times out under turbo-test.
-    if !has_flag(forward, "--testTimeout") {
-        if let Some(tt) = find_config(cwd, forced).and_then(|c| scan_number(&c.text, "testTimeout"))
-        {
-            forward.push("--testTimeout".to_string());
-            forward.push(tt);
+    // the same for hooks: `test.hookTimeout` (turbo-test#255)
+    for key in ["testTimeout", "hookTimeout"] {
+        let flag = format!("--{key}");
+        if has_flag(forward, &flag) {
+            continue;
+        }
+        if let Some(v) = find_config(cwd, forced).and_then(|c| scan_number(&c.text, key)) {
+            forward.push(flag);
+            forward.push(v);
         }
     }
 }
