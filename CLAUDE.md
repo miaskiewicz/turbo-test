@@ -52,9 +52,9 @@ A release where these disagree is a bug. Bump both in the same commit.
   installed from its home at the pinned rev in ci.yml, over every tracked `.rs` file) and
   `complexity / js (cc <= 15)` (`npm run complexity:js`: oxlint `complexity` over cli.js,
   index.js, src/runtime.js). One limit, no allow-list, no baseline.
-- Both are report-only (`continue-on-error`; the step summary lists the functions over the
-  limit) until the post-0.6.0 refactor clears that backlog, then they become blocking (README
-  "Gates and CI"). New code stays <= 15; never raise the limit.
+- Both are blocking since 0.8.0 (turbo-test#240 cleared the backlog; on failure the step summary
+  lists the functions over the limit). Every new or changed function stays <= 15: split it, never
+  raise the limit, never add an allow-list or a lint-disable comment.
 
 ## Where the DOM and V8 live
 - The DOM binding (window/document/CSSOM/forms/events, its probes, Chrome controls and
