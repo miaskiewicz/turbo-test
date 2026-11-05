@@ -37,7 +37,7 @@ path = "src/bin/m5_affected.rs"
 v8 = { package = "turbo-dom-v8", version = "~150.4" }
 # The browser environment (window, document, CSSOM, forms, events) the runner
 # installs into each test context.
-turbo-dom-browser-env = { version = "0.7.0" }
+turbo-dom-browser-env = { version = "0.7.1" }
 oxc_allocator = "0.134"
 oxc_parser = "0.134"
 oxc_span = "0.134"
@@ -78,6 +78,6 @@ codegen-units = 1
 # crates.io. turbo-dom-v8 150.4.0 stays on crates.io. Remove this section and re-lock before
 # tagging (RELEASING.md); the tag-only release guard fails while it is here.
 [patch.crates-io]
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "b72fb6500ec6dc5229d5bc4419d7922165f73f5b" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "b72fb6500ec6dc5229d5bc4419d7922165f73f5b" }
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "b72fb6500ec6dc5229d5bc4419d7922165f73f5b" }
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "a5e05113406292fc3471e44591397d1bb89943eb" }
+turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "a5e05113406292fc3471e44591397d1bb89943eb" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "a5e05113406292fc3471e44591397d1bb89943eb" }
