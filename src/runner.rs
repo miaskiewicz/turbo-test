@@ -2543,10 +2543,11 @@ fn setup_dom(scope: &mut v8::PinScope, entry: &Path) {
     // jsdom's: no CSS transitions / animations and no Web Animations by default (vitest
     // parity); Chrome's with --css-transitions, TURBO_CSS_TRANSITIONS=1 or
     // test.cssTransitions: true. Independent of the media switch.
-    turbo_dom_browser_env::browser_env::set_css_transitions(
-        scope,
-        dom_switch(entry, "TURBO_CSS_TRANSITIONS", "cssTransitions"),
-    );
+    // turbo-dom 0.8 gates transitions and @keyframes animations separately (turbo-dom#313);
+    // turbo-test's one switch drives both, so the default stays jsdom's (neither runs).
+    let css_motion = dom_switch(entry, "TURBO_CSS_TRANSITIONS", "cssTransitions");
+    turbo_dom_browser_env::browser_env::set_css_transitions(scope, css_motion);
+    turbo_dom_browser_env::browser_env::set_css_animations(scope, css_motion);
     // the embedder's window members: open / alert / print / postMessage … (turbo-test#208)
     run_js(
         scope,
