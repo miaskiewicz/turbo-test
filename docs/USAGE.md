@@ -51,7 +51,7 @@ Full matrix + quirks: `vitest.compat.md`. Summary:
 
 **CLI flags** ✅ `<file globs>`, `-j/--jobs` (≈ `--maxWorkers`), `--shard i/n`, `--reporter`
 (json/junit/tap/verbose/dot/default) + `--outputFile`, `-t/--testNamePattern`, `--testTimeout`,
-`--retry`, `--bail`, `-c/--config`, `--root`/`--dir`, `--environment`, `--isolate`/`--no-isolate`,
+`--retry`, `--hookTimeout`, `--bail`, `-c/--config`, `--root`/`--dir`, `--environment`, `--isolate`/`--no-isolate`,
 `--changed [since]`, `--passWithNoTests`, `-u/--update`, the `--coverage*` family.
 turbo-test's own: `--zero-delay-timers` / `--no-zero-delay-timers` (`setTimeout(fn, 0)` takes 0 ms
 of the clock in Node's order (default) or Node's 1 ms; also `TURBO_ZERO_DELAY_TIMERS=0|1`, preferred over

@@ -7789,24 +7789,28 @@ const __ttIsProjectCaller = () => {
   const named = frames.find((l) => l.includes('/') && !l.includes('<anonymous>'));
   return !!named && !named.includes('/node_modules/');
 };
-const __ttAddHook = (kind, fn) => {
-  current.hooks[kind].push(fn);
+// A hook, an onTestFinished / onTestFailed handler: its function, its own timeout (vitest's
+// last argument: turbo-test#255) and where it was registered (its timeout error's stack)
+const __ttHook = (fn, timeout) => ({ fn, timeout, site: new Error('STACK_TRACE_ERROR') });
+const __ttAddHook = (kind, fn, timeout) => {
+  const h = __ttHook(fn, timeout);
+  current.hooks[kind].push(h);
   if (current === root && globalThis.__ttHookBaseline && __ttIsProjectCaller()) {
-    __ttFileRootHooks.push([kind, fn]);
+    __ttFileRootHooks.push([kind, h]);
   }
 };
-globalThis.beforeEach = (fn) => __ttAddHook('be', fn);
-globalThis.afterEach = (fn) => __ttAddHook('ae', fn);
-globalThis.beforeAll = (fn) => __ttAddHook('ba', fn);
-globalThis.afterAll = (fn) => __ttAddHook('aa', fn);
+globalThis.beforeEach = (fn, timeout) => __ttAddHook('be', fn, timeout);
+globalThis.afterEach = (fn, timeout) => __ttAddHook('ae', fn, timeout);
+globalThis.beforeAll = (fn, timeout) => __ttAddHook('ba', fn, timeout);
+globalThis.afterAll = (fn, timeout) => __ttAddHook('aa', fn, timeout);
 // onTestFinished / onTestFailed imported from 'vitest' (turbo-test#258): vitest's
 // createTestHook — the callback is type-checked, then registered on the test running now (its
 // body, a beforeEach or an afterEach), the same list as the context's own
-const __ttTestHook = (name, key) => (fn) => {
+const __ttTestHook = (name, key) => (fn, timeout) => {
   if (typeof fn !== 'function') throw new TypeError(`"${name}" callback value must be function, received "${typeof fn}"`);
   const t = __snap.currentTest;
   if (!t) throw new Error(`Hook ${name}() can only be called inside a test`);
-  t[key].push(fn);
+  t[key].push(__ttHook(fn, timeout));
 };
 globalThis.onTestFinished = __ttTestHook('onTestFinished', 'onFinished');
 globalThis.onTestFailed = __ttTestHook('onTestFailed', 'onFailed');
@@ -8082,13 +8086,14 @@ function __contextOf(t, chain) {
     task.annotations.push(annotation);
     return Promise.resolve(annotation);
   };
-  context.onTestFailed = (fn) => { t.onFailed.push(fn); };
-  context.onTestFinished = (fn) => { t.onFinished.push(fn); };
+  context.onTestFailed = (fn, timeout) => { t.onFailed.push(__ttHook(fn, timeout)); };
+  context.onTestFinished = (fn, timeout) => { t.onFinished.push(__ttHook(fn, timeout)); };
   let ownExpect;
   Object.defineProperty(context, 'expect', { get: () => (ownExpect ||= new Proxy(globalThis.expect, {})) });
   Object.defineProperty(task, 'context', { value: context, configurable: true });
   t.abort = abort;
   t.context = context;
+  __ctxAborts.set(context, abort);
   return context;
 }
 // onTestFinished (last registered first) / onTestFailed handlers: each gets the context and a
@@ -8098,9 +8103,12 @@ async function __callTestHooks(t, hooks, fail) {
   const keep = [ctx.onTestFailed, ctx.onTestFinished];
   ctx.onTestFailed = () => { throw new Error('Cannot call "onTestFailed" inside a test hook.'); };
   ctx.onTestFinished = () => { throw new Error('Cannot call "onTestFinished" inside a test hook.'); };
-  for (const fn of hooks.slice().reverse()) {
+  for (const h of hooks.slice().reverse()) {
+    // an internal handler (expect.poll's) is a bare function, without a timeout
+    const fn = typeof h === 'function' ? h : h.fn;
+    const arm = typeof h === 'function' ? undefined : __hookArm(h, ctx);
     try {
-      await __vtLimit(() => { __loop.ticks++; return __vtSettle(() => fn(ctx)); });
+      await __vtLimit(() => { __loop.ticks++; return __vtSettle(() => fn(ctx), arm); });
     } catch (e) { fail(e); }
   }
   [ctx.onTestFailed, ctx.onTestFinished] = keep;
@@ -8137,6 +8145,33 @@ function __vtSettle(fn, arm) {
     } catch (e) { ko(e); }
   });
 }
+// vitest's hookTimeout (turbo-test#255): the hook's own timeout, else `test.hookTimeout` /
+// --hookTimeout (host → __TT_HOOK_TIMEOUT), else vitest's 10 s
+function __hookTimeout(own) {
+  if (typeof own === 'number') return own;
+  const n = Number(globalThis.__TT_HOOK_TIMEOUT);
+  return Number.isFinite(n) && n > 0 ? n : 10000;
+}
+// the contexts' AbortControllers: a beforeEach / afterEach / handler timing out aborts its test's
+// signal with the error (vitest's abortIfTimeout)
+const __ctxAborts = new WeakMap();
+// withTimeout's timer for hook `h` (none for a timeout of 0 or Infinity, as vitest's): an
+// internal timer, so a hook that never settles fails on the virtual clock with vitest's
+// makeTimeoutError — its stack where the hook was registered
+function __hookArm(h, ctx) {
+  const ms = __hookTimeout(h.timeout);
+  if (!(ms > 0) || ms === Infinity) return undefined;
+  return (reject) => {
+    const timer = __scheduleInternal(() => {
+      const err = new Error(`Hook timed out in ${ms}ms.\nIf this is a long-running hook, pass a timeout value as the last argument or configure it globally with "hookTimeout".`);
+      err.stack = String(h.site.stack).replace('STACK_TRACE_ERROR', err.message);
+      const abort = ctx && __ctxAborts.get(ctx);
+      if (abort) abort.abort(err);
+      reject(err);
+    }, ms);
+    return () => __clearInternal(timer);
+  };
+}
 // callAroundEachHooks / callAroundAllHooks with no aroundEach / aroundAll hook
 async function __vtAround(inner) {
   await (async () => { await inner(); })();
@@ -8146,8 +8181,11 @@ async function __vtAround(inner) {
 async function __vtRunHook(h, args, name) {
   return __vtLimit(async () => {
     if (name === 'be' || name === 'ae') __loop.ticks++;
-    const r = await __vtSettle(async () => h(...args));
-    return typeof r === 'function' ? r : undefined;
+    // called as a plain function, as vitest calls it (its frame has no method name)
+    const fn = h.fn;
+    const r = await __vtSettle(async () => fn(...args), __hookArm(h, args[0]));
+    // a cleanup runs under its hook's timeout (vitest's getBeforeHookCleanupCallback)
+    return typeof r === 'function' ? { fn: r, hook: h, ctx: args[0] } : undefined;
   });
 }
 // callSuiteHook: a suite's hooks (afterEach / afterAll last registered first); beforeEach runs
@@ -8162,9 +8200,9 @@ async function __vtSuiteHook(chain, i, name, args) {
 }
 // callCleanupHooks: the functions beforeEach / beforeAll hooks returned, last first
 async function __vtCleanups(cleanups, bump) {
-  for (const fn of cleanups.slice().reverse()) {
-    if (typeof fn !== 'function') continue;
-    await __vtLimit(() => { if (bump) __loop.ticks++; return __vtSettle(fn); });
+  for (const c of cleanups.slice().reverse()) {
+    if (!c) continue;
+    await __vtLimit(() => { if (bump) __loop.ticks++; return __vtSettle(c.fn, __hookArm(c.hook, c.ctx)); });
   }
 }
 

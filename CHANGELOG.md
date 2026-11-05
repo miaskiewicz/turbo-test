@@ -48,6 +48,15 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   the reporters print `(repeat xN)`. Tests: `repeats_run_a_test_again_as_vitest` and
   `repeats_show_in_the_verbose_reporter` in `tests/runner_c_vitest_gaps.rs` (recorded from
   vitest 4.1.12).
+- Hooks time out as on vitest (#255). A beforeAll / beforeEach / afterEach / afterAll (and a
+  beforeEach's or beforeAll's cleanup, an onTestFinished / onTestFailed handler) that never
+  settled hung its file until the whole file was killed, where vitest fails it after
+  `hookTimeout` with a pointed error. Each now runs under its own timeout argument, else the
+  config's `test.hookTimeout` / `--hookTimeout`, else vitest's 10 s, on turbo-test's virtual
+  clock (no real wait), failing with vitest's `Hook timed out in <n>ms.` error (stack at the
+  hook's registration); a beforeEach / afterEach timing out aborts the test's `signal`. Tests:
+  `hooks_time_out_as_vitest` and `hook_timeout_defaults_to_ten_seconds_and_follows_the_flag` in
+  `tests/runner_c_vitest_gaps.rs` (recorded from vitest 4.1.12).
 
 ### Added
 - `jest.fn()` / `jest.spyOn()` mocks have `whenCalledWith(...matchers)` with jest-mock 30.5.2's
