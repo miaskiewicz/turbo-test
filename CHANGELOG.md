@@ -20,6 +20,17 @@ implementations, not the reporter's branches.
   (vitest 4.1.12 + jsdom 27.4.0 and Chrome 156 at 1024x768 as oracles),
   `chrome_media_env_wins_over_the_config`, `chrome_media_reads_the_nearest_config`,
   `chrome_media_flags_set_the_env_switch`.
+- No CSS transitions or animations by default, as on vitest's jsdom (turbo-dom
+  perf/0.7.1-jsdom-no-transitions): jsdom 27.4.0 runs neither, so `getComputedStyle` reports a
+  transitioned property's end value at once and no `transition*` / `animation*` event fires; it
+  has no Web Animations, so `element.animate`, `getAnimations()`, `document.timeline`,
+  `Animation`, `CSSTransition`, `CSSAnimation` and `AnimationEvent` are undefined. turbo-dom
+  created a CSSTransition per changed element; skipping it cut full payroll-app from 16.10 s
+  to 14.69 s (medians, ABBA, load 13-15). `--css-transitions`, `TURBO_CSS_TRANSITIONS=1` or `test.cssTransitions: true`
+  (flag over env over config) restore Chrome's; the switch is independent of the media one. Tests:
+  `css_transitions_flags_set_the_env_switch`, `chrome_media_reads_the_nearest_config`,
+  `transitions_are_jsdom_by_default_and_chrome_on_opt_in` (vitest 4.1.12 + jsdom 27.4.0 and
+  Chrome 156 as oracles).
 
 ### Fixed
 - Zero-delay timers keep vitest's event-loop order (#237). A real `setTimeout(fn, 0)` still takes

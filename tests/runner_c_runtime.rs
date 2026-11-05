@@ -1120,3 +1120,101 @@ fn media_is_jsdom_by_default_and_chrome_on_opt_in() {
         1,
     );
 }
+
+/// A jsdom-environment project whose test starts an opacity transition and a 10s
+/// `@keyframes` animation, then reads the computed values, the Web Animations surface and
+/// `typeof matchMedia`, and expects `{ matchMedia: media, ..transitions }`.
+fn transitions_project(name: &str, config: &str, media: &str, transitions: &str) -> Project {
+    let p = Project::new(name);
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "vitest.config.ts",
+        &format!("export default {{ test: {{ environment: 'jsdom', {config} }} }};\n"),
+    );
+    p.file(
+        "a.test.js",
+        &format!(
+            "import {{ expect, it }} from 'vitest';\n\
+             it('transitions', () => {{\n\
+             document.head.innerHTML = '<style>@keyframes k {{ from {{ color: rgb(1, 2, 3) }} to {{ color: rgb(1, 2, 3) }} }} #a {{ color: rgb(9, 9, 9); animation: k 10s linear }} #t {{ opacity: 0; transition: opacity 1000s linear }} #t.on {{ opacity: 1 }}</style>';\n\
+             document.body.innerHTML = '<div id=\"a\"></div><div id=\"t\"></div>';\n\
+             const t = document.getElementById('t');\n\
+             getComputedStyle(t).opacity;\n\
+             t.className = 'on';\n\
+             expect({{ matchMedia: typeof window.matchMedia, opacity: getComputedStyle(t).opacity, color: getComputedStyle(document.getElementById('a')).color, animate: typeof t.animate, getAnimations: typeof document.getAnimations, Animation: typeof Animation, animations: typeof document.getAnimations === 'function' ? document.getAnimations().length : null }}).toEqual({{ matchMedia: '{media}', {transitions} }});\n\
+             }});\n"
+        ),
+    );
+    p
+}
+
+/// vitest 4.1.12 with jsdom 27.4.0 (the default): no Web Animations, and neither the
+/// transition nor the animation runs, so the end and declared values show at once.
+const JSDOM_TRANSITIONS: &str = "opacity: '1', color: 'rgb(9, 9, 9)', animate: 'undefined', getAnimations: 'undefined', Animation: 'undefined', animations: null";
+/// Chrome 156: the transition starts at its start value and both run.
+const CHROME_TRANSITIONS: &str = "opacity: '0', color: 'rgb(1, 2, 3)', animate: 'function', getAnimations: 'function', Animation: 'function', animations: 2";
+
+/// No CSS transitions or animations by default (vitest parity); Chrome's with
+/// `--css-transitions`, `TURBO_CSS_TRANSITIONS=1` or `test.cssTransitions: true` (flag over env
+/// over config). The media switch and the transitions switch are independent: all four
+/// combinations.
+#[test]
+fn transitions_are_jsdom_by_default_and_chrome_on_opt_in() {
+    for (name, args, media, transitions) in [
+        ("tr-neither", vec![], "undefined", JSDOM_TRANSITIONS),
+        (
+            "tr-media",
+            vec!["--chrome-media"],
+            "function",
+            JSDOM_TRANSITIONS,
+        ),
+        (
+            "tr-css",
+            vec!["--css-transitions"],
+            "undefined",
+            CHROME_TRANSITIONS,
+        ),
+        (
+            "tr-both",
+            vec!["--chrome-media", "--css-transitions"],
+            "function",
+            CHROME_TRANSITIONS,
+        ),
+    ] {
+        let p = transitions_project(name, "", media, transitions);
+        assert_passes(&turbo_test(&p.dir, &args, &[]), 1);
+    }
+    let off = transitions_project("tr-off", "", "undefined", JSDOM_TRANSITIONS);
+    let r = turbo_test(&off.dir, &["--css-transitions"], &[]);
+    assert!(r.stdout.contains("Tests  1 failed (1)"), "{}", r.all());
+    assert_passes(
+        &turbo_test(
+            &off.dir,
+            &["--no-css-transitions"],
+            &[("TURBO_CSS_TRANSITIONS", "1")],
+        ),
+        1,
+    );
+    let on = transitions_project("tr-env", "", "undefined", CHROME_TRANSITIONS);
+    assert_passes(
+        &turbo_test(&on.dir, &[], &[("TURBO_CSS_TRANSITIONS", "1")]),
+        1,
+    );
+    let config = transitions_project(
+        "tr-config",
+        "cssTransitions: true",
+        "undefined",
+        CHROME_TRANSITIONS,
+    );
+    assert_passes(&turbo_test(&config.dir, &[], &[]), 1);
+    let config_off = transitions_project(
+        "tr-config-env",
+        "cssTransitions: true",
+        "undefined",
+        JSDOM_TRANSITIONS,
+    );
+    assert_passes(
+        &turbo_test(&config_off.dir, &[], &[("TURBO_CSS_TRANSITIONS", "0")]),
+        1,
+    );
+}

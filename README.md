@@ -73,6 +73,7 @@ turbo-test has no Cargo feature flags; behaviour switches are environment variab
 | `TURBO_LEGACY_REPORTER=1` | compact `PASS` / `FAIL` reporter instead of vitest's |
 | `TURBO_ZERO_DELAY_TIMERS=1` / `=0` | zero-delay timers on (default) / off (see below) |
 | `TURBO_CHROME_MEDIA=1` / `=0` | Chrome's media / jsdom's (default) (see below) |
+| `TURBO_CSS_TRANSITIONS=1` / `=0` | Chrome's CSS transitions and animations / jsdom's none (default) (see below) |
 | `TURBO_SNAPSHOT=0` | each DOM file runs turbo-dom's engine install instead of opening the window snapshot (see below) |
 
 **Window snapshot** (on by default for runs with at least 8 DOM-environment files). The worker
@@ -130,6 +131,25 @@ that width, so mobile-only elements are `display: none`. In both modes a test's 
 | vitest config | `test: { chromeMedia: true }` | `test: { chromeMedia: false }` |
 
 `test.chromeMedia` is not in vitest's `InlineConfig` type either (`// @ts-expect-error`).
+
+**CSS transitions: none by default (jsdom's), Chrome's on opt-in.** jsdom 27 runs no CSS
+transitions or `@keyframes` animations, so by default turbo-test runs none either: after a class
+or style change `getComputedStyle` reports the end value at once, and no `transitionrun` /
+`transitionstart` / `transitionend` or `animation*` event fires. jsdom has no Web Animations, so
+`element.animate`, `getAnimations()`, `document.timeline`, `Animation`, `CSSTransition`,
+`CSSAnimation` and `AnimationEvent` are undefined too (`TransitionEvent` exists, as in jsdom).
+Libraries that feature-detect `animate` take their jsdom path, and suites skip the per-element
+transition work. On, turbo-dom runs them as Chrome 156 does (a transition starts at its start
+value and `getAnimations()` lists the CSSTransition / CSSAnimation objects). This switch and the
+media switch are independent: either can be on without the other.
+
+| source | Chrome | jsdom (default) |
+|---|---|---|
+| CLI flag (wins) | `--css-transitions` | `--no-css-transitions` |
+| env var | `TURBO_CSS_TRANSITIONS=1` | `TURBO_CSS_TRANSITIONS=0` |
+| vitest config | `test: { cssTransitions: true }` | `test: { cssTransitions: false }` |
+
+`test.cssTransitions` is not in vitest's `InlineConfig` type either (`// @ts-expect-error`).
 
 ## Isolate-reuse (extra speed, zero config)
 
