@@ -116,7 +116,7 @@ breakpoint rules such as MUI's `sx={{ display: { xs: 'flex', md: 'none' } }}` ne
 both a mobile and a desktop layout stay in the accessibility tree, which is what tests written
 against vitest expect. Tests that need `matchMedia` mock it, as on jsdom.
 
-Chrome's media (turbo-dom's `MediaMode::Chrome`, the behaviour turbo-dom 0.7.1 has for every
+Chrome's media (turbo-dom's `MediaMode::Chrome`, the behaviour turbo-dom 0.8.0 has for every
 other embedder): `matchMedia` returns a live `MediaQueryList`, and `@media` / `@import` media
 lists are evaluated against the 1024x768 viewport, as in Chrome 156. MUI's `md` rules apply at
 that width, so mobile-only elements are `display: none`. In both modes a test's replacement
@@ -181,7 +181,11 @@ are erased by the transform. When there's **no vitest config**, the nearest **je
 file loads, and `now` / `doNotFake` / `timerLimit` / `advanceTimers` become the defaults of
 `jest.useFakeTimers()` (the call's own argument wins). Mocks from `jest.fn()` / `jest.spyOn()`
 have jest-mock's `whenCalledWith(...matchers)` (0.8.0+; `vi.fn()` has none, as in vitest).
-Automock (`enableAutomock`, `automock: true`, …) is not supported yet (#184).
+Automock (`enableAutomock`, `automock: true`, …) is not supported yet (#184). Under a jest
+project, `mockReset` / `jest.resetAllMocks` / `mockRestore` drop a mock's implementation so it
+returns `undefined` (jest 30 semantics, 0.8.0+); `vi.fn()` / `vi.spyOn()` keep vitest's behaviour
+(the impl stays and a spy keeps calling through). When a vitest config applies, the jest config's
+`fakeTimers` is ignored.
 
 Both the injected globals **and** the explicit-import form work — a suite with `injectGlobals: false`
 that does `import { describe, it, expect, jest } from '@jest/globals'` resolves that specifier from
