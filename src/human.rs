@@ -300,7 +300,7 @@ fn duration(c: &Colors, ms: f64) -> String {
 }
 
 /// vitest's getTestCaseSuffix: the duration of a test that ran (one with a result: a test
-/// skipped at run time has a start, turbo-test#96), then ` (retry x2)` for a retried one and
+/// skipped at run time has a start, turbo-test#96), then ` (retry x2)` for a retried one, ` (repeat x2)` for a repeated one and
 /// ` [note]` for one skipped with a note.
 fn suffix(c: &Colors, t: &TestCase) -> String {
     let mut s = String::new();
@@ -310,6 +310,9 @@ fn suffix(c: &Colors, t: &TestCase) -> String {
     }
     if t.retry_count > 0 {
         s.push_str(&c.yellow(&format!(" (retry x{})", t.retry_count)));
+    }
+    if t.repeat_count > 0 {
+        s.push_str(&c.yellow(&format!(" (repeat x{})", t.repeat_count)));
     }
     if t.status == "skipped" && !t.note.is_empty() {
         s.push_str(&c.dim(&c.gray(&format!(" [{}]", t.note))));

@@ -40,6 +40,14 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   vitest's `Hook onTestFinished() can only be called inside a test` outside one and its
   TypeError for a non-function. Test: `on_test_finished_and_failed_import_from_vitest` in
   `tests/runner_c_vitest_gaps.rs` (recorded from vitest 4.1.12).
+- A test's `{ repeats: n }` option runs it 1 + n times, as vitest (#257). turbo-test ignored the
+  option, so a test meant to be repeated (to shake out flakiness or state leaking between runs)
+  ran once and passed where vitest would catch the failure on a later repeat. Each repeat runs
+  with its hooks and handlers, is retried up to `retry` times (`retryCount` counts on across
+  repeats), a failed repeat fails the test, a describe's `repeats` is inherited by its tests, and
+  the reporters print `(repeat xN)`. Tests: `repeats_run_a_test_again_as_vitest` and
+  `repeats_show_in_the_verbose_reporter` in `tests/runner_c_vitest_gaps.rs` (recorded from
+  vitest 4.1.12).
 
 ### Added
 - `jest.fn()` / `jest.spyOn()` mocks have `whenCalledWith(...matchers)` with jest-mock 30.5.2's

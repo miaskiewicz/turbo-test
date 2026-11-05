@@ -8598,6 +8598,8 @@ pub struct TestCase {
     pub expected_fail: bool,
     /// How many times it was retried (vitest's `retryCount`, `(retry x1)`).
     pub retry_count: u32,
+    /// The last repeat it ran (vitest's `repeatCount`, `(repeat x2)` for `{ repeats: 2 }`).
+    pub repeat_count: u32,
     /// Its console output (`stdout` / `stderr`, content) while logs are captured (junit).
     pub logs: Vec<(String, String)>,
     /// The error it failed with (junit's `<failure>`, turbo-test#81).
@@ -9680,6 +9682,7 @@ fn test_case_of<'s>(scope: &mut v8::PinScope<'s, '_>, o: v8::Local<'s, v8::Objec
         not_run: flag(scope, "not_run"),
         expected_fail: flag(scope, "expected_fail"),
         retry_count: num(scope, "retry_count") as u32,
+        repeat_count: num(scope, "repeat_count") as u32,
         logs: pairs_of(scope, o, "logs"),
         errors: errors_of(scope, o),
         note: text(scope, "note"),

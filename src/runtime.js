@@ -7678,9 +7678,13 @@ globalThis.__ttScopeBind = (file, get, set) => {
 const root = { name: '', tasks: [], suite: true, hooks: { be: [], ae: [], ba: [], aa: [] }, parent: null };
 let current = root;
 
+// A describe's options object (`describe(name, { repeats }, fn)`) is merged over its enclosing
+// suite's, and its tests inherit them (vitest's createSuite / createTest).
+const __suiteOptions = (a, b) => (a && typeof a === 'object' ? a : b && typeof b === 'object' ? b : {});
 function describe(name, a, b) {
   const fn = typeof a === 'function' ? a : (typeof b === 'function' ? b : () => {});
-  const suite = { name, tasks: [], suite: true, hooks: { be: [], ae: [], ba: [], aa: [] }, parent: current };
+  const opts = { ...current.opts, ...__suiteOptions(a, b) };
+  const suite = { name, tasks: [], suite: true, hooks: { be: [], ae: [], ba: [], aa: [] }, parent: current, opts };
   current.tasks.push(suite);
   const prev = current;
   current = suite;
@@ -7722,22 +7726,24 @@ function __addTest(t) {
   // where it was registered: a timeout's stack (vitest's `STACK_TRACE_ERROR`, turbo-test#102)
   t.stackTrace = new Error('STACK_TRACE_ERROR');
   if (__inEach) t.each = true;
+  // `repeats` from the enclosing describe's options (turbo-test#257)
+  if (t.repeats === undefined && current.opts) t.repeats = current.opts.repeats;
   current.tasks.push(t);
 }
 function it(name, a, b) {
   const { fn, o } = __normTest(a, b);
-  __addTest({ name, fn, skip: false, only: false, retry: o.retry || 0, timeout: o.timeout });
+  __addTest({ name, fn, skip: false, only: false, retry: o.retry || 0, repeats: o.repeats, timeout: o.timeout });
 }
 it.skip = (name, a, b) => __addTest({ name, fn: __normTest(a, b).fn, skip: true });
 it.todo = (name) => __addTest({ name, fn: () => {}, skip: true, todo: true });
-it.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: true, retry: o.retry || 0, timeout: o.timeout }); };
+it.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: true, retry: o.retry || 0, repeats: o.repeats, timeout: o.timeout }); };
 it.concurrent = it; // accepted; this runner executes a file's tests sequentially
 it.each = (cases, ...targs) => __each(it, cases, targs);
 it.for = (cases, ...targs) => __for(it, cases, targs);
 it.skipIf = (cond) => (name, fn) => __addTest({ name, fn, skip: !!cond, only: false, retry: 0 });
 it.runIf = (cond) => (name, fn) => __addTest({ name, fn, skip: !cond, only: false, retry: 0 });
 // it.fails: the test PASSES iff its body throws (runSuite inverts the outcome via `fails`).
-it.fails = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: false, retry: o.retry || 0, fails: true }); };
+it.fails = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: false, retry: o.retry || 0, repeats: o.repeats, fails: true }); };
 // it.extend({...}) — test-context fixtures (best-effort). vitest passes a merged context object as
 // the test fn's first arg; fixtures defined as plain values or `async ({}, use) => use(value)`
 // functions are resolved here and provided. Returns a new test fn with these fixtures baked in.
@@ -7760,9 +7766,9 @@ it.extend = (fixtures) => {
     return ctx;
   };
   const wrap = (userFn) => async (ctx) => userFn(await resolveCtx(ctx));
-  const ext = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: false, retry: o.retry || 0 }); };
+  const ext = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: false, retry: o.retry || 0, repeats: o.repeats }); };
   ext.skip = (name, a, b) => __addTest({ name, fn: wrap(__normTest(a, b).fn), skip: true });
-  ext.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: true, retry: o.retry || 0 }); };
+  ext.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: true, retry: o.retry || 0, repeats: o.repeats }); };
   ext.each = (cases, ...targs) => __each(ext, cases, targs);
   ext.for = (cases, ...targs) => __for(ext, cases, targs);
   ext.extend = (more) => it.extend({ ...fixtures, ...more });
@@ -8044,7 +8050,7 @@ function __testTaskOf(t, chain) {
   t.task = {
     type: 'test', name: t.name, id: `${(up || file).id}_${parent.tasks.indexOf(t)}`, mode: 'run', file, suite: up,
     fullName: [file.name, ...names].join(' > '), fullTestName: names.join(' > '), meta: Object.create(null),
-    each: t.each || undefined, fails: t.fails || undefined, retry: t.retry || undefined, repeats: undefined,
+    each: t.each || undefined, fails: t.fails || undefined, retry: t.retry || undefined, repeats: t.repeats,
     timeout: (typeof t.timeout === 'number' && t.timeout > 0) ? t.timeout : __defaultTimeout(), shuffle: undefined,
     tags: [], annotations: [], artifacts: [], result: undefined,
   };
@@ -8266,7 +8272,9 @@ function __attemptError(task, run, e) {
   } else run.lastErr = e;
 }
 function __attemptState(task, run) {
-  if (task.result.state === 'run') task.result.state = run.ok ? 'pass' : 'fail';
+  // a failed attempt fails the test even after a passed repeat; a passed one keeps a failed
+  // repeat's state (vitest's failTask / `state !== 'fail'`)
+  if (task.result.state === 'run' || (!run.ok && !task.result.pending)) task.result.state = run.ok ? 'pass' : 'fail';
   if (!run.ok && !task.result.pending) {
     run.attemptErrors.push(run.lastErr);
     task.result.errors = run.attemptErrors;
@@ -8308,11 +8316,11 @@ function __invertFails(run, mark) {
   else { run.ok = false; run.lastErr = new Error('expected test to fail, but it passed'); run.attemptErrors.push(run.lastErr); }
 }
 // an attempt's start: its state, handlers and snapshot counters; returns where its errors start
-function __beginAttempt(t, label, run, a) {
+function __beginAttempt(t, label, run, repeat) {
   const task = t.task;
-  run.tries++;
-  task.result.retryCount = a;
-  task.result.state = 'run';
+  task.result.retryCount = run.retries;
+  task.result.repeatCount = repeat;
+  run.ok = false;
   t.onFinished = [];
   t.onFailed = [];
   run.lastErr = undefined;
@@ -8362,13 +8370,25 @@ function __recordTest(t, chain, summary, label, run, timing, dur) {
   summary.tests.push(__testRecord(t, chain, 'failed', { ...timing, message: msg, failure_messages: run.attemptErrors.map(__failureMessage), errors: run.attemptErrors.map(__errorInfo) }));
   return true;
 }
-// a test that runs: its attempts (retries), then its record; returns whether it failed
+// An attempt's end: it.fails inverted; whether the repeat stands failed — a repeat after a
+// failed one starts failed and only a retry clears that (vitest keeps `state: 'fail'` until it
+// sets `run` for the retry). A retry (`retry`) clears it and counts.
+function __endAttempt(t, run, mark, failed) {
+  if (t.fails && !t.task.result.pending) __invertFails(run, mark);
+  return !t.task.result.pending && (failed || !run.ok);
+}
+function __retryAttempt(task, run) {
+  task.result.state = 'run';
+  run.retries++;
+  return false;
+}
+// a test that runs: its repeats and attempts (retries), then its record; returns whether it failed
 async function __runTest(t, chain, summary, label, suiteTask) {
   const attempts = __testRetry(t) + 1;
   // timeout (ms): per-test `{ timeout }` wins; else the --testTimeout/5000 default.
   const timeoutMs = (typeof t.timeout === 'number' && t.timeout > 0) ? t.timeout : __defaultTimeout();
   // vitest keeps every failed attempt's error and counts the retries (`(retry x1)`)
-  const run = { ok: false, lastErr: undefined, attemptErrors: [], tries: 0, failWith: null };
+  const run = { ok: false, lastErr: undefined, attemptErrors: [], retries: 0, failWith: null };
   // Real wall time for the per-test start, and for the duration the reporters show plus the
   // drive loop's clock jumps (turbo-test#95). NOT performance.now() (fake timers replace it) nor Date.now() (fake timers /
   // vi.setSystemTime replace it).
@@ -8390,17 +8410,25 @@ async function __runTest(t, chain, summary, label, suiteTask) {
     task.result.errors = run.attemptErrors;
   };
   await null;
-  for (let a = 0; a < attempts && !run.ok; a++) {
-    const mark = __beginAttempt(t, label, run, a);
-    await __vtAround(() => __runAttemptInner(t, chain, ctx, timeoutMs, run)).catch(__vtNoop);
-    await null;
-    __snap.currentTest = null;
-    if (t.fails && !task.result.pending) __invertFails(run, mark);
-    if (task.result.pending) break;
+  // `{ repeats: n }` (turbo-test#257): 1 + n repeats, each retried up to `retry` times
+  const repeats = t.repeats > 0 ? t.repeats : 0;
+  let failed = false;
+  for (let r = 0; r <= repeats && !task.result.pending; r++) {
+    for (let a = 0; a < attempts; a++) {
+      const mark = __beginAttempt(t, label, run, r);
+      await __vtAround(() => __runAttemptInner(t, chain, ctx, timeoutMs, run)).catch(__vtNoop);
+      await null;
+      __snap.currentTest = null;
+      failed = __endAttempt(t, run, mark, failed);
+      if (!failed) break;
+      if (a + 1 < attempts) failed = __retryAttempt(task, run);
+    }
   }
+  run.ok = !failed;
+  if (failed && !run.lastErr) run.lastErr = run.attemptErrors[run.attemptErrors.length - 1];
   if (!task.result.pending) await __vtAfterRunTask();
   const dur = __loop.elapsed() - t0;
-  const timing = { duration_ms: dur, start_ms: start, retry_count: run.tries - 1, logs: __ttTestLogs.map((l) => [l[0], l[1]]) };
+  const timing = { duration_ms: dur, start_ms: start, retry_count: run.retries, repeat_count: task.result.repeatCount, logs: __ttTestLogs.map((l) => [l[0], l[1]]) };
   __ttTestLogs = null;
   __ttLogTask = suiteTask;
   return __recordTest(t, chain, summary, label, run, timing, dur);
