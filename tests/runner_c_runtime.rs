@@ -849,7 +849,8 @@ test('node:path', () => {
 }
 
 /// The loop order probe: a `setTimeout(fn, 0)`, a setImmediate, a MessageChannel message and a
-/// promise, queued in that order; the test expects `want`.
+/// promise, queued in that order, then the clock across 200 `setTimeout(fn, 0)` turns (`clamped`:
+/// at least 1 ms each, Node's clamp; `zero`: 0 ms each); the test expects `want`.
 fn loop_order_project(name: &str, config: &str, want: &str) -> Project {
     let p = Project::new(name);
     p.file("package.json", r#"{"type":"module"}"#);
@@ -868,6 +869,9 @@ fn loop_order_project(name: &str, config: &str, want: &str) -> Project {
                const ch = new MessageChannel(); ch.port1.onmessage = () => {{ log.push('message'); ch.port1.close(); }}; ch.port2.postMessage(1);\n\
                Promise.resolve().then(() => log.push('micro'));\n\
                await new Promise((r) => setTimeout(r, 20));\n\
+               const t0 = performance.now();\n\
+               for (let i = 0; i < 200; i++) await new Promise((r) => setTimeout(r, 0));\n\
+               log.push(performance.now() - t0 >= 200 ? 'clamped' : 'zero');\n\
                expect(log).toEqual({want});\n\
              }});\n"
         ),
@@ -875,8 +879,8 @@ fn loop_order_project(name: &str, config: &str, want: &str) -> Project {
     p
 }
 
-const NODE_ORDER: &str = "['micro', 'immediate', 'message', 'timeout0']";
-const ZERO_DELAY_ORDER: &str = "['micro', 'timeout0', 'immediate', 'message']";
+const NODE_ORDER: &str = "['micro', 'immediate', 'message', 'timeout0', 'clamped']";
+const ZERO_DELAY_ORDER: &str = "['micro', 'immediate', 'message', 'timeout0', 'zero']";
 
 /// turbo-test#212: Node's event loop order, which vitest runs on: a `setTimeout(fn, 0)` is a 1 ms
 /// timer, so a setImmediate and a MessageChannel message queued after it still run first
@@ -900,8 +904,9 @@ fn timeout_zero_runs_after_immediates_and_messages_like_node_without_zero_delay(
     }
 }
 
-/// zeroDelayTimers (the default): a `setTimeout(fn, 0)` is a 0 ms timer, as in 0.4.2. It still
-/// runs after the promise jobs, and the setImmediate and MessageChannel message keep their order.
+/// zeroDelayTimers (the default): a `setTimeout(fn, 0)` takes 0 ms of the clock, but keeps Node's
+/// order (turbo-test#237): it still runs after a setImmediate and a MessageChannel message queued
+/// after it, as vitest's 1 ms timer does.
 #[test]
 fn timeout_zero_is_zero_ms_by_default() {
     for env in ["node", "jsdom"] {
@@ -914,6 +919,55 @@ fn timeout_zero_is_zero_ms_by_default() {
         assert!(
             r.stdout.contains("Tests  1 passed (1)"),
             "{env}\n{}",
+            r.all()
+        );
+    }
+}
+
+/// turbo-test#237: the in-flight UI pattern. A click handler starts a save that never settles
+/// and commits its "saving" state through a setImmediate (React's scheduler outside `act`); the
+/// test then yields one `setTimeout(fn, 0)` (RTL's asyncWrapper drain after a user-event action)
+/// and reads the state. vitest's 1 ms timer runs after the setImmediate, so the state is
+/// committed; zeroDelayTimers must keep that, also for a timer queued inside another timer.
+#[test]
+fn zero_delay_timeout_runs_after_a_pending_immediate_for_in_flight_state() {
+    let p = Project::new("zdt-inflight");
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "a.test.js",
+        "import { expect, it } from 'vitest';\n\
+         const drain = () => new Promise((r) => setTimeout(r, 0));\n\
+         function app() {\n\
+           const ui = { saving: false, resolve: null };\n\
+           ui.click = () => {\n\
+             setImmediate(() => { ui.saving = true; });\n\
+             return new Promise((r) => { ui.resolve = r; }).then(() => setImmediate(() => { ui.saving = false; }));\n\
+           };\n\
+           return ui;\n\
+         }\n\
+         it('shows the in-flight state after a drain', async () => {\n\
+           const ui = app();\n\
+           void ui.click();\n\
+           await drain();\n\
+           expect(ui.saving).toBe(true);\n\
+           ui.resolve();\n\
+           await drain();\n\
+           expect(ui.saving).toBe(false);\n\
+         });\n\
+         it('keeps the order for a timer queued inside a timer', async () => {\n\
+           const log = [];\n\
+           await new Promise((done) => setTimeout(() => {\n\
+             setTimeout(() => { log.push('timeout0'); done(); }, 0);\n\
+             setImmediate(() => log.push('immediate'));\n\
+           }, 5));\n\
+           expect(log).toEqual(['immediate', 'timeout0']);\n\
+         });\n",
+    );
+    for args in [vec![], vec!["--no-zero-delay-timers"]] {
+        let r = turbo_test(&p.dir, &args, &[]);
+        assert!(
+            r.stdout.contains("Tests  2 passed (2)"),
+            "{args:?}\n{}",
             r.all()
         );
     }
@@ -1003,4 +1057,164 @@ fn zero_delay_timers_switch_without_a_config_file() {
     }
     let r = turbo_test(&node.dir, &[], &[("TURBO_ZERO_DELAY_TIMERS", "1")]);
     assert!(r.stdout.contains("Tests  1 failed (1)"), "{}", r.all());
+}
+
+/// A jsdom-environment project whose test reads MUI-style breakpoint rules
+/// (`display: {xs: 'flex', md: 'none'}` and `{xs: 'none', md: 'grid'}`), an `@media screen`
+/// rule and `typeof window.matchMedia`, and expects `want`.
+fn media_project(name: &str, config: &str, want: &str) -> Project {
+    let p = Project::new(name);
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "vitest.config.ts",
+        &format!("export default {{ test: {{ environment: 'jsdom', {config} }} }};\n"),
+    );
+    p.file(
+        "a.test.js",
+        &format!(
+            "import {{ expect, it }} from 'vitest';\n\
+             it('media', () => {{\n\
+             document.head.innerHTML = '<style>#m {{ display: block }} @media (min-width:0px) {{ #m {{ display: flex }} }} @media (min-width:900px) {{ #m {{ display: none }} }} #d {{ display: none }} @media (min-width:900px) {{ #d {{ display: grid }} }} @media screen {{ #s {{ color: rgb(0, 0, 2) }} }}</style>';\n\
+             document.body.innerHTML = '<div id=\"m\"></div><div id=\"d\"></div><div id=\"s\"></div>';\n\
+             const cs = (id) => getComputedStyle(document.getElementById(id));\n\
+             expect({{ matchMedia: typeof window.matchMedia, m: cs('m').display, d: cs('d').display, s: cs('s').color }}).toEqual({want});\n\
+             }});\n"
+        ),
+    );
+    p
+}
+
+/// vitest 4.1.12 with jsdom 27.4.0 (the default): no matchMedia, and only the `screen` rule
+/// applies, so the mobile box stays visible and the desktop one hidden.
+const JSDOM_MEDIA: &str = "{ matchMedia: 'undefined', m: 'block', d: 'none', s: 'rgb(0, 0, 2)' }";
+/// Chrome 156 headless shell at 1024x768: the md rules apply.
+const CHROME_MEDIA: &str = "{ matchMedia: 'function', m: 'none', d: 'grid', s: 'rgb(0, 0, 2)' }";
+
+/// jsdom media by default (vitest parity); Chrome's with `--chrome-media`,
+/// `TURBO_CHROME_MEDIA=1` or `test.chromeMedia: true` (flag over env over config).
+#[test]
+fn media_is_jsdom_by_default_and_chrome_on_opt_in() {
+    let jsdom = media_project("media-default", "", JSDOM_MEDIA);
+    assert_passes(&turbo_test(&jsdom.dir, &[], &[]), 1);
+    assert_passes(
+        &turbo_test(
+            &jsdom.dir,
+            &["--no-chrome-media"],
+            &[("TURBO_CHROME_MEDIA", "1")],
+        ),
+        1,
+    );
+    let r = turbo_test(&jsdom.dir, &["--chrome-media"], &[]);
+    assert!(r.stdout.contains("Tests  1 failed (1)"), "{}", r.all());
+    let chrome = media_project("media-flag", "", CHROME_MEDIA);
+    assert_passes(&turbo_test(&chrome.dir, &["--chrome-media"], &[]), 1);
+    assert_passes(
+        &turbo_test(&chrome.dir, &[], &[("TURBO_CHROME_MEDIA", "1")]),
+        1,
+    );
+    let config = media_project("media-config", "chromeMedia: true", CHROME_MEDIA);
+    assert_passes(&turbo_test(&config.dir, &[], &[]), 1);
+    let config_off = media_project("media-config-env", "chromeMedia: true", JSDOM_MEDIA);
+    assert_passes(
+        &turbo_test(&config_off.dir, &[], &[("TURBO_CHROME_MEDIA", "0")]),
+        1,
+    );
+}
+
+/// A jsdom-environment project whose test starts an opacity transition and a 10s
+/// `@keyframes` animation, then reads the computed values, the Web Animations surface and
+/// `typeof matchMedia`, and expects `{ matchMedia: media, ..transitions }`.
+fn transitions_project(name: &str, config: &str, media: &str, transitions: &str) -> Project {
+    let p = Project::new(name);
+    p.file("package.json", r#"{"type":"module"}"#);
+    p.file(
+        "vitest.config.ts",
+        &format!("export default {{ test: {{ environment: 'jsdom', {config} }} }};\n"),
+    );
+    p.file(
+        "a.test.js",
+        &format!(
+            "import {{ expect, it }} from 'vitest';\n\
+             it('transitions', () => {{\n\
+             document.head.innerHTML = '<style>@keyframes k {{ from {{ color: rgb(1, 2, 3) }} to {{ color: rgb(1, 2, 3) }} }} #a {{ color: rgb(9, 9, 9); animation: k 10s linear }} #t {{ opacity: 0; transition: opacity 1000s linear }} #t.on {{ opacity: 1 }}</style>';\n\
+             document.body.innerHTML = '<div id=\"a\"></div><div id=\"t\"></div>';\n\
+             const t = document.getElementById('t');\n\
+             getComputedStyle(t).opacity;\n\
+             t.className = 'on';\n\
+             expect({{ matchMedia: typeof window.matchMedia, opacity: getComputedStyle(t).opacity, color: getComputedStyle(document.getElementById('a')).color, animate: typeof t.animate, getAnimations: typeof document.getAnimations, Animation: typeof Animation, animations: typeof document.getAnimations === 'function' ? document.getAnimations().length : null }}).toEqual({{ matchMedia: '{media}', {transitions} }});\n\
+             }});\n"
+        ),
+    );
+    p
+}
+
+/// vitest 4.1.12 with jsdom 27.4.0 (the default): no Web Animations, and neither the
+/// transition nor the animation runs, so the end and declared values show at once.
+const JSDOM_TRANSITIONS: &str = "opacity: '1', color: 'rgb(9, 9, 9)', animate: 'undefined', getAnimations: 'undefined', Animation: 'undefined', animations: null";
+/// Chrome 156: the transition starts at its start value and both run.
+const CHROME_TRANSITIONS: &str = "opacity: '0', color: 'rgb(1, 2, 3)', animate: 'function', getAnimations: 'function', Animation: 'function', animations: 2";
+
+/// No CSS transitions or animations by default (vitest parity); Chrome's with
+/// `--css-transitions`, `TURBO_CSS_TRANSITIONS=1` or `test.cssTransitions: true` (flag over env
+/// over config). The media switch and the transitions switch are independent: all four
+/// combinations.
+#[test]
+fn transitions_are_jsdom_by_default_and_chrome_on_opt_in() {
+    for (name, args, media, transitions) in [
+        ("tr-neither", vec![], "undefined", JSDOM_TRANSITIONS),
+        (
+            "tr-media",
+            vec!["--chrome-media"],
+            "function",
+            JSDOM_TRANSITIONS,
+        ),
+        (
+            "tr-css",
+            vec!["--css-transitions"],
+            "undefined",
+            CHROME_TRANSITIONS,
+        ),
+        (
+            "tr-both",
+            vec!["--chrome-media", "--css-transitions"],
+            "function",
+            CHROME_TRANSITIONS,
+        ),
+    ] {
+        let p = transitions_project(name, "", media, transitions);
+        assert_passes(&turbo_test(&p.dir, &args, &[]), 1);
+    }
+    let off = transitions_project("tr-off", "", "undefined", JSDOM_TRANSITIONS);
+    let r = turbo_test(&off.dir, &["--css-transitions"], &[]);
+    assert!(r.stdout.contains("Tests  1 failed (1)"), "{}", r.all());
+    assert_passes(
+        &turbo_test(
+            &off.dir,
+            &["--no-css-transitions"],
+            &[("TURBO_CSS_TRANSITIONS", "1")],
+        ),
+        1,
+    );
+    let on = transitions_project("tr-env", "", "undefined", CHROME_TRANSITIONS);
+    assert_passes(
+        &turbo_test(&on.dir, &[], &[("TURBO_CSS_TRANSITIONS", "1")]),
+        1,
+    );
+    let config = transitions_project(
+        "tr-config",
+        "cssTransitions: true",
+        "undefined",
+        CHROME_TRANSITIONS,
+    );
+    assert_passes(&turbo_test(&config.dir, &[], &[]), 1);
+    let config_off = transitions_project(
+        "tr-config-env",
+        "cssTransitions: true",
+        "undefined",
+        JSDOM_TRANSITIONS,
+    );
+    assert_passes(
+        &turbo_test(&config_off.dir, &[], &[("TURBO_CSS_TRANSITIONS", "0")]),
+        1,
+    );
 }

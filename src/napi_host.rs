@@ -4076,7 +4076,7 @@ pub unsafe extern "C" fn napi_module_register(module: *mut napi_module) {
 /// The init of the library just loaded from `path`: what it registered with
 /// napi_module_register (now or when it was first loaded), else its napi_register_module_v1.
 unsafe fn module_init(lib: &libloading::Library, path: &Path) -> Result<RegisterFn, String> {
-    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let key = crate::canon::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let mut saved = SAVED_MODULES.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(init) = SELF_REGISTERED.with(|r| r.take()) {
         saved.push((key, init));

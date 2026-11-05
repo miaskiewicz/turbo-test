@@ -48,7 +48,7 @@ thread_local! {
     /// The other transformed modules' maps, `(map, lines before the code)`, while a reporter
     /// prints failure frames ([`frames_enabled`]): an error's frames in a helper module map back
     /// too (turbo-test#81). Per worker thread; a module's map does not depend on the test file.
-    static MODULES: RefCell<std::collections::HashMap<PathBuf, (Segments, usize)>> =
+    static MODULES: RefCell<std::collections::HashMap<PathBuf, (ModuleMap, usize)>> =
         RefCell::new(std::collections::HashMap::new());
     /// Column edits the ESM-graph loader made after the transform (esm_spy.rs), by module.
     static SHIFTS: RefCell<std::collections::HashMap<PathBuf, Vec<Shift>>> =
@@ -100,12 +100,62 @@ fn unshift(script: &str, line: usize, col: usize) -> usize {
 /// Whether failure frames are printed (`--reporter junit` sets `TURBO_ERROR_FRAMES`): the
 /// loaders then keep a source map for every app module they transform.
 pub fn frames_enabled() -> bool {
+    #[cfg(test)]
+    if FRAMES_FOR_TEST.with(std::cell::Cell::get) {
+        return true;
+    }
     std::env::var_os("TURBO_ERROR_FRAMES").is_some()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Unit tests: failure frames on for this thread (the env switch is process-wide).
+    pub static FRAMES_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A module's map: built, or built by its function on the first frame that needs it.
+enum ModuleMap {
+    Ready(Segments),
+    Lazy(fn(&Path) -> Option<Segments>),
 }
 
 /// `path`'s transformed code maps back through `map`; `offset` lines precede the code.
 pub fn set_module_map(path: &Path, map: Segments, offset: usize) {
-    MODULES.with(|m| m.borrow_mut().insert(path.to_path_buf(), (map, offset)));
+    MODULES.with(|m| {
+        m.borrow_mut()
+            .insert(path.to_path_buf(), (ModuleMap::Ready(map), offset))
+    });
+}
+
+/// [`set_module_map`] with the map built by `build` only when a frame in the module is
+/// resolved: a passing run needs no module map, and building one is an uncached transform.
+/// `build` must map the code the module ran (the same transform's lines).
+pub fn set_module_map_lazy(path: &Path, build: fn(&Path) -> Option<Segments>, offset: usize) {
+    MODULES.with(|m| {
+        m.borrow_mut()
+            .insert(path.to_path_buf(), (ModuleMap::Lazy(build), offset))
+    });
+}
+
+/// The module's map and offset, building a lazy map now (once).
+fn module_map(script: &Path) -> Option<(Segments, usize)> {
+    let lazy = MODULES.with(|m| match m.borrow().get(script) {
+        Some((ModuleMap::Ready(map), offset)) => Err(Some((map.clone(), *offset))),
+        Some((ModuleMap::Lazy(build), offset)) => Ok((*build, *offset)),
+        None => Err(None),
+    });
+    let (build, offset) = match lazy {
+        Ok(lazy) => lazy,
+        Err(ready) => return ready,
+    };
+    let map = build(script).unwrap_or_default();
+    MODULES.with(|m| {
+        m.borrow_mut().insert(
+            script.to_path_buf(),
+            (ModuleMap::Ready(map.clone()), offset),
+        )
+    });
+    Some((map, offset))
 }
 
 /// A new test file starts on this thread (no map, no wrapper offset yet). `src` is its source: one
@@ -184,17 +234,14 @@ pub fn resolve_frame(script: &str, line: usize, column: usize) -> Option<(u32, u
     });
     match entry {
         Some(found) => found,
-        None => MODULES.with(|m| {
-            let m = m.borrow();
-            match m.get(Path::new(script)) {
-                Some((map, offset)) => mapped(map, *offset),
-                // a module the loader did not transform but edited in-line (a `.js` module's
-                // spy rewrite, esm_spy.rs): its columns before the edits (turbo-test#176)
-                None => SHIFTS
-                    .with(|s| s.borrow().contains_key(Path::new(script)))
-                    .then(|| (line as u32, unshift(script, line, column) as u32)),
-            }
-        }),
+        None => match module_map(Path::new(script)) {
+            Some((map, offset)) => mapped(&map, offset),
+            // a module the loader did not transform but edited in-line (a `.js` module's
+            // spy rewrite, esm_spy.rs): its columns before the edits (turbo-test#176)
+            None => SHIFTS
+                .with(|s| s.borrow().contains_key(Path::new(script)))
+                .then(|| (line as u32, unshift(script, line, column) as u32)),
+        },
     }
 }
 

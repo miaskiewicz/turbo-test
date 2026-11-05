@@ -3,6 +3,79 @@
 All notable changes to `@miaskiewicz/turbo-test`. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.7.1] — 2026-11-04 — Windows paths, timer order, pnpm, bundled helper shadowing, window viewport
+
+Fixes parts 1–3 of #230, reported by nagisokyn-prog in #230 after running a 196-file pnpm
+monorepo suite (Vue 3, Pinia, TypeScript) on Windows 11. The fixes here are turbo-test's own
+implementations, not the reporter's branches.
+
+### Added
+- Media follows vitest's jsdom by default (turbo-dom#309): `window.matchMedia` is undefined and
+  `getComputedStyle` applies an `@media` rule only when a media list item is exactly `screen`.
+  turbo-dom 0.7.1 evaluates media against the 1024x768 viewport as Chrome does, which hid MUI's
+  mobile-only elements (`display: {xs: 'flex', md: 'none'}`) at 1024 px and failed 13
+  ui-design-components tests and payroll-app's TimeEntryCard delete test that pass on vitest
+  and 0.7.0. `--chrome-media`, `TURBO_CHROME_MEDIA=1` or `test.chromeMedia: true` (flag over env
+  over config) choose Chrome's media. Tests: `media_is_jsdom_by_default_and_chrome_on_opt_in`
+  (vitest 4.1.12 + jsdom 27.4.0 and Chrome 156 at 1024x768 as oracles),
+  `chrome_media_env_wins_over_the_config`, `chrome_media_reads_the_nearest_config`,
+  `chrome_media_flags_set_the_env_switch`.
+- No CSS transitions or animations by default, as on vitest's jsdom (turbo-dom
+  perf/0.7.1-jsdom-no-transitions): jsdom 27.4.0 runs neither, so `getComputedStyle` reports a
+  transitioned property's end value at once and no `transition*` / `animation*` event fires; it
+  has no Web Animations, so `element.animate`, `getAnimations()`, `document.timeline`,
+  `Animation`, `CSSTransition`, `CSSAnimation` and `AnimationEvent` are undefined. turbo-dom
+  created a CSSTransition per changed element; skipping it cut full payroll-app from 16.10 s
+  to 14.69 s (medians, ABBA, load 13-15). `--css-transitions`, `TURBO_CSS_TRANSITIONS=1` or `test.cssTransitions: true`
+  (flag over env over config) restore Chrome's; the switch is independent of the media one. Tests:
+  `css_transitions_flags_set_the_env_switch`, `chrome_media_reads_the_nearest_config`,
+  `transitions_are_jsdom_by_default_and_chrome_on_opt_in` (vitest 4.1.12 + jsdom 27.4.0 and
+  Chrome 156 as oracles).
+
+### Fixed
+- Zero-delay timers keep vitest's event-loop order (#237). A real `setTimeout(fn, 0)` still takes
+  0 ms of the clock, but now runs where Node's 1 ms timer does: after a setImmediate or a
+  MessageChannel message queued alongside it. In 0.7.0 it ran first, so React's scheduler (which
+  commits through setImmediate outside `act`) had not rendered when RTL's `setTimeout(0)` drain
+  after a user-event action resumed the test: "disabled while in flight" and error-alert
+  assertions failed by default and passed with `--no-zero-delay-timers` and on vitest.
+- Windows: `std::fs::canonicalize` returns extended-length paths (`\\?\C:\proj\a.ts`). They
+  reached `node:path`, `URL`, `__dirname` and the module registry, which gave the same module two
+  registry entries and broke resolution from pnpm's virtual store. Every canonical path now goes
+  through `canon::canonicalize`, which spells it as Node's `realpath` does (`C:\proj\a.ts`,
+  `\\server\share\a.ts`). A source scan test keeps other code from calling
+  `std::fs::canonicalize` directly.
+- `TypeError: __export is not a function` from packages built by tsup or esbuild (pinia,
+  vue-router). Such a module declares esbuild's helpers itself (`var __export = ...`). The native
+  dependency bundler wraps each module in a `__commonJS` closure, so that `var` was hoisted over
+  the bundle's helper and was `undefined` when the module's export registration ran. Each
+  closure now takes `__export` / `__toCommonJS` / `__toESM` / `__reExport` as parameters. A `var`
+  redeclaring a parameter keeps the parameter's value until its own assignment runs. A name the
+  module declares with `let` / `const` / `class` / `import` gets a placeholder parameter instead,
+  because a parameter of the same name would be a redeclaration error. The bundle cache key moves
+  to `native-dep-v8-bundle`. We did not add the reporter's suggested in-memory `tslib` /
+  `hey-listen` stubs. The real packages resolve now, and stubbing third-party code would vendor
+  it.
+- The DOM window had no `innerWidth` / `innerHeight` / `outerWidth` / `outerHeight` /
+  `devicePixelRatio`, so a bare `innerWidth` threw a `ReferenceError` and responsive components
+  failed. They are now 1024 / 768 / 1024 / 768 / 1, the values vitest's jsdom and happy-dom
+  report, each as Chrome's replaceable accessor.
+
+### Tests
+- `canon_tests.rs`: verbatim drive / UNC / device paths as Windows-style strings, so they run on
+  every CI leg including Windows. `runner_a_resolve.rs`: a pnpm virtual-store fixture (declared
+  siblings, the hoisted `.pnpm/node_modules`, ES module and CommonJS packages, the ES module
+  graph and the module runner); vitest 4.1.12 passes the same files. `runner_a_transform.rs` +
+  `bundler_tests.rs`: a tsup-style package declaring every helper, checked against Node and
+  vitest 4.1.12. `window_embedder.rs`: the viewport metrics, and `style.transition`
+  serialization pinned to Chrome 156 (`opacity 0.3s`, `opacity 300ms ease` → `opacity 300ms`).
+
+### Changed
+- Built on turbo-dom 0.7.1: subtree-scoped style invalidation (turbo-dom#279), cheaper fresh
+  cascades (#308), cheaper transition updates (turbo-test#227 part 1, turbo-dom#302), Chrome's
+  computed defaults (#305), custom properties kept as authored and reported by
+  `getComputedStyle` (#285, #286), a real `MediaQueryList` evaluated against the viewport (#287).
+
 ## [0.7.0] — performance: bytecode cache and turbo-dom 0.7.0
 
 0.6.x ran payroll-app's suite in ~220 s where 0.4.2 took ~15 s. Profiling with samply

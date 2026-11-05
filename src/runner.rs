@@ -713,7 +713,7 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
             }
         });
     if let Ok(res) = resolved {
-        if let Ok(c) = std::fs::canonicalize(res.path()) {
+        if let Ok(c) = crate::canon::canonicalize(res.path()) {
             // oxc can resolve a bare `require("..")` / `require(".")` (a directory re-export, common
             // in NestJS package `index.js` → `require("./dist")` chains and `dist/utils/x.js →
             // require("..")` self-references) to the DIRECTORY path rather than its index file. A
@@ -743,7 +743,7 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
             base.join("index.cjs"),
         ] {
             if c.is_file() {
-                return std::fs::canonicalize(c).ok();
+                return crate::canon::canonicalize(c).ok();
             }
         }
     }
@@ -791,7 +791,7 @@ fn svgr_stub_path(from_dir: &Path) -> Option<PathBuf> {
     if !path.exists() {
         write_atomic(&path, &src);
     }
-    std::fs::canonicalize(&path).ok()
+    crate::canon::canonicalize(&path).ok()
 }
 
 /// Body of the svgr `?react` stub; `__REACT_SPEC__` is replaced with the quoted react import spec.
@@ -1726,6 +1726,77 @@ fn zero_delay_timers_from(env: Option<&str>, s: &str) -> Option<bool> {
         .or_else(|| v.starts_with("false").then_some(false))
 }
 
+/// A DOM switch: Chrome's behaviour or jsdom's (the default, vitest parity), from the env
+/// variable `var` (what the CLI flag sets) or the nearest config's `test.<key>`, memoized by
+/// the test file's directory. `TURBO_CHROME_MEDIA` / `chromeMedia`: turbo-dom `MediaMode`
+/// (a live `matchMedia`, `@media` against the 1024x768 viewport). `TURBO_CSS_TRANSITIONS` /
+/// `cssTransitions`: CSS transitions, `@keyframes` animations and Web Animations.
+fn dom_switch(entry: &Path, var: &'static str, key: &str) -> bool {
+    let dir = entry.parent().unwrap_or(entry);
+    thread_local! {
+        static SWITCH_MEMO: RefCell<HashMap<(&'static str, PathBuf), bool>> = RefCell::new(HashMap::new());
+    }
+    let memo_key = (var, dir.to_path_buf());
+    if let Some(v) = SWITCH_MEMO.with(|m| m.borrow().get(&memo_key).copied()) {
+        return v;
+    }
+    let env = std::env::var(var).ok();
+    warn_switch_env_once(var, env.as_deref());
+    let v = switch_for(dir, env.as_deref(), key);
+    SWITCH_MEMO.with(|m| m.borrow_mut().insert(memo_key, v));
+    v
+}
+
+/// [`dom_switch`] for files under `start`: the nearest config's `test.<key>`, or the env
+/// switch with or without a config file.
+fn switch_for(start: &Path, env: Option<&str>, key: &str) -> bool {
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        for cfg in VITEST_CONFIG_FILES {
+            if let Ok(s) = std::fs::read_to_string(d.join(cfg)) {
+                return switch_from(env, &s, key);
+            }
+        }
+        dir = d.parent();
+    }
+    switch_from(env, "", key)
+}
+
+/// The env switch `0|1|true|false` (what the flag sets) wins over the config's
+/// `test.<key>: true|false`; neither set means jsdom's behaviour.
+fn switch_from(env: Option<&str>, s: &str, key: &str) -> bool {
+    match env {
+        Some("0" | "false") => false,
+        Some("1" | "true") => true,
+        _ => config_is_true(s, key),
+    }
+}
+
+/// Print [`switch_env_warning`] the first time `var` has a bad value; whether it printed.
+fn warn_switch_env_once(var: &'static str, env: Option<&str>) -> bool {
+    static WARNED: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let Some(w) = switch_env_warning(var, env) else {
+        return false;
+    };
+    let mut warned = WARNED.lock().unwrap();
+    if warned.contains(&var) {
+        return false;
+    }
+    warned.push(var);
+    eprintln!("{w}");
+    true
+}
+
+/// The warning for an env switch value that is not `0|1|true|false` (ignored).
+fn switch_env_warning(var: &str, env: Option<&str>) -> Option<String> {
+    match env {
+        None | Some("0" | "1" | "true" | "false") => None,
+        Some(v) => Some(format!(
+            "turbo-test: ignoring {var}={v:?} (expected 0, 1, true or false)"
+        )),
+    }
+}
+
 /// Whether a config key's value is `true`.
 fn config_is_true(s: &str, key: &str) -> bool {
     find_config_key(s, key).is_some_and(|start| {
@@ -2343,8 +2414,25 @@ fn set_mock_prepass(scope: &mut v8::PinScope, on: bool) {
 /// Set up the DOM environment in the current context: bind the all-Rust DOM (rtdom) natively so
 /// document/window exist before the test evaluates. (The legacy JS turbo-dom bootstrap —
 /// installGlobals + the `.node` parser — was removed in v0.3.0; rtdom is the only DOM now.)
-fn setup_dom(scope: &mut v8::PinScope, _entry: &Path) {
+fn setup_dom(scope: &mut v8::PinScope, entry: &Path) {
     turbo_dom_browser_env::browser_env::install(scope);
+    // jsdom's media by default (vitest parity); Chrome's with --chrome-media,
+    // TURBO_CHROME_MEDIA=1 or test.chromeMedia: true
+    turbo_dom_browser_env::browser_env::set_media_mode(
+        scope,
+        if dom_switch(entry, "TURBO_CHROME_MEDIA", "chromeMedia") {
+            turbo_dom_browser_env::browser_env::MediaMode::Chrome
+        } else {
+            turbo_dom_browser_env::browser_env::MediaMode::Jsdom
+        },
+    );
+    // jsdom's: no CSS transitions / animations and no Web Animations by default (vitest
+    // parity); Chrome's with --css-transitions, TURBO_CSS_TRANSITIONS=1 or
+    // test.cssTransitions: true. Independent of the media switch.
+    turbo_dom_browser_env::browser_env::set_css_transitions(
+        scope,
+        dom_switch(entry, "TURBO_CSS_TRANSITIONS", "cssTransitions"),
+    );
     // the embedder's window members: open / alert / print / postMessage … (turbo-test#208)
     run_js(
         scope,
@@ -2634,7 +2722,20 @@ fn native_transform_cjs_located(file: &Path) -> Option<String> {
 
 /// `native_transform_cjs` with the map of its lines back to the source (and that source): the
 /// test file's for test locations, another app module's while failure frames are printed.
+/// The map of an app module's `native_transform_cjs` lines back to its source, for a failure
+/// frame in it (`location::set_module_map_lazy`): the mapped transform emits the same code.
+fn native_module_segments(file: &Path) -> Option<crate::location::Segments> {
+    native_transform_cjs_mapped(file).map(|(_, segs, _)| segs)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Uncached mapped transforms on this thread (the gate in `runner_tests_a`).
+    static MAPPED_TRANSFORMS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 fn native_transform_cjs_mapped(file: &Path) -> Option<(String, crate::location::Segments, String)> {
+    #[cfg(test)]
+    MAPPED_TRANSFORMS.with(|n| n.set(n.get() + 1));
     let raw = with_binder(file, read_app_source(file)?, true);
     let legacy_decorators = decorator_metadata_enabled(file) && file_has_decorator(&raw);
     let emitted = crate::esm_cjs::emit_mapped(file, &raw, legacy_decorators)?;
@@ -2672,7 +2773,8 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
     // v6: package interop `__ttToESMDep`, Node's for a package Node runs as ES modules
     // (turbo-test#133)
     // v7: package ES modules marked "pkg" (turbo-test#159)
-    "native-dep-v7-bundle".hash(&mut h);
+    // v8: each module's closure takes the bundle's helpers as parameters (turbo-test#230)
+    "native-dep-v8-bundle".hash(&mut h);
     // the bundle inlines the package's whole relative graph, not just this file: two installs
     // with the same entry file (user-event 14.6.1 / 14.6.8) differ inside, so the key names this
     // install (its path) and its package.json (turbo-test#213)
@@ -3856,15 +3958,14 @@ fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<S
                     if let Some(code) = native_transform_cjs_located(abs) {
                         return Some(code);
                     }
-                } else if crate::location::frames_enabled() {
-                    // failure frames (junit) in this module map back too; its code runs below
-                    // the CJS wrapper's first line
-                    if let Some((code, segs, _)) = native_transform_cjs_mapped(abs) {
-                        crate::location::set_module_map(abs, segs, 1);
-                        return Some(code);
-                    }
                 }
                 if let Some(code) = native_transform_cjs(abs) {
+                    if crate::location::frames_enabled() && !crate::location::is_entry(abs) {
+                        // failure frames (junit, the human reporters) in this module map back
+                        // too; its code runs below the CJS wrapper's first line. The map comes
+                        // from the same transform's lines, built only when a frame needs it.
+                        crate::location::set_module_map_lazy(abs, native_module_segments, 1);
+                    }
                     return Some(code);
                 }
                 // strict mode (conformity coverage measurement): do NOT fall back to esbuild on an
@@ -7049,7 +7150,8 @@ pub(crate) fn framework_snapshot() -> &'static FrameworkSnapshot {
     static SNAP: std::sync::OnceLock<FrameworkSnapshot> = std::sync::OnceLock::new();
     SNAP.get_or_init(|| {
         let chai = chai_script();
-        let flags = std::env::var("TURBO_V8_FLAGS").unwrap_or_default();
+        // the blob is keyed on the flags it was built under
+        let flags = run_v8_flags();
         if window_snapshot_enabled() {
             if let Some(snap) = window_snapshot(&chai, &flags) {
                 turbo_dom_browser_env::browser_env::set_snapshot_install(true);
@@ -8287,7 +8389,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     }
     let _dom_guard = DomGuard;
 
-    let entry_abs = std::fs::canonicalize(entry).map_err(|e| format!("{e}"))?;
+    let entry_abs = crate::canon::canonicalize(entry).map_err(|e| format!("{e}"))?;
     crate::location::begin(
         &entry_abs,
         &std::fs::read_to_string(&entry_abs).unwrap_or_default(),
@@ -8983,7 +9085,7 @@ fn drive_tests(
 /// vitest's `task.file.name` (turbo-test#96): the test file relative to the run's root (both
 /// canonical), as the reports name it; its canonical path for a file outside the root.
 pub fn task_file_name(entry: &Path, root: &Path) -> String {
-    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let canon = |p: &Path| crate::canon::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let entry = canon(entry);
     match entry.strip_prefix(canon(root)) {
         Ok(rel) => rel.to_string_lossy().into_owned(),
@@ -9553,19 +9655,29 @@ fn clear_registry() {
     });
 }
 
+/// The V8 flags a run applies: `TURBO_V8_FLAGS` when set (empty: none), else the defaults.
+/// `--single-threaded`: each worker's isolate compiles and collects on its own thread. With an
+/// isolate per core, V8's background compile and GC helpers (a platform pool as large as the
+/// machine, shared by every isolate) only contend with the other workers: payroll's full run
+/// takes about 9% less wall and CPU time, ui about the same, a run of a few dozen files at most
+/// a tenth of a second more.
+fn v8_flags(env: Option<&str>) -> String {
+    env.unwrap_or("--single-threaded").to_string()
+}
+
+/// This run's V8 flags ([`v8_flags`] of `TURBO_V8_FLAGS`).
+fn run_v8_flags() -> String {
+    v8_flags(std::env::var("TURBO_V8_FLAGS").ok().as_deref())
+}
+
 /// Initialize V8 once for the process.
 pub fn init_v8() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        // V8 flag tuning for short-lived per-file isolates. Each test file gets a fresh isolate
-        // that allocates a burst then dies, so: (a) a larger young generation lets a whole file's
-        // allocation live in new-space (fewer scavenges, less promotion), and (b) concurrent
-        // marking/sweeping helper threads only add cross-thread overhead when 8 job-threads each
-        // spawn their own — the heaps are too small/short-lived to benefit from background GC.
-        // Overridable via TURBO_V8_FLAGS (empty string disables the defaults entirely) so the set
-        // is A/B-testable without a rebuild. Generic: helps any allocation-heavy short-lived run.
-        let flags = std::env::var("TURBO_V8_FLAGS").unwrap_or_default();
+        // V8 flags for an isolate per worker ([`v8_flags`]): overridable via TURBO_V8_FLAGS
+        // (an empty value runs none) so the set is A/B-testable without a rebuild.
+        let flags = run_v8_flags();
         if !flags.trim().is_empty() {
             v8::V8::set_flags_from_string(&flags);
         }

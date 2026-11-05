@@ -178,3 +178,51 @@ fn jsdom_quirks_are_off_by_default() {
     let r = turbo_test(&p.dir, &[], &[]);
     assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
 }
+
+/// turbo-test#230: the window is a 1024 x 768 viewport at device pixel ratio 1, the size vitest
+/// 4.1.12's jsdom and happy-dom report (Chrome 156 opened at `--window-size=1024,768` gives the
+/// same inner size). Each metric is Chrome's own replaceable accessor: assigning one (a test
+/// simulating a resize) replaces it with a plain data property holding the new value.
+#[test]
+fn a_dom_window_has_a_1024_by_768_viewport() {
+    let p = Project::new("window-viewport");
+    p.file(
+        "package.json",
+        r#"{"name":"window-viewport","type":"module"}"#,
+    );
+    p.file(
+        "vitest.config.ts",
+        "export default { test: { environment: 'jsdom' } };\n",
+    );
+    p.file(
+        "a.test.js",
+        "import { expect, it } from 'vitest';\n\
+         const names = ['innerWidth', 'innerHeight', 'outerWidth', 'outerHeight', 'devicePixelRatio'];\n\
+         it('metrics', () => {\n\
+           expect(names.map((n) => window[n])).toEqual([1024, 768, 1024, 768, 1]);\n\
+           expect([innerWidth, innerHeight]).toEqual([1024, 768]);\n\
+           const d = Object.getOwnPropertyDescriptor(window, 'innerWidth');\n\
+           expect([typeof d.get, typeof d.set, d.enumerable, d.configurable, d.get.name]).toEqual(['function', 'function', true, true, 'get innerWidth']);\n\
+           window.innerWidth = 500;\n\
+           window.dispatchEvent(new Event('resize'));\n\
+           expect(window.innerWidth).toBe(500);\n\
+           expect(Object.getOwnPropertyDescriptor(window, 'innerWidth')).toEqual({ value: 500, writable: true, enumerable: true, configurable: true });\n\
+           expect(window.innerHeight).toBe(768);\n\
+         });\n\
+         it('transition serializes as Chrome does', () => {\n\
+           const el = document.createElement('div');\n\
+           el.style.transition = 'opacity 0.3s';\n\
+           expect([el.style.transition, el.style.transitionTimingFunction, el.style.cssText]).toEqual(['opacity 0.3s', 'ease', 'transition: opacity 0.3s;']);\n\
+           el.style.transition = 'opacity 300ms ease';\n\
+           expect(el.style.transition).toBe('opacity 300ms');\n\
+           el.style.transition = 'all 1s ease-in-out 2s, color 2s';\n\
+           expect(el.style.transition).toBe('1s ease-in-out 2s, color 2s');\n\
+         });\n",
+    );
+    p.file(
+        "b.test.js",
+        "// @vitest-environment happy-dom\nimport { expect, it } from 'vitest';\nit('happy-dom too', () => expect([window.innerWidth, window.innerHeight]).toEqual([1024, 768]));\n",
+    );
+    let r = turbo_test(&p.dir, &[], &[]);
+    assert!(r.stdout.contains("Tests  3 passed (3)"), "{}", r.all());
+}

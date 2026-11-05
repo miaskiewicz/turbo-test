@@ -1,7 +1,7 @@
 # turbo-test
 
 **A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
-(and, experimentally, jest).** Release **0.7.0**.
+(and, experimentally, jest).** Release **0.7.1**.
 
 turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
 work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
@@ -27,10 +27,8 @@ turbo-test links `turbo-dom-browser-env` 0.6.0 and `turbo-dom-v8 ~150.4` (under 
 copy of the binding or of V8: the binding, its probes and the Chrome-control collectors that
 record their oracles live in turbo-dom's
 [`crates/turbo-dom-browser-env`](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
-— fix DOM behaviour and recollect controls there. turbo-dom-v8 150.4.0 comes from crates.io;
-until turbo-dom 0.7.0 is published, turbo-dom / -layout / -browser-env 0.7.0 are pinned to a
-git rev of turbo-dom's release PR (`[patch.crates-io]` in Cargo.toml, which `release-guard`
-rejects: the pin must be gone before the tag).
+— fix DOM behaviour and recollect controls there. turbo-dom-v8 150.4.0 and
+turbo-dom / -layout / -browser-env 0.7.1 come from crates.io.
 
 ## Install and run
 
@@ -72,6 +70,8 @@ turbo-test has no Cargo feature flags; behaviour switches are environment variab
 | `TURBO_REUSE_ISOLATE=1` / `TURBO_NO_REUSE=1` | force isolate reuse on / off (see below) |
 | `TURBO_LEGACY_REPORTER=1` | compact `PASS` / `FAIL` reporter instead of vitest's |
 | `TURBO_ZERO_DELAY_TIMERS=1` / `=0` | zero-delay timers on (default) / off (see below) |
+| `TURBO_CHROME_MEDIA=1` / `=0` | Chrome's media / jsdom's (default) (see below) |
+| `TURBO_CSS_TRANSITIONS=1` / `=0` | Chrome's CSS transitions and animations / jsdom's none (default) (see below) |
 | `TURBO_SNAPSHOT=0` | each DOM file runs turbo-dom's engine install instead of opening the window snapshot (see below) |
 
 **Window snapshot** (on by default for runs with at least 8 DOM-environment files). The worker
@@ -82,22 +82,22 @@ file). Building the blob costs about 170 ms once per process, so smaller runs sk
 `TURBO_SNAPSHOT=0` turns it off, and so does any `TURBO_V8_FLAGS` (code deserialized from the blob
 can conflict with custom V8 flags).
 
+**Single-threaded V8** (the default V8 flags). Each worker's isolate compiles and collects
+garbage on its own thread (`--single-threaded`): with an isolate per core, V8's background compile
+and GC helpers only contend with the other workers (payroll's full run: about 9% less wall and
+CPU time). `TURBO_V8_FLAGS` replaces the defaults (set it empty to run V8 with none).
+
 The startup blob (window or framework-only) is saved in the build's cache directory and reused by
 later runs: a rebuilt blob is not byte-identical, and V8 rejects module bytecode caches made
 against another blob, so without it every run recompiled its modules.
 
-**Zero-delay timers** (on by default). A real `setTimeout(fn, 0)` (or any delay below 1 ms) waits
-0 ms, as in turbo-test 0.4.2: it fires before a setImmediate or MessageChannel message queued after
-it, which is faster for timer-heavy suites. Off, the delay is clamped to 1 ms as on Node and vitest
-(#212), so setImmediate and MessageChannel run first. Promise jobs run first in both modes, and
-fake timers are not affected.
-
-> **Known difference from vitest.** With the default, `setTimeout(fn, 0)` runs before a
-> setImmediate or MessageChannel message queued after it; vitest runs `micro, immediate,
-> message, timeout0`. React's scheduler posts renders through MessageChannel, so a test that
-> waits for a render with `await new Promise((r) => setTimeout(r, 0))` (a common React Testing
-> Library pattern) can resume before the render. For vitest's order run
-> `turbo-test --no-zero-delay-timers` or set `TURBO_ZERO_DELAY_TIMERS=0`.
+**Zero-delay timers** (on by default). A real `setTimeout(fn, 0)` (or any delay below 1 ms) takes
+0 ms of the clock, as in turbo-test 0.4.2, which is faster for timer-heavy suites. It keeps the
+order of Node's 1 ms timer (#237): a setImmediate or MessageChannel message queued alongside it
+runs first, as on vitest, so a React render posted through the scheduler is committed when RTL's
+`setTimeout(0)` drain resumes the test. Off, the delay is clamped to 1 ms as on Node and vitest
+(#212), so `Date.now()` and `performance.now()` also move 1 ms per such timer. Promise jobs run
+first in both modes, and fake timers are not affected.
 
 Prefer the flag or the env var. `test.zeroDelayTimers` is not in vitest's `InlineConfig` type, so a
 typed config needs `// @ts-expect-error` above it.
@@ -107,6 +107,47 @@ typed config needs `// @ts-expect-error` above it.
 | CLI flag (wins) | `--zero-delay-timers` | `--no-zero-delay-timers` |
 | env var | `TURBO_ZERO_DELAY_TIMERS=1` | `TURBO_ZERO_DELAY_TIMERS=0` |
 | vitest config | `test: { zeroDelayTimers: true }` | `test: { zeroDelayTimers: false }` |
+
+**Media: jsdom's by default, Chrome's on opt-in.** By default the DOM's media behaviour is
+jsdom 27's, as on vitest with `environment: 'jsdom'`: `window.matchMedia`, `MediaQueryList` and
+`MediaQueryListEvent` are undefined, and `getComputedStyle` applies an `@media` rule only when one
+of its media list items is exactly `screen` (an `@import` also with no media list). So
+breakpoint rules such as MUI's `sx={{ display: { xs: 'flex', md: 'none' } }}` never apply and
+both a mobile and a desktop layout stay in the accessibility tree, which is what tests written
+against vitest expect. Tests that need `matchMedia` mock it, as on jsdom.
+
+Chrome's media (turbo-dom's `MediaMode::Chrome`, the behaviour turbo-dom 0.7.1 has for every
+other embedder): `matchMedia` returns a live `MediaQueryList`, and `@media` / `@import` media
+lists are evaluated against the 1024x768 viewport, as in Chrome 156. MUI's `md` rules apply at
+that width, so mobile-only elements are `display: none`. In both modes a test's replacement
+`window.matchMedia` changes what `useMediaQuery` sees, never which CSS rules apply.
+
+| source | Chrome | jsdom (default) |
+|---|---|---|
+| CLI flag (wins) | `--chrome-media` | `--no-chrome-media` |
+| env var | `TURBO_CHROME_MEDIA=1` | `TURBO_CHROME_MEDIA=0` |
+| vitest config | `test: { chromeMedia: true }` | `test: { chromeMedia: false }` |
+
+`test.chromeMedia` is not in vitest's `InlineConfig` type either (`// @ts-expect-error`).
+
+**CSS transitions: none by default (jsdom's), Chrome's on opt-in.** jsdom 27 runs no CSS
+transitions or `@keyframes` animations, so by default turbo-test runs none either: after a class
+or style change `getComputedStyle` reports the end value at once, and no `transitionrun` /
+`transitionstart` / `transitionend` or `animation*` event fires. jsdom has no Web Animations, so
+`element.animate`, `getAnimations()`, `document.timeline`, `Animation`, `CSSTransition`,
+`CSSAnimation` and `AnimationEvent` are undefined too (`TransitionEvent` exists, as in jsdom).
+Libraries that feature-detect `animate` take their jsdom path, and suites skip the per-element
+transition work. On, turbo-dom runs them as Chrome 156 does (a transition starts at its start
+value and `getAnimations()` lists the CSSTransition / CSSAnimation objects). This switch and the
+media switch are independent: either can be on without the other.
+
+| source | Chrome | jsdom (default) |
+|---|---|---|
+| CLI flag (wins) | `--css-transitions` | `--no-css-transitions` |
+| env var | `TURBO_CSS_TRANSITIONS=1` | `TURBO_CSS_TRANSITIONS=0` |
+| vitest config | `test: { cssTransitions: true }` | `test: { cssTransitions: false }` |
+
+`test.cssTransitions` is not in vitest's `InlineConfig` type either (`// @ts-expect-error`).
 
 ## Isolate-reuse (extra speed, zero config)
 
@@ -357,6 +398,12 @@ import.meta.url))`, string concatenation (`__dirname + '/z'`, `path.resolve(__di
 - Node built-in modules (`node:buffer`, `fs/promises`, `assert/strict`, `timers/promises`,
   `querystring`, `string_decoder`, `vm`, `worker_threads`, …) are runtime shims; what each one
   provides is listed in [vitest.compat.md](vitest.compat.md#node-built-in-modules).
+- Under a DOM environment the window is a 1024 x 768 viewport at `devicePixelRatio` 1, the size
+  vitest's jsdom and happy-dom report; assigning `window.innerWidth` (a simulated resize) replaces
+  it, as in Chrome.
+- pnpm's isolated layout resolves as Node does: a package's bare imports from its real path in
+  `node_modules/.pnpm/<name>@<version>/node_modules/<name>`. On Windows, canonical paths are
+  spelled as Node spells them (`C:\...`, `\\server\share\...`), never with the `\\?\` prefix.
 
 ## Benchmarks — pending re-run
 
@@ -418,7 +465,7 @@ npm run complexity:js        # CI job `complexity / js (cc <= 15)`
 - **Release** (`v*` tag): `release-guard` (no `[patch]`, no git sources, versions equal the tag),
   then the npm and crates.io publish jobs ([RELEASING.md](RELEASING.md)).
 
-## Status (0.7.0)
+## Status (0.7.1)
 
 - vitest suites: drop-in; the `vi` / mock / `expect` surface is vitest 4.1.12's
   ([vitest.compat.md](vitest.compat.md) lists what is covered and what is approximated).

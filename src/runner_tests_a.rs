@@ -1743,6 +1743,76 @@ fn zero_delay_timers_env_wins_over_the_config() {
     );
 }
 
+/// jsdom media is the default; `TURBO_CHROME_MEDIA=0|1` (what `--[no-]chrome-media` sets)
+/// wins over the config's `test.chromeMedia: true|false`.
+#[test]
+fn chrome_media_env_wins_over_the_config() {
+    let on = "test: { chromeMedia: true }";
+    let off = "test: { chromeMedia:false }";
+    assert!(!switch_from(None, "", "chromeMedia"));
+    assert!(!switch_from(None, "test: {}", "chromeMedia"));
+    assert!(!switch_from(
+        None,
+        "test: { chromeMedia: flag }",
+        "chromeMedia"
+    ));
+    assert!(switch_from(None, on, "chromeMedia"));
+    assert!(!switch_from(None, off, "chromeMedia"));
+    assert!(!switch_from(Some("0"), on, "chromeMedia"));
+    assert!(!switch_from(Some("false"), on, "chromeMedia"));
+    assert!(switch_from(Some("1"), off, "chromeMedia"));
+    assert!(switch_from(Some("true"), off, "chromeMedia"));
+    // an unknown env value leaves the config's, with a warning
+    assert!(switch_from(Some("yes"), on, "chromeMedia"));
+    assert!(!switch_from(Some("yes"), off, "chromeMedia"));
+    assert_eq!(
+        switch_env_warning("TURBO_CHROME_MEDIA", Some("yes")).as_deref(),
+        Some("turbo-test: ignoring TURBO_CHROME_MEDIA=\"yes\" (expected 0, 1, true or false)")
+    );
+    for ok in [None, Some("0"), Some("1"), Some("true"), Some("false")] {
+        assert_eq!(switch_env_warning("TURBO_CHROME_MEDIA", ok), None);
+    }
+}
+
+/// The nearest config decides per directory; no config file means the default (jsdom).
+#[test]
+fn chrome_media_reads_the_nearest_config() {
+    let d = tmp("chrome-media-cfg");
+    put(
+        &d,
+        "vitest.config.ts",
+        "export default { test: { chromeMedia: true } };\n",
+    );
+    let sub = d.join("src/deep");
+    std::fs::create_dir_all(&sub).unwrap();
+    assert!(switch_for(&sub, None, "chromeMedia"));
+    assert!(!switch_for(&sub, Some("0"), "chromeMedia"));
+    let bare = tmp("chrome-media-none");
+    assert!(!switch_for(&bare, None, "chromeMedia"));
+    assert!(switch_for(&bare, Some("1"), "chromeMedia"));
+    // A bad value warns once per variable.
+    assert!(!warn_switch_env_once("TURBO_TEST_SWITCH_A", Some("1")));
+    assert!(warn_switch_env_once("TURBO_TEST_SWITCH_A", Some("on")));
+    assert!(!warn_switch_env_once("TURBO_TEST_SWITCH_A", Some("on")));
+    assert!(warn_switch_env_once("TURBO_TEST_SWITCH_B", Some("on")));
+    // Each switch reads its own key.
+    assert!(!switch_for(&sub, None, "cssTransitions"));
+    assert!(switch_from(
+        None,
+        "test: { cssTransitions: true }",
+        "cssTransitions"
+    ));
+    assert!(!switch_from(
+        None,
+        "test: { cssTransitions: true }",
+        "chromeMedia"
+    ));
+    assert_eq!(
+        switch_env_warning("TURBO_CSS_TRANSITIONS", Some("on")).as_deref(),
+        Some("turbo-test: ignoring TURBO_CSS_TRANSITIONS=\"on\" (expected 0, 1, true or false)")
+    );
+}
+
 // Wrapped CJS sources are shared by every isolate of the process (from alphajew420's #106): a
 // module loads from one copy, one entry per (path, decorator-metadata mode) replaced on edit.
 #[test]
@@ -2045,4 +2115,47 @@ fn code_cache_bytes_are_read_from_the_file_not_kept() {
     assert_eq!(&*module_code_cache(&m).unwrap(), &[7u8; 40][..]);
     std::fs::remove_file(&m.cc_path).unwrap();
     assert!(module_code_cache(&m).is_none());
+}
+
+/// With failure frames on (junit, the human reporters), an app module still loads from the
+/// transform cache: its map back to the source is an uncached transform, built only when a
+/// frame in it is resolved (a passing run needs none), and it maps the code that ran.
+#[test]
+fn module_maps_for_failure_frames_are_built_on_demand() {
+    let d = tmp("lazymap");
+    let module = put(
+        &d,
+        "src/m.ts",
+        "import { x } from './x';\nexport function boom(): number {\n  throw new Error('m ' + x);\n}\n",
+    );
+    put(&d, "src/x.ts", "export const x = 1;\n");
+    crate::location::FRAMES_FOR_TEST.with(|f| f.set(true));
+    let before = MAPPED_TRANSFORMS.with(std::cell::Cell::get);
+    let code = read_transformed(&module, true, false).expect("the module transforms");
+    let again = read_transformed(&module, true, false).expect("the module transforms");
+    assert_eq!(code, again);
+    assert_eq!(
+        MAPPED_TRANSFORMS.with(std::cell::Cell::get) - before,
+        0,
+        "no map is built while the module loads"
+    );
+    let line = code
+        .lines()
+        .position(|l| l.contains("throw new Error"))
+        .expect("the throw")
+        + 1;
+    let column = code.lines().nth(line - 1).unwrap().find("throw").unwrap() + 1;
+    // the CJS wrapper puts one line before the code
+    let frame = crate::location::resolve_frame(&module.to_string_lossy(), line + 1, column);
+    crate::location::FRAMES_FOR_TEST.with(|f| f.set(false));
+    assert_eq!(
+        MAPPED_TRANSFORMS.with(std::cell::Cell::get) - before,
+        1,
+        "the first frame builds the map"
+    );
+    assert_eq!(
+        frame.map(|(l, _)| l),
+        Some(3),
+        "the frame maps to the source line of the throw"
+    );
 }
