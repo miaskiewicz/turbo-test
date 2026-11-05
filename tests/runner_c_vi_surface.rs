@@ -239,6 +239,25 @@ fn jest_module_members_are_jests() {
     assert_eq!(rows_diff(&want, &read(&p, "tt.json")), Vec::<String>::new());
 }
 
+#[test]
+fn jest_fn_when_called_with_is_jests() {
+    // turbo-test#185: jest.fn() / jest.spyOn() mocks have jest-mock's whenCalledWith(...matchers),
+    // a sub-mock answering the calls whose arguments equal the matchers (asymmetric ones too):
+    // the parent's own onces first, then the earliest matching branch with a queued once, then
+    // the last-registered matching branch with an implementation, then the implementation the
+    // mock had (mockImplementation after whenCalledWith sets that fall-through); mockReset drops
+    // every branch and resets each sub-mock.
+    let p = jest_project("rc-jest-when");
+    p.file(
+        "when.test.js",
+        include_str!("data/vi_surface/jest_when.test.js"),
+    );
+    let r = turbo_test(&p.dir, &["when.test.js"], &[("OUT", "tt.json")]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let want: Value = serde_json::from_str(include_str!("data/vi_surface/when.jest.json")).unwrap();
+    assert_eq!(rows_diff(&want, &read(&p, "tt.json")), Vec::<String>::new());
+}
+
 /// The `Failed Tests` block of a human report (through the last error's `[n/n]` separator).
 fn failed_block(out: &str) -> String {
     let start = out.find("⎯⎯⎯⎯⎯⎯⎯ Failed Tests").unwrap_or(0);
