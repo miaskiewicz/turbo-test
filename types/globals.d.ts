@@ -14,6 +14,7 @@ import type {
   SuiteAPI,
   TestAPI,
   HookFunction,
+  TestContext,
   ExpectStatic,
   ExpectTypeOfStatic,
   AssertType,
@@ -38,4 +39,6 @@ declare global {
   const afterEach: HookFunction;
   const beforeAll: HookFunction;
   const afterAll: HookFunction;
+  const onTestFinished: TestContext['onTestFinished'];
+  const onTestFailed: TestContext['onTestFailed'];
 }
