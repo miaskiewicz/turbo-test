@@ -8076,10 +8076,73 @@ async function __callTestHooks(t, hooks, fail) {
   ctx.onTestFailed = () => { throw new Error('Cannot call "onTestFailed" inside a test hook.'); };
   ctx.onTestFinished = () => { throw new Error('Cannot call "onTestFinished" inside a test hook.'); };
   for (const fn of hooks.slice().reverse()) {
-    __loop.ticks++;
-    try { await fn(ctx); } catch (e) { fail(e); }
+    try {
+      await __vtLimit(() => { __loop.ticks++; return __vtSettle(() => fn(ctx)); });
+    } catch (e) { fail(e); }
   }
   [ctx.onTestFailed, ctx.onTestFinished] = keep;
+}
+
+// vitest 4.1.12's runner, call for call (turbo-test#251): where it awaits, and through which
+// wrappers it calls each hook, test and handler, sets the microtask turns between them — a
+// promise chain queued in one phase settles at the same point of the next ones as under vitest.
+// Each `await null` stands for a runner step that settles at once (onBeforeRunTask,
+// onBeforeTryTask, onAfterTryTask, onTaskFinished, onAfterRetryTask, onAfterRunTask,
+// onBeforeRunSuite, onAfterRunSuite, the fixture cleanups).
+const __vtNoop = () => {};
+// onAfterRunTask: vitest's worker wraps the runner's (sync) one in an async function
+async function __vtAfterRunTask() {
+  await null;
+}
+// limitConcurrency(Infinity)'s call: a promise result settles through `.finally`
+function __vtLimit(func) {
+  let r;
+  try { r = func(); } catch (e) { return Promise.reject(e); }
+  return r instanceof Promise ? r.finally(__vtNoop) : Promise.resolve(r);
+}
+// withTimeout / withCancel: a new promise, settled through a thenable result's `then`; `arm`
+// (the timeout timer) gets its reject and returns what disarms it
+function __vtSettle(fn, arm) {
+  return new Promise((resolve, reject) => {
+    const disarm = arm ? arm(reject) : __vtNoop;
+    const ok = (v) => { disarm(); resolve(v); };
+    const ko = (e) => { disarm(); reject(e); };
+    try {
+      const r = fn();
+      if (typeof r === 'object' && r != null && typeof r.then === 'function') r.then(ok, ko);
+      else ok(r);
+    } catch (e) { ko(e); }
+  });
+}
+// callAroundEachHooks / callAroundAllHooks with no aroundEach / aroundAll hook
+async function __vtAround(inner) {
+  await (async () => { await inner(); })();
+}
+// a hook (`be` / `ae` / `ba` / `aa`): withTimeout over withFixtures' async wrapper, through
+// limitConcurrency; what it returns (a function: its cleanup) or undefined
+async function __vtRunHook(h, args, name) {
+  return __vtLimit(async () => {
+    if (name === 'be' || name === 'ae') __loop.ticks++;
+    const r = await __vtSettle(async () => h(...args));
+    return typeof r === 'function' ? r : undefined;
+  });
+}
+// callSuiteHook: a suite's hooks (afterEach / afterAll last registered first); beforeEach runs
+// the enclosing suites' first, afterEach after. `chain[i]` is the suite. A throw stops them.
+async function __vtSuiteHook(chain, i, name, args) {
+  const callbacks = [];
+  if (name === 'be' && i > 0) callbacks.push(...(await __vtSuiteHook(chain, i - 1, name, args)));
+  const hooks = chain[i].hooks[name];
+  for (const h of name === 'ae' || name === 'aa' ? hooks.slice().reverse() : hooks) callbacks.push(await __vtRunHook(h, args, name));
+  if (name === 'ae' && i > 0) callbacks.push(...(await __vtSuiteHook(chain, i - 1, name, args)));
+  return callbacks;
+}
+// callCleanupHooks: the functions beforeEach / beforeAll hooks returned, last first
+async function __vtCleanups(cleanups, bump) {
+  for (const fn of cleanups.slice().reverse()) {
+    if (typeof fn !== 'function') continue;
+    await __vtLimit(() => { if (bump) __loop.ticks++; return __vtSettle(fn); });
+  }
 }
 
 // Whether a test of `suite` (or of a nested suite) will run: not skip / todo / filtered by -t /
@@ -8092,9 +8155,6 @@ function __runnable(suite, chain) {
     : !t.skip && !t.todo && !t.notOnly && !(__tt.namePattern && !__tt.namePattern.test(inner.slice(1).map((s) => s.name).concat(t.name).join(' ')))));
 }
 
-// Returns whether the suite failed (a failed test, or a hook / empty-suite error, in it or a
-// nested suite). `mode` is the enclosing mode: '' (run), 'skip', 'todo' or 'hook' (an enclosing
-// beforeAll failed).
 // runSuite: a describe without tasks (failing, or a describe.todo / .skip one) is a TAP task of
 // its own (turbo-test#170): where it sits among the tests, its mode and its describe path; one
 // that is not skipped fails with "No test found in suite <name>" (returns true)
@@ -8110,31 +8170,6 @@ function __emptySuite(suite, ancestors, summary, skipAll, record) {
 function __suiteHookError(suite, summary, suiteErrors, hook, e) {
   summary.failures.push(`${suite.name || '<root>'} ${hook}: ${(e && e.message) || String(e)}`);
   suiteErrors.push(__errorInfo(e));
-}
-// a suite's beforeAll hooks: the functions they return (run after its afterAll hooks, last
-// returned first: vitest's `sequence.hooks: 'stack'`), or null when one throws (that drops them
-// all, turbo-test#101)
-async function __runBeforeAll(suite, summary, suiteErrors) {
-  const returned = [];
-  for (const h of suite.hooks.ba) {
-    try { returned.push(await h()); } catch (e) {
-      __suiteHookError(suite, summary, suiteErrors, 'beforeAll', e);
-      return null;
-    }
-  }
-  return returned;
-}
-// afterAll last registered first, then the beforeAll cleanups (last returned first); a throw
-// fails the suite and stops the hooks after it (vitest, turbo-test#101). Returns whether it failed.
-async function __runAfterAll(suite, baCleanups, summary, suiteErrors) {
-  try {
-    for (const h of suite.hooks.aa.slice().reverse()) await h();
-    for (const c of baCleanups.slice().reverse()) if (typeof c === 'function') await c();
-  } catch (e) {
-    __suiteHookError(suite, summary, suiteErrors, 'afterAll', e);
-    return true;
-  }
-  return false;
 }
 // A test that does not run is reported `skipped` (`todo` for it.todo / inside describe.todo),
 // as vitest's JSON reporter does — -t-filtered ones included (#63).
@@ -8168,14 +8203,14 @@ function __resetTestSnap(t, label) {
   __snap.expectedAssertions = null;
   __snap.hasAssertions = false;
 }
-// Race t.fn() against a timeout. The timeout is an INTERNAL one-shot timer (separate
-// from the user/fake-timer queue), so the Rust drive loop advances the virtual clock to
-// it and rejects even a test that never resolves (e.g. `await new Promise(() => {})`) —
+// The test function, as vitest wraps it (withTimeout(withCancel(withAwaitAsyncAssertions(
+// withFixtures(fn))))) and calls it through limitConcurrency. The timeout is an INTERNAL one-shot
+// timer (separate from the user/fake-timer queue), so the Rust drive loop advances the virtual
+// clock to it and rejects even a test that never resolves (e.g. `await new Promise(() => {})`) —
 // otherwise that hangs the whole worker — while staying invisible to vi.runAllTimers etc.
-async function __runTestBody(t, ctx, timeoutMs) {
-  let timer;
-  const timed = new Promise((_, rej) => {
-    timer = __scheduleInternal(() => {
+function __runTestBody(t, ctx, timeoutMs) {
+  const arm = (reject) => {
+    const timer = __scheduleInternal(() => {
       // vitest's message; its stack is the test's registration (`it(`), as vitest's
       const err = new Error(`Test timed out in ${timeoutMs}ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".`);
       // up to its frame in the test file (vitest collects a describe's tests after the
@@ -8185,17 +8220,17 @@ async function __runTestBody(t, ctx, timeoutMs) {
       err.stack = (own < 0 ? frames : frames.slice(0, own + 1)).join('\n');
       // the context's signal aborts with the timeout error (vitest's `withTimeout`)
       t.abort.abort(err);
-      rej(err);
+      reject(err);
     }, timeoutMs);
-  });
-  try {
-    // called as a plain function, as vitest calls it (its stack frame has no method name)
-    const fn = t.fn;
+    return () => __clearInternal(timer);
+  };
+  // called as a plain function, as vitest calls it (its stack frame has no method name)
+  const fn = t.fn;
+  const body = async () => {
     __loop.ticks++;
-    await Promise.race([Promise.resolve().then(() => fn(ctx)), timed]);
-  } finally {
-    __clearInternal(timer);
-  }
+    return fn(ctx);
+  };
+  return __vtLimit(() => __vtSettle(() => __vtSettle(async () => await body()), arm));
 }
 // expect.assertions(n) / hasAssertions() enforcement (vitest: checked after the test body).
 function __checkAssertions() {
@@ -8204,39 +8239,50 @@ function __checkAssertions() {
   }
   if (__snap.hasAssertions && __snap.assertCount === 0) throw __snap.hasAssertions;
 }
-// afterEach (incl. @testing-library cleanup) runs even when the test failed — otherwise a
-// failed test's mounted DOM leaks into the next test — innermost suite first, each suite's
-// last registered first, then the beforeEach cleanups, last returned first (vitest's
-// `sequence.hooks: 'stack'`). A throw fails the test, next to its own error, and stops
-// the hooks after it (turbo-test#101).
-async function __runAfterEach(chain, ctx, beCleanups, failWith) {
-  try {
-    for (const s of [...chain].reverse()) for (const h of s.hooks.ae.slice().reverse()) { __loop.ticks++; await h(ctx); }
-    for (const c of beCleanups.slice().reverse()) if (typeof c === 'function') { __loop.ticks++; await c(); }
-  } catch (e) { failWith(e); }
+// a thrown attempt error: ctx.skip() marks the test pending, with its note (a caught one skips
+// it, without a note)
+function __attemptError(task, run, e) {
+  if (e instanceof __PendingError) {
+    task.result.pending = true;
+    task.result.note = e.note;
+    task.result.state = 'skip';
+  } else run.lastErr = e;
 }
-// one attempt's beforeEach hooks and body; returns the functions the beforeEach hooks returned
-// (run after its afterEach hooks; a throwing beforeEach drops them all, as vitest:
-// turbo-test#101). `run.ok` is set when the body passed; ctx.skip() marks the test pending.
-async function __runAttemptBody(t, chain, ctx, task, timeoutMs, run) {
+function __attemptState(task, run) {
+  if (task.result.state === 'run') task.result.state = run.ok ? 'pass' : 'fail';
+  if (!run.ok && !task.result.pending) {
+    run.attemptErrors.push(run.lastErr);
+    task.result.errors = run.attemptErrors;
+  }
+}
+// One attempt of a test: its beforeEach hooks (the enclosing suites' first) and body, then its
+// afterEach hooks (even when it failed, so a failed test's mounted DOM does not leak into the
+// next one: innermost suite first, each suite's last registered first), the functions its
+// beforeEach hooks returned (last first; a throwing beforeEach drops them all: turbo-test#101),
+// its onTestFinished handlers, and onTestFailed ones when it failed (vitest's order). A throwing
+// afterEach fails the test next to its own error and stops the hooks after it.
+async function __runAttemptInner(t, chain, ctx, timeoutMs, run) {
+  const task = t.task;
   let beCleanups = [];
   try {
     __clearModuleMocks();
-    const returned = [];
-    for (const s of chain) for (const h of s.hooks.be) { __loop.ticks++; returned.push(await h(ctx)); }
-    beCleanups = returned;
+    await null;
+    beCleanups = await __vtSuiteHook(chain, chain.length - 1, 'be', [ctx]);
     await __runTestBody(t, ctx, timeoutMs);
     __checkAssertions();
+    await null;
     run.ok = true;
-  } catch (e) {
-    // ctx.skip(): the test is skipped, with its note (a caught one skips it, without a note)
-    if (e instanceof __PendingError) {
-      task.result.pending = true;
-      task.result.note = e.note;
-      task.result.state = 'skip';
-    } else run.lastErr = e;
-  }
-  return beCleanups;
+  } catch (e) { __attemptError(task, run, e); }
+  __attemptState(task, run);
+  await null;
+  try {
+    await __vtSuiteHook(chain, chain.length - 1, 'ae', [ctx]);
+    if (beCleanups.length) await __vtCleanups(beCleanups, true);
+    await null;
+  } catch (e) { run.failWith(e); }
+  if (t.onFinished.length) await __callTestHooks(t, t.onFinished, run.failWith);
+  if (task.result.state === 'fail' && t.onFailed.length) await __callTestHooks(t, t.onFailed, run.failWith);
+  await null;
 }
 // it.fails: invert the outcome once its hooks ran (vitest flips the final state) — an
 // error (past this attempt's `mark`) is the success condition, a clean pass fails.
@@ -8244,8 +8290,8 @@ function __invertFails(run, mark) {
   if (run.attemptErrors.length > mark) { run.ok = true; run.lastErr = undefined; run.attemptErrors.length = mark; }
   else { run.ok = false; run.lastErr = new Error('expected test to fail, but it passed'); run.attemptErrors.push(run.lastErr); }
 }
-// one attempt of a test: its hooks, its body, its onTestFinished / onTestFailed handlers
-async function __runAttempt(t, chain, ctx, label, timeoutMs, run, a) {
+// an attempt's start: its state, handlers and snapshot counters; returns where its errors start
+function __beginAttempt(t, label, run, a) {
   const task = t.task;
   run.tries++;
   task.result.retryCount = a;
@@ -8254,20 +8300,7 @@ async function __runAttempt(t, chain, ctx, label, timeoutMs, run, a) {
   t.onFailed = [];
   run.lastErr = undefined;
   __resetTestSnap(t, label);
-  // this attempt's errors start here
-  const mark = run.attemptErrors.length;
-  const beCleanups = await __runAttemptBody(t, chain, ctx, task, timeoutMs, run);
-  if (task.result.state === 'run') task.result.state = run.ok ? 'pass' : 'fail';
-  if (!run.ok && !task.result.pending) {
-    run.attemptErrors.push(run.lastErr);
-    task.result.errors = run.attemptErrors;
-  }
-  await __runAfterEach(chain, ctx, beCleanups, run.failWith);
-  // then its onTestFinished handlers, and onTestFailed ones when it failed (vitest's order)
-  await __callTestHooks(t, t.onFinished, run.failWith);
-  if (task.result.state === 'fail') await __callTestHooks(t, t.onFailed, run.failWith);
-  __snap.currentTest = null;
-  if (t.fails && !task.result.pending) __invertFails(run, mark);
+  return run.attemptErrors.length;
 }
 // a failed test's summary message: the error's (with an AggregateError's errors), its stack's
 // first lines when it says nothing more, and under __TT_STACK its stack
@@ -8339,18 +8372,24 @@ async function __runTest(t, chain, summary, label, suiteTask) {
     task.result.state = 'fail';
     task.result.errors = run.attemptErrors;
   };
+  await null;
   for (let a = 0; a < attempts && !run.ok; a++) {
-    await __runAttempt(t, chain, ctx, label, timeoutMs, run, a);
+    const mark = __beginAttempt(t, label, run, a);
+    await __vtAround(() => __runAttemptInner(t, chain, ctx, timeoutMs, run)).catch(__vtNoop);
+    await null;
+    __snap.currentTest = null;
+    if (t.fails && !task.result.pending) __invertFails(run, mark);
     if (task.result.pending) break;
   }
+  if (!task.result.pending) await __vtAfterRunTask();
   const dur = __loop.elapsed() - t0;
   const timing = { duration_ms: dur, start_ms: start, retry_count: run.tries - 1, logs: __ttTestLogs.map((l) => [l[0], l[1]]) };
   __ttTestLogs = null;
   __ttLogTask = suiteTask;
   return __recordTest(t, chain, summary, label, run, timing, dur);
 }
-// one test of a suite (not a nested suite); returns whether it failed
-async function __runSuiteTest(t, chain, summary, skipAll, hookFailed, suiteTask) {
+// one test of a suite (not a nested suite): whether it failed, or the promise of that when it runs
+function __runSuiteTest(t, chain, summary, skipAll, hookFailed, suiteTask) {
   const label = chain.map((s) => s.name).filter(Boolean).concat(t.name).join(' > ');
   // -t/--testNamePattern: skip tests whose full name does not match the regex (vitest: unanchored,
   // case-sensitive, tested against `getTaskFullName` — the enclosing describe names and the
@@ -8374,49 +8413,100 @@ async function __runSuiteTest(t, chain, summary, skipAll, hookFailed, suiteTask)
   }
   return __runTest(t, chain, summary, label, suiteTask);
 }
-// a suite's tasks: nested suites and tests; returns whether any failed
-async function __runSuiteTasks(suite, chain, summary, skipAll, hookFailed, suiteTask) {
-  let failed = false;
-  for (const t of suite.tasks) {
-    if (t.suite) { failed = (await runSuite(t, chain, summary, hookFailed ? 'hook' : skipAll)) || failed; continue; }
-    if (await __runSuiteTest(t, chain, summary, skipAll, hookFailed, suiteTask)) failed = true;
-  }
+// runSuiteChild: a test through limitTestConcurrency, a suite as it is
+async function __vtChild(t, run) {
+  return t.suite ? run() : __vtLimit(run);
+}
+// a test that does not run settles after its onBeforeRunTask step
+async function __vtNotRun(failed) {
+  await null;
   return failed;
 }
+const __vtTest = (r) => (r instanceof Promise ? r : __vtNotRun(r));
+// Returns whether the suite failed (a failed test, or a hook / empty-suite error, in it or a
+// nested suite). `mode` is the enclosing mode: '' (run), 'skip', 'todo' or 'hook' (an enclosing
+// beforeAll failed).
 async function runSuite(suite, ancestors, summary, mode = '') {
-  // vitest (turbo-test#69): a describe with no task fails with "No test found in suite <name>";
-  // a throwing beforeAll fails the suite (a file-level failure, not a failed test) and skips its
-  // tests and nested suites, whose hooks do not run, while its afterAll hooks still run. A
-  // throwing afterAll fails the suite too. Neither rejects the run: the file still reports.
-  // A describe.skip / describe.todo block (or one inside it) runs nothing (#63).
+  await null;
+  const st = __suiteOpen(suite, ancestors, summary, mode);
+  if (st.empty) return true;
+  if (!st.hooks) __idleTasks(st);
+  else {
+    await __vtAround(() => __runSuiteBody(st));
+    await null;
+  }
+  return __suiteClose(st);
+}
+// A suite none of whose tasks runs (skipped, todo, left out, or under a failed beforeAll):
+// vitest does not visit it, so it records its tasks without a microtask turn.
+function __idleSuite(suite, ancestors, summary, mode) {
+  const st = __suiteOpen(suite, ancestors, summary, mode);
+  if (st.empty) return true;
+  __idleTasks(st);
+  return __suiteClose(st);
+}
+function __idleTasks(st) {
+  const mode = st.hookFailed ? 'hook' : st.skipAll;
+  for (const t of st.suite.tasks) {
+    if (t.suite ? __idleSuite(t, st.chain, st.summary, mode) : __runSuiteTest(t, st.chain, st.summary, st.skipAll, st.hookFailed, st.suiteTask)) st.failed = true;
+  }
+}
+// vitest (turbo-test#69): a describe with no task fails with "No test found in suite <name>";
+// a throwing beforeAll fails the suite (a file-level failure, not a failed test) and skips its
+// tests and nested suites, whose hooks do not run, while its afterAll hooks still run. A
+// throwing afterAll fails the suite too. Neither rejects the run: the file still reports.
+// A describe.skip / describe.todo block (or one inside it) runs nothing (#63).
+function __suiteOpen(suite, ancestors, summary, mode) {
   const skipAll = mode || suite.mode || '';
   const record = (state) => { if (ancestors.length) summary.suites.push(skipAll === 'todo' ? 'todo' : state); };
-  if (__emptySuite(suite, ancestors, summary, skipAll, record)) return true;
+  if (__emptySuite(suite, ancestors, summary, skipAll, record)) return { empty: true };
   const { idle, forbidden, hooks } = __suitePlan(suite, ancestors, summary, skipAll);
-  let failed = forbidden;
-  let hookFailed = mode === 'hook' || forbidden;
-  // console output from here on belongs to this suite (the file for the root suite)
-  const outerTask = __ttLogTask;
-  const suiteTask = __suiteTaskName(suite, ancestors);
-  __ttLogTask = suiteTask;
-  // a suite's hook errors (vitest's failed suite, a junit testcase of its own: turbo-test#81)
-  const suiteStart = __loop.elapsed();
-  const suiteErrors = [];
-  // in vitest's getSuites order (a suite before the suites inside it)
-  const suiteSlot = summary.suite_errors.push(null) - 1;
+  const st = {
+    suite, ancestors, chain: [...ancestors, suite], summary, skipAll, idle, hooks, record,
+    failed: forbidden, hookFailed: mode === 'hook' || forbidden,
+    // console output from here on belongs to this suite (the file for the root suite)
+    outerTask: __ttLogTask, suiteTask: __suiteTaskName(suite, ancestors),
+    // a suite's hook errors (vitest's failed suite, a junit testcase of its own: turbo-test#81)
+    suiteStart: __loop.elapsed(), suiteErrors: [],
+    // in vitest's getSuites order (a suite before the suites inside it)
+    suiteSlot: summary.suite_errors.push(null) - 1,
+  };
+  __ttLogTask = st.suiteTask;
+  return st;
+}
+function __suiteClose(st) {
+  if (st.suiteErrors.length && st.ancestors.length) __recordSuiteErrors(st.suite, st.summary, st.suiteSlot, st.suiteStart, st.suiteErrors);
+  __ttLogTask = st.outerTask;
+  st.record(__suiteState(st.failed, st.skipAll, st.idle));
+  return st.failed;
+}
+// a running suite: its beforeAll hooks, its tasks (each as vitest's runSuiteChild runs it), its
+// afterAll hooks, then the functions its beforeAll hooks returned (last first: vitest's
+// `sequence.hooks: 'stack'`; a throwing beforeAll drops them all, turbo-test#101). A throwing
+// hook stops the hooks after it.
+async function __runSuiteBody(st) {
+  const { suite, summary, suiteErrors } = st;
   let baCleanups = [];
-  if (hooks) {
-    const returned = await __runBeforeAll(suite, summary, suiteErrors);
-    hookFailed = returned === null;
-    failed = hookFailed;
-    baCleanups = returned || [];
+  try {
+    baCleanups = await __vtSuiteHook([suite], 0, 'ba', []);
+  } catch (e) {
+    __suiteHookError(suite, summary, suiteErrors, 'beforeAll', e);
+    st.hookFailed = st.failed = true;
   }
-  if (await __runSuiteTasks(suite, [...ancestors, suite], summary, skipAll, hookFailed, suiteTask)) failed = true;
-  if (hooks && (await __runAfterAll(suite, baCleanups, summary, suiteErrors))) failed = true;
-  if (suiteErrors.length && ancestors.length) __recordSuiteErrors(suite, summary, suiteSlot, suiteStart, suiteErrors);
-  __ttLogTask = outerTask;
-  record(__suiteState(failed, skipAll, idle));
-  return failed;
+  if (st.hookFailed) __idleTasks(st);
+  else {
+    for (const t of suite.tasks) {
+      if (await __vtChild(t, () => (t.suite ? runSuite(t, st.chain, summary) : __vtTest(__runSuiteTest(t, st.chain, summary, '', false, st.suiteTask))))) st.failed = true;
+    }
+  }
+  try {
+    await __vtSuiteHook([suite], 0, 'aa', []);
+    if (baCleanups.length) await __vtCleanups(baCleanups, false);
+    if (!st.ancestors.length) await null;
+  } catch (e) {
+    __suiteHookError(suite, summary, suiteErrors, 'afterAll', e);
+    st.failed = true;
+  }
 }
 // runSuite's plan: `idle` (nothing in it runs: no hooks either), `forbidden` (a forbidden
 // `describe.only`, turbo-test#76: it fails the suite like a throwing beforeAll, but none of its
