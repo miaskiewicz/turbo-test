@@ -240,3 +240,70 @@ fn hook_timeout_defaults_to_ten_seconds_and_follows_the_flag() {
         r.all()
     );
 }
+
+/// turbo-test#256: concurrent tests run together, as vitest's runSuite: a suite's consecutive
+/// concurrent children (it.concurrent / test.concurrent, the tests and nested suites of a
+/// describe.concurrent, test.sequential / describe.sequential opting out) start together, at
+/// most `maxConcurrency` (5) at a time, and the next group waits for them; hooks run around each
+/// test. The JSON report keeps declaration order.
+#[test]
+fn concurrent_tests_run_together_as_vitest() {
+    let r = check(&Probe {
+        name: "conc",
+        src: include_str!("data/vitest-gaps/conc.test.js"),
+        want: include_str!("data/vitest-gaps/conc.vitest.json"),
+        config: JSDOM,
+    });
+    assert_eq!(r.code, Some(0), "{}", r.all());
+}
+
+/// The config's `test.maxConcurrency` limits them, and `test.sequence.concurrent` makes every
+/// test and describe concurrent (test.sequential / describe.sequential still opt out).
+#[test]
+fn max_concurrency_and_sequence_concurrent_come_from_the_config() {
+    check(&Probe {
+        name: "mc",
+        src: include_str!("data/vitest-gaps/mc.test.js"),
+        want: include_str!("data/vitest-gaps/mc.vitest.json"),
+        config: include_str!("data/vitest-gaps/mc.config.js"),
+    });
+    check(&Probe {
+        name: "seqconc",
+        src: include_str!("data/vitest-gaps/seqconc.test.js"),
+        want: include_str!("data/vitest-gaps/seqconc.vitest.json"),
+        config: include_str!("data/vitest-gaps/seq.config.js"),
+    });
+}
+
+/// `--maxConcurrency` / `--sequence.concurrent` do the same as the config's (inline value form
+/// too), the flags winning over it.
+#[test]
+fn max_concurrency_and_sequence_concurrent_flags() {
+    for (probe, src, want, args) in [
+        (
+            "mc",
+            include_str!("data/vitest-gaps/mc.test.js"),
+            include_str!("data/vitest-gaps/mc.vitest.json"),
+            &["--maxConcurrency", "2"][..],
+        ),
+        (
+            "seqconc",
+            include_str!("data/vitest-gaps/seqconc.test.js"),
+            include_str!("data/vitest-gaps/seqconc.vitest.json"),
+            &["--sequence.concurrent", "--maxConcurrency=3"][..],
+        ),
+    ] {
+        let want: Value = serde_json::from_str(want).unwrap();
+        let (order, tests, r) = run_with(
+            &Probe {
+                name: probe,
+                src,
+                want: "",
+                config: "export default { test: { environment: 'jsdom', maxConcurrency: 9 } };\n",
+            },
+            args,
+        );
+        assert_eq!(order, want["order"], "{probe}\n{}", r.all());
+        assert_eq!(tests, want["tests"], "{probe}\n{}", r.all());
+    }
+}

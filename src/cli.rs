@@ -167,13 +167,7 @@ pub fn default_jobs(turbo_jobs: Option<&str>) -> usize {
 }
 
 /// Value-taking vitest flags with no effect on turbo-test (their value is consumed and dropped).
-const IGNORED_VALUE_FLAGS: [&str; 5] = [
-    "--pool",
-    "--mode",
-    "--project",
-    "--exclude",
-    "--maxConcurrency",
-];
+const IGNORED_VALUE_FLAGS: [&str; 4] = ["--pool", "--mode", "--project", "--exclude"];
 
 /// Whether `key` (the part of a `--key=value` token before the first `=`) is a runner value flag,
 /// so the token is its inline form rather than an unknown flag.
@@ -221,6 +215,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             "--testTimeout" => push_u64_env(&mut o.env, "TURBO_TEST_TIMEOUT", value()),
             // `--hookTimeout N` → default hook timeout (ms): __TT_HOOK_TIMEOUT (turbo-test#255)
             "--hookTimeout" => push_u64_env(&mut o.env, "TURBO_HOOK_TIMEOUT", value()),
+            // `--maxConcurrency N` / `--sequence.concurrent` → how many concurrent tests run at
+            // once / every test concurrent (turbo-test#256)
+            "--maxConcurrency" => push_u64_env(&mut o.env, "TURBO_MAX_CONCURRENCY", value()),
+            "--sequence.concurrent" => o.env.push(("TURBO_SEQUENCE_CONCURRENT", "1".to_string())),
             // `--retry N` → global default retry count; runtime reads __TT_DEFAULT_RETRY.
             "--retry" => push_u64_env(&mut o.env, "TURBO_TEST_RETRY", value()),
             // `--bail N` → stop the run after N failed tests total (cross-worker, file-granular).
@@ -289,7 +287,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             // Value-taking vitest flags with no effect on a native single-run runner. Consume the
             // value (inline, or the following token — the launcher forwards flag+value together)
             // so it isn't mistaken for a test-file path.
-            "--pool" | "--mode" | "--project" | "--exclude" | "--maxConcurrency" => {
+            "--pool" | "--mode" | "--project" | "--exclude" => {
                 let _ = value();
             }
             // Boolean / no-effect vitest flags — silently accepted (NOT warned) so scripts and CI

@@ -1148,8 +1148,6 @@ fn plan_drops_noop_vitest_flags() {
             "--project",
             "--exclude",
             "e/**",
-            "--maxConcurrency",
-            "4",
             "--run",
             "--watch",
             "-w",

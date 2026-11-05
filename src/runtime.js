@@ -7681,15 +7681,51 @@ let current = root;
 // A describe's options object (`describe(name, { repeats }, fn)`) is merged over its enclosing
 // suite's, and its tests inherit them (vitest's createSuite / createTest).
 const __suiteOptions = (a, b) => (a && typeof a === 'object' ? a : b && typeof b === 'object' ? b : {});
+// `.concurrent` / `.sequential` (turbo-test#256): the modifier of the call being made (vitest's
+// chainable context), read by describe / the test collector (not inside a describe's body)
+let __chain = '';
+// it.concurrent / describe.sequential …: `target` called with the modifier set; its members
+// (`.each`, `.skip`, `.fails` …) and the functions they return carry it too
+function __withChain(target, mode) {
+  return new Proxy(target, {
+    apply(f, self, args) {
+      const prev = __chain;
+      __chain = mode;
+      try {
+        const r = Reflect.apply(f, self, args);
+        return typeof r === 'function' ? __withChain(r, mode) : r;
+      } finally { __chain = prev; }
+    },
+    get(f, k) {
+      const v = Reflect.get(f, k);
+      return typeof v === 'function' && k !== 'concurrent' && k !== 'sequential' ? __withChain(v, mode) : v;
+    },
+  });
+}
+// the options a suite's tests and nested suites inherit: the enclosing suite's (the root's:
+// `sequence.concurrent`, host → __TT_SEQUENCE_CONCURRENT), then its own, with vitest's
+// createSuite precedence of concurrent / sequential
+const __parentOpts = (s) => s.opts || (globalThis.__TT_SEQUENCE_CONCURRENT ? { concurrent: true } : {});
+function __suiteOpts(parent, own, chain) {
+  const cs = !!own.concurrent || chain === 'concurrent' || own.sequential === false;
+  const ss = !!own.sequential || chain === 'sequential' || own.concurrent === false;
+  const o = { ...__parentOpts(parent), ...own };
+  const isC = cs || (o.concurrent && !ss);
+  const isS = ss || (o.sequential && !cs);
+  if (isC != null) o.concurrent = !!isC && !isS;
+  if (isS != null) o.sequential = !!isS && !isC;
+  return o;
+}
 function describe(name, a, b) {
+  const chain = __chain;
   const fn = typeof a === 'function' ? a : (typeof b === 'function' ? b : () => {});
-  const opts = { ...current.opts, ...__suiteOptions(a, b) };
-  const suite = { name, tasks: [], suite: true, hooks: { be: [], ae: [], ba: [], aa: [] }, parent: current, opts };
+  const opts = __suiteOpts(current, __suiteOptions(a, b), chain);
+  const suite = { name, tasks: [], suite: true, hooks: { be: [], ae: [], ba: [], aa: [] }, parent: current, opts, concurrent: opts.concurrent };
   current.tasks.push(suite);
   const prev = current;
   current = suite;
-  fn();
-  current = prev;
+  __chain = '';
+  try { fn(); } finally { current = prev; __chain = chain; }
   return suite;
 }
 // A skipped/todo suite registers no tests, but it IS a collected task for vitest's "No test suite
@@ -7701,7 +7737,6 @@ describe.only = (name, a, b) => { __tt.hasOnly = true; describe(name, a, b).only
 describe.todo = (name, a, b) => { describe(name, a, b).mode = 'todo'; };
 describe.skipIf = (cond) => (cond ? describe.skip : describe);
 describe.runIf = (cond) => (cond ? describe : describe.skip);
-describe.concurrent = describe; // accepted; a file's tests still run sequentially
 describe.each = (cases, ...targs) => __each(describe, cases, targs);
 describe.for = (cases, ...targs) => __for(describe, cases, targs, true);
 // Supports both vitest signatures: it(name, fn, opts) and it(name, opts, fn).
@@ -7721,29 +7756,38 @@ function __defaultTimeout() {
 // Collect a test into the current suite. Under `includeTaskLocation` it records where it was
 // registered from (`[line, column]` in the test file, native `__ttCallSite`, #63).
 let __inEach = false;
+// whether a test runs concurrently (vitest's createTest): `.concurrent` / `.sequential`, else
+// its own / its suite's `concurrent`, else not `sequential` under `sequence.concurrent`
+function __testConcurrent(own, chain) {
+  if (chain) return chain === 'concurrent';
+  const o = { ...__parentOpts(current), ...own };
+  return o.concurrent != null ? !!o.concurrent : !o.sequential && !!globalThis.__TT_SEQUENCE_CONCURRENT;
+}
+let __testSeq = 0;
 function __addTest(t) {
+  t.seq = __testSeq++;
   if (globalThis.__TT_TASK_LOCATION) t.location = globalThis.__ttCallSite();
   // where it was registered: a timeout's stack (vitest's `STACK_TRACE_ERROR`, turbo-test#102)
   t.stackTrace = new Error('STACK_TRACE_ERROR');
   if (__inEach) t.each = true;
   // `repeats` from the enclosing describe's options (turbo-test#257)
   if (t.repeats === undefined && current.opts) t.repeats = current.opts.repeats;
+  t.concurrent = __testConcurrent(t.own || {}, __chain);
   current.tasks.push(t);
 }
 function it(name, a, b) {
   const { fn, o } = __normTest(a, b);
-  __addTest({ name, fn, skip: false, only: false, retry: o.retry || 0, repeats: o.repeats, timeout: o.timeout });
+  __addTest({ name, fn, skip: false, only: false, retry: o.retry || 0, repeats: o.repeats, own: o, timeout: o.timeout });
 }
 it.skip = (name, a, b) => __addTest({ name, fn: __normTest(a, b).fn, skip: true });
 it.todo = (name) => __addTest({ name, fn: () => {}, skip: true, todo: true });
-it.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: true, retry: o.retry || 0, repeats: o.repeats, timeout: o.timeout }); };
-it.concurrent = it; // accepted; this runner executes a file's tests sequentially
+it.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: true, retry: o.retry || 0, repeats: o.repeats, own: o, timeout: o.timeout }); };
 it.each = (cases, ...targs) => __each(it, cases, targs);
 it.for = (cases, ...targs) => __for(it, cases, targs);
 it.skipIf = (cond) => (name, fn) => __addTest({ name, fn, skip: !!cond, only: false, retry: 0 });
 it.runIf = (cond) => (name, fn) => __addTest({ name, fn, skip: !cond, only: false, retry: 0 });
 // it.fails: the test PASSES iff its body throws (runSuite inverts the outcome via `fails`).
-it.fails = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: false, retry: o.retry || 0, repeats: o.repeats, fails: true }); };
+it.fails = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: false, retry: o.retry || 0, repeats: o.repeats, own: o, fails: true }); };
 // it.extend({...}) — test-context fixtures (best-effort). vitest passes a merged context object as
 // the test fn's first arg; fixtures defined as plain values or `async ({}, use) => use(value)`
 // functions are resolved here and provided. Returns a new test fn with these fixtures baked in.
@@ -7766,14 +7810,18 @@ it.extend = (fixtures) => {
     return ctx;
   };
   const wrap = (userFn) => async (ctx) => userFn(await resolveCtx(ctx));
-  const ext = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: false, retry: o.retry || 0, repeats: o.repeats }); };
+  const ext = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: false, retry: o.retry || 0, repeats: o.repeats, own: o }); };
   ext.skip = (name, a, b) => __addTest({ name, fn: wrap(__normTest(a, b).fn), skip: true });
-  ext.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: true, retry: o.retry || 0, repeats: o.repeats }); };
+  ext.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: true, retry: o.retry || 0, repeats: o.repeats, own: o }); };
   ext.each = (cases, ...targs) => __each(ext, cases, targs);
   ext.for = (cases, ...targs) => __for(ext, cases, targs);
   ext.extend = (more) => it.extend({ ...fixtures, ...more });
   return ext;
 };
+for (const api of [describe, it]) {
+  api.concurrent = __withChain(api, 'concurrent');
+  api.sequential = __withChain(api, 'sequential');
+}
 globalThis.describe = describe;
 globalThis.it = it;
 globalThis.test = it;
@@ -7996,6 +8044,7 @@ function __testRecord(t, chain, status, extra) {
     name: chain.map((s) => s.name).filter(Boolean).concat(t.name).join(' > '),
     title: t.name,
     ancestors: chain.slice(1).map((s) => s.name),
+    seq: t.seq,
     status,
     duration_ms: 0,
     location: t.location,
@@ -8125,12 +8174,57 @@ const __vtNoop = () => {};
 async function __vtAfterRunTask() {
   await null;
 }
-// limitConcurrency(Infinity)'s call: a promise result settles through `.finally`
-function __vtLimit(func) {
-  let r;
-  try { r = func(); } catch (e) { return Promise.reject(e); }
-  return r instanceof Promise ? r.finally(__vtNoop) : Promise.resolve(r);
+// @vitest/runner's limitConcurrency (turbo-test#256): at most `concurrency` calls run at once,
+// the others wait in order; a promise result settles through `.finally(release)`
+function __limitConcurrency(concurrency) {
+  let count = 0;
+  let head;
+  let tail;
+  const finish = () => {
+    count--;
+    if (head) {
+      head[0]();
+      head = head[1];
+      tail = head && tail;
+    }
+  };
+  const acquire = () => {
+    let released = false;
+    const release = () => { if (!released) { released = true; finish(); } };
+    if (count++ < concurrency) return release;
+    return new Promise((resolve) => {
+      const node = [() => resolve(release)];
+      if (tail) tail = tail[1] = node;
+      else head = tail = node;
+    });
+  };
+  return (func) => {
+    const run = (release) => {
+      try {
+        const r = func();
+        if (r instanceof Promise) return r.finally(release);
+        release();
+        return Promise.resolve(r);
+      } catch (e) {
+        release();
+        return Promise.reject(e);
+      }
+    };
+    const release = acquire();
+    return release instanceof Promise ? release.then(run) : run(release);
+  };
 }
+// `maxConcurrency` (host → __TT_MAX_CONCURRENCY; vitest's default 5)
+function __maxConcurrency() {
+  const n = Number(globalThis.__TT_MAX_CONCURRENCY);
+  return Number.isFinite(n) && n > 0 ? n : 5;
+}
+// vitest's limitMaxConcurrency (each hook, test function and handler) and limitTestConcurrency
+// (each test of a suite), made on first use
+let __maxLimiter;
+let __testLimiter;
+const __vtLimit = (func) => (__maxLimiter ||= __limitConcurrency(__maxConcurrency()))(func);
+const __vtTestLimit = (func) => (__testLimiter ||= __limitConcurrency(__maxConcurrency()))(func);
 // withTimeout / withCancel: a new promise, settled through a thenable result's `then`; `arm`
 // (the timeout timer) gets its reject and returns what disarms it
 function __vtSettle(fn, arm) {
@@ -8432,7 +8526,8 @@ async function __runTest(t, chain, summary, label, suiteTask) {
   // vi.setSystemTime replace it).
   const t0 = __loop.elapsed();
   const start = __loop.realNow();
-  __ttTestLogs = [];
+  // its console output (concurrent tests: what is logged while it is the last started)
+  const logs = (__ttTestLogs = []);
   __ttLogTask = chain.slice(1).map((s) => s.name).concat(t.name).join(' > ');
   // its context (turbo-test#96): `task.result` while it runs, as vitest's
   const ctx = __contextOf(t, chain);
@@ -8466,8 +8561,8 @@ async function __runTest(t, chain, summary, label, suiteTask) {
   if (failed && !run.lastErr) run.lastErr = run.attemptErrors[run.attemptErrors.length - 1];
   if (!task.result.pending) await __vtAfterRunTask();
   const dur = __loop.elapsed() - t0;
-  const timing = { duration_ms: dur, start_ms: start, retry_count: run.retries, repeat_count: task.result.repeatCount, logs: __ttTestLogs.map((l) => [l[0], l[1]]) };
-  __ttTestLogs = null;
+  const timing = { duration_ms: dur, start_ms: start, retry_count: run.retries, repeat_count: task.result.repeatCount, logs: logs.map((l) => [l[0], l[1]]) };
+  if (__ttTestLogs === logs) __ttTestLogs = null;
   __ttLogTask = suiteTask;
   return __recordTest(t, chain, summary, label, run, timing, dur);
 }
@@ -8498,7 +8593,7 @@ function __runSuiteTest(t, chain, summary, skipAll, hookFailed, suiteTask) {
 }
 // runSuiteChild: a test through limitTestConcurrency, a suite as it is
 async function __vtChild(t, run) {
-  return t.suite ? run() : __vtLimit(run);
+  return t.suite ? run() : __vtTestLimit(run);
 }
 // a test that does not run settles after its onBeforeRunTask step
 async function __vtNotRun(failed) {
@@ -8578,8 +8673,15 @@ async function __runSuiteBody(st) {
   }
   if (st.hookFailed) __idleTasks(st);
   else {
-    for (const t of suite.tasks) {
-      if (await __vtChild(t, () => (t.suite ? runSuite(t, st.chain, summary) : __vtTest(__runSuiteTest(t, st.chain, summary, '', false, st.suiteTask))))) st.failed = true;
+    // vitest's partitionSuiteChildren: a run of concurrent children runs together
+    for (const group of __partition(suite.tasks)) {
+      if (group[0].concurrent === true) {
+        if (await __runConcurrent(group, st)) st.failed = true;
+        continue;
+      }
+      for (const t of group) {
+        if (await __vtChild(t, () => __suiteChild(t, st))) st.failed = true;
+      }
     }
   }
   try {
@@ -8590,6 +8692,27 @@ async function __runSuiteBody(st) {
     __suiteHookError(suite, summary, suiteErrors, 'afterAll', e);
     st.failed = true;
   }
+}
+// a suite's child as vitest's runSuiteChild runs it
+const __suiteChild = (t, st) => (t.suite ? runSuite(t, st.chain, st.summary) : __vtTest(__runSuiteTest(t, st.chain, st.summary, '', false, st.suiteTask)));
+// consecutive children with the same `concurrent`
+function __partition(tasks) {
+  const groups = [];
+  for (const t of tasks) {
+    const last = groups[groups.length - 1];
+    if (last && last[0].concurrent === t.concurrent) last.push(t);
+    else groups.push([t]);
+  }
+  return groups;
+}
+// a group of concurrent children: started together through a group limiter of maxConcurrency
+// (turbo-test#256); whether one failed. Their records are put back in declaration order at the
+// end of the file.
+async function __runConcurrent(group, st) {
+  const limit = __limitConcurrency(__maxConcurrency());
+  __tt.concurrent = true;
+  const failed = await Promise.all(group.map((t) => limit(() => __vtChild(t, () => __suiteChild(t, st)))));
+  return failed.some(Boolean);
 }
 // runSuite's plan: `idle` (nothing in it runs: no hooks either), `forbidden` (a forbidden
 // `describe.only`, turbo-test#76: it fails the suite like a throwing beforeAll, but none of its
@@ -8658,7 +8781,10 @@ globalThis.__tt = {
     // `.only` task fails in place, as vitest's `checkAllowOnly` (turbo-test#76).
     if (this.hasOnly) __interpretOnly(root, false, !!globalThis.__TT_FORBID_ONLY);
     const waited = __loop.waited;
+    this.concurrent = false;
     await runSuite(root, [], summary);
+    // concurrent tests finish out of order: the reports list them as declared (vitest's tree)
+    if (this.concurrent) summary.tests.sort((a, b) => a.seq - b.seq);
     summary.waited_ms = __loop.waited - waited;
     summary.snapshot = __snapFinish(summary.skippedNames);
     summary.logs = __ttFileLogs.map((l) => [l[0], l[3], l[1]]);
@@ -8689,6 +8815,8 @@ globalThis.__ttCaptureHookBaseline = () => {
 // spy registry, unstubbing globals, poking React internals) was what broke interaction tests
 // ~100 files into a shared isolate — vitest proves none of that is needed.
 globalThis.__ttResetForNextFile = () => {
+  // a file stopped mid-run holds no limiter slot into the next one (turbo-test#256)
+  __maxLimiter = __testLimiter = undefined;
   __ttFileLogs = [];
   __ttLogTask = '';
   // turbo-test collects tests into a single global `root` (vitest scopes per file via

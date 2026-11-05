@@ -66,8 +66,8 @@ media switch; README "Switches"). Leading
 `run`/`watch`/`dev` accepted-and-stripped. Unknown flags warned + ignored (never treated as files).
 
 **Test / `vi` / `expect` API** ✅
-- `describe`/`it`/`test` + `.skip`/`.only`/`.todo`/`.each`/`.for`/`.skipIf`/`.runIf`/`.concurrent`
-  (concurrent runs sequentially within a file), `it.fails`.
+- `describe`/`it`/`test` + `.skip`/`.only`/`.todo`/`.each`/`.for`/`.skipIf`/`.runIf`/`.concurrent`/`.sequential`
+  (concurrent tests run together, up to `maxConcurrency`), `it.fails`.
 - hooks `beforeAll`/`afterAll`/`beforeEach`/`afterEach`; per-test `{ timeout }`/`{ retry }`/`{ repeats }`; the test
   context (`task`, `skip`, `onTestFinished`/`onTestFailed`, also importable from `'vitest'`, `signal`, `expect`, `annotate`).
 - `expect` + a large matcher set, `expect.extend`, `.soft`, asymmetric matchers,

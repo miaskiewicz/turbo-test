@@ -57,6 +57,18 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   hook's registration); a beforeEach / afterEach timing out aborts the test's `signal`. Tests:
   `hooks_time_out_as_vitest` and `hook_timeout_defaults_to_ten_seconds_and_follows_the_flag` in
   `tests/runner_c_vitest_gaps.rs` (recorded from vitest 4.1.12).
+- Concurrent tests run concurrently, as vitest (#256). `it.concurrent`, `describe.concurrent`
+  and `sequence.concurrent` were accepted but a file's tests ran one after another, so suites
+  relying on concurrency (a test awaiting another's progress, timing-sensitive interleavings)
+  hung or behaved differently than on vitest. turbo-test now runs a suite's consecutive
+  concurrent children together through @vitest/runner's `limitConcurrency` (at most
+  `maxConcurrency`, default 5: `test.maxConcurrency` / `--maxConcurrency`), honours
+  `.sequential` / `describe.sequential`, `{ concurrent }` options and `test.sequence.concurrent`
+  / `--sequence.concurrent`, and reports them in declaration order. Sequential suites keep their
+  exact microtask order (#251). Tests: `concurrent_tests_run_together_as_vitest`,
+  `max_concurrency_and_sequence_concurrent_come_from_the_config` and
+  `max_concurrency_and_sequence_concurrent_flags` in `tests/runner_c_vitest_gaps.rs` (recorded
+  from vitest 4.1.12).
 
 ### Added
 - `jest.fn()` / `jest.spyOn()` mocks have `whenCalledWith(...matchers)` with jest-mock 30.5.2's

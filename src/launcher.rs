@@ -48,7 +48,7 @@ pub const VITEST_CONFIG_FILES: [&str; 12] = [
 /// Runner flags that take a following value (so a file arg isn't mistaken for the value, and the
 /// value isn't mistaken for a file). Mirrors the value-flag set cli.js forwarded with their arg.
 /// `cli::parse_args` also accepts each `--` one in its inline `--flag=value` form.
-pub(crate) const VALUE_FLAGS: [&str; 22] = [
+pub(crate) const VALUE_FLAGS: [&str; 23] = [
     "-j",
     "--jobs",
     "--shard",
@@ -60,6 +60,7 @@ pub(crate) const VALUE_FLAGS: [&str; 22] = [
     "--testNamePattern",
     "--testTimeout",
     "--hookTimeout",
+    "--maxConcurrency",
     "--retry",
     "--bail",
     "--maxWorkers",
@@ -1412,6 +1413,10 @@ fn plan_arg(
     // the flag and, when the next token is its value (a non-flag), that too — otherwise the
     // orphaned value token would be mistaken for a test-file path and hard-fail the run. Covers
     // both the `=`-inline and space forms.
+    if a == SEQUENCE_CONCURRENT {
+        forward.push(a);
+        return i;
+    }
     if key.starts_with("--sequence") || key.starts_with("--browser") || key.starts_with("--inspect")
     {
         let _ = take_val(raw, &mut i, &inline_val);
@@ -1484,7 +1489,7 @@ fn launcher_flag(key: &str, opts: &mut Opts, take_val: &mut dyn FnMut() -> Optio
         // runner never sees them — the runner must NOT re-consume a value that may be absent
         // (a trailing `--pool`) and swallow a real test-file arg instead. `--no-file-parallelism`
         // is intentionally NOT here: it maps to real behavior (jobs=1) and is forwarded below.
-        "--pool" | "--mode" | "--project" | "--exclude" | "--maxConcurrency" => {
+        "--pool" | "--mode" | "--project" | "--exclude" => {
             let _ = take_val();
         }
         // Boolean / no-effect vitest flags — dropped (NO value consumed, so a following test
@@ -1589,8 +1594,8 @@ fn config_forward(cwd: &Path, forced: Option<&Path>, forward: &mut Vec<String>) 
     // `--testTimeout` explicitly. Without this the binary falls back to vitest's 5000ms default,
     // so a project that raises testTimeout (e.g. 10000 for slow editor/auto-hide flows) spuriously
     // times out under turbo-test.
-    // the same for hooks: `test.hookTimeout` (turbo-test#255)
-    for key in ["testTimeout", "hookTimeout"] {
+    // the same for hooks (`test.hookTimeout`, turbo-test#255) and `test.maxConcurrency` (#256)
+    for key in ["testTimeout", "hookTimeout", "maxConcurrency"] {
         let flag = format!("--{key}");
         if has_flag(forward, &flag) {
             continue;
@@ -1600,7 +1605,17 @@ fn config_forward(cwd: &Path, forced: Option<&Path>, forward: &mut Vec<String>) 
             forward.push(v);
         }
     }
+    // `test.sequence.concurrent: true` (turbo-test#256)
+    let seq = find_config(cwd, forced)
+        .and_then(|c| scan_braced(&c.text, "sequence"))
+        .is_some_and(|b| config_true(&b, "concurrent"));
+    if seq && !has_flag(forward, SEQUENCE_CONCURRENT) {
+        forward.push(SEQUENCE_CONCURRENT.to_string());
+    }
 }
+
+/// vitest's `--sequence.concurrent` (every test concurrent): forwarded to the runner.
+const SEQUENCE_CONCURRENT: &str = "--sequence.concurrent";
 
 /// Coverage thresholds/include/exclude from the config `cov`, unless `forward` passes them.
 fn coverage_forward(cov: &CoverageCfg, forward: &mut Vec<String>) {
