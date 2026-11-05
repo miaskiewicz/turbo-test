@@ -449,10 +449,9 @@ npm run complexity:js        # CI job `complexity / js (cc <= 15)`
   attributed through `tarpaulin.toml`'s `objects`; the `#[path]` unit-test modules are excluded.
 - **Lint — blocking.** `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`;
   `npm-lockfile` checks the lock under npm 10 and 11.
-- **Complexity — report-only until the post-0.6.0 refactor.** Every function should have
-  cyclomatic complexity <= 15 (one limit, no allow-list). The two jobs run with
-  `continue-on-error` and list the functions over the limit in their step summary; they become
-  blocking once the refactor clears that backlog. Rust uses turbo-html2pdf's `cc-check` over every
+- **Complexity — blocking (since 0.8.0).** Every function has cyclomatic complexity <= 15 (one
+  limit, no allow-list, no baseline). A failing job lists the functions over the limit in its step
+  summary. Rust uses turbo-html2pdf's `cc-check` over every
   tracked `.rs` file, installed from its home at the rev CI pins:
 
   ```sh
