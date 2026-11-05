@@ -1,0 +1,52 @@
+[
+ [
+  "faked at load",
+  "value",
+  "[\"object\",true]"
+ ],
+ [
+  "faked in test",
+  "value",
+  "[\"object\",true,true]"
+ ],
+ [
+  "timers run on advance",
+  "value",
+  "[1,0]"
+ ],
+ [
+  "doNotFake",
+  "value",
+  "[\"undefined\",\"object\"]"
+ ],
+ [
+  "timerLimit",
+  "throws",
+  "Error: Aborting after running 10 timers, assuming an infinite loop!"
+ ],
+ [
+  "useRealTimers",
+  "value",
+  "[\"undefined\",true]"
+ ],
+ [
+  "useFakeTimers() takes the config",
+  "value",
+  "[\"object\",1000,\"undefined\"]"
+ ],
+ [
+  "useFakeTimers(cfg) over the config",
+  "value",
+  "[5,\"undefined\"]"
+ ],
+ [
+  "advanceTimers",
+  "value",
+  "\"object\""
+ ],
+ [
+  "second test",
+  "value",
+  "\"object\""
+ ]
+]

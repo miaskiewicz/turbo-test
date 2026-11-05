@@ -432,7 +432,8 @@ globalThis.__ttCaptureConfigBaseline = () => {
 };
 globalThis.__ttApplyConfig = (cfg) => {
   if (!cfg || typeof cfg !== 'object') return;
-  const { fakeTimers, zeroDelayTimers, ...rest } = cfg;
+  const { fakeTimers, zeroDelayTimers, jestFakeTimers, ...rest } = cfg;
+  __jestApplyConfig(jestFakeTimers);
   if (typeof zeroDelayTimers === 'boolean') __ttZeroDelay = zeroDelayTimers;
   if (fakeTimers && typeof fakeTimers === 'object') __ttConfig.fakeTimers = Object.assign(__ttConfigDefaults().fakeTimers, fakeTimers);
   Object.assign(__ttConfig, rest);
@@ -5820,8 +5821,15 @@ globalThis.babelHelpers.decorateMetadata = function (metadataKey, metadataValue)
 // and runAllImmediates works.
 let __jestLegacy = false;
 const __jestSeed = Math.floor(Math.random() * 0xffffffff) - 0x80000000;
+// a jest config's fakeTimers (turbo-test#186): the defaults of every jest.useFakeTimers (its
+// argument over them), and with `enableGlobally: true` fake timers before the test file loads
+let __jestTimerDefaults = {};
+function __jestApplyConfig(ft) {
+  __jestTimerDefaults = ft && typeof ft === 'object' ? ft : {};
+  if (__jestTimerDefaults.enableGlobally === true) __jestInstallFake();
+}
 function __jestInstallFake(cfg) {
-  const c = cfg || {};
+  const c = Object.assign({}, __jestTimerDefaults, cfg);
   const legacy = c.legacyFakeTimers === true;
   const skip = new Set(legacy ? ['Date', 'performance', 'hrtime'] : Array.isArray(c.doNotFake) ? c.doNotFake : []);
   const at = c.now === undefined ? undefined : c.now;
