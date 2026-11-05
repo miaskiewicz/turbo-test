@@ -2404,8 +2404,8 @@ fn set_mock_prepass(scope: &mut v8::PinScope, on: bool) {
 /// installGlobals + the `.node` parser — was removed in v0.3.0; rtdom is the only DOM now.)
 fn setup_dom(scope: &mut v8::PinScope, entry: &Path) {
     turbo_dom_browser_env::browser_env::install(scope);
-    // jsdom's media by default (vitest parity); Chrome's with --chrome-media,
-    // TURBO_CHROME_MEDIA=1 or test.chromeMedia: true
+    // jsdom's media, no CSS transitions / animations and no Web Animations by default (vitest
+    // parity); Chrome's with --chrome-media, TURBO_CHROME_MEDIA=1 or test.chromeMedia: true
     turbo_dom_browser_env::browser_env::set_media_mode(
         scope,
         if chrome_media(entry) {
