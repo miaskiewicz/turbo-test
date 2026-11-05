@@ -25,9 +25,10 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrayExpression, ArrayExpressionElement, BinaryOperator, CallExpression, Expression,
-    LogicalOperator, ObjectExpression, ObjectPropertyKind, PropertyKey, PropertyKind,
-    TemplateLiteral, UnaryOperator,
+    ArrayExpression, ArrayExpressionElement, BinaryOperator, CallExpression,
+    ComputedMemberExpression, ConditionalExpression, Expression, LogicalExpression,
+    LogicalOperator, ObjectExpression, ObjectProperty, ObjectPropertyKind, PropertyKey,
+    PropertyKind, TemplateLiteral, UnaryExpression, UnaryOperator,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
@@ -84,14 +85,9 @@ pub fn expand(file: &Path, src: &str, root: &Path, aliases: &[(String, String)])
         })
     });
     if let Some(message) = invalid {
-        let at = if src.starts_with("#!") {
-            src.find('\n').map_or(src.len(), |n| n + 1)
-        } else {
-            0
-        };
         let mut out = src.to_string();
         let message = serde_json::to_string(&message).ok()?;
-        out.insert_str(at, &format!("throw new Error({message});"));
+        out.insert_str(after_hashbang(src), &format!("throw new Error({message});"));
         return Some(out);
     }
     let mut out = src.to_string();
@@ -99,26 +95,7 @@ pub fn expand(file: &Path, src: &str, root: &Path, aliases: &[(String, String)])
     for (i, call) in calls.iter().enumerate().rev() {
         // every pattern and base anchors here (checked above and by glob_options)
         let found = matches(call, file, dir, root, aliases)?;
-        let mut entries = Vec::new();
-        let mut eager = String::new();
-        for (j, (key, spec)) in found.iter().enumerate() {
-            let spec = serde_json::to_string(&format!("{spec}{}", call.query)).ok()?;
-            let pick = call
-                .import
-                .as_ref()
-                .map(|n| format!("[{}]", serde_json::to_string(n).unwrap_or_default()))
-                .unwrap_or_default();
-            let value = if call.eager {
-                let local = format!("__tt_glob_{i}_{j}");
-                eager.push_str(&format!("import * as {local} from {spec};"));
-                format!("{local}{pick}")
-            } else if pick.is_empty() {
-                format!("() => import({spec})")
-            } else {
-                format!("() => import({spec}).then((m) => m{pick})")
-            };
-            entries.push(format!("{}: {value}", serde_json::to_string(key).ok()?));
-        }
+        let (entries, eager) = call_entries(call, i, &found)?;
         imports.push(eager);
         let (start, end) = (call.span.0 as usize, call.span.1 as usize);
         let lines = "\n".repeat(src[start..end].matches('\n').count());
@@ -127,13 +104,46 @@ pub fn expand(file: &Path, src: &str, root: &Path, aliases: &[(String, String)])
     }
     imports.reverse();
     let imports = imports.concat();
-    let at = if out.starts_with("#!") {
-        out.find('\n').map_or(out.len(), |n| n + 1)
+    out.insert_str(after_hashbang(&out), &imports);
+    Some(out)
+}
+
+/// The offset of the first line after a hashbang (0 without one).
+fn after_hashbang(src: &str) -> usize {
+    if src.starts_with("#!") {
+        src.find('\n').map_or(src.len(), |n| n + 1)
     } else {
         0
-    };
-    out.insert_str(at, &imports);
-    Some(out)
+    }
+}
+
+/// The object entries (`key: value`) of call `i`'s matches, and its eager imports.
+fn call_entries(
+    call: &Call,
+    i: usize,
+    found: &[(String, String)],
+) -> Option<(Vec<String>, String)> {
+    let mut entries = Vec::new();
+    let mut eager = String::new();
+    let pick = call
+        .import
+        .as_ref()
+        .map(|n| format!("[{}]", serde_json::to_string(n).unwrap_or_default()))
+        .unwrap_or_default();
+    for (j, (key, spec)) in found.iter().enumerate() {
+        let spec = serde_json::to_string(&format!("{spec}{}", call.query)).ok()?;
+        let value = if call.eager {
+            let local = format!("__tt_glob_{i}_{j}");
+            eager.push_str(&format!("import * as {local} from {spec};"));
+            format!("{local}{pick}")
+        } else if pick.is_empty() {
+            format!("() => import({spec})")
+        } else {
+            format!("() => import({spec}).then((m) => m{pick})")
+        };
+        entries.push(format!("{}: {value}", serde_json::to_string(key).ok()?));
+    }
+    Some((entries, eager))
 }
 
 /// The `import.meta.glob(...)` calls of `src` vite replaces or fails on, in source order.
@@ -590,134 +600,159 @@ fn eval(e: &Expression) -> Result<Value, Eval> {
         Expression::NullLiteral(_) => Value::Null,
         Expression::NumericLiteral(n) => Value::Num(n.value),
         Expression::StringLiteral(s) => Value::Str(s.value.to_string()),
-        Expression::TemplateLiteral(t) => {
-            let mut out = String::new();
-            for (i, q) in t.quasis.iter().enumerate() {
-                out.push_str(q.value.cooked.ok_or(Eval::Unsupported)?.as_str());
-                if let Some(e) = t.expressions.get(i) {
-                    match eval(e)? {
-                        Value::Global(_) => return Err(Eval::Unsupported),
-                        v => out.push_str(&v.to_js_string()),
-                    }
-                }
-            }
-            Value::Str(out)
-        }
-        Expression::Identifier(id) => match id.name.as_str() {
-            // evalValue declares these (`var console, exports, …`)
-            "undefined" | "console" | "exports" | "global" | "module" | "process" | "require" => {
-                Value::Undefined
-            }
-            n => global_value(n).ok_or(Eval::NotStatic)?,
-        },
-        // `typeof` of an undeclared name is "undefined"
-        Expression::UnaryExpression(u) if u.operator == UnaryOperator::Typeof => {
-            match (u.argument.get_inner_expression(), eval(&u.argument)) {
-                (Expression::Identifier(_), Err(Eval::NotStatic)) => Value::Str("undefined".into()),
-                (_, v) => Value::Str(v?.type_of().to_string()),
-            }
-        }
-        Expression::UnaryExpression(u) => {
-            let v = eval(&u.argument)?;
-            match (u.operator, v) {
-                (UnaryOperator::LogicalNot, v) => Value::Bool(!v.truthy()),
-                (UnaryOperator::UnaryNegation, Value::Num(n)) => Value::Num(-n),
-                (UnaryOperator::UnaryPlus, Value::Num(n)) => Value::Num(n),
-                (UnaryOperator::Void, _) => Value::Undefined,
-                _ => return Err(Eval::Unsupported),
-            }
-        }
+        Expression::TemplateLiteral(t) => eval_template(t)?,
+        Expression::Identifier(id) => eval_identifier(&id.name)?,
+        Expression::UnaryExpression(u) => eval_unary(u)?,
         Expression::BinaryExpression(b) => {
             let l = eval(&b.left)?;
             binary(b.operator, l, eval(&b.right)?)?
         }
-        Expression::LogicalExpression(l) => {
-            let left = eval(&l.left)?;
-            let take_left = match l.operator {
-                LogicalOperator::And => !left.truthy(),
-                LogicalOperator::Or => left.truthy(),
-                LogicalOperator::Coalesce => !matches!(left, Value::Undefined | Value::Null),
-            };
-            if take_left {
-                left
-            } else {
-                eval(&l.right)?
-            }
-        }
-        Expression::ConditionalExpression(c) => {
-            if eval(&c.test)?.truthy() {
-                eval(&c.consequent)?
-            } else {
-                eval(&c.alternate)?
-            }
-        }
+        Expression::LogicalExpression(l) => eval_logical(l)?,
+        Expression::ConditionalExpression(c) => eval_conditional(c)?,
         Expression::StaticMemberExpression(m) => member(eval(&m.object)?, &m.property.name)?,
-        Expression::ComputedMemberExpression(m) => {
-            let object = eval(&m.object)?;
-            match eval(&m.expression)? {
-                Value::Global(_) => return Err(Eval::Unsupported),
-                k => member(object, &k.to_js_string())?,
-            }
-        }
-        Expression::ArrayExpression(a) => {
-            let mut props = Vec::new();
-            for (i, el) in a.elements.iter().enumerate() {
-                match el {
-                    ArrayExpressionElement::Elision(_) => {}
-                    ArrayExpressionElement::SpreadElement(_) => return Err(Eval::Unsupported),
-                    el => props.push((i.to_string(), eval(el.to_expression())?)),
-                }
-            }
-            Value::Object(props)
-        }
-        Expression::ObjectExpression(o) => {
-            let mut props = Vec::new();
-            for p in &o.properties {
-                match p {
-                    ObjectPropertyKind::SpreadProperty(s) => match eval(&s.argument)? {
-                        Value::Object(inner) => {
-                            for (k, v) in own_keys(&inner) {
-                                define(&mut props, k.clone(), v.clone());
-                            }
-                        }
-                        Value::Str(s) if s.is_ascii() => {
-                            for (i, c) in s.chars().enumerate() {
-                                define(&mut props, i.to_string(), Value::Str(c.to_string()));
-                            }
-                        }
-                        Value::Str(_) => return Err(Eval::Unsupported),
-                        // null, undefined, booleans and numbers spread nothing
-                        _ => {}
-                    },
-                    ObjectPropertyKind::ObjectProperty(p) => {
-                        if p.kind != PropertyKind::Init || p.method {
-                            return Err(Eval::Unsupported);
-                        }
-                        let key = match &p.key {
-                            // `__proto__: x` sets the prototype, it defines no key
-                            PropertyKey::StaticIdentifier(id) if id.name == "__proto__" => {
-                                return Err(Eval::Unsupported)
-                            }
-                            PropertyKey::StaticIdentifier(id) => id.name.to_string(),
-                            PropertyKey::StringLiteral(s)
-                                if !p.computed && s.value == "__proto__" =>
-                            {
-                                return Err(Eval::Unsupported)
-                            }
-                            k => match eval(k.as_expression().ok_or(Eval::Unsupported)?)? {
-                                Value::Global(_) => return Err(Eval::Unsupported),
-                                k => k.to_js_string(),
-                            },
-                        };
-                        let value = eval(&p.value)?;
-                        define(&mut props, key, value);
-                    }
-                }
-            }
-            Value::Object(props)
-        }
+        Expression::ComputedMemberExpression(m) => eval_computed(m)?,
+        Expression::ArrayExpression(a) => eval_array(a)?,
+        Expression::ObjectExpression(o) => eval_object(o)?,
         _ => return Err(Eval::Unsupported),
     })
+}
+
+fn eval_conditional(c: &ConditionalExpression) -> Result<Value, Eval> {
+    if eval(&c.test)?.truthy() {
+        eval(&c.consequent)
+    } else {
+        eval(&c.alternate)
+    }
+}
+
+fn eval_computed(m: &ComputedMemberExpression) -> Result<Value, Eval> {
+    let object = eval(&m.object)?;
+    member(object, &eval_key(&m.expression)?)
+}
+
+/// A computed key evaluated to its string (a global object is no key).
+fn eval_key(e: &Expression) -> Result<String, Eval> {
+    match eval(e)? {
+        Value::Global(_) => Err(Eval::Unsupported),
+        k => Ok(k.to_js_string()),
+    }
+}
+
+fn eval_template(t: &TemplateLiteral) -> Result<Value, Eval> {
+    let mut out = String::new();
+    for (i, q) in t.quasis.iter().enumerate() {
+        out.push_str(q.value.cooked.ok_or(Eval::Unsupported)?.as_str());
+        if let Some(e) = t.expressions.get(i) {
+            out.push_str(&eval_key(e)?);
+        }
+    }
+    Ok(Value::Str(out))
+}
+
+fn eval_identifier(name: &str) -> Result<Value, Eval> {
+    match name {
+        // evalValue declares these (`var console, exports, …`)
+        "undefined" | "console" | "exports" | "global" | "module" | "process" | "require" => {
+            Ok(Value::Undefined)
+        }
+        n => global_value(n).ok_or(Eval::NotStatic),
+    }
+}
+
+fn eval_unary(u: &UnaryExpression) -> Result<Value, Eval> {
+    // `typeof` of an undeclared name is "undefined"
+    if u.operator == UnaryOperator::Typeof {
+        return Ok(
+            match (u.argument.get_inner_expression(), eval(&u.argument)) {
+                (Expression::Identifier(_), Err(Eval::NotStatic)) => Value::Str("undefined".into()),
+                (_, v) => Value::Str(v?.type_of().to_string()),
+            },
+        );
+    }
+    let v = eval(&u.argument)?;
+    Ok(match (u.operator, v) {
+        (UnaryOperator::LogicalNot, v) => Value::Bool(!v.truthy()),
+        (UnaryOperator::UnaryNegation, Value::Num(n)) => Value::Num(-n),
+        (UnaryOperator::UnaryPlus, Value::Num(n)) => Value::Num(n),
+        (UnaryOperator::Void, _) => Value::Undefined,
+        _ => return Err(Eval::Unsupported),
+    })
+}
+
+fn eval_logical(l: &LogicalExpression) -> Result<Value, Eval> {
+    let left = eval(&l.left)?;
+    let take_left = match l.operator {
+        LogicalOperator::And => !left.truthy(),
+        LogicalOperator::Or => left.truthy(),
+        LogicalOperator::Coalesce => !matches!(left, Value::Undefined | Value::Null),
+    };
+    if take_left {
+        Ok(left)
+    } else {
+        eval(&l.right)
+    }
+}
+
+fn eval_array(a: &ArrayExpression) -> Result<Value, Eval> {
+    let mut props = Vec::new();
+    for (i, el) in a.elements.iter().enumerate() {
+        match el {
+            ArrayExpressionElement::Elision(_) => {}
+            ArrayExpressionElement::SpreadElement(_) => return Err(Eval::Unsupported),
+            el => props.push((i.to_string(), eval(el.to_expression())?)),
+        }
+    }
+    Ok(Value::Object(props))
+}
+
+fn eval_object(o: &ObjectExpression) -> Result<Value, Eval> {
+    let mut props = Vec::new();
+    for p in &o.properties {
+        match p {
+            ObjectPropertyKind::SpreadProperty(s) => eval_spread(&s.argument, &mut props)?,
+            ObjectPropertyKind::ObjectProperty(p) => {
+                if p.kind != PropertyKind::Init || p.method {
+                    return Err(Eval::Unsupported);
+                }
+                let key = eval_property_key(p)?;
+                let value = eval(&p.value)?;
+                define(&mut props, key, value);
+            }
+        }
+    }
+    Ok(Value::Object(props))
+}
+
+/// `...argument` spread into `props`.
+fn eval_spread(argument: &Expression, props: &mut Vec<(String, Value)>) -> Result<(), Eval> {
+    match eval(argument)? {
+        Value::Object(inner) => {
+            for (k, v) in own_keys(&inner) {
+                define(props, k.clone(), v.clone());
+            }
+        }
+        Value::Str(s) if s.is_ascii() => {
+            for (i, c) in s.chars().enumerate() {
+                define(props, i.to_string(), Value::Str(c.to_string()));
+            }
+        }
+        Value::Str(_) => return Err(Eval::Unsupported),
+        // null, undefined, booleans and numbers spread nothing
+        _ => {}
+    }
+    Ok(())
+}
+
+fn eval_property_key(p: &ObjectProperty) -> Result<String, Eval> {
+    match &p.key {
+        // `__proto__: x` sets the prototype, it defines no key
+        PropertyKey::StaticIdentifier(id) if id.name == "__proto__" => Err(Eval::Unsupported),
+        PropertyKey::StaticIdentifier(id) => Ok(id.name.to_string()),
+        PropertyKey::StringLiteral(s) if !p.computed && s.value == "__proto__" => {
+            Err(Eval::Unsupported)
+        }
+        k => eval_key(k.as_expression().ok_or(Eval::Unsupported)?),
+    }
 }
 
 /// The ESTree node type vite's message names for an argument.
@@ -794,6 +829,31 @@ const KNOWN_OPTIONS: [(&str, &[&str]); 7] = [
 /// The evaluated options checked and normalized as vite's parseGlobOptions does, into `call`;
 /// `Err` its message.
 fn glob_options(opts: &[(String, Value)], call: &mut Call) -> Result<(), String> {
+    check_option_types(opts)?;
+    let get = |k: &str| opts.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+    // a string option, "" when it is absent (falsy)
+    let text = |k: &str| match get(k) {
+        Some(Value::Str(s)) => s.clone(),
+        _ => String::new(),
+    };
+    let base = text("base");
+    check_base(&base)?;
+    let query = match get("query") {
+        Some(Value::Object(q)) => object_query(q)?,
+        _ => text("query"),
+    };
+    let (import, query) = as_option(text("as"), text("import"), query)?;
+    call.case_sensitive = get("caseSensitive") != Some(&Value::Bool(false));
+    call.eager = get("eager") == Some(&Value::Bool(true));
+    call.exhaustive = get("exhaustive") == Some(&Value::Bool(true));
+    call.import = (!import.is_empty() && import != "*").then_some(import);
+    call.query = query;
+    call.base = (!base.is_empty()).then_some(base);
+    Ok(())
+}
+
+/// Every option known and of a type it takes.
+fn check_option_types(opts: &[(String, Value)]) -> Result<(), String> {
     for (key, value) in own_keys(opts) {
         let Some((_, allowed)) = KNOWN_OPTIONS.iter().find(|(k, _)| k == key) else {
             return Err(format!("Unknown glob option \"{key}\""));
@@ -806,13 +866,10 @@ fn glob_options(opts: &[(String, Value)], call: &mut Call) -> Result<(), String>
             ));
         }
     }
-    let get = |k: &str| opts.iter().find(|(n, _)| n == k).map(|(_, v)| v);
-    // a string option, "" when it is absent (falsy)
-    let text = |k: &str| match get(k) {
-        Some(Value::Str(s)) => s.clone(),
-        _ => String::new(),
-    };
-    let base = text("base");
+    Ok(())
+}
+
+fn check_base(base: &str) -> Result<(), String> {
     if base.starts_with('!') {
         return Err("Option \"base\" cannot start with \"!\"".to_string());
     }
@@ -825,32 +882,38 @@ fn glob_options(opts: &[(String, Value)], call: &mut Call) -> Result<(), String>
             "Option \"base\" must start with '/', './' or '../', but got \"{base}\""
         ));
     }
-    let mut query = match get("query") {
-        Some(Value::Object(q)) => {
-            let mut items = Vec::new();
-            for (k, v) in own_keys(q) {
-                let t = v.type_of();
-                if !["string", "number", "boolean"].contains(&t) {
-                    return Err(format!(
-                        "Expected glob option \"query.{k}\" to be of type string, number, or boolean, but got {t}"
-                    ));
-                }
-                // vite's stringifyQuery: an empty value is the key alone
-                let v = v.to_js_string();
-                let item = match v.as_str() {
-                    "" => form_encode(k),
-                    _ => format!("{}={}", form_encode(k), form_encode(&v)),
-                };
-                if !item.is_empty() {
-                    items.push(item);
-                }
-            }
-            items.join("&")
+    Ok(())
+}
+
+/// An object `query` as vite's stringifyQuery writes it.
+fn object_query(q: &[(String, Value)]) -> Result<String, String> {
+    let mut items = Vec::new();
+    for (k, v) in own_keys(q) {
+        let t = v.type_of();
+        if !["string", "number", "boolean"].contains(&t) {
+            return Err(format!(
+                "Expected glob option \"query.{k}\" to be of type string, number, or boolean, but got {t}"
+            ));
         }
-        _ => text("query"),
-    };
-    let r#as = text("as");
-    let mut import = text("import");
+        // vite's stringifyQuery: an empty value is the key alone
+        let v = v.to_js_string();
+        let item = match v.as_str() {
+            "" => form_encode(k),
+            _ => format!("{}={}", form_encode(k), form_encode(&v)),
+        };
+        if !item.is_empty() {
+            items.push(item);
+        }
+    }
+    Ok(items.join("&"))
+}
+
+/// `import` and `query` with the `as` option applied (and `query` given its `?`).
+fn as_option(
+    r#as: String,
+    mut import: String,
+    mut query: String,
+) -> Result<(String, String), String> {
     if r#as == "raw" || r#as == "url" {
         if !import.is_empty() && import != "default" && import != "*" {
             return Err(format!(
@@ -871,13 +934,7 @@ fn glob_options(opts: &[(String, Value)], call: &mut Call) -> Result<(), String>
     if !query.is_empty() && !query.starts_with('?') {
         query = format!("?{query}");
     }
-    call.case_sensitive = get("caseSensitive") != Some(&Value::Bool(false));
-    call.eager = get("eager") == Some(&Value::Bool(true));
-    call.exhaustive = get("exhaustive") == Some(&Value::Bool(true));
-    call.import = (!import.is_empty() && import != "*").then_some(import);
-    call.query = query;
-    call.base = (!base.is_empty()).then_some(base);
-    Ok(())
+    Ok((import, query))
 }
 
 /// vite (4.1.12) cuts the options at the end of their first call and fails its own parse of the
@@ -1051,14 +1108,7 @@ fn matches(
             {
                 continue;
             }
-            let key = match &base {
-                Some(b) => relative_spec(b, &abs),
-                None if *relative => relative_spec(dir, &abs),
-                None => match normal(&abs).strip_prefix(normal(root)) {
-                    Ok(r) => format!("/{}", crate::coverage::slash_path(r)),
-                    Err(_) => crate::coverage::slash_path(&abs),
-                },
-            };
+            let key = match_key(base.as_deref(), *relative, dir, root, &abs);
             if found.iter().any(|(k, _)| *k == key) {
                 continue;
             }
@@ -1067,6 +1117,19 @@ fn matches(
     }
     found.sort();
     Some(found)
+}
+
+/// The key vite writes for match `abs`: relative to `base` when there is one, else to the
+/// module's `dir` for a relative pattern, else root-relative (`/…`).
+fn match_key(base: Option<&Path>, relative: bool, dir: &Path, root: &Path, abs: &Path) -> String {
+    match base {
+        Some(b) => relative_spec(b, abs),
+        None if relative => relative_spec(dir, abs),
+        None => match normal(abs).strip_prefix(normal(root)) {
+            Ok(r) => format!("/{}", crate::coverage::slash_path(r)),
+            Err(_) => crate::coverage::slash_path(abs),
+        },
+    }
 }
 
 /// A pattern as (the directory its fixed leading segments name, the glob below it, whether it
