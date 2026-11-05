@@ -17,6 +17,16 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   default stays jsdom's (no transitions, no animations, no Web Animations). Guarded by
   `transitions_are_jsdom_by_default_and_chrome_on_opt_in`, which fails on the pin alone.
 
+### Fixed
+- Microtasks queued in a hook or test settle where they do on vitest (#251). vitest awaits each
+  phase (beforeAll / beforeEach / test / afterEach / afterAll, retries, `it.fails`, nested
+  describes, cleanups) through @vitest/runner's fixed-depth async chain, so a short promise chain
+  finishes before the next phase and a longer one interleaves with it; turbo-test ran fewer turns
+  between phases, so ordering-sensitive code (async cleanups, React state flushes) could observe a
+  different order. The runner now mirrors @vitest/runner's await structure turn for turn. Test:
+  `tests/runner_c_microtask_order.rs`, five probes recorded from vitest 4.1.12 + jsdom 27.4.0,
+  checked in fresh isolates and under isolate reuse.
+
 ### Added
 - `jest.fn()` / `jest.spyOn()` mocks have `whenCalledWith(...matchers)` with jest-mock 30.5.2's
   dispatch (own onces, then the first matching branch's once, then the last matching
