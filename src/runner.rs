@@ -1700,6 +1700,9 @@ fn vitest_runtime_config_uncached(start: &Path) -> Option<String> {
 /// The runtime literal for files under `start`: the nearest config's settings, and the
 /// zeroDelayTimers env switch (what the CLI flag sets) with or without a config file.
 fn runtime_config_for(start: &Path, env: Option<&str>) -> Option<String> {
+    // A jest config is read only when no vitest config governs the project (README): the
+    // nearest jest config is kept while the walk goes on, and any vitest config above wins.
+    let mut jest: Option<String> = None;
     let mut dir = Some(start);
     while let Some(d) = dir {
         for cfg in VITEST_CONFIG_FILES {
@@ -1707,12 +1710,15 @@ fn runtime_config_for(start: &Path, env: Option<&str>) -> Option<String> {
                 return runtime_config_literal_with(&s, env);
             }
         }
-        if let Some(s) = jest_config_text(d) {
-            return jest_runtime_config_literal(&s, env);
+        if jest.is_none() {
+            jest = jest_config_text(d);
         }
         dir = d.parent();
     }
-    runtime_config_literal_with("", env)
+    match jest {
+        Some(s) => jest_runtime_config_literal(&s, env),
+        None => runtime_config_literal_with("", env),
+    }
 }
 
 /// A jest config's runtime literal (turbo-test#186): its `fakeTimers` block as `jestFakeTimers`
