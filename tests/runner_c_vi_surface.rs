@@ -368,3 +368,27 @@ fn config_clears_restores_and_unstubs_before_each_test() {
         assert_eq!(r.code, Some(0), "{name}: {}", r.all());
     }
 }
+
+#[test]
+fn jest_fake_timers_do_not_apply_under_a_vitest_config() {
+    // A jest config's `fakeTimers` (turbo-test#186) is read only when no vitest config governs
+    // the project: with a vitest.config.js in a parent dir, a package.json `"jest"` block's
+    // `enableGlobally: true` is ignored and the timers stay real, as in vitest 4.1.12.
+    let p = Project::new("rc-jest-timers-under-vitest");
+    p.file("vitest.config.js", "export default { test: {} }\n");
+    p.file(
+        "pkg/package.json",
+        r#"{ "type": "module", "jest": { "fakeTimers": { "enableGlobally": true } } }"#,
+    );
+    p.file(
+        "pkg/real.test.js",
+        r#"import { test, vi, expect } from 'vitest'
+test('timers are real', async () => {
+  expect(vi.isFakeTimers()).toBe(false)
+  await new Promise((r) => setTimeout(r, 20))
+})
+"#,
+    );
+    let r = turbo_test(&p.path("pkg"), &["real.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+}
