@@ -33,6 +33,13 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   reset to silence a mock passed on jest and not here. Jest mocks now drop the implementation
   (and their `whenCalledWith` branches) on reset; `vi.fn` / `vi.spyOn` keep vitest's reset. Test:
   `jest_mock_reset_is_jests` in `tests/runner_c_vi_surface.rs`, recorded with jest 30.5.2.
+- `onTestFinished` / `onTestFailed` can be imported from `'vitest'` (and are globals), as on
+  vitest (#258). Only the context's `ctx.onTestFinished` existed, so a suite importing the
+  standalone hooks — the form vitest's docs show for cleanups registered from helpers — failed to
+  load. They register on the running test (its body, a beforeEach or an afterEach), throw
+  vitest's `Hook onTestFinished() can only be called inside a test` outside one and its
+  TypeError for a non-function. Test: `on_test_finished_and_failed_import_from_vitest` in
+  `tests/runner_c_vitest_gaps.rs` (recorded from vitest 4.1.12).
 
 ### Added
 - `jest.fn()` / `jest.spyOn()` mocks have `whenCalledWith(...matchers)` with jest-mock 30.5.2's

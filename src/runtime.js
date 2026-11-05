@@ -7793,6 +7793,17 @@ globalThis.beforeEach = (fn) => __ttAddHook('be', fn);
 globalThis.afterEach = (fn) => __ttAddHook('ae', fn);
 globalThis.beforeAll = (fn) => __ttAddHook('ba', fn);
 globalThis.afterAll = (fn) => __ttAddHook('aa', fn);
+// onTestFinished / onTestFailed imported from 'vitest' (turbo-test#258): vitest's
+// createTestHook — the callback is type-checked, then registered on the test running now (its
+// body, a beforeEach or an afterEach), the same list as the context's own
+const __ttTestHook = (name, key) => (fn) => {
+  if (typeof fn !== 'function') throw new TypeError(`"${name}" callback value must be function, received "${typeof fn}"`);
+  const t = __snap.currentTest;
+  if (!t) throw new Error(`Hook ${name}() can only be called inside a test`);
+  t[key].push(fn);
+};
+globalThis.onTestFinished = __ttTestHook('onTestFinished', 'onFinished');
+globalThis.onTestFailed = __ttTestHook('onTestFailed', 'onFailed');
 
 // ---- runner ----
 // One per-test record for the reporters (`summary.tests`): the `describe > test` label, the

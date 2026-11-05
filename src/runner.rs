@@ -6965,6 +6965,8 @@ fn ensure_vitest_builtin<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<()> {
         ("afterEach", "afterEach"),
         ("beforeAll", "beforeAll"),
         ("afterAll", "afterAll"),
+        ("onTestFinished", "onTestFinished"),
+        ("onTestFailed", "onTestFailed"),
         ("assert", "__ttVitestAssert"),
         ("chai", "__ttVitestChai"),
         ("should", "__ttVitestShould"),
