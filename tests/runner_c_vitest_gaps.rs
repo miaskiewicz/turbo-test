@@ -240,3 +240,37 @@ fn hook_timeout_defaults_to_ten_seconds_and_follows_the_flag() {
         r.all()
     );
 }
+
+/// turbo-test#256: concurrent tests run together, as vitest's runSuite: a suite's consecutive
+/// concurrent children (it.concurrent / test.concurrent, the tests and nested suites of a
+/// describe.concurrent, test.sequential / describe.sequential opting out) start together, at
+/// most `maxConcurrency` (5) at a time, and the next group waits for them; hooks run around each
+/// test. The JSON report keeps declaration order.
+#[test]
+fn concurrent_tests_run_together_as_vitest() {
+    let r = check(&Probe {
+        name: "conc",
+        src: include_str!("data/vitest-gaps/conc.test.js"),
+        want: include_str!("data/vitest-gaps/conc.vitest.json"),
+        config: JSDOM,
+    });
+    assert_eq!(r.code, Some(0), "{}", r.all());
+}
+
+/// The config's `test.maxConcurrency` limits them, and `test.sequence.concurrent` makes every
+/// test and describe concurrent (test.sequential / describe.sequential still opt out).
+#[test]
+fn max_concurrency_and_sequence_concurrent_come_from_the_config() {
+    check(&Probe {
+        name: "mc",
+        src: include_str!("data/vitest-gaps/mc.test.js"),
+        want: include_str!("data/vitest-gaps/mc.vitest.json"),
+        config: include_str!("data/vitest-gaps/mc.config.js"),
+    });
+    check(&Probe {
+        name: "seqconc",
+        src: include_str!("data/vitest-gaps/seqconc.test.js"),
+        want: include_str!("data/vitest-gaps/seqconc.vitest.json"),
+        config: include_str!("data/vitest-gaps/seq.config.js"),
+    });
+}
