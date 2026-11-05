@@ -98,3 +98,69 @@ fn on_test_finished_and_failed_import_from_vitest() {
         config: JSDOM,
     });
 }
+
+/// turbo-test#257: `{ repeats: n }` runs a test 1 + n times, each repeat with its hooks and
+/// handlers and `result.repeatCount` counting them; retries count on across repeats; a suite's
+/// `repeats` is inherited by its tests; a repeat that fails fails the test even when a later one
+/// passes (an it.fails one passes).
+#[test]
+fn repeats_run_a_test_again_as_vitest() {
+    let r = check(&Probe {
+        name: "rep",
+        src: include_str!("data/vitest-gaps/rep.test.js"),
+        want: include_str!("data/vitest-gaps/rep.vitest.json"),
+        config: JSDOM,
+    });
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let r = check(&Probe {
+        name: "repfail",
+        src: include_str!("data/vitest-gaps/repfail.test.js"),
+        want: include_str!("data/vitest-gaps/repfail.vitest.json"),
+        config: JSDOM,
+    });
+    assert_eq!(r.code, Some(1), "{}", r.all());
+}
+
+/// vitest's verbose reporter marks a repeated test `(repeat xN)` (after `(retry xN)`), and a
+/// test failing in a repeat with that repeat's error.
+#[test]
+fn repeats_show_in_the_verbose_reporter() {
+    let p = Project::new("rc-gaps-rep-verbose");
+    p.file("package.json", r#"{"name":"rv","type":"module"}"#);
+    p.file("vitest.config.js", JSDOM);
+    p.file("rep.test.js", include_str!("data/vitest-gaps/rep.test.js"));
+    p.file(
+        "repfail.test.js",
+        include_str!("data/vitest-gaps/repfail.test.js"),
+    );
+    let r = turbo_test(
+        &p.dir,
+        &["--jobs", "1", "--reporter", "verbose"],
+        &[("TURBO_LEGACY_REPORTER", "0"), ("NO_COLOR", "1")],
+    );
+    let line = |name: &str| {
+        r.stdout
+            .lines()
+            .find(|l| l.contains(&format!("> {name} ")))
+            .unwrap_or_else(|| panic!("no line for {name}\n{}", r.all()))
+            .to_string()
+    };
+    // as vitest 4.1.12 prints them (tests/data/vitest-gaps: rep.test.js, repfail.test.js)
+    for (name, suffix) in [
+        ("two", "ms (repeat x2)"),
+        ("retry", "ms (retry x2) (repeat x2)"),
+        ("zero", "ms"),
+        ("in", "ms (repeat x1)"),
+        ("own", "ms (repeat x2)"),
+        ("fails-in-repeat-1", "ms (repeat x2)"),
+        ("fails", "ms (repeat x1)"),
+    ] {
+        assert!(
+            line(name).ends_with(suffix),
+            "{name}: {}\n{}",
+            line(name),
+            r.all()
+        );
+    }
+    assert!(r.stdout.contains("→ repeat 2"), "{}", r.all());
+}
