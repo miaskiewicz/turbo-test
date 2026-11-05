@@ -1707,9 +1707,26 @@ fn runtime_config_for(start: &Path, env: Option<&str>) -> Option<String> {
                 return runtime_config_literal_with(&s, env);
             }
         }
+        if let Some(s) = jest_config_text(d) {
+            return jest_runtime_config_literal(&s, env);
+        }
         dir = d.parent();
     }
     runtime_config_literal_with("", env)
+}
+
+/// A jest config's runtime literal (turbo-test#186): its `fakeTimers` block as `jestFakeTimers`
+/// (enableGlobally and jest.useFakeTimers' defaults, runtime.js), and the zeroDelayTimers env
+/// switch as for a vitest config.
+fn jest_runtime_config_literal(s: &str, env: Option<&str>) -> Option<String> {
+    let base = runtime_config_literal_with("", env);
+    let Some(ft) = config_object_literal(s, "fakeTimers") else {
+        return base;
+    };
+    Some(match base {
+        Some(b) => format!("{{ jestFakeTimers: {ft}, {}", &b[2..]),
+        None => format!("{{ jestFakeTimers: {ft} }}"),
+    })
 }
 
 /// The warning for a `TURBO_ZERO_DELAY_TIMERS` value that is not `0|1|true|false` (ignored).
@@ -1905,6 +1922,13 @@ fn load_snapshot_serializers(scope: &mut v8::PinScope, files: &[PathBuf]) -> Res
 /// `<rootDir>` token (rootDir defaults to the config dir). Returns None if no jest config here
 /// (so the caller keeps walking up); Some(possibly-empty) once a jest config is found.
 fn jest_setup_files(dir: &Path) -> Option<Vec<PathBuf>> {
+    let s = jest_config_text(dir)?;
+    jest_setup_files_from(dir, &s)
+}
+
+/// The text of the jest config in `dir`: `jest.config.{js,cjs,mjs,ts,json}`, else the `"jest"`
+/// block of package.json; None when `dir` has neither.
+fn jest_config_text(dir: &Path) -> Option<String> {
     let names = [
         "jest.config.js",
         "jest.config.cjs",
@@ -1925,14 +1949,17 @@ fn jest_setup_files(dir: &Path) -> Option<Vec<PathBuf>> {
             .ok()
             .and_then(|pkg| package_json_jest_block(&pkg));
     }
-    let s = text?;
+    text
+}
+
+fn jest_setup_files_from(dir: &Path, s: &str) -> Option<Vec<PathBuf>> {
     // rootDir (default = config dir). Jest paths in setupFiles use `<rootDir>`.
-    let root_dir = config_string_value(&s, "rootDir")
+    let root_dir = config_string_value(s, "rootDir")
         .map(|r| normalize_path(&dir.join(&r)))
         .unwrap_or_else(|| dir.to_path_buf());
     let mut out = Vec::new();
     for key in ["setupFiles", "setupFilesAfterEnv"] {
-        if let Some(start) = find_config_key(&s, key) {
+        if let Some(start) = find_config_key(s, key) {
             let tail = &s[start..];
             if let Some(lb) = tail.find('[') {
                 if let Some(rb) = tail[lb..].find(']') {
@@ -10174,3 +10201,6 @@ mod tests_a;
 #[cfg(all(test, unix))]
 #[path = "runner_tests_b.rs"]
 mod tests_b;
+#[cfg(all(test, unix))]
+#[path = "runner_tests_jest.rs"]
+mod tests_jest;
