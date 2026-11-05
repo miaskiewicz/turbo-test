@@ -258,6 +258,46 @@ fn jest_fn_when_called_with_is_jests() {
     assert_eq!(rows_diff(&want, &read(&p, "tt.json")), Vec::<String>::new());
 }
 
+#[test]
+fn jest_config_fake_timers_are_jests() {
+    // turbo-test#186: a jest config's `fakeTimers` — `enableGlobally: true` fakes the timers
+    // before the test file loads (and they stay faked across its tests), and `now` /
+    // `doNotFake` / `timerLimit` are the defaults of every jest.useFakeTimers() (its argument
+    // over them); without enableGlobally the timers start real. Recorded with jest 30.5.2.
+    for (mode, enable, data) in [
+        (
+            "on",
+            "enableGlobally: true, ",
+            include_str!("data/vi_surface/config_timers_on.jest.json"),
+        ),
+        (
+            "off",
+            "",
+            include_str!("data/vi_surface/config_timers_off.jest.json"),
+        ),
+    ] {
+        let p = jest_project(&format!("rc-jest-cfg-timers-{mode}"));
+        p.file(
+            "jest.config.js",
+            &format!(
+                "export default {{ fakeTimers: {{ {enable}now: 1000, doNotFake: ['queueMicrotask'], timerLimit: 10 }} }}\n"
+            ),
+        );
+        p.file(
+            "timers.test.js",
+            include_str!("data/vi_surface/jest_config_timers.test.js"),
+        );
+        let r = turbo_test(&p.dir, &["timers.test.js"], &[("OUT", "tt.json")]);
+        assert_eq!(r.code, Some(0), "{mode}: {}", r.all());
+        let want: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(
+            rows_diff(&want, &read(&p, "tt.json")),
+            Vec::<String>::new(),
+            "{mode}"
+        );
+    }
+}
+
 /// The `Failed Tests` block of a human report (through the last error's `[n/n]` separator).
 fn failed_block(out: &str) -> String {
     let start = out.find("⎯⎯⎯⎯⎯⎯⎯ Failed Tests").unwrap_or(0);
