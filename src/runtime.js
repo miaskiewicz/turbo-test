@@ -6116,7 +6116,7 @@ function __jestCheckFake() {
 // later mockImplementation); each call whose arguments equal a branch's matchers
 // ([iterableEquality], asymmetric matchers too) runs the earliest such branch with a queued once,
 // else the last-registered one with an implementation, else the fall-through (a spy's original).
-// mockReset drops every branch and resets each sub-mock.
+// mockReset drops every branch, resets each sub-mock and (as jest-mock does) the implementation.
 function __jestWhenPick(branches, args) {
   const matching = branches.filter((b) => __equals(b.matchers, args, [__iterableEquality]));
   const once = matching.find((b) => b.sub[__mockConfigKey].once.length > 0);
@@ -6129,8 +6129,9 @@ function __jestWhen(fn) {
   const config = fn[__mockConfigKey];
   const branches = [];
   let fallback;
+  let reset = false; // jest-mock's reset drops the implementation: a reset spy no longer calls through
   const dispatcher = function (...args) {
-    const target = __jestWhenPick(branches, args) || fallback || config.original;
+    const target = __jestWhenPick(branches, args) || fallback || (reset ? undefined : config.original);
     return target ? target.apply(this, args) : undefined;
   };
   const { mockImplementation, getMockImplementation, mockReset } = fn;
@@ -6139,7 +6140,12 @@ function __jestWhen(fn) {
   fn.mockReset = () => {
     for (const b of branches.splice(0)) b.sub.mockReset();
     fallback = undefined;
-    return mockReset();
+    mockReset();
+    // jest 30 (turbo-test#254), unlike vitest's back-to-vi.fn(impl): jest.fn(impl) and a spy
+    // return undefined until a new implementation is set
+    reset = true;
+    config.impl = dispatcher;
+    return fn;
   };
   fn.whenCalledWith = (...matchers) => {
     if (config.impl !== dispatcher) { fallback = config.impl; config.impl = dispatcher; }
