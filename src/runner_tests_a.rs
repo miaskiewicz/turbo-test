@@ -1749,24 +1749,28 @@ fn zero_delay_timers_env_wins_over_the_config() {
 fn chrome_media_env_wins_over_the_config() {
     let on = "test: { chromeMedia: true }";
     let off = "test: { chromeMedia:false }";
-    assert!(!chrome_media_from(None, ""));
-    assert!(!chrome_media_from(None, "test: {}"));
-    assert!(!chrome_media_from(None, "test: { chromeMedia: flag }"));
-    assert!(chrome_media_from(None, on));
-    assert!(!chrome_media_from(None, off));
-    assert!(!chrome_media_from(Some("0"), on));
-    assert!(!chrome_media_from(Some("false"), on));
-    assert!(chrome_media_from(Some("1"), off));
-    assert!(chrome_media_from(Some("true"), off));
+    assert!(!switch_from(None, "", "chromeMedia"));
+    assert!(!switch_from(None, "test: {}", "chromeMedia"));
+    assert!(!switch_from(
+        None,
+        "test: { chromeMedia: flag }",
+        "chromeMedia"
+    ));
+    assert!(switch_from(None, on, "chromeMedia"));
+    assert!(!switch_from(None, off, "chromeMedia"));
+    assert!(!switch_from(Some("0"), on, "chromeMedia"));
+    assert!(!switch_from(Some("false"), on, "chromeMedia"));
+    assert!(switch_from(Some("1"), off, "chromeMedia"));
+    assert!(switch_from(Some("true"), off, "chromeMedia"));
     // an unknown env value leaves the config's, with a warning
-    assert!(chrome_media_from(Some("yes"), on));
-    assert!(!chrome_media_from(Some("yes"), off));
+    assert!(switch_from(Some("yes"), on, "chromeMedia"));
+    assert!(!switch_from(Some("yes"), off, "chromeMedia"));
     assert_eq!(
-        chrome_media_env_warning(Some("yes")).as_deref(),
+        switch_env_warning("TURBO_CHROME_MEDIA", Some("yes")).as_deref(),
         Some("turbo-test: ignoring TURBO_CHROME_MEDIA=\"yes\" (expected 0, 1, true or false)")
     );
     for ok in [None, Some("0"), Some("1"), Some("true"), Some("false")] {
-        assert_eq!(chrome_media_env_warning(ok), None);
+        assert_eq!(switch_env_warning("TURBO_CHROME_MEDIA", ok), None);
     }
 }
 
@@ -1781,11 +1785,32 @@ fn chrome_media_reads_the_nearest_config() {
     );
     let sub = d.join("src/deep");
     std::fs::create_dir_all(&sub).unwrap();
-    assert!(chrome_media_for(&sub, None));
-    assert!(!chrome_media_for(&sub, Some("0")));
+    assert!(switch_for(&sub, None, "chromeMedia"));
+    assert!(!switch_for(&sub, Some("0"), "chromeMedia"));
     let bare = tmp("chrome-media-none");
-    assert!(!chrome_media_for(&bare, None));
-    assert!(chrome_media_for(&bare, Some("1")));
+    assert!(!switch_for(&bare, None, "chromeMedia"));
+    assert!(switch_for(&bare, Some("1"), "chromeMedia"));
+    // A bad value warns once per variable.
+    assert!(!warn_switch_env_once("TURBO_TEST_SWITCH_A", Some("1")));
+    assert!(warn_switch_env_once("TURBO_TEST_SWITCH_A", Some("on")));
+    assert!(!warn_switch_env_once("TURBO_TEST_SWITCH_A", Some("on")));
+    assert!(warn_switch_env_once("TURBO_TEST_SWITCH_B", Some("on")));
+    // Each switch reads its own key.
+    assert!(!switch_for(&sub, None, "cssTransitions"));
+    assert!(switch_from(
+        None,
+        "test: { cssTransitions: true }",
+        "cssTransitions"
+    ));
+    assert!(!switch_from(
+        None,
+        "test: { cssTransitions: true }",
+        "chromeMedia"
+    ));
+    assert_eq!(
+        switch_env_warning("TURBO_CSS_TRANSITIONS", Some("on")).as_deref(),
+        Some("turbo-test: ignoring TURBO_CSS_TRANSITIONS=\"on\" (expected 0, 1, true or false)")
+    );
 }
 
 // Wrapped CJS sources are shared by every isolate of the process (from alphajew420's #106): a

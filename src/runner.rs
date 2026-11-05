@@ -1726,61 +1726,73 @@ fn zero_delay_timers_from(env: Option<&str>, s: &str) -> Option<bool> {
         .or_else(|| v.starts_with("false").then_some(false))
 }
 
-/// Whether `entry`'s DOM gets Chrome's media (turbo-dom `MediaMode::Chrome`: a live
-/// `matchMedia` and `@media` evaluated against the 1024x768 viewport) instead of jsdom's (the
-/// default, vitest parity: no `matchMedia`, only `screen` media lists apply), memoized by the
-/// test file's directory.
-fn chrome_media(entry: &Path) -> bool {
-    let Some(dir) = entry.parent() else {
-        return false;
-    };
+/// A DOM switch: Chrome's behaviour or jsdom's (the default, vitest parity), from the env
+/// variable `var` (what the CLI flag sets) or the nearest config's `test.<key>`, memoized by
+/// the test file's directory. `TURBO_CHROME_MEDIA` / `chromeMedia`: turbo-dom `MediaMode`
+/// (a live `matchMedia`, `@media` against the 1024x768 viewport). `TURBO_CSS_TRANSITIONS` /
+/// `cssTransitions`: CSS transitions, `@keyframes` animations and Web Animations.
+fn dom_switch(entry: &Path, var: &'static str, key: &str) -> bool {
+    let dir = entry.parent().unwrap_or(entry);
     thread_local! {
-        static CHROME_MEDIA_MEMO: RefCell<HashMap<PathBuf, bool>> = RefCell::new(HashMap::new());
+        static SWITCH_MEMO: RefCell<HashMap<(&'static str, PathBuf), bool>> = RefCell::new(HashMap::new());
     }
-    if let Some(v) = CHROME_MEDIA_MEMO.with(|m| m.borrow().get(dir).copied()) {
+    let memo_key = (var, dir.to_path_buf());
+    if let Some(v) = SWITCH_MEMO.with(|m| m.borrow().get(&memo_key).copied()) {
         return v;
     }
-    let env = std::env::var("TURBO_CHROME_MEDIA").ok();
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    if let Some(w) = chrome_media_env_warning(env.as_deref()) {
-        WARNED.call_once(|| eprintln!("{w}"));
-    }
-    let v = chrome_media_for(dir, env.as_deref());
-    CHROME_MEDIA_MEMO.with(|m| m.borrow_mut().insert(dir.to_path_buf(), v));
+    let env = std::env::var(var).ok();
+    warn_switch_env_once(var, env.as_deref());
+    let v = switch_for(dir, env.as_deref(), key);
+    SWITCH_MEMO.with(|m| m.borrow_mut().insert(memo_key, v));
     v
 }
 
-/// [`chrome_media`] for files under `start`: the nearest config's `test.chromeMedia`, or the
-/// env switch with or without a config file.
-fn chrome_media_for(start: &Path, env: Option<&str>) -> bool {
+/// [`dom_switch`] for files under `start`: the nearest config's `test.<key>`, or the env
+/// switch with or without a config file.
+fn switch_for(start: &Path, env: Option<&str>, key: &str) -> bool {
     let mut dir = Some(start);
     while let Some(d) = dir {
         for cfg in VITEST_CONFIG_FILES {
             if let Ok(s) = std::fs::read_to_string(d.join(cfg)) {
-                return chrome_media_from(env, &s);
+                return switch_from(env, &s, key);
             }
         }
         dir = d.parent();
     }
-    chrome_media_from(env, "")
+    switch_from(env, "", key)
 }
 
-/// `TURBO_CHROME_MEDIA=0|1` (what `--[no-]chrome-media` sets) wins over the config's
-/// `test.chromeMedia: true|false`; neither set means jsdom media.
-fn chrome_media_from(env: Option<&str>, s: &str) -> bool {
+/// The env switch `0|1|true|false` (what the flag sets) wins over the config's
+/// `test.<key>: true|false`; neither set means jsdom's behaviour.
+fn switch_from(env: Option<&str>, s: &str, key: &str) -> bool {
     match env {
         Some("0" | "false") => false,
         Some("1" | "true") => true,
-        _ => config_is_true(s, "chromeMedia"),
+        _ => config_is_true(s, key),
     }
 }
 
-/// The warning for a `TURBO_CHROME_MEDIA` value that is not `0|1|true|false` (ignored).
-fn chrome_media_env_warning(env: Option<&str>) -> Option<String> {
+/// Print [`switch_env_warning`] the first time `var` has a bad value; whether it printed.
+fn warn_switch_env_once(var: &'static str, env: Option<&str>) -> bool {
+    static WARNED: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let Some(w) = switch_env_warning(var, env) else {
+        return false;
+    };
+    let mut warned = WARNED.lock().unwrap();
+    if warned.contains(&var) {
+        return false;
+    }
+    warned.push(var);
+    eprintln!("{w}");
+    true
+}
+
+/// The warning for an env switch value that is not `0|1|true|false` (ignored).
+fn switch_env_warning(var: &str, env: Option<&str>) -> Option<String> {
     match env {
         None | Some("0" | "1" | "true" | "false") => None,
         Some(v) => Some(format!(
-            "turbo-test: ignoring TURBO_CHROME_MEDIA={v:?} (expected 0, 1, true or false)"
+            "turbo-test: ignoring {var}={v:?} (expected 0, 1, true or false)"
         )),
     }
 }
@@ -2404,15 +2416,22 @@ fn set_mock_prepass(scope: &mut v8::PinScope, on: bool) {
 /// installGlobals + the `.node` parser — was removed in v0.3.0; rtdom is the only DOM now.)
 fn setup_dom(scope: &mut v8::PinScope, entry: &Path) {
     turbo_dom_browser_env::browser_env::install(scope);
-    // jsdom's media, no CSS transitions / animations and no Web Animations by default (vitest
-    // parity); Chrome's with --chrome-media, TURBO_CHROME_MEDIA=1 or test.chromeMedia: true
+    // jsdom's media by default (vitest parity); Chrome's with --chrome-media,
+    // TURBO_CHROME_MEDIA=1 or test.chromeMedia: true
     turbo_dom_browser_env::browser_env::set_media_mode(
         scope,
-        if chrome_media(entry) {
+        if dom_switch(entry, "TURBO_CHROME_MEDIA", "chromeMedia") {
             turbo_dom_browser_env::browser_env::MediaMode::Chrome
         } else {
             turbo_dom_browser_env::browser_env::MediaMode::Jsdom
         },
+    );
+    // jsdom's: no CSS transitions / animations and no Web Animations by default (vitest
+    // parity); Chrome's with --css-transitions, TURBO_CSS_TRANSITIONS=1 or
+    // test.cssTransitions: true. Independent of the media switch.
+    turbo_dom_browser_env::browser_env::set_css_transitions(
+        scope,
+        dom_switch(entry, "TURBO_CSS_TRANSITIONS", "cssTransitions"),
     );
     // the embedder's window members: open / alert / print / postMessage … (turbo-test#208)
     run_js(

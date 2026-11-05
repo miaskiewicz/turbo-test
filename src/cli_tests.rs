@@ -1767,6 +1767,17 @@ fn chrome_media_flags_set_the_env_switch() {
 }
 
 #[test]
+fn css_transitions_flags_set_the_env_switch() {
+    assert_eq!(
+        parse(&["--css-transitions", "--no-css-transitions"]).env,
+        vec![
+            ("TURBO_CSS_TRANSITIONS", "1".to_string()),
+            ("TURBO_CSS_TRANSITIONS", "0".to_string())
+        ]
+    );
+}
+
+#[test]
 fn zero_delay_timer_flags_set_the_env_switch() {
     assert_eq!(
         parse(&["--zero-delay-timers"]).env,

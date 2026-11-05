@@ -57,8 +57,12 @@ turbo-test's own: `--zero-delay-timers` / `--no-zero-delay-timers` (`setTimeout(
 of the clock in Node's order (default) or Node's 1 ms; also `TURBO_ZERO_DELAY_TIMERS=0|1`, preferred over
 `test.zeroDelayTimers`, which vitest's config type lacks; README "Switches"); `--chrome-media` /
 `--no-chrome-media` (`matchMedia` and `@media` evaluated against the 1024x768 viewport as in Chrome,
-plus Chrome's CSS transitions, CSS animations and Web Animations; or jsdom's (default): no `matchMedia`, only `screen` media lists apply, no CSS transitions / animations and no `animate` / `getAnimations`; also
-`TURBO_CHROME_MEDIA=0|1` and `test.chromeMedia`; README "Switches"). Leading
+or jsdom's media (default): no `matchMedia`, only `screen` media lists apply; also
+`TURBO_CHROME_MEDIA=0|1` and `test.chromeMedia`; README "Switches"); `--css-transitions` /
+`--no-css-transitions` (Chrome's CSS transitions, `@keyframes` animations and Web Animations, or
+jsdom's (default): none run, `getComputedStyle` reports the end value at once, no `animate` /
+`getAnimations`; also `TURBO_CSS_TRANSITIONS=0|1` and `test.cssTransitions`; independent of the
+media switch; README "Switches"). Leading
 `run`/`watch`/`dev` accepted-and-stripped. Unknown flags warned + ignored (never treated as files).
 
 **Test / `vi` / `expect` API** ✅
