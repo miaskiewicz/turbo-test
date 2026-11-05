@@ -414,6 +414,8 @@ fn lex(src: &str) -> Lexed {
     let mut last_word = String::new();
     // the last token is the `(` of `import(`
     let mut import_call = false;
+    // the template text to resume at (after a backtick or a substitution's `}`)
+    let mut template_at = None;
     while i < b.len() {
         let c = b[i];
         let after_import_call = std::mem::take(&mut import_call);
@@ -429,31 +431,15 @@ fn lex(src: &str) -> Lexed {
             }
             b')' | b'}' => match open.pop() {
                 None => return failed(i, imports),
-                Some(true) if c == b'}' => {
-                    // back in the template after `${ … }`
-                    match template(b, i + 1, &mut open) {
-                        Some(next) => {
-                            i = next;
-                            last = Some(b'w');
-                            last_word.clear();
-                            continue;
-                        }
-                        None => return failed(b.len(), imports),
-                    }
-                }
+                // back in the template after `${ … }`
+                Some(true) if c == b'}' => template_at = Some(i + 1),
                 Some(_) => {}
             },
             b'\'' | b'"' => {
-                let mut j = i + 1;
-                loop {
-                    match b.get(j) {
-                        None => return failed(b.len(), imports),
-                        Some(b'\n') | Some(b'\r') => return failed(j, imports),
-                        Some(b'\\') => j += 2,
-                        Some(&q) if q == c => break,
-                        Some(_) => j += 1,
-                    }
-                }
+                let j = match string_end(b, i, c) {
+                    Ok(j) => j,
+                    Err(at) => return failed(at, imports),
+                };
                 let specifier = after_import_call
                     || (last == Some(b'w') && matches!(last_word.as_str(), "from" | "import"));
                 if specifier {
@@ -464,59 +450,35 @@ fn lex(src: &str) -> Lexed {
                 last_word.clear();
                 continue;
             }
-            b'`' => match template(b, i + 1, &mut open) {
-                Some(next) => {
-                    i = next;
-                    last = Some(b'w');
-                    last_word.clear();
-                    continue;
-                }
-                None => return failed(b.len(), imports),
-            },
-            b'/' if b.get(i + 1) == Some(&b'/') => {
-                while i < b.len() && b[i] != b'\n' {
-                    i += 1;
-                }
-                import_call = after_import_call;
-                continue;
-            }
-            b'/' if b.get(i + 1) == Some(&b'*') => {
-                i = src[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2);
+            b'`' => template_at = Some(i + 1),
+            b'/' if matches!(b.get(i + 1), Some(b'/' | b'*')) => {
+                i = comment_end(src, i);
                 import_call = after_import_call;
                 continue;
             }
             b'/' if regex_allowed(last, &last_word) => {
-                let mut j = i + 1;
-                let mut class = false;
-                loop {
-                    match b.get(j) {
-                        None => return failed(b.len(), imports),
-                        Some(b'\n') | Some(b'\r') => return failed(j, imports),
-                        Some(b'\\') => j += 2,
-                        Some(b'[') => {
-                            class = true;
-                            j += 1;
-                        }
-                        Some(b']') => {
-                            class = false;
-                            j += 1;
-                        }
-                        Some(b'/') if !class => break,
-                        Some(_) => j += 1,
-                    }
+                match regex_end(b, i) {
+                    Ok(j) => i = j + 1,
+                    Err(at) => return failed(at, imports),
                 }
-                i = j + 1;
                 last = Some(b'w');
                 last_word.clear();
                 continue;
             }
             _ => {}
         }
-        if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80 {
+        if let Some(at) = template_at.take() {
+            let Some(next) = template(b, at, &mut open) else {
+                return failed(b.len(), imports);
+            };
+            i = next;
+            last = Some(b'w');
+            last_word.clear();
+            continue;
+        }
+        if is_word_byte(c) {
             let s = i;
-            while i < b.len()
-                && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$' || b[i] >= 0x80)
-            {
+            while i < b.len() && is_word_byte(b[i]) {
                 i += 1;
             }
             last_word = src[s..i].to_string();
@@ -530,6 +492,59 @@ fn lex(src: &str) -> Lexed {
     Lexed {
         error: (!open.is_empty()).then_some(0),
         imports,
+    }
+}
+
+/// The end of the `//` or `/*` comment at `i` (a line comment's line break excluded).
+fn comment_end(src: &str, i: usize) -> usize {
+    let b = src.as_bytes();
+    if b[i + 1] == b'/' {
+        return src[i..].find('\n').map_or(b.len(), |e| i + e);
+    }
+    src[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2)
+}
+
+/// A byte of a word, a number or a non-ASCII character.
+fn is_word_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80
+}
+
+/// The offset of the closing quote `q` of the string opening at `i`; `Err` the offset the
+/// lexer fails at (a line break, or the end).
+fn string_end(b: &[u8], i: usize, q: u8) -> Result<usize, usize> {
+    let mut j = i + 1;
+    loop {
+        match b.get(j) {
+            None => return Err(b.len()),
+            Some(b'\n') | Some(b'\r') => return Err(j),
+            Some(b'\\') => j += 2,
+            Some(&c) if c == q => return Ok(j),
+            Some(_) => j += 1,
+        }
+    }
+}
+
+/// The offset of the closing `/` of the regular expression opening at `i` (a `/` inside a
+/// class `[…]` does not close it); `Err` the offset the lexer fails at.
+fn regex_end(b: &[u8], i: usize) -> Result<usize, usize> {
+    let mut j = i + 1;
+    let mut class = false;
+    loop {
+        match b.get(j) {
+            None => return Err(b.len()),
+            Some(b'\n') | Some(b'\r') => return Err(j),
+            Some(b'\\') => j += 2,
+            Some(b'[') => {
+                class = true;
+                j += 1;
+            }
+            Some(b']') => {
+                class = false;
+                j += 1;
+            }
+            Some(b'/') if !class => return Ok(j),
+            Some(_) => j += 1,
+        }
     }
 }
 
