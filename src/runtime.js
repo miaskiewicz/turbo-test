@@ -4935,6 +4935,7 @@ let __mockCallOrder = 0;
 // implementation is set), `restore` (spyOn's, run by mockRestore / vi.restoreAllMocks),
 // `keepName` (spyOn: mockReset keeps the method's name).
 const __mockRestores = new Set();
+const __mockConfigKey = Symbol('turbo-test mock config');
 const __mockStatic = new Set(['length', 'name', 'prototype', Symbol.for('nodejs.util.promisify.custom')]);
 function __mockDescriptor(o, k) {
   for (let p = o; p != null; p = Object.getPrototypeOf(p)) {
@@ -4951,6 +4952,8 @@ function makeSpy(impl, opts) {
   const original = opts.original;
   if (opts.restore) __mockRestores.add(opts.restore);
   const config = { impl: undefined, once: [], name: 'vi.fn()' };
+  // spyOn's original: jest.fn()'s whenCalledWith (__jestWhen) falls through to it
+  Object.defineProperty(config, 'original', { value: original });
   const state = {
     calls: [], contexts: [], instances: [], invocationCallOrder: [], settledResults: [], results: [],
     get lastCall() { return state.calls[state.calls.length - 1]; },
@@ -5006,6 +5009,8 @@ function makeSpy(impl, opts) {
   Object.defineProperty(fn, 'length', { writable: true, enumerable: false, configurable: true, value: (impl || original) ? (impl || original).length : 0 });
   if (opts.keepName) config.name = fn.name || 'vi.fn()';
   fn._isMockFunction = true;
+  // the closure's state, for jest.fn()'s whenCalledWith (__jestWhen); a symbol, so no member
+  Object.defineProperty(fn, __mockConfigKey, { value: config });
   // the implementation the next call runs (vitest: a queued once first)
   fn.getMockImplementation = () => config.once[0] || config.impl;
   Object.defineProperty(fn, 'mock', { configurable: false, enumerable: true, writable: false, value: state });
@@ -5838,14 +5843,53 @@ function __jestCheckFake() {
   return false;
 }
 
+// jest-mock's whenCalledWith (turbo-test#185) on a vi mock `fn`: the first call installs a
+// dispatcher as the implementation (the one it replaces becomes the fall-through, and so does a
+// later mockImplementation); each call whose arguments equal a branch's matchers
+// ([iterableEquality], asymmetric matchers too) runs the earliest such branch with a queued once,
+// else the last-registered one with an implementation, else the fall-through (a spy's original).
+// mockReset drops every branch and resets each sub-mock.
+function __jestWhenPick(branches, args) {
+  const matching = branches.filter((b) => __equals(b.matchers, args, [__iterableEquality]));
+  const once = matching.find((b) => b.sub[__mockConfigKey].once.length > 0);
+  if (once) return once.sub;
+  for (let i = matching.length - 1; i >= 0; i--) if (matching[i].sub[__mockConfigKey].impl !== undefined) return matching[i].sub;
+  return undefined;
+}
+function __jestWhen(fn) {
+  if (fn.whenCalledWith) return fn; // a spyOn of an already-spied method returns the same mock
+  const config = fn[__mockConfigKey];
+  const branches = [];
+  let fallback;
+  const dispatcher = function (...args) {
+    const target = __jestWhenPick(branches, args) || fallback || config.original;
+    return target ? target.apply(this, args) : undefined;
+  };
+  const { mockImplementation, getMockImplementation, mockReset } = fn;
+  fn.mockImplementation = (f) => { if (config.impl === dispatcher) fallback = f; else mockImplementation(f); return fn; };
+  fn.getMockImplementation = () => (config.impl === dispatcher ? fallback : getMockImplementation());
+  fn.mockReset = () => {
+    for (const b of branches.splice(0)) b.sub.mockReset();
+    fallback = undefined;
+    return mockReset();
+  };
+  fn.whenCalledWith = (...matchers) => {
+    if (config.impl !== dispatcher) { fallback = config.impl; config.impl = dispatcher; }
+    const sub = __jestWhen(globalThis.vi.fn());
+    branches.push({ matchers, sub });
+    return sub;
+  };
+  return fn;
+}
+
 // Jest's `jest` global maps onto the same machinery as `vi` (drop-in for jest projects, e.g.
 // NestJS backends using ts-jest). Most methods are identical; the jest-only ones (sync
 // requireActual/requireMock, isolateModules, setTimeout) are bridged here. Type-only members
 // (jest.Mock, jest.Mocked, jest.SpyInstance, ...) are erased by the transform — no runtime needed.
 // Defined unconditionally: it doesn't touch vitest behavior (vitest suites never reference `jest`).
 globalThis.jest = {
-  fn: (impl) => globalThis.vi.fn(impl),
-  spyOn: (obj, key, accessType) => globalThis.vi.spyOn(obj, key, accessType),
+  fn: (impl) => __jestWhen(globalThis.vi.fn(impl)),
+  spyOn: (obj, key, accessType) => __jestWhen(globalThis.vi.spyOn(obj, key, accessType)),
   mock: (spec, factory) => __ttMock(spec, factory, false),
   unmock: (spec) => globalThis.vi.unmock(spec),
   doMock: (spec, factory) => __ttMock(spec, factory, false, true),
