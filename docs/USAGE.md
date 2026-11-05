@@ -68,7 +68,7 @@ media switch; README "Switches"). Leading
 **Test / `vi` / `expect` API** ✅
 - `describe`/`it`/`test` + `.skip`/`.only`/`.todo`/`.each`/`.for`/`.skipIf`/`.runIf`/`.concurrent`
   (concurrent runs sequentially within a file), `it.fails`.
-- hooks `beforeAll`/`afterAll`/`beforeEach`/`afterEach`; per-test `{ timeout }`/`{ retry }`; the test
+- hooks `beforeAll`/`afterAll`/`beforeEach`/`afterEach`; per-test `{ timeout }`/`{ retry }`/`{ repeats }`; the test
   context (`task`, `skip`, `onTestFinished`/`onTestFailed`, also importable from `'vitest'`, `signal`, `expect`, `annotate`).
 - `expect` + a large matcher set, `expect.extend`, `.soft`, asymmetric matchers,
   `expect.assertions`/`hasAssertions` (enforced), `toMatchObject`/`toContainEqual`/`toSatisfy`/
