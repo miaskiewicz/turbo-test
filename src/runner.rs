@@ -8069,24 +8069,24 @@ fn runtime_prelude() -> String {
     // Execution-control knobs from the CLI, plumbed to the runtime the same way as the name
     // pattern: env (set by cli.rs) → global the runtime reads. All optional.
     //   --testTimeout → __TT_DEFAULT_TIMEOUT (ms), --hookTimeout → __TT_HOOK_TIMEOUT (ms),
+    //   --maxConcurrency → __TT_MAX_CONCURRENCY, --sequence.concurrent → __TT_SEQUENCE_CONCURRENT,
     //   --retry → __TT_DEFAULT_RETRY,
     //   --silent → __TT_SILENT, --no-allowOnly → __TT_FORBID_ONLY,
     //   --passWithNoTests → __TT_PASS_WITH_NO_TESTS.
     let mut prelude = String::new();
-    if let Ok(v) = std::env::var("TURBO_TEST_TIMEOUT") {
-        if let Ok(n) = v.parse::<u64>() {
-            prelude.push_str(&format!("globalThis.__TT_DEFAULT_TIMEOUT={n};"));
+    // the numeric knobs (ignored unless a whole number)
+    for (var, global) in [
+        ("TURBO_TEST_TIMEOUT", "__TT_DEFAULT_TIMEOUT"),
+        ("TURBO_HOOK_TIMEOUT", "__TT_HOOK_TIMEOUT"),
+        ("TURBO_MAX_CONCURRENCY", "__TT_MAX_CONCURRENCY"),
+        ("TURBO_TEST_RETRY", "__TT_DEFAULT_RETRY"),
+    ] {
+        if let Some(n) = std::env::var(var).ok().and_then(|v| v.parse::<u64>().ok()) {
+            prelude.push_str(&format!("globalThis.{global}={n};"));
         }
     }
-    if let Ok(v) = std::env::var("TURBO_HOOK_TIMEOUT") {
-        if let Ok(n) = v.parse::<u64>() {
-            prelude.push_str(&format!("globalThis.__TT_HOOK_TIMEOUT={n};"));
-        }
-    }
-    if let Ok(v) = std::env::var("TURBO_TEST_RETRY") {
-        if let Ok(n) = v.parse::<u64>() {
-            prelude.push_str(&format!("globalThis.__TT_DEFAULT_RETRY={n};"));
-        }
+    if std::env::var("TURBO_SEQUENCE_CONCURRENT").is_ok() {
+        prelude.push_str("globalThis.__TT_SEQUENCE_CONCURRENT=true;");
     }
     if std::env::var("TURBO_TEST_SILENT").is_ok() {
         prelude.push_str("globalThis.__TT_SILENT=true;");

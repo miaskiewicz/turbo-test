@@ -274,3 +274,36 @@ fn max_concurrency_and_sequence_concurrent_come_from_the_config() {
         config: include_str!("data/vitest-gaps/seq.config.js"),
     });
 }
+
+/// `--maxConcurrency` / `--sequence.concurrent` do the same as the config's (inline value form
+/// too), the flags winning over it.
+#[test]
+fn max_concurrency_and_sequence_concurrent_flags() {
+    for (probe, src, want, args) in [
+        (
+            "mc",
+            include_str!("data/vitest-gaps/mc.test.js"),
+            include_str!("data/vitest-gaps/mc.vitest.json"),
+            &["--maxConcurrency", "2"][..],
+        ),
+        (
+            "seqconc",
+            include_str!("data/vitest-gaps/seqconc.test.js"),
+            include_str!("data/vitest-gaps/seqconc.vitest.json"),
+            &["--sequence.concurrent", "--maxConcurrency=3"][..],
+        ),
+    ] {
+        let want: Value = serde_json::from_str(want).unwrap();
+        let (order, tests, r) = run_with(
+            &Probe {
+                name: probe,
+                src,
+                want: "",
+                config: "export default { test: { environment: 'jsdom', maxConcurrency: 9 } };\n",
+            },
+            args,
+        );
+        assert_eq!(order, want["order"], "{probe}\n{}", r.all());
+        assert_eq!(tests, want["tests"], "{probe}\n{}", r.all());
+    }
+}
