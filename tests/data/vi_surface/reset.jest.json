@@ -1,0 +1,42 @@
+[
+ [
+  "mockReset",
+  "value",
+  "[\"undef\",1,\"undef\",\"undef\",\"undef\",\"undef\",\"undef\",1,true,\"undef\",\"undef\",\"undefined\"]"
+ ],
+ [
+  "resetAllMocks",
+  "value",
+  "[\"undef\",1,\"undef\",\"undef\",\"undef\",\"undef\",\"undef\",1,true,\"undef\",\"undef\",\"undefined\"]"
+ ],
+ [
+  "mockClear",
+  "value",
+  "[\"base\",1,\"once\",\"impl\",\"io\",\"rv\",\"spied\",1,true,\"a\",\"base\",\"function\"]"
+ ],
+ [
+  "clearAllMocks",
+  "value",
+  "[\"base\",1,\"once\",\"impl\",\"io\",\"rv\",\"spied\",1,true,\"a\",\"base\",\"function\"]"
+ ],
+ [
+  "mockRestore",
+  "value",
+  "[\"undef\",1,\"undef\",\"undef\",\"undef\",\"undef\",\"real1\",0,false,\"undef\",\"undef\",\"undefined\"]"
+ ],
+ [
+  "restoreAllMocks",
+  "value",
+  "[\"base\",2,\"once\",\"impl\",\"io\",\"rv\",\"real1\",0,false,\"a\",\"base\",\"function\"]"
+ ],
+ [
+  "reset then reuse",
+  "value",
+  "[\"new\",\"n2\"]"
+ ],
+ [
+  "when after reset",
+  "value",
+  "[\"undef\",\"b\"]"
+ ]
+]

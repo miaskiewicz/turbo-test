@@ -259,6 +259,42 @@ fn jest_fn_when_called_with_is_jests() {
 }
 
 #[test]
+fn jest_mock_reset_is_jests() {
+    // turbo-test#254: jest-mock's mockReset / resetAllMocks (and mockRestore on a jest.fn) drop
+    // the implementation — jest.fn(impl) and a reset spy return undefined, whenCalledWith
+    // branches go — while restoreAllMocks only puts spies back. Recorded with jest 30.5.2.
+    let p = jest_project("rc-jest-reset");
+    p.file(
+        "reset.test.js",
+        include_str!("data/vi_surface/jest_reset.test.js"),
+    );
+    let r = turbo_test(&p.dir, &["reset.test.js"], &[("OUT", "tt.json")]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let want: Value =
+        serde_json::from_str(include_str!("data/vi_surface/reset.jest.json")).unwrap();
+    assert_eq!(rows_diff(&want, &read(&p, "tt.json")), Vec::<String>::new());
+    // guard: vi.fn / vi.spyOn keep vitest 4.1.12's reset (back to the original implementation)
+    p.file(
+        "sub/vitest.config.js",
+        "export default { test: { environment: 'node' } }\n",
+    );
+    p.file(
+        "sub/vi.test.js",
+        r#"import { test, vi, expect } from 'vitest'
+test('vitest reset', () => {
+  const f = vi.fn(() => 'base'); f.mockReturnValue('rv'); f.mockReset()
+  const g = vi.fn(() => 'base'); g.mockReturnValue('rv'); vi.resetAllMocks()
+  const o = { m: (x) => 'real' + x }; const s = vi.spyOn(o, 'm').mockReturnValue('spied'); s.mockReset()
+  const h = vi.fn(); h.mockReturnValue('rv'); h.mockReset()
+  expect([f(), g(), o.m(1), h()]).toEqual(['base', 'base', 'real1', undefined])
+})
+"#,
+    );
+    let r = turbo_test(&p.path("sub"), &["vi.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+}
+
+#[test]
 fn jest_config_fake_timers_are_jests() {
     // turbo-test#186: a jest config's `fakeTimers` — `enableGlobally: true` fakes the timers
     // before the test file loads (and they stay faked across its tests), and `now` /
