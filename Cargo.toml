@@ -71,13 +71,3 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tarpaulin)"] }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-
-
-# Pre-publish only (turbo-dom 0.7.1): turbo-dom, -layout and -browser-env come from turbo-dom's
-# 0.7.1 branch (miaskiewicz/turbo-dom#298, fix/0.7.1-surf-items; pinned to the jsdom-no-transitions head (b72fb650)) until turbo-dom 0.7.1 is on
-# crates.io. turbo-dom-v8 150.4.0 stays on crates.io. Remove this section and re-lock before
-# tagging (RELEASING.md); the tag-only release guard fails while it is here.
-[patch.crates-io]
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "a5e05113406292fc3471e44591397d1bb89943eb" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "a5e05113406292fc3471e44591397d1bb89943eb" }
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "a5e05113406292fc3471e44591397d1bb89943eb" }
