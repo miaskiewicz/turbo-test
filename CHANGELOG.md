@@ -3,6 +3,33 @@
 All notable changes to `@miaskiewicz/turbo-test`. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.8.0] — 2026-11-05 — complexity gates blocking, jest whenCalledWith / fakeTimers config, turbo-dom 0.8
+
+### Changed
+- Every function is at cyclomatic complexity <= 15 and both complexity CI jobs
+  (`complexity / rust (cc <= 15)`, `complexity / js (cc <= 15)`) are now blocking (#240). The
+  0.6.0 gate landed report-only with 43 Rust and 44 JS functions over the limit; they were split
+  into helpers with no behaviour change (full suite and the 99.9 coverage floor unchanged, no
+  re-baselining), so new code can't grow the backlog back. One limit, no allow-list.
+- turbo-dom 0.8 (pinned by git rev to its release/0.8.0 until it is published): turbo-dom#313
+  split CSS `@keyframes` animations off the transitions switch. turbo-test's one switch
+  (`--css-transitions` / `TURBO_CSS_TRANSITIONS` / `test.cssTransitions`) now drives both, so the
+  default stays jsdom's (no transitions, no animations, no Web Animations). Guarded by
+  `transitions_are_jsdom_by_default_and_chrome_on_opt_in`, which fails on the pin alone.
+
+### Added
+- `jest.fn()` / `jest.spyOn()` mocks have `whenCalledWith(...matchers)` with jest-mock 30.5.2's
+  dispatch (own onces, then the first matching branch's once, then the last matching
+  implementation, then the fallback) (#185). Test: `jest_fn_when_called_with_is_jests` (16 rows
+  recorded from real jest 30.5.2).
+- The jest config's `fakeTimers` is read (#186): `enableGlobally: true` fakes timers before each
+  file; `now`, `doNotFake`, `timerLimit`, `advanceTimers` are `jest.useFakeTimers()`'s defaults.
+  Test: `jest_config_fake_timers_are_jests` (real jest as oracle).
+
+### Not in this release
+- jest automock (#184) needs module-registry-wide automocking in both loaders; moved off the
+  milestone with the reason on the issue.
+
 ## [0.7.1] — 2026-11-04 — Windows paths, timer order, pnpm, bundled helper shadowing, window viewport
 
 Fixes parts 1–3 of #230, reported by nagisokyn-prog in #230 after running a 196-file pnpm

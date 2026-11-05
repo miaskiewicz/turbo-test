@@ -1,7 +1,7 @@
 # turbo-test
 
 **A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
-(and, experimentally, jest).** Release **0.7.1**.
+(and, experimentally, jest).** Release **0.8.0**.
 
 turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
 work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
@@ -28,7 +28,7 @@ copy of the binding or of V8: the binding, its probes and the Chrome-control col
 record their oracles live in turbo-dom's
 [`crates/turbo-dom-browser-env`](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
 — fix DOM behaviour and recollect controls there. turbo-dom-v8 150.4.0 and
-turbo-dom / -layout / -browser-env 0.7.1 come from crates.io.
+turbo-dom / -layout / -browser-env 0.8.0 come from crates.io.
 
 ## Install and run
 
@@ -176,7 +176,12 @@ machinery as `vi` (`jest.fn`, `jest.mock`/`doMock`, `jest.spyOn`, `jest.mocked`,
 `jest.isolateModules`, …); the type-only members (`jest.Mock`, `jest.Mocked`, `jest.SpyInstance`)
 are erased by the transform. When there's **no vitest config**, the nearest **jest config**
 (`jest.config.{js,cjs,mjs,ts,json}` or a `package.json` `"jest"` block) is read for `setupFiles` /
-`setupFilesAfterEnv` (with `<rootDir>` resolved), so your existing setup runs unchanged.
+`setupFilesAfterEnv` (with `<rootDir>` resolved), so your existing setup runs unchanged. Its
+`fakeTimers` block is read too (0.8.0+): `enableGlobally: true` fakes the timers before each test
+file loads, and `now` / `doNotFake` / `timerLimit` / `advanceTimers` become the defaults of
+`jest.useFakeTimers()` (the call's own argument wins). Mocks from `jest.fn()` / `jest.spyOn()`
+have jest-mock's `whenCalledWith(...matchers)` (0.8.0+; `vi.fn()` has none, as in vitest).
+Automock (`enableAutomock`, `automock: true`, …) is not supported yet (#184).
 
 Both the injected globals **and** the explicit-import form work — a suite with `injectGlobals: false`
 that does `import { describe, it, expect, jest } from '@jest/globals'` resolves that specifier from
@@ -464,7 +469,7 @@ npm run complexity:js        # CI job `complexity / js (cc <= 15)`
 - **Release** (`v*` tag): `release-guard` (no `[patch]`, no git sources, versions equal the tag),
   then the npm and crates.io publish jobs ([RELEASING.md](RELEASING.md)).
 
-## Status (0.7.1)
+## Status (0.8.0)
 
 - vitest suites: drop-in; the `vi` / mock / `expect` surface is vitest 4.1.12's
   ([vitest.compat.md](vitest.compat.md) lists what is covered and what is approximated).
