@@ -8815,6 +8815,8 @@ globalThis.__ttCaptureHookBaseline = () => {
 // spy registry, unstubbing globals, poking React internals) was what broke interaction tests
 // ~100 files into a shared isolate — vitest proves none of that is needed.
 globalThis.__ttResetForNextFile = () => {
+  // a file stopped mid-run holds no limiter slot into the next one (turbo-test#256)
+  __maxLimiter = __testLimiter = undefined;
   __ttFileLogs = [];
   __ttLogTask = '';
   // turbo-test collects tests into a single global `root` (vitest scopes per file via
