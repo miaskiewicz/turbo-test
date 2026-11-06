@@ -241,6 +241,31 @@ fn hook_timeout_defaults_to_ten_seconds_and_follows_the_flag() {
     );
 }
 
+/// turbo-test#268: `--hookTimeout 0` disables the hook timeout entirely, as vitest's
+/// `withTimeout` (`timeout <= 0 || Infinity` → no timeout). Before the fix, turbo-test fell back
+/// to the 10 000 ms default when the env value was `0`, so a hook that waited more than 10 s
+/// timed out where vitest's would not. Probe: a beforeEach that waits 10 200 ms with
+/// `--hookTimeout 0` passes under both runners.
+#[test]
+fn hook_timeout_zero_disables_the_timeout_as_vitest() {
+    let probe = Probe {
+        name: "hookzero",
+        src: include_str!("data/vitest-gaps/hookzero.test.js"),
+        want: include_str!("data/vitest-gaps/hookzero.vitest.json"),
+        config: JSDOM,
+    };
+    let want: Value = serde_json::from_str(probe.want).unwrap();
+    let (order, tests, r) = run_with(&probe, &["--hookTimeout", "0"]);
+    assert_eq!(order, want["order"], "hookzero order: {}", r.all());
+    assert_eq!(tests, want["tests"], "hookzero tests: {}", r.all());
+    assert_eq!(r.code, Some(0), "hookzero exit: {}", r.all());
+    assert!(
+        !r.all().contains("Hook timed out"),
+        "no timeout error expected: {}",
+        r.all()
+    );
+}
+
 /// turbo-test#256: concurrent tests run together, as vitest's runSuite: a suite's consecutive
 /// concurrent children (it.concurrent / test.concurrent, the tests and nested suites of a
 /// describe.concurrent, test.sequential / describe.sequential opting out) start together, at
