@@ -9,6 +9,8 @@ bound directly to V8 (no jsdom, no Node). It runs your existing `*.test.ts(x)` f
 `describe` / `it` / `expect` / `vi`, `@testing-library/react` and jest-dom; the `vi`, mock and
 `jest` surface follows vitest 4.1.12 and jest 30.5.2.
 
+> **For AI agents and humans running the common workflows:** see [`docs/AGENTS.md`](docs/AGENTS.md) and the one-shot scripts under [`scripts/agent/`](scripts/agent).
+
 ## Where it sits: turbo-dom is the shared base
 
 Since 0.6.0 the browser engine lives in one place,
