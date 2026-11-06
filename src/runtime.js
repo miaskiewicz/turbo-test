@@ -8243,8 +8243,15 @@ function __vtSettle(fn, arm) {
 // --hookTimeout (host → __TT_HOOK_TIMEOUT), else vitest's 10 s
 function __hookTimeout(own) {
   if (typeof own === 'number') return own;
-  const n = Number(globalThis.__TT_HOOK_TIMEOUT);
-  return Number.isFinite(n) && n > 0 ? n : 10000;
+  // vitest's withTimeout treats `<= 0 || Infinity` as "no timeout" (turbo-test#268), so
+  // honour an explicit 0 or Infinity from __TT_HOOK_TIMEOUT; only fall back to the 10 s
+  // default when nothing was set (or the value does not parse as a number).
+  const raw = globalThis.__TT_HOOK_TIMEOUT;
+  if (raw !== undefined && raw !== null && raw !== '') {
+    const n = Number(raw);
+    if (!Number.isNaN(n)) return n;
+  }
+  return 10000;
 }
 // the contexts' AbortControllers: a beforeEach / afterEach / handler timing out aborts its test's
 // signal with the error (vitest's abortIfTimeout)

@@ -18,6 +18,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `transitions_are_jsdom_by_default_and_chrome_on_opt_in`, which fails on the pin alone.
 
 ### Fixed
+- `--hookTimeout 0` and `Infinity` disable the hook timeout, as vitest's `withTimeout` does
+  (#268). Before, turbo-test fell back to the 10 000 ms default when the env value was `0`, so a
+  hook that ran longer than 10 s timed out under `--hookTimeout 0` where vitest would never time
+  out. Test: `hook_timeout_zero_disables_the_timeout_as_vitest` (a 10.2 s beforeEach passes under
+  `--hookTimeout 0`; fails before the fix).
 - Microtasks queued in a hook or test settle where they do on vitest (#251). vitest awaits each
   phase (beforeAll / beforeEach / test / afterEach / afterAll, retries, `it.fails`, nested
   describes, cleanups) through @vitest/runner's fixed-depth async chain, so a short promise chain
