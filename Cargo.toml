@@ -1,6 +1,6 @@
 [package]
 name = "turbo-test"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 description = "A blazing-fast native test runner — drop-in replacement for Vitest"
@@ -37,7 +37,7 @@ path = "src/bin/m5_affected.rs"
 v8 = { package = "turbo-dom-v8", version = "~150.4" }
 # The browser environment (window, document, CSSOM, forms, events) the runner
 # installs into each test context.
-turbo-dom-browser-env = { version = "0.7.1" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "3d02b8dbbbc128e95572f2fdaa6ad43ffc2fefc9" }
 oxc_allocator = "0.134"
 oxc_parser = "0.134"
 oxc_span = "0.134"

@@ -54,7 +54,6 @@ const SLOW_MS: f64 = 300.0;
 /// `(stdout, stderr)` of `kind` for the run.
 pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
     let c = &run.colors;
-    let sep = c.dim(" > ");
     let (mut out, mut err) = (String::new(), String::new());
     // printBanner: withLabel('cyan', 'RUN', `v${version} `) + c.gray(root)
     out.push_str(&format!(
@@ -65,94 +64,11 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
     ));
     for r in res {
         let name = run.names[r.idx].to_string_lossy().to_string();
-        let logs: Vec<&(String, String, String)> = if kind == Kind::Agent {
-            agent_logs(r)
-        } else {
-            r.logs.iter().collect()
-        };
-        for (stream, task, content) in logs {
-            // onUserConsoleLog: c.gray(type + c.dim(` | ${getFullName(task, separator)}\n`))
-            let header = if task.is_empty() {
-                name.clone()
-            } else {
-                format!(
-                    "{name}{sep}{}",
-                    task.split(" > ").collect::<Vec<_>>().join(&sep)
-                )
-            };
-            let block = format!(
-                "{}{content}\n",
-                c.gray(&format!("{stream}{}", c.dim(&format!(" | {header}\n"))))
-            );
-            if stream == "stderr" {
-                err.push_str(&block);
-            } else {
-                out.push_str(&block);
-            }
-        }
+        console_logs(c, kind, r, &name, &mut out, &mut err);
         match kind {
-            // DotReporter.onTestCaseResult off a TTY: formatTests([state]) for each test, an
-            // empty yellow (pending) run before its icon
-            Kind::Dot => {
-                for t in &r.tests {
-                    out.push_str(&c.yellow(""));
-                    out.push_str(&match t.status.as_str() {
-                        "passed" => c.green("·"),
-                        "failed" => c.red("x"),
-                        _ => c.dim(&c.gray("-")),
-                    });
-                }
-            }
-            Kind::Verbose => {
-                for t in &r.tests {
-                    let path = test_path(t).split(" > ").collect::<Vec<_>>().join(&sep);
-                    out.push_str(&format!(
-                        " {} {name}{sep}{path}{}\n",
-                        symbol(c, t),
-                        suffix(c, t)
-                    ));
-                    if t.status == "failed" {
-                        for e in errors(t) {
-                            let message = if e.no_message {
-                                "undefined"
-                            } else {
-                                &e.message
-                            };
-                            out.push_str(&c.red(&format!("   → {message}")));
-                            out.push('\n');
-                        }
-                    }
-                    if !t.annotations.is_empty() {
-                        out.push('\n');
-                        out.push_str(&annotation_lines(c, &t.annotations, &name, 3));
-                        out.push('\n');
-                    }
-                }
-            }
-            Kind::Default | Kind::Agent => {
-                if kind == Kind::Agent && !r.failed_file {
-                    continue;
-                }
-                out.push_str(&module_line(c, r, &name));
-                // DefaultReporter.printTestCase (the agent reporter prints only failed tests)
-                for t in &r.tests {
-                    let pad = "  ".repeat(t.ancestors.len() + 1);
-                    let (title, suffix) = (&t.title, suffix(c, t));
-                    let line = if t.status == "failed" {
-                        c.red(&format!(" {pad}{} {title}", c.red("×"))) + &suffix
-                    } else if kind == Kind::Agent {
-                        continue;
-                    } else if t.duration_ms > SLOW_MS {
-                        format!(" {pad}{} {title} {suffix}", c.yellow(&c.dim("✓")))
-                    } else if r.failed_file {
-                        format!(" {pad}{} {title}{suffix}", symbol(c, t))
-                    } else {
-                        continue;
-                    };
-                    out.push_str(&line);
-                    out.push('\n');
-                }
-            }
+            Kind::Dot => dot_tests(c, r, &mut out),
+            Kind::Verbose => verbose_tests(c, r, &name, &mut out),
+            Kind::Default | Kind::Agent => default_tests(c, kind, r, &name, &mut out),
         }
     }
     err.push_str(&errors_summary(res, run, kind == Kind::Verbose));
@@ -160,6 +76,117 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
         // DotReporter.onTestRunEnd off a TTY: logger.log()
         out.push('\n');
     }
+    summary(c, res, run, &mut out);
+    (out, err)
+}
+
+/// A file's console output, each block under its task's header (onUserConsoleLog).
+fn console_logs(
+    c: &Colors,
+    kind: Kind,
+    r: &FileResult,
+    name: &str,
+    out: &mut String,
+    err: &mut String,
+) {
+    let sep = c.dim(" > ");
+    let logs: Vec<&(String, String, String)> = if kind == Kind::Agent {
+        agent_logs(r)
+    } else {
+        r.logs.iter().collect()
+    };
+    for (stream, task, content) in logs {
+        // onUserConsoleLog: c.gray(type + c.dim(` | ${getFullName(task, separator)}\n`))
+        let header = if task.is_empty() {
+            name.to_string()
+        } else {
+            format!(
+                "{name}{sep}{}",
+                task.split(" > ").collect::<Vec<_>>().join(&sep)
+            )
+        };
+        let block = format!(
+            "{}{content}\n",
+            c.gray(&format!("{stream}{}", c.dim(&format!(" | {header}\n"))))
+        );
+        if stream == "stderr" {
+            err.push_str(&block);
+        } else {
+            out.push_str(&block);
+        }
+    }
+}
+
+/// DotReporter.onTestCaseResult off a TTY: formatTests([state]) for each test, an empty yellow
+/// (pending) run before its icon.
+fn dot_tests(c: &Colors, r: &FileResult, out: &mut String) {
+    for t in &r.tests {
+        out.push_str(&c.yellow(""));
+        out.push_str(&match t.status.as_str() {
+            "passed" => c.green("·"),
+            "failed" => c.red("x"),
+            _ => c.dim(&c.gray("-")),
+        });
+    }
+}
+
+/// The verbose reporter's line per test, its errors' messages and its annotations.
+fn verbose_tests(c: &Colors, r: &FileResult, name: &str, out: &mut String) {
+    let sep = c.dim(" > ");
+    for t in &r.tests {
+        let path = test_path(t).split(" > ").collect::<Vec<_>>().join(&sep);
+        out.push_str(&format!(
+            " {} {name}{sep}{path}{}\n",
+            symbol(c, t),
+            suffix(c, t)
+        ));
+        if t.status == "failed" {
+            for e in errors(t) {
+                let message = if e.no_message {
+                    "undefined"
+                } else {
+                    &e.message
+                };
+                out.push_str(&c.red(&format!("   → {message}")));
+                out.push('\n');
+            }
+        }
+        if !t.annotations.is_empty() {
+            out.push('\n');
+            out.push_str(&annotation_lines(c, &t.annotations, name, 3));
+            out.push('\n');
+        }
+    }
+}
+
+/// The default (and agent) reporter's module line and DefaultReporter.printTestCase (the agent
+/// reporter prints only failed files' failed tests).
+fn default_tests(c: &Colors, kind: Kind, r: &FileResult, name: &str, out: &mut String) {
+    if kind == Kind::Agent && !r.failed_file {
+        return;
+    }
+    out.push_str(&module_line(c, r, name));
+    for t in &r.tests {
+        let pad = "  ".repeat(t.ancestors.len() + 1);
+        let (title, suffix) = (&t.title, suffix(c, t));
+        let line = if t.status == "failed" {
+            c.red(&format!(" {pad}{} {title}", c.red("×"))) + &suffix
+        } else if kind == Kind::Agent {
+            continue;
+        } else if t.duration_ms > SLOW_MS {
+            format!(" {pad}{} {title} {suffix}", c.yellow(&c.dim("✓")))
+        } else if r.failed_file {
+            format!(" {pad}{} {title}{suffix}", symbol(c, t))
+        } else {
+            continue;
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+}
+
+/// reportTestSummary: the Snapshots, Test Files, Tests, Start at and Duration lines.
+fn summary(c: &Colors, res: &[FileResult], run: &Run, out: &mut String) {
     // reportTestSummary: padSummaryTitle(title) = c.dim(`${title.padStart(11)} `), then a space
     let title = |t: &str| c.dim(&format!("{t:>11} "));
     out.push('\n');
@@ -189,7 +216,6 @@ pub fn render(kind: Kind, res: &[FileResult], run: &Run) -> (String, String) {
             format_time(setup),
         ))
     ));
-    (out, err)
 }
 
 /// The console output the agent reporter prints (vitest's `silent: 'passed-only'`): only that of
@@ -274,7 +300,7 @@ fn duration(c: &Colors, ms: f64) -> String {
 }
 
 /// vitest's getTestCaseSuffix: the duration of a test that ran (one with a result: a test
-/// skipped at run time has a start, turbo-test#96), then ` (retry x2)` for a retried one and
+/// skipped at run time has a start, turbo-test#96), then ` (retry x2)` for a retried one, ` (repeat x2)` for a repeated one and
 /// ` [note]` for one skipped with a note.
 fn suffix(c: &Colors, t: &TestCase) -> String {
     let mut s = String::new();
@@ -284,6 +310,9 @@ fn suffix(c: &Colors, t: &TestCase) -> String {
     }
     if t.retry_count > 0 {
         s.push_str(&c.yellow(&format!(" (retry x{})", t.retry_count)));
+    }
+    if t.repeat_count > 0 {
+        s.push_str(&c.yellow(&format!(" (repeat x{})", t.repeat_count)));
     }
     if t.status == "skipped" && !t.note.is_empty() {
         s.push_str(&c.dim(&c.gray(&format!(" [{}]", t.note))));
@@ -588,30 +617,7 @@ pub fn print_error(
     // vite's details (`__vitest_rollup_error__`): `  Plugin: …`, `  File: <id>[:line:col]` and
     // its code frame indented two spaces (turbo-test#113)
     if let Some(r) = &e.rollup {
-        let mut lines = Vec::new();
-        if !r.plugin.is_empty() {
-            lines.push(format!("  Plugin: {}", c.magenta(&r.plugin)));
-        }
-        if !r.id.is_empty() {
-            let loc = if r.loc.is_empty() {
-                String::new()
-            } else {
-                format!(":{}", r.loc)
-            };
-            lines.push(format!("  File: {}{loc}", c.cyan(&r.id)));
-        }
-        if !r.frame.is_empty() {
-            let frame: Vec<String> = r
-                .frame
-                .split('\n')
-                .map(|l| format!("  {}", l.strip_suffix('\r').unwrap_or(l)))
-                .collect();
-            lines.push(c.yellow(&frame.join("\n")));
-        }
-        if !lines.is_empty() {
-            out.push_str(&lines.join("\n"));
-            out.push('\n');
-        }
+        out.push_str(&rollup_details(r, c));
     }
     if !e.diff.is_empty() {
         out.push_str(&format!("\n{}\n\n", e.diff));
@@ -642,15 +648,7 @@ pub fn print_error(
         });
         out.push('\n');
         if code_frame && Some(i) == nearest {
-            if let Ok(source) = std::fs::read_to_string(&f.file) {
-                let shown = if js_len(&source) > 100_000 {
-                    source
-                } else {
-                    crate::highlight::highlight_code(c, &f.file, &source)
-                };
-                out.push_str(&code_frame_of(&shown, f.line, f.col, c));
-                out.push('\n');
-            }
+            out.push_str(&nearest_code_frame(f, c));
         }
     }
     if !frames.is_empty() {
@@ -669,6 +667,48 @@ pub fn print_error(
         out.push_str(&print_error(cause, root, false, true, "Caused by: ", c));
     }
     out
+}
+
+/// vite's rollup error details: `  Plugin: …`, `  File: <id>[:line:col]` and its code frame
+/// indented two spaces, each on a line of its own ("" when it has none).
+fn rollup_details(r: &crate::failure::RollupDetails, c: &Colors) -> String {
+    let mut lines = Vec::new();
+    if !r.plugin.is_empty() {
+        lines.push(format!("  Plugin: {}", c.magenta(&r.plugin)));
+    }
+    if !r.id.is_empty() {
+        let loc = if r.loc.is_empty() {
+            String::new()
+        } else {
+            format!(":{}", r.loc)
+        };
+        lines.push(format!("  File: {}{loc}", c.cyan(&r.id)));
+    }
+    if !r.frame.is_empty() {
+        let frame: Vec<String> = r
+            .frame
+            .split('\n')
+            .map(|l| format!("  {}", l.strip_suffix('\r').unwrap_or(l)))
+            .collect();
+        lines.push(c.yellow(&frame.join("\n")));
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    lines.join("\n") + "\n"
+}
+
+/// The highlighted code frame of the nearest frame `f` and a line break ("" when its file
+/// cannot be read).
+fn nearest_code_frame(f: &Frame, c: &Colors) -> String {
+    std::fs::read_to_string(&f.file).map_or(String::new(), |source| {
+        let shown = if js_len(&source) > 100_000 {
+            source
+        } else {
+            crate::highlight::highlight_code(c, &f.file, &source)
+        };
+        code_frame_of(&shown, f.line, f.col, c) + "\n"
+    })
 }
 
 /// vitest's `generateCodeFrame(source, 4, { line, column })` for an 80-column output, over the

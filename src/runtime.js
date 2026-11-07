@@ -432,7 +432,8 @@ globalThis.__ttCaptureConfigBaseline = () => {
 };
 globalThis.__ttApplyConfig = (cfg) => {
   if (!cfg || typeof cfg !== 'object') return;
-  const { fakeTimers, zeroDelayTimers, ...rest } = cfg;
+  const { fakeTimers, zeroDelayTimers, jestFakeTimers, ...rest } = cfg;
+  __jestApplyConfig(jestFakeTimers);
   if (typeof zeroDelayTimers === 'boolean') __ttZeroDelay = zeroDelayTimers;
   if (fakeTimers && typeof fakeTimers === 'object') __ttConfig.fakeTimers = Object.assign(__ttConfigDefaults().fakeTimers, fakeTimers);
   Object.assign(__ttConfig, rest);
@@ -463,6 +464,12 @@ function __installFake(cfg) {
   if (__loop.faked.has('Date')) __installFakeDate();
   else __restoreDate();
   for (const k of Object.keys(__fakeTimers)) globalThis[k] = __loop.faked.has(k) ? __fakeTimers[k] : __realTimers[k];
+  __installFakeClocks();
+  // shouldAdvanceTime: a real-clock interval ticks the fake clock by advanceTimeDelta (20ms)
+  if (c.shouldAdvanceTime === true) __setTickMode('interval', c.advanceTimeDelta);
+}
+// the faked performance / process.hrtime of __installFake
+function __installFakeClocks() {
   if (__loop.faked.has('performance') && globalThis.performance) {
     __loop.realPerf = Object.getOwnPropertyDescriptor(globalThis, 'performance');
     Object.defineProperty(globalThis, 'performance', { value: __fakePerformance(globalThis.performance), writable: true, configurable: true, enumerable: !!(__loop.realPerf && __loop.realPerf.enumerable) });
@@ -471,8 +478,6 @@ function __installFake(cfg) {
     __loop.realHrtime = globalThis.process.hrtime;
     globalThis.process.hrtime = __fakeHrtime;
   }
-  // shouldAdvanceTime: a real-clock interval ticks the fake clock by advanceTimeDelta (20ms)
-  if (c.shouldAdvanceTime === true) __setTickMode('interval', c.advanceTimeDelta);
 }
 // sinon's setTickMode (vi.setTimerTickMode, shouldAdvanceTime): 'interval' is a real-clock
 // interval moving the fake clock by `delta` (20ms) each time; 'nextAsync' fires the next fake
@@ -665,6 +670,19 @@ globalThis.sessionStorage = new __Storage();
 // leading BOM is stripped unless `ignoreBOM`, `stream` keeps a partial sequence. TextDecoder's
 // other encodings (turbo-test#119) decode natively through encoding_rs (src/text_decoder.rs).
 const __codecError = (Ctor, code, msg) => { const e = new Ctor(msg); e.code = code; return e; };
+// a UTF-8 lead byte's [continuation count, its code point bits, first continuation's bounds]
+// (null: not a lead byte)
+function __utf8Lead(c) {
+  if (c >= 0xc2 && c <= 0xdf) return [1, c & 0x1f, 0x80, 0xbf];
+  if (c >= 0xe0 && c <= 0xef) return [2, c & 0xf, c === 0xe0 ? 0xa0 : 0x80, c === 0xed ? 0x9f : 0xbf];
+  if (c >= 0xf0 && c <= 0xf4) return [3, c & 0x7, c === 0xf0 ? 0x90 : 0x80, c === 0xf4 ? 0x8f : 0xbf];
+  return null;
+}
+// a code point as its UTF-16 code units
+function __utf16Units(cp, unit) {
+  if (cp < 0x10000) { unit(cp); return; }
+  cp -= 0x10000; unit(0xd800 + (cp >> 10)); unit(0xdc00 + (cp & 0x3ff));
+}
 // The one WHATWG UTF-8 decoder (turbo-test#121): b[start..end) (any indexable bytes) to a string,
 // one U+FFFD per maximal invalid subpart (or `onBad()`'s throw, for `fatal`). With `stream`, an
 // incomplete-but-valid sequence at the end is left undecoded; returns [string, where it starts].
@@ -676,20 +694,16 @@ function __utf8Run(b, start, end, stream, onBad) {
   while (i < end) {
     const c = b[i];
     if (c < 0x80) { unit(c); i++; continue; }
-    let need; let cp; let lo = 0x80; let hi = 0xbf;
-    if (c >= 0xc2 && c <= 0xdf) { need = 1; cp = c & 0x1f; }
-    else if (c >= 0xe0 && c <= 0xef) { need = 2; cp = c & 0xf; if (c === 0xe0) lo = 0xa0; if (c === 0xed) hi = 0x9f; }
-    else if (c >= 0xf0 && c <= 0xf4) { need = 3; cp = c & 0x7; if (c === 0xf0) lo = 0x90; if (c === 0xf4) hi = 0x8f; }
-    else { bad(); i++; continue; }
+    const lead = __utf8Lead(c);
+    if (!lead) { bad(); i++; continue; }
+    let [need, cp, lo, hi] = lead;
     let j = i + 1;
     for (; j <= i + need && j < end; j++) {
       if (b[j] < lo || b[j] > hi) break;
       cp = (cp << 6) | (b[j] & 0x3f); lo = 0x80; hi = 0xbf;
     }
-    if (j > i + need) {
-      if (cp < 0x10000) unit(cp);
-      else { cp -= 0x10000; unit(0xd800 + (cp >> 10)); unit(0xdc00 + (cp & 0x3ff)); }
-    } else if (j === end && stream) break; // valid so far: wait for more
+    if (j > i + need) __utf16Units(cp, unit);
+    else if (j === end && stream) break; // valid so far: wait for more
     else bad(); // one U+FFFD for the maximal subpart b[i..j)
     i = j;
   }
@@ -761,6 +775,21 @@ if (typeof globalThis.TextDecoder === 'undefined') {
     if (!st) throw __codecError(TypeError, 'ERR_INVALID_THIS', 'Value of "this" must be of type TextDecoder');
     return st;
   };
+  // the UTF-8 decode of TextDecoder#decode: a pending partial sequence first, BOM per stream
+  const decodeUtf8 = (st, b, stream) => {
+    if (st.pending) { const m = new Uint8Array(st.pending.length + b.length); m.set(st.pending); m.set(b, st.pending.length); b = m; st.pending = null; }
+    const fail = () => { st.pending = null; st.bomSeen = false; throw __codecError(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', 'The encoded data was not valid for encoding utf-8'); };
+    let decoded, rest;
+    try { [decoded, rest] = __utf8Run(b, 0, b.length, stream, st.fatal ? fail : null); } catch (e) { throw e instanceof RangeError ? tooLong() : e; }
+    if (rest < b.length) st.pending = b.slice(rest);
+    let out = decoded;
+    if (!st.ignoreBOM && !st.bomSeen && out.length > 0) {
+      st.bomSeen = true;
+      if (out.charCodeAt(0) === 0xfeff) out = out.slice(1);
+    }
+    if (!stream) st.bomSeen = false; // end of stream: reset (a partial sequence already became U+FFFD)
+    return out;
+  };
   globalThis.TextDecoder = class TextDecoder {
     constructor(label = 'utf-8', opts = undefined) {
       const name = `${label}`.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '').replace(/[A-Z]+/g, (c) => c.toLowerCase());
@@ -777,7 +806,7 @@ if (typeof globalThis.TextDecoder === 'undefined') {
     get ignoreBOM() { return self(this).ignoreBOM; }
     decode(input = undefined, opts = undefined) {
       const st = self(this);
-      let b = bytesOf(input);
+      const b = bytesOf(input);
       const stream = !!options(opts).stream;
       if (st.id) {
         const text = globalThis.__ttTextDecode(st.id, st.encoding, st.ignoreBOM, st.fatal, stream, b);
@@ -785,18 +814,7 @@ if (typeof globalThis.TextDecoder === 'undefined') {
         if (text === undefined) throw tooLong();
         return text;
       }
-      if (st.pending) { const m = new Uint8Array(st.pending.length + b.length); m.set(st.pending); m.set(b, st.pending.length); b = m; st.pending = null; }
-      const fail = () => { st.pending = null; st.bomSeen = false; throw __codecError(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', 'The encoded data was not valid for encoding utf-8'); };
-      let decoded, rest;
-      try { [decoded, rest] = __utf8Run(b, 0, b.length, stream, st.fatal ? fail : null); } catch (e) { throw e instanceof RangeError ? tooLong() : e; }
-      if (rest < b.length) st.pending = b.slice(rest);
-      let out = decoded;
-      if (!st.ignoreBOM && !st.bomSeen && out.length > 0) {
-        st.bomSeen = true;
-        if (out.charCodeAt(0) === 0xfeff) out = out.slice(1);
-      }
-      if (!stream) st.bomSeen = false; // end of stream: reset (a partial sequence already became U+FFFD)
-      return out;
+      return decodeUtf8(st, b, stream);
     }
   };
   Object.defineProperty(globalThis.TextDecoder.prototype, Symbol.toStringTag, { value: 'TextDecoder', configurable: true });
@@ -846,6 +864,28 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
   const iter = (p, k) => Object.defineProperties(Object.create(IterProto), {
     _p: { value: p }, _k: { value: k }, _i: { value: 0, writable: true },
   });
+  // sequence<sequence<USVString>>: every pair is an iterable of exactly two
+  const fromPairs = (list, init, m) => {
+    if (typeof m !== 'function') throw new TypeError('Query pairs must be iterable');
+    for (const pair of { [Symbol.iterator]: () => m.call(init) }) {
+      if ((typeof pair !== 'object' || pair === null) && typeof pair !== 'function') {
+        throw new TypeError('Each query pair must be an iterable [name, value] tuple');
+      }
+      const kv = [...pair];
+      if (kv.length !== 2) throw new TypeError('Each query pair must be an iterable [name, value] tuple');
+      list.push([usv(kv[0]), usv(kv[1])]);
+    }
+  };
+  // record<USVString, USVString>: own enumerable keys; a key repeated after conversion keeps its
+  // first position and takes the last value
+  const fromRecord = (list, init) => {
+    const rec = new Map();
+    for (const key of Reflect.ownKeys(init)) {
+      const d = Reflect.getOwnPropertyDescriptor(init, key);
+      if (d && d.enumerable) rec.set(usv(key), usv(init[key]));
+    }
+    for (const kv of rec) list.push(kv);
+  };
   globalThis.URLSearchParams = class URLSearchParams {
     constructor(init = undefined) {
       // list of [name, value] pairs; not enumerable, as a real URLSearchParams has no own keys
@@ -854,27 +894,8 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
       if (init === undefined) return;
       if ((typeof init === 'object' && init !== null) || typeof init === 'function') {
         const m = init[Symbol.iterator];
-        if (m !== undefined && m !== null) {
-          // sequence<sequence<USVString>>: every pair is an iterable of exactly two
-          if (typeof m !== 'function') throw new TypeError('Query pairs must be iterable');
-          for (const pair of { [Symbol.iterator]: () => m.call(init) }) {
-            if ((typeof pair !== 'object' || pair === null) && typeof pair !== 'function') {
-              throw new TypeError('Each query pair must be an iterable [name, value] tuple');
-            }
-            const kv = [...pair];
-            if (kv.length !== 2) throw new TypeError('Each query pair must be an iterable [name, value] tuple');
-            this._.push([usv(kv[0]), usv(kv[1])]);
-          }
-        } else {
-          // record<USVString, USVString>: own enumerable keys; a key repeated after conversion
-          // keeps its first position and takes the last value
-          const rec = new Map();
-          for (const key of Reflect.ownKeys(init)) {
-            const d = Reflect.getOwnPropertyDescriptor(init, key);
-            if (d && d.enumerable) rec.set(usv(key), usv(init[key]));
-          }
-          for (const kv of rec) this._.push(kv);
-        }
+        if (m !== undefined && m !== null) fromPairs(this._, init, m);
+        else fromRecord(this._, init);
         return;
       }
       const s = usv(init);
@@ -958,49 +979,59 @@ if (typeof globalThis.URL === 'undefined') {
       const scheme = /^([a-z][a-z0-9+.-]*:)/i.exec(url);
       this._protocol = scheme ? scheme[1].toLowerCase() : 'http:';
       const m = /^([a-z][a-z0-9+.-]*:)\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/i.exec(url);
-      let searchStr;
-      if (m) {
-        this._hierarchical = true;
-        // `user:pass@` before the last '@' is the userinfo, percent-encoded (WHATWG; turbo-test#114)
-        const at = m[2].lastIndexOf('@');
-        const info = at < 0 ? '' : m[2].slice(0, at);
-        const hostport = at < 0 ? m[2] : m[2].slice(at + 1);
-        const colon = info.indexOf(':');
-        this._username = URL._encode(colon < 0 ? info : info.slice(0, colon), URL._USERINFO);
-        this._password = colon < 0 ? '' : URL._encode(info.slice(colon + 1), URL._USERINFO);
-        // a special host takes no forbidden code point, and a port is digits up to 65535 (WHATWG)
-        const hp = /^(\[[^\]]*\]|[^:]*)(?::(.*))?$/.exec(hostport);
-        if (this._special && !this._isFile && (!hp || /[\x00-\x20#/:<>?@[\\\]^|]/.test(hp[1].replace(/^\[.*\]$/, '')) || (hp[2] && !/^\d+$/.test(hp[2])) || (hp[2] && Number(hp[2]) > 65535))) {
-          throw new TypeError('Invalid URL: ' + url);
-        }
-        // a file URL's `localhost` host is the empty host (WHATWG)
-        this._hostname = '';
-        this._port = '';
-        this._setHost(hostport, true);
-        this.pathname = m[3] || '/';
-        searchStr = m[4] || '';
-        this.hash = m[5] || '';
-      } else {
-        // opaque URL (no authority): everything after the scheme is the path (sans query/hash).
-        this._hierarchical = false;
-        this._username = ''; this._password = '';
-        this._hostname = ''; this._port = '';
-        const rest = url.slice(this.protocol.length);
-        const qi = rest.indexOf('?'); const hi = rest.indexOf('#');
-        let cut = rest.length;
-        if (qi >= 0) cut = Math.min(cut, qi);
-        if (hi >= 0) cut = Math.min(cut, hi);
-        this._path = URL._encode(rest.slice(0, cut), URL._C0);
-        const after = rest.slice(cut);
-        const am = /^(\?[^#]*)?(#.*)?$/.exec(after) || [];
-        searchStr = am[1] || ''; this.hash = am[2] || '';
-      }
+      const searchStr = m ? this._parseAuthority(url, m) : this._parseOpaque(url);
       // the query as parsed, percent-encoded with the query set (null: none); searchParams is
       // parsed from it and writes back to it when changed (turbo-test#115)
       this._query = searchStr ? URL._encode(searchStr.slice(1), URL._querySet(this.protocol)) : null;
       this._sp = URL._params(this._query || '', this);
       // the parts live in non-enumerable slots: a real URL has no own enumerable keys
       for (const k of Object.keys(this)) Object.defineProperty(this, k, { enumerable: false });
+    }
+    // the constructor's parse of a hierarchical URL (scheme://authority/path?query#hash); returns
+    // the search string
+    _parseAuthority(url, m) {
+      this._hierarchical = true;
+      // `user:pass@` before the last '@' is the userinfo, percent-encoded (WHATWG; turbo-test#114)
+      const at = m[2].lastIndexOf('@');
+      const info = at < 0 ? '' : m[2].slice(0, at);
+      const hostport = at < 0 ? m[2] : m[2].slice(at + 1);
+      const colon = info.indexOf(':');
+      this._username = URL._encode(colon < 0 ? info : info.slice(0, colon), URL._USERINFO);
+      this._password = colon < 0 ? '' : URL._encode(info.slice(colon + 1), URL._USERINFO);
+      // a special host takes no forbidden code point, and a port is digits up to 65535 (WHATWG)
+      const hp = /^(\[[^\]]*\]|[^:]*)(?::(.*))?$/.exec(hostport);
+      if (this._special && !this._isFile && URL._badHostPort(hp)) {
+        throw new TypeError('Invalid URL: ' + url);
+      }
+      // a file URL's `localhost` host is the empty host (WHATWG)
+      this._hostname = '';
+      this._port = '';
+      this._setHost(hostport, true);
+      this.pathname = m[3] || '/';
+      this.hash = m[5] || '';
+      return m[4] || '';
+    }
+    // the constructor's parse of an opaque URL; returns the search string
+    _parseOpaque(url) {
+      // opaque URL (no authority): everything after the scheme is the path (sans query/hash).
+      this._hierarchical = false;
+      this._username = ''; this._password = '';
+      this._hostname = ''; this._port = '';
+      const rest = url.slice(this.protocol.length);
+      const qi = rest.indexOf('?'); const hi = rest.indexOf('#');
+      let cut = rest.length;
+      if (qi >= 0) cut = Math.min(cut, qi);
+      if (hi >= 0) cut = Math.min(cut, hi);
+      this._path = URL._encode(rest.slice(0, cut), URL._C0);
+      const after = rest.slice(cut);
+      const am = /^(\?[^#]*)?(#.*)?$/.exec(after) || [];
+      this.hash = am[2] || '';
+      return am[1] || '';
+    }
+    // a special URL's host has no forbidden code point, and its port is digits up to 65535
+    static _badHostPort(hp) {
+      if (!hp || /[\x00-\x20#/:<>?@[\\\]^|]/.test(hp[1].replace(/^\[.*\]$/, ''))) return true;
+      return !!hp[2] && (!/^\d+$/.test(hp[2]) || Number(hp[2]) > 65535);
     }
     // host, hostname and port are views of _hostname/_port, so a set reaches href and origin
     // (WHATWG host/hostname/port setters, as Node; turbo-test#201)
@@ -1222,30 +1253,37 @@ if (typeof globalThis.Blob === 'undefined') {
     for (const c of chunks) { out.set(c, at); at += c.length; }
     return out;
   };
+  // the Blob constructor's argument checks; returns [options, endings]
+  const blobOptions = (blobParts, options) => {
+    if (blobParts !== undefined && (blobParts === null || (typeof blobParts !== 'object' && typeof blobParts !== 'function') || typeof blobParts[Symbol.iterator] !== 'function'))
+      throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'Value cannot be converted to sequence.');
+    if (options != null && typeof options !== 'object' && typeof options !== 'function')
+      throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "options" argument must be a dictionary. Received ' + received(options));
+    const o = options == null ? {} : options;
+    const endings = o.endings === undefined ? 'transparent' : String(o.endings);
+    if (endings !== 'transparent' && endings !== 'native')
+      throw __codecError(TypeError, 'ERR_INVALID_ARG_VALUE', `The property 'options.endings' is invalid. Received '${endings}'`);
+    return [o, endings];
+  };
   globalThis.Blob = class Blob {
     #chunks = [];
     #size = 0;
     #type = '';
     constructor(blobParts = undefined, options = undefined) {
-      if (blobParts !== undefined && (blobParts === null || (typeof blobParts !== 'object' && typeof blobParts !== 'function') || typeof blobParts[Symbol.iterator] !== 'function'))
-        throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'Value cannot be converted to sequence.');
-      if (options != null && typeof options !== 'object' && typeof options !== 'function')
-        throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "options" argument must be a dictionary. Received ' + received(options));
-      const o = options == null ? {} : options;
-      const endings = o.endings === undefined ? 'transparent' : String(o.endings);
-      if (endings !== 'transparent' && endings !== 'native')
-        throw __codecError(TypeError, 'ERR_INVALID_ARG_VALUE', `The property 'options.endings' is invalid. Received '${endings}'`);
+      const [o, endings] = blobOptions(blobParts, options);
       this.#type = o.type === undefined ? '' : normType(o.type);
       const add = (c) => { if (c.length) { this.#chunks.push(c); this.#size += c.length; } };
-      for (const p of blobParts === undefined ? [] : blobParts) {
-        if (p instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && p instanceof SharedArrayBuffer)) add(new Uint8Array(p.slice(0)));
-        else if (ArrayBuffer.isView(p)) add(new Uint8Array(p.buffer, p.byteOffset, p.byteLength).slice());
-        else if (p !== null && typeof p === 'object' && #chunks in p) p.#chunks.forEach(add);
-        else {
-          let s = String(p);
-          if (endings === 'native') s = s.replace(/\r\n?/g, '\n');
-          add(new globalThis.TextEncoder().encode(s));
-        }
+      for (const p of blobParts === undefined ? [] : blobParts) Blob.#addPart(p, endings, add);
+    }
+    // one blob part's bytes, to `add`
+    static #addPart(p, endings, add) {
+      if (p instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && p instanceof SharedArrayBuffer)) add(new Uint8Array(p.slice(0)));
+      else if (ArrayBuffer.isView(p)) add(new Uint8Array(p.buffer, p.byteOffset, p.byteLength).slice());
+      else if (p !== null && typeof p === 'object' && #chunks in p) p.#chunks.forEach(add);
+      else {
+        let s = String(p);
+        if (endings === 'native') s = s.replace(/\r\n?/g, '\n');
+        add(new globalThis.TextEncoder().encode(s));
       }
     }
     get type() { if (!(#chunks in this)) throw thisErr('Blob'); return this.#type; }
@@ -2448,103 +2486,126 @@ function __highlightRegExp(re) {
       writeDepth(start, 1, -seq.length);
     }
   };
+  const readDigits = () => {
+    let digits = '';
+    while (i < re.length && re[i] >= '0' && re[i] <= '9') digits += re[i++];
+    return digits;
+  };
+  // inside a character class
+  const classEscape = () => {
+    let seq = '\\';
+    i++;
+    if (i < re.length) {
+      seq += re[i++];
+      const next = seq[1];
+      if (next === 'u' && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return; }
+      else if ((next === 'p' || next === 'P') && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return; }
+      else if (seq[1] === 'x') { seq += re.slice(i, i + 2); i += 2; }
+    }
+    write(seq);
+  };
+  const classChar = (ch) => {
+    if (ch === '\\') {
+      classEscape();
+    } else if (ch === ']') {
+      depth--; write(']'); i++; inClass = false;
+    } else if (ch === '-' && re[i - 1] !== '[' && i + 1 < re.length && re[i + 1] !== ']') {
+      writeDepth('-', 1, 1);
+    } else {
+      write(ch); i++;
+    }
+  };
+  const namedGroup = () => {
+    i++;
+    const start = i;
+    while (i < re.length && re[i] !== '>') i++;
+    const name = re.slice(start, i);
+    if (i < re.length && re[i] === '>') {
+      depth--; write('?<'); writeDepth(name, 1, 0); write('>'); depth++; i++;
+    } else {
+      writeDepth('?<', -1, 0); write(name);
+    }
+  };
+  // after `(?`
+  const groupModifier = () => {
+    const a = i < re.length ? re[i] : '';
+    if (a === ':' || a === '=' || a === '!') {
+      writeDepth(`?${a}`, -1, 1);
+      return;
+    }
+    const b = i + 1 < re.length ? re[i + 1] : '';
+    if (a === '<' && (b === '=' || b === '!')) writeDepth(`?<${b}`, -1, 2);
+    else if (a === '<') namedGroup();
+    else write('?');
+  };
+  const openGroup = () => {
+    write('('); depth++; i++;
+    if (i < re.length && re[i] === '?') {
+      i++;
+      groupModifier();
+    }
+  };
+  const escape = () => {
+    let seq = '\\';
+    i++;
+    if (i < re.length) {
+      seq += re[i++];
+      const next = seq[1];
+      if (i < re.length) {
+        if (next === 'u' && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return; }
+        else if (next === 'x') { seq += re.slice(i, i + 2); i += 2; }
+        else if (next >= '0' && next <= '9') { seq += readDigits(); }
+        else if (next === 'k' && re[i] === '<') { writeGroup(`${seq}<`, '>'); return; }
+        else if ((next === 'p' || next === 'P') && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return; }
+      }
+    }
+    writeDepth(seq, 1, 0);
+  };
+  const quantifier = () => {
+    i++;
+    const digits = readDigits();
+    if (digits) { write('{'); depth++; writeDepth(digits, 1, 0); }
+    if (i < re.length) {
+      if (re[i] === ',') {
+        if (!digits) { write('{'); depth++; }
+        write(','); i++;
+      } else if (!digits) {
+        depth += 1; write('{'); depth -= 1;
+        return;
+      }
+    }
+    const digits2 = readDigits();
+    if (digits2) writeDepth(digits2, 1, 0);
+    if (i < re.length && re[i] === '}') { depth--; write('}'); i++; }
+    if (i < re.length && re[i] === '?') writeDepth('?', 3, 1);
+  };
+  const step = (ch) => {
+    if (ch === '[') {
+      write('['); depth++; i++; inClass = true;
+    } else if (ch === '(') {
+      openGroup();
+    } else if (ch === ')') {
+      depth--; write(')'); i++;
+    } else if (ch === '\\') {
+      escape();
+    } else if (ch === '|' || ch === '+' || ch === '*' || ch === '?' || ch === ',' || ch === '^' || ch === '$') {
+      writeDepth(ch, 3, 1);
+    } else if (ch === '{') {
+      quantifier();
+    } else if (ch === '.') {
+      writeDepth(ch, 2, 1);
+    } else {
+      writeDepth(ch, 1, 1);
+    }
+  };
   write('/');
   depth++;
   i = 1;
   while (i < re.length) {
     const ch = re[i];
-    if (inClass) {
-      if (ch === '\\') {
-        let seq = '\\';
-        i++;
-        if (i < re.length) {
-          seq += re[i++];
-          const next = seq[1];
-          if (next === 'u' && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); continue; }
-          else if ((next === 'p' || next === 'P') && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); continue; }
-          else if (seq[1] === 'x') { seq += re.slice(i, i + 2); i += 2; }
-        }
-        write(seq);
-      } else if (ch === ']') {
-        depth--; write(']'); i++; inClass = false;
-      } else if (ch === '-' && re[i - 1] !== '[' && i + 1 < re.length && re[i + 1] !== ']') {
-        writeDepth('-', 1, 1);
-      } else {
-        write(ch); i++;
-      }
-    } else if (ch === '[') {
-      write('['); depth++; i++; inClass = true;
-    } else if (ch === '(') {
-      write('('); depth++; i++;
-      if (i < re.length && re[i] === '?') {
-        i++;
-        const a = i < re.length ? re[i] : '';
-        if (a === ':' || a === '=' || a === '!') {
-          writeDepth(`?${a}`, -1, 1);
-        } else {
-          const b = i + 1 < re.length ? re[i + 1] : '';
-          if (a === '<' && (b === '=' || b === '!')) {
-            writeDepth(`?<${b}`, -1, 2);
-          } else if (a === '<') {
-            i++;
-            const start = i;
-            while (i < re.length && re[i] !== '>') i++;
-            const name = re.slice(start, i);
-            if (i < re.length && re[i] === '>') {
-              depth--; write('?<'); writeDepth(name, 1, 0); write('>'); depth++; i++;
-            } else {
-              writeDepth('?<', -1, 0); write(name);
-            }
-          } else {
-            write('?');
-          }
-        }
-      }
-    } else if (ch === ')') {
-      depth--; write(')'); i++;
-    } else if (ch === '\\') {
-      let seq = '\\';
-      i++;
-      if (i < re.length) {
-        seq += re[i++];
-        const next = seq[1];
-        if (i < re.length) {
-          if (next === 'u' && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); continue; }
-          else if (next === 'x') { seq += re.slice(i, i + 2); i += 2; }
-          else if (next >= '0' && next <= '9') { while (i < re.length && re[i] >= '0' && re[i] <= '9') seq += re[i++]; }
-          else if (next === 'k' && re[i] === '<') { writeGroup(`${seq}<`, '>'); continue; }
-          else if ((next === 'p' || next === 'P') && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); continue; }
-        }
-      }
-      writeDepth(seq, 1, 0);
-    } else if (ch === '|' || ch === '+' || ch === '*' || ch === '?' || ch === ',' || ch === '^' || ch === '$') {
-      writeDepth(ch, 3, 1);
-    } else if (ch === '{') {
-      i++;
-      let digits = '';
-      while (i < re.length && re[i] >= '0' && re[i] <= '9') digits += re[i++];
-      if (digits) { write('{'); depth++; writeDepth(digits, 1, 0); }
-      if (i < re.length) {
-        if (re[i] === ',') {
-          if (!digits) { write('{'); depth++; }
-          write(','); i++;
-        } else if (!digits) {
-          depth += 1; write('{'); depth -= 1;
-          continue;
-        }
-      }
-      let digits2 = '';
-      while (i < re.length && re[i] >= '0' && re[i] <= '9') digits2 += re[i++];
-      if (digits2) writeDepth(digits2, 1, 0);
-      if (i < re.length && re[i] === '}') { depth--; write('}'); i++; }
-      if (i < re.length && re[i] === '?') writeDepth('?', 3, 1);
-    } else if (ch === '.') {
-      writeDepth(ch, 2, 1);
-    } else if (ch === '/') {
-      break;
-    } else {
-      writeDepth(ch, 1, 1);
-    }
+    if (inClass) classChar(ch);
+    else if (ch === '/') break;
+    else step(ch);
   }
   writeDepth('/', -1, 1);
   if (i < re.length) write(re.slice(i));
@@ -2662,6 +2723,47 @@ function __formatProperty(ctx, value, recurseTimes, key, type, desc) {
   else name = /^[a-zA-Z_][a-zA-Z_0-9]*$/.test(key) ? key : __sty(ctx, __strEscape(key), 'string');
   return `${name}: ${str}`;
 }
+// groupArrayElements: each column's width (the widest entry in it, plus the separator)
+function __groupColumnWidths(output, dataLen, columns, separatorSpace) {
+  const maxLineLength = [];
+  for (let i = 0; i < columns; i++) {
+    let lineLength = 0;
+    for (let j = i; j < output.length; j += columns) if (dataLen[j] > lineLength) lineLength = dataLen[j];
+    maxLineLength.push(lineLength + separatorSpace);
+  }
+  return maxLineLength;
+}
+// groupArrayElements: numbers (and bigints) are right-aligned
+function __groupPadStart(value, output) {
+  if (value === undefined) return true;
+  for (let i = 0; i < output.length; i++) {
+    if (typeof value[i] !== 'number' && typeof value[i] !== 'bigint') return false;
+  }
+  return true;
+}
+// groupArrayElements: the rows of `columns` entries
+function __groupRows(output, outputLength, dataLen, columns, separatorSpace, value) {
+  const tmp = [];
+  const maxLineLength = __groupColumnWidths(output, dataLen, columns, separatorSpace);
+  const padStart = __groupPadStart(value, output);
+  for (let i = 0; i < outputLength; i += columns) {
+    const max = Math.min(i + columns, outputLength);
+    let str = '';
+    let j = i;
+    for (; j < max - 1; j++) {
+      const padding = maxLineLength[j - i] + output[j].length - dataLen[j];
+      str += padStart ? `${output[j]}, `.padStart(padding, ' ') : `${output[j]}, `.padEnd(padding, ' ');
+    }
+    if (padStart) {
+      const padding = maxLineLength[j - i] + output[j].length - dataLen[j] - separatorSpace;
+      str += output[j].padStart(padding, ' ');
+    } else {
+      str += output[j];
+    }
+    tmp.push(str);
+  }
+  return tmp;
+}
 function __groupArrayElements(ctx, output, value) {
   let totalLength = 0;
   let maxLength = 0;
@@ -2686,35 +2788,7 @@ function __groupArrayElements(ctx, output, value) {
       15,
     );
     if (columns <= 1) return output;
-    const tmp = [];
-    const maxLineLength = [];
-    for (let i = 0; i < columns; i++) {
-      let lineLength = 0;
-      for (let j = i; j < output.length; j += columns) if (dataLen[j] > lineLength) lineLength = dataLen[j];
-      maxLineLength.push(lineLength + separatorSpace);
-    }
-    let padStart = true;
-    if (value !== undefined) {
-      for (let i = 0; i < output.length; i++) {
-        if (typeof value[i] !== 'number' && typeof value[i] !== 'bigint') { padStart = false; break; }
-      }
-    }
-    for (let i = 0; i < outputLength; i += columns) {
-      const max = Math.min(i + columns, outputLength);
-      let str = '';
-      let j = i;
-      for (; j < max - 1; j++) {
-        const padding = maxLineLength[j - i] + output[j].length - dataLen[j];
-        str += padStart ? `${output[j]}, `.padStart(padding, ' ') : `${output[j]}, `.padEnd(padding, ' ');
-      }
-      if (padStart) {
-        const padding = maxLineLength[j - i] + output[j].length - dataLen[j] - separatorSpace;
-        str += output[j].padStart(padding, ' ');
-      } else {
-        str += output[j];
-      }
-      tmp.push(str);
-    }
+    const tmp = __groupRows(output, outputLength, dataLen, columns, separatorSpace, value);
     if (ctx.maxArrayLength < output.length) tmp.push(output[outputLength]);
     output = tmp;
   }
@@ -2729,18 +2803,26 @@ function __isBelowBreakLength(ctx, output, start, base) {
   }
   return base === '' || !base.includes('\n');
 }
+// reduceToSingleString with a numeric `compact`: [the (grouped) output, its one-line form or
+// undefined when it does not fit on one line]
+function __reduceCompactNumber(ctx, output, base, braces, extrasType, recurseTimes, value) {
+  const entries = output.length;
+  if (extrasType === 2 && entries > 6) output = __groupArrayElements(ctx, output, value);
+  if (ctx.currentDepth - recurseTimes < ctx.compact && entries === output.length) {
+    const start = output.length + ctx.indentationLvl + braces[0].length + base.length + 10;
+    if (__isBelowBreakLength(ctx, output, start, base)) {
+      const joined = output.join(', ');
+      if (!joined.includes('\n')) return [output, `${base ? `${base} ` : ''}${braces[0]} ${joined} ${braces[1]}`];
+    }
+  }
+  return [output, undefined];
+}
 function __reduceToSingleString(ctx, output, base, braces, extrasType, recurseTimes, value) {
   if (ctx.compact !== true) {
     if (typeof ctx.compact === 'number' && ctx.compact >= 1) {
-      const entries = output.length;
-      if (extrasType === 2 && entries > 6) output = __groupArrayElements(ctx, output, value);
-      if (ctx.currentDepth - recurseTimes < ctx.compact && entries === output.length) {
-        const start = output.length + ctx.indentationLvl + braces[0].length + base.length + 10;
-        if (__isBelowBreakLength(ctx, output, start, base)) {
-          const joined = output.join(', ');
-          if (!joined.includes('\n')) return `${base ? `${base} ` : ''}${braces[0]} ${joined} ${braces[1]}`;
-        }
-      }
+      const [grouped, line] = __reduceCompactNumber(ctx, output, base, braces, extrasType, recurseTimes, value);
+      if (line !== undefined) return line;
+      output = grouped;
     }
     const indentation = `\n${' '.repeat(ctx.indentationLvl)}`;
     return `${base ? `${base} ` : ''}${braces[0]}${indentation}  ${output.join(`,${indentation}  `)}${indentation}${braces[1]}`;
@@ -2750,7 +2832,110 @@ function __reduceToSingleString(ctx, output, base, braces, extrasType, recurseTi
   const ln = base === '' && braces[0].length === 1 ? ' ' : `${base ? ` ${base}` : ''}\n${indentation}  `;
   return `${braces[0]}${ln}${output.join(`,\n${indentation}  `)} ${braces[1]}`;
 }
+// formatRaw's per-kind result: the keys still to print, the braces, the entries' formatter (given
+// the entries' recurseTimes), the
+// base (a function's, regexp's, date's ... text) and the extras type (2: array-like)
+const __rawSpec = (keys, braces, formatter = () => [], base = '', extrasType = 0) => ({ keys, braces, formatter, base, extrasType });
+const __moreItems = (n) => `... ${n} more item${n > 1 ? 's' : ''}`;
+const __emptyItems = (ctx, holes) => __sty(ctx, `<${holes} empty item${holes > 1 ? 's' : ''}>`, 'undefined');
+function __rawArrayItems(ctx, value, recurseTimes) {
+  const out = [];
+  const len = Math.min(ctx.maxArrayLength, value.length);
+  let holes = 0;
+  for (let i = 0; i < len; i++) {
+    if (!Object.prototype.hasOwnProperty.call(value, i)) { holes++; continue; }
+    if (holes) { out.push(__emptyItems(ctx, holes)); holes = 0; }
+    out.push(__formatProperty(ctx, value, recurseTimes, i, 1));
+  }
+  if (holes) out.push(__emptyItems(ctx, holes));
+  if (value.length > len) out.push(__moreItems(value.length - len));
+  return out;
+}
+function __rawArray(ctx, value, keys, ctor, tag, prefix) {
+  const p = ctor !== 'Array' || (typeof tag === 'string' && tag !== '') ? prefix('Array', `(${value.length})`) : '';
+  keys = keys.filter((k) => typeof k === 'symbol' || !(/^(0|[1-9][0-9]*)$/.test(k) && Number(k) < value.length));
+  const braces = [`${p}[`, ']'];
+  if (value.length === 0 && keys.length === 0) return `${braces[0]}]`;
+  return __rawSpec(keys, braces, (rt) => __rawArrayItems(ctx, value, rt), '', 2);
+}
+function __rawMapSet(ctx, value, keys, prefix) {
+  const isMap = value instanceof Map;
+  const braces = [`${prefix(isMap ? 'Map' : 'Set', `(${value.size})`)}{`, '}'];
+  if (value.size === 0 && keys.length === 0) return `${braces[0]}}`;
+  return __rawSpec(keys, braces, (rt) => {
+    const out = [];
+    ctx.indentationLvl += 2;
+    if (isMap) for (const [k, v] of value) out.push(`${__formatValue(ctx, k, rt)} => ${__formatValue(ctx, v, rt)}`);
+    else for (const v of value) out.push(__formatValue(ctx, v, rt));
+    ctx.indentationLvl -= 2;
+    return out;
+  });
+}
+function __rawTyped(ctx, value, keys, ctor, tag, prefix) {
+  if (globalThis.Buffer && globalThis.Buffer.isBuffer && globalThis.Buffer.isBuffer(value)) {
+    const bytes = Array.from(value.subarray(0, 50), (b) => b.toString(16).padStart(2, '0')).join(' ');
+    const more = value.length > 50 ? ` ... ${value.length - 50} more byte${value.length - 50 > 1 ? 's' : ''}` : '';
+    return `<${ctor || 'Buffer'}${bytes ? ` ${bytes}` : ''}${more}>`;
+  }
+  keys = keys.filter((k) => !/^(0|[1-9][0-9]*)$/.test(k));
+  const braces = [`${prefix(tag || 'TypedArray', `(${value.length})`)}[`, ']'];
+  if (value.length === 0 && keys.length === 0) return `${braces[0]}]`;
+  return __rawSpec(keys, braces, () => {
+    const out = [];
+    const len = Math.min(ctx.maxArrayLength, value.length);
+    for (let i = 0; i < len; i++) out.push(__inspectPrimitive(value[i], ctx));
+    if (value.length > len) out.push(__moreItems(value.length - len));
+    return out;
+  }, '', 2);
+}
+function __rawBoxed(ctx, value, keys) {
+  const type = value instanceof Number ? 'Number' : value instanceof String ? 'String' : 'Boolean';
+  const base = `[${type}: ${__inspectPrimitive(value.valueOf(), ctx, true)}]`;
+  if (value instanceof String) keys = keys.filter((k) => !/^(0|[1-9][0-9]*)$/.test(k));
+  if (keys.length === 0) return __sty(ctx, base, type.toLowerCase());
+  return __rawSpec(keys, ['{', '}'], undefined, base);
+}
+// a function, regexp, date or error: its base text, alone when it has no keys to print
+function __rawBased(ctx, value, recurseTimes, keys, ctor) {
+  if (typeof value === 'function') {
+    const base = __fnBase(value, ctor);
+    return keys.length === 0 ? __sty(ctx, base, 'special') : __rawSpec(keys, ['{', '}'], undefined, base);
+  }
+  if (value instanceof RegExp) {
+    const base = __sty(ctx, RegExp.prototype.toString.call(value), 'regexp');
+    return keys.length === 0 || recurseTimes > ctx.depth ? base : __rawSpec(keys, ['{', '}'], undefined, base);
+  }
+  if (value instanceof Date) {
+    const base = Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
+    return keys.length === 0 ? __sty(ctx, base, 'date') : __rawSpec(keys, ['{', '}'], undefined, base);
+  }
+  const base = value.stack ? String(value.stack) : `[${Error.prototype.toString.call(value)}]`;
+  keys = keys.filter((k) => k !== 'stack' && k !== 'message');
+  return keys.length === 0 ? base : __rawSpec(keys, ['{', '}'], undefined, base);
+}
+function __rawOther(ctx, value, recurseTimes, keys, ctor, tag, prefix) {
+  if (typeof value === 'function' || value instanceof RegExp || value instanceof Date || value instanceof Error) return __rawBased(ctx, value, recurseTimes, keys, ctor);
+  if (value instanceof Number || value instanceof String || value instanceof Boolean) return __rawBoxed(ctx, value, keys);
+  if (value instanceof Promise) return __rawSpec(keys, [`${prefix('Promise', '')}{`, '}'], () => [__sty(ctx, '<pending>', 'special')]);
+  if (value instanceof WeakMap || value instanceof WeakSet) {
+    return __rawSpec(keys, [`${prefix(value instanceof WeakMap ? 'WeakMap' : 'WeakSet', '')}{`, '}'], () => [__sty(ctx, '<items unknown>', 'special')]);
+  }
+  return __rawPlain(keys, ctor, tag, prefix);
+}
+function __rawPlain(keys, ctor, tag, prefix) {
+  const p = ctor === 'Object' && !(typeof tag === 'string' && tag !== '') ? '' : prefix('Object', '');
+  if (keys.length === 0) return `${p}{}`;
+  return __rawSpec(keys, [`${p}{`, '}']);
+}
+// formatRaw's kind of value: a string when that alone is the result
+function __rawKind(ctx, value, recurseTimes, keys, ctor, tag, prefix) {
+  if (Array.isArray(value)) return __rawArray(ctx, value, keys, ctor, tag, prefix);
+  if (value instanceof Map || value instanceof Set) return __rawMapSet(ctx, value, keys, prefix);
+  if (ArrayBuffer.isView(value) && !(value instanceof DataView)) return __rawTyped(ctx, value, keys, ctor, tag, prefix);
+  return __rawOther(ctx, value, recurseTimes, keys, ctor, tag, prefix);
+}
 function __formatRaw(ctx, value, recurseTimes, typedArray) {
+  void typedArray;
   const ctor = __ctorName(value);
   const tag = value[Symbol.toStringTag];
   const prefix = (fallback, size) => {
@@ -2758,106 +2943,9 @@ function __formatRaw(ctx, value, recurseTimes, typedArray) {
     if (typeof tag === 'string' && tag !== '' && tag !== (ctor || fallback)) p = `${p.slice(0, -1)} [${tag}] `;
     return p;
   };
-  let keys = ctx.showHidden ? Reflect.ownKeys(value) : Object.keys(value).concat(Object.getOwnPropertySymbols(value).filter((s) => Object.prototype.propertyIsEnumerable.call(value, s)));
-  let base = '';
-  let braces;
-  let extrasType = 0;
-  let formatter = () => [];
-  let noIterator = true;
-  if (Array.isArray(value)) {
-    const p = ctor !== 'Array' || (typeof tag === 'string' && tag !== '') ? prefix('Array', `(${value.length})`) : '';
-    keys = keys.filter((k) => typeof k === 'symbol' || !(/^(0|[1-9][0-9]*)$/.test(k) && Number(k) < value.length));
-    braces = [`${p}[`, ']'];
-    if (value.length === 0 && keys.length === 0) return `${braces[0]}]`;
-    extrasType = 2;
-    formatter = () => {
-      const out = [];
-      const len = Math.min(ctx.maxArrayLength, value.length);
-      let holes = 0;
-      for (let i = 0; i < len; i++) {
-        if (!Object.prototype.hasOwnProperty.call(value, i)) { holes++; continue; }
-        if (holes) { out.push(__sty(ctx, `<${holes} empty item${holes > 1 ? 's' : ''}>`, 'undefined')); holes = 0; }
-        out.push(__formatProperty(ctx, value, recurseTimes, i, 1));
-      }
-      if (holes) out.push(__sty(ctx, `<${holes} empty item${holes > 1 ? 's' : ''}>`, 'undefined'));
-      if (value.length > len) { const n = value.length - len; out.push(`... ${n} more item${n > 1 ? 's' : ''}`); }
-      return out;
-    };
-  } else if (value instanceof Map) {
-    noIterator = false;
-    braces = [`${prefix('Map', `(${value.size})`)}{`, '}'];
-    if (value.size === 0 && keys.length === 0) return `${braces[0]}}`;
-    formatter = () => {
-      const out = [];
-      ctx.indentationLvl += 2;
-      for (const [k, v] of value) out.push(`${__formatValue(ctx, k, recurseTimes)} => ${__formatValue(ctx, v, recurseTimes)}`);
-      ctx.indentationLvl -= 2;
-      return out;
-    };
-  } else if (value instanceof Set) {
-    noIterator = false;
-    braces = [`${prefix('Set', `(${value.size})`)}{`, '}'];
-    if (value.size === 0 && keys.length === 0) return `${braces[0]}}`;
-    formatter = () => {
-      const out = [];
-      ctx.indentationLvl += 2;
-      for (const v of value) out.push(__formatValue(ctx, v, recurseTimes));
-      ctx.indentationLvl -= 2;
-      return out;
-    };
-  } else if (ArrayBuffer.isView(value) && !(value instanceof DataView)) {
-    if (globalThis.Buffer && globalThis.Buffer.isBuffer && globalThis.Buffer.isBuffer(value)) {
-      const bytes = Array.from(value.subarray(0, 50), (b) => b.toString(16).padStart(2, '0')).join(' ');
-      const more = value.length > 50 ? ` ... ${value.length - 50} more byte${value.length - 50 > 1 ? 's' : ''}` : '';
-      return `<${ctor || 'Buffer'}${bytes ? ` ${bytes}` : ''}${more}>`;
-    }
-    keys = keys.filter((k) => !/^(0|[1-9][0-9]*)$/.test(k));
-    braces = [`${prefix(tag || 'TypedArray', `(${value.length})`)}[`, ']'];
-    if (value.length === 0 && keys.length === 0) return `${braces[0]}]`;
-    extrasType = 2;
-    formatter = () => {
-      const out = [];
-      const len = Math.min(ctx.maxArrayLength, value.length);
-      for (let i = 0; i < len; i++) out.push(__inspectPrimitive(value[i], ctx));
-      if (value.length > len) { const n = value.length - len; out.push(`... ${n} more item${n > 1 ? 's' : ''}`); }
-      return out;
-    };
-  } else {
-    if (typeof value === 'function') {
-      base = __fnBase(value, ctor);
-      if (keys.length === 0) return __sty(ctx, base, 'special');
-      braces = ['{', '}'];
-    } else if (value instanceof RegExp) {
-      base = __sty(ctx, RegExp.prototype.toString.call(value), 'regexp');
-      if (keys.length === 0 || recurseTimes > ctx.depth) return base;
-      braces = ['{', '}'];
-    } else if (value instanceof Date) {
-      base = Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
-      if (keys.length === 0) return __sty(ctx, base, 'date');
-      braces = ['{', '}'];
-    } else if (value instanceof Error) {
-      base = value.stack ? String(value.stack) : `[${Error.prototype.toString.call(value)}]`;
-      keys = keys.filter((k) => k !== 'stack' && k !== 'message');
-      if (keys.length === 0) return base;
-      braces = ['{', '}'];
-    } else if (value instanceof Number || value instanceof String || value instanceof Boolean) {
-      const type = value instanceof Number ? 'Number' : value instanceof String ? 'String' : 'Boolean';
-      base = `[${type}: ${__inspectPrimitive(value.valueOf(), ctx, true)}]`;
-      if (value instanceof String) keys = keys.filter((k) => !/^(0|[1-9][0-9]*)$/.test(k));
-      if (keys.length === 0) return __sty(ctx, base, type.toLowerCase());
-      braces = ['{', '}'];
-    } else if (value instanceof Promise) {
-      braces = [`${prefix('Promise', '')}{`, '}'];
-      formatter = () => [__sty(ctx, '<pending>', 'special')];
-    } else if (value instanceof WeakMap || value instanceof WeakSet) {
-      braces = [`${prefix(value instanceof WeakMap ? 'WeakMap' : 'WeakSet', '')}{`, '}'];
-      formatter = () => [__sty(ctx, '<items unknown>', 'special')];
-    } else {
-      const p = ctor === 'Object' && !(typeof tag === 'string' && tag !== '') ? '' : prefix('Object', '');
-      braces = [`${p}{`, '}'];
-      if (keys.length === 0) return `${p}{}`;
-    }
-  }
+  const allKeys = ctx.showHidden ? Reflect.ownKeys(value) : Object.keys(value).concat(Object.getOwnPropertySymbols(value).filter((s) => Object.prototype.propertyIsEnumerable.call(value, s)));
+  const sp = __rawKind(ctx, value, recurseTimes, allKeys, ctor, tag, prefix);
+  if (typeof sp === 'string') return sp;
   if (recurseTimes > ctx.depth) {
     const name = (ctor || tag || 'Object');
     return __sty(ctx, Array.isArray(value) ? '[Array]' : `[${name}]`, 'special');
@@ -2865,15 +2953,15 @@ function __formatRaw(ctx, value, recurseTimes, typedArray) {
   recurseTimes++;
   ctx.seen.push(value);
   ctx.currentDepth = recurseTimes;
-  let output = formatter();
-  for (const k of keys) output.push(__formatProperty(ctx, value, recurseTimes, k, extrasType));
+  // the entries are formatted one level down
+  const output = sp.formatter(recurseTimes);
+  for (const k of sp.keys) output.push(__formatProperty(ctx, value, recurseTimes, k, sp.extrasType));
   ctx.seen.pop();
-  let res = __reduceToSingleString(ctx, output, base, braces, extrasType, recurseTimes, value);
+  let res = __reduceToSingleString(ctx, output, sp.base, sp.braces, sp.extrasType, recurseTimes, value);
   if (ctx.circular !== undefined) {
     const index = ctx.circular.get(value);
     if (index !== undefined) res = `${__sty(ctx, `<ref *${index}>`, 'special')} ${res}`;
   }
-  void noIterator;
   return res;
 }
 // The options a [util.inspect.custom] method passes on to its inner inspect calls (Node's
@@ -2902,6 +2990,33 @@ function __nodeFormat(...args) {
   return __nodeFormatWith({}, ...args);
 }
 // util.formatWithOptions: `o.colors` colours %o / %O and the inspected rest (not %s / %d / …)
+// util.format's %s: strings as they are, objects inspected one level deep
+function __formatSpecS(a) {
+  if (typeof a === 'string') return a;
+  if (typeof a === 'bigint') return `${a}n`;
+  if (typeof a === 'symbol') return String(a);
+  if (typeof a === 'object' && a !== null) return __nodeInspect(a, { depth: 0 });
+  return Object.is(a, -0) ? '-0' : String(a);
+}
+// util.format's numeric specifiers %d, %i, %f
+function __formatSpecNum(c, a) {
+  if (typeof a === 'symbol') return 'NaN';
+  if (c === 'f') return String(parseFloat(a));
+  if (typeof a === 'bigint') return `${a}n`;
+  if (c === 'i') return String(parseInt(a));
+  return Object.is(Number(a), -0) ? '-0' : String(Number(a));
+}
+// one util.format specifier (sdifjoOc) applied to its argument
+function __formatSpec(c, a, colors) {
+  switch (c) {
+    case 's': return __formatSpecS(a);
+    case 'd': case 'i': case 'f': return __formatSpecNum(c, a);
+    case 'j': try { return JSON.stringify(a); } catch (e) { return '[Circular]'; }
+    case 'o': return __nodeInspect(a, { depth: 4, colors, showHidden: true });
+    case 'O': return __nodeInspect(a, { colors });
+    default: return '';
+  }
+}
 function __nodeFormatWith(o, ...args) {
   const colors = !!(o && o.colors);
   const first = args[0];
@@ -2915,21 +3030,7 @@ function __nodeFormatWith(o, ...args) {
     const c = first[p + 1];
     if (c === '%') { out += first.slice(last, p) + '%'; last = p + 2; p++; continue; }
     if (i >= args.length || !'sdifjoOc'.includes(c)) continue;
-    const a = args[i++];
-    let s;
-    switch (c) {
-      case 's':
-        s = typeof a === 'string' ? a : typeof a === 'bigint' ? `${a}n` : typeof a === 'symbol' ? String(a)
-          : typeof a === 'object' && a !== null ? __nodeInspect(a, { depth: 0 }) : Object.is(a, -0) ? '-0' : String(a);
-        break;
-      case 'd': s = typeof a === 'bigint' ? `${a}n` : typeof a === 'symbol' ? 'NaN' : (Object.is(Number(a), -0) ? '-0' : String(Number(a))); break;
-      case 'i': s = typeof a === 'bigint' ? `${a}n` : typeof a === 'symbol' ? 'NaN' : String(parseInt(a)); break;
-      case 'f': s = typeof a === 'symbol' ? 'NaN' : String(parseFloat(a)); break;
-      case 'j': try { s = JSON.stringify(a); } catch (e) { s = '[Circular]'; } break;
-      case 'o': s = __nodeInspect(a, { depth: 4, colors, showHidden: true }); break;
-      case 'O': s = __nodeInspect(a, { colors }); break;
-      case 'c': s = ''; break;
-    }
+    const s = __formatSpec(c, args[i++], colors);
     out += first.slice(last, p) + s;
     last = p + 2;
     p++;
@@ -2974,6 +3075,12 @@ const __qsPrim = (v) => {
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   return '';
 };
+// querystring.parse: a repeated key collects its values in an array
+function __qsAdd(obj, k, v) {
+  if (!(k in obj)) obj[k] = v;
+  else if (Array.isArray(obj[k])) obj[k].push(v);
+  else obj[k] = [obj[k], v];
+}
 const __querystring = {
   unescape: __qsUnescape,
   escape: (s) => encodeURIComponent(typeof s === 'string' ? s : String(s)),
@@ -3003,9 +3110,7 @@ const __querystring = {
       const i = part.indexOf(eq);
       const k = dec((i >= 0 ? part.slice(0, i) : part).replace(/\+/g, ' '));
       const v = i >= 0 ? dec(part.slice(i + eq.length).replace(/\+/g, ' ')) : '';
-      if (!(k in obj)) obj[k] = v;
-      else if (Array.isArray(obj[k])) obj[k].push(v);
-      else obj[k] = [obj[k], v];
+      __qsAdd(obj, k, v);
     }
     return obj;
   },
@@ -3044,23 +3149,9 @@ class __StringDecoder {
         this._rest = b.slice(b.length - keep);
         return __utf8Decode(b, 0, b.length - keep);
       }
-      case 'utf16le': {
-        let n = b.length - (b.length % 2);
-        if (!final && n >= 2) { const last = b[n - 2] | (b[n - 1] << 8); if (last >= 0xd800 && last <= 0xdbff) n -= 2; }
-        this._rest = final ? new Uint8Array(0) : b.slice(n);
-        let s = '';
-        for (let i = 0; i < n; i += 2) s += String.fromCharCode(b[i] | (b[i + 1] << 8));
-        return s;
-      }
+      case 'utf16le': return this._utf16(b, final);
       case 'base64':
-      case 'base64url': {
-        const n = final ? b.length : b.length - (b.length % 3);
-        this._rest = b.slice(n);
-        let bin = '';
-        for (let i = 0; i < n; i++) bin += String.fromCharCode(b[i]);
-        const s = n ? globalThis.btoa(bin) : '';
-        return this.encoding === 'base64' ? s : s.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-      }
+      case 'base64url': return this._base64(b, final);
       default: {
         this._rest = new Uint8Array(0);
         let s = '';
@@ -3069,54 +3160,82 @@ class __StringDecoder {
       }
     }
   }
+  _utf16(b, final) {
+    let n = b.length - (b.length % 2);
+    if (!final && n >= 2) { const last = b[n - 2] | (b[n - 1] << 8); if (last >= 0xd800 && last <= 0xdbff) n -= 2; }
+    this._rest = final ? new Uint8Array(0) : b.slice(n);
+    let s = '';
+    for (let i = 0; i < n; i += 2) s += String.fromCharCode(b[i] | (b[i + 1] << 8));
+    return s;
+  }
+  _base64(b, final) {
+    const n = final ? b.length : b.length - (b.length % 3);
+    this._rest = b.slice(n);
+    let bin = '';
+    for (let i = 0; i < n; i++) bin += String.fromCharCode(b[i]);
+    const s = n ? globalThis.btoa(bin) : '';
+    return this.encoding === 'base64' ? s : s.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
   write(buf) { return this._decode(this._bytes(buf), false); }
   end(buf) { const s = this._decode(this._bytes(buf === undefined ? new Uint8Array(0) : buf), true); this._rest = new Uint8Array(0); return s; }
 }
 // ---- assert / assert/strict ----
 function __fmtv(v) { try { return typeof v === 'string' ? JSON.stringify(v) : typeof v === 'bigint' ? v + 'n' : (v && typeof v === 'object') ? JSON.stringify(v) : String(v); } catch (e) { return String(v); } }
-function __deepEq(a, b, strict, seen) {
-  if (a === b) return a !== 0 || !strict || Object.is(a, b);
-  if (a === null || typeof a !== 'object' || b === null || typeof b !== 'object') {
-    if ((a === null || typeof a !== 'object') && (b === null || typeof b !== 'object')) return strict ? Object.is(a, b) : (a == b || (a !== a && b !== b));
-    return false;
-  }
-  if (strict && Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false;
+const __isPrimOrNull = (x) => x === null || typeof x !== 'object';
+// deepEqual of two values not both objects
+function __deepEqPrim(a, b, strict) {
+  if (__isPrimOrNull(a) && __isPrimOrNull(b)) return strict ? Object.is(a, b) : (a == b || (a !== a && b !== b));
+  return false;
+}
+// deepEqual's shape check of two objects: their tag, or null when prototype (strict), tag or
+// array-ness differ
+function __deepEqTag(a, b, strict) {
+  if (strict && Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return null;
   const tag = Object.prototype.toString.call(a);
-  if (tag !== Object.prototype.toString.call(b)) return false;
-  if (Array.isArray(a) !== Array.isArray(b)) return false;
-  seen = seen || new Map();
-  const memo = seen.get(a);
-  if (memo && memo.has(b)) return true;
-  if (memo) memo.add(b); else seen.set(a, new Set([b]));
-  if (a instanceof Date) { if (a.getTime() !== b.getTime()) return false; }
-  else if (a instanceof RegExp) { if (a.source !== b.source || a.flags !== b.flags || a.lastIndex !== b.lastIndex) return false; }
-  else if (a instanceof Error) { if (a.message !== b.message || a.name !== b.name) return false; }
-  else if (ArrayBuffer.isView(a)) {
-    if (a.length !== b.length || a.byteLength !== b.byteLength) return false;
-    for (let i = 0; i < a.length; i++) if (strict ? !Object.is(a[i], b[i]) : a[i] != b[i]) return false;
-  } else if (tag === '[object Number]' || tag === '[object String]' || tag === '[object Boolean]' || tag === '[object BigInt]' || tag === '[object Symbol]') {
-    if (!Object.is(a.valueOf(), b.valueOf())) return false;
+  if (tag !== Object.prototype.toString.call(b)) return null;
+  if (Array.isArray(a) !== Array.isArray(b)) return null;
+  return tag;
+}
+const __BOXED_TAGS = new Set(['[object Number]', '[object String]', '[object Boolean]', '[object BigInt]', '[object Symbol]']);
+function __deepEqView(a, b, strict) {
+  if (a.length !== b.length || a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.length; i++) if (strict ? !Object.is(a[i], b[i]) : a[i] != b[i]) return false;
+  return true;
+}
+// deepEqual of the internal value of a date, regexp, error, typed array or boxed primitive
+function __deepEqValue(a, b, strict, tag) {
+  if (a instanceof Date) return a.getTime() === b.getTime();
+  if (a instanceof RegExp) return a.source === b.source && a.flags === b.flags && a.lastIndex === b.lastIndex;
+  if (a instanceof Error) return a.message === b.message && a.name === b.name;
+  if (ArrayBuffer.isView(a)) return __deepEqView(a, b, strict);
+  if (__BOXED_TAGS.has(tag)) return Object.is(a.valueOf(), b.valueOf());
+  return true;
+}
+function __deepEqMap(a, b, strict, seen) {
+  if (a.size !== b.size) return false;
+  for (const [k, v] of a) {
+    if (b.has(k)) { if (!__deepEq(v, b.get(k), strict, seen)) return false; continue; }
+    // an object key (or, loosely, a primitive one) can still match a deep-equal key
+    if (strict && (k === null || typeof k !== 'object')) return false;
+    let hit = false;
+    for (const [k2, v2] of b) if (__deepEq(k, k2, strict, seen) && __deepEq(v, v2, strict, seen)) { hit = true; break; }
+    if (!hit) return false;
   }
-  if (a instanceof Map) {
-    if (a.size !== b.size) return false;
-    for (const [k, v] of a) {
-      if (b.has(k)) { if (!__deepEq(v, b.get(k), strict, seen)) return false; continue; }
-      // an object key (or, loosely, a primitive one) can still match a deep-equal key
-      if (strict && (k === null || typeof k !== 'object')) return false;
-      let hit = false;
-      for (const [k2, v2] of b) if (__deepEq(k, k2, strict, seen) && __deepEq(v, v2, strict, seen)) { hit = true; break; }
-      if (!hit) return false;
-    }
-  } else if (a instanceof Set) {
-    if (a.size !== b.size) return false;
-    for (const v of a) {
-      if (b.has(v)) continue;
-      if (strict && (v === null || typeof v !== 'object')) return false;
-      let hit = false;
-      for (const v2 of b) if (__deepEq(v, v2, strict, seen)) { hit = true; break; }
-      if (!hit) return false;
-    }
+  return true;
+}
+function __deepEqSet(a, b, strict, seen) {
+  if (a.size !== b.size) return false;
+  for (const v of a) {
+    if (b.has(v)) continue;
+    if (strict && (v === null || typeof v !== 'object')) return false;
+    let hit = false;
+    for (const v2 of b) if (__deepEq(v, v2, strict, seen)) { hit = true; break; }
+    if (!hit) return false;
   }
+  return true;
+}
+// deepEqual of the own enumerable keys (and, strictly, symbols)
+function __deepEqKeys(a, b, strict, seen) {
   const own = (o) => { const ks = Object.keys(o); if (strict) for (const s of Object.getOwnPropertySymbols(o)) if (Object.prototype.propertyIsEnumerable.call(o, s)) ks.push(s); return ks; };
   const ka = own(a), kb = own(b);
   if (ka.length !== kb.length) return false;
@@ -3125,6 +3244,25 @@ function __deepEq(a, b, strict, seen) {
     if (!__deepEq(a[k], b[k], strict, seen)) return false;
   }
   return true;
+}
+// deepEqual's cycle memo: true when a/b is already being compared (else it is recorded)
+function __deepEqSeen(seen, a, b) {
+  const memo = seen.get(a);
+  if (memo && memo.has(b)) return true;
+  if (memo) memo.add(b); else seen.set(a, new Set([b]));
+  return false;
+}
+function __deepEq(a, b, strict, seen) {
+  if (a === b) return a !== 0 || !strict || Object.is(a, b);
+  if (__isPrimOrNull(a) || __isPrimOrNull(b)) return __deepEqPrim(a, b, strict);
+  const tag = __deepEqTag(a, b, strict);
+  if (tag === null) return false;
+  seen = seen || new Map();
+  if (__deepEqSeen(seen, a, b)) return true;
+  if (!__deepEqValue(a, b, strict, tag)) return false;
+  if (a instanceof Map) { if (!__deepEqMap(a, b, strict, seen)) return false; }
+  else if (a instanceof Set) { if (!__deepEqSet(a, b, strict, seen)) return false; }
+  return __deepEqKeys(a, b, strict, seen);
 }
 class __AssertionError extends Error {
   constructor(options) {
@@ -3149,23 +3287,24 @@ function __mkAssert(strict) {
   };
   const looseEq = (a, b) => a == b || (a !== a && b !== b);
   // error validation for throws/rejects: a class, a RegExp, a validation function or an object
+  const matchesFn = (err, expected, message, operator) => {
+    if (expected.prototype !== undefined && err instanceof expected) return;
+    if (Error.isPrototypeOf(expected) || expected === Error) fail(err, expected, message, operator, 'The error is expected to be an instance of "' + expected.name + '". Received "' + (err && err.constructor && err.constructor.name) + '"');
+    const res = expected.call({}, err);
+    if (res !== true) fail(err, expected, message, operator, 'The validation function is expected to return "true". Received ' + __fmtv(res));
+  };
+  const matchesObj = (err, expected, message, operator) => {
+    for (const k of Object.keys(expected)) {
+      const want = expected[k], got = err == null ? undefined : err[k];
+      const ok = want instanceof RegExp && typeof got === 'string' ? want.test(got) : __deepEq(got, want, true);
+      if (!ok) fail(err, expected, message, operator, 'Expected values to be strictly deep-equal: ' + k + ' ' + __fmtv(got) + ' !== ' + __fmtv(want));
+    }
+  };
   const matches = (err, expected, message, operator) => {
     if (expected === undefined) return;
-    if (typeof expected === 'function') {
-      if (expected.prototype !== undefined && err instanceof expected) return;
-      if (Error.isPrototypeOf(expected) || expected === Error) fail(err, expected, message, operator, 'The error is expected to be an instance of "' + expected.name + '". Received "' + (err && err.constructor && err.constructor.name) + '"');
-      const res = expected.call({}, err);
-      if (res !== true) fail(err, expected, message, operator, 'The validation function is expected to return "true". Received ' + __fmtv(res));
-      return;
-    }
+    if (typeof expected === 'function') { matchesFn(err, expected, message, operator); return; }
     if (expected instanceof RegExp) { if (expected.test(String(err))) return; fail(err, expected, message, operator, 'The input did not match the regular expression ' + String(expected) + '. Input:\n\n' + __fmtv(String(err)) + '\n'); }
-    if (expected && typeof expected === 'object') {
-      for (const k of Object.keys(expected)) {
-        const want = expected[k], got = err == null ? undefined : err[k];
-        const ok = want instanceof RegExp && typeof got === 'string' ? want.test(got) : __deepEq(got, want, true);
-        if (!ok) fail(err, expected, message, operator, 'Expected values to be strictly deep-equal: ' + k + ' ' + __fmtv(got) + ' !== ' + __fmtv(want));
-      }
-    }
+    if (expected && typeof expected === 'object') matchesObj(err, expected, message, operator);
   };
   // doesNotThrow / doesNotReject: an error that does not match `expected` propagates as is
   const unwanted = (e, expected, message, operator, what) => {
@@ -3800,7 +3939,10 @@ function __isDomNode(o) {
 function __equals(a, b, testers, strictCheck) {
   return __eq(a, b, [], [], testers || [], strictCheck ? __hasKey : __hasDefinedKey);
 }
-function __eq(a, b, aStack, bStack, testers, hasKey) {
+// __eq's "no answer yet" (an asymmetric matcher or tester may answer anything else)
+const __EQ_NEXT = Symbol('eq-next');
+// __eq before the structural walk: asymmetric matchers, custom testers, URLs, identity, null
+function __eqPre(a, b, testers) {
   const asymA = __isAsym(a), asymB = __isAsym(b);
   if (asymA && !asymB) return a.asymmetricMatch(b, testers);
   if (asymB && !asymA) return b.asymmetricMatch(a, testers);
@@ -3812,8 +3954,10 @@ function __eq(a, b, aStack, bStack, testers, hasKey) {
   if (typeof URL === 'function' && a instanceof URL && b instanceof URL) return a.href === b.href;
   if (Object.is(a, b)) return true;
   if (a === null || b === null) return a === b;
-  const cls = Object.prototype.toString.call(a);
-  if (cls !== Object.prototype.toString.call(b)) return false;
+  return __EQ_NEXT;
+}
+// __eq of booleans, strings, numbers (boxed or not), dates and regexps (undefined: other classes)
+function __eqByClass(a, b, cls) {
   switch (cls) {
     case '[object Boolean]':
     case '[object String]':
@@ -3827,42 +3971,95 @@ function __eq(a, b, aStack, bStack, testers, hasKey) {
     }
     case '[object RegExp]': return a.source === b.source && a.flags === b.flags;
   }
-  if (typeof a !== 'object' || typeof b !== 'object') return false;
-  if (__isDomNode(a) && __isDomNode(b)) return a.isEqualNode(b);
+  return undefined;
+}
+// __eq's cycle check: a pair already on the stacks (undefined: not there)
+function __eqCycle(a, b, aStack, bStack) {
   for (let i = aStack.length; i--;) {
     if (aStack[i] === a) return bStack[i] === b;
     if (bStack[i] === b) return false;
   }
-  aStack.push(a);
-  bStack.push(b);
-  if (cls === '[object Array]' && a.length !== b.length) return false;
-  if (__isError(a) && __isError(b)) {
-    try {
-      let r = Object.prototype.toString.call(a) === Object.prototype.toString.call(b) && a.name === b.name && a.message === b.message;
-      if (typeof b.cause !== 'undefined') r = r && __eq(a.cause, b.cause, aStack, bStack, testers, hasKey);
-      if (a instanceof AggregateError && b instanceof AggregateError) r = r && __eq(a.errors, b.errors, aStack, bStack, testers, hasKey);
-      return r && __eq({ ...a }, { ...b }, aStack, bStack, testers, hasKey);
-    } finally {
-      aStack.pop();
-      bStack.pop();
-    }
+  return undefined;
+}
+function __eqError(a, b, aStack, bStack, testers, hasKey) {
+  try {
+    let r = Object.prototype.toString.call(a) === Object.prototype.toString.call(b) && a.name === b.name && a.message === b.message;
+    if (typeof b.cause !== 'undefined') r = r && __eq(a.cause, b.cause, aStack, bStack, testers, hasKey);
+    if (a instanceof AggregateError && b instanceof AggregateError) r = r && __eq(a.errors, b.errors, aStack, bStack, testers, hasKey);
+    return r && __eq({ ...a }, { ...b }, aStack, bStack, testers, hasKey);
+  } finally {
+    aStack.pop();
+    bStack.pop();
   }
+}
+function __eqOwnKeys(a, b, aStack, bStack, testers, hasKey) {
   const aKeys = __eqKeys(a, hasKey);
   if (__eqKeys(b, hasKey).length !== aKeys.length) return false;
   for (let i = aKeys.length; i--;) {
     const k = aKeys[i];
     if (!(hasKey(b, k) && __eq(a[k], b[k], aStack, bStack, testers, hasKey))) return false;
   }
+  return true;
+}
+function __eq(a, b, aStack, bStack, testers, hasKey) {
+  const pre = __eqPre(a, b, testers);
+  if (pre !== __EQ_NEXT) return pre;
+  const cls = Object.prototype.toString.call(a);
+  if (cls !== Object.prototype.toString.call(b)) return false;
+  const byClass = __eqByClass(a, b, cls);
+  if (byClass !== undefined) return byClass;
+  if (typeof a !== 'object' || typeof b !== 'object') return false;
+  if (__isDomNode(a) && __isDomNode(b)) return a.isEqualNode(b);
+  const cycle = __eqCycle(a, b, aStack, bStack);
+  if (cycle !== undefined) return cycle;
+  aStack.push(a);
+  bStack.push(b);
+  if (cls === '[object Array]' && a.length !== b.length) return false;
+  if (__isError(a) && __isError(b)) return __eqError(a, b, aStack, bStack, testers, hasKey);
+  if (!__eqOwnKeys(a, b, aStack, bStack, testers, hasKey)) return false;
   aStack.pop();
   bStack.pop();
   return true;
+}
+const __bothIterable = (a, b) => !(typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) || Array.isArray(b) ||
+  a == null || b == null || !a[Symbol.iterator] || !b[Symbol.iterator]);
+// iterableEquality of two Sets: every member of `a` is in `b` or deep-equals one there
+function __iterSetEq(a, b, inner) {
+  for (const av of a) {
+    if (!b.has(av)) {
+      let has = false;
+      for (const bv of b) if (__equals(av, bv, inner) === true) has = true;
+      if (!has) return false;
+    }
+  }
+  return true;
+}
+// iterableEquality of two Maps: every entry of `a` is in `b` or deep-equals one there
+function __iterMapEq(a, b, inner) {
+  for (const [ak, av] of a) {
+    if (!b.has(ak) || !__equals(av, b.get(ak), inner)) {
+      let has = false;
+      for (const [bk, bv] of b) if (__equals(ak, bk, inner) === true && __equals(av, bv, inner) === true) has = true;
+      if (!has) return false;
+    }
+  }
+  return true;
+}
+// iterableEquality of other iterables: in iteration order, then their enumerable own entries
+function __iterOrderedEq(a, b, inner) {
+  const bi = b[Symbol.iterator]();
+  for (const av of a) {
+    const nb = bi.next();
+    if (nb.done || !__equals(av, nb.value, inner)) return false;
+  }
+  if (!bi.next().done) return false;
+  return !!__equals(Object.entries(a), Object.entries(b), inner);
 }
 // vitest iterableEquality: two non-array iterables of the same constructor — Sets by members and
 // Maps by entries (in any order, deep-equal members match), others in iteration order plus their
 // enumerable own entries.
 function __iterableEquality(a, b, testers = [], aStack = [], bStack = []) {
-  if (typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) || Array.isArray(b) ||
-    a == null || b == null || !a[Symbol.iterator] || !b[Symbol.iterator]) return undefined;
+  if (!__bothIterable(a, b)) return undefined;
   if (a.constructor !== b.constructor) return false;
   for (let i = aStack.length; i--;) if (aStack[i] === a) return bStack[i] === b;
   aStack.push(a);
@@ -3872,38 +4069,14 @@ function __iterableEquality(a, b, testers = [], aStack = [], bStack = []) {
   const isA = (t, v) => Object.prototype.toString.call(v) === `[object ${t}]`;
   if (a.size !== undefined) {
     if (a.size !== b.size) return false;
-    if (isA('Set', a)) {
-      let all = true;
-      for (const av of a) {
-        if (!b.has(av)) {
-          let has = false;
-          for (const bv of b) if (__equals(av, bv, inner) === true) has = true;
-          if (!has) { all = false; break; }
-        }
-      }
-      aStack.pop(); bStack.pop();
-      return all;
-    }
-    if (isA('Map', a)) {
-      let all = true;
-      for (const [ak, av] of a) {
-        if (!b.has(ak) || !__equals(av, b.get(ak), inner)) {
-          let has = false;
-          for (const [bk, bv] of b) if (__equals(ak, bk, inner) === true && __equals(av, bv, inner) === true) has = true;
-          if (!has) { all = false; break; }
-        }
-      }
+    const unordered = isA('Set', a) ? __iterSetEq : isA('Map', a) ? __iterMapEq : null;
+    if (unordered) {
+      const all = unordered(a, b, inner);
       aStack.pop(); bStack.pop();
       return all;
     }
   }
-  const bi = b[Symbol.iterator]();
-  for (const av of a) {
-    const nb = bi.next();
-    if (nb.done || !__equals(av, nb.value, inner)) return false;
-  }
-  if (!bi.next().done) return false;
-  if (!__equals(Object.entries(a), Object.entries(b), inner)) return false;
+  if (!__iterOrderedEq(a, b, inner)) return false;
   aStack.pop();
   bStack.pop();
   return true;
@@ -4129,6 +4302,20 @@ function __snapLiteral(snap, code, index) {
   if (lines.length <= 1) return `\`${esc(lines.join('\n'))}\``;
   return `\`\n${esc(lines.map((l) => (l ? next + l : '')).join('\n'))}\n${indent}\``;
 }
+// __inlineSplice of a call whose first argument is a property matcher object: the snapshot
+// goes after it
+function __inlineSpliceProps(code, index, snap, name, at, ws) {
+  // toMatchInlineSnapshot({ …properties }) [, `…`]
+  const obj = new RegExp(`${name}${ws}\\{`).exec(at);
+  if (!obj) return null;
+  let depth = 0, i = obj.index + obj[0].length - 1, end = -1;
+  for (; i < at.length; i++) { if (at[i] === '{') depth++; else if (at[i] === '}' && --depth === 0) { end = i + 1; break; } }
+  let callEnd = -1;
+  for (let j = obj.index + name.length, d = 0; j < at.length; j++) { if (at[j] === '(') d++; else if (at[j] === ')' && --d === 0) { callEnd = j; break; } }
+  if (end < 0 || callEnd < 0) return null;
+  const lit = `, ${__snapLiteral(snap, code, index)}`;
+  return end === callEnd ? [index + callEnd, index + callEnd, lit] : [index + end, index + callEnd, lit];
+}
 // @vitest/snapshot replaceInlineSnap / replaceObjectSnap on `code` at `index` (the method name):
 // the splice [start, end, text] that writes `snap` as the call's snapshot argument.
 function __inlineSplice(code, index, snap, name) {
@@ -4137,16 +4324,7 @@ function __inlineSplice(code, index, snap, name) {
   const start = new RegExp(`${name}${ws}[\\w$]*(['"\`)])`).exec(at);
   const first = at.indexOf(name);
   if (!start || start.index !== first) {
-    // toMatchInlineSnapshot({ …properties }) [, `…`]
-    const obj = new RegExp(`${name}${ws}\\{`).exec(at);
-    if (!obj) return null;
-    let depth = 0, i = obj.index + obj[0].length - 1, end = -1;
-    for (; i < at.length; i++) { if (at[i] === '{') depth++; else if (at[i] === '}' && --depth === 0) { end = i + 1; break; } }
-    let callEnd = -1;
-    for (let j = obj.index + name.length, d = 0; j < at.length; j++) { if (at[j] === '(') d++; else if (at[j] === ')' && --d === 0) { callEnd = j; break; } }
-    if (end < 0 || callEnd < 0) return null;
-    const lit = `, ${__snapLiteral(snap, code, index)}`;
-    return end === callEnd ? [index + callEnd, index + callEnd, lit] : [index + end, index + callEnd, lit];
+    return __inlineSpliceProps(code, index, snap, name, at, ws);
   }
   const quote = start[1];
   const startIndex = index + start.index + start[0].length;
@@ -4178,6 +4356,28 @@ function __snapMismatch(key, expected, actual) {
   err.actual = actual;
   return err;
 }
+// the snapshots of skipped tests count as checked
+function __snapCheckSkipped(st, skipped) {
+  for (const name of skipped) {
+    for (const k of st.unchecked) if (k.startsWith(name) && / \d+$| > /.test(k.slice(name.length))) st.unchecked.delete(k);
+  }
+}
+// __snapFinish's save of the snapshot file (or, under -u, delete of an emptied one); returns
+// whether the file counts as deleted
+function __snapSave(st, external, mode) {
+  if ((st.dirty || st.unchecked.size) && (external || st.inline || st.raw)) {
+    if (external) {
+      globalThis.__fs_mkdir(st.sf.dir, true);
+      globalThis.__fs_writeFile(st.sf.path, __serializeSnapFile(st.data), false);
+    }
+    return false;
+  }
+  if (!external && st.exists) {
+    if (mode === 'all') globalThis.__fs_remove(st.sf.path, 'unlink');
+    return true;
+  }
+  return false;
+}
 // End of the file: mark the snapshots of skipped tests checked, drop the obsolete ones under -u,
 // save (or, under -u, delete an emptied file) and report the counts.
 function __snapFinish(skipped) {
@@ -4187,9 +4387,7 @@ function __snapFinish(skipped) {
     if (!sf || !globalThis.__fs_existsSync(sf.path)) return undefined;
     __snapLoad();
   }
-  for (const name of skipped) {
-    for (const k of st.unchecked) if (k.startsWith(name) && / \d+$| > /.test(k.slice(name.length))) st.unchecked.delete(k);
-  }
+  __snapCheckSkipped(st, skipped);
   const mode = __snapMode();
   const uncheckedKeys = [...st.unchecked];
   if (uncheckedKeys.length && mode === 'all') {
@@ -4199,16 +4397,7 @@ function __snapFinish(skipped) {
   }
   __writeInlineSnapshots(st.inlineWrites);
   const external = Object.keys(st.data).length;
-  let deleted = false;
-  if ((st.dirty || st.unchecked.size) && (external || st.inline || st.raw)) {
-    if (external) {
-      globalThis.__fs_mkdir(st.sf.dir, true);
-      globalThis.__fs_writeFile(st.sf.path, __serializeSnapFile(st.data), false);
-    }
-  } else if (!external && st.exists) {
-    if (mode === 'all') globalThis.__fs_remove(st.sf.path, 'unlink');
-    deleted = true;
-  }
+  const deleted = __snapSave(st, external, mode);
   return {
     added: st.added, matched: st.matched, unmatched: st.unmatched, updated: st.updated,
     unchecked: deleted ? 0 : uncheckedKeys.length, unchecked_keys: uncheckedKeys, file_deleted: deleted,
@@ -4216,6 +4405,44 @@ function __snapFinish(skipped) {
 }
 
 // ---- expect ----
+// toThrow's call of `actual`: [whether it threw (or is an Error), what]
+function __thrownBy(actual) {
+  if (typeof actual === 'function') { try { actual(); } catch (e) { return [true, e]; } return [false, undefined]; }
+  if (actual instanceof Error) return [true, actual];
+  return [false, undefined];
+}
+// toThrow() / toThrow(string) / toThrow(RegExp), as chai's `throws` with vitest's messages
+function __toThrowChai(negated, expected, threw, err, fnShown) {
+  const shown = (x) => (x instanceof Error ? x.toString() : typeof x === 'string' ? x : x && x.constructor && x.constructor.name);
+  if (expected === undefined) {
+    return __chaiAssert(negated, threw, 'expected #{this} to throw an error', 'expected #{this} to not throw an error but #{act} was thrown', fnShown, undefined, shown(err));
+  }
+  if (!threw) {
+    if (negated) return;
+    throw new __ChaiAssertionError(__chaiMsg('expected #{this} to throw an error', fnShown));
+  }
+  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : String(err);
+  const re = expected === '' ? /^$/ : expected;
+  const matches = re instanceof RegExp ? re.test(message) : message.includes(re);
+  const verb = re instanceof RegExp ? 'matching' : 'including';
+  return __chaiAssert(negated, matches, `expected #{this} to throw error ${verb} #{exp} but got #{act}`, `expected #{this} to throw error not ${verb} #{exp}`, fnShown, re, message);
+}
+// toThrow(class / Error / asymmetric matcher / value); `c` is the matcher's chai assert
+function __toThrowValue(c, testers, expected, threw, err) {
+  if (typeof expected === 'function') {
+    const name = expected.name || expected.prototype.constructor.name;
+    return c(threw && err instanceof expected, `expected error to be instance of ${name}`, `expected error not to be instance of ${name}`, expected, err);
+  }
+  // an Error or any other value: vitest's `equals(thrown, expected, [iterableEquality])`
+  // (Errors by name / message / cause / own props; a plain object never equals an Error)
+  if (__isError(expected)) {
+    return c(threw && __equals(err, expected, [...testers, __iterableEquality]), 'expected a thrown error to be #{exp}', 'expected a thrown error not to be #{exp}', expected, err);
+  }
+  if (__isAsym(expected)) {
+    return c(threw && expected.asymmetricMatch(err), 'expected error to match asymmetric matcher', 'expected error not to match asymmetric matcher', expected, err);
+  }
+  c(threw && __equals(err, expected, [...testers, __iterableEquality]), 'expected a thrown value to equal #{exp}', 'expected a thrown value not to equal #{exp}', expected, err);
+}
 // The jest-style matchers of one call on a chai Assertion (__attachMatcher): `actual`, `negated`,
 // `message` and `promise` are the assertion's object / negate / message / promise flags.
 function makeExpect(actual, negated = false, message = undefined, promise = '') {
@@ -4418,40 +4645,12 @@ function makeExpect(actual, negated = false, message = undefined, promise = '') 
       c(typeof re === 'string' ? actual.includes(re) : re.test(actual), 'expected #{this} to match #{exp}', 'expected #{this} not to match #{exp}', re);
     },
     toThrow(expected) {
-      let threw = false, err;
-      if (typeof actual === 'function') { try { actual(); } catch (e) { threw = true; err = e; } }
-      else if (actual instanceof Error) { threw = true; err = actual; }
+      const [threw, err] = __thrownBy(actual);
       const fnShown = typeof actual === 'function' ? actual : () => {};
       // chai's `throws` (no argument, a string, a RegExp): vitest's messages
-      if (expected === undefined || typeof expected === 'string' || expected instanceof RegExp) {
-        const shown = (x) => (x instanceof Error ? x.toString() : typeof x === 'string' ? x : x && x.constructor && x.constructor.name);
-        if (expected === undefined) {
-          return __chaiAssert(negated, threw, 'expected #{this} to throw an error', 'expected #{this} to not throw an error but #{act} was thrown', fnShown, undefined, shown(err));
-        }
-        if (!threw) {
-          if (negated) return;
-          throw new __ChaiAssertionError(__chaiMsg('expected #{this} to throw an error', fnShown));
-        }
-        const message = err instanceof Error ? err.message : typeof err === 'string' ? err : String(err);
-        const re = expected === '' ? /^$/ : expected;
-        const matches = re instanceof RegExp ? re.test(message) : message.includes(re);
-        const verb = re instanceof RegExp ? 'matching' : 'including';
-        return __chaiAssert(negated, matches, `expected #{this} to throw error ${verb} #{exp} but got #{act}`, `expected #{this} to throw error not ${verb} #{exp}`, fnShown, re, message);
-      }
+      if (expected === undefined || typeof expected === 'string' || expected instanceof RegExp) return __toThrowChai(negated, expected, threw, err, fnShown);
       if (!threw && !negated) throw new __ChaiAssertionError("expected function to throw an error, but it didn't", { showDiff: false });
-      if (typeof expected === 'function') {
-        const name = expected.name || expected.prototype.constructor.name;
-        return c(threw && err instanceof expected, `expected error to be instance of ${name}`, `expected error not to be instance of ${name}`, expected, err);
-      }
-      // an Error or any other value: vitest's `equals(thrown, expected, [iterableEquality])`
-      // (Errors by name / message / cause / own props; a plain object never equals an Error)
-      if (__isError(expected)) {
-        return c(threw && __equals(err, expected, [...testers, __iterableEquality]), 'expected a thrown error to be #{exp}', 'expected a thrown error not to be #{exp}', expected, err);
-      }
-      if (__isAsym(expected)) {
-        return c(threw && expected.asymmetricMatch(err), 'expected error to match asymmetric matcher', 'expected error not to match asymmetric matcher', expected, err);
-      }
-      c(threw && __equals(err, expected, [...testers, __iterableEquality]), 'expected a thrown value to equal #{exp}', 'expected a thrown value not to equal #{exp}', expected, err);
+      return __toThrowValue(c, testers, expected, threw, err);
     },
     toHaveBeenCalled() {
       const spy = spyOf();
@@ -4601,23 +4800,35 @@ function __withExpectMessage(e, message) {
 // iterableEquality / subsetEquality (turbo-test#163), coloured as tinyrainbow colours them
 const __bold = __tr('\x1b[1m', '\x1b[22m', '\x1b[22m\x1b[1m');
 // @vitest/expect matcherHint
-function __matcherHint(matcherName, received = 'received', expected = 'expected', options = {}) {
-  const { comment = '', isDirectExpectCall = false, isNot = false, promise = '', secondArgument = '', expectedColor = __dcol.green, receivedColor = __dcol.red, secondArgumentColor = __dcol.green } = options;
-  const dim = __dcol.dim;
+// matcherHint's options, with their defaults
+function __hintOptions(options) {
+  const d = { comment: '', isDirectExpectCall: false, isNot: false, promise: '', secondArgument: '', expectedColor: __dcol.green, receivedColor: __dcol.red, secondArgumentColor: __dcol.green };
+  const o = {};
+  for (const k of Object.keys(d)) { const v = options[k]; o[k] = v === undefined ? d[k] : v; }
+  return o;
+}
+// matcherHint up to the matcher name: [hint, the dim text still to come]
+function __hintHead(matcherName, received, o, dim) {
   let hint = '';
   let dimString = 'expect';
-  if (!isDirectExpectCall && received !== '') { hint += dim(`${dimString}(`) + receivedColor(received); dimString = ')'; }
-  if (promise !== '') { hint += dim(`${dimString}.`) + promise; dimString = ''; }
-  if (isNot) { hint += `${dim(`${dimString}.`)}not`; dimString = ''; }
+  if (!o.isDirectExpectCall && received !== '') { hint += dim(`${dimString}(`) + o.receivedColor(received); dimString = ')'; }
+  if (o.promise !== '') { hint += dim(`${dimString}.`) + o.promise; dimString = ''; }
+  if (o.isNot) { hint += `${dim(`${dimString}.`)}not`; dimString = ''; }
   if (matcherName.includes('.')) dimString += matcherName;
   else { hint += dim(`${dimString}.`) + matcherName; dimString = ''; }
+  return [hint, dimString];
+}
+function __matcherHint(matcherName, received = 'received', expected = 'expected', options = {}) {
+  const o = __hintOptions(options);
+  const dim = __dcol.dim;
+  let [hint, dimString] = __hintHead(matcherName, received, o, dim);
   if (expected === '') dimString += '()';
   else {
-    hint += dim(`${dimString}(`) + expectedColor(expected);
-    if (secondArgument) hint += dim(', ') + secondArgumentColor(secondArgument);
+    hint += dim(`${dimString}(`) + o.expectedColor(expected);
+    if (o.secondArgument) hint += dim(', ') + o.secondArgumentColor(o.secondArgument);
     dimString = ')';
   }
-  if (comment !== '') dimString += ` // ${comment}`;
+  if (o.comment !== '') dimString += ` // ${o.comment}`;
   if (dimString !== '') hint += dim(dimString);
   return hint;
 }
@@ -4935,6 +5146,7 @@ let __mockCallOrder = 0;
 // implementation is set), `restore` (spyOn's, run by mockRestore / vi.restoreAllMocks),
 // `keepName` (spyOn: mockReset keeps the method's name).
 const __mockRestores = new Set();
+const __mockConfigKey = Symbol('turbo-test mock config');
 const __mockStatic = new Set(['length', 'name', 'prototype', Symbol.for('nodejs.util.promisify.custom')]);
 function __mockDescriptor(o, k) {
   for (let p = o; p != null; p = Object.getPrototypeOf(p)) {
@@ -4946,11 +5158,23 @@ function __mockDescriptor(o, k) {
 function __mockConstructorError(shorthand) {
   return new TypeError(`Cannot use \`${shorthand}\` when called with \`new\`. Use \`mockImplementation\` with a \`class\` keyword instead. See https://vitest.dev/api/mock#class-support for more information.`);
 }
+// makeSpy: the original's (or implementation's) own and inherited statics onto the mock
+function __copyMockStatics(fn, from) {
+  for (let src = from; src && src !== Object.prototype && src !== Function.prototype; src = Object.getPrototypeOf(src)) {
+    for (const k of [...Object.getOwnPropertyNames(src), ...Object.getOwnPropertySymbols(src)]) {
+      if (__mockStatic.has(k) || __mockDescriptor(fn, k)) continue;
+      try { Object.defineProperty(fn, k, Object.getOwnPropertyDescriptor(src, k)); } catch (e) {}
+    }
+  }
+}
+const __mockLength = (impl, original) => ((impl || original) ? (impl || original).length : 0);
 function makeSpy(impl, opts) {
   opts = opts || {};
   const original = opts.original;
   if (opts.restore) __mockRestores.add(opts.restore);
   const config = { impl: undefined, once: [], name: 'vi.fn()' };
+  // spyOn's original: jest.fn()'s whenCalledWith (__jestWhen) falls through to it
+  Object.defineProperty(config, 'original', { value: original });
   const state = {
     calls: [], contexts: [], instances: [], invocationCallOrder: [], settledResults: [], results: [],
     get lastCall() { return state.calls[state.calls.length - 1]; },
@@ -4997,15 +5221,12 @@ function makeSpy(impl, opts) {
     return ret;
   } }[name];
   // the original's (or implementation's) own and inherited statics, as vitest copies them
-  for (let src = original || impl; src && src !== Object.prototype && src !== Function.prototype; src = Object.getPrototypeOf(src)) {
-    for (const k of [...Object.getOwnPropertyNames(src), ...Object.getOwnPropertySymbols(src)]) {
-      if (__mockStatic.has(k) || __mockDescriptor(fn, k)) continue;
-      try { Object.defineProperty(fn, k, Object.getOwnPropertyDescriptor(src, k)); } catch (e) {}
-    }
-  }
-  Object.defineProperty(fn, 'length', { writable: true, enumerable: false, configurable: true, value: (impl || original) ? (impl || original).length : 0 });
+  __copyMockStatics(fn, original || impl);
+  Object.defineProperty(fn, 'length', { writable: true, enumerable: false, configurable: true, value: __mockLength(impl, original) });
   if (opts.keepName) config.name = fn.name || 'vi.fn()';
   fn._isMockFunction = true;
+  // the closure's state, for jest.fn()'s whenCalledWith (__jestWhen); a symbol, so no member
+  Object.defineProperty(fn, __mockConfigKey, { value: config });
   // the implementation the next call runs (vitest: a queued once first)
   fn.getMockImplementation = () => config.once[0] || config.impl;
   Object.defineProperty(fn, 'mock', { configurable: false, enumerable: true, writable: false, value: state });
@@ -5081,37 +5302,39 @@ const __ttMockNames = new WeakMap();
 globalThis.__ttMockNames = (m) => (m && (typeof m === 'object' || typeof m === 'function') ? __ttMockNames.get(m) : undefined);
 // `spy` (vi.mockObject's `{ spy: true }`, vitest's autospy): functions call their originals and
 // arrays are kept.
+function __automockFn(mod, depth, spy) {
+  const m = __trackSpy(makeSpy(undefined, { original: spy ? mod : undefined }));
+  // vitest's automocker keeps the function's own name (`Comp.name`, not the spy's) (turbo-test#136)
+  try { Object.defineProperty(m, 'name', { value: mod.name, configurable: true }); } catch (e) {}
+  if (depth < 3) {
+    // own statics (class static methods are non-enumerable), not the function's built-ins
+    for (const k of Object.getOwnPropertyNames(mod)) {
+      if (k === 'length' || k === 'name' || k === 'prototype' || k === 'caller' || k === 'arguments') continue;
+      try { m[k] = __automock(mod[k], depth + 1, spy); } catch (e) {}
+    }
+    // class / constructor function: `new m()` returns an instance of m.prototype, whose
+    // methods (inherited ones included) are mocks
+    if (mod.prototype && mod.prototype.constructor === mod) __automockProtoMethods(m.prototype, mod.prototype, spy);
+  }
+  return m;
+}
+function __automockObj(mod, depth, spy) {
+  const out = {};
+  for (const k of Object.keys(mod)) {
+    let v; try { v = mod[k]; } catch (e) { continue; }
+    out[k] = depth < 4 ? __automock(v, depth + 1, spy) : v;
+  }
+  // a class instance: its prototype methods become mocks too
+  __automockProtoMethods(out, Object.getPrototypeOf(mod), spy);
+  // an ES module's automock is still an ES module: its `default` is the mocked default
+  if (mod[Symbol.for('turbo-test.esm')]) Object.defineProperty(out, Symbol.for('turbo-test.esm'), { value: true });
+  return out;
+}
 function __automock(mod, depth, spy) {
   depth = depth || 0;
-  if (typeof mod === 'function') {
-    const m = __trackSpy(makeSpy(undefined, { original: spy ? mod : undefined }));
-    // vitest's automocker keeps the function's own name (`Comp.name`, not the spy's) (turbo-test#136)
-    try { Object.defineProperty(m, 'name', { value: mod.name, configurable: true }); } catch (e) {}
-    if (depth < 3) {
-      // own statics (class static methods are non-enumerable), not the function's built-ins
-      for (const k of Object.getOwnPropertyNames(mod)) {
-        if (k === 'length' || k === 'name' || k === 'prototype' || k === 'caller' || k === 'arguments') continue;
-        try { m[k] = __automock(mod[k], depth + 1, spy); } catch (e) {}
-      }
-      // class / constructor function: `new m()` returns an instance of m.prototype, whose
-      // methods (inherited ones included) are mocks
-      if (mod.prototype && mod.prototype.constructor === mod) __automockProtoMethods(m.prototype, mod.prototype, spy);
-    }
-    return m;
-  }
+  if (typeof mod === 'function') return __automockFn(mod, depth, spy);
   if (Array.isArray(mod)) return spy ? mod.slice() : [];
-  if (mod && typeof mod === 'object') {
-    const out = {};
-    for (const k of Object.keys(mod)) {
-      let v; try { v = mod[k]; } catch (e) { continue; }
-      out[k] = depth < 4 ? __automock(v, depth + 1, spy) : v;
-    }
-    // a class instance: its prototype methods become mocks too
-    __automockProtoMethods(out, Object.getPrototypeOf(mod), spy);
-    // an ES module's automock is still an ES module: its `default` is the mocked default
-    if (mod[Symbol.for('turbo-test.esm')]) Object.defineProperty(out, Symbol.for('turbo-test.esm'), { value: true });
-    return out;
-  }
+  if (mod && typeof mod === 'object') return __automockObj(mod, depth, spy);
   return mod;
 }
 // vitest's autospy (vi.mockObject(value, { spy: true })): in place, each function (nested
@@ -5337,12 +5560,19 @@ globalThis.__ttToESM = (m) => {
 // (its default the whole `module.exports`); else a bundler's interop, the exports object itself
 // with a `default` (a package's CommonJS with its own `default` and no `__esModule` read through
 // a view, its own `default` staying what CommonJS code reads).
+const __ttNotObject = (m) => m === null || (typeof m !== 'object' && typeof m !== 'function');
+// __ttToESMDep's values taken as they are: primitives, strict mocks and namespaces
+const __ttDepAsIs = (m) => !m || __ttNotObject(m) || __ttStrictMocks.has(m) || __ttIsNs(m) || m[__ttEsmMark];
 globalThis.__ttToESMDep = (m, node) => {
   // Node's namespace of a primitive module.exports: the value as default and 'module.exports'
   // (turbo-test#193)
-  if (node && (m === null || (typeof m !== 'object' && typeof m !== 'function'))) return { default: m, 'module.exports': m };
-  if (!m || (typeof m !== 'object' && typeof m !== 'function') || __ttStrictMocks.has(m) || __ttIsNs(m) || m[__ttEsmMark]) return m;
+  if (node && __ttNotObject(m)) return { default: m, 'module.exports': m };
+  if (__ttDepAsIs(m)) return m;
   if (node) return __ttNodeNs(m);
+  return __ttBundlerNs(m);
+};
+// __ttToESMDep's bundler interop of a package's CommonJS module
+function __ttBundlerNs(m) {
   if (m.__esModule || '__esModule' in m) return ('default' in m || m.default !== undefined) ? m : __ttCjsView(m);
   if ('default' in m) return m.default === m || !__ttExternalCjs.has(m) ? m : __ttCjsView(m);
   try {
@@ -5351,7 +5581,7 @@ globalThis.__ttToESMDep = (m, node) => {
   } catch (e) {
     return __ttCjsView(m);
   }
-};
+}
 // Modules (resolved absolute paths) the entry's mock prepass registered for the current file.
 // vitest calls a hoisted factory ONCE; the module's own hoisted vi.mock call for such a module
 // keeps the prepass registration instead of running the factory a second time. Consumed by
@@ -5409,48 +5639,63 @@ function __ttAwaitDoMock(dir, spec, exports, key, vitest) {
   __ttDoMockWaits.set(k, done);
   return true;
 }
+const __ttQueueMock = (spec, exports, vitest, key) => {
+  (globalThis.__pendingMocks || (globalThis.__pendingMocks = [])).push({ spec: String(spec), exports, vitest, key });
+};
+// __ttMock outside the prepass: the module's lenient-ness, and whether the prepass already
+// registered it (true: nothing more to do); this mock supersedes a pending async doMock
+function __ttMockPrepassed(spec, vitest, key, dir) {
+  if (vitest) __ttLenientMockKeys.delete(key); else __ttLenientMockKeys.add(key);
+  if (__ttPrepassMocks.size && __ttPrepassMocks.delete(__ttPrepassKey(spec))) return true;
+  // this mock supersedes a still-pending async doMock of the module
+  const pending = __ttDoMockKey(dir, spec);
+  if (pending) __ttDoMockWaits.delete(pending);
+  return false;
+}
+// AUTOMOCK: no factory -> auto-generate a mock from the real module (functions -> vi.fn()).
+// A real module that fails to load is left unmocked: importing it reports its own error.
+// vitest automocks the module's namespace: a package's CommonJS one is Node's (`default`,
+// `module.exports` and the names cjs-module-lexer finds; turbo-test#136, #133).
+// [false] when the module is left unmocked
+function __ttAutomockOf(dir, spec) {
+  try {
+    const actual = globalThis.__ttImportActual(dir, String(spec));
+    const exports = __automock(globalThis.__ttToESM(actual));
+    // its own names stay importable on the ESM graph (reading undefined, as vitest's)
+    if (__ttExternalCjs.has(actual)) __ttMockNames.set(exports, Object.keys(actual));
+    return [true, exports];
+  }
+  catch (e) { return [false]; }
+}
+// the factory's mock: [false] when nothing is registered
+function __ttFactoryExports(spec, factory, vitest, isDoMock, dir) {
+  // vitest passes `importOriginal` (a fn returning the real module, as a Promise) as the
+  // factory's first arg — `vi.mock('x', async (importOriginal) => ({...await importOriginal(), y}))`.
+  const importOriginal = () => Promise.resolve(globalThis.__ttToESM(globalThis.__ttImportActual(dir, String(spec))));
+  try { return [true, typeof factory === 'function' ? factory(importOriginal) : factory]; }
+  catch (e) {
+    // The entry's mock prepass (__ttMockPrepass) runs factories outside the module's scope; a
+    // throw there is not registered — the module's own vi.mock call re-runs it in scope.
+    if (globalThis.__ttMockPrepass) return [false];
+    // a hoisted call's factory reading a binding not initialised yet runs on first import
+    // (turbo-test#205); any other throw registers the error stand-in now
+    return [true, !isDoMock && e instanceof ReferenceError && typeof factory === 'function'
+      ? __ttLazyFactoryMock(() => factory(importOriginal), vitest)
+      : __ttFactoryErrorMock(e, vitest)];
+  }
+}
 function __ttMock(spec, factory, vitest, isDoMock) {
-  let exports;
   const key = (globalThis.__ttDir || '') + '\0' + String(spec);
   // The calling module's dir: the module-runner's __ttDir, else (ESM graph, where modules have
   // none) the entry file's dir, so a runtime vi.doMock registers immediately and a later import()
   // of the module sees it.
   const dir = globalThis.__ttDir || globalThis.__ttEntryDir;
-  if (!globalThis.__ttMockPrepass) {
-    if (vitest) __ttLenientMockKeys.delete(key); else __ttLenientMockKeys.add(key);
-    if (__ttPrepassMocks.size && __ttPrepassMocks.delete(__ttPrepassKey(spec))) return;
-    // this mock supersedes a still-pending async doMock of the module
-    const pending = __ttDoMockKey(dir, spec);
-    if (pending) __ttDoMockWaits.delete(pending);
-  }
-  // vitest passes `importOriginal` (a fn returning the real module, as a Promise) as the
-  // factory's first arg — `vi.mock('x', async (importOriginal) => ({...await importOriginal(), y}))`.
-  const importOriginal = () => Promise.resolve(globalThis.__ttToESM(globalThis.__ttImportActual(dir, String(spec))));
-  if (factory === undefined) {
-    // AUTOMOCK: no factory -> auto-generate a mock from the real module (functions -> vi.fn()).
-    // A real module that fails to load is left unmocked: importing it reports its own error.
-    // vitest automocks the module's namespace: a package's CommonJS one is Node's (`default`,
-    // `module.exports` and the names cjs-module-lexer finds; turbo-test#136, #133)
-    try {
-      const actual = globalThis.__ttImportActual(dir, String(spec));
-      exports = __automock(globalThis.__ttToESM(actual));
-      // its own names stay importable on the ESM graph (reading undefined, as vitest's)
-      if (__ttExternalCjs.has(actual)) __ttMockNames.set(exports, Object.keys(actual));
-    }
-    catch (e) { return; }
-  } else {
-    try { exports = typeof factory === 'function' ? factory(importOriginal) : factory; }
-    catch (e) {
-      // The entry's mock prepass (__ttMockPrepass) runs factories outside the module's scope; a
-      // throw there is not registered — the module's own vi.mock call re-runs it in scope.
-      if (globalThis.__ttMockPrepass) return;
-      // a hoisted call's factory reading a binding not initialised yet runs on first import
-      // (turbo-test#205); any other throw registers the error stand-in now
-      exports = !isDoMock && e instanceof ReferenceError && typeof factory === 'function'
-        ? __ttLazyFactoryMock(() => factory(importOriginal), vitest)
-        : __ttFactoryErrorMock(e, vitest);
-    }
-  }
+  if (!globalThis.__ttMockPrepass && __ttMockPrepassed(spec, vitest, key, dir)) return;
+  const [ok, made] = factory === undefined ? __ttAutomockOf(dir, spec) : __ttFactoryExports(spec, factory, vitest, isDoMock, dir);
+  if (ok) __ttMockRegister(spec, factory, vitest, isDoMock, dir, key, made);
+}
+// __ttMock's registration of the made mock
+function __ttMockRegister(spec, factory, vitest, isDoMock, dir, key, exports) {
   // Sync factory: register IMMEDIATELY in the calling module's dir (vi.mock is hoisted above
   // the module's consumer requires, so the mock is in place before they load — and the factory
   // ran in THIS module's scope, so it shares the test's bindings). Async (Promise) factory:
@@ -5460,12 +5705,12 @@ function __ttMock(spec, factory, vitest, isDoMock) {
     // a doMock (not hoisted: it applies to later imports) waits on its own; a hoisted vi.mock is
     // awaited by the loader's resolve + drain
     if (isDoMock && !globalThis.__ttMockPrepass && globalThis.__ttRegisterMock && __ttAwaitDoMock(dir, spec, exports, key, vitest)) return;
-    (globalThis.__pendingMocks || (globalThis.__pendingMocks = [])).push({ spec: String(spec), exports, vitest, key });
+    __ttQueueMock(spec, exports, vitest, key);
     return;
   }
   if (factory !== undefined) exports = __ttStrictMock(exports, key, String(spec), vitest);
   if (globalThis.__ttRegisterMock && dir && __ttRegisterMockNow(dir, spec, exports, key)) return;
-  (globalThis.__pendingMocks || (globalThis.__pendingMocks = [])).push({ spec: String(spec), exports, vitest, key });
+  __ttQueueMock(spec, exports, vitest, key);
 }
 // vi.dynamicImportSettled (vitest's waitForImportsToResolve): wait a macrotask on the real
 // clock (vitest's safe timers, so fake timers do not hold it), then for every import() still
@@ -5577,57 +5822,78 @@ function __waitUntil(callback, options = {}) {
 function __viPath(name, path) {
   if (typeof path !== 'string') throw new TypeError(`vi.${name}() expects a string path, but received a ${typeof path}`);
 }
+function __spyCheckTarget(obj) {
+  if (obj == null) throw new Error('The vi.spyOn() function could not find an object to spy upon. The first argument must be defined.');
+  if (typeof obj !== 'object' && typeof obj !== 'function') throw new Error('Vitest cannot spy on a primitive value.');
+}
+// a registered ESM-graph namespace's own export (not an accessor spy)
+function __spyIsNs(nsRaw, key, accessor) {
+  try { return !accessor && typeof key === 'string' && __ttNsInfo.has(__ttNsTarget(nsRaw)) && key in nsRaw; } catch (e) { return false; }
+}
+function __spyCheckHas(obj, key, desc) {
+  let has = !!desc;
+  if (!has) { try { has = key in obj; } catch (e) { has = true; } }
+  if (!has) throw new Error(`The property "${String(key)}" is not defined on the ${typeof obj}.`);
+}
+// [the access type spied on, whether a getter holding a function is spied through]
+function __spyAccess(accessor, desc) {
+  const accessType = accessor || 'value';
+  if (accessType === 'value' && desc && desc.value == null && desc.get) return ['get', true];
+  return [accessType, false];
+}
+// the spied-on value: the namespace's export, the descriptor's value / accessor, or the property
+function __spyOriginal(isNs, nsRaw, obj, key, desc, accessType) {
+  if (isNs) return globalThis.__ttR(nsRaw, key);
+  if (desc) {
+    const original = desc[accessType];
+    return original == null && accessType === 'value' ? obj[key] : original;
+  }
+  if (accessType !== 'value') return () => obj[key];
+  return obj[key];
+}
+// @vitest/spy's spyOn: `accessor` 'get' / 'set' spies on an accessor; a getter holding a
+// function (a live re-export) is spied through it; the original descriptor comes back on
+// restore (a method found on a prototype is deleted from the object again)
+function __viSpyOn(obj, key, accessor) {
+  __spyCheckTarget(obj);
+  // a registered ESM-graph namespace: the spy is its override (esm_spy.rs, turbo-test#131,
+  // #146); its current value (a spy already set on it included) is the original
+  const nsRaw = typeof obj === 'object' ? __ttNsRaw.get(obj) || obj : obj;
+  const isNs = __spyIsNs(nsRaw, key, accessor);
+  const found = isNs ? undefined : __mockDescriptor(obj, key);
+  const [descObj, desc] = found || [];
+  __spyCheckHas(obj, key, desc);
+  const [accessType, ssr] = __spyAccess(accessor, desc);
+  const original = __spyOriginal(isNs, nsRaw, obj, key, desc, accessType);
+  const originalImpl = ssr && original ? original.call(obj) : original;
+  if (!(typeof originalImpl === 'function' || (accessType !== 'value' && original == null))) {
+    throw new Error(`vi.spyOn() can only spy on a function. Received ${typeof originalImpl}.`);
+  }
+  if (globalThis.vi.isMockFunction(originalImpl)) return originalImpl;
+  const reassign = (cb) => {
+    if (isNs) { globalThis.__ttNsSet(obj, key, cb); return; }
+    const d = Object.assign({}, desc || { configurable: true, writable: true });
+    delete d.value;
+    if (accessType !== 'value') delete d.writable;
+    d[accessType] = cb;
+    Object.defineProperty(obj, key, d);
+  };
+  const restore = () => {
+    if (!isNs && descObj !== obj) Reflect.deleteProperty(obj, key);
+    else if (!isNs && desc && !original) Object.defineProperty(obj, key, desc);
+    else reassign(original);
+  };
+  const s = makeSpy(undefined, { original: originalImpl, restore, keepName: true });
+  reassign(ssr ? () => s : s);
+  return __trackSpy(s);
+}
 globalThis.vi = {
   // a mock given a mock is that mock (vitest)
   fn: (impl) => (impl != null && globalThis.vi.isMockFunction(impl) ? impl : __trackSpy(makeSpy(impl, { resetTo: impl }))),
   // @vitest/spy's spyOn: `accessor` 'get' / 'set' spies on an accessor; a getter holding a
   // function (a live re-export) is spied through it; the original descriptor comes back on
   // restore (a method found on a prototype is deleted from the object again)
-  spyOn: (obj, key, accessor) => {
-    if (obj == null) throw new Error('The vi.spyOn() function could not find an object to spy upon. The first argument must be defined.');
-    if (typeof obj !== 'object' && typeof obj !== 'function') throw new Error('Vitest cannot spy on a primitive value.');
-    // a registered ESM-graph namespace: the spy is its override (esm_spy.rs, turbo-test#131,
-    // #146); its current value (a spy already set on it included) is the original
-    const nsRaw = typeof obj === 'object' ? __ttNsRaw.get(obj) || obj : obj;
-    let isNs = false;
-    try { isNs = !accessor && typeof key === 'string' && __ttNsInfo.has(__ttNsTarget(nsRaw)) && key in nsRaw; } catch (e) {}
-    const found = isNs ? undefined : __mockDescriptor(obj, key);
-    const [descObj, desc] = found || [];
-    let has = !!desc;
-    if (!has) { try { has = key in obj; } catch (e) { has = true; } }
-    if (!has) throw new Error(`The property "${String(key)}" is not defined on the ${typeof obj}.`);
-    let accessType = accessor || 'value';
-    let ssr = false;
-    if (accessType === 'value' && desc && desc.value == null && desc.get) { accessType = 'get'; ssr = true; }
-    let original;
-    if (isNs) original = globalThis.__ttR(nsRaw, key);
-    else if (desc) {
-      original = desc[accessType];
-      if (original == null && accessType === 'value') original = obj[key];
-    } else if (accessType !== 'value') original = () => obj[key];
-    else original = obj[key];
-    const originalImpl = ssr && original ? original.call(obj) : original;
-    if (!(typeof originalImpl === 'function' || (accessType !== 'value' && original == null))) {
-      throw new Error(`vi.spyOn() can only spy on a function. Received ${typeof originalImpl}.`);
-    }
-    if (globalThis.vi.isMockFunction(originalImpl)) return originalImpl;
-    const reassign = (cb) => {
-      if (isNs) { globalThis.__ttNsSet(obj, key, cb); return; }
-      const d = Object.assign({}, desc || { configurable: true, writable: true });
-      delete d.value;
-      if (accessType !== 'value') delete d.writable;
-      d[accessType] = cb;
-      Object.defineProperty(obj, key, d);
-    };
-    const restore = () => {
-      if (!isNs && descObj !== obj) Reflect.deleteProperty(obj, key);
-      else if (!isNs && desc && !original) Object.defineProperty(obj, key, desc);
-      else reassign(original);
-    };
-    const s = makeSpy(undefined, { original: originalImpl, restore, keepName: true });
-    reassign(ssr ? () => s : s);
-    return __trackSpy(s);
-  },
+  spyOn: (obj, key, accessor) => __viSpyOn(obj, key, accessor),
   // Record (specifier, evaluated-exports) into a queue the native loader drains after the
   // module runs, registering the mock keyed by the resolved absolute path. The factory runs
   // here, in the calling module's scope (so closures over setup-file vars work).
@@ -5815,8 +6081,15 @@ globalThis.babelHelpers.decorateMetadata = function (metadataKey, metadataValue)
 // and runAllImmediates works.
 let __jestLegacy = false;
 const __jestSeed = Math.floor(Math.random() * 0xffffffff) - 0x80000000;
+// a jest config's fakeTimers (turbo-test#186): the defaults of every jest.useFakeTimers (its
+// argument over them), and with `enableGlobally: true` fake timers before the test file loads
+let __jestTimerDefaults = {};
+function __jestApplyConfig(ft) {
+  __jestTimerDefaults = ft && typeof ft === 'object' ? ft : {};
+  if (__jestTimerDefaults.enableGlobally === true) __jestInstallFake();
+}
 function __jestInstallFake(cfg) {
-  const c = cfg || {};
+  const c = Object.assign({}, __jestTimerDefaults, cfg);
   const legacy = c.legacyFakeTimers === true;
   const skip = new Set(legacy ? ['Date', 'performance', 'hrtime'] : Array.isArray(c.doNotFake) ? c.doNotFake : []);
   const at = c.now === undefined ? undefined : c.now;
@@ -5838,14 +6111,59 @@ function __jestCheckFake() {
   return false;
 }
 
+// jest-mock's whenCalledWith (turbo-test#185) on a vi mock `fn`: the first call installs a
+// dispatcher as the implementation (the one it replaces becomes the fall-through, and so does a
+// later mockImplementation); each call whose arguments equal a branch's matchers
+// ([iterableEquality], asymmetric matchers too) runs the earliest such branch with a queued once,
+// else the last-registered one with an implementation, else the fall-through (a spy's original).
+// mockReset drops every branch, resets each sub-mock and (as jest-mock does) the implementation.
+function __jestWhenPick(branches, args) {
+  const matching = branches.filter((b) => __equals(b.matchers, args, [__iterableEquality]));
+  const once = matching.find((b) => b.sub[__mockConfigKey].once.length > 0);
+  if (once) return once.sub;
+  for (let i = matching.length - 1; i >= 0; i--) if (matching[i].sub[__mockConfigKey].impl !== undefined) return matching[i].sub;
+  return undefined;
+}
+function __jestWhen(fn) {
+  if (fn.whenCalledWith) return fn; // a spyOn of an already-spied method returns the same mock
+  const config = fn[__mockConfigKey];
+  const branches = [];
+  let fallback;
+  let reset = false; // jest-mock's reset drops the implementation: a reset spy no longer calls through
+  const dispatcher = function (...args) {
+    const target = __jestWhenPick(branches, args) || fallback || (reset ? undefined : config.original);
+    return target ? target.apply(this, args) : undefined;
+  };
+  const { mockImplementation, getMockImplementation, mockReset } = fn;
+  fn.mockImplementation = (f) => { if (config.impl === dispatcher) fallback = f; else mockImplementation(f); return fn; };
+  fn.getMockImplementation = () => (config.impl === dispatcher ? fallback : getMockImplementation());
+  fn.mockReset = () => {
+    for (const b of branches.splice(0)) b.sub.mockReset();
+    fallback = undefined;
+    mockReset();
+    // jest 30 (turbo-test#254), unlike vitest's back-to-vi.fn(impl): jest.fn(impl) and a spy
+    // return undefined until a new implementation is set
+    reset = true;
+    config.impl = dispatcher;
+    return fn;
+  };
+  fn.whenCalledWith = (...matchers) => {
+    if (config.impl !== dispatcher) { fallback = config.impl; config.impl = dispatcher; }
+    const sub = __jestWhen(globalThis.vi.fn());
+    branches.push({ matchers, sub });
+    return sub;
+  };
+  return fn;
+}
+
 // Jest's `jest` global maps onto the same machinery as `vi` (drop-in for jest projects, e.g.
 // NestJS backends using ts-jest). Most methods are identical; the jest-only ones (sync
 // requireActual/requireMock, isolateModules, setTimeout) are bridged here. Type-only members
 // (jest.Mock, jest.Mocked, jest.SpyInstance, ...) are erased by the transform — no runtime needed.
 // Defined unconditionally: it doesn't touch vitest behavior (vitest suites never reference `jest`).
 globalThis.jest = {
-  fn: (impl) => globalThis.vi.fn(impl),
-  spyOn: (obj, key, accessType) => globalThis.vi.spyOn(obj, key, accessType),
+  fn: (impl) => __jestWhen(globalThis.vi.fn(impl)),
+  spyOn: (obj, key, accessType) => __jestWhen(globalThis.vi.spyOn(obj, key, accessType)),
   mock: (spec, factory) => __ttMock(spec, factory, false),
   unmock: (spec) => globalThis.vi.unmock(spec),
   doMock: (spec, factory) => __ttMock(spec, factory, false, true),
@@ -5906,9 +6224,10 @@ globalThis.jest = {
     if (__jestCheckFake()) __setTickMode(o && o.mode, o && o.delta);
     return globalThis.jest;
   },
-  // per-test config knobs — no-ops (turbo-test has no per-file timeout/retry gate yet)
-  setTimeout: () => globalThis.jest,
-  retryTimes: () => globalThis.jest,
+  // jest.setTimeout(ms) and jest.retryTimes(n): per-file overrides (turbo-test#273), cleared
+  // in __ttResetForNextFile. jest 30 ignores a non-number argument.
+  setTimeout: (ms) => { if (typeof ms === 'number' && ms >= 0) globalThis.__TT_JEST_TIMEOUT = ms; return globalThis.jest; },
+  retryTimes: (n) => { if (typeof n === 'number' && n >= 0) globalThis.__TT_JEST_RETRY = n; return globalThis.jest; },
   // env stubbing parity (rarely used via jest, but harmless)
   replaceProperty: (obj, key, val) => { const orig = obj[key]; obj[key] = val; return { restore: () => { obj[key] = orig; } }; },
 };
@@ -5942,6 +6261,12 @@ function __inspectNumber(n, o) {
   return __inspectTrunc(String(n), o.truncate);
 }
 // loupe's `inspectList`: items joined with `sep`, cut with `…(n)` once `o.truncate` runs out.
+// inspectList: the entry does not fit (before the next one is looked at)
+const __listCutBefore = (last, second, next, cutLen, outCut, orig) => (last && next > orig && outCut <= orig) || (!last && !second && cutLen > orig);
+// inspectList: the last-but-one entry and the last do not fit
+const __listCutPeek = (last, second, cutLen, withPeek, orig) => !last && second && cutLen > orig && withPeek > orig;
+// inspectList: the entries after this one do not fit
+const __listCutAfter = (last, second, withPeek, orig) => !last && !second && withPeek >= orig;
 function __inspectList(list, o, item = __inspect, sep = ', ') {
   if (!list.length) return '';
   const orig = o.truncate;
@@ -5956,12 +6281,11 @@ function __inspectList(list, o, item = __inspect, sep = ', ') {
     const str = peek || item(list[i], o) + (last ? '' : sep);
     const next = out.length + str.length;
     const cutLen = next + cut.length;
-    if (last && next > orig && out.length + cut.length <= orig) break;
-    if (!last && !second && cutLen > orig) break;
+    if (__listCutBefore(last, second, next, cutLen, out.length + cut.length, orig)) break;
     peek = last ? '' : item(list[i + 1], o) + (second ? '' : sep);
-    if (!last && second && cutLen > orig && next + peek.length > orig) break;
+    if (__listCutPeek(last, second, cutLen, next + peek.length, orig)) break;
     out += str;
-    if (!last && !second && next + peek.length >= orig) { cut = `…(${list.length - i - 1})`; break; }
+    if (__listCutAfter(last, second, next + peek.length, orig)) { cut = `…(${list.length - i - 1})`; break; }
     cut = '';
   }
   return `${out}${cut}`;
@@ -5990,8 +6314,8 @@ function __inspectObject(obj, o) {
 }
 // vitest's loupe `inspect` (the value rendering of titles, `%o`/`%O`/`%s` objects); `o.truncate`
 // (default unlimited) bounds the output as loupe does.
-function __inspect(v, o = { truncate: Infinity, seen: [] }) {
-  if (v === null) return 'null';
+// loupe's inspect of a primitive or function (undefined: an object)
+function __inspectPrim(v, o) {
   switch (typeof v) {
     case 'undefined': return 'undefined';
     case 'boolean': return String(v);
@@ -6004,71 +6328,83 @@ function __inspect(v, o = { truncate: Infinity, seen: [] }) {
       return v.name ? `[${tag} ${__inspectTrunc(v.name, o.truncate - 11)}]` : `[${tag}]`;
     }
   }
-  const type = Object.prototype.toString.call(v).slice(8, -1);
-  switch (type) {
-    case 'Boolean': return String(v);
-    case 'Number': return __inspectNumber(Number(v), o);
-    case 'String': return __inspectString(v, o);
-    case 'Array': {
-      const extra = Object.keys(v).slice(v.length);
-      if (!v.length && !extra.length) return '[]';
-      o.truncate -= 4;
-      const items = __inspectList(Array.from({ length: v.length }, (_, i) => v[i]), o);
-      o.truncate -= items.length;
-      const props = extra.length ? __inspectList(extra.map((k) => [k, v[k]]), o, __inspectProp) : '';
-      return `[ ${items}${props ? `, ${props}` : ''} ]`;
-    }
-    case 'Date': {
-      const j = v.toJSON();
-      if (j === null) return 'Invalid Date';
-      const [d, t] = j.split('T');
-      return `${d}T${__inspectTrunc(t, o.truncate - d.length - 1)}`;
-    }
-    case 'Map':
-      if (!v.size) return 'Map{}';
-      o.truncate -= 7;
-      return `Map{ ${__inspectList([...v], o, ([k, x], oo) => { oo.truncate -= 4; const ks = __inspect(k, oo); oo.truncate -= ks.length; return `${ks} => ${__inspect(x, oo)}`; })} }`;
-    case 'Set':
-      if (!v.size) return 'Set{}';
-      o.truncate -= 7;
-      return `Set{ ${__inspectList([...v], o)} }`;
-    case 'RegExp': return `/${__inspectTrunc(v.source, o.truncate - (2 + v.flags.length))}/${v.flags}`;
-    case 'Promise': return 'Promise{…}';
-    case 'WeakSet': return 'WeakSet{…}';
-    case 'WeakMap': return 'WeakMap{…}';
-    case 'Arguments':
-      if (!v.length) return 'Arguments[]';
-      o.truncate -= 13;
-      return `Arguments[ ${__inspectList([...v], o)} ]`;
-    case 'Generator': case 'DataView': case 'ArrayBuffer': return '';
-    case 'Error': {
-      const skip = ['stack', 'line', 'column', 'name', 'message', 'fileName', 'lineNumber', 'columnNumber', 'number', 'description', 'cause'];
-      const keys = Object.getOwnPropertyNames(v).filter((k) => !skip.includes(k));
-      o.truncate -= v.name.length;
-      let msg = '';
-      if (typeof v.message === 'string') msg = __inspectTrunc(v.message, o.truncate);
-      else keys.unshift('message');
-      msg = msg ? `: ${msg}` : '';
-      o.truncate -= msg.length + 5;
-      if (o.seen.includes(v)) return '[Circular]';
-      o.seen.push(v);
-      const props = __inspectList(keys.map((k) => [k, v[k]]), o, __inspectProp);
-      return `${v.name}${msg}${props ? ` { ${props} }` : ''}`;
-    }
+  return undefined;
+}
+function __inspectArray(v, o) {
+  const extra = Object.keys(v).slice(v.length);
+  if (!v.length && !extra.length) return '[]';
+  o.truncate -= 4;
+  const items = __inspectList(Array.from({ length: v.length }, (_, i) => v[i]), o);
+  o.truncate -= items.length;
+  const props = extra.length ? __inspectList(extra.map((k) => [k, v[k]]), o, __inspectProp) : '';
+  return `[ ${items}${props ? `, ${props}` : ''} ]`;
+}
+function __inspectDate(v, o) {
+  const j = v.toJSON();
+  if (j === null) return 'Invalid Date';
+  const [d, t] = j.split('T');
+  return `${d}T${__inspectTrunc(t, o.truncate - d.length - 1)}`;
+}
+function __inspectError(v, o) {
+  const skip = ['stack', 'line', 'column', 'name', 'message', 'fileName', 'lineNumber', 'columnNumber', 'number', 'description', 'cause'];
+  const keys = Object.getOwnPropertyNames(v).filter((k) => !skip.includes(k));
+  o.truncate -= v.name.length;
+  let msg = '';
+  if (typeof v.message === 'string') msg = __inspectTrunc(v.message, o.truncate);
+  else keys.unshift('message');
+  msg = msg ? `: ${msg}` : '';
+  o.truncate -= msg.length + 5;
+  if (o.seen.includes(v)) return '[Circular]';
+  o.seen.push(v);
+  const props = __inspectList(keys.map((k) => [k, v[k]]), o, __inspectProp);
+  return `${v.name}${msg}${props ? ` { ${props} }` : ''}`;
+}
+// loupe's inspect of a collection: `name{ entries }` (empty: `name{}`)
+function __inspectCollection(v, o, name, size, entries, item) {
+  if (!size) return `${name}{}`;
+  o.truncate -= 7;
+  return `${name}{ ${__inspectList(entries, o, item)} }`;
+}
+const __inspectMapEntry = ([k, x], oo) => { oo.truncate -= 4; const ks = __inspect(k, oo); oo.truncate -= ks.length; return `${ks} => ${__inspect(x, oo)}`; };
+const __inspectEmpty = () => '';
+const __inspectArguments = (v, o) => {
+  if (!v.length) return 'Arguments[]';
+  o.truncate -= 13;
+  return `Arguments[ ${__inspectList([...v], o)} ]`;
+};
+// loupe's inspect by the object's class
+const __inspectTypes = new Map([
+  ['Boolean', (v) => String(v)],
+  ['Number', (v, o) => __inspectNumber(Number(v), o)],
+  ['String', (v, o) => __inspectString(v, o)],
+  ['Array', __inspectArray],
+  ['Date', __inspectDate],
+  ['Map', (v, o) => __inspectCollection(v, o, 'Map', v.size, v.size ? [...v] : [], __inspectMapEntry)],
+  ['Set', (v, o) => __inspectCollection(v, o, 'Set', v.size, v.size ? [...v] : [], undefined)],
+  ['RegExp', (v, o) => `/${__inspectTrunc(v.source, o.truncate - (2 + v.flags.length))}/${v.flags}`],
+  ['Promise', () => 'Promise{…}'],
+  ['WeakSet', () => 'WeakSet{…}'],
+  ['WeakMap', () => 'WeakMap{…}'],
+  ['Arguments', __inspectArguments],
+  ['Generator', __inspectEmpty], ['DataView', __inspectEmpty], ['ArrayBuffer', __inspectEmpty],
+  ['Error', __inspectError],
+]);
+function __inspectTyped(v, o) {
+  const name = (typeof Buffer === 'function' && v instanceof Buffer) ? 'Buffer' : (v[Symbol.toStringTag] || v.constructor.name);
+  if (!v.length) return `${name}[]`;
+  o.truncate -= name.length + 4;
+  let out = '';
+  for (let i = 0; i < v.length; i++) {
+    const str = `${__inspectTrunc(v[i], o.truncate)}${i === v.length - 1 ? '' : ', '}`;
+    o.truncate -= str.length;
+    if (v[i] !== v.length && o.truncate <= 3) { out += `…(${v.length - v[i] + 1})`; break; }
+    out += str;
   }
-  if (ArrayBuffer.isView(v)) {
-    const name = (typeof Buffer === 'function' && v instanceof Buffer) ? 'Buffer' : (v[Symbol.toStringTag] || v.constructor.name);
-    if (!v.length) return `${name}[]`;
-    o.truncate -= name.length + 4;
-    let out = '';
-    for (let i = 0; i < v.length; i++) {
-      const str = `${__inspectTrunc(v[i], o.truncate)}${i === v.length - 1 ? '' : ', '}`;
-      o.truncate -= str.length;
-      if (v[i] !== v.length && o.truncate <= 3) { out += `…(${v.length - v[i] + 1})`; break; }
-      out += str;
-    }
-    return `${name}[ ${out} ]`;
-  }
+  return `${name}[ ${out} ]`;
+}
+// an object's own inspect: an asymmetric matcher, chai/inspect, util.inspect.custom or an
+// `inspect` method (undefined: none)
+function __inspectHooks(v, o) {
   // vitest's asymmetric matchers inspect as their minimal pretty-format (`Any<Number>`, …)
   if (v instanceof Asymmetric) {
     const r = __pf(v, { min: true });
@@ -6080,12 +6416,26 @@ function __inspect(v, o = { truncate: Infinity, seen: [] }) {
   // loupe hands the method its normalised options (depth 2, breakLength Infinity, no colours)
   if (typeof custom === 'function') { const r = custom.call(v, 2, Object.assign({ depth: 2, breakLength: Infinity, colors: false, showHidden: false }, o), __inspect); return typeof r === 'string' ? r : __inspect(r, o); }
   if (typeof v.inspect === 'function') { const r = v.inspect(2, o); return typeof r === 'string' ? r : __inspect(r, o); }
+  return undefined;
+}
+function __inspectInstance(v, o) {
   const proto = Object.getPrototypeOf(v);
   if (proto === Object.prototype || proto === null) return __inspectObject(v, o);
   let name = v[Symbol.toStringTag] || (v.constructor && v.constructor.name);
   if (!name || name === '_class') name = '<Anonymous Class>';
   o.truncate -= name.length;
   return `${name}${__inspectObject(v, o)}`;
+}
+function __inspect(v, o = { truncate: Infinity, seen: [] }) {
+  if (v === null) return 'null';
+  const prim = __inspectPrim(v, o);
+  if (prim !== undefined) return prim;
+  const byType = __inspectTypes.get(Object.prototype.toString.call(v).slice(8, -1));
+  if (byType) return byType(v, o);
+  if (ArrayBuffer.isView(v)) return __inspectTyped(v, o);
+  const hooked = __inspectHooks(v, o);
+  if (hooked !== undefined) return hooked;
+  return __inspectInstance(v, o);
 }
 // @vitest/utils `objDisplay` (truncateThreshold 40): loupe-truncated, and a rendering still that
 // long collapses to a summary.
@@ -6228,46 +6578,55 @@ function __pfItems(items, cfg, ind, depth, refs, print) {
   });
   return out + cfg.outer + ind;
 }
-function __pfPrint(v, cfg, ind, depth, refs, calledToJSON) {
+// __pfPrint's "not printed by this step"
+const __PF_NONE = Symbol('pf-none');
+// @vitest/pretty-format's AsymmetricMatcher plugin: anything with vitest's `$$typeof`, printed by
+// its toString name (containing / matching samples) or its toAsymmetricMatcher()
+function __pfAsym(v, cfg, ind, depth, refs) {
+  const name = v.toString();
+  const d = depth + 1;
+  const pp = (x, i) => __pfPrint(x, cfg, i, d, refs, false);
+  if (name === 'ArrayContaining' || name === 'ArrayNotContaining') return d > cfg.maxDepth ? `[${name}]` : `${name} [${__pfItems(Array.from(v.sample), cfg, ind, d, refs, pp)}]`;
+  if (name === 'ObjectContaining' || name === 'ObjectNotContaining') return d > cfg.maxDepth ? `[${name}]` : `${name} {${__pfProps(v.sample, cfg, ind, d, refs)}}`;
+  if (name === 'StringMatching' || name === 'StringNotMatching' || name === 'StringContaining' || name === 'StringNotContaining') return `${name} ${__pfPrint(v.sample, cfg, ind, depth, refs, false)}`;
+  if (typeof v.toAsymmetricMatcher !== 'function') throw new TypeError(`Asymmetric matcher ${v.constructor.name} does not implement toAsymmetricMatcher()`);
+  return v.toAsymmetricMatcher();
+}
+// vitest's snapshot serializer for mock functions: `[MockFunction name] { calls, results }`
+function __pfMockFn(v, cfg, ind, depth, refs) {
+  const name = v.getMockName();
+  let calls = '';
+  if (v.mock.calls.length) {
+    const next = ind + cfg.indent;
+    calls = ` {${cfg.outer}${next}"calls": ${__pfPrint(v.mock.calls, cfg, next, depth, refs, false)}${cfg.min ? ', ' : ','}${cfg.outer}${next}"results": ${__pfPrint(v.mock.results, cfg, next, depth, refs, false)}${cfg.min ? '' : ','}${cfg.outer}${ind}}`;
+  }
+  return `[MockFunction${name === 'vi.fn()' ? '' : ` ${name}`}]${calls}`;
+}
+function __pfError(v, cfg, ind, depth, refs) {
+  if (refs.includes(v)) return '[Circular]';
+  const r = [...refs, v];
+  const d = depth + 1;
+  const entries = { message: v.message };
+  if (v.cause !== undefined) entries.cause = v.cause;
+  for (const k of Object.keys(v)) if (k !== 'message' && k !== 'cause') entries[k] = v[k];
+  const name = v.name !== 'Error' ? v.name : __pfCtorName(v);
+  if (d > cfg.maxDepth) return `[${name}]`;
+  return `${name} {${__pfEntries(Object.entries(entries), cfg, ind, d, r, ': ')}}`;
+}
+// plugins, asymmetric matchers, mock functions and (cfg.errors) errors
+function __pfHooks(v, cfg, ind, depth, refs) {
   for (const plugin of cfg.plugins) {
     let hit;
     try { hit = plugin.test(v); } catch (error) { throw new __PrettyFormatPluginError(error.message, error.stack); }
     if (hit) return __pfPlugin(plugin, v, cfg, ind, depth, refs);
   }
-  const p = (x, i) => __pfPrint(x, cfg, i, depth, refs, false);
-  // @vitest/pretty-format's AsymmetricMatcher plugin: anything with vitest's `$$typeof`, printed by
-  // its toString name (containing / matching samples) or its toAsymmetricMatcher()
-  if (v && v.$$typeof === Symbol.for('jest.asymmetricMatcher')) {
-    const name = v.toString();
-    const d = depth + 1;
-    const pp = (x, i) => __pfPrint(x, cfg, i, d, refs, false);
-    if (name === 'ArrayContaining' || name === 'ArrayNotContaining') return d > cfg.maxDepth ? `[${name}]` : `${name} [${__pfItems(Array.from(v.sample), cfg, ind, d, refs, pp)}]`;
-    if (name === 'ObjectContaining' || name === 'ObjectNotContaining') return d > cfg.maxDepth ? `[${name}]` : `${name} {${__pfProps(v.sample, cfg, ind, d, refs)}}`;
-    if (name === 'StringMatching' || name === 'StringNotMatching' || name === 'StringContaining' || name === 'StringNotContaining') return `${name} ${p(v.sample, ind)}`;
-    if (typeof v.toAsymmetricMatcher !== 'function') throw new TypeError(`Asymmetric matcher ${v.constructor.name} does not implement toAsymmetricMatcher()`);
-    return v.toAsymmetricMatcher();
-  }
-  // vitest's snapshot serializer for mock functions: `[MockFunction name] { calls, results }`
-  if (cfg.mocks && typeof v === 'function' && v._isMockFunction) {
-    const name = v.getMockName();
-    let calls = '';
-    if (v.mock.calls.length) {
-      const next = ind + cfg.indent;
-      calls = ` {${cfg.outer}${next}"calls": ${__pfPrint(v.mock.calls, cfg, next, depth, refs, false)}${cfg.min ? ', ' : ','}${cfg.outer}${next}"results": ${__pfPrint(v.mock.results, cfg, next, depth, refs, false)}${cfg.min ? '' : ','}${cfg.outer}${ind}}`;
-    }
-    return `[MockFunction${name === 'vi.fn()' ? '' : ` ${name}`}]${calls}`;
-  }
-  if (cfg.errors && v instanceof Error) {
-    if (refs.includes(v)) return '[Circular]';
-    const r = [...refs, v];
-    const d = depth + 1;
-    const entries = { message: v.message };
-    if (v.cause !== undefined) entries.cause = v.cause;
-    for (const k of Object.keys(v)) if (k !== 'message' && k !== 'cause') entries[k] = v[k];
-    const name = v.name !== 'Error' ? v.name : __pfCtorName(v);
-    if (d > cfg.maxDepth) return `[${name}]`;
-    return `${name} {${__pfEntries(Object.entries(entries), cfg, ind, d, r, ': ')}}`;
-  }
+  if (v && v.$$typeof === Symbol.for('jest.asymmetricMatcher')) return __pfAsym(v, cfg, ind, depth, refs);
+  if (cfg.mocks && typeof v === 'function' && v._isMockFunction) return __pfMockFn(v, cfg, ind, depth, refs);
+  if (cfg.errors && v instanceof Error) return __pfError(v, cfg, ind, depth, refs);
+  return __PF_NONE;
+}
+// a primitive or function (undefined: an object)
+function __pfPrimitive(v, cfg) {
   if (v === true || v === false) return `${v}`;
   if (v === undefined) return 'undefined';
   if (v === null) return 'null';
@@ -6278,7 +6637,10 @@ function __pfPrint(v, cfg, ind, depth, refs, calledToJSON) {
     case 'function': return cfg.fnName ? `[Function ${v.name || 'anonymous'}]` : '[Function]';
     case 'symbol': return String(v).replace(/^Symbol\((.*)\)(.*)$/, 'Symbol($1)');
   }
-  const tag = Object.prototype.toString.call(v);
+  return undefined;
+}
+// weak collections, dates, errors and regexps (undefined: other objects)
+function __pfSimpleTag(v, cfg, tag) {
   if (tag === '[object WeakMap]') return 'WeakMap {}';
   if (tag === '[object WeakSet]') return 'WeakSet {}';
   if (tag === '[object Date]') return Number.isNaN(+v) ? 'Date { NaN }' : v.toISOString();
@@ -6287,6 +6649,37 @@ function __pfPrint(v, cfg, ind, depth, refs, calledToJSON) {
     const r = RegExp.prototype.toString.call(v);
     return cfg.escapeRegex ? r.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&') : r;
   }
+  return undefined;
+}
+function __pfArrayLike(v, cfg, ind, d, refs, hit, pp) {
+  const name = v.constructor.name;
+  if (hit) return `[${name}]`;
+  const prefix = cfg.min ? '' : !cfg.basic && name === 'Array' ? '' : `${name} `;
+  return `${prefix}[${__pfItems(Array.from({ length: v.length }, (_, i) => v[i]), cfg, ind, d, refs, pp)}]`;
+}
+function __pfObject(v, cfg, ind, d, refs, hit) {
+  const name = __pfCtorName(v);
+  if (hit) return `[${name}]`;
+  const prefix = cfg.min ? '' : !cfg.basic && name === 'Object' ? '' : `${name} `;
+  return `${prefix}{${__pfProps(v, cfg, ind, d, refs)}}`;
+}
+// arguments, arrays, typed arrays, maps, sets and other objects, one level down (`hit`: past maxDepth)
+function __pfComposite(v, cfg, ind, d, refs, hit, tag) {
+  const pp = (x, i) => __pfPrint(x, cfg, i, d, refs, false);
+  if (tag === '[object Arguments]') return hit ? '[Arguments]' : `${cfg.min ? '' : 'Arguments '}[${__pfItems(Array.from(v), cfg, ind, d, refs, pp)}]`;
+  if (Array.isArray(v) || ArrayBuffer.isView(v)) return __pfArrayLike(v, cfg, ind, d, refs, hit, pp);
+  if (tag === '[object Map]') return hit ? '[Map]' : `Map {${__pfEntries([...v.entries()], cfg, ind, d, refs, ' => ')}}`;
+  if (tag === '[object Set]') return hit ? '[Set]' : `Set {${__pfItems([...v.values()], cfg, ind, d, refs, pp)}}`;
+  return __pfObject(v, cfg, ind, d, refs, hit);
+}
+function __pfPrint(v, cfg, ind, depth, refs, calledToJSON) {
+  const hooked = __pfHooks(v, cfg, ind, depth, refs);
+  if (hooked !== __PF_NONE) return hooked;
+  const prim = __pfPrimitive(v, cfg);
+  if (prim !== undefined) return prim;
+  const tag = Object.prototype.toString.call(v);
+  const simple = __pfSimpleTag(v, cfg, tag);
+  if (simple !== undefined) return simple;
   if (refs.includes(v)) return '[Circular]';
   refs = [...refs, v];
   const d = depth + 1;
@@ -6294,20 +6687,7 @@ function __pfPrint(v, cfg, ind, depth, refs, calledToJSON) {
   if (cfg.toJSON && !hit && typeof v.toJSON === 'function' && !calledToJSON) {
     return __pfPrint(v.toJSON(), cfg, ind, d, refs, true);
   }
-  const pp = (x, i) => __pfPrint(x, cfg, i, d, refs, false);
-  if (tag === '[object Arguments]') return hit ? '[Arguments]' : `${cfg.min ? '' : 'Arguments '}[${__pfItems(Array.from(v), cfg, ind, d, refs, pp)}]`;
-  if (Array.isArray(v) || ArrayBuffer.isView(v)) {
-    const name = v.constructor.name;
-    if (hit) return `[${name}]`;
-    const prefix = cfg.min ? '' : !cfg.basic && name === 'Array' ? '' : `${name} `;
-    return `${prefix}[${__pfItems(Array.from({ length: v.length }, (_, i) => v[i]), cfg, ind, d, refs, pp)}]`;
-  }
-  if (tag === '[object Map]') return hit ? '[Map]' : `Map {${__pfEntries([...v.entries()], cfg, ind, d, refs, ' => ')}}`;
-  if (tag === '[object Set]') return hit ? '[Set]' : `Set {${__pfItems([...v.values()], cfg, ind, d, refs, pp)}}`;
-  const name = __pfCtorName(v);
-  if (hit) return `[${name}]`;
-  const prefix = cfg.min ? '' : !cfg.basic && name === 'Object' ? '' : `${name} `;
-  return `${prefix}{${__pfProps(v, cfg, ind, d, refs)}}`;
+  return __pfComposite(v, cfg, ind, d, refs, hit, tag);
 }
 function __pfEntries(entries, cfg, ind, depth, refs, sep) {
   if (!entries.length) return '';
@@ -6413,6 +6793,49 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     }
     return iMaxR;
   };
+  // overlapF's division of the sequences at the middle snake
+  const divisionF = (d, aStart, aEnd, bStart, bEnd, common, division, bF, aLastPrev, insert, kF, aFirst, bFirst, nCommonF, aLast) => {
+    const bLastPrev = bF + aLastPrev - (insert ? kF + 1 : kF - 1);
+    const nCommonR = countR(aStart, aLastPrev, bStart, bLastPrev, common);
+    const aEndPreceding = aLastPrev - nCommonR + 1;
+    const bEndPreceding = bLastPrev - nCommonR + 1;
+    division.nChangePreceding = d - 1;
+    if (d - 1 === aEndPreceding + bEndPreceding - aStart - bStart) { division.aEndPreceding = aStart; division.bEndPreceding = bStart; }
+    else { division.aEndPreceding = aEndPreceding; division.bEndPreceding = bEndPreceding; }
+    division.nCommonPreceding = nCommonR;
+    if (nCommonR !== 0) { division.aCommonPreceding = aEndPreceding; division.bCommonPreceding = bEndPreceding; }
+    division.nCommonFollowing = nCommonF;
+    if (nCommonF !== 0) { division.aCommonFollowing = aFirst + 1; division.bCommonFollowing = bFirst + 1; }
+    const aStartFollowing = aLast + 1;
+    const bStartFollowing = bFirst + nCommonF + 1;
+    division.nChangeFollowing = d - 1;
+    if (d - 1 === aEnd + bEnd - aStartFollowing - bStartFollowing) { division.aStartFollowing = aEnd; division.bStartFollowing = bEnd; }
+    else { division.aStartFollowing = aStartFollowing; division.bStartFollowing = bStartFollowing; }
+  };
+  // overlapR's division of the sequences at the middle snake
+  const divisionR = (d, aStart, aEnd, bStart, bEnd, common, division, bR, aLastPrev, insert, kR, bFirst, nCommonR, aLast) => {
+    const bLast = bFirst - nCommonR;
+    division.nChangePreceding = d;
+    if (d === aLast + bLast - aStart - bStart) { division.aEndPreceding = aStart; division.bEndPreceding = bStart; }
+    else { division.aEndPreceding = aLast; division.bEndPreceding = bLast; }
+    division.nCommonPreceding = nCommonR;
+    if (nCommonR !== 0) { division.aCommonPreceding = aLast; division.bCommonPreceding = bLast; }
+    division.nChangeFollowing = d - 1;
+    if (d === 1) {
+      division.nCommonFollowing = 0;
+      division.aStartFollowing = aEnd;
+      division.bStartFollowing = bEnd;
+    } else {
+      const bLastPrev = bR + aLastPrev - (insert ? kR - 1 : kR + 1);
+      const nCommonF = countF(aLastPrev, aEnd, bLastPrev, bEnd, common);
+      division.nCommonFollowing = nCommonF;
+      if (nCommonF !== 0) { division.aCommonFollowing = aLastPrev; division.bCommonFollowing = bLastPrev; }
+      const aStartFollowing = aLastPrev + nCommonF;
+      const bStartFollowing = bLastPrev + nCommonF;
+      if (d - 1 === aEnd + bEnd - aStartFollowing - bStartFollowing) { division.aStartFollowing = aEnd; division.bStartFollowing = bEnd; }
+      else { division.aStartFollowing = aStartFollowing; division.bStartFollowing = bStartFollowing; }
+    }
+  };
   const overlapF = (d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division) => {
     const bF = bStart - aStart;
     const baDeltaLength = (bEnd - bStart) - (aEnd - aStart);
@@ -6432,22 +6855,7 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
       if (kMin <= kF && kF <= kMax) {
         const iR = (d - 1 - (kF + baDeltaLength)) / 2;
         if (iR <= iMaxR && aIndexesR[iR] - 1 <= aLast) {
-          const bLastPrev = bF + aLastPrev - (insert ? kF + 1 : kF - 1);
-          const nCommonR = countR(aStart, aLastPrev, bStart, bLastPrev, common);
-          const aEndPreceding = aLastPrev - nCommonR + 1;
-          const bEndPreceding = bLastPrev - nCommonR + 1;
-          division.nChangePreceding = d - 1;
-          if (d - 1 === aEndPreceding + bEndPreceding - aStart - bStart) { division.aEndPreceding = aStart; division.bEndPreceding = bStart; }
-          else { division.aEndPreceding = aEndPreceding; division.bEndPreceding = bEndPreceding; }
-          division.nCommonPreceding = nCommonR;
-          if (nCommonR !== 0) { division.aCommonPreceding = aEndPreceding; division.bCommonPreceding = bEndPreceding; }
-          division.nCommonFollowing = nCommonF;
-          if (nCommonF !== 0) { division.aCommonFollowing = aFirst + 1; division.bCommonFollowing = bFirst + 1; }
-          const aStartFollowing = aLast + 1;
-          const bStartFollowing = bFirst + nCommonF + 1;
-          division.nChangeFollowing = d - 1;
-          if (d - 1 === aEnd + bEnd - aStartFollowing - bStartFollowing) { division.aStartFollowing = aEnd; division.bStartFollowing = bEnd; }
-          else { division.aStartFollowing = aStartFollowing; division.bStartFollowing = bStartFollowing; }
+          divisionF(d, aStart, aEnd, bStart, bEnd, common, division, bF, aLastPrev, insert, kF, aFirst, bFirst, nCommonF, aLast);
           return true;
         }
       }
@@ -6473,27 +6881,7 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
       if (kMin <= kR && kR <= kMax) {
         const iF = (d + (kR - baDeltaLength)) / 2;
         if (iF <= iMaxF && aLast - 1 <= aIndexesF[iF]) {
-          const bLast = bFirst - nCommonR;
-          division.nChangePreceding = d;
-          if (d === aLast + bLast - aStart - bStart) { division.aEndPreceding = aStart; division.bEndPreceding = bStart; }
-          else { division.aEndPreceding = aLast; division.bEndPreceding = bLast; }
-          division.nCommonPreceding = nCommonR;
-          if (nCommonR !== 0) { division.aCommonPreceding = aLast; division.bCommonPreceding = bLast; }
-          division.nChangeFollowing = d - 1;
-          if (d === 1) {
-            division.nCommonFollowing = 0;
-            division.aStartFollowing = aEnd;
-            division.bStartFollowing = bEnd;
-          } else {
-            const bLastPrev = bR + aLastPrev - (insert ? kR - 1 : kR + 1);
-            const nCommonF = countF(aLastPrev, aEnd, bLastPrev, bEnd, common);
-            division.nCommonFollowing = nCommonF;
-            if (nCommonF !== 0) { division.aCommonFollowing = aLastPrev; division.bCommonFollowing = bLastPrev; }
-            const aStartFollowing = aLastPrev + nCommonF;
-            const bStartFollowing = bLastPrev + nCommonF;
-            if (d - 1 === aEnd + bEnd - aStartFollowing - bStartFollowing) { division.aStartFollowing = aEnd; division.bStartFollowing = bEnd; }
-            else { division.aStartFollowing = aStartFollowing; division.bStartFollowing = bStartFollowing; }
-          }
+          divisionR(d, aStart, aEnd, bStart, bEnd, common, division, bR, aLastPrev, insert, kR, bFirst, nCommonR, aLast);
           return true;
         }
       }
@@ -6584,29 +6972,26 @@ let __diffAnno = ['Expected', 'Received'];
 const __annotation = () => `${__dcol.green(`- ${__diffAnno[0]}`)}\n${__dcol.red(`+ ${__diffAnno[1]}`)}\n\n`;
 // jest-diff `joinAlignedDiffsNoExpand` (5 context lines, `@@` patch marks), each line as
 // printDiffLine colours it: deleted green, inserted red, common dim, the marks yellow.
+// joinAlignedDiffsNoExpand: whether common runs longer than the context are cut (`@@` marks)
+function __diffsNeedPatch(diffs, ctx, ctx2) {
+  const len = diffs.length;
+  let i = 0;
+  while (i !== len) {
+    const start = i;
+    while (i !== len && diffs[i][0] === 0) i++;
+    const k = i - start;
+    if (start !== i && k > (start === 0 || i === len ? ctx : ctx2)) return true;
+    while (i !== len && diffs[i][0] !== 0) i++;
+  }
+  return false;
+}
 function __joinDiffs(diffs) {
   const ctx = 5;
   const ctx2 = ctx + ctx;
   const color = { '-': __dcol.green, '+': __dcol.red, ' ': __dcol.dim };
   const line = (ind, l) => (l.length ? color[ind](`${ind} ${l}`) : ind !== ' ' ? color[ind](ind) : '');
   const len = diffs.length;
-  let jLength = len;
-  let excessEdge = false;
-  let excessBetween = 0;
-  let i = 0;
-  while (i !== len) {
-    const start = i;
-    while (i !== len && diffs[i][0] === 0) i++;
-    if (start !== i) {
-      if (start === 0) { if (i > ctx) { jLength -= i - ctx; excessEdge = true; } }
-      else if (i === len) { const k = i - start; if (k > ctx) { jLength -= k - ctx; excessEdge = true; } }
-      else { const k = i - start; if (k > ctx2) { jLength -= k - ctx2; excessBetween++; } }
-    }
-    while (i !== len && diffs[i][0] !== 0) i++;
-  }
-  const patch = excessBetween !== 0 || excessEdge;
-  if (excessBetween !== 0) jLength += excessBetween + 1;
-  else if (excessEdge) jLength += 1;
+  const patch = __diffsNeedPatch(diffs, ctx, ctx2);
   const lines = [];
   let mark = 0;
   if (patch) lines.push('');
@@ -6615,32 +7000,35 @@ function __joinDiffs(diffs) {
   const del = (l) => { lines.push(line('-', l)); aEnd++; };
   const ins = (l) => { lines.push(line('+', l)); bEnd++; };
   const patchMark = () => __dcol.yellow(`@@ -${aStart + 1},${aEnd - aStart} +${bStart + 1},${bEnd - bStart} @@`);
-  i = 0;
-  while (i !== len) {
-    let start = i;
-    while (i !== len && diffs[i][0] === 0) i++;
-    if (start !== i) {
-      if (start === 0) {
-        if (i > ctx) { start = i - ctx; aStart = start; bStart = start; aEnd = aStart; bEnd = bStart; }
-        for (let c = start; c !== i; c++) common(diffs[c][1]);
-      } else if (i === len) {
-        const end = i - start > ctx ? start + ctx : i;
-        for (let c = start; c !== end; c++) common(diffs[c][1]);
+  // the common run diffs[start..i): leading / trailing ones keep `ctx` lines, inner ones `ctx`
+  // on each side of a patch mark
+  const commonRun = (start, i) => {
+    if (start === 0) {
+      if (i > ctx) { start = i - ctx; aStart = start; bStart = start; aEnd = aStart; bEnd = bStart; }
+      for (let c = start; c !== i; c++) common(diffs[c][1]);
+    } else if (i === len) {
+      const end = i - start > ctx ? start + ctx : i;
+      for (let c = start; c !== end; c++) common(diffs[c][1]);
+    } else {
+      const k = i - start;
+      if (k > ctx2) {
+        for (let c = start; c !== start + ctx; c++) common(diffs[c][1]);
+        lines[mark] = patchMark();
+        mark = lines.length;
+        lines.push('');
+        const omit = k - ctx2;
+        aStart = aEnd + omit; bStart = bEnd + omit; aEnd = aStart; bEnd = bStart;
+        for (let c = i - ctx; c !== i; c++) common(diffs[c][1]);
       } else {
-        const k = i - start;
-        if (k > ctx2) {
-          for (let c = start; c !== start + ctx; c++) common(diffs[c][1]);
-          lines[mark] = patchMark();
-          mark = lines.length;
-          lines.push('');
-          const omit = k - ctx2;
-          aStart = aEnd + omit; bStart = bEnd + omit; aEnd = aStart; bEnd = bStart;
-          for (let c = i - ctx; c !== i; c++) common(diffs[c][1]);
-        } else {
-          for (let c = start; c !== i; c++) common(diffs[c][1]);
-        }
+        for (let c = start; c !== i; c++) common(diffs[c][1]);
       }
     }
+  };
+  let i = 0;
+  while (i !== len) {
+    const start = i;
+    while (i !== len && diffs[i][0] === 0) i++;
+    if (start !== i) commonRun(start, i);
     while (i !== len && diffs[i][0] === -1) { del(diffs[i][1]); i++; }
     while (i !== len && diffs[i][0] === 1) { ins(diffs[i][1]); i++; }
   }
@@ -6699,23 +7087,23 @@ function __commonOverlap(t1, t2) {
     if (found === 0 || t1.substring(len - length) === t2.substring(0, length)) { best = length; length++; }
   }
 }
+// semanticScore's classes of the character at a boundary: non-alphanumeric, whitespace, line
+// break, blank line (`blank`: the text's blank-line test at that end)
+function __scoreSide(c, text, blank) {
+  const nonAlnum = /[^a-z0-9]/i.test(c);
+  const ws = nonAlnum && /\s/.test(c);
+  const lb = ws && /[\r\n]/.test(c);
+  return { nonAlnum, ws, lb, blank: lb && blank.test(text) };
+}
 function __semanticScore(one, two) {
   if (!one || !two) return 6;
-  const c1 = one.charAt(one.length - 1);
-  const c2 = two.charAt(0);
-  const nonAlnum1 = /[^a-z0-9]/i.test(c1);
-  const nonAlnum2 = /[^a-z0-9]/i.test(c2);
-  const ws1 = nonAlnum1 && /\s/.test(c1);
-  const ws2 = nonAlnum2 && /\s/.test(c2);
-  const lb1 = ws1 && /[\r\n]/.test(c1);
-  const lb2 = ws2 && /[\r\n]/.test(c2);
-  const blank1 = lb1 && /\n\r?\n$/.test(one);
-  const blank2 = lb2 && /^\r?\n\r?\n/.test(two);
-  if (blank1 || blank2) return 5;
-  if (lb1 || lb2) return 4;
-  if (nonAlnum1 && !ws1 && ws2) return 3;
-  if (ws1 || ws2) return 2;
-  if (nonAlnum1 || nonAlnum2) return 1;
+  const x = __scoreSide(one.charAt(one.length - 1), one, /\n\r?\n$/);
+  const y = __scoreSide(two.charAt(0), two, /^\r?\n\r?\n/);
+  if (x.blank || y.blank) return 5;
+  if (x.lb || y.lb) return 4;
+  if (x.nonAlnum && !x.ws && y.ws) return 3;
+  if (x.ws || y.ws) return 2;
+  if (x.nonAlnum || y.nonAlnum) return 1;
   return 0;
 }
 function __cleanupSemanticLossless(diffs) {
@@ -6754,52 +7142,47 @@ function __cleanupSemanticLossless(diffs) {
     pointer++;
   }
 }
-function __cleanupMerge(diffs) {
-  diffs.push([0, '']);
-  let pointer = 0;
-  let nDel = 0;
-  let nIns = 0;
-  let tDel = '';
-  let tIns = '';
-  while (pointer < diffs.length) {
-    switch (diffs[pointer][0]) {
-      case 1: nIns++; tIns += diffs[pointer][1]; pointer++; break;
-      case -1: nDel++; tDel += diffs[pointer][1]; pointer++; break;
-      case 0:
-        if (nDel + nIns > 1) {
-          if (nDel !== 0 && nIns !== 0) {
-            let n = __commonPrefix(tIns, tDel);
-            if (n !== 0) {
-              if (pointer - nDel - nIns > 0 && diffs[pointer - nDel - nIns - 1][0] === 0) diffs[pointer - nDel - nIns - 1][1] += tIns.substring(0, n);
-              else { diffs.splice(0, 0, [0, tIns.substring(0, n)]); pointer++; }
-              tIns = tIns.substring(n);
-              tDel = tDel.substring(n);
-            }
-            n = __commonSuffix(tIns, tDel);
-            if (n !== 0) {
-              diffs[pointer][1] = tIns.substring(tIns.length - n) + diffs[pointer][1];
-              tIns = tIns.substring(0, tIns.length - n);
-              tDel = tDel.substring(0, tDel.length - n);
-            }
-          }
-          pointer -= nDel + nIns;
-          diffs.splice(pointer, nDel + nIns);
-          if (tDel.length) { diffs.splice(pointer, 0, [-1, tDel]); pointer++; }
-          if (tIns.length) { diffs.splice(pointer, 0, [1, tIns]); pointer++; }
-          pointer++;
-        } else if (pointer !== 0 && diffs[pointer - 1][0] === 0) {
-          diffs[pointer - 1][1] += diffs[pointer][1];
-          diffs.splice(pointer, 1);
-        } else {
-          pointer++;
-        }
-        nIns = 0; nDel = 0; tDel = ''; tIns = '';
-        break;
-    }
+// cleanupMerge: factor a common prefix / suffix of the run's insertions and deletions out into
+// the equalities around it; returns [pointer, tIns, tDel]
+function __mergeFactor(diffs, pointer, nDel, nIns, tIns, tDel) {
+  let n = __commonPrefix(tIns, tDel);
+  if (n !== 0) {
+    if (pointer - nDel - nIns > 0 && diffs[pointer - nDel - nIns - 1][0] === 0) diffs[pointer - nDel - nIns - 1][1] += tIns.substring(0, n);
+    else { diffs.splice(0, 0, [0, tIns.substring(0, n)]); pointer++; }
+    tIns = tIns.substring(n);
+    tDel = tDel.substring(n);
   }
-  if (diffs.at(-1)?.[1] === '') diffs.pop();
+  n = __commonSuffix(tIns, tDel);
+  if (n !== 0) {
+    diffs[pointer][1] = tIns.substring(tIns.length - n) + diffs[pointer][1];
+    tIns = tIns.substring(0, tIns.length - n);
+    tDel = tDel.substring(0, tDel.length - n);
+  }
+  return [pointer, tIns, tDel];
+}
+// cleanupMerge at an equality ending a run of edits: the run as one deletion and one insertion
+// (or the equality merged into the previous one); returns the new pointer
+function __mergeRun(diffs, pointer, nDel, nIns, tDel, tIns) {
+  if (nDel + nIns > 1) {
+    if (nDel !== 0 && nIns !== 0) [pointer, tIns, tDel] = __mergeFactor(diffs, pointer, nDel, nIns, tIns, tDel);
+    pointer -= nDel + nIns;
+    diffs.splice(pointer, nDel + nIns);
+    if (tDel.length) { diffs.splice(pointer, 0, [-1, tDel]); pointer++; }
+    if (tIns.length) { diffs.splice(pointer, 0, [1, tIns]); pointer++; }
+    return pointer + 1;
+  }
+  if (pointer !== 0 && diffs[pointer - 1][0] === 0) {
+    diffs[pointer - 1][1] += diffs[pointer][1];
+    diffs.splice(pointer, 1);
+    return pointer;
+  }
+  return pointer + 1;
+}
+// cleanupMerge's second pass: single edits surrounded by equalities shift to eliminate one;
+// returns whether any did
+function __mergeShifts(diffs) {
   let changes = false;
-  pointer = 1;
+  let pointer = 1;
   while (pointer < diffs.length - 1) {
     if (diffs[pointer - 1][0] === 0 && diffs[pointer + 1][0] === 0) {
       const prev = diffs[pointer - 1][1];
@@ -6819,7 +7202,57 @@ function __cleanupMerge(diffs) {
     }
     pointer++;
   }
-  if (changes) __cleanupMerge(diffs);
+  return changes;
+}
+function __cleanupMerge(diffs) {
+  diffs.push([0, '']);
+  let pointer = 0;
+  let nDel = 0;
+  let nIns = 0;
+  let tDel = '';
+  let tIns = '';
+  while (pointer < diffs.length) {
+    switch (diffs[pointer][0]) {
+      case 1: nIns++; tIns += diffs[pointer][1]; pointer++; break;
+      case -1: nDel++; tDel += diffs[pointer][1]; pointer++; break;
+      case 0:
+        pointer = __mergeRun(diffs, pointer, nDel, nIns, tDel, tIns);
+        nIns = 0; nDel = 0; tDel = ''; tIns = '';
+        break;
+    }
+  }
+  if (diffs.at(-1)?.[1] === '') diffs.pop();
+  if (__mergeShifts(diffs)) __cleanupMerge(diffs);
+}
+// cleanupSemantic's last step: a deletion and insertion overlapping by at least half of either
+// become deletion, equality, insertion
+function __cleanupOverlaps(diffs) {
+  let pointer = 1;
+  while (pointer < diffs.length) {
+    if (diffs[pointer - 1][0] === -1 && diffs[pointer][0] === 1) {
+      const deletion = diffs[pointer - 1][1];
+      const insertion = diffs[pointer][1];
+      const o1 = __commonOverlap(deletion, insertion);
+      const o2 = __commonOverlap(insertion, deletion);
+      if (o1 >= o2) {
+        if (o1 >= deletion.length / 2 || o1 >= insertion.length / 2) {
+          diffs.splice(pointer, 0, [0, insertion.substring(0, o1)]);
+          diffs[pointer - 1][1] = deletion.substring(0, deletion.length - o1);
+          diffs[pointer + 1][1] = insertion.substring(o1);
+          pointer++;
+        }
+      } else if (o2 >= deletion.length / 2 || o2 >= insertion.length / 2) {
+        diffs.splice(pointer, 0, [0, deletion.substring(0, o2)]);
+        diffs[pointer - 1][0] = 1;
+        diffs[pointer - 1][1] = insertion.substring(0, insertion.length - o2);
+        diffs[pointer + 1][0] = -1;
+        diffs[pointer + 1][1] = deletion.substring(o2);
+        pointer++;
+      }
+      pointer++;
+    }
+    pointer++;
+  }
 }
 function __cleanupSemantic(diffs) {
   let changes = false;
@@ -6851,32 +7284,7 @@ function __cleanupSemantic(diffs) {
   }
   if (changes) __cleanupMerge(diffs);
   __cleanupSemanticLossless(diffs);
-  pointer = 1;
-  while (pointer < diffs.length) {
-    if (diffs[pointer - 1][0] === -1 && diffs[pointer][0] === 1) {
-      const deletion = diffs[pointer - 1][1];
-      const insertion = diffs[pointer][1];
-      const o1 = __commonOverlap(deletion, insertion);
-      const o2 = __commonOverlap(insertion, deletion);
-      if (o1 >= o2) {
-        if (o1 >= deletion.length / 2 || o1 >= insertion.length / 2) {
-          diffs.splice(pointer, 0, [0, insertion.substring(0, o1)]);
-          diffs[pointer - 1][1] = deletion.substring(0, deletion.length - o1);
-          diffs[pointer + 1][1] = insertion.substring(o1);
-          pointer++;
-        }
-      } else if (o2 >= deletion.length / 2 || o2 >= insertion.length / 2) {
-        diffs.splice(pointer, 0, [0, deletion.substring(0, o2)]);
-        diffs[pointer - 1][0] = 1;
-        diffs[pointer - 1][1] = insertion.substring(0, insertion.length - o2);
-        diffs[pointer + 1][0] = -1;
-        diffs[pointer + 1][1] = deletion.substring(o2);
-        pointer++;
-      }
-      pointer++;
-    }
-    pointer++;
-  }
+  __cleanupOverlaps(diffs);
 }
 // @vitest/utils `diffStringsRaw(a, b, true)`: the character diff, cleaned up semantically.
 function __diffStringsRaw(a, b) {
@@ -6965,24 +7373,22 @@ function __diffType(v) {
 }
 const __NO_DIFF = 'Compared values have no visual difference.';
 // @vitest/utils `diff(expected, received)`; `annotate` false is its `omitAnnotationLines: true`.
-function __vdiff(a, b, annotate = false) {
-  if (Object.is(a, b)) return '';
-  let type = __diffType(a);
-  let omitDifference = false;
-  // an asymmetric matcher diffs as its expected type (vitest); a user-defined one (no vitest
-  // `$$typeof`) or one without getExpectedType (expect.anything) has no diff
+// __vdiff's diff type of `a`: [type, omit the difference]; null when there is no diff (a
+// user-defined asymmetric matcher, or one without getExpectedType like expect.anything)
+function __vdiffType(a) {
+  const type = __diffType(a);
+  // an asymmetric matcher diffs as its expected type (vitest)
   if (type === 'object' && typeof a.asymmetricMatch === 'function') {
-    if (a.$$typeof !== Symbol.for('jest.asymmetricMatcher')) return undefined;
-    if (typeof a.getExpectedType !== 'function') return undefined;
-    type = a.getExpectedType();
-    omitDifference = type === 'string';
+    if (a.$$typeof !== Symbol.for('jest.asymmetricMatcher')) return null;
+    if (typeof a.getExpectedType !== 'function') return null;
+    const expected = a.getExpectedType();
+    return [expected, expected === 'string'];
   }
-  const fmt = { indent: 2, basic: false, maxDepth: 20, errors: true };
-  const fallback = { ...fmt, maxDepth: 8, toJSON: false };
-  if (type !== __diffType(b)) {
-    return `${__dcol.green(`- ${__diffAnno[0]}:`)}\n${__pf(a, fallback)}\n\n${__dcol.red(`+ ${__diffAnno[1]}:`)}\n${__pf(b, fallback)}`;
-  }
-  if (omitDifference) return undefined;
+  return [type, false];
+}
+// __vdiff of objects (maps and sets sorted): by their pretty-format, falling back to the
+// structure without toJSON when they serialize the same
+function __vdiffObjects(a, b, type, fmt, fallback, annotate) {
   const noDiff = __dcol.dim(__NO_DIFF);
   const objects = (opts) => {
     const ac = __pf(a, { ...opts, indent: 0 });
@@ -6990,19 +7396,8 @@ function __vdiff(a, b, annotate = false) {
     if (ac === bc) return noDiff;
     return __diffLines(__pf(a, opts).split('\n'), __pf(b, opts).split('\n'), ac.split('\n'), bc.split('\n'), annotate);
   };
-  const sortMap = (x) => new Map([...x.entries()].sort());
-  const sortSet = (x) => new Set([...x.values()].sort());
-  switch (type) {
-    case 'string': return __diffLines(a.split('\n'), b.split('\n'), undefined, undefined, annotate);
-    case 'boolean':
-    case 'number': {
-      const af = __pf(a, fmt);
-      const bf = __pf(b, fmt);
-      return af === bf ? '' : __diffLines(af.split('\n'), bf.split('\n'), undefined, undefined, annotate);
-    }
-    case 'map': a = sortMap(a); b = sortMap(b); break;
-    case 'set': a = sortSet(a); b = sortSet(b); break;
-  }
+  if (type === 'map') { a = new Map([...a.entries()].sort()); b = new Map([...b.entries()].sort()); }
+  else if (type === 'set') { a = new Set([...a.values()].sort()); b = new Set([...b.values()].sort()); }
   let d;
   let threw = false;
   try { d = objects(fmt); } catch (e) { threw = true; }
@@ -7011,6 +7406,28 @@ function __vdiff(a, b, annotate = false) {
     if (d !== noDiff && !threw) d = `${__dcol.dim('Compared values serialize to the same structure.\nPrinting internal object structure without calling `toJSON` instead.')}\n\n${d}`;
   }
   return d;
+}
+function __vdiff(a, b, annotate = false) {
+  if (Object.is(a, b)) return '';
+  const typed = __vdiffType(a);
+  if (typed === null) return undefined;
+  const [type, omitDifference] = typed;
+  const fmt = { indent: 2, basic: false, maxDepth: 20, errors: true };
+  const fallback = { ...fmt, maxDepth: 8, toJSON: false };
+  if (type !== __diffType(b)) {
+    return `${__dcol.green(`- ${__diffAnno[0]}:`)}\n${__pf(a, fallback)}\n\n${__dcol.red(`+ ${__diffAnno[1]}:`)}\n${__pf(b, fallback)}`;
+  }
+  if (omitDifference) return undefined;
+  switch (type) {
+    case 'string': return __diffLines(a.split('\n'), b.split('\n'), undefined, undefined, annotate);
+    case 'boolean':
+    case 'number': {
+      const af = __pf(a, fmt);
+      const bf = __pf(b, fmt);
+      return af === bf ? '' : __diffLines(af.split('\n'), bf.split('\n'), undefined, undefined, annotate);
+    }
+  }
+  return __vdiffObjects(a, b, type, fmt, fallback, annotate);
 }
 function __ordinal(n) {
   const j = n % 10;
@@ -7055,24 +7472,28 @@ function __objectSubset(object, subset) {
     } else if (object instanceof Date) {
       return object;
     } else if (isObj(object) && isObj(subset)) {
-      if (__subsetMatches(object, subset)) return subset;
-      const trimmed = {};
-      seen.set(object, trimmed);
-      if (typeof object.constructor === 'function' && typeof object.constructor.name === 'string') {
-        Object.defineProperty(trimmed, 'constructor', { enumerable: false, value: object.constructor });
-      }
-      for (const key of keys(object)) {
-        if (inObj(subset, key)) {
-          trimmed[key] = seen.has(object[key]) ? seen.get(object[key]) : withContext(seen)(object[key], subset[key]);
-        } else if (!seen.has(object[key])) {
-          stripped += 1;
-          if (isObj(object[key])) stripped += keys(object[key]).length;
-          withContext(seen)(object[key], subset[key]);
-        }
-      }
-      if (keys(trimmed).length > 0) return trimmed;
+      return trimObject(seen, object, subset);
     }
     return object;
+  };
+  // an object cut down to the subset's keys (the subset itself when it matches)
+  const trimObject = (seen, object, subset) => {
+    if (__subsetMatches(object, subset)) return subset;
+    const trimmed = {};
+    seen.set(object, trimmed);
+    if (typeof object.constructor === 'function' && typeof object.constructor.name === 'string') {
+      Object.defineProperty(trimmed, 'constructor', { enumerable: false, value: object.constructor });
+    }
+    for (const key of keys(object)) {
+      if (inObj(subset, key)) {
+        trimmed[key] = seen.has(object[key]) ? seen.get(object[key]) : withContext(seen)(object[key], subset[key]);
+      } else if (!seen.has(object[key])) {
+        stripped += 1;
+        if (isObj(object[key])) stripped += keys(object[key]).length;
+        withContext(seen)(object[key], subset[key]);
+      }
+    }
+    return keys(trimmed).length > 0 ? trimmed : object;
   };
   return { subset: withContext()(object, subset), stripped };
 }
@@ -7081,34 +7502,38 @@ function __subsetMatches(a, e) {
   return __equals(a, e, [...__customTesters, __iterableEquality, __subsetEquality]);
 }
 
+// @vitest/utils format's extra argument
+const __formatExtra = (v) => (v === null || typeof v !== 'object' ? (typeof v === 'symbol' ? v.toString() : v) : __inspect(v));
+// @vitest/utils format's %s
+function __formatOneS(v) {
+  if (typeof v === 'bigint') return `${v}n`;
+  if (typeof v === 'number' && v === 0 && 1 / v < 0) return '-0';
+  if (typeof v === 'object' && v !== null) return (typeof v.toString === 'function' && v.toString !== Object.prototype.toString) ? v.toString() : __inspect(v);
+  return String(v);
+}
+// @vitest/utils format's %j: a circular value is `[Circular]`
+function __formatOneJ(v) {
+  try { return JSON.stringify(v); } catch (e) {
+    const m = String(e && e.message);
+    if (/circular structure|cyclic structures|cyclic object/.test(m)) return '[Circular]';
+    throw e;
+  }
+}
 // @vitest/utils `format(spec, item)` for one placeholder.
 function __formatOne(spec, item) {
   const v = item;
-  let consumed = true;
-  let out;
   switch (spec) {
-    case '%%': consumed = false; out = '%'; break;
-    case '%s':
-      if (typeof v === 'bigint') out = `${v}n`;
-      else if (typeof v === 'number' && v === 0 && 1 / v < 0) out = '-0';
-      else if (typeof v === 'object' && v !== null) out = (typeof v.toString === 'function' && v.toString !== Object.prototype.toString) ? v.toString() : __inspect(v);
-      else out = String(v);
-      break;
-    case '%d': out = typeof v === 'bigint' ? `${v}n` : typeof v === 'symbol' ? 'NaN' : Number(v).toString(); break;
-    case '%i': out = typeof v === 'bigint' ? `${v}n` : Number.parseInt(String(v)).toString(); break;
-    case '%f': out = Number.parseFloat(String(v)).toString(); break;
-    case '%o': case '%O': out = __inspect(v); break;
-    case '%c': out = ''; break;
-    case '%j':
-      try { out = JSON.stringify(v); } catch (e) {
-        const m = String(e && e.message);
-        if (/circular structure|cyclic structures|cyclic object/.test(m)) out = '[Circular]'; else throw e;
-      }
-      break;
+    // an unconsumed item is appended, as `format` appends extra arguments
+    case '%%': return `% ${__formatExtra(v)}`;
+    case '%s': return __formatOneS(v);
+    case '%d': return typeof v === 'bigint' ? `${v}n` : typeof v === 'symbol' ? 'NaN' : Number(v).toString();
+    case '%i': return typeof v === 'bigint' ? `${v}n` : Number.parseInt(String(v)).toString();
+    case '%f': return Number.parseFloat(String(v)).toString();
+    case '%o': case '%O': return __inspect(v);
+    case '%c': return '';
+    case '%j': return __formatOneJ(v);
   }
-  // an unconsumed item is appended, as `format` appends extra arguments
-  if (!consumed) out += ` ${v === null || typeof v !== 'object' ? (typeof v === 'symbol' ? v.toString() : v) : __inspect(v)}`;
-  return out;
+  return undefined;
 }
 function __objectAttr(source, path, dflt) {
   let r = source;
@@ -7254,14 +7679,54 @@ globalThis.__ttScopeBind = (file, get, set) => {
 const root = { name: '', tasks: [], suite: true, hooks: { be: [], ae: [], ba: [], aa: [] }, parent: null };
 let current = root;
 
+// A describe's options object (`describe(name, { repeats }, fn)`) is merged over its enclosing
+// suite's, and its tests inherit them (vitest's createSuite / createTest).
+const __suiteOptions = (a, b) => (a && typeof a === 'object' ? a : b && typeof b === 'object' ? b : {});
+// `.concurrent` / `.sequential` (turbo-test#256): the modifier of the call being made (vitest's
+// chainable context), read by describe / the test collector (not inside a describe's body)
+let __chain = '';
+// it.concurrent / describe.sequential …: `target` called with the modifier set; its members
+// (`.each`, `.skip`, `.fails` …) and the functions they return carry it too
+function __withChain(target, mode) {
+  return new Proxy(target, {
+    apply(f, self, args) {
+      const prev = __chain;
+      __chain = mode;
+      try {
+        const r = Reflect.apply(f, self, args);
+        return typeof r === 'function' ? __withChain(r, mode) : r;
+      } finally { __chain = prev; }
+    },
+    get(f, k) {
+      const v = Reflect.get(f, k);
+      return typeof v === 'function' && k !== 'concurrent' && k !== 'sequential' ? __withChain(v, mode) : v;
+    },
+  });
+}
+// the options a suite's tests and nested suites inherit: the enclosing suite's (the root's:
+// `sequence.concurrent`, host → __TT_SEQUENCE_CONCURRENT), then its own, with vitest's
+// createSuite precedence of concurrent / sequential
+const __parentOpts = (s) => s.opts || (globalThis.__TT_SEQUENCE_CONCURRENT ? { concurrent: true } : {});
+function __suiteOpts(parent, own, chain) {
+  const cs = !!own.concurrent || chain === 'concurrent' || own.sequential === false;
+  const ss = !!own.sequential || chain === 'sequential' || own.concurrent === false;
+  const o = { ...__parentOpts(parent), ...own };
+  const isC = cs || (o.concurrent && !ss);
+  const isS = ss || (o.sequential && !cs);
+  if (isC != null) o.concurrent = !!isC && !isS;
+  if (isS != null) o.sequential = !!isS && !isC;
+  return o;
+}
 function describe(name, a, b) {
+  const chain = __chain;
   const fn = typeof a === 'function' ? a : (typeof b === 'function' ? b : () => {});
-  const suite = { name, tasks: [], suite: true, hooks: { be: [], ae: [], ba: [], aa: [] }, parent: current };
+  const opts = __suiteOpts(current, __suiteOptions(a, b), chain);
+  const suite = { name, tasks: [], suite: true, hooks: { be: [], ae: [], ba: [], aa: [] }, parent: current, opts, concurrent: opts.concurrent };
   current.tasks.push(suite);
   const prev = current;
   current = suite;
-  fn();
-  current = prev;
+  __chain = '';
+  try { fn(); } finally { current = prev; __chain = chain; }
   return suite;
 }
 // A skipped/todo suite registers no tests, but it IS a collected task for vitest's "No test suite
@@ -7273,7 +7738,6 @@ describe.only = (name, a, b) => { __tt.hasOnly = true; describe(name, a, b).only
 describe.todo = (name, a, b) => { describe(name, a, b).mode = 'todo'; };
 describe.skipIf = (cond) => (cond ? describe.skip : describe);
 describe.runIf = (cond) => (cond ? describe : describe.skip);
-describe.concurrent = describe; // accepted; a file's tests still run sequentially
 describe.each = (cases, ...targs) => __each(describe, cases, targs);
 describe.for = (cases, ...targs) => __for(describe, cases, targs, true);
 // Supports both vitest signatures: it(name, fn, opts) and it(name, opts, fn).
@@ -7287,33 +7751,52 @@ function __normTest(a, b) {
 // Default per-test timeout (ms): `--testTimeout` (host → globalThis.__TT_DEFAULT_TIMEOUT) else
 // vitest's 5000ms default. A test's own `{ timeout }` overrides this in runSuite.
 function __defaultTimeout() {
-  const n = Number(globalThis.__TT_DEFAULT_TIMEOUT);
-  return Number.isFinite(n) && n > 0 ? n : 5000;
+  // jest.setTimeout(ms) sets a per-file override (cleared in __ttResetForNextFile).
+  if (typeof globalThis.__TT_JEST_TIMEOUT === 'number') return globalThis.__TT_JEST_TIMEOUT;
+  // vitest's withTimeout treats `<= 0 || Infinity` as "no timeout" (turbo-test#273); honour an
+  // explicit 0 or Infinity from __TT_DEFAULT_TIMEOUT and fall back to 5 s otherwise.
+  const raw = globalThis.__TT_DEFAULT_TIMEOUT;
+  if (raw !== undefined && raw !== null && raw !== '') {
+    const n = Number(raw);
+    if (!Number.isNaN(n)) return n;
+  }
+  return 5000;
 }
 // Collect a test into the current suite. Under `includeTaskLocation` it records where it was
 // registered from (`[line, column]` in the test file, native `__ttCallSite`, #63).
 let __inEach = false;
+// whether a test runs concurrently (vitest's createTest): `.concurrent` / `.sequential`, else
+// its own / its suite's `concurrent`, else not `sequential` under `sequence.concurrent`
+function __testConcurrent(own, chain) {
+  if (chain) return chain === 'concurrent';
+  const o = { ...__parentOpts(current), ...own };
+  return o.concurrent != null ? !!o.concurrent : !o.sequential && !!globalThis.__TT_SEQUENCE_CONCURRENT;
+}
+let __testSeq = 0;
 function __addTest(t) {
+  t.seq = __testSeq++;
   if (globalThis.__TT_TASK_LOCATION) t.location = globalThis.__ttCallSite();
   // where it was registered: a timeout's stack (vitest's `STACK_TRACE_ERROR`, turbo-test#102)
   t.stackTrace = new Error('STACK_TRACE_ERROR');
   if (__inEach) t.each = true;
+  // `repeats` from the enclosing describe's options (turbo-test#257)
+  if (t.repeats === undefined && current.opts) t.repeats = current.opts.repeats;
+  t.concurrent = __testConcurrent(t.own || {}, __chain);
   current.tasks.push(t);
 }
 function it(name, a, b) {
   const { fn, o } = __normTest(a, b);
-  __addTest({ name, fn, skip: false, only: false, retry: o.retry || 0, timeout: o.timeout });
+  __addTest({ name, fn, skip: false, only: false, retry: o.retry || 0, repeats: o.repeats, own: o, timeout: o.timeout });
 }
 it.skip = (name, a, b) => __addTest({ name, fn: __normTest(a, b).fn, skip: true });
 it.todo = (name) => __addTest({ name, fn: () => {}, skip: true, todo: true });
-it.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: true, retry: o.retry || 0, timeout: o.timeout }); };
-it.concurrent = it; // accepted; this runner executes a file's tests sequentially
+it.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: true, retry: o.retry || 0, repeats: o.repeats, own: o, timeout: o.timeout }); };
 it.each = (cases, ...targs) => __each(it, cases, targs);
 it.for = (cases, ...targs) => __for(it, cases, targs);
 it.skipIf = (cond) => (name, fn) => __addTest({ name, fn, skip: !!cond, only: false, retry: 0 });
 it.runIf = (cond) => (name, fn) => __addTest({ name, fn, skip: !cond, only: false, retry: 0 });
 // it.fails: the test PASSES iff its body throws (runSuite inverts the outcome via `fails`).
-it.fails = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: false, retry: o.retry || 0, fails: true }); };
+it.fails = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: false, retry: o.retry || 0, repeats: o.repeats, own: o, fails: true }); };
 // it.extend({...}) — test-context fixtures (best-effort). vitest passes a merged context object as
 // the test fn's first arg; fixtures defined as plain values or `async ({}, use) => use(value)`
 // functions are resolved here and provided. Returns a new test fn with these fixtures baked in.
@@ -7336,14 +7819,18 @@ it.extend = (fixtures) => {
     return ctx;
   };
   const wrap = (userFn) => async (ctx) => userFn(await resolveCtx(ctx));
-  const ext = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: false, retry: o.retry || 0 }); };
+  const ext = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: false, retry: o.retry || 0, repeats: o.repeats, own: o }); };
   ext.skip = (name, a, b) => __addTest({ name, fn: wrap(__normTest(a, b).fn), skip: true });
-  ext.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: true, retry: o.retry || 0 }); };
+  ext.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: true, retry: o.retry || 0, repeats: o.repeats, own: o }); };
   ext.each = (cases, ...targs) => __each(ext, cases, targs);
   ext.for = (cases, ...targs) => __for(ext, cases, targs);
   ext.extend = (more) => it.extend({ ...fixtures, ...more });
   return ext;
 };
+for (const api of [describe, it]) {
+  api.concurrent = __withChain(api, 'concurrent');
+  api.sequential = __withChain(api, 'sequential');
+}
 globalThis.describe = describe;
 globalThis.it = it;
 globalThis.test = it;
@@ -7359,16 +7846,31 @@ const __ttIsProjectCaller = () => {
   const named = frames.find((l) => l.includes('/') && !l.includes('<anonymous>'));
   return !!named && !named.includes('/node_modules/');
 };
-const __ttAddHook = (kind, fn) => {
-  current.hooks[kind].push(fn);
+// A hook, an onTestFinished / onTestFailed handler: its function, its own timeout (vitest's
+// last argument: turbo-test#255) and where it was registered (its timeout error's stack)
+const __ttHook = (fn, timeout) => ({ fn, timeout, site: new Error('STACK_TRACE_ERROR') });
+const __ttAddHook = (kind, fn, timeout) => {
+  const h = __ttHook(fn, timeout);
+  current.hooks[kind].push(h);
   if (current === root && globalThis.__ttHookBaseline && __ttIsProjectCaller()) {
-    __ttFileRootHooks.push([kind, fn]);
+    __ttFileRootHooks.push([kind, h]);
   }
 };
-globalThis.beforeEach = (fn) => __ttAddHook('be', fn);
-globalThis.afterEach = (fn) => __ttAddHook('ae', fn);
-globalThis.beforeAll = (fn) => __ttAddHook('ba', fn);
-globalThis.afterAll = (fn) => __ttAddHook('aa', fn);
+globalThis.beforeEach = (fn, timeout) => __ttAddHook('be', fn, timeout);
+globalThis.afterEach = (fn, timeout) => __ttAddHook('ae', fn, timeout);
+globalThis.beforeAll = (fn, timeout) => __ttAddHook('ba', fn, timeout);
+globalThis.afterAll = (fn, timeout) => __ttAddHook('aa', fn, timeout);
+// onTestFinished / onTestFailed imported from 'vitest' (turbo-test#258): vitest's
+// createTestHook — the callback is type-checked, then registered on the test running now (its
+// body, a beforeEach or an afterEach), the same list as the context's own
+const __ttTestHook = (name, key) => (fn, timeout) => {
+  if (typeof fn !== 'function') throw new TypeError(`"${name}" callback value must be function, received "${typeof fn}"`);
+  const t = __snap.currentTest;
+  if (!t) throw new Error(`Hook ${name}() can only be called inside a test`);
+  t[key].push(__ttHook(fn, timeout));
+};
+globalThis.onTestFinished = __ttTestHook('onTestFinished', 'onFinished');
+globalThis.onTestFailed = __ttTestHook('onTestFailed', 'onFailed');
 
 // ---- runner ----
 // One per-test record for the reporters (`summary.tests`): the `describe > test` label, the
@@ -7383,29 +7885,40 @@ globalThis.afterAll = (fn) => __ttAddHook('aa', fn);
 // (`inspected`), and the serialized error's own properties are vitest's `Serialized Error`
 // (`properties`). `no_name` / `no_message`: the serialized error has no `name` / `message`
 // (junit leaves the `type` / `message` attribute out).
-function __errorInfo(e) {
-  const ser = __serializeError(e);
-  let diff = '';
-  const diffable = e !== null && typeof e === 'object' && (e.showDiff || (e.showDiff === undefined && e.expected !== undefined && e.actual !== undefined));
-  if (diffable) {
-    try { diff = __printDiffOrStringify(e.actual, e.expected); } catch (err) { diff = ''; }
-  }
-  const cause = e !== null && typeof e === 'object' && e.cause && typeof e.cause === 'object' && 'name' in e.cause ? __errorInfo(e.cause) : null;
-  // an Error with an empty message keeps the `Name: ` line (vitest prints its serialized form
-  // with its parsed frames, not modelled)
-  const inspected = !ser.message && !(e instanceof Error) ? __nodeInspect(__plainOf({ ...ser, stacks: [] })) : null;
-  const props = __errorProperties(ser);
-  // vite's details of a module's parse / transform error (printErrorInner's
-  // `__vitest_rollup_error__` lines, turbo-test#113)
-  const re = e !== null && typeof e === 'object' ? e.__vitest_rollup_error__ : undefined;
-  const rollup = re && typeof re === 'object'
-    ? { plugin: re.plugin ? String(re.plugin) : '', id: re.id ? String(re.id) : '', loc: re.loc ? `${re.loc.line}:${re.loc.column}` : '', frame: re.frame ? String(re.frame) : '' }
-    : null;
+// an error whose actual / expected are diffed (chai's showDiff, else both present)
+const __errorDiffable = (e) => e.showDiff || (e.showDiff === undefined && e.expected !== undefined && e.actual !== undefined);
+function __errorDiff(e) {
+  try { return __printDiffOrStringify(e.actual, e.expected); } catch (err) { return ''; }
+}
+const __errorHasCause = (e) => e.cause && typeof e.cause === 'object' && 'name' in e.cause;
+// vite's details of a module's parse / transform error (printErrorInner's
+// `__vitest_rollup_error__` lines, turbo-test#113)
+function __errorRollup(re) {
+  if (!re || typeof re !== 'object') return null;
+  return { plugin: re.plugin ? String(re.plugin) : '', id: re.id ? String(re.id) : '', loc: re.loc ? `${re.loc.line}:${re.loc.column}` : '', frame: re.frame ? String(re.frame) : '' };
+}
+// the serialized error's name and message (and whether it has none)
+function __errorNames(ser) {
   return {
     name: ser.name ? String(ser.name) : 'Unknown Error',
     message: ser.message === undefined ? '' : String(ser.message),
     no_name: ser.name === undefined,
     no_message: ser.message === undefined,
+  };
+}
+function __errorInfo(e) {
+  const ser = __serializeError(e);
+  const obj = e !== null && typeof e === 'object';
+  const diffable = obj && __errorDiffable(e);
+  const diff = diffable ? __errorDiff(e) : '';
+  const cause = obj && __errorHasCause(e) ? __errorInfo(e.cause) : null;
+  // an Error with an empty message keeps the `Name: ` line (vitest prints its serialized form
+  // with its parsed frames, not modelled)
+  const inspected = !ser.message && !(e instanceof Error) ? __nodeInspect(__plainOf({ ...ser, stacks: [] })) : null;
+  const props = __errorProperties(ser);
+  const rollup = __errorRollup(obj ? e.__vitest_rollup_error__ : undefined);
+  return {
+    ...__errorNames(ser),
     diff: diff || '',
     stack: typeof ser.stack === 'string' ? ser.stack : '',
     cause,
@@ -7414,7 +7927,7 @@ function __errorInfo(e) {
     rollup,
     // processError's prettified actual / expected and the error's showDiff (vitest's TAP
     // block, turbo-test#170)
-    show_diff: !!(e !== null && typeof e === 'object' && e.showDiff),
+    show_diff: !!(obj && e.showDiff),
     actual: diffable ? __prettifyValue(e.actual) : null,
     expected: diffable ? __prettifyValue(e.expected) : null,
   };
@@ -7440,18 +7953,23 @@ function __failureMessage(e) {
 const __unserializable = (err) => (err instanceof Error ? `<unserializable>: ${err.message}` : typeof err === 'string' ? `<unserializable>: ${err}` : '<unserializable>');
 // @vitest/utils serializeValue: functions as `Function<name>`, objects as null-prototype clones
 // of their own and inherited (up to Object.prototype) properties.
-function __serializeValue(val, seen = new WeakMap()) {
-  if (!val || typeof val === 'string') return val;
-  if (val instanceof Error && 'toJSON' in val && typeof val.toJSON === 'function') {
-    const j = val.toJSON();
-    if (j && j !== val && typeof j === 'object') {
-      try { if (typeof val.message === 'string') j.message ??= val.message; } catch {}
-      try { if (typeof val.stack === 'string') j.stack ??= val.stack; } catch {}
-      try { if (typeof val.name === 'string') j.name ??= val.name; } catch {}
-      try { if (val.cause != null) j.cause ??= __serializeValue(val.cause, seen); } catch {}
-    }
-    return __serializeValue(j, seen);
-  }
+// an Error's toJSON(), completed with its message / stack / name / cause
+function __serializeErrorJSON(val, seen) {
+  const j = val.toJSON();
+  if (j && j !== val && typeof j === 'object') __serializeErrorFill(j, val, seen);
+  return __serializeValue(j, seen);
+}
+function __serializeErrorFill(j, val, seen) {
+  try { if (typeof val.message === 'string') j.message ??= val.message; } catch {}
+  try { if (typeof val.stack === 'string') j.stack ??= val.stack; } catch {}
+  try { if (typeof val.name === 'string') j.name ??= val.name; } catch {}
+  try { if (val.cause != null) j.cause ??= __serializeValue(val.cause, seen); } catch {}
+}
+// __serializeValue's "not a leaf"
+const __SER_NONE = Symbol('ser-none');
+// the values serialized as themselves or a short text (functions, symbols, primitives, buffers,
+// promises, elements)
+function __serializeLeaf(val) {
   if (typeof val === 'function') return `Function<${val.name || 'anonymous'}>`;
   if (typeof val === 'symbol') return val.toString();
   if (typeof val !== 'object') return val;
@@ -7459,14 +7977,16 @@ function __serializeValue(val, seen = new WeakMap()) {
   if (val instanceof Uint8Array) return `<Uint8Array(${val.length}) ...>`;
   if (val instanceof Promise) return 'Promise';
   if (typeof Element !== 'undefined' && val instanceof Element) return val.tagName;
-  if (typeof val.toJSON === 'function') return __serializeValue(val.toJSON(), seen);
-  if (seen.has(val)) return seen.get(val);
-  if (Array.isArray(val)) {
-    const clone = new Array(val.length);
-    seen.set(val, clone);
-    val.forEach((x, i) => { try { clone[i] = __serializeValue(x, seen); } catch (err) { clone[i] = __unserializable(err); } });
-    return clone;
-  }
+  return __SER_NONE;
+}
+function __serializeArray(val, seen) {
+  const clone = new Array(val.length);
+  seen.set(val, clone);
+  val.forEach((x, i) => { try { clone[i] = __serializeValue(x, seen); } catch (err) { clone[i] = __unserializable(err); } });
+  return clone;
+}
+// an object's own and inherited properties (short of Object.prototype)
+function __serializeObject(val, seen) {
   const clone = Object.create(null);
   seen.set(val, clone);
   for (let obj = val; obj && obj !== Object.prototype; obj = Object.getPrototypeOf(obj)) {
@@ -7477,6 +7997,16 @@ function __serializeValue(val, seen = new WeakMap()) {
   }
   if (val instanceof Error) { try { clone.message = val.message; } catch {} }
   return clone;
+}
+function __serializeValue(val, seen = new WeakMap()) {
+  if (!val || typeof val === 'string') return val;
+  if (val instanceof Error && 'toJSON' in val && typeof val.toJSON === 'function') return __serializeErrorJSON(val, seen);
+  const leaf = __serializeLeaf(val);
+  if (leaf !== __SER_NONE) return leaf;
+  if (typeof val.toJSON === 'function') return __serializeValue(val.toJSON(), seen);
+  if (seen.has(val)) return seen.get(val);
+  if (Array.isArray(val)) return __serializeArray(val, seen);
+  return __serializeObject(val, seen);
 }
 // The serialized error as the reporters see it (structured-cloned to the main process): plain
 // objects and arrays.
@@ -7523,6 +8053,7 @@ function __testRecord(t, chain, status, extra) {
     name: chain.map((s) => s.name).filter(Boolean).concat(t.name).join(' > '),
     title: t.name,
     ancestors: chain.slice(1).map((s) => s.name),
+    seq: t.seq,
     status,
     duration_ms: 0,
     location: t.location,
@@ -7581,8 +8112,8 @@ function __testTaskOf(t, chain) {
   t.task = {
     type: 'test', name: t.name, id: `${(up || file).id}_${parent.tasks.indexOf(t)}`, mode: 'run', file, suite: up,
     fullName: [file.name, ...names].join(' > '), fullTestName: names.join(' > '), meta: Object.create(null),
-    each: t.each || undefined, fails: t.fails || undefined, retry: t.retry || undefined, repeats: undefined,
-    timeout: (typeof t.timeout === 'number' && t.timeout > 0) ? t.timeout : __defaultTimeout(), shuffle: undefined,
+    each: t.each || undefined, fails: t.fails || undefined, retry: t.retry || undefined, repeats: t.repeats,
+    timeout: typeof t.timeout === 'number' ? t.timeout : __defaultTimeout(), shuffle: undefined,
     tags: [], annotations: [], artifacts: [], result: undefined,
   };
   return t.task;
@@ -7613,13 +8144,14 @@ function __contextOf(t, chain) {
     task.annotations.push(annotation);
     return Promise.resolve(annotation);
   };
-  context.onTestFailed = (fn) => { t.onFailed.push(fn); };
-  context.onTestFinished = (fn) => { t.onFinished.push(fn); };
+  context.onTestFailed = (fn, timeout) => { t.onFailed.push(__ttHook(fn, timeout)); };
+  context.onTestFinished = (fn, timeout) => { t.onFinished.push(__ttHook(fn, timeout)); };
   let ownExpect;
   Object.defineProperty(context, 'expect', { get: () => (ownExpect ||= new Proxy(globalThis.expect, {})) });
   Object.defineProperty(task, 'context', { value: context, configurable: true });
   t.abort = abort;
   t.context = context;
+  __ctxAborts.set(context, abort);
   return context;
 }
 // onTestFinished (last registered first) / onTestFailed handlers: each gets the context and a
@@ -7629,11 +8161,159 @@ async function __callTestHooks(t, hooks, fail) {
   const keep = [ctx.onTestFailed, ctx.onTestFinished];
   ctx.onTestFailed = () => { throw new Error('Cannot call "onTestFailed" inside a test hook.'); };
   ctx.onTestFinished = () => { throw new Error('Cannot call "onTestFinished" inside a test hook.'); };
-  for (const fn of hooks.slice().reverse()) {
-    __loop.ticks++;
-    try { await fn(ctx); } catch (e) { fail(e); }
+  for (const h of hooks.slice().reverse()) {
+    // an internal handler (expect.poll's) is a bare function, without a timeout
+    const fn = typeof h === 'function' ? h : h.fn;
+    const arm = typeof h === 'function' ? undefined : __hookArm(h, ctx);
+    try {
+      await __vtLimit(() => { __loop.ticks++; return __vtSettle(() => fn(ctx), arm); });
+    } catch (e) { fail(e); }
   }
   [ctx.onTestFailed, ctx.onTestFinished] = keep;
+}
+
+// vitest 4.1.12's runner, call for call (turbo-test#251): where it awaits, and through which
+// wrappers it calls each hook, test and handler, sets the microtask turns between them — a
+// promise chain queued in one phase settles at the same point of the next ones as under vitest.
+// Each `await null` stands for a runner step that settles at once (onBeforeRunTask,
+// onBeforeTryTask, onAfterTryTask, onTaskFinished, onAfterRetryTask, onAfterRunTask,
+// onBeforeRunSuite, onAfterRunSuite, the fixture cleanups).
+const __vtNoop = () => {};
+// onAfterRunTask: vitest's worker wraps the runner's (sync) one in an async function
+async function __vtAfterRunTask() {
+  await null;
+}
+// @vitest/runner's limitConcurrency (turbo-test#256): at most `concurrency` calls run at once,
+// the others wait in order; a promise result settles through `.finally(release)`
+function __limitConcurrency(concurrency) {
+  let count = 0;
+  let head;
+  let tail;
+  const finish = () => {
+    count--;
+    if (head) {
+      head[0]();
+      head = head[1];
+      tail = head && tail;
+    }
+  };
+  const acquire = () => {
+    let released = false;
+    const release = () => { if (!released) { released = true; finish(); } };
+    if (count++ < concurrency) return release;
+    return new Promise((resolve) => {
+      const node = [() => resolve(release)];
+      if (tail) tail = tail[1] = node;
+      else head = tail = node;
+    });
+  };
+  return (func) => {
+    const run = (release) => {
+      try {
+        const r = func();
+        if (r instanceof Promise) return r.finally(release);
+        release();
+        return Promise.resolve(r);
+      } catch (e) {
+        release();
+        return Promise.reject(e);
+      }
+    };
+    const release = acquire();
+    return release instanceof Promise ? release.then(run) : run(release);
+  };
+}
+// `maxConcurrency` (host → __TT_MAX_CONCURRENCY; vitest's default 5)
+function __maxConcurrency() {
+  const n = Number(globalThis.__TT_MAX_CONCURRENCY);
+  return Number.isFinite(n) && n > 0 ? n : 5;
+}
+// vitest's limitMaxConcurrency (each hook, test function and handler) and limitTestConcurrency
+// (each test of a suite), made on first use
+let __maxLimiter;
+let __testLimiter;
+const __vtLimit = (func) => (__maxLimiter ||= __limitConcurrency(__maxConcurrency()))(func);
+const __vtTestLimit = (func) => (__testLimiter ||= __limitConcurrency(__maxConcurrency()))(func);
+// withTimeout / withCancel: a new promise, settled through a thenable result's `then`; `arm`
+// (the timeout timer) gets its reject and returns what disarms it
+function __vtSettle(fn, arm) {
+  return new Promise((resolve, reject) => {
+    const disarm = arm ? arm(reject) : __vtNoop;
+    const ok = (v) => { disarm(); resolve(v); };
+    const ko = (e) => { disarm(); reject(e); };
+    try {
+      const r = fn();
+      if (typeof r === 'object' && r != null && typeof r.then === 'function') r.then(ok, ko);
+      else ok(r);
+    } catch (e) { ko(e); }
+  });
+}
+// vitest's hookTimeout (turbo-test#255): the hook's own timeout, else `test.hookTimeout` /
+// --hookTimeout (host → __TT_HOOK_TIMEOUT), else vitest's 10 s
+function __hookTimeout(own) {
+  if (typeof own === 'number') return own;
+  // vitest's withTimeout treats `<= 0 || Infinity` as "no timeout" (turbo-test#268), so
+  // honour an explicit 0 or Infinity from __TT_HOOK_TIMEOUT; only fall back to the 10 s
+  // default when nothing was set (or the value does not parse as a number).
+  const raw = globalThis.__TT_HOOK_TIMEOUT;
+  if (raw !== undefined && raw !== null && raw !== '') {
+    const n = Number(raw);
+    if (!Number.isNaN(n)) return n;
+  }
+  return 10000;
+}
+// the contexts' AbortControllers: a beforeEach / afterEach / handler timing out aborts its test's
+// signal with the error (vitest's abortIfTimeout)
+const __ctxAborts = new WeakMap();
+// withTimeout's timer for hook `h` (none for a timeout of 0 or Infinity, as vitest's): an
+// internal timer, so a hook that never settles fails on the virtual clock with vitest's
+// makeTimeoutError — its stack where the hook was registered
+function __hookArm(h, ctx) {
+  const ms = __hookTimeout(h.timeout);
+  if (!(ms > 0) || ms === Infinity) return undefined;
+  return (reject) => {
+    const timer = __scheduleInternal(() => {
+      const err = new Error(`Hook timed out in ${ms}ms.\nIf this is a long-running hook, pass a timeout value as the last argument or configure it globally with "hookTimeout".`);
+      err.stack = String(h.site.stack).replace('STACK_TRACE_ERROR', err.message);
+      const abort = ctx && __ctxAborts.get(ctx);
+      if (abort) abort.abort(err);
+      reject(err);
+    }, ms);
+    return () => __clearInternal(timer);
+  };
+}
+// callAroundEachHooks / callAroundAllHooks with no aroundEach / aroundAll hook
+async function __vtAround(inner) {
+  await (async () => { await inner(); })();
+}
+// a hook (`be` / `ae` / `ba` / `aa`): withTimeout over withFixtures' async wrapper, through
+// limitConcurrency; what it returns (a function: its cleanup) or undefined
+async function __vtRunHook(h, args, name) {
+  return __vtLimit(async () => {
+    if (name === 'be' || name === 'ae') __loop.ticks++;
+    // called as a plain function, as vitest calls it (its frame has no method name)
+    const fn = h.fn;
+    const r = await __vtSettle(async () => fn(...args), __hookArm(h, args[0]));
+    // a cleanup runs under its hook's timeout (vitest's getBeforeHookCleanupCallback)
+    return typeof r === 'function' ? { fn: r, hook: h, ctx: args[0] } : undefined;
+  });
+}
+// callSuiteHook: a suite's hooks (afterEach / afterAll last registered first); beforeEach runs
+// the enclosing suites' first, afterEach after. `chain[i]` is the suite. A throw stops them.
+async function __vtSuiteHook(chain, i, name, args) {
+  const callbacks = [];
+  if (name === 'be' && i > 0) callbacks.push(...(await __vtSuiteHook(chain, i - 1, name, args)));
+  const hooks = chain[i].hooks[name];
+  for (const h of name === 'ae' || name === 'aa' ? hooks.slice().reverse() : hooks) callbacks.push(await __vtRunHook(h, args, name));
+  if (name === 'ae' && i > 0) callbacks.push(...(await __vtSuiteHook(chain, i - 1, name, args)));
+  return callbacks;
+}
+// callCleanupHooks: the functions beforeEach / beforeAll hooks returned, last first
+async function __vtCleanups(cleanups, bump) {
+  for (const c of cleanups.slice().reverse()) {
+    if (!c) continue;
+    await __vtLimit(() => { if (bump) __loop.ticks++; return __vtSettle(c.fn, __hookArm(c.hook, c.ctx)); });
+  }
 }
 
 // Whether a test of `suite` (or of a nested suite) will run: not skip / todo / filtered by -t /
@@ -7646,278 +8326,427 @@ function __runnable(suite, chain) {
     : !t.skip && !t.todo && !t.notOnly && !(__tt.namePattern && !__tt.namePattern.test(inner.slice(1).map((s) => s.name).concat(t.name).join(' ')))));
 }
 
+// runSuite: a describe without tasks (failing, or a describe.todo / .skip one) is a TAP task of
+// its own (turbo-test#170): where it sits among the tests, its mode and its describe path; one
+// that is not skipped fails with "No test found in suite <name>" (returns true)
+function __emptySuite(suite, ancestors, summary, skipAll, record) {
+  if (!ancestors.length || suite.tasks.length) return false;
+  summary.empty_suites.push([String(summary.tests.length), skipAll || 'run', ...ancestors.slice(1).map((x) => x.name), suite.name].join('\u001f'));
+  if (skipAll) return false;
+  summary.failures.push(`No test found in suite ${suite.name}`);
+  record('fail');
+  return true;
+}
+// a suite's hook error: its failure line and its error
+function __suiteHookError(suite, summary, suiteErrors, hook, e) {
+  summary.failures.push(`${suite.name || '<root>'} ${hook}: ${(e && e.message) || String(e)}`);
+  suiteErrors.push(__errorInfo(e));
+}
+// A test that does not run is reported `skipped` (`todo` for it.todo / inside describe.todo),
+// as vitest's JSON reporter does — -t-filtered ones included (#63).
+// Precedence as vitest's `interpretTaskModes` + runner: a failed beforeAll skips everything;
+// a describe.todo block makes its tests todo and a describe.skip block skips them (an
+// it.todo stays todo); otherwise -t, then the test's own todo / skip / `.only`.
+// Returns whether the test is not run.
+function __skipTest(t, chain, summary, label, skipAll, hookFailed, filtered) {
+  const todo = !hookFailed && (skipAll === 'todo' || (!filtered && !!t.todo));
+  if (!(todo || hookFailed || skipAll || filtered || t.skip || t.notOnly)) return false;
+  summary.skipped++;
+  // a forbidden `.only` test that does not run keeps its error (vitest)
+  const extra = t.forbiddenOnly ? { failure_messages: [__onlyForbiddenError()] } : undefined;
+  summary.tests.push(__testRecord(t, chain, todo ? 'todo' : 'skipped', extra));
+  // vitest marks a skipped test's snapshots checked (not obsolete)
+  if (!todo) summary.skippedNames.push(label);
+  return true;
+}
+// retry: per-test `{ retry }` wins; else the global default (--retry → __TT_DEFAULT_RETRY).
+function __testRetry(t) {
+  if (t.retry != null && t.retry > 0) return t.retry;
+  // jest.retryTimes(n) sets a per-file override; cleared in __ttResetForNextFile.
+  if (typeof globalThis.__TT_JEST_RETRY === 'number' && globalThis.__TT_JEST_RETRY > 0) return globalThis.__TT_JEST_RETRY;
+  return Number(globalThis.__TT_DEFAULT_RETRY) > 0 ? Number(globalThis.__TT_DEFAULT_RETRY) : 0;
+}
+// Reset per-test snapshot + assertion-count state (snapshot counter is keyed by test name,
+// so distinct multi-snapshot tests don't collide; assertion enforcement resets each attempt).
+function __resetTestSnap(t, label) {
+  __snap.testName = label;
+  __snap.currentTest = t;
+  for (const k of Object.keys(__snap.counters)) if (k === label || k.startsWith(`${label} > `)) __snap.counters[k] = 0;
+  __snap.assertCount = 0;
+  __snap.expectedAssertions = null;
+  __snap.hasAssertions = false;
+}
+// The test function, as vitest wraps it (withTimeout(withCancel(withAwaitAsyncAssertions(
+// withFixtures(fn))))) and calls it through limitConcurrency. The timeout is an INTERNAL one-shot
+// timer (separate from the user/fake-timer queue), so the Rust drive loop advances the virtual
+// clock to it and rejects even a test that never resolves (e.g. `await new Promise(() => {})`) —
+// otherwise that hangs the whole worker — while staying invisible to vi.runAllTimers etc.
+function __runTestBody(t, ctx, timeoutMs) {
+  // vitest's withTimeout: no timeout when timeoutMs <= 0 or Infinity (turbo-test#273).
+  const arm = (!(timeoutMs > 0) || timeoutMs === Infinity) ? undefined : (reject) => {
+    const timer = __scheduleInternal(() => {
+      // vitest's message; its stack is the test's registration (`it(`), as vitest's
+      const err = new Error(`Test timed out in ${timeoutMs}ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".`);
+      // up to its frame in the test file (vitest collects a describe's tests after the
+      // describe( call returned: no enclosing describe( frames)
+      const frames = String(t.stackTrace.stack).split('\n');
+      const own = frames.findIndex((l, i) => i > 0 && !!globalThis.__ttFile && l.includes(globalThis.__ttFile));
+      err.stack = (own < 0 ? frames : frames.slice(0, own + 1)).join('\n');
+      // the context's signal aborts with the timeout error (vitest's `withTimeout`)
+      t.abort.abort(err);
+      reject(err);
+    }, timeoutMs);
+    return () => __clearInternal(timer);
+  };
+  // called as a plain function, as vitest calls it (its stack frame has no method name)
+  const fn = t.fn;
+  const body = async () => {
+    __loop.ticks++;
+    return fn(ctx);
+  };
+  return __vtLimit(() => __vtSettle(() => __vtSettle(async () => await body()), arm));
+}
+// expect.assertions(n) / hasAssertions() enforcement (vitest: checked after the test body).
+function __checkAssertions() {
+  if (__snap.expectedAssertions != null && __snap.assertCount !== __snap.expectedAssertions) {
+    throw new Error(`expected number of assertions to be ${__snap.expectedAssertions}, but got ${__snap.assertCount}`);
+  }
+  if (__snap.hasAssertions && __snap.assertCount === 0) throw __snap.hasAssertions;
+}
+// a thrown attempt error: ctx.skip() marks the test pending, with its note (a caught one skips
+// it, without a note)
+function __attemptError(task, run, e) {
+  if (e instanceof __PendingError) {
+    task.result.pending = true;
+    task.result.note = e.note;
+    task.result.state = 'skip';
+  } else run.lastErr = e;
+}
+function __attemptState(task, run) {
+  // a failed attempt fails the test even after a passed repeat; a passed one keeps a failed
+  // repeat's state (vitest's failTask / `state !== 'fail'`)
+  if (task.result.state === 'run' || (!run.ok && !task.result.pending)) task.result.state = run.ok ? 'pass' : 'fail';
+  if (!run.ok && !task.result.pending) {
+    run.attemptErrors.push(run.lastErr);
+    task.result.errors = run.attemptErrors;
+  }
+}
+// One attempt of a test: its beforeEach hooks (the enclosing suites' first) and body, then its
+// afterEach hooks (even when it failed, so a failed test's mounted DOM does not leak into the
+// next one: innermost suite first, each suite's last registered first), the functions its
+// beforeEach hooks returned (last first; a throwing beforeEach drops them all: turbo-test#101),
+// its onTestFinished handlers, and onTestFailed ones when it failed (vitest's order). A throwing
+// afterEach fails the test next to its own error and stops the hooks after it.
+async function __runAttemptInner(t, chain, ctx, timeoutMs, run) {
+  const task = t.task;
+  let beCleanups = [];
+  try {
+    __clearModuleMocks();
+    await null;
+    beCleanups = await __vtSuiteHook(chain, chain.length - 1, 'be', [ctx]);
+    await __runTestBody(t, ctx, timeoutMs);
+    __checkAssertions();
+    await null;
+    run.ok = true;
+  } catch (e) { __attemptError(task, run, e); }
+  __attemptState(task, run);
+  await null;
+  try {
+    await __vtSuiteHook(chain, chain.length - 1, 'ae', [ctx]);
+    if (beCleanups.length) await __vtCleanups(beCleanups, true);
+    await null;
+  } catch (e) { run.failWith(e); }
+  if (t.onFinished.length) await __callTestHooks(t, t.onFinished, run.failWith);
+  if (task.result.state === 'fail' && t.onFailed.length) await __callTestHooks(t, t.onFailed, run.failWith);
+  await null;
+}
+// it.fails: invert the outcome once its hooks ran (vitest flips the final state) — an
+// error (past this attempt's `mark`) is the success condition, a clean pass fails.
+function __invertFails(run, mark) {
+  if (run.attemptErrors.length > mark) { run.ok = true; run.lastErr = undefined; run.attemptErrors.length = mark; }
+  else { run.ok = false; run.lastErr = new Error('expected test to fail, but it passed'); run.attemptErrors.push(run.lastErr); }
+}
+// an attempt's start: its state, handlers and snapshot counters; returns where its errors start
+function __beginAttempt(t, label, run, repeat) {
+  const task = t.task;
+  task.result.retryCount = run.retries;
+  task.result.repeatCount = repeat;
+  run.ok = false;
+  t.onFinished = [];
+  t.onFailed = [];
+  run.lastErr = undefined;
+  __resetTestSnap(t, label);
+  return run.attemptErrors.length;
+}
+// a failed test's summary message: the error's (with an AggregateError's errors), its stack's
+// first lines when it says nothing more, and under __TT_STACK its stack
+function __failMessage(lastErr) {
+  let msg = lastErr ? (lastErr.message || String(lastErr)) : String(lastErr);
+  if (!lastErr) return msg;
+  if (lastErr.errors && lastErr.errors.length) {
+    msg += ' [' + lastErr.errors.map((x) => (x && x.message) || String(x)).join('; ') + ']';
+  }
+  if ((!msg || msg === 'AggregateError' || msg === 'Error') && lastErr.stack) {
+    msg = String(lastErr.stack).split('\n').slice(0, 3).join(' | ');
+  }
+  if (globalThis.__TT_STACK) {
+    const e0 = lastErr.errors && lastErr.errors[0] ? lastErr.errors[0] : lastErr;
+    if (e0 && e0.stack) msg += '\n          @ ' + String(e0.stack).split('\n').slice(0, 5).join('\n          @ ');
+  }
+  return msg;
+}
+// a run test's record; returns whether it failed
+function __recordTest(t, chain, summary, label, run, timing, dur) {
+  const task = t.task;
+  // skipped at run time (ctx.skip): its duration and note (turbo-test#96); its snapshots
+  // count as checked, as a skipped test's
+  if (task.result.pending) {
+    task.mode = 'skip';
+    task.result = { state: 'skip', note: task.result.note, pending: true, duration: dur };
+    summary.skipped++;
+    summary.skippedNames.push(label);
+    summary.tests.push(__testRecord(t, chain, 'skipped', { ...timing, note: task.result.note === undefined ? '' : String(task.result.note) }));
+    return false;
+  }
+  task.result.duration = dur;
+  // a passing it.fails is vitest's `expected fail` in the summary footer (#78)
+  if (run.ok) {
+    summary.passed++;
+    summary.tests.push(__testRecord(t, chain, 'passed', t.fails ? { ...timing, expected_fail: true } : timing));
+    return false;
+  }
+  summary.failed++;
+  const msg = __failMessage(run.lastErr);
+  summary.failures.push(`${label}: ${msg}`);
+  summary.tests.push(__testRecord(t, chain, 'failed', { ...timing, message: msg, failure_messages: run.attemptErrors.map(__failureMessage), errors: run.attemptErrors.map(__errorInfo) }));
+  return true;
+}
+// An attempt's end: it.fails inverted; whether the repeat stands failed — a repeat after a
+// failed one starts failed and only a retry clears that (vitest keeps `state: 'fail'` until it
+// sets `run` for the retry). A retry (`retry`) clears it and counts.
+function __endAttempt(t, run, mark, failed) {
+  if (t.fails && !t.task.result.pending) __invertFails(run, mark);
+  return !t.task.result.pending && (failed || !run.ok);
+}
+function __retryAttempt(task, run) {
+  task.result.state = 'run';
+  run.retries++;
+  return false;
+}
+// a test that runs: its repeats and attempts (retries), then its record; returns whether it failed
+async function __runTest(t, chain, summary, label, suiteTask) {
+  const attempts = __testRetry(t) + 1;
+  // timeout (ms): per-test `{ timeout }` wins; else the --testTimeout/5000 default.
+  const timeoutMs = typeof t.timeout === 'number' ? t.timeout : __defaultTimeout();
+  // vitest keeps every failed attempt's error and counts the retries (`(retry x1)`)
+  const run = { ok: false, lastErr: undefined, attemptErrors: [], retries: 0, failWith: null };
+  // Real wall time for the per-test start, and for the duration the reporters show plus the
+  // drive loop's clock jumps (turbo-test#95). NOT performance.now() (fake timers replace it) nor Date.now() (fake timers /
+  // vi.setSystemTime replace it).
+  const t0 = __loop.elapsed();
+  const start = __loop.realNow();
+  // its console output (concurrent tests: what is logged while it is the last started)
+  const logs = (__ttTestLogs = []);
+  __ttLogTask = chain.slice(1).map((s) => s.name).concat(t.name).join(' > ');
+  // its context (turbo-test#96): `task.result` while it runs, as vitest's
+  const ctx = __contextOf(t, chain);
+  const task = t.task;
+  task.result = { state: 'run', startTime: start, retryCount: 0, repeatCount: 0 };
+  // a failing onTestFinished / onTestFailed handler fails the test (not a skipped one)
+  run.failWith = (e) => {
+    if (task.result.pending) return;
+    run.ok = false;
+    run.lastErr = e;
+    run.attemptErrors.push(e);
+    task.result.state = 'fail';
+    task.result.errors = run.attemptErrors;
+  };
+  await null;
+  // `{ repeats: n }` (turbo-test#257): 1 + n repeats, each retried up to `retry` times
+  const repeats = t.repeats > 0 ? t.repeats : 0;
+  let failed = false;
+  for (let r = 0; r <= repeats && !task.result.pending; r++) {
+    for (let a = 0; a < attempts; a++) {
+      const mark = __beginAttempt(t, label, run, r);
+      await __vtAround(() => __runAttemptInner(t, chain, ctx, timeoutMs, run)).catch(__vtNoop);
+      await null;
+      __snap.currentTest = null;
+      failed = __endAttempt(t, run, mark, failed);
+      if (!failed) break;
+      if (a + 1 < attempts) failed = __retryAttempt(task, run);
+    }
+  }
+  run.ok = !failed;
+  if (failed && !run.lastErr) run.lastErr = run.attemptErrors[run.attemptErrors.length - 1];
+  if (!task.result.pending) await __vtAfterRunTask();
+  const dur = __loop.elapsed() - t0;
+  const timing = { duration_ms: dur, start_ms: start, retry_count: run.retries, repeat_count: task.result.repeatCount, logs: logs.map((l) => [l[0], l[1]]) };
+  if (__ttTestLogs === logs) __ttTestLogs = null;
+  __ttLogTask = suiteTask;
+  return __recordTest(t, chain, summary, label, run, timing, dur);
+}
+// one test of a suite (not a nested suite): whether it failed, or the promise of that when it runs
+function __runSuiteTest(t, chain, summary, skipAll, hookFailed, suiteTask) {
+  const label = chain.map((s) => s.name).filter(Boolean).concat(t.name).join(' > ');
+  // -t/--testNamePattern: skip tests whose full name does not match the regex (vitest: unanchored,
+  // case-sensitive, tested against `getTaskFullName` — the enclosing describe names and the
+  // test's joined with a space, turbo-test#66).
+  const fullName = chain.slice(1).map((s) => s.name).concat(t.name).join(' ');
+  const filtered = !skipAll && __tt.namePattern && !__tt.namePattern.test(fullName);
+  // a `.only` test inside describe.skip / describe.todo: vitest's interpretTaskModes does not
+  // descend there, so it keeps mode `only`, never runs and is reported `pending` (#77)
+  if (t.only && (skipAll === 'skip' || skipAll === 'todo')) {
+    summary.tests.push(__testRecord(t, chain, 'pending'));
+    summary.skippedNames.push(label);
+    return false;
+  }
+  if (__skipTest(t, chain, summary, label, skipAll, hookFailed, filtered)) return false;
+  // a forbidden `.only` test fails without running: no hooks, no body, no duration (#76)
+  if (t.forbiddenOnly) {
+    summary.failed++;
+    summary.failures.push(`${label}: ${__ONLY_FORBIDDEN}`);
+    summary.tests.push(__testRecord(t, chain, 'failed', { message: __ONLY_FORBIDDEN, failure_messages: [__onlyForbiddenError()], not_run: true }));
+    return true;
+  }
+  return __runTest(t, chain, summary, label, suiteTask);
+}
+// runSuiteChild: a test through limitTestConcurrency, a suite as it is
+async function __vtChild(t, run) {
+  return t.suite ? run() : __vtTestLimit(run);
+}
+// a test that does not run settles after its onBeforeRunTask step
+async function __vtNotRun(failed) {
+  await null;
+  return failed;
+}
+const __vtTest = (r) => (r instanceof Promise ? r : __vtNotRun(r));
 // Returns whether the suite failed (a failed test, or a hook / empty-suite error, in it or a
 // nested suite). `mode` is the enclosing mode: '' (run), 'skip', 'todo' or 'hook' (an enclosing
 // beforeAll failed).
 async function runSuite(suite, ancestors, summary, mode = '') {
-  // vitest (turbo-test#69): a describe with no task fails with "No test found in suite <name>";
-  // a throwing beforeAll fails the suite (a file-level failure, not a failed test) and skips its
-  // tests and nested suites, whose hooks do not run, while its afterAll hooks still run. A
-  // throwing afterAll fails the suite too. Neither rejects the run: the file still reports.
-  // A describe.skip / describe.todo block (or one inside it) runs nothing (#63).
+  await null;
+  const st = __suiteOpen(suite, ancestors, summary, mode);
+  if (st.empty) return true;
+  if (!st.hooks) __idleTasks(st);
+  else {
+    await __vtAround(() => __runSuiteBody(st));
+    await null;
+  }
+  return __suiteClose(st);
+}
+// A suite none of whose tasks runs (skipped, todo, left out, or under a failed beforeAll):
+// vitest does not visit it, so it records its tasks without a microtask turn.
+function __idleSuite(suite, ancestors, summary, mode) {
+  const st = __suiteOpen(suite, ancestors, summary, mode);
+  if (st.empty) return true;
+  __idleTasks(st);
+  return __suiteClose(st);
+}
+function __idleTasks(st) {
+  const mode = st.hookFailed ? 'hook' : st.skipAll;
+  for (const t of st.suite.tasks) {
+    if (t.suite ? __idleSuite(t, st.chain, st.summary, mode) : __runSuiteTest(t, st.chain, st.summary, st.skipAll, st.hookFailed, st.suiteTask)) st.failed = true;
+  }
+}
+// vitest (turbo-test#69): a describe with no task fails with "No test found in suite <name>";
+// a throwing beforeAll fails the suite (a file-level failure, not a failed test) and skips its
+// tests and nested suites, whose hooks do not run, while its afterAll hooks still run. A
+// throwing afterAll fails the suite too. Neither rejects the run: the file still reports.
+// A describe.skip / describe.todo block (or one inside it) runs nothing (#63).
+function __suiteOpen(suite, ancestors, summary, mode) {
   const skipAll = mode || suite.mode || '';
   const record = (state) => { if (ancestors.length) summary.suites.push(skipAll === 'todo' ? 'todo' : state); };
-  // a describe without tasks (failing, or a describe.todo / .skip one) is a TAP task of its own
-  // (turbo-test#170): where it sits among the tests, its mode and its describe path
-  if (ancestors.length && !suite.tasks.length) {
-    summary.empty_suites.push([String(summary.tests.length), skipAll || 'run', ...ancestors.slice(1).map((x) => x.name), suite.name].join('\u001f'));
-  }
-  if (ancestors.length && !skipAll && !suite.tasks.length) {
-    summary.failures.push(`No test found in suite ${suite.name}`);
-    record('fail');
-    return true;
-  }
-  let failed = false;
-  // nothing in it runs: no hooks either
-  const idle = !skipAll && !__runnable(suite, ancestors);
-  let hookFailed = mode === 'hook';
-  // a forbidden `describe.only` (turbo-test#76) fails the suite like a throwing beforeAll, but
-  // none of its hooks run
-  const forbidden = !skipAll && !!suite.forbiddenOnly;
-  if (forbidden) {
-    summary.failures.push(`${suite.name}: ${__ONLY_FORBIDDEN}`);
-    hookFailed = true;
-    failed = true;
-  }
-  // console output from here on belongs to this suite (the file for the root suite)
-  const outerTask = __ttLogTask;
-  const suiteTask = ancestors.length ? [...ancestors.slice(1), suite].map((x) => x.name).join(' > ') : '';
-  __ttLogTask = suiteTask;
-  // a suite's hook errors (vitest's failed suite, a junit testcase of its own: turbo-test#81)
-  const suiteStart = __loop.elapsed();
-  const suiteErrors = [];
-  // in vitest's getSuites order (a suite before the suites inside it)
-  const suiteSlot = summary.suite_errors.push(null) - 1;
-  // the functions its beforeAll hooks return: run after its afterAll hooks, last returned first
-  // (vitest's `sequence.hooks: 'stack'`); a throwing beforeAll drops them all (turbo-test#101)
-  let baCleanups = [];
-  if (!skipAll && !idle && !forbidden) {
-    const returned = [];
-    for (const h of suite.hooks.ba) {
-      try { returned.push(await h()); } catch (e) {
-        summary.failures.push(`${suite.name || '<root>'} beforeAll: ${(e && e.message) || String(e)}`);
-        suiteErrors.push(__errorInfo(e));
-        hookFailed = true;
-        failed = true;
-        break;
-      }
-    }
-    if (!hookFailed) baCleanups = returned;
-  }
-  const chain = [...ancestors, suite];
-  for (const t of suite.tasks) {
-    if (t.suite) { failed = (await runSuite(t, chain, summary, hookFailed ? 'hook' : skipAll)) || failed; continue; }
-    const label = chain.map((s) => s.name).filter(Boolean).concat(t.name).join(' > ');
-    // -t/--testNamePattern: skip tests whose full name does not match the regex (vitest: unanchored,
-    // case-sensitive, tested against `getTaskFullName` — the enclosing describe names and the
-    // test's joined with a space, turbo-test#66).
-    const fullName = chain.slice(1).map((s) => s.name).concat(t.name).join(' ');
-    // A test that does not run is reported `skipped` (`todo` for it.todo / inside describe.todo),
-    // as vitest's JSON reporter does — -t-filtered ones included (#63).
-    // Precedence as vitest's `interpretTaskModes` + runner: a failed beforeAll skips everything;
-    // a describe.todo block makes its tests todo and a describe.skip block skips them (an
-    // it.todo stays todo); otherwise -t, then the test's own todo / skip / `.only`.
-    const filtered = !skipAll && __tt.namePattern && !__tt.namePattern.test(fullName);
-    // a `.only` test inside describe.skip / describe.todo: vitest's interpretTaskModes does not
-    // descend there, so it keeps mode `only`, never runs and is reported `pending` (#77)
-    if (t.only && (skipAll === 'skip' || skipAll === 'todo')) {
-      summary.tests.push(__testRecord(t, chain, 'pending'));
-      summary.skippedNames.push(label);
-      continue;
-    }
-    const todo = !hookFailed && (skipAll === 'todo' || (!filtered && !!t.todo));
-    if (todo || hookFailed || skipAll || filtered || t.skip || t.notOnly) {
-      summary.skipped++;
-      // a forbidden `.only` test that does not run keeps its error (vitest)
-      const extra = t.forbiddenOnly ? { failure_messages: [__onlyForbiddenError()] } : undefined;
-      summary.tests.push(__testRecord(t, chain, todo ? 'todo' : 'skipped', extra));
-      // vitest marks a skipped test's snapshots checked (not obsolete)
-      if (!todo) summary.skippedNames.push(label);
-      continue;
-    }
-    // a forbidden `.only` test fails without running: no hooks, no body, no duration (#76)
-    if (t.forbiddenOnly) {
-      failed = true;
-      summary.failed++;
-      summary.failures.push(`${label}: ${__ONLY_FORBIDDEN}`);
-      summary.tests.push(__testRecord(t, chain, 'failed', { message: __ONLY_FORBIDDEN, failure_messages: [__onlyForbiddenError()], not_run: true }));
-      continue;
-    }
-    // retry: per-test `{ retry }` wins; else the global default (--retry → __TT_DEFAULT_RETRY).
-    const retry = (t.retry != null && t.retry > 0)
-      ? t.retry
-      : (Number(globalThis.__TT_DEFAULT_RETRY) > 0 ? Number(globalThis.__TT_DEFAULT_RETRY) : 0);
-    const attempts = retry + 1;
-    // timeout (ms): per-test `{ timeout }` wins; else the --testTimeout/5000 default.
-    const timeoutMs = (typeof t.timeout === 'number' && t.timeout > 0) ? t.timeout : __defaultTimeout();
-    let lastErr;
-    let ok = false;
-    // vitest keeps every failed attempt's error and counts the retries (`(retry x1)`)
-    const attemptErrors = [];
-    let tries = 0;
-    // Real wall time for the per-test start, and for the duration the reporters show plus the
-    // drive loop's clock jumps (turbo-test#95). NOT performance.now() (fake timers replace it) nor Date.now() (fake timers /
-    // vi.setSystemTime replace it).
-    const __t0 = __loop.elapsed();
-    const __start = __loop.realNow();
-    __ttTestLogs = [];
-    __ttLogTask = chain.slice(1).map((s) => s.name).concat(t.name).join(' > ');
-    // its context (turbo-test#96): `task.result` while it runs, as vitest's
-    const ctx = __contextOf(t, chain);
-    const task = t.task;
-    task.result = { state: 'run', startTime: __start, retryCount: 0, repeatCount: 0 };
-    // a failing onTestFinished / onTestFailed handler fails the test (not a skipped one)
-    const failWith = (e) => {
-      if (task.result.pending) return;
-      ok = false;
-      lastErr = e;
-      attemptErrors.push(e);
-      task.result.state = 'fail';
-      task.result.errors = attemptErrors;
-    };
-    for (let a = 0; a < attempts && !ok; a++) {
-      tries++;
-      task.result.retryCount = a;
-      task.result.state = 'run';
-      t.onFinished = [];
-      t.onFailed = [];
-      lastErr = undefined;
-      // Reset per-test snapshot + assertion-count state (snapshot counter is keyed by test name,
-      // so distinct multi-snapshot tests don't collide; assertion enforcement resets each attempt).
-      __snap.testName = label;
-      __snap.currentTest = t;
-      for (const k of Object.keys(__snap.counters)) if (k === label || k.startsWith(`${label} > `)) __snap.counters[k] = 0;
-      __snap.assertCount = 0;
-      __snap.expectedAssertions = null;
-      __snap.hasAssertions = false;
-      // this attempt's errors start here; the functions its beforeEach hooks return run after
-      // its afterEach hooks (a throwing beforeEach drops them all, as vitest: turbo-test#101)
-      const mark = attemptErrors.length;
-      let beCleanups = [];
-      try {
-        __clearModuleMocks();
-        const returned = [];
-        for (const s of chain) for (const h of s.hooks.be) { __loop.ticks++; returned.push(await h(ctx)); }
-        beCleanups = returned;
-        // Race t.fn() against a timeout. The timeout is an INTERNAL one-shot timer (separate
-        // from the user/fake-timer queue), so the Rust drive loop advances the virtual clock to
-        // it and rejects even a test that never resolves (e.g. `await new Promise(() => {})`) —
-        // otherwise that hangs the whole worker — while staying invisible to vi.runAllTimers etc.
-        let timer;
-        const timed = new Promise((_, rej) => {
-          timer = __scheduleInternal(() => {
-            // vitest's message; its stack is the test's registration (`it(`), as vitest's
-            const err = new Error(`Test timed out in ${timeoutMs}ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".`);
-            // up to its frame in the test file (vitest collects a describe's tests after the
-            // describe( call returned: no enclosing describe( frames)
-            const frames = String(t.stackTrace.stack).split('\n');
-            const own = frames.findIndex((l, i) => i > 0 && !!globalThis.__ttFile && l.includes(globalThis.__ttFile));
-            err.stack = (own < 0 ? frames : frames.slice(0, own + 1)).join('\n');
-            // the context's signal aborts with the timeout error (vitest's `withTimeout`)
-            t.abort.abort(err);
-            rej(err);
-          }, timeoutMs);
-        });
-        try {
-          // called as a plain function, as vitest calls it (its stack frame has no method name)
-          const fn = t.fn;
-          __loop.ticks++;
-          await Promise.race([Promise.resolve().then(() => fn(ctx)), timed]);
-        } finally {
-          __clearInternal(timer);
-        }
-        // expect.assertions(n) / hasAssertions() enforcement (vitest: checked after the test body).
-        if (__snap.expectedAssertions != null && __snap.assertCount !== __snap.expectedAssertions) {
-          throw new Error(`expected number of assertions to be ${__snap.expectedAssertions}, but got ${__snap.assertCount}`);
-        }
-        if (__snap.hasAssertions && __snap.assertCount === 0) throw __snap.hasAssertions;
-        ok = true;
-      } catch (e) {
-        // ctx.skip(): the test is skipped, with its note (a caught one skips it, without a note)
-        if (e instanceof __PendingError) {
-          task.result.pending = true;
-          task.result.note = e.note;
-          task.result.state = 'skip';
-        } else lastErr = e;
-      }
-      if (task.result.state === 'run') task.result.state = ok ? 'pass' : 'fail';
-      if (!ok && !task.result.pending) {
-        attemptErrors.push(lastErr);
-        task.result.errors = attemptErrors;
-      }
-      // afterEach (incl. @testing-library cleanup) runs even when the test failed — otherwise a
-      // failed test's mounted DOM leaks into the next test — innermost suite first, each suite's
-      // last registered first, then the beforeEach cleanups, last returned first (vitest's
-      // `sequence.hooks: 'stack'`). A throw fails the test, next to its own error, and stops
-      // the hooks after it (turbo-test#101).
-      try {
-        for (const s of [...chain].reverse()) for (const h of s.hooks.ae.slice().reverse()) { __loop.ticks++; await h(ctx); }
-        for (const c of beCleanups.slice().reverse()) if (typeof c === 'function') { __loop.ticks++; await c(); }
-      } catch (e) { failWith(e); }
-      // then its onTestFinished handlers, and onTestFailed ones when it failed (vitest's order)
-      await __callTestHooks(t, t.onFinished, failWith);
-      if (task.result.state === 'fail') await __callTestHooks(t, t.onFailed, failWith);
-      __snap.currentTest = null;
-      // it.fails: invert the outcome once its hooks ran (vitest flips the final state) — an
-      // error is the success condition, a clean pass fails.
-      if (t.fails && !task.result.pending) {
-        if (attemptErrors.length > mark) { ok = true; lastErr = undefined; attemptErrors.length = mark; }
-        else { ok = false; lastErr = new Error('expected test to fail, but it passed'); attemptErrors.push(lastErr); }
-      }
-      if (task.result.pending) break;
-    }
-    const __dur = __loop.elapsed() - __t0;
-    const timing = { duration_ms: __dur, start_ms: __start, retry_count: tries - 1, logs: __ttTestLogs.map((l) => [l[0], l[1]]) };
-    __ttTestLogs = null;
-    __ttLogTask = suiteTask;
-    // skipped at run time (ctx.skip): its duration and note (turbo-test#96); its snapshots
-    // count as checked, as a skipped test's
-    if (task.result.pending) {
-      task.mode = 'skip';
-      task.result = { state: 'skip', note: task.result.note, pending: true, duration: __dur };
-      summary.skipped++;
-      summary.skippedNames.push(label);
-      summary.tests.push(__testRecord(t, chain, 'skipped', { ...timing, note: task.result.note === undefined ? '' : String(task.result.note) }));
-      continue;
-    }
-    task.result.duration = __dur;
-    // a passing it.fails is vitest's `expected fail` in the summary footer (#78)
-    if (ok) { summary.passed++; summary.tests.push(__testRecord(t, chain, 'passed', t.fails ? { ...timing, expected_fail: true } : timing)); }
-    else {
-      failed = true;
-      summary.failed++;
-      let msg = lastErr ? (lastErr.message || String(lastErr)) : String(lastErr);
-      if (lastErr && lastErr.errors && lastErr.errors.length) {
-        msg += ' [' + lastErr.errors.map((x) => (x && x.message) || String(x)).join('; ') + ']';
-      }
-      if ((!msg || msg === 'AggregateError' || msg === 'Error') && lastErr && lastErr.stack) {
-        msg = String(lastErr.stack).split('\n').slice(0, 3).join(' | ');
-      }
-      if (globalThis.__TT_STACK && lastErr) {
-        const e0 = lastErr.errors && lastErr.errors[0] ? lastErr.errors[0] : lastErr;
-        if (e0 && e0.stack) msg += '\n          @ ' + String(e0.stack).split('\n').slice(0, 5).join('\n          @ ');
-      }
-      summary.failures.push(`${label}: ${msg}`);
-      summary.tests.push(__testRecord(t, chain, 'failed', { ...timing, message: msg, failure_messages: attemptErrors.map(__failureMessage), errors: attemptErrors.map(__errorInfo) }));
-    }
-  }
-  // afterAll last registered first, then the beforeAll cleanups (last returned first); a throw
-  // fails the suite and stops the hooks after it (vitest, turbo-test#101)
-  if (!skipAll && !idle && !forbidden) {
-    try {
-      for (const h of suite.hooks.aa.slice().reverse()) await h();
-      for (const c of baCleanups.slice().reverse()) if (typeof c === 'function') await c();
-    } catch (e) {
-      summary.failures.push(`${suite.name || '<root>'} afterAll: ${(e && e.message) || String(e)}`);
-      suiteErrors.push(__errorInfo(e));
-      failed = true;
-    }
-  }
-  if (suiteErrors.length && ancestors.length) summary.suite_errors[suiteSlot] = { name: suite.name, duration_ms: __loop.elapsed() - suiteStart, errors: suiteErrors };
-  __ttLogTask = outerTask;
-  record(failed ? 'fail' : skipAll || idle ? 'skip' : 'pass');
-  return failed;
+  if (__emptySuite(suite, ancestors, summary, skipAll, record)) return { empty: true };
+  const { idle, forbidden, hooks } = __suitePlan(suite, ancestors, summary, skipAll);
+  const st = {
+    suite, ancestors, chain: [...ancestors, suite], summary, skipAll, idle, hooks, record,
+    failed: forbidden, hookFailed: mode === 'hook' || forbidden,
+    // console output from here on belongs to this suite (the file for the root suite)
+    outerTask: __ttLogTask, suiteTask: __suiteTaskName(suite, ancestors),
+    // a suite's hook errors (vitest's failed suite, a junit testcase of its own: turbo-test#81)
+    suiteStart: __loop.elapsed(), suiteErrors: [],
+    // in vitest's getSuites order (a suite before the suites inside it)
+    suiteSlot: summary.suite_errors.push(null) - 1,
+  };
+  __ttLogTask = st.suiteTask;
+  return st;
 }
+function __suiteClose(st) {
+  if (st.suiteErrors.length && st.ancestors.length) __recordSuiteErrors(st.suite, st.summary, st.suiteSlot, st.suiteStart, st.suiteErrors);
+  __ttLogTask = st.outerTask;
+  st.record(__suiteState(st.failed, st.skipAll, st.idle));
+  return st.failed;
+}
+// a running suite: its beforeAll hooks, its tasks (each as vitest's runSuiteChild runs it), its
+// afterAll hooks, then the functions its beforeAll hooks returned (last first: vitest's
+// `sequence.hooks: 'stack'`; a throwing beforeAll drops them all, turbo-test#101). A throwing
+// hook stops the hooks after it.
+async function __runSuiteBody(st) {
+  const { suite, summary, suiteErrors } = st;
+  let baCleanups = [];
+  try {
+    baCleanups = await __vtSuiteHook([suite], 0, 'ba', []);
+  } catch (e) {
+    __suiteHookError(suite, summary, suiteErrors, 'beforeAll', e);
+    st.hookFailed = st.failed = true;
+  }
+  if (st.hookFailed) __idleTasks(st);
+  else {
+    // vitest's partitionSuiteChildren: a run of concurrent children runs together
+    for (const group of __partition(suite.tasks)) {
+      if (group[0].concurrent === true) {
+        if (await __runConcurrent(group, st)) st.failed = true;
+        continue;
+      }
+      for (const t of group) {
+        if (await __vtChild(t, () => __suiteChild(t, st))) st.failed = true;
+      }
+    }
+  }
+  try {
+    await __vtSuiteHook([suite], 0, 'aa', []);
+    if (baCleanups.length) await __vtCleanups(baCleanups, false);
+    if (!st.ancestors.length) await null;
+  } catch (e) {
+    __suiteHookError(suite, summary, suiteErrors, 'afterAll', e);
+    st.failed = true;
+  }
+}
+// a suite's child as vitest's runSuiteChild runs it
+const __suiteChild = (t, st) => (t.suite ? runSuite(t, st.chain, st.summary) : __vtTest(__runSuiteTest(t, st.chain, st.summary, '', false, st.suiteTask)));
+// consecutive children with the same `concurrent`
+function __partition(tasks) {
+  const groups = [];
+  for (const t of tasks) {
+    const last = groups[groups.length - 1];
+    if (last && last[0].concurrent === t.concurrent) last.push(t);
+    else groups.push([t]);
+  }
+  return groups;
+}
+// a group of concurrent children: started together through a group limiter of maxConcurrency
+// (turbo-test#256); whether one failed. Their records are put back in declaration order at the
+// end of the file.
+async function __runConcurrent(group, st) {
+  const limit = __limitConcurrency(__maxConcurrency());
+  __tt.concurrent = true;
+  const failed = await Promise.all(group.map((t) => limit(() => __vtChild(t, () => __suiteChild(t, st)))));
+  return failed.some(Boolean);
+}
+// runSuite's plan: `idle` (nothing in it runs: no hooks either), `forbidden` (a forbidden
+// `describe.only`, turbo-test#76: it fails the suite like a throwing beforeAll, but none of its
+// hooks run) and whether its hooks run
+function __suitePlan(suite, ancestors, summary, skipAll) {
+  const idle = !skipAll && !__runnable(suite, ancestors);
+  const forbidden = !skipAll && !!suite.forbiddenOnly;
+  if (forbidden) summary.failures.push(`${suite.name}: ${__ONLY_FORBIDDEN}`);
+  return { idle, forbidden, hooks: !skipAll && !idle && !forbidden };
+}
+const __suiteTaskName = (suite, ancestors) => (ancestors.length ? [...ancestors.slice(1), suite].map((x) => x.name).join(' > ') : '');
+function __recordSuiteErrors(suite, summary, suiteSlot, suiteStart, suiteErrors) {
+  summary.suite_errors[suiteSlot] = { name: suite.name, duration_ms: __loop.elapsed() - suiteStart, errors: suiteErrors };
+}
+const __suiteState = (failed, skipAll, idle) => (failed ? 'fail' : skipAll || idle ? 'skip' : 'pass');
 
 // `.only` (vitest `interpretTaskModes`): with a `.only` in the file, a task runs when it or an
 // enclosing suite is `.only` — except that inside a suite holding `.only` tasks only those run.
@@ -7971,7 +8800,10 @@ globalThis.__tt = {
     // `.only` task fails in place, as vitest's `checkAllowOnly` (turbo-test#76).
     if (this.hasOnly) __interpretOnly(root, false, !!globalThis.__TT_FORBID_ONLY);
     const waited = __loop.waited;
+    this.concurrent = false;
     await runSuite(root, [], summary);
+    // concurrent tests finish out of order: the reports list them as declared (vitest's tree)
+    if (this.concurrent) summary.tests.sort((a, b) => a.seq - b.seq);
     summary.waited_ms = __loop.waited - waited;
     summary.snapshot = __snapFinish(summary.skippedNames);
     summary.logs = __ttFileLogs.map((l) => [l[0], l[3], l[1]]);
@@ -8002,6 +8834,8 @@ globalThis.__ttCaptureHookBaseline = () => {
 // spy registry, unstubbing globals, poking React internals) was what broke interaction tests
 // ~100 files into a shared isolate — vitest proves none of that is needed.
 globalThis.__ttResetForNextFile = () => {
+  // a file stopped mid-run holds no limiter slot into the next one (turbo-test#256)
+  __maxLimiter = __testLimiter = undefined;
   __ttFileLogs = [];
   __ttLogTask = '';
   // turbo-test collects tests into a single global `root` (vitest scopes per file via
@@ -8035,6 +8869,9 @@ globalThis.__ttResetForNextFile = () => {
   // file's own pending one-shots. Do NOT clear macro/nextTicks or reset the clock here (that
   // broke ~40 async tests).
   __loop.gen++;
+  // jest.setTimeout / jest.retryTimes are per-file overrides (turbo-test#273)
+  globalThis.__TT_JEST_TIMEOUT = undefined;
+  globalThis.__TT_JEST_RETRY = undefined;
   // each file starts on real timers (vitest's fresh environment per file): fake timers a file
   // left on would otherwise hold every timer of the next one (turbo-test#168)
   if (__loop.fake) __uninstallFake();
@@ -8116,24 +8953,31 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
   const kebab = (p) => p.startsWith('--') ? p : p.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()).replace(/^(webkit|moz|ms)-/, '-$1-');
   // the style rules that can apply, in cascade order (jsdom's @media / @supports handling);
   // re-flattened only when the sheets change
+  const head = (rule) => String(rule.cssText || '').slice(0, String(rule.cssText || '').indexOf('{')).trim();
+  // jsdom applies an @media block only for a media-type list naming screen / all, no
+  // feature queries (its window has no layout to query)
+  const mediaApplies = (rule) => {
+    const m = String((rule.media && rule.media.mediaText) || rule.conditionText || head(rule).replace(/^@media/i, '')).trim().toLowerCase();
+    return !m || (!m.includes('(') && m.split(',').some((t) => /^(only\s+)?(screen|all)$/.test(t.trim())));
+  };
+  const supportsApplies = (rule) => {
+    const c = String(rule.conditionText || head(rule).replace(/^@supports/i, '')).trim();
+    return typeof CSS !== 'undefined' && CSS.supports && CSS.supports(c);
+  };
+  const flattenRule = (rule, out) => {
+    if (rule.type === 1 && rule.style) {
+      out.push(rule);
+    } else if (rule.type === 4 && rule.cssRules) {
+      if (mediaApplies(rule)) flatten(rule.cssRules, out);
+    } else if (rule.type === 12 && rule.cssRules) {
+      if (supportsApplies(rule)) flatten(rule.cssRules, out);
+    } else if (rule.cssRules) {
+      flatten(rule.cssRules, out);
+    }
+  };
   const flatten = (rules, out) => {
     for (const rule of rules) {
-      try {
-        const head = () => String(rule.cssText || '').slice(0, String(rule.cssText || '').indexOf('{')).trim();
-        if (rule.type === 1 && rule.style) {
-          out.push(rule);
-        } else if (rule.type === 4 && rule.cssRules) {
-          // jsdom applies an @media block only for a media-type list naming screen / all, no
-          // feature queries (its window has no layout to query)
-          const m = String((rule.media && rule.media.mediaText) || rule.conditionText || head().replace(/^@media/i, '')).trim().toLowerCase();
-          if (!m || (!m.includes('(') && m.split(',').some((t) => /^(only\s+)?(screen|all)$/.test(t.trim())))) flatten(rule.cssRules, out);
-        } else if (rule.type === 12 && rule.cssRules) {
-          const c = String(rule.conditionText || head().replace(/^@supports/i, '')).trim();
-          if (typeof CSS !== 'undefined' && CSS.supports && CSS.supports(c)) flatten(rule.cssRules, out);
-        } else if (rule.cssRules) {
-          flatten(rule.cssRules, out);
-        }
-      } catch (e) {}
+      try { flattenRule(rule, out); } catch (e) {}
     }
     return out;
   };
@@ -8146,7 +8990,8 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
   let observed;
   const isSheetOwner = (n) => n && n.nodeType === 1 && (n.localName === 'style' || (n.localName === 'link' && /stylesheet/i.test(n.rel || '')));
   const touch = (n) => { const i = order.lastIndexOf(n); if (i >= 0) order.splice(i, 1); order.push(n); version++; };
-  const track = (doc) => {
+  // (re)start observing `doc`
+  const observe = (doc) => {
     if (observer && observed !== doc) { observer.disconnect(); observer = undefined; order = []; }
     if (!observer && typeof w.MutationObserver === 'function') {
       observed = doc;
@@ -8155,41 +9000,52 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
       observer.observe(doc, { childList: true, subtree: true, characterData: true });
       version++;
     }
+  };
+  const childList = (rec) => {
+    if (isSheetOwner(rec.target)) touch(rec.target);
+    for (const n of rec.addedNodes) {
+      if (isSheetOwner(n)) touch(n);
+      else if (n.nodeType === 1 && n.querySelectorAll) for (const m of n.querySelectorAll('style, link')) if (isSheetOwner(m)) touch(m);
+    }
+    if (rec.removedNodes.length) version++;
+  };
+  const track = (doc) => {
+    observe(doc);
     if (!observer) return;
     for (const rec of observer.takeRecords()) {
       if (rec.type === 'childList') {
-        if (isSheetOwner(rec.target)) touch(rec.target);
-        for (const n of rec.addedNodes) {
-          if (isSheetOwner(n)) touch(n);
-          else if (n.nodeType === 1 && n.querySelectorAll) for (const m of n.querySelectorAll('style, link')) if (isSheetOwner(m)) touch(m);
-        }
-        if (rec.removedNodes.length) version++;
+        childList(rec);
       } else if (rec.type === 'characterData' && isSheetOwner(rec.target.parentNode)) {
         touch(rec.target.parentNode);
       }
     }
   };
   let cache = { key: '', rules: [] };
+  const countRules = (tree, adopted) => {
+    let count = 0;
+    for (const sh of tree) { try { count += sh.cssRules.length; } catch (e) {} }
+    for (const sh of adopted) { try { count += sh.cssRules.length; } catch (e) {} }
+    return count;
+  };
+  // the document's sheets in jsdom's order: the observed ones last, by when they were created or
+  // re-parsed
+  const ranked = (tree) => {
+    const inTree = new Set(tree);
+    const out = [];
+    const seen = new Set();
+    for (const n of order) {
+      const sh = n.isConnected && n.sheet;
+      if (sh && inTree.has(sh) && !seen.has(sh)) { seen.add(sh); out.push(sh); }
+    }
+    return [...tree.filter((sh) => !seen.has(sh)), ...out];
+  };
   const rulesOf = (doc) => {
     track(doc);
     const tree = Array.from(doc.styleSheets || []);
     const adopted = Array.from(doc.adoptedStyleSheets || []);
-    let count = 0;
-    for (const sh of tree) { try { count += sh.cssRules.length; } catch (e) {} }
-    for (const sh of adopted) { try { count += sh.cssRules.length; } catch (e) {} }
-    const key = version + ':' + tree.length + ':' + adopted.length + ':' + count;
+    const key = version + ':' + tree.length + ':' + adopted.length + ':' + countRules(tree, adopted);
     if (cache.key === key && cache.doc === doc) return cache.rules;
-    let sheets = tree;
-    if (observer) {
-      const inTree = new Set(tree);
-      const ranked = [];
-      const seen = new Set();
-      for (const n of order) {
-        const sh = n.isConnected && n.sheet;
-        if (sh && inTree.has(sh) && !seen.has(sh)) { seen.add(sh); ranked.push(sh); }
-      }
-      sheets = [...tree.filter((sh) => !seen.has(sh)), ...ranked];
-    }
+    const sheets = observer ? ranked(tree) : tree;
     const rules = [];
     for (const sh of [...sheets, ...adopted]) {
       try { if (!sh.disabled) flatten(sh.cssRules, rules); } catch (e) {}

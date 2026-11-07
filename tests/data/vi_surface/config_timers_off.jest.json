@@ -1,0 +1,52 @@
+[
+ [
+  "faked at load",
+  "value",
+  "[\"undefined\",false]"
+ ],
+ [
+  "faked in test",
+  "value",
+  "[\"undefined\",false,false]"
+ ],
+ [
+  "timers run on advance",
+  "value",
+  "[0,0]"
+ ],
+ [
+  "doNotFake",
+  "value",
+  "[\"undefined\",\"undefined\"]"
+ ],
+ [
+  "timerLimit",
+  "value",
+  "\"real\""
+ ],
+ [
+  "useRealTimers",
+  "value",
+  "[\"undefined\",true]"
+ ],
+ [
+  "useFakeTimers() takes the config",
+  "value",
+  "[\"object\",1000,\"undefined\"]"
+ ],
+ [
+  "useFakeTimers(cfg) over the config",
+  "value",
+  "[5,\"undefined\"]"
+ ],
+ [
+  "advanceTimers",
+  "value",
+  "\"object\""
+ ],
+ [
+  "second test",
+  "value",
+  "\"object\""
+ ]
+]

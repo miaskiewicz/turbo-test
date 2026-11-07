@@ -17,8 +17,9 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Declaration, Expression, IdentifierReference, ImportDeclarationSpecifier, ImportExpression,
-    ModuleExportName, ObjectProperty, Statement, VariableDeclarationKind,
+    Declaration, ExportNamedDeclaration, Expression, IdentifierReference,
+    ImportDeclarationSpecifier, ImportExpression, ModuleExportName, ObjectProperty, Statement,
+    VariableDeclarationKind,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
@@ -42,108 +43,9 @@ pub fn spyable(file: &Path, code: &str) -> Option<(String, Vec<crate::location::
     let program = parsed.program;
     let semantic = SemanticBuilder::new().build(&program).semantic;
     let scoping = semantic.scoping();
-    let lit = |s: &str| serde_json::to_string(s).unwrap_or_default();
-
-    let mut sources: Vec<String> = Vec::new();
-    let mut ns_of = |source: &str| -> String {
-        let i = sources.iter().position(|s| s == source).unwrap_or_else(|| {
-            sources.push(source.to_string());
-            sources.len() - 1
-        });
-        format!("__tt_ns_{i}")
-    };
-    // import binding symbol -> the expression an importer's read of it becomes
-    let mut reads: HashMap<SymbolId, String> = HashMap::new();
-    // local name -> (source, imported name) of named / default imports (for re-exports)
-    let mut imported: HashMap<String, (String, String)> = HashMap::new();
-    let mut own: Vec<String> = Vec::new();
-    let mut reexports: Vec<(String, String, String)> = Vec::new();
-    let mut stars: Vec<String> = Vec::new();
+    let mut m = Module::default();
     for st in &program.body {
-        match st {
-            Statement::ImportDeclaration(d) if d.with_clause.is_none() && d.phase.is_none() => {
-                let source = d.source.value.as_str();
-                let api =
-                    matches!(source, "vitest" | "@jest/globals") || source.starts_with("node:");
-                for s in d.specifiers.iter().flatten() {
-                    let (local, name) = match s {
-                        ImportDeclarationSpecifier::ImportSpecifier(s) => {
-                            (&s.local, Some(s.imported.name().to_string()))
-                        }
-                        ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
-                            (&s.local, Some("default".to_string()))
-                        }
-                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => (&s.local, None),
-                    };
-                    if let Some(n) = &name {
-                        imported.insert(local.name.to_string(), (source.to_string(), n.clone()));
-                    }
-                    // (the semantic pass gives every binding a symbol, a redeclared one too)
-                    if let (Some(symbol), false) = (local.symbol_id.get(), api) {
-                        let read = match name {
-                            Some(n) => {
-                                format!("(globalThis.__ttR({}, {}))", ns_of(source), lit(&n))
-                            }
-                            None => format!("(globalThis.__ttNs({}))", local.name),
-                        };
-                        reads.insert(symbol, read);
-                    }
-                }
-            }
-            Statement::ExportNamedDeclaration(e) if e.with_clause.is_none() => {
-                if let Some(src) = &e.source {
-                    for s in &e.specifiers {
-                        reexports.push((
-                            s.exported.name().to_string(),
-                            src.value.to_string(),
-                            s.local.name().to_string(),
-                        ));
-                    }
-                    continue;
-                }
-                match &e.declaration {
-                    Some(Declaration::VariableDeclaration(v))
-                        if !matches!(
-                            v.kind,
-                            VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing
-                        ) =>
-                    {
-                        for d in &v.declarations {
-                            own.extend(
-                                d.id.get_binding_identifiers()
-                                    .iter()
-                                    .map(|i| i.name.to_string()),
-                            );
-                        }
-                    }
-                    Some(Declaration::FunctionDeclaration(f)) => {
-                        own.extend(f.id.iter().map(|i| i.name.to_string()))
-                    }
-                    Some(Declaration::ClassDeclaration(c)) => {
-                        own.extend(c.id.iter().map(|i| i.name.to_string()))
-                    }
-                    _ => {}
-                }
-                for s in &e.specifiers {
-                    let exported = s.exported.name().to_string();
-                    match &s.local {
-                        ModuleExportName::IdentifierReference(r)
-                            if imported.contains_key(r.name.as_str()) =>
-                        {
-                            let (source, name) = imported[r.name.as_str()].clone();
-                            reexports.push((exported, source, name));
-                        }
-                        _ => own.push(exported),
-                    }
-                }
-            }
-            Statement::ExportDefaultDeclaration(_) => own.push("default".to_string()),
-            Statement::ExportAllDeclaration(e) if e.with_clause.is_none() => match &e.exported {
-                Some(n) => own.push(n.name().to_string()),
-                None => stars.push(e.source.value.to_string()),
-            },
-            _ => {}
-        }
+        m.statement(st);
     }
 
     struct Reads<'s> {
@@ -177,10 +79,7 @@ pub fn spyable(file: &Path, code: &str) -> Option<(String, Vec<crate::location::
             walk::walk_object_property(self, it);
         }
         // `export { binding }` names the binding, it does not read it
-        fn visit_export_named_declaration(
-            &mut self,
-            it: &oxc_ast::ast::ExportNamedDeclaration<'a>,
-        ) {
+        fn visit_export_named_declaration(&mut self, it: &ExportNamedDeclaration<'a>) {
             if let Some(d) = &it.declaration {
                 self.visit_declaration(d);
             }
@@ -196,12 +95,12 @@ pub fn spyable(file: &Path, code: &str) -> Option<(String, Vec<crate::location::
     }
     let mut v = Reads {
         scoping,
-        reads: &reads,
+        reads: &m.reads,
         edits: Vec::new(),
     };
     v.visit_program(&program);
     let mut edits = v.edits;
-    let exporter = !own.is_empty() || !reexports.is_empty() || !stars.is_empty();
+    let exporter = !m.own.is_empty() || !m.reexports.is_empty() || !m.stars.is_empty();
     if edits.is_empty() && !exporter {
         return None;
     }
@@ -212,28 +111,7 @@ pub fn spyable(file: &Path, code: &str) -> Option<(String, Vec<crate::location::
         out.replace_range(s as usize..e as usize, &text);
     }
     // the registration, after the last line
-    let mut tail = String::new();
-    let re: Vec<String> = reexports
-        .iter()
-        .map(|(name, source, imported)| {
-            format!("{}: [{}, {}]", lit(name), ns_of(source), lit(imported))
-        })
-        .collect();
-    let star_ns: Vec<String> = stars.iter().map(|s| ns_of(s)).collect();
-    for (i, s) in sources.iter().enumerate() {
-        tail.push_str(&format!("import * as __tt_ns_{i} from {};", lit(s)));
-    }
-    if exporter {
-        let me = file.file_name()?.to_string_lossy().into_owned();
-        let own: Vec<String> = own.iter().map(|n| lit(n)).collect();
-        tail.push_str(&format!(
-            "import * as __tt_self from {};globalThis.__ttNsRegister?.(__tt_self, [{}], {{{}}}, [{}]);",
-            lit(&format!("./{me}")),
-            own.join(", "),
-            re.join(", "),
-            star_ns.join(", ")
-        ));
-    }
+    let tail = m.registration(file, exporter)?;
     if !tail.is_empty() {
         if !out.ends_with('\n') {
             out.push('\n');
@@ -242,6 +120,162 @@ pub fn spyable(file: &Path, code: &str) -> Option<(String, Vec<crate::location::
         out.push('\n');
     }
     Some((out, shifts))
+}
+
+fn lit(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_default()
+}
+
+/// What [`spyable`] collects from a module's top-level statements.
+#[derive(Default)]
+struct Module {
+    /// the imported sources, each read through `__tt_ns_<index>`
+    sources: Vec<String>,
+    /// import binding symbol -> the expression an importer's read of it becomes
+    reads: HashMap<SymbolId, String>,
+    /// local name -> (source, imported name) of named / default imports (for re-exports)
+    imported: HashMap<String, (String, String)>,
+    own: Vec<String>,
+    reexports: Vec<(String, String, String)>,
+    stars: Vec<String>,
+}
+
+impl Module {
+    fn ns_of(&mut self, source: &str) -> String {
+        let i = self
+            .sources
+            .iter()
+            .position(|s| s == source)
+            .unwrap_or_else(|| {
+                self.sources.push(source.to_string());
+                self.sources.len() - 1
+            });
+        format!("__tt_ns_{i}")
+    }
+
+    fn statement(&mut self, st: &Statement) {
+        match st {
+            Statement::ImportDeclaration(d) if d.with_clause.is_none() && d.phase.is_none() => {
+                let source = d.source.value.as_str();
+                let api =
+                    matches!(source, "vitest" | "@jest/globals") || source.starts_with("node:");
+                for s in d.specifiers.iter().flatten() {
+                    self.import_specifier(s, source, api);
+                }
+            }
+            Statement::ExportNamedDeclaration(e) if e.with_clause.is_none() => {
+                self.export_named(e);
+            }
+            Statement::ExportDefaultDeclaration(_) => self.own.push("default".to_string()),
+            Statement::ExportAllDeclaration(e) if e.with_clause.is_none() => match &e.exported {
+                Some(n) => self.own.push(n.name().to_string()),
+                None => self.stars.push(e.source.value.to_string()),
+            },
+            _ => {}
+        }
+    }
+
+    fn import_specifier(&mut self, s: &ImportDeclarationSpecifier, source: &str, api: bool) {
+        let (local, name) = match s {
+            ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                (&s.local, Some(s.imported.name().to_string()))
+            }
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                (&s.local, Some("default".to_string()))
+            }
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => (&s.local, None),
+        };
+        if let Some(n) = &name {
+            self.imported
+                .insert(local.name.to_string(), (source.to_string(), n.clone()));
+        }
+        // (the semantic pass gives every binding a symbol, a redeclared one too)
+        if let (Some(symbol), false) = (local.symbol_id.get(), api) {
+            let read = match name {
+                Some(n) => format!("(globalThis.__ttR({}, {}))", self.ns_of(source), lit(&n)),
+                None => format!("(globalThis.__ttNs({}))", local.name),
+            };
+            self.reads.insert(symbol, read);
+        }
+    }
+
+    fn export_named(&mut self, e: &ExportNamedDeclaration) {
+        if let Some(src) = &e.source {
+            for s in &e.specifiers {
+                self.reexports.push((
+                    s.exported.name().to_string(),
+                    src.value.to_string(),
+                    s.local.name().to_string(),
+                ));
+            }
+            return;
+        }
+        match &e.declaration {
+            Some(Declaration::VariableDeclaration(v))
+                if !matches!(
+                    v.kind,
+                    VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing
+                ) =>
+            {
+                for d in &v.declarations {
+                    self.own.extend(
+                        d.id.get_binding_identifiers()
+                            .iter()
+                            .map(|i| i.name.to_string()),
+                    );
+                }
+            }
+            Some(Declaration::FunctionDeclaration(f)) => {
+                self.own.extend(f.id.iter().map(|i| i.name.to_string()))
+            }
+            Some(Declaration::ClassDeclaration(c)) => {
+                self.own.extend(c.id.iter().map(|i| i.name.to_string()))
+            }
+            _ => {}
+        }
+        for s in &e.specifiers {
+            let exported = s.exported.name().to_string();
+            match &s.local {
+                ModuleExportName::IdentifierReference(r)
+                    if self.imported.contains_key(r.name.as_str()) =>
+                {
+                    let (source, name) = self.imported[r.name.as_str()].clone();
+                    self.reexports.push((exported, source, name));
+                }
+                _ => self.own.push(exported),
+            }
+        }
+    }
+
+    /// The imports of the sources and (an `exporter`) the namespace registration; `None` when
+    /// `file` has no name.
+    fn registration(&mut self, file: &Path, exporter: bool) -> Option<String> {
+        let mut tail = String::new();
+        let reexports = std::mem::take(&mut self.reexports);
+        let re: Vec<String> = reexports
+            .iter()
+            .map(|(name, source, imported)| {
+                format!("{}: [{}, {}]", lit(name), self.ns_of(source), lit(imported))
+            })
+            .collect();
+        let stars = std::mem::take(&mut self.stars);
+        let star_ns: Vec<String> = stars.iter().map(|s| self.ns_of(s)).collect();
+        for (i, s) in self.sources.iter().enumerate() {
+            tail.push_str(&format!("import * as __tt_ns_{i} from {};", lit(s)));
+        }
+        if exporter {
+            let me = file.file_name()?.to_string_lossy().into_owned();
+            let own: Vec<String> = self.own.iter().map(|n| lit(n)).collect();
+            tail.push_str(&format!(
+                "import * as __tt_self from {};globalThis.__ttNsRegister?.(__tt_self, [{}], {{{}}}, [{}]);",
+                lit(&format!("./{me}")),
+                own.join(", "),
+                re.join(", "),
+                star_ns.join(", ")
+            ));
+        }
+        Some(tail)
+    }
 }
 
 /// The edits (sorted, byte offsets into `code`, no newlines) as UTF-16 column shifts per line;

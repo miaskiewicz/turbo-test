@@ -232,6 +232,16 @@ fn expand_braces(pat: &str) -> Vec<String> {
     out
 }
 
+/// `**` (followed by `rest`, an optional leading '/' skipped) against the remaining `path`:
+/// greedy with backtracking, the remainder tried at each position to the end of the path.
+fn double_star_match(rest: &[u8], path: &[u8]) -> bool {
+    let rest = rest.strip_prefix(b"/").unwrap_or(rest);
+    if rest.is_empty() {
+        return true; // trailing `**` matches anything
+    }
+    (0..=path.len()).any(|k| simple_match(rest, &path[k..]))
+}
+
 /// Match a brace-free glob (`**` spans path separators, `*`/`?` do not) against a path.
 fn simple_match(pat: &[u8], path: &[u8]) -> bool {
     let (mut pi, mut si) = (0usize, 0usize);
@@ -242,22 +252,7 @@ fn simple_match(pat: &[u8], path: &[u8]) -> bool {
             match pat[pi] {
                 b'*' => {
                     if pi + 1 < pat.len() && pat[pi + 1] == b'*' {
-                        // `**` — matches across separators. Greedy with backtracking via outer loop:
-                        // try to consume the rest after `**` (skip an optional trailing '/').
-                        let mut rest = pi + 2;
-                        if rest < pat.len() && pat[rest] == b'/' {
-                            rest += 1;
-                        }
-                        if rest >= pat.len() {
-                            return true; // trailing `**` matches anything
-                        }
-                        // attempt to match the remainder at each position to end of path
-                        for k in si..=path.len() {
-                            if simple_match(&pat[rest..], &path[k..]) {
-                                return true;
-                            }
-                        }
-                        return false;
+                        return double_star_match(&pat[pi + 2..], &path[si..]);
                     }
                     // single `*` — matches zero+ non-separator chars
                     star = Some(pi);

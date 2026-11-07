@@ -167,13 +167,7 @@ pub fn default_jobs(turbo_jobs: Option<&str>) -> usize {
 }
 
 /// Value-taking vitest flags with no effect on turbo-test (their value is consumed and dropped).
-const IGNORED_VALUE_FLAGS: [&str; 5] = [
-    "--pool",
-    "--mode",
-    "--project",
-    "--exclude",
-    "--maxConcurrency",
-];
+const IGNORED_VALUE_FLAGS: [&str; 4] = ["--pool", "--mode", "--project", "--exclude"];
 
 /// Whether `key` (the part of a `--key=value` token before the first `=`) is a runner value flag,
 /// so the token is its inline form rather than an unknown flag.
@@ -218,21 +212,15 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
                 let _ = value();
             }
             // `--testTimeout N` → default per-test timeout (ms); runtime reads __TT_DEFAULT_TIMEOUT.
-            "--testTimeout" => {
-                if let Some(v) = value() {
-                    if v.parse::<u64>().is_ok() {
-                        o.env.push(("TURBO_TEST_TIMEOUT", v));
-                    }
-                }
-            }
+            "--testTimeout" => push_u64_env(&mut o.env, "TURBO_TEST_TIMEOUT", value()),
+            // `--hookTimeout N` → default hook timeout (ms): __TT_HOOK_TIMEOUT (turbo-test#255)
+            "--hookTimeout" => push_u64_env(&mut o.env, "TURBO_HOOK_TIMEOUT", value()),
+            // `--maxConcurrency N` / `--sequence.concurrent` → how many concurrent tests run at
+            // once / every test concurrent (turbo-test#256)
+            "--maxConcurrency" => push_u64_env(&mut o.env, "TURBO_MAX_CONCURRENCY", value()),
+            "--sequence.concurrent" => o.env.push(("TURBO_SEQUENCE_CONCURRENT", "1".to_string())),
             // `--retry N` → global default retry count; runtime reads __TT_DEFAULT_RETRY.
-            "--retry" => {
-                if let Some(v) = value() {
-                    if v.parse::<u64>().is_ok() {
-                        o.env.push(("TURBO_TEST_RETRY", v));
-                    }
-                }
-            }
+            "--retry" => push_u64_env(&mut o.env, "TURBO_TEST_RETRY", value()),
             // `--bail N` → stop the run after N failed tests total (cross-worker, file-granular).
             "--bail" => o.bail = value().and_then(|v| v.parse().ok()).unwrap_or(0),
             // `--silent` → suppress test console.* output; runtime reads __TT_SILENT.
@@ -247,12 +235,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             "--allowOnly" => o.allow_only = Some(true),
             "--no-allowOnly" => o.allow_only = Some(false),
             "--shard" => {
-                if let Some(v) = value() {
-                    if let Some((i, n)) = v.split_once('/') {
-                        if let (Ok(i), Ok(n)) = (i.parse(), n.parse()) {
-                            o.shard = Some((i, n));
-                        }
-                    }
+                if let Some(shard) = value().as_deref().and_then(parse_shard) {
+                    o.shard = Some(shard);
                 }
             }
             // `--reporter <r>`: select an output reporter. Implemented: default, dot, json,
@@ -280,18 +264,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             "-u" | "--update" => o.env.push(("TURBO_UPDATE_SNAPSHOTS", "1".to_string())),
             "--coverage" => o.coverage.push(CoverageOp::Enable),
             // `--coverage-dir <path>` sets the lcov output dir (and implies --coverage).
-            "--coverage-dir" => {
-                o.coverage.push(CoverageOp::Enable);
-                if let Some(d) = value() {
-                    o.coverage.push(CoverageOp::OutDir(d));
-                }
-            }
+            "--coverage-dir" => push_coverage(&mut o.coverage, CoverageOp::OutDir, value()),
             // `--coverage-thresholds lines=90,functions=80,branches=80` — gate (implies --coverage).
             "--coverage-thresholds" | "--coverage-threshold" => {
-                o.coverage.push(CoverageOp::Enable);
-                if let Some(v) = value() {
-                    o.coverage.push(CoverageOp::Thresholds(v));
-                }
+                push_coverage(&mut o.coverage, CoverageOp::Thresholds, value())
             }
             // apply thresholds to EACH reported file, not just the total.
             "--coverage-per-file" => {
@@ -300,31 +276,18 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             }
             // `--coverage-reporter lcov,json-summary,text,html` (repeatable / comma-list).
             "--coverage-reporter" | "--coverage-reporters" => {
-                o.coverage.push(CoverageOp::Enable);
-                if let Some(v) = value() {
-                    o.coverage.push(CoverageOp::Reporters(v));
-                }
+                push_coverage(&mut o.coverage, CoverageOp::Reporters, value())
             }
             // include/exclude globs (cwd-relative) — usually injected from vitest config by the
             // launcher.
-            "--coverage-include" => {
-                o.coverage.push(CoverageOp::Enable);
-                if let Some(v) = value() {
-                    o.coverage.push(CoverageOp::Include(v));
-                }
-            }
-            "--coverage-exclude" => {
-                o.coverage.push(CoverageOp::Enable);
-                if let Some(v) = value() {
-                    o.coverage.push(CoverageOp::Exclude(v));
-                }
-            }
+            "--coverage-include" => push_coverage(&mut o.coverage, CoverageOp::Include, value()),
+            "--coverage-exclude" => push_coverage(&mut o.coverage, CoverageOp::Exclude, value()),
             // `--no-file-parallelism` (vitest: run test files serially) → jobs = 1.
             "--no-file-parallelism" => o.jobs = 1,
             // Value-taking vitest flags with no effect on a native single-run runner. Consume the
             // value (inline, or the following token — the launcher forwards flag+value together)
             // so it isn't mistaken for a test-file path.
-            "--pool" | "--mode" | "--project" | "--exclude" | "--maxConcurrency" => {
+            "--pool" | "--mode" | "--project" | "--exclude" => {
                 let _ = value();
             }
             // Boolean / no-effect vitest flags — silently accepted (NOT warned) so scripts and CI
@@ -354,6 +317,29 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
         }
     }
     o
+}
+
+/// `env` gains (`key`, `v`) when `v` is a whole number.
+fn push_u64_env(env: &mut Vec<(&'static str, String)>, key: &'static str, v: Option<String>) {
+    // vitest's withTimeout treats `<= 0 || Infinity` as "no timeout" (turbo-test#273); forward
+    // the literal `Infinity` to the runtime alongside u64 values.
+    if let Some(v) = v.filter(|v| v.parse::<u64>().is_ok() || v == "Infinity") {
+        env.push((key, v));
+    }
+}
+
+/// `--shard i/n` as (i, n); `None` when it is not two whole numbers.
+fn parse_shard(v: &str) -> Option<(usize, usize)> {
+    let (i, n) = v.split_once('/')?;
+    Some((i.parse().ok()?, n.parse().ok()?))
+}
+
+/// A coverage value flag: enables coverage, and records `op(v)` when it has a value.
+fn push_coverage(ops: &mut Vec<CoverageOp>, op: fn(String) -> CoverageOp, v: Option<String>) {
+    ops.push(CoverageOp::Enable);
+    if let Some(v) = v {
+        ops.push(op(v));
+    }
 }
 
 /// How the reports name each file: relative to `root` (`--root`, the launcher's `TURBO_ROOT`), as
@@ -1020,47 +1006,13 @@ pub fn render_junit(names: &[PathBuf], res: &[FileResult], root: &Path) -> Strin
         let (mut n, mut failed, mut skipped) = (0usize, 0usize, 0usize);
         for t in &r.tests {
             n += 1;
-            let mut body = Vec::new();
-            for (stream, tag) in [("stdout", "system-out"), ("stderr", "system-err")] {
-                let logs: Vec<&(String, String)> = r_logs(t, stream);
-                if !logs.is_empty() {
-                    body.push(format!("            <{tag}>"));
-                    for (_, content) in logs {
-                        body.push(xml_esc(content));
-                    }
-                    body.push(format!("            </{tag}>"));
-                }
-            }
             if t.status == "skipped" || t.status == "todo" {
                 skipped += 1;
-                body.push("            <skipped/>".to_string());
-            }
-            // its annotations, one property each (turbo-test#96)
-            if !t.annotations.is_empty() {
-                body.push("            <properties>".to_string());
-                for a in &t.annotations {
-                    body.push(format!(
-                        "                <property name=\"{}\" value=\"{}\">",
-                        xml_esc(&a.kind),
-                        xml_esc(&a.message)
-                    ));
-                    body.push("                </property>".to_string());
-                }
-                body.push("            </properties>".to_string());
             }
             if t.status == "failed" {
                 failed += 1;
-                // a failure the runtime recorded no error object for (a forbidden `.only`)
-                let fallback = [load_error_info(&t.message)];
-                let errors = if t.errors.is_empty() {
-                    &fallback[..]
-                } else {
-                    &t.errors[..]
-                };
-                for e in errors {
-                    body.extend(failure_element(e, root));
-                }
             }
+            let body = junit_test_body(t, root);
             cases.push(testcase(&name, &t.name, t.duration_ms, body));
         }
         for se in &r.suite_errors {
@@ -1104,6 +1056,50 @@ pub fn render_junit(names: &[PathBuf], res: &[FileResult], root: &Path) -> Strin
     lines.extend(suites.into_iter().flatten());
     lines.push("</testsuites>".to_string());
     lines.join("\n")
+}
+
+/// A `<testcase>`'s body: its console output, `<skipped/>`, its annotations and its failures.
+fn junit_test_body(t: &TestCase, root: &Path) -> Vec<String> {
+    let mut body = Vec::new();
+    for (stream, tag) in [("stdout", "system-out"), ("stderr", "system-err")] {
+        let logs: Vec<&(String, String)> = r_logs(t, stream);
+        if !logs.is_empty() {
+            body.push(format!("            <{tag}>"));
+            for (_, content) in logs {
+                body.push(xml_esc(content));
+            }
+            body.push(format!("            </{tag}>"));
+        }
+    }
+    if t.status == "skipped" || t.status == "todo" {
+        body.push("            <skipped/>".to_string());
+    }
+    // its annotations, one property each (turbo-test#96)
+    if !t.annotations.is_empty() {
+        body.push("            <properties>".to_string());
+        for a in &t.annotations {
+            body.push(format!(
+                "                <property name=\"{}\" value=\"{}\">",
+                xml_esc(&a.kind),
+                xml_esc(&a.message)
+            ));
+            body.push("                </property>".to_string());
+        }
+        body.push("            </properties>".to_string());
+    }
+    if t.status == "failed" {
+        // a failure the runtime recorded no error object for (a forbidden `.only`)
+        let fallback = [load_error_info(&t.message)];
+        let errors = if t.errors.is_empty() {
+            &fallback[..]
+        } else {
+            &t.errors[..]
+        };
+        for e in errors {
+            body.extend(failure_element(e, root));
+        }
+    }
+    body
 }
 
 /// A test's captured console output on `stream`.
@@ -1377,43 +1373,8 @@ fn tap_tasks(out: &mut String, nodes: &[TapNode], depth: usize, prefix: &str, er
                 out.push_str(&format!("{ind}not ok {id} - {}\n", tap_string(name)));
                 tap_errors(out, std::slice::from_ref(e), depth + 1);
             }
-            TapNode::Empty(name, mode, raw) => {
-                let name = tap_string(name);
-                match mode.as_str() {
-                    "todo" => out.push_str(&format!("{ind}ok {id} - {name} # TODO\n")),
-                    "skip" => out.push_str(&format!("{ind}ok {id} - {name} # SKIP\n")),
-                    _ => {
-                        out.push_str(&format!("{ind}not ok {id} - {name} # time=0.00ms\n"));
-                        let e = crate::failure::ErrorInfo {
-                            name: "Error".into(),
-                            message: format!("No test found in suite {raw}"),
-                            ..Default::default()
-                        };
-                        tap_errors(out, &[e], depth + 1);
-                    }
-                }
-            }
-            TapNode::Test(name, t) => {
-                let comment = match t.status.as_str() {
-                    "skipped" | "pending" => " # SKIP".to_string(),
-                    "todo" => " # TODO".to_string(),
-                    _ if t.not_run => String::new(),
-                    _ => format!(" # time={:.2}ms", t.duration_ms),
-                };
-                let ok = if t.status == "failed" { "not ok" } else { "ok" };
-                out.push_str(&format!("{ind}{ok} {id} - {}{comment}\n", tap_string(name)));
-                for a in &t.annotations {
-                    out.push_str(&format!("{ind}    # {}: {}\n", a.kind, a.message));
-                }
-                if t.status == "failed" {
-                    let errors = if t.errors.is_empty() && !t.message.is_empty() {
-                        vec![load_error_info(&t.message)]
-                    } else {
-                        t.errors.clone()
-                    };
-                    tap_errors(out, &errors, depth + 1);
-                }
-            }
+            TapNode::Empty(name, mode, raw) => tap_empty(out, &ind, id, depth, (name, mode, raw)),
+            TapNode::Test(name, t) => tap_test(out, &ind, id, depth, name, t),
             TapNode::Suite {
                 name,
                 children,
@@ -1424,23 +1385,7 @@ fn tap_tasks(out: &mut String, nodes: &[TapNode], depth: usize, prefix: &str, er
                 } else {
                     format!("{prefix} > {name}")
                 };
-                let mut tests = Vec::new();
-                tap_tests(n, &mut tests);
-                let (ok, comment) = match file {
-                    Some((passed, ms, _)) => (*passed, format!(" # time={ms:.2}ms")),
-                    None => {
-                        let below = format!("{path} > ");
-                        let failed = tests.iter().any(|t| t.status == "failed")
-                            || tap_has_empty_failure(n)
-                            || errored.iter().any(|e| *e == path || e.starts_with(&below));
-                        if !failed && !tests.is_empty() && tests.iter().all(|t| tap_not_run(t)) {
-                            (true, " # SKIP".to_string())
-                        } else {
-                            let ms: f64 = tests.iter().map(|t| t.duration_ms).sum();
-                            (!failed, format!(" # time={ms:.2}ms"))
-                        }
-                    }
-                };
+                let (ok, comment) = tap_suite_status(n, file.as_ref(), &path, errored);
                 let ok = if ok { "ok" } else { "not ok" };
                 out.push_str(&format!(
                     "{ind}{ok} {id} - {}{comment} {{\n",
@@ -1453,6 +1398,78 @@ fn tap_tasks(out: &mut String, nodes: &[TapNode], depth: usize, prefix: &str, er
                 out.push_str(&format!("{ind}}}\n"));
             }
         }
+    }
+}
+
+/// A suite with no tests (`mode` todo / skip, else a failure naming `raw`).
+fn tap_empty(
+    out: &mut String,
+    ind: &str,
+    id: usize,
+    depth: usize,
+    (name, mode, raw): (&str, &str, &str),
+) {
+    let name = tap_string(name);
+    match mode {
+        "todo" => out.push_str(&format!("{ind}ok {id} - {name} # TODO\n")),
+        "skip" => out.push_str(&format!("{ind}ok {id} - {name} # SKIP\n")),
+        _ => {
+            out.push_str(&format!("{ind}not ok {id} - {name} # time=0.00ms\n"));
+            let e = crate::failure::ErrorInfo {
+                name: "Error".into(),
+                message: format!("No test found in suite {raw}"),
+                ..Default::default()
+            };
+            tap_errors(out, &[e], depth + 1);
+        }
+    }
+}
+
+/// A test's line, its annotations and (failed) its errors.
+fn tap_test(out: &mut String, ind: &str, id: usize, depth: usize, name: &str, t: &TestCase) {
+    let comment = match t.status.as_str() {
+        "skipped" | "pending" => " # SKIP".to_string(),
+        "todo" => " # TODO".to_string(),
+        _ if t.not_run => String::new(),
+        _ => format!(" # time={:.2}ms", t.duration_ms),
+    };
+    let ok = if t.status == "failed" { "not ok" } else { "ok" };
+    out.push_str(&format!("{ind}{ok} {id} - {}{comment}\n", tap_string(name)));
+    for a in &t.annotations {
+        out.push_str(&format!("{ind}    # {}: {}\n", a.kind, a.message));
+    }
+    if t.status == "failed" {
+        let errors = if t.errors.is_empty() && !t.message.is_empty() {
+            vec![load_error_info(&t.message)]
+        } else {
+            t.errors.clone()
+        };
+        tap_errors(out, &errors, depth + 1);
+    }
+}
+
+/// A suite's (ok, comment): a file's own; a describe's from its tests, empty failures and the
+/// failed hooks at or below `path`.
+fn tap_suite_status(
+    n: &TapNode,
+    file: Option<&(bool, f64, Vec<String>)>,
+    path: &str,
+    errored: &[String],
+) -> (bool, String) {
+    let mut tests = Vec::new();
+    tap_tests(n, &mut tests);
+    if let Some((passed, ms, _)) = file {
+        return (*passed, format!(" # time={ms:.2}ms"));
+    }
+    let below = format!("{path} > ");
+    let failed = tests.iter().any(|t| t.status == "failed")
+        || tap_has_empty_failure(n)
+        || errored.iter().any(|e| *e == path || e.starts_with(&below));
+    if !failed && !tests.is_empty() && tests.iter().all(|t| tap_not_run(t)) {
+        (true, " # SKIP".to_string())
+    } else {
+        let ms: f64 = tests.iter().map(|t| t.duration_ms).sum();
+        (!failed, format!(" # time={ms:.2}ms"))
     }
 }
 
@@ -1787,28 +1804,7 @@ pub fn run(opts: Options) -> i32 {
     // They, and junit (vitest), print each task's console output with its task, and failure
     // frames named in the original source (the test file's transform map, location.rs)
     let human = human_kind(opts.reporter, opts.reporter_explicit);
-    // vitest colours its human reporters as tinyrainbow decides, never under an AI agent; the
-    // runtime colours console values and diffs to match
-    let colors = crate::colors::Colors {
-        on: human.is_some()
-            && !crate::agent::is_agent_env()
-            && crate::colors::supported(
-                |k| std::env::var(k).ok(),
-                &std::env::args().collect::<Vec<_>>(),
-            ),
-    };
-    if colors.on {
-        std::env::set_var("TURBO_COLORS", "1");
-    }
-    if human.is_some() || opts.reporter == Reporter::Junit {
-        std::env::set_var("TURBO_CAPTURE_LOGS", "1");
-        std::env::set_var("TURBO_TASK_LOCATION", "1");
-        std::env::set_var("TURBO_ERROR_FRAMES", "1");
-    } else if matches!(opts.reporter, Reporter::Tap | Reporter::TapFlat) {
-        // a load failure's `at:` (turbo-test#166)
-        std::env::set_var("TURBO_TASK_LOCATION", "1");
-        std::env::set_var("TURBO_ERROR_FRAMES", "1");
-    }
+    let colors = reporter_env(opts.reporter, human.is_some());
 
     runner::plan_window_snapshot(&files);
     runner::init_v8(); // builds the framework snapshot once, before workers spawn
@@ -1889,6 +1885,34 @@ pub fn run(opts: Options) -> i32 {
         true
     };
     exit_code(&t, cov_ok && output_ok)
+}
+
+/// The colours of the reporters, with the runtime's reporter switches set (`human`: vitest's
+/// human reporters).
+fn reporter_env(reporter: Reporter, human: bool) -> crate::colors::Colors {
+    // vitest colours its human reporters as tinyrainbow decides, never under an AI agent; the
+    // runtime colours console values and diffs to match
+    let colors = crate::colors::Colors {
+        on: human
+            && !crate::agent::is_agent_env()
+            && crate::colors::supported(
+                |k| std::env::var(k).ok(),
+                &std::env::args().collect::<Vec<_>>(),
+            ),
+    };
+    if colors.on {
+        std::env::set_var("TURBO_COLORS", "1");
+    }
+    if human || reporter == Reporter::Junit {
+        std::env::set_var("TURBO_CAPTURE_LOGS", "1");
+        std::env::set_var("TURBO_TASK_LOCATION", "1");
+        std::env::set_var("TURBO_ERROR_FRAMES", "1");
+    } else if matches!(reporter, Reporter::Tap | Reporter::TapFlat) {
+        // a load failure's `at:` (turbo-test#166)
+        std::env::set_var("TURBO_TASK_LOCATION", "1");
+        std::env::set_var("TURBO_ERROR_FRAMES", "1");
+    }
+    colors
 }
 
 #[cfg(all(test, unix))]
