@@ -266,6 +266,53 @@ fn hook_timeout_zero_disables_the_timeout_as_vitest() {
     );
 }
 
+/// turbo-test#273: `--testTimeout 0` (and `Infinity`) disables the per-test timeout, as vitest's
+/// `withTimeout` does. Probe: a test that awaits 6 s under `--testTimeout 0 --hookTimeout 0`
+/// passes; before the fix, turbo-test fell back to the 5 000 ms default and timed out.
+#[test]
+fn test_timeout_zero_disables_the_timeout_as_vitest() {
+    let probe = Probe {
+        name: "testzero",
+        src: include_str!("data/vitest-gaps/testzero.test.js"),
+        want: include_str!("data/vitest-gaps/testzero.vitest.json"),
+        config: JSDOM,
+    };
+    let want: Value = serde_json::from_str(probe.want).unwrap();
+    let (order, tests, r) = run_with(&probe, &["--testTimeout", "0", "--hookTimeout", "0"]);
+    assert_eq!(order, want["order"], "testzero order: {}", r.all());
+    assert_eq!(tests, want["tests"], "testzero tests: {}", r.all());
+    assert_eq!(r.code, Some(0), "testzero exit: {}", r.all());
+    assert!(
+        !r.all().contains("Test timed out"),
+        "no timeout error expected: {}",
+        r.all()
+    );
+}
+
+/// turbo-test#273: `test.hookTimeout: Infinity` in the vitest config disables the hook timeout
+/// (vitest's withTimeout rule). The CLI path (`--hookTimeout 0`) was covered by #268; the
+/// launcher's `scan_number` only matched decimal digits so `Infinity` from a config was silently
+/// dropped and turbo-test fell back to the 10 s default.
+#[test]
+fn config_hook_timeout_infinity_disables_the_timeout_as_vitest() {
+    let probe = Probe {
+        name: "hookinf",
+        src: include_str!("data/vitest-gaps/hookinf.test.js"),
+        want: include_str!("data/vitest-gaps/hookinf.vitest.json"),
+        config: include_str!("data/vitest-gaps/hookinf.config.js"),
+    };
+    let want: Value = serde_json::from_str(probe.want).unwrap();
+    let (order, tests, r) = run(&probe);
+    assert_eq!(order, want["order"], "hookinf order: {}", r.all());
+    assert_eq!(tests, want["tests"], "hookinf tests: {}", r.all());
+    assert_eq!(r.code, Some(0), "hookinf exit: {}", r.all());
+    assert!(
+        !r.all().contains("Hook timed out"),
+        "no timeout error expected: {}",
+        r.all()
+    );
+}
+
 /// turbo-test#256: concurrent tests run together, as vitest's runSuite: a suite's consecutive
 /// concurrent children (it.concurrent / test.concurrent, the tests and nested suites of a
 /// describe.concurrent, test.sequential / describe.sequential opting out) start together, at

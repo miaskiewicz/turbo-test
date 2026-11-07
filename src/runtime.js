@@ -6224,9 +6224,10 @@ globalThis.jest = {
     if (__jestCheckFake()) __setTickMode(o && o.mode, o && o.delta);
     return globalThis.jest;
   },
-  // per-test config knobs — no-ops (turbo-test has no per-file timeout/retry gate yet)
-  setTimeout: () => globalThis.jest,
-  retryTimes: () => globalThis.jest,
+  // jest.setTimeout(ms) and jest.retryTimes(n): per-file overrides (turbo-test#273), cleared
+  // in __ttResetForNextFile. jest 30 ignores a non-number argument.
+  setTimeout: (ms) => { if (typeof ms === 'number' && ms >= 0) globalThis.__TT_JEST_TIMEOUT = ms; return globalThis.jest; },
+  retryTimes: (n) => { if (typeof n === 'number' && n >= 0) globalThis.__TT_JEST_RETRY = n; return globalThis.jest; },
   // env stubbing parity (rarely used via jest, but harmless)
   replaceProperty: (obj, key, val) => { const orig = obj[key]; obj[key] = val; return { restore: () => { obj[key] = orig; } }; },
 };
@@ -7750,8 +7751,16 @@ function __normTest(a, b) {
 // Default per-test timeout (ms): `--testTimeout` (host → globalThis.__TT_DEFAULT_TIMEOUT) else
 // vitest's 5000ms default. A test's own `{ timeout }` overrides this in runSuite.
 function __defaultTimeout() {
-  const n = Number(globalThis.__TT_DEFAULT_TIMEOUT);
-  return Number.isFinite(n) && n > 0 ? n : 5000;
+  // jest.setTimeout(ms) sets a per-file override (cleared in __ttResetForNextFile).
+  if (typeof globalThis.__TT_JEST_TIMEOUT === 'number') return globalThis.__TT_JEST_TIMEOUT;
+  // vitest's withTimeout treats `<= 0 || Infinity` as "no timeout" (turbo-test#273); honour an
+  // explicit 0 or Infinity from __TT_DEFAULT_TIMEOUT and fall back to 5 s otherwise.
+  const raw = globalThis.__TT_DEFAULT_TIMEOUT;
+  if (raw !== undefined && raw !== null && raw !== '') {
+    const n = Number(raw);
+    if (!Number.isNaN(n)) return n;
+  }
+  return 5000;
 }
 // Collect a test into the current suite. Under `includeTaskLocation` it records where it was
 // registered from (`[line, column]` in the test file, native `__ttCallSite`, #63).
@@ -8104,7 +8113,7 @@ function __testTaskOf(t, chain) {
     type: 'test', name: t.name, id: `${(up || file).id}_${parent.tasks.indexOf(t)}`, mode: 'run', file, suite: up,
     fullName: [file.name, ...names].join(' > '), fullTestName: names.join(' > '), meta: Object.create(null),
     each: t.each || undefined, fails: t.fails || undefined, retry: t.retry || undefined, repeats: t.repeats,
-    timeout: (typeof t.timeout === 'number' && t.timeout > 0) ? t.timeout : __defaultTimeout(), shuffle: undefined,
+    timeout: typeof t.timeout === 'number' ? t.timeout : __defaultTimeout(), shuffle: undefined,
     tags: [], annotations: [], artifacts: [], result: undefined,
   };
   return t.task;
@@ -8353,6 +8362,8 @@ function __skipTest(t, chain, summary, label, skipAll, hookFailed, filtered) {
 // retry: per-test `{ retry }` wins; else the global default (--retry → __TT_DEFAULT_RETRY).
 function __testRetry(t) {
   if (t.retry != null && t.retry > 0) return t.retry;
+  // jest.retryTimes(n) sets a per-file override; cleared in __ttResetForNextFile.
+  if (typeof globalThis.__TT_JEST_RETRY === 'number' && globalThis.__TT_JEST_RETRY > 0) return globalThis.__TT_JEST_RETRY;
   return Number(globalThis.__TT_DEFAULT_RETRY) > 0 ? Number(globalThis.__TT_DEFAULT_RETRY) : 0;
 }
 // Reset per-test snapshot + assertion-count state (snapshot counter is keyed by test name,
@@ -8371,7 +8382,8 @@ function __resetTestSnap(t, label) {
 // clock to it and rejects even a test that never resolves (e.g. `await new Promise(() => {})`) —
 // otherwise that hangs the whole worker — while staying invisible to vi.runAllTimers etc.
 function __runTestBody(t, ctx, timeoutMs) {
-  const arm = (reject) => {
+  // vitest's withTimeout: no timeout when timeoutMs <= 0 or Infinity (turbo-test#273).
+  const arm = (!(timeoutMs > 0) || timeoutMs === Infinity) ? undefined : (reject) => {
     const timer = __scheduleInternal(() => {
       // vitest's message; its stack is the test's registration (`it(`), as vitest's
       const err = new Error(`Test timed out in ${timeoutMs}ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".`);
@@ -8525,7 +8537,7 @@ function __retryAttempt(task, run) {
 async function __runTest(t, chain, summary, label, suiteTask) {
   const attempts = __testRetry(t) + 1;
   // timeout (ms): per-test `{ timeout }` wins; else the --testTimeout/5000 default.
-  const timeoutMs = (typeof t.timeout === 'number' && t.timeout > 0) ? t.timeout : __defaultTimeout();
+  const timeoutMs = typeof t.timeout === 'number' ? t.timeout : __defaultTimeout();
   // vitest keeps every failed attempt's error and counts the retries (`(retry x1)`)
   const run = { ok: false, lastErr: undefined, attemptErrors: [], retries: 0, failWith: null };
   // Real wall time for the per-test start, and for the duration the reporters show plus the
@@ -8857,6 +8869,9 @@ globalThis.__ttResetForNextFile = () => {
   // file's own pending one-shots. Do NOT clear macro/nextTicks or reset the clock here (that
   // broke ~40 async tests).
   __loop.gen++;
+  // jest.setTimeout / jest.retryTimes are per-file overrides (turbo-test#273)
+  globalThis.__TT_JEST_TIMEOUT = undefined;
+  globalThis.__TT_JEST_RETRY = undefined;
   // each file starts on real timers (vitest's fresh environment per file): fake timers a file
   // left on would otherwise hold every timer of the next one (turbo-test#168)
   if (__loop.fake) __uninstallFake();

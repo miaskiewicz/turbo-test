@@ -344,6 +344,52 @@ fn failed_block(out: &str) -> String {
     rest[..end].to_string()
 }
 
+/// turbo-test#273: `jest.setTimeout(ms)` sets the default per-test timeout for the file, as jest
+/// 30.5.2 does. Before the fix the call was a no-op and a slow test ran to the 5 000 ms default.
+/// Probe: `jest.setTimeout(100)` + a test that awaits 300 ms; jest reports
+/// `Exceeded timeout of 100 ms`, so turbo-test must time out at 100 ms too.
+#[test]
+fn jest_set_timeout_overrides_the_default_as_jest() {
+    let p = jest_project("rc-jest-set-timeout");
+    p.file(
+        "set_timeout.test.js",
+        include_str!("data/vi_surface/jest_set_timeout.test.js"),
+    );
+    let r = turbo_test(&p.dir, &["set_timeout.test.js"], &[]);
+    assert_ne!(r.code, Some(0), "expected non-zero exit: {}", r.all());
+    assert!(
+        r.all().contains("Test timed out in 100ms"),
+        "expected 'Test timed out in 100ms' in output: {}",
+        r.all()
+    );
+}
+
+/// turbo-test#273: `jest.retryTimes(n)` retries a failing test n more times, as jest 30.5.2 does.
+/// Before the fix the call was a no-op, so a test failing twice then passing failed the run.
+#[test]
+fn jest_retry_times_retries_the_failing_test_as_jest() {
+    let p = jest_project("rc-jest-retry");
+    p.file(
+        "retry.test.js",
+        include_str!("data/vi_surface/jest_retry_times.test.js"),
+    );
+    let r = turbo_test(&p.dir, &["retry.test.js"], &[("OUT", "r.log")]);
+    assert_eq!(
+        r.code,
+        Some(0),
+        "expected pass after 3 retries: {}",
+        r.all()
+    );
+    let log = std::fs::read_to_string(p.dir.join("r.log")).unwrap_or_default();
+    assert_eq!(
+        log,
+        "aaa",
+        "expected three attempts recorded: {:?}\n{}",
+        log,
+        r.all()
+    );
+}
+
 #[test]
 fn define_helper_errors_are_located_at_the_call() {
     // turbo-test#182: vitest drops the stack frames up to the last `__VITEST_HELPER__` one, so a

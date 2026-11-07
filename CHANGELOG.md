@@ -18,6 +18,18 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `transitions_are_jsdom_by_default_and_chrome_on_opt_in`, which fails on the pin alone.
 
 ### Fixed
+- `--testTimeout 0` and `Infinity` disable the per-test timeout, as vitest's `withTimeout` does
+  (#273). Mirror of #268 for tests: before, turbo-test fell back to the 5 000 ms default when the
+  env value was `0`/`Infinity`. Covers `test.testTimeout` from the config and the per-test
+  `{ timeout: 0 | Infinity }` option.
+- `test.hookTimeout: Infinity` (and `test.testTimeout: Infinity`) in a vitest config now reaches
+  the runtime instead of being dropped (#273). The launcher's config scan accepts `Infinity` as
+  a value, and the runner's env→global prelude forwards it.
+- `jest.setTimeout(ms)` overrides the default per-test timeout for the file, as jest 30.5.2 does
+  (#273). Before, the call was a no-op and a slow test ran to the 5 s default. Cleared between
+  files, so under isolate reuse one file's override does not leak into the next.
+- `jest.retryTimes(n)` retries a failing test n more times, as jest 30.5.2 does (#273). Before,
+  the call was a no-op. Also per-file.
 - `--hookTimeout 0` and `Infinity` disable the hook timeout, as vitest's `withTimeout` does
   (#268). Before, turbo-test fell back to the 10 000 ms default when the env value was `0`, so a
   hook that ran longer than 10 s timed out under `--hookTimeout 0` where vitest would never time
