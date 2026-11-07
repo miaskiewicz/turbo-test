@@ -373,11 +373,19 @@ fn jest_retry_times_retries_the_failing_test_as_jest() {
         "retry.test.js",
         include_str!("data/vi_surface/jest_retry_times.test.js"),
     );
-    let r = turbo_test(&p.dir, &["retry.test.js"], &[]);
-    assert_eq!(r.code, Some(0), "expected pass after 3 retries: {}", r.all());
-    assert!(
-        r.stdout.contains("passes-on-third-try"),
-        "test should be in the report: {}",
+    let r = turbo_test(&p.dir, &["retry.test.js"], &[("OUT", "r.log")]);
+    assert_eq!(
+        r.code,
+        Some(0),
+        "expected pass after 3 retries: {}",
+        r.all()
+    );
+    let log = std::fs::read_to_string(p.dir.join("r.log")).unwrap_or_default();
+    assert_eq!(
+        log,
+        "aaa",
+        "expected three attempts recorded: {:?}\n{}",
+        log,
         r.all()
     );
 }

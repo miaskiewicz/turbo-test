@@ -480,7 +480,7 @@ npm run complexity:js        # CI job `complexity / js (cc <= 15)`
 - vitest suites: drop-in; the `vi` / mock / `expect` surface is vitest 4.1.12's
   ([vitest.compat.md](vitest.compat.md) lists what is covered and what is approximated).
 - jest suites: experimental (see above).
-- DOM: turbo-dom-browser-env 0.7.0, Chrome 156-controlled in turbo-dom.
+- DOM: turbo-dom-browser-env 0.8.0, Chrome 156-controlled in turbo-dom.
 - Open work is tracked as GitHub issues in this repository and in turbo-dom.
 
 ## License

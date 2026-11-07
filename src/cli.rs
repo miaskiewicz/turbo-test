@@ -321,7 +321,9 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
 
 /// `env` gains (`key`, `v`) when `v` is a whole number.
 fn push_u64_env(env: &mut Vec<(&'static str, String)>, key: &'static str, v: Option<String>) {
-    if let Some(v) = v.filter(|v| v.parse::<u64>().is_ok()) {
+    // vitest's withTimeout treats `<= 0 || Infinity` as "no timeout" (turbo-test#273); forward
+    // the literal `Infinity` to the runtime alongside u64 values.
+    if let Some(v) = v.filter(|v| v.parse::<u64>().is_ok() || v == "Infinity") {
         env.push((key, v));
     }
 }

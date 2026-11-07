@@ -8074,15 +8074,20 @@ fn runtime_prelude() -> String {
     //   --silent → __TT_SILENT, --no-allowOnly → __TT_FORBID_ONLY,
     //   --passWithNoTests → __TT_PASS_WITH_NO_TESTS.
     let mut prelude = String::new();
-    // the numeric knobs (ignored unless a whole number)
+    // the numeric knobs (ignored unless a whole number). testTimeout / hookTimeout also accept
+    // `Infinity` (turbo-test#273; vitest's withTimeout rule).
     for (var, global) in [
         ("TURBO_TEST_TIMEOUT", "__TT_DEFAULT_TIMEOUT"),
         ("TURBO_HOOK_TIMEOUT", "__TT_HOOK_TIMEOUT"),
         ("TURBO_MAX_CONCURRENCY", "__TT_MAX_CONCURRENCY"),
         ("TURBO_TEST_RETRY", "__TT_DEFAULT_RETRY"),
     ] {
-        if let Some(n) = std::env::var(var).ok().and_then(|v| v.parse::<u64>().ok()) {
+        let Ok(v) = std::env::var(var) else { continue };
+        if let Ok(n) = v.parse::<u64>() {
             prelude.push_str(&format!("globalThis.{global}={n};"));
+        } else if v == "Infinity" && matches!(global, "__TT_DEFAULT_TIMEOUT" | "__TT_HOOK_TIMEOUT")
+        {
+            prelude.push_str(&format!("globalThis.{global}=Infinity;"));
         }
     }
     if std::env::var("TURBO_SEQUENCE_CONCURRENT").is_ok() {

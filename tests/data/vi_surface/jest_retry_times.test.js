@@ -1,3 +1,7 @@
+import { appendFileSync, readFileSync } from 'node:fs'
 jest.retryTimes(3)
-let n = 0
-test('passes-on-third-try', () => { n++; if (n < 3) throw new Error('nope ' + n) })
+test('passes-on-third-try', () => {
+  appendFileSync(process.env.OUT, 'a')
+  const n = readFileSync(process.env.OUT, 'utf8').length
+  if (n < 3) throw new Error('nope attempt ' + n)
+})

@@ -380,8 +380,10 @@ fn scan_braced(text: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Numeric value for `key` (`(?:^|[^.\w])key\s*:\s*(\d+(?:\.\d+)?)`) — the leading guard prevents
-/// matching `key` as the tail of another identifier (so `branches` doesn't match `subBranches`).
+/// Numeric or `Infinity` value for `key` (the leading guard prevents matching `key` as the
+/// tail of another identifier so `branches` doesn't match `subBranches`). vitest's withTimeout
+/// treats `<= 0 || Infinity` as "no timeout" (turbo-test#273), so `test.hookTimeout: Infinity`
+/// in a config must forward too.
 fn scan_number(text: &str, key: &str) -> Option<String> {
     let b = text.as_bytes();
     let mut from = 0usize;
@@ -403,6 +405,10 @@ fn scan_number(text: &str, key: &str) -> Option<String> {
                 }
                 if i > start {
                     return Some(text[start..i].to_string());
+                }
+                // turbo-test#273: accept `Infinity` as a numeric value (no timeout).
+                if text[start..].starts_with("Infinity") {
+                    return Some("Infinity".to_string());
                 }
             }
         }
