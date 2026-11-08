@@ -232,6 +232,17 @@ __loop.drainNextTicks = function () {
 // Considers BOTH the user macro queue and the internal test-timeout queue, firing whichever is
 // due first — so a hung test (no user timers) still advances to its timeout and rejects.
 __loop.ticks = 0;
+function __fireInternalTimer(it) {
+  __loop.now = Math.max(__loop.now, it.due);
+  __clearInternal(it.id);
+  try { it.cb(); } catch (e) { __reportUncaught(e); }
+}
+function __fireMacroTimer(m) {
+  __loop.now = Math.max(__loop.now, m.due);
+  if (m.interval == null) __clearTimer(m.id);
+  else m.ord = m.due = __loop.now + m.interval;
+  try { m.cb(); } catch (e) { __reportUncaught(e); }
+}
 __loop.stepMacro = function () {
   __loop.ticks++;
   __dropStaleTimers();
@@ -244,16 +255,8 @@ __loop.stepMacro = function () {
   const useInternal = it && (!m || it.due < m.due);
   const due = useInternal ? it.due : m.due;
   if (due > __loop.now) __loop.waited += due - __loop.now;
-  if (useInternal) {
-    __loop.now = Math.max(__loop.now, it.due);
-    __clearInternal(it.id);
-    try { it.cb(); } catch (e) { __reportUncaught(e); }
-    return true;
-  }
-  __loop.now = Math.max(__loop.now, m.due);
-  if (m.interval == null) __clearTimer(m.id);
-  else m.ord = m.due = __loop.now + m.interval;
-  try { m.cb(); } catch (e) { __reportUncaught(e); }
+  if (useInternal) __fireInternalTimer(it);
+  else __fireMacroTimer(m);
   return true;
 };
 // Fake mode: advance the fake clock, firing the fake timers in order (synchronous).
@@ -463,10 +466,13 @@ function __installFake(cfg) {
   __loop.epoch0 = start;
   if (__loop.faked.has('Date')) __installFakeDate();
   else __restoreDate();
-  for (const k of Object.keys(__fakeTimers)) globalThis[k] = __loop.faked.has(k) ? __fakeTimers[k] : __realTimers[k];
+  __swapFakeTimers();
   __installFakeClocks();
   // shouldAdvanceTime: a real-clock interval ticks the fake clock by advanceTimeDelta (20ms)
   if (c.shouldAdvanceTime === true) __setTickMode('interval', c.advanceTimeDelta);
+}
+function __swapFakeTimers() {
+  for (const k of Object.keys(__fakeTimers)) globalThis[k] = __loop.faked.has(k) ? __fakeTimers[k] : __realTimers[k];
 }
 // the faked performance / process.hrtime of __installFake
 function __installFakeClocks() {
@@ -672,10 +678,12 @@ globalThis.sessionStorage = new __Storage();
 const __codecError = (Ctor, code, msg) => { const e = new Ctor(msg); e.code = code; return e; };
 // a UTF-8 lead byte's [continuation count, its code point bits, first continuation's bounds]
 // (null: not a lead byte)
+function __utf8Lead3(c) { return [2, c & 0xf, c === 0xe0 ? 0xa0 : 0x80, c === 0xed ? 0x9f : 0xbf]; }
+function __utf8Lead4(c) { return [3, c & 0x7, c === 0xf0 ? 0x90 : 0x80, c === 0xf4 ? 0x8f : 0xbf]; }
 function __utf8Lead(c) {
   if (c >= 0xc2 && c <= 0xdf) return [1, c & 0x1f, 0x80, 0xbf];
-  if (c >= 0xe0 && c <= 0xef) return [2, c & 0xf, c === 0xe0 ? 0xa0 : 0x80, c === 0xed ? 0x9f : 0xbf];
-  if (c >= 0xf0 && c <= 0xf4) return [3, c & 0x7, c === 0xf0 ? 0x90 : 0x80, c === 0xf4 ? 0x8f : 0xbf];
+  if (c >= 0xe0 && c <= 0xef) return __utf8Lead3(c);
+  if (c >= 0xf0 && c <= 0xf4) return __utf8Lead4(c);
   return null;
 }
 // a code point as its UTF-16 code units
@@ -686,6 +694,16 @@ function __utf16Units(cp, unit) {
 // The one WHATWG UTF-8 decoder (turbo-test#121): b[start..end) (any indexable bytes) to a string,
 // one U+FFFD per maximal invalid subpart (or `onBad()`'s throw, for `fatal`). With `stream`, an
 // incomplete-but-valid sequence at the end is left undecoded; returns [string, where it starts].
+// Consume UTF-8 continuation bytes after the lead. Returns [j, cp]: j is the position past the
+// last accepted byte (equals end if we ran out mid-sequence), cp is the accumulated code point.
+function __utf8ContRun(b, i, end, need, cp, lo, hi) {
+  let j = i + 1;
+  for (; j <= i + need && j < end; j++) {
+    if (b[j] < lo || b[j] > hi) break;
+    cp = (cp << 6) | (b[j] & 0x3f); lo = 0x80; hi = 0xbf;
+  }
+  return [j, cp];
+}
 function __utf8Run(b, start, end, stream, onBad) {
   const units = []; let out = '';
   const unit = (u) => { units.push(u); if (units.length >= 8192) { out += String.fromCharCode.apply(null, units); units.length = 0; } };
@@ -696,12 +714,8 @@ function __utf8Run(b, start, end, stream, onBad) {
     if (c < 0x80) { unit(c); i++; continue; }
     const lead = __utf8Lead(c);
     if (!lead) { bad(); i++; continue; }
-    let [need, cp, lo, hi] = lead;
-    let j = i + 1;
-    for (; j <= i + need && j < end; j++) {
-      if (b[j] < lo || b[j] > hi) break;
-      cp = (cp << 6) | (b[j] & 0x3f); lo = 0x80; hi = 0xbf;
-    }
+    const [need, cp0, lo, hi] = lead;
+    const [j, cp] = __utf8ContRun(b, i, end, need, cp0, lo, hi);
     if (j > i + need) __utf16Units(cp, unit);
     else if (j === end && stream) break; // valid so far: wait for more
     else bad(); // one U+FFFD for the maximal subpart b[i..j)
@@ -719,17 +733,20 @@ if (typeof globalThis.TextEncoder === 'undefined') {
     if (len === 3) { out[j++] = 0xe0 | (c >> 12); out[j++] = 0x80 | ((c >> 6) & 0x3f); out[j++] = 0x80 | (c & 0x3f); return j; }
     out[j++] = 0xf0 | (c >> 18); out[j++] = 0x80 | ((c >> 12) & 0x3f); out[j++] = 0x80 | ((c >> 6) & 0x3f); out[j++] = 0x80 | (c & 0x3f); return j;
   };
+  // Resolve a surrogate at s[i] to [codePoint, codeUnitsConsumed]: a lone surrogate becomes U+FFFD.
+  const surrogateCp = (c, s, i, n) => {
+    const d = c < 0xdc00 && i + 1 < n ? s.charCodeAt(i + 1) : 0;
+    if (d >= 0xdc00 && d <= 0xdfff) return [0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00), 2];
+    return [0xfffd, 1];
+  };
+  const cpLen = (c) => c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
   // UTF-8 bytes of s[i..] into out[j..] while they fit; returns [code units read, bytes written]
   const encodeTo = (s, out) => {
     const n = s.length; const max = out.length; let i = 0; let j = 0;
     while (i < n) {
       let c = s.charCodeAt(i); let units = 1;
-      if (c >= 0xd800 && c <= 0xdfff) {
-        const d = c < 0xdc00 && i + 1 < n ? s.charCodeAt(i + 1) : 0;
-        if (d >= 0xdc00 && d <= 0xdfff) { c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00); units = 2; }
-        else c = 0xfffd;
-      }
-      const len = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+      if (c >= 0xd800 && c <= 0xdfff) [c, units] = surrogateCp(c, s, i, n);
+      const len = cpLen(c);
       if (j + len > max) break;
       j = writeCp(out, j, c, len);
       i += units;
@@ -779,6 +796,16 @@ if (typeof globalThis.TextDecoder === 'undefined') {
     if (!st) throw __codecError(TypeError, 'ERR_INVALID_THIS', 'Value of "this" must be of type TextDecoder');
     return st;
   };
+  // Apply the per-stream BOM strip (once at the start of a stream unless `ignoreBOM`) and reset
+  // `bomSeen` at end of stream — a partial sequence already became U+FFFD above.
+  const stripBom = (st, out, stream) => {
+    if (!st.ignoreBOM && !st.bomSeen && out.length > 0) {
+      st.bomSeen = true;
+      if (out.charCodeAt(0) === 0xfeff) out = out.slice(1);
+    }
+    if (!stream) st.bomSeen = false;
+    return out;
+  };
   // the UTF-8 decode of TextDecoder#decode: a pending partial sequence first, BOM per stream
   const decodeUtf8 = (st, b, stream) => {
     if (st.pending) { const m = new Uint8Array(st.pending.length + b.length); m.set(st.pending); m.set(b, st.pending.length); b = m; st.pending = null; }
@@ -786,13 +813,7 @@ if (typeof globalThis.TextDecoder === 'undefined') {
     let decoded, rest;
     try { [decoded, rest] = __utf8Run(b, 0, b.length, stream, st.fatal ? fail : null); } catch (e) { throw e instanceof RangeError ? tooLong() : e; }
     if (rest < b.length) st.pending = b.slice(rest);
-    let out = decoded;
-    if (!st.ignoreBOM && !st.bomSeen && out.length > 0) {
-      st.bomSeen = true;
-      if (out.charCodeAt(0) === 0xfeff) out = out.slice(1);
-    }
-    if (!stream) st.bomSeen = false; // end of stream: reset (a partial sequence already became U+FFFD)
-    return out;
+    return stripBom(st, decoded, stream);
   };
   globalThis.TextDecoder = class TextDecoder {
     constructor(label = 'utf-8', opts = undefined) {
@@ -999,9 +1020,7 @@ if (typeof globalThis.URL === 'undefined') {
       const at = m[2].lastIndexOf('@');
       const info = at < 0 ? '' : m[2].slice(0, at);
       const hostport = at < 0 ? m[2] : m[2].slice(at + 1);
-      const colon = info.indexOf(':');
-      this._username = URL._encode(colon < 0 ? info : info.slice(0, colon), URL._USERINFO);
-      this._password = colon < 0 ? '' : URL._encode(info.slice(colon + 1), URL._USERINFO);
+      this._parseUserInfo(info);
       // a special host takes no forbidden code point, and a port is digits up to 65535 (WHATWG)
       const hp = /^(\[[^\]]*\]|[^:]*)(?::(.*))?$/.exec(hostport);
       if (this._special && !this._isFile && URL._badHostPort(hp)) {
@@ -1014,6 +1033,11 @@ if (typeof globalThis.URL === 'undefined') {
       this.pathname = m[3] || '/';
       this.hash = m[5] || '';
       return m[4] || '';
+    }
+    _parseUserInfo(info) {
+      const colon = info.indexOf(':');
+      this._username = URL._encode(colon < 0 ? info : info.slice(0, colon), URL._USERINFO);
+      this._password = colon < 0 ? '' : URL._encode(info.slice(colon + 1), URL._USERINFO);
     }
     // the constructor's parse of an opaque URL; returns the search string
     _parseOpaque(url) {
@@ -2110,6 +2134,11 @@ const __ttWinSplit = (p) => {
   }
   return ['', '/' + path.slice(0, 2), path.slice(2)];
 };
+const __ttNormSegs = (path) => {
+  const out = [];
+  for (const seg of path.split('/')) { if (seg === '..') out.pop(); else if (seg && seg !== '.') out.push(seg); }
+  return out;
+};
 globalThis.__pathToFileURL = (p) => {
   let host = '';
   let root = '';
@@ -2118,8 +2147,7 @@ globalThis.__pathToFileURL = (p) => {
   const trailing = /\/$/.test(path) || (__ttWin() && path.endsWith('\\')) ? '/' : '';
   if (__ttWin()) [host, root, path] = __ttWinSplit(path);
   else if (!path.startsWith('/')) path = globalThis.process.cwd() + '/' + path;
-  const out = [];
-  for (const seg of path.split('/')) { if (seg === '..') out.pop(); else if (seg && seg !== '.') out.push(seg); }
+  const out = __ttNormSegs(path);
   const resolved = root + '/' + out.join('/') + (out.length ? trailing : '');
   const url = new globalThis.URL(`file://${host}/`);
   // Node's set: controls, space, "#%<>?[\]^`{|}~ and DEL (the setter encodes non-ASCII)
@@ -2321,6 +2349,15 @@ const __stat = (p, options, lstat) => {
 };
 // readdirSync: sorted names, or Dirents with `withFileTypes`; `recursive` walks breadth-first
 // as Node does (names relative to the base; a symlink to a directory is descended too).
+// readdir recursive: a dirent is a directory when its mode is S_IFDIR directly, or it's a symlink
+// whose target is a directory (statSync's throw on a broken link falls through as non-directory).
+const __readdirIsDir = (full, type) => {
+  if (type === 0o040000) return true;
+  if (type === 0o120000) {
+    try { return (globalThis.__fs_stat(full, false)[1] & __S_IFMT) === 0o040000; } catch (e) {}
+  }
+  return false;
+};
 const __readdir = (p, options) => {
   const base = __fsPath(p);
   const opts = typeof options === 'object' && options !== null ? options : {};
@@ -2332,9 +2369,7 @@ const __readdir = (p, options) => {
     for (const [name, type] of read(queue[i])) {
       const full = join(queue[i], name);
       out.push(opts.withFileTypes ? new Dirent(name, type, queue[i]) : full.slice(base.length + (base.endsWith('/') ? 0 : 1)));
-      let dir = type === 0o040000;
-      if (type === 0o120000) { try { dir = (globalThis.__fs_stat(full, false)[1] & __S_IFMT) === 0o040000; } catch (e) {} }
-      if (dir) queue.push(full);
+      if (__readdirIsDir(full, type)) queue.push(full);
     }
   }
   return out;
@@ -2590,11 +2625,10 @@ function __highlightRegExp(re) {
   // \p{..}, \P{..}); returns the updated `seq` or null if nothing special, and writes directly
   // for the forms that emit a writeGroup (returning 'done' then).
   const escapeTail = (seq, next) => {
-    if (next === 'u' && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return 'done'; }
     if (next === 'x') { seq += re.slice(i, i + 2); i += 2; return seq; }
     if (next >= '0' && next <= '9') return seq + readDigits();
+    if (re[i] === '{' && (next === 'u' || next === 'p' || next === 'P')) { writeGroup(`${seq}{`, '}', 0); return 'done'; }
     if (next === 'k' && re[i] === '<') { writeGroup(`${seq}<`, '>'); return 'done'; }
-    if ((next === 'p' || next === 'P') && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return 'done'; }
     return seq;
   };
   const escape = () => {
@@ -2609,6 +2643,11 @@ function __highlightRegExp(re) {
       }
     }
     writeDepth(seq, 1, 0);
+  };
+  // Close out a `{...}` quantifier: emit the closing brace if present, then a lazy '?' modifier.
+  const closeQuantifier = () => {
+    if (i < re.length && re[i] === '}') { depth--; write('}'); i++; }
+    if (i < re.length && re[i] === '?') writeDepth('?', 3, 1);
   };
   const quantifier = () => {
     i++;
@@ -2625,8 +2664,7 @@ function __highlightRegExp(re) {
     }
     const digits2 = readDigits();
     if (digits2) writeDepth(digits2, 1, 0);
-    if (i < re.length && re[i] === '}') { depth--; write('}'); i++; }
-    if (i < re.length && re[i] === '?') writeDepth('?', 3, 1);
+    closeQuantifier();
   };
   // A one-char token that writes at a lifted depth (operators |+*?,^$ at 3,1; '.' at 2,1).
   const stepLifted = '|+*?,^$';
@@ -2696,14 +2734,16 @@ function __ctorName(obj) {
   }
   return null;
 }
+// `[class Name extends Super]` tag for a class. (The class/non-class branch of __fnBase.)
+function __fnBaseClass(fn) {
+  let base = `[class ${fn.name || '(anonymous)'}`;
+  const sup = Object.getPrototypeOf(fn);
+  if (sup && sup.name) base += ` extends ${sup.name}`;
+  return base + ']';
+}
 function __fnBase(fn, ctor) {
   const src = Function.prototype.toString.call(fn);
-  if (src.startsWith('class') && /^class\s*[\s{A-Za-z_$]/.test(src)) {
-    let base = `[class ${fn.name || '(anonymous)'}`;
-    const sup = Object.getPrototypeOf(fn);
-    if (sup && sup.name) base += ` extends ${sup.name}`;
-    return base + ']';
-  }
+  if (src.startsWith('class') && /^class\s*[\s{A-Za-z_$]/.test(src)) return __fnBaseClass(fn);
   let type = 'Function';
   const tag = fn[Symbol.toStringTag];
   if (tag === 'AsyncFunction' || tag === 'GeneratorFunction' || tag === 'AsyncGeneratorFunction') type = tag;
@@ -2712,18 +2752,20 @@ function __fnBase(fn, ctor) {
   if (ctor === null) base += ' (null prototype)';
   return base;
 }
+// A long string that spans newlines is rendered as a joined per-line sequence with the indent
+// of the surrounding value; anything else stays as a single escaped literal.
+function __inspectStrLines(v, ctx, sty) {
+  if (v.length > 16 && v.length > 80 - ctx.indentationLvl - 4) {
+    const parts = v.split(/(?<=\n)/);
+    if (parts.length > 1) return parts.map((l) => sty(__strEscape(l), 'string')).join(` +\n${' '.repeat(ctx.indentationLvl + 2)}`);
+  }
+  return sty(__strEscape(v), 'string');
+}
 // formatPrimitive; `plain` is Node's stylizeNoColor (boxed primitives)
 function __inspectPrimitive(v, ctx, plain) {
   const sty = (str, type) => (plain ? str : __sty(ctx, str, type));
   switch (typeof v) {
-    case 'string': {
-      const trailer = '';
-      if (v.length > 16 && v.length > 80 - ctx.indentationLvl - 4) {
-        const parts = v.split(/(?<=\n)/);
-        if (parts.length > 1) return parts.map((l) => sty(__strEscape(l), 'string')).join(` +\n${' '.repeat(ctx.indentationLvl + 2)}`) + trailer;
-      }
-      return sty(__strEscape(v), 'string') + trailer;
-    }
+    case 'string': return __inspectStrLines(v, ctx, sty);
     case 'number': return sty(Object.is(v, -0) ? '-0' : String(v), 'number');
     case 'bigint': return sty(`${v}n`, 'bigint');
     case 'boolean': return sty(String(v), 'boolean');
@@ -2742,16 +2784,15 @@ function __formatValue(ctx, value, recurseTimes, typedArray) {
     // a multi-line result is indented to where it is printed, as Node does
     if (r !== value) return typeof r === 'string' ? r.replace(/\n/g, `\n${' '.repeat(ctx.indentationLvl)}`) : __formatValue(ctx, r, recurseTimes);
   }
-  if (ctx.seen.includes(value)) {
-    let index = 1;
-    if (ctx.circular === undefined) { ctx.circular = new Map(); ctx.circular.set(value, index); }
-    else {
-      index = ctx.circular.get(value);
-      if (index === undefined) { index = ctx.circular.size + 1; ctx.circular.set(value, index); }
-    }
-    return __sty(ctx, `[Circular *${index}]`, 'special');
-  }
+  if (ctx.seen.includes(value)) return __sty(ctx, `[Circular *${__trackCircular(ctx, value)}]`, 'special');
   return __formatRaw(ctx, value, recurseTimes, typedArray);
+}
+// On the first circular hit for `value`, assign it a fresh 1-based index; later hits reuse it.
+function __trackCircular(ctx, value) {
+  if (ctx.circular === undefined) { ctx.circular = new Map(); ctx.circular.set(value, 1); return 1; }
+  let index = ctx.circular.get(value);
+  if (index === undefined) { index = ctx.circular.size + 1; ctx.circular.set(value, index); }
+  return index;
 }
 // The styled value side of __formatProperty: the data / accessor shape of desc.
 function __formatPropertyValue(ctx, value, recurseTimes, type, desc) {
@@ -2872,16 +2913,19 @@ function __reduceCompactNumber(ctx, output, base, braces, extrasType, recurseTim
   }
   return [output, undefined];
 }
-function __reduceToSingleString(ctx, output, base, braces, extrasType, recurseTimes, value) {
-  if (ctx.compact !== true) {
-    if (typeof ctx.compact === 'number' && ctx.compact >= 1) {
-      const [grouped, line] = __reduceCompactNumber(ctx, output, base, braces, extrasType, recurseTimes, value);
-      if (line !== undefined) return line;
-      output = grouped;
-    }
-    const indentation = `\n${' '.repeat(ctx.indentationLvl)}`;
-    return `${base ? `${base} ` : ''}${braces[0]}${indentation}  ${output.join(`,${indentation}  `)}${indentation}${braces[1]}`;
+// The multi-line branch of __reduceToSingleString (ctx.compact !== true): entries one per line,
+// with a numeric `compact` first trying the one-line grouped form from __reduceCompactNumber.
+function __reduceExpanded(ctx, output, base, braces, extrasType, recurseTimes, value) {
+  if (typeof ctx.compact === 'number' && ctx.compact >= 1) {
+    const [grouped, line] = __reduceCompactNumber(ctx, output, base, braces, extrasType, recurseTimes, value);
+    if (line !== undefined) return line;
+    output = grouped;
   }
+  const indentation = `\n${' '.repeat(ctx.indentationLvl)}`;
+  return `${base ? `${base} ` : ''}${braces[0]}${indentation}  ${output.join(`,${indentation}  `)}${indentation}${braces[1]}`;
+}
+function __reduceToSingleString(ctx, output, base, braces, extrasType, recurseTimes, value) {
+  if (ctx.compact !== true) return __reduceExpanded(ctx, output, base, braces, extrasType, recurseTimes, value);
   if (__isBelowBreakLength(ctx, output, 0, base)) return `${braces[0]}${base ? ` ${base}` : ''} ${output.join(', ')} ${braces[1]}`;
   const indentation = ' '.repeat(ctx.indentationLvl);
   const ln = base === '' && braces[0].length === 1 ? ' ' : `${base ? ` ${base}` : ''}\n${indentation}  `;
@@ -2926,12 +2970,15 @@ function __rawMapSet(ctx, value, keys, prefix) {
     return out;
   });
 }
+// Node's Buffer inspect: `<Buffer deadbeef ... N more bytes>`; the first 50 bytes in hex,
+// with an ellipsis for anything past that. (Buffer branch of __rawTyped.)
+function __rawBuffer(value, ctor) {
+  const bytes = Array.from(value.subarray(0, 50), (b) => b.toString(16).padStart(2, '0')).join(' ');
+  const more = value.length > 50 ? ` ... ${value.length - 50} more byte${value.length - 50 > 1 ? 's' : ''}` : '';
+  return `<${ctor || 'Buffer'}${bytes ? ` ${bytes}` : ''}${more}>`;
+}
 function __rawTyped(ctx, value, keys, ctor, tag, prefix) {
-  if (globalThis.Buffer && globalThis.Buffer.isBuffer && globalThis.Buffer.isBuffer(value)) {
-    const bytes = Array.from(value.subarray(0, 50), (b) => b.toString(16).padStart(2, '0')).join(' ');
-    const more = value.length > 50 ? ` ... ${value.length - 50} more byte${value.length - 50 > 1 ? 's' : ''}` : '';
-    return `<${ctor || 'Buffer'}${bytes ? ` ${bytes}` : ''}${more}>`;
-  }
+  if (globalThis.Buffer && globalThis.Buffer.isBuffer && globalThis.Buffer.isBuffer(value)) return __rawBuffer(value, ctor);
   keys = keys.filter((k) => !/^(0|[1-9][0-9]*)$/.test(k));
   const braces = [`${prefix(tag || 'TypedArray', `(${value.length})`)}[`, ']'];
   if (value.length === 0 && keys.length === 0) return `${braces[0]}]`;
@@ -2950,31 +2997,44 @@ function __rawBoxed(ctx, value, keys) {
   if (keys.length === 0) return __sty(ctx, base, type.toLowerCase());
   return __rawSpec(keys, ['{', '}'], undefined, base);
 }
-// a function, regexp, date or error: its base text, alone when it has no keys to print
-function __rawBased(ctx, value, recurseTimes, keys, ctor) {
-  if (typeof value === 'function') {
-    const base = __fnBase(value, ctor);
-    return keys.length === 0 ? __sty(ctx, base, 'special') : __rawSpec(keys, ['{', '}'], undefined, base);
-  }
-  if (value instanceof RegExp) {
-    const base = __sty(ctx, RegExp.prototype.toString.call(value), 'regexp');
-    return keys.length === 0 || recurseTimes > ctx.depth ? base : __rawSpec(keys, ['{', '}'], undefined, base);
-  }
-  if (value instanceof Date) {
-    const base = Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
-    return keys.length === 0 ? __sty(ctx, base, 'date') : __rawSpec(keys, ['{', '}'], undefined, base);
-  }
+function __rawFn(ctx, value, keys, ctor) {
+  const base = __fnBase(value, ctor);
+  return keys.length === 0 ? __sty(ctx, base, 'special') : __rawSpec(keys, ['{', '}'], undefined, base);
+}
+function __rawRegExp(ctx, value, keys, recurseTimes) {
+  const base = __sty(ctx, RegExp.prototype.toString.call(value), 'regexp');
+  return keys.length === 0 || recurseTimes > ctx.depth ? base : __rawSpec(keys, ['{', '}'], undefined, base);
+}
+function __rawDate(ctx, value, keys) {
+  const base = Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
+  return keys.length === 0 ? __sty(ctx, base, 'date') : __rawSpec(keys, ['{', '}'], undefined, base);
+}
+function __rawErr(value, keys) {
   const base = value.stack ? String(value.stack) : `[${Error.prototype.toString.call(value)}]`;
   keys = keys.filter((k) => k !== 'stack' && k !== 'message');
   return keys.length === 0 ? base : __rawSpec(keys, ['{', '}'], undefined, base);
 }
+// a function, regexp, date or error: its base text, alone when it has no keys to print
+function __rawBased(ctx, value, recurseTimes, keys, ctor) {
+  if (typeof value === 'function') return __rawFn(ctx, value, keys, ctor);
+  if (value instanceof RegExp) return __rawRegExp(ctx, value, keys, recurseTimes);
+  if (value instanceof Date) return __rawDate(ctx, value, keys);
+  return __rawErr(value, keys);
+}
+function __rawIsBased(value) {
+  return typeof value === 'function' || value instanceof RegExp || value instanceof Date || value instanceof Error;
+}
+function __rawIsBoxed(value) {
+  return value instanceof Number || value instanceof String || value instanceof Boolean;
+}
+function __rawWeak(ctx, value, keys, prefix) {
+  return __rawSpec(keys, [`${prefix(value instanceof WeakMap ? 'WeakMap' : 'WeakSet', '')}{`, '}'], () => [__sty(ctx, '<items unknown>', 'special')]);
+}
 function __rawOther(ctx, value, recurseTimes, keys, ctor, tag, prefix) {
-  if (typeof value === 'function' || value instanceof RegExp || value instanceof Date || value instanceof Error) return __rawBased(ctx, value, recurseTimes, keys, ctor);
-  if (value instanceof Number || value instanceof String || value instanceof Boolean) return __rawBoxed(ctx, value, keys);
+  if (__rawIsBased(value)) return __rawBased(ctx, value, recurseTimes, keys, ctor);
+  if (__rawIsBoxed(value)) return __rawBoxed(ctx, value, keys);
   if (value instanceof Promise) return __rawSpec(keys, [`${prefix('Promise', '')}{`, '}'], () => [__sty(ctx, '<pending>', 'special')]);
-  if (value instanceof WeakMap || value instanceof WeakSet) {
-    return __rawSpec(keys, [`${prefix(value instanceof WeakMap ? 'WeakMap' : 'WeakSet', '')}{`, '}'], () => [__sty(ctx, '<items unknown>', 'special')]);
-  }
+  if (value instanceof WeakMap || value instanceof WeakSet) return __rawWeak(ctx, value, keys, prefix);
   return __rawPlain(keys, ctor, tag, prefix);
 }
 function __rawPlain(keys, ctor, tag, prefix) {
@@ -3181,11 +3241,18 @@ const __querystring = {
 __querystring.decode = __querystring.parse;
 __querystring.encode = __querystring.stringify;
 // Length of the incomplete-but-valid UTF-8 sequence at the end of b (0 if none).
+// Continuation bytes a lead byte needs (0 for non-leads / disallowed bytes).
+function __utf8LeadNeed(c) {
+  if (c >= 0xc2 && c <= 0xdf) return 1;
+  if (c >= 0xe0 && c <= 0xef) return 2;
+  if (c >= 0xf0 && c <= 0xf4) return 3;
+  return 0;
+}
 function __utf8Tail(b) {
   for (let back = 1; back <= 3 && back <= b.length; back++) {
     const c = b[b.length - back];
     if ((c & 0xc0) === 0x80) continue; // continuation byte: keep looking for the lead
-    const need = c >= 0xc2 && c <= 0xdf ? 1 : c >= 0xe0 && c <= 0xef ? 2 : c >= 0xf0 && c <= 0xf4 ? 3 : 0;
+    const need = __utf8LeadNeed(c);
     return need >= back ? back : 0;
   }
   return 0;
@@ -3274,15 +3341,19 @@ function __deepEqValue(a, b, strict, tag) {
   if (__BOXED_TAGS.has(tag)) return Object.is(a.valueOf(), b.valueOf());
   return true;
 }
+// Loose-equal fallback for a Map key that b.has() misses: deep-equal k to some b-key with a
+// deep-equal value. (Used by __deepEqMap.)
+function __deepEqMapHit(k, v, b, strict, seen) {
+  for (const [k2, v2] of b) if (__deepEq(k, k2, strict, seen) && __deepEq(v, v2, strict, seen)) return true;
+  return false;
+}
 function __deepEqMap(a, b, strict, seen) {
   if (a.size !== b.size) return false;
   for (const [k, v] of a) {
     if (b.has(k)) { if (!__deepEq(v, b.get(k), strict, seen)) return false; continue; }
     // an object key (or, loosely, a primitive one) can still match a deep-equal key
     if (strict && (k === null || typeof k !== 'object')) return false;
-    let hit = false;
-    for (const [k2, v2] of b) if (__deepEq(k, k2, strict, seen) && __deepEq(v, v2, strict, seen)) { hit = true; break; }
-    if (!hit) return false;
+    if (!__deepEqMapHit(k, v, b, strict, seen)) return false;
   }
   return true;
 }
@@ -3321,8 +3392,10 @@ function __deepEqCollection(a, b, strict, seen) {
   if (a instanceof Set) return __deepEqSet(a, b, strict, seen);
   return true;
 }
+// `a === b` ends the comparison except for -0 vs 0 under strict, which splits on Object.is.
+function __deepEqSame(a, b, strict) { return a !== 0 || !strict || Object.is(a, b); }
 function __deepEq(a, b, strict, seen) {
-  if (a === b) return a !== 0 || !strict || Object.is(a, b);
+  if (a === b) return __deepEqSame(a, b, strict);
   if (__isPrimOrNull(a) || __isPrimOrNull(b)) return __deepEqPrim(a, b, strict);
   const tag = __deepEqTag(a, b, strict);
   if (tag === null) return false;
@@ -3374,12 +3447,17 @@ function __mkAssert(strict) {
     if (expected instanceof RegExp) { if (expected.test(String(err))) return; fail(err, expected, message, operator, 'The input did not match the regular expression ' + String(expected) + '. Input:\n\n' + __fmtv(String(err)) + '\n'); }
     if (expected && typeof expected === 'object') matchesObj(err, expected, message, operator);
   };
+  // Does `e` match the doesNotThrow / doesNotReject `expected` — a class, a RegExp, or a predicate?
+  const unwantedHit = (e, expected) => {
+    if (expected instanceof RegExp) return expected.test(String(e));
+    if (expected.prototype !== undefined && e instanceof expected) return true;
+    return !Error.isPrototypeOf(expected) && expected !== Error && expected.call({}, e) === true;
+  };
   // doesNotThrow / doesNotReject: an error that does not match `expected` propagates as is
   const unwanted = (e, expected, message, operator, what) => {
     if (expected !== undefined) {
       if (typeof expected !== 'function' && !(expected instanceof RegExp)) { const t = new TypeError('The "expected" argument must be of type function or an instance of RegExp'); t.code = 'ERR_INVALID_ARG_TYPE'; throw t; }
-      const hit = expected instanceof RegExp ? expected.test(String(e)) : (expected.prototype !== undefined && e instanceof expected) || (!Error.isPrototypeOf(expected) && expected !== Error && expected.call({}, e) === true);
-      if (!hit) throw e;
+      if (!unwantedHit(e, expected)) throw e;
     }
     fail(e, expected, message, operator, 'Got unwanted ' + what + (message ? ': ' + message : '.') + '\nActual message: "' + (e && e.message) + '"');
   };
@@ -3706,16 +3784,18 @@ globalThis.__ttNsRegister = (ns, own, re, stars) => {
   const t = __ttNsTarget(ns);
   if (!__ttNsInfo.has(t)) __ttNsInfo.set(t, { over: new Map(), own: new Set(own), re, stars });
 };
+// a name the namespace does not list (a CommonJS source's `__esModule`) is not re-exported
+const __ttNsLookupKey = (info, ns, k) => {
+  const r = Object.prototype.hasOwnProperty.call(info.re, k) ? info.re[k] : undefined;
+  if (r !== undefined) return { v: globalThis.__ttR(r[0], r[1]) };
+  if (k !== 'default') for (const s of info.stars) if (k in s) return { v: globalThis.__ttR(s, k) };
+  return undefined;
+};
 const __ttNsLookup = (ns, k) => {
   const info = __ttNsInfo.get(__ttNsTarget(ns));
   if (info === undefined || typeof k !== 'string') return undefined;
   if (info.over.has(k)) return { v: info.over.get(k) };
-  // a name the namespace does not list (a CommonJS source's `__esModule`) is not re-exported
-  if (!info.own.has(k) && k in ns) {
-    const r = Object.prototype.hasOwnProperty.call(info.re, k) ? info.re[k] : undefined;
-    if (r !== undefined) return { v: globalThis.__ttR(r[0], r[1]) };
-    if (k !== 'default') for (const s of info.stars) if (k in s) return { v: globalThis.__ttR(s, k) };
-  }
+  if (!info.own.has(k) && k in ns) return __ttNsLookupKey(info, ns, k);
   return undefined;
 };
 globalThis.__ttR = (ns, k) => {
@@ -4025,17 +4105,26 @@ function __eqTesters(a, b, testers) {
   }
   return __EQ_NEXT;
 }
+// A side-only asymmetric matcher runs its own equality.
+function __eqAsym(a, b, asymA, testers) {
+  if (asymA) return a.asymmetricMatch(b, testers);
+  return b.asymmetricMatch(a, testers);
+}
 // __eq before the structural walk: asymmetric matchers, custom testers, URLs, identity, null
 function __eqPre(a, b, testers) {
   const asymA = __isAsym(a), asymB = __isAsym(b);
-  if (asymA && !asymB) return a.asymmetricMatch(b, testers);
-  if (asymB && !asymA) return b.asymmetricMatch(a, testers);
+  if (asymA !== asymB) return __eqAsym(a, b, asymA, testers);
   const t = __eqTesters(a, b, testers);
   if (t !== __EQ_NEXT) return t;
   if (typeof URL === 'function' && a instanceof URL && b instanceof URL) return a.href === b.href;
   if (Object.is(a, b)) return true;
   if (a === null || b === null) return a === b;
   return __EQ_NEXT;
+}
+// Dates are equal when they hold the same timestamp (NaN === NaN is also equal).
+function __eqDate(a, b) {
+  const x = +a, y = +b;
+  return x === y || (Number.isNaN(x) && Number.isNaN(y));
 }
 // __eq of booleans, strings, numbers (boxed or not), dates and regexps (undefined: other classes)
 function __eqByClass(a, b, cls) {
@@ -4046,10 +4135,7 @@ function __eqByClass(a, b, cls) {
       if (typeof a !== typeof b) return false;
       if (typeof a !== 'object') return Object.is(a, b);
       return Object.is(a.valueOf(), b.valueOf());
-    case '[object Date]': {
-      const x = +a, y = +b;
-      return x === y || (Number.isNaN(x) && Number.isNaN(y));
-    }
+    case '[object Date]': return __eqDate(a, b);
     case '[object RegExp]': return a.source === b.source && a.flags === b.flags;
   }
   return undefined;
@@ -4153,6 +4239,18 @@ function __iterSizedEq(a, b, inner) {
   if (tag === '[object Map]') return __iterMapEq(a, b, inner);
   return __EQ_NEXT;
 }
+// The structural comparison inside __iterableEquality, once both values are on the stacks:
+// tries the Set / Map sized path first, then the ordered iteration fallback, popping on success.
+function __iterableEqualityCompare(a, b, testers, aStack, bStack) {
+  const withStack = (x, y) => __iterableEquality(x, y, [...testers], [...aStack], [...bStack]);
+  const inner = [...testers.filter((t) => t !== __iterableEquality), withStack];
+  const sized = a.size !== undefined ? __iterSizedEq(a, b, inner) : __EQ_NEXT;
+  if (sized !== __EQ_NEXT) { aStack.pop(); bStack.pop(); return sized; }
+  if (!__iterOrderedEq(a, b, inner)) return false;
+  aStack.pop();
+  bStack.pop();
+  return true;
+}
 // vitest iterableEquality: two non-array iterables of the same constructor — Sets by members and
 // Maps by entries (in any order, deep-equal members match), others in iteration order plus their
 // enumerable own entries.
@@ -4162,14 +4260,7 @@ function __iterableEquality(a, b, testers = [], aStack = [], bStack = []) {
   for (let i = aStack.length; i--;) if (aStack[i] === a) return bStack[i] === b;
   aStack.push(a);
   bStack.push(b);
-  const withStack = (x, y) => __iterableEquality(x, y, [...testers], [...aStack], [...bStack]);
-  const inner = [...testers.filter((t) => t !== __iterableEquality), withStack];
-  const sized = a.size !== undefined ? __iterSizedEq(a, b, inner) : __EQ_NEXT;
-  if (sized !== __EQ_NEXT) { aStack.pop(); bStack.pop(); return sized; }
-  if (!__iterOrderedEq(a, b, inner)) return false;
-  aStack.pop();
-  bStack.pop();
-  return true;
+  return __iterableEqualityCompare(a, b, testers, aStack, bStack);
 }
 // vitest typeEquality: toStrictEqual tells apart values whose `constructor` differs (a class
 // instance never strictly equals a plain object; turbo-test#98).
@@ -4685,11 +4776,7 @@ function makeExpect(actual, negated = false, message = undefined, promise = '') 
         const sf = __snapFile();
         if (!sf) throw new Error('toMatchFileSnapshot: no test file path available');
         const testDir = sf.dir.replace(/\/__snapshots__$/, '');
-        const parts = [];
-        for (const seg of (String(file).startsWith('/') ? String(file) : `${testDir}/${file}`).split('/')) {
-          if (seg === '..') parts.pop();
-          else if (seg && seg !== '.') parts.push(seg);
-        }
+        const parts = __ttNormSegs(String(file).startsWith('/') ? String(file) : `${testDir}/${file}`);
         const path = `/${parts.join('/')}`;
         const key = __snapNextKey(hint ? `${__snap.testName} > ${hint}` : __snap.testName);
         const body = typeof actual === 'string' ? actual : __serialize(actual);
@@ -5274,6 +5361,17 @@ function __copyMockStatics(fn, from) {
   }
 }
 const __mockLength = (impl, original) => ((impl || original) ? (impl || original).length : 0);
+// makeSpy's error path: record the throw/reject on the pending result and settled slot, and
+// warn when the implementation was a plain object so `new spy()` surfaces that as the cause.
+function __handleMockError(e, result, settled, fn) {
+  result.type = 'throw';
+  result.value = e;
+  settled.type = 'rejected';
+  settled.value = e;
+  if (e instanceof TypeError && String(e.message).includes('is not a constructor')) {
+    globalThis.console.warn(`[vitest] The ${fn.getMockName()} mock did not use 'function' or 'class' in its implementation, see https://vitest.dev/api/vi#vi-spyon for examples.`);
+  }
+}
 function makeSpy(impl, opts) {
   opts = opts || {};
   const original = opts.original;
@@ -5303,13 +5401,7 @@ function makeSpy(impl, opts) {
       // `new spy()` constructs the implementation (a class cannot be called with .apply)
       ret = new.target ? Reflect.construct(implementation, args, new.target) : implementation.apply(this, args);
     } catch (e) {
-      result.type = 'throw';
-      result.value = e;
-      settled.type = 'rejected';
-      settled.value = e;
-      if (e instanceof TypeError && String(e.message).includes('is not a constructor')) {
-        globalThis.console.warn(`[vitest] The ${fn.getMockName()} mock did not use 'function' or 'class' in its implementation, see https://vitest.dev/api/vi#vi-spyon for examples.`);
-      }
+      __handleMockError(e, result, settled, fn);
       throw e;
     }
     result.type = 'return';
@@ -5452,9 +5544,13 @@ function __automock(mod, depth, spy) {
 // objects' too) becomes a spy on it; arrays and other values stay.
 // Only these children are walked recursively by __autospy (functions and plain objects).
 function __autospyWalkable(x) { return typeof x === 'function' || (x && typeof x === 'object'); }
+// Values __autospy leaves alone: null, non-objects, arrays, cycles, and depths past 4.
+function __autospyOpaque(v, seen, depth) {
+  return v === null || typeof v !== 'object' || Array.isArray(v) || seen.has(v) || depth > 4;
+}
 function __autospy(v, depth, seen) {
   if (typeof v === 'function') return __automock(v, depth, true);
-  if (v === null || typeof v !== 'object' || Array.isArray(v) || seen.has(v) || depth > 4) return v;
+  if (__autospyOpaque(v, seen, depth)) return v;
   seen.add(v);
   for (const k of Object.keys(v)) {
     let x;
@@ -5815,6 +5911,12 @@ function __ttMock(spec, factory, vitest, isDoMock) {
   const [ok, made] = factory === undefined ? __ttAutomockOf(dir, spec) : __ttFactoryExports(spec, factory, vitest, isDoMock, dir);
   if (ok) __ttMockRegister(spec, factory, vitest, isDoMock, dir, key, made);
 }
+// Async (Promise) factory branch of __ttMockRegister: a doMock (not hoisted: it applies to
+// later imports) waits on its own; a hoisted vi.mock is awaited by the loader's resolve + drain.
+function __ttRegisterAsyncMock(spec, vitest, isDoMock, dir, key, exports) {
+  if (isDoMock && !globalThis.__ttMockPrepass && globalThis.__ttRegisterMock && __ttAwaitDoMock(dir, spec, exports, key, vitest)) return;
+  __ttQueueMock(spec, exports, vitest, key);
+}
 // __ttMock's registration of the made mock
 function __ttMockRegister(spec, factory, vitest, isDoMock, dir, key, exports) {
   // Sync factory: register IMMEDIATELY in the calling module's dir (vi.mock is hoisted above
@@ -5822,13 +5924,7 @@ function __ttMockRegister(spec, factory, vitest, isDoMock, dir, key, exports) {
   // ran in THIS module's scope, so it shares the test's bindings). Async (Promise) factory:
   // queue for __resolvePendingMocks (run_entry_mocks prepass / drain).
   if (globalThis.__ttMockPrepass) __ttPrepassMocks.add(__ttPrepassKey(spec));
-  if (exports && typeof exports.then === 'function') {
-    // a doMock (not hoisted: it applies to later imports) waits on its own; a hoisted vi.mock is
-    // awaited by the loader's resolve + drain
-    if (isDoMock && !globalThis.__ttMockPrepass && globalThis.__ttRegisterMock && __ttAwaitDoMock(dir, spec, exports, key, vitest)) return;
-    __ttQueueMock(spec, exports, vitest, key);
-    return;
-  }
+  if (exports && typeof exports.then === 'function') return __ttRegisterAsyncMock(spec, vitest, isDoMock, dir, key, exports);
   if (factory !== undefined) exports = __ttStrictMock(exports, key, String(spec), vitest);
   if (globalThis.__ttRegisterMock && dir && __ttRegisterMockNow(dir, spec, exports, key)) return;
   __ttQueueMock(spec, exports, vitest, key);
@@ -5972,6 +6068,13 @@ function __spyOriginal(isNs, nsRaw, obj, key, desc, accessType) {
   if (accessType !== 'value') return () => obj[key];
   return obj[key];
 }
+// A spyable target: a function, or an accessor whose current value is nullish (so spying
+// installs one). Anything else is a TypeError for the caller.
+function __viSpyOnCheck(originalImpl, accessType, original) {
+  if (typeof originalImpl === 'function') return;
+  if (accessType !== 'value' && original == null) return;
+  throw new Error(`vi.spyOn() can only spy on a function. Received ${typeof originalImpl}.`);
+}
 // @vitest/spy's spyOn: `accessor` 'get' / 'set' spies on an accessor; a getter holding a
 // function (a live re-export) is spied through it; the original descriptor comes back on
 // restore (a method found on a prototype is deleted from the object again)
@@ -5987,9 +6090,7 @@ function __viSpyOn(obj, key, accessor) {
   const [accessType, ssr] = __spyAccess(accessor, desc);
   const original = __spyOriginal(isNs, nsRaw, obj, key, desc, accessType);
   const originalImpl = ssr && original ? original.call(obj) : original;
-  if (!(typeof originalImpl === 'function' || (accessType !== 'value' && original == null))) {
-    throw new Error(`vi.spyOn() can only spy on a function. Received ${typeof originalImpl}.`);
-  }
+  __viSpyOnCheck(originalImpl, accessType, original);
   if (globalThis.vi.isMockFunction(originalImpl)) return originalImpl;
   const reassign = (cb) => {
     if (isNs) { globalThis.__ttNsSet(obj, key, cb); return; }
@@ -6172,16 +6273,22 @@ globalThis.vi = {
 // reflect-metadata's "already installed" guard, leaving it missing methods (getOwnMetadataKeys
 // etc.). `decorateMetadata` no-ops cleanly when Reflect.metadata is absent (non-Nest projects).
 globalThis.babelHelpers = globalThis.babelHelpers || {};
+// Non-Reflect fallback for babelHelpers.decorate: apply each decorator in reverse, picking the
+// member / class / parameter shape based on `c` (arguments.length).
+function __babelDecorateFallback(decorators, target, key, r, c) {
+  for (var i = decorators.length - 1; i >= 0; i--) {
+    var d = decorators[i];
+    if (d) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+  }
+  return r;
+}
 globalThis.babelHelpers.decorate = function (decorators, target, key, desc) {
   var c = arguments.length,
-    r = c < 3 ? target : desc === null ? (desc = Object.getOwnPropertyDescriptor(target, key)) : desc,
-    d;
+    r = c < 3 ? target : desc === null ? (desc = Object.getOwnPropertyDescriptor(target, key)) : desc;
   if (typeof Reflect === 'object' && typeof Reflect.decorate === 'function') {
     r = Reflect.decorate(decorators, target, key, desc);
   } else {
-    for (var i = decorators.length - 1; i >= 0; i--) {
-      if ((d = decorators[i])) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
-    }
+    r = __babelDecorateFallback(decorators, target, key, r, c);
   }
   return c > 3 && r && Object.defineProperty(target, key, r), r;
 };
@@ -6441,19 +6548,24 @@ function __inspectObject(obj, o) {
 }
 // vitest's loupe `inspect` (the value rendering of titles, `%o`/`%O`/`%s` objects); `o.truncate`
 // (default unlimited) bounds the output as loupe does.
+function __inspectBigInt(v, o) {
+  const n = __inspectTrunc(v.toString(), o.truncate - 1);
+  return n === '…' ? n : `${n}n`;
+}
+function __inspectFunction(v, o) {
+  const tag = v[Symbol.toStringTag] || 'Function';
+  return v.name ? `[${tag} ${__inspectTrunc(v.name, o.truncate - 11)}]` : `[${tag}]`;
+}
 // loupe's inspect of a primitive or function (undefined: an object)
 function __inspectPrim(v, o) {
   switch (typeof v) {
     case 'undefined': return 'undefined';
     case 'boolean': return String(v);
     case 'number': return __inspectNumber(v, o);
-    case 'bigint': { const n = __inspectTrunc(v.toString(), o.truncate - 1); return n === '…' ? n : `${n}n`; }
+    case 'bigint': return __inspectBigInt(v, o);
     case 'string': return __inspectString(v, o);
     case 'symbol': return v.description ? `Symbol(${v.description})` : 'Symbol()';
-    case 'function': {
-      const tag = v[Symbol.toStringTag] || 'Function';
-      return v.name ? `[${tag} ${__inspectTrunc(v.name, o.truncate - 11)}]` : `[${tag}]`;
-    }
+    case 'function': return __inspectFunction(v, o);
   }
   return undefined;
 }
@@ -6719,15 +6831,19 @@ function __pfItems(items, cfg, ind, depth, refs, print) {
 }
 // __pfPrint's "not printed by this step"
 const __PF_NONE = Symbol('pf-none');
+// __pfAsym matcher-name tables: a toString() membership dispatches to the sample shape.
+const __PF_ARR_MATCHERS = new Set(['ArrayContaining', 'ArrayNotContaining']);
+const __PF_OBJ_MATCHERS = new Set(['ObjectContaining', 'ObjectNotContaining']);
+const __PF_STR_MATCHERS = new Set(['StringMatching', 'StringNotMatching', 'StringContaining', 'StringNotContaining']);
 // @vitest/pretty-format's AsymmetricMatcher plugin: anything with vitest's `$$typeof`, printed by
 // its toString name (containing / matching samples) or its toAsymmetricMatcher()
 function __pfAsym(v, cfg, ind, depth, refs) {
   const name = v.toString();
   const d = depth + 1;
   const pp = (x, i) => __pfPrint(x, cfg, i, d, refs, false);
-  if (name === 'ArrayContaining' || name === 'ArrayNotContaining') return d > cfg.maxDepth ? `[${name}]` : `${name} [${__pfItems(Array.from(v.sample), cfg, ind, d, refs, pp)}]`;
-  if (name === 'ObjectContaining' || name === 'ObjectNotContaining') return d > cfg.maxDepth ? `[${name}]` : `${name} {${__pfProps(v.sample, cfg, ind, d, refs)}}`;
-  if (name === 'StringMatching' || name === 'StringNotMatching' || name === 'StringContaining' || name === 'StringNotContaining') return `${name} ${__pfPrint(v.sample, cfg, ind, depth, refs, false)}`;
+  if (__PF_ARR_MATCHERS.has(name)) return d > cfg.maxDepth ? `[${name}]` : `${name} [${__pfItems(Array.from(v.sample), cfg, ind, d, refs, pp)}]`;
+  if (__PF_OBJ_MATCHERS.has(name)) return d > cfg.maxDepth ? `[${name}]` : `${name} {${__pfProps(v.sample, cfg, ind, d, refs)}}`;
+  if (__PF_STR_MATCHERS.has(name)) return `${name} ${__pfPrint(v.sample, cfg, ind, depth, refs, false)}`;
   if (typeof v.toAsymmetricMatcher !== 'function') throw new TypeError(`Asymmetric matcher ${v.constructor.name} does not implement toAsymmetricMatcher()`);
   return v.toAsymmetricMatcher();
 }
@@ -6752,13 +6868,19 @@ function __pfError(v, cfg, ind, depth, refs) {
   if (d > cfg.maxDepth) return `[${name}]`;
   return `${name} {${__pfEntries(Object.entries(entries), cfg, ind, d, r, ': ')}}`;
 }
-// plugins, asymmetric matchers, mock functions and (cfg.errors) errors
-function __pfHooks(v, cfg, ind, depth, refs) {
+// Walk cfg.plugins, calling each one's test(v) and letting the first match print the value.
+function __pfPluginFor(v, cfg, ind, depth, refs) {
   for (const plugin of cfg.plugins) {
     let hit;
     try { hit = plugin.test(v); } catch (error) { throw new __PrettyFormatPluginError(error.message, error.stack); }
     if (hit) return __pfPlugin(plugin, v, cfg, ind, depth, refs);
   }
+  return __PF_NONE;
+}
+// plugins, asymmetric matchers, mock functions and (cfg.errors) errors
+function __pfHooks(v, cfg, ind, depth, refs) {
+  const p = __pfPluginFor(v, cfg, ind, depth, refs);
+  if (p !== __PF_NONE) return p;
   if (v && v.$$typeof === Symbol.for('jest.asymmetricMatcher')) return __pfAsym(v, cfg, ind, depth, refs);
   if (cfg.mocks && typeof v === 'function' && v._isMockFunction) return __pfMockFn(v, cfg, ind, depth, refs);
   if (cfg.errors && v instanceof Error) return __pfError(v, cfg, ind, depth, refs);
@@ -6979,6 +7101,12 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
       else { division.aStartFollowing = aStartFollowing; division.bStartFollowing = bStartFollowing; }
     }
   };
+  // Did the forward wavefront at (kF, aLast) reach a reverse-wavefront point already recorded?
+  const overlapFReached = (kF, kMin, kMax, iMaxR, d, baDeltaLength, aIndexesR, aLast) => {
+    if (kMin > kF || kF > kMax) return false;
+    const iR = (d - 1 - (kF + baDeltaLength)) / 2;
+    return iR <= iMaxR && aIndexesR[iR] - 1 <= aLast;
+  };
   const overlapF = (d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division) => {
     const bF = bStart - aStart;
     const baDeltaLength = (bEnd - bStart) - (aEnd - aStart);
@@ -6995,15 +7123,18 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
       const aLast = aFirst + nCommonF;
       aIndexPrev1 = aIndexesF[iF];
       aIndexesF[iF] = aLast;
-      if (kMin <= kF && kF <= kMax) {
-        const iR = (d - 1 - (kF + baDeltaLength)) / 2;
-        if (iR <= iMaxR && aIndexesR[iR] - 1 <= aLast) {
-          divisionF(d, aStart, aEnd, bStart, bEnd, common, division, bF, aLastPrev, insert, kF, aFirst, bFirst, nCommonF, aLast);
-          return true;
-        }
+      if (overlapFReached(kF, kMin, kMax, iMaxR, d, baDeltaLength, aIndexesR, aLast)) {
+        divisionF(d, aStart, aEnd, bStart, bEnd, common, division, bF, aLastPrev, insert, kF, aFirst, bFirst, nCommonF, aLast);
+        return true;
       }
     }
     return false;
+  };
+  // Did the reverse wavefront at (kR, aLast) reach a forward-wavefront point already recorded?
+  const overlapRReached = (kR, kMin, kMax, iMaxF, d, baDeltaLength, aIndexesF, aLast) => {
+    if (kMin > kR || kR > kMax) return false;
+    const iF = (d + (kR - baDeltaLength)) / 2;
+    return iF <= iMaxF && aLast - 1 <= aIndexesF[iF];
   };
   const overlapR = (d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division) => {
     const bR = bEnd - aEnd;
@@ -7021,12 +7152,9 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
       const aLast = aFirst - nCommonR;
       aIndexPrev1 = aIndexesR[iR];
       aIndexesR[iR] = aLast;
-      if (kMin <= kR && kR <= kMax) {
-        const iF = (d + (kR - baDeltaLength)) / 2;
-        if (iF <= iMaxF && aLast - 1 <= aIndexesF[iF]) {
-          divisionR(d, aStart, aEnd, bStart, bEnd, common, division, bR, aLastPrev, insert, kR, bFirst, nCommonR, aLast);
-          return true;
-        }
+      if (overlapRReached(kR, kMin, kMax, iMaxF, d, baDeltaLength, aIndexesF, aLast)) {
+        divisionR(d, aStart, aEnd, bStart, bEnd, common, division, bR, aLastPrev, insert, kR, bFirst, nCommonR, aLast);
+        return true;
       }
     }
     return false;
@@ -7062,14 +7190,19 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     }
     throw new Error(`diff-sequences: no overlap aStart=${aStart} aEnd=${aEnd} bStart=${bStart} bEnd=${bEnd}`);
   };
+  // Transpose the halves so that `a` is the shorter sequence, lazily installing the mirrored
+  // callback pair the first time this happens. Returns the new [aStart, aEnd, bStart, bEnd, transposed].
+  const transposeHalves = (aStart, aEnd, bStart, bEnd, transposed, callbacks) => {
+    const t = !transposed;
+    if (t && callbacks.length === 1) {
+      const { found, common } = callbacks[0];
+      callbacks[1] = { found: (n, bc, ac) => found(n, ac, bc), common: (bi, ai) => common(ai, bi) };
+    }
+    return [bStart, bEnd, aStart, aEnd, t];
+  };
   const find = (nChange, aStart, aEnd, bStart, bEnd, transposed, callbacks, aIndexesF, aIndexesR, division) => {
     if (bEnd - bStart < aEnd - aStart) {
-      transposed = !transposed;
-      if (transposed && callbacks.length === 1) {
-        const { found, common } = callbacks[0];
-        callbacks[1] = { found: (n, bc, ac) => found(n, ac, bc), common: (bi, ai) => common(ai, bi) };
-      }
-      [aStart, aEnd, bStart, bEnd] = [bStart, bEnd, aStart, aEnd];
+      [aStart, aEnd, bStart, bEnd, transposed] = transposeHalves(aStart, aEnd, bStart, bEnd, transposed, callbacks);
     }
     const { found, common } = callbacks[transposed ? 1 : 0];
     divide(nChange, aStart, aEnd, bStart, bEnd, common, aIndexesF, aIndexesR, division);
@@ -7128,6 +7261,18 @@ function __diffsNeedPatch(diffs, ctx, ctx2) {
   }
   return false;
 }
+// __joinDiffs's main pass over the (op, line) sequence: a run of common lines first (deferred to
+// commonRun), then every immediately-adjacent `-` and `+` as consecutive del/ins blocks.
+function __joinDiffsLoop(diffs, len, commonRun, del, ins) {
+  let i = 0;
+  while (i !== len) {
+    const start = i;
+    while (i !== len && diffs[i][0] === 0) i++;
+    if (start !== i) commonRun(start, i);
+    while (i !== len && diffs[i][0] === -1) { del(diffs[i][1]); i++; }
+    while (i !== len && diffs[i][0] === 1) { ins(diffs[i][1]); i++; }
+  }
+}
 function __joinDiffs(diffs) {
   const ctx = 5;
   const ctx2 = ctx + ctx;
@@ -7143,6 +7288,22 @@ function __joinDiffs(diffs) {
   const del = (l) => { lines.push(line('-', l)); aEnd++; };
   const ins = (l) => { lines.push(line('+', l)); bEnd++; };
   const patchMark = () => __dcol.yellow(`@@ -${aStart + 1},${aEnd - aStart} +${bStart + 1},${bEnd - bStart} @@`);
+  // An inner common run (both ends are change lines): emit `ctx` lines on each side with a patch
+  // mark between them when the gap is wider than `ctx2`; otherwise emit the whole run as-is.
+  const innerCommonRun = (start, i) => {
+    const k = i - start;
+    if (k > ctx2) {
+      for (let c = start; c !== start + ctx; c++) common(diffs[c][1]);
+      lines[mark] = patchMark();
+      mark = lines.length;
+      lines.push('');
+      const omit = k - ctx2;
+      aStart = aEnd + omit; bStart = bEnd + omit; aEnd = aStart; bEnd = bStart;
+      for (let c = i - ctx; c !== i; c++) common(diffs[c][1]);
+    } else {
+      for (let c = start; c !== i; c++) common(diffs[c][1]);
+    }
+  };
   // the common run diffs[start..i): leading / trailing ones keep `ctx` lines, inner ones `ctx`
   // on each side of a patch mark
   const commonRun = (start, i) => {
@@ -7153,38 +7314,26 @@ function __joinDiffs(diffs) {
       const end = i - start > ctx ? start + ctx : i;
       for (let c = start; c !== end; c++) common(diffs[c][1]);
     } else {
-      const k = i - start;
-      if (k > ctx2) {
-        for (let c = start; c !== start + ctx; c++) common(diffs[c][1]);
-        lines[mark] = patchMark();
-        mark = lines.length;
-        lines.push('');
-        const omit = k - ctx2;
-        aStart = aEnd + omit; bStart = bEnd + omit; aEnd = aStart; bEnd = bStart;
-        for (let c = i - ctx; c !== i; c++) common(diffs[c][1]);
-      } else {
-        for (let c = start; c !== i; c++) common(diffs[c][1]);
-      }
+      innerCommonRun(start, i);
     }
   };
-  let i = 0;
-  while (i !== len) {
-    const start = i;
-    while (i !== len && diffs[i][0] === 0) i++;
-    if (start !== i) commonRun(start, i);
-    while (i !== len && diffs[i][0] === -1) { del(diffs[i][1]); i++; }
-    while (i !== len && diffs[i][0] === 1) { ins(diffs[i][1]); i++; }
-  }
+  __joinDiffsLoop(diffs, len, commonRun, del, ins);
   if (patch) lines[mark] = patchMark();
   return lines.join('\n');
 }
-// jest-diff `diffLinesUnified2`: align by the compare lines, show the display lines; with
-// `annotate` the `- Expected` / `+ Received` lines first (printDiffLines).
-function __diffLines(aDisp, bDisp, aCmp = aDisp, bCmp = bDisp, annotate = false) {
+// A single line of "" and no compare lines becomes an empty array, matching jest-diff's own
+// collapse. Returns the normalized [aDisp, bDisp, aCmp, bCmp] for __diffLines to consume.
+function __diffLinesPrep(aDisp, bDisp, aCmp, bCmp) {
   const empty = (l) => l.length === 1 && l[0].length === 0;
   if (empty(aDisp) && empty(aCmp)) { aDisp = []; aCmp = []; }
   if (empty(bDisp) && empty(bCmp)) { bDisp = []; bCmp = []; }
   if (aDisp.length !== aCmp.length || bDisp.length !== bCmp.length) { aCmp = aDisp; bCmp = bDisp; }
+  return [aDisp, bDisp, aCmp, bCmp];
+}
+// jest-diff `diffLinesUnified2`: align by the compare lines, show the display lines; with
+// `annotate` the `- Expected` / `+ Received` lines first (printDiffLines).
+function __diffLines(aDisp, bDisp, aCmp = aDisp, bCmp = bDisp, annotate = false) {
+  [aDisp, bDisp, aCmp, bCmp] = __diffLinesPrep(aDisp, bDisp, aCmp, bCmp);
   const diffs = __lineDiff(aCmp, bCmp).map((d) => (d[0] === -1 ? [-1, aDisp[d[1]]] : d[0] === 1 ? [1, bDisp[d[1]]] : [0, bDisp[d[2]]]));
   return (annotate ? __annotation() : '') + __joinDiffs(diffs);
 }
@@ -7238,13 +7387,15 @@ function __scoreSide(c, text, blank) {
   const lb = ws && /[\r\n]/.test(c);
   return { nonAlnum, ws, lb, blank: lb && blank.test(text) };
 }
+// True when either edge has the flag — the symmetric half of __semanticRank's table.
+function __semanticEither(x, y, key) { return x[key] || y[key]; }
 // __semanticScore's rank table over the two edges' character classes.
 function __semanticRank(x, y) {
-  if (x.blank || y.blank) return 5;
-  if (x.lb || y.lb) return 4;
+  if (__semanticEither(x, y, 'blank')) return 5;
+  if (__semanticEither(x, y, 'lb')) return 4;
   if (x.nonAlnum && !x.ws && y.ws) return 3;
-  if (x.ws || y.ws) return 2;
-  if (x.nonAlnum || y.nonAlnum) return 1;
+  if (__semanticEither(x, y, 'ws')) return 2;
+  if (__semanticEither(x, y, 'nonAlnum')) return 1;
   return 0;
 }
 function __semanticScore(one, two) {
@@ -7704,26 +7855,22 @@ function __negZeroOrNaN(v) {
   const f = new Float64Array([v]);
   return new Uint32Array(f.buffer)[1] >>> 31 === 1;
 }
-function __formatTitle(template, items, idx) {
-  if (template.includes('%#') || template.includes('%$')) {
-    template = template.replace(/%%/g, '__tt_escaped_%__').replace(/%#/g, `${idx}`).replace(/%\$/g, `${idx + 1}`).replace(/__tt_escaped_%__/g, '%%');
-  }
-  const count = template.split('%').length - 1;
-  if (template.includes('%f')) {
-    (template.match(/%f/g) || []).forEach((_, i) => {
-      if (__negZeroOrNaN(items[i])) {
-        let n = 0;
-        template = template.replace(/%f/g, (m) => (++n === i + 1 ? '-%f' : m));
-      }
-    });
-  }
-  const isObjectItem = items[0] != null && typeof items[0] === 'object' && !Array.isArray(items[0]);
-  const attrs = (str) => str.replace(/\$([$\w.]+)/g, (_, key) => {
-    const isArrayKey = /^\d+$/.test(key);
-    if (!isObjectItem && !isArrayKey) return `$${key}`;
-    const el = isArrayKey ? __objectAttr(items, key) : undefined;
-    return __objDisplay(isObjectItem ? __objectAttr(items[0], key, el) : el);
+// vitest's %# / %$ substitutions: round-trip %% through a sentinel so a literal %% is preserved.
+function __formatTitleIndices(template, idx) {
+  return template.replace(/%%/g, '__tt_escaped_%__').replace(/%#/g, `${idx}`).replace(/%\$/g, `${idx + 1}`).replace(/__tt_escaped_%__/g, '%%');
+}
+// For each %f whose corresponding item is -0 or NaN, swap in `-%f` so util.format keeps the sign.
+function __formatTitleHandleF(template, items) {
+  (template.match(/%f/g) || []).forEach((_, i) => {
+    if (__negZeroOrNaN(items[i])) {
+      let n = 0;
+      template = template.replace(/%f/g, (m) => (++n === i + 1 ? '-%f' : m));
+    }
   });
+  return template;
+}
+// Weave __formatOne specifiers (`%s`, `%d`, …) with `attrs` substitutions around them.
+function __formatTitleJoin(template, items, attrs, count) {
   let out = '';
   let last = 0;
   let i = 0;
@@ -7734,6 +7881,19 @@ function __formatTitle(template, items, idx) {
   }
   if (last < template.length) out += attrs(template.slice(last));
   return out;
+}
+function __formatTitle(template, items, idx) {
+  if (template.includes('%#') || template.includes('%$')) template = __formatTitleIndices(template, idx);
+  const count = template.split('%').length - 1;
+  if (template.includes('%f')) template = __formatTitleHandleF(template, items);
+  const isObjectItem = items[0] != null && typeof items[0] === 'object' && !Array.isArray(items[0]);
+  const attrs = (str) => str.replace(/\$([$\w.]+)/g, (_, key) => {
+    const isArrayKey = /^\d+$/.test(key);
+    if (!isObjectItem && !isArrayKey) return `$${key}`;
+    const el = isArrayKey ? __objectAttr(items, key) : undefined;
+    return __objDisplay(isObjectItem ? __objectAttr(items[0], key, el) : el);
+  });
+  return __formatTitleJoin(template, items, attrs, count);
 }
 function __formatName(name) {
   return typeof name === 'string' ? name : typeof name === 'function' ? name.name || '<anonymous>' : String(name);
@@ -8140,14 +8300,20 @@ function __serializeErrorFill(j, val, seen) {
 }
 // __serializeValue's "not a leaf"
 const __SER_NONE = Symbol('ser-none');
+// Binary-like leaves: Node's Buffer and plain Uint8Array (contents elided).
+function __serializeLeafBuf(val) {
+  if (typeof Buffer !== 'undefined' && val instanceof Buffer) return `<Buffer(${val.length}) ...>`;
+  if (val instanceof Uint8Array) return `<Uint8Array(${val.length}) ...>`;
+  return __SER_NONE;
+}
 // the values serialized as themselves or a short text (functions, symbols, primitives, buffers,
 // promises, elements)
 function __serializeLeaf(val) {
   if (typeof val === 'function') return `Function<${val.name || 'anonymous'}>`;
   if (typeof val === 'symbol') return val.toString();
   if (typeof val !== 'object') return val;
-  if (typeof Buffer !== 'undefined' && val instanceof Buffer) return `<Buffer(${val.length}) ...>`;
-  if (val instanceof Uint8Array) return `<Uint8Array(${val.length}) ...>`;
+  const buf = __serializeLeafBuf(val);
+  if (buf !== __SER_NONE) return buf;
   if (val instanceof Promise) return 'Promise';
   if (typeof Element !== 'undefined' && val instanceof Element) return val.tagName;
   return __SER_NONE;
@@ -8171,9 +8337,15 @@ function __serializeObject(val, seen) {
   if (val instanceof Error) { try { clone.message = val.message; } catch {} }
   return clone;
 }
+// An Error with a toJSON() method is serialized through it (so Node's full error payload stays).
+function __serializeErrorIfJSON(val, seen) {
+  if (val instanceof Error && 'toJSON' in val && typeof val.toJSON === 'function') return __serializeErrorJSON(val, seen);
+  return __SER_NONE;
+}
 function __serializeValue(val, seen = new WeakMap()) {
   if (!val || typeof val === 'string') return val;
-  if (val instanceof Error && 'toJSON' in val && typeof val.toJSON === 'function') return __serializeErrorJSON(val, seen);
+  const json = __serializeErrorIfJSON(val, seen);
+  if (json !== __SER_NONE) return json;
   const leaf = __serializeLeaf(val);
   if (leaf !== __SER_NONE) return leaf;
   if (typeof val.toJSON === 'function') return __serializeValue(val.toJSON(), seen);
@@ -8207,10 +8379,15 @@ function __errorProperties(ser) {
   return any ? out : null;
 }
 globalThis.__ttErrorInfo = (e) => __errorInfo(e);
+// __printDiffOrStringify's fast-path guard: both sides are non-empty strings short enough to
+// char-diff. vitest's diffStringsRaw is quadratic, so the 20 000-char cap matches jest-diff's.
+function __bothShortStrings(a, b) {
+  return typeof a === 'string' && typeof b === 'string' && a.length > 0 && b.length > 0
+    && a.length <= 20000 && b.length <= 20000;
+}
 // @vitest/utils printDiffOrStringify(received, expected)
 function __printDiffOrStringify(received, expected) {
-  if (typeof expected === 'string' && typeof received === 'string' && expected.length > 0 && received.length > 0
-    && expected.length <= 20000 && received.length <= 20000 && expected !== received) {
+  if (__bothShortStrings(expected, received) && expected !== received) {
     if (expected.includes('\n') || received.includes('\n')) return __diffStringsUnified(expected, received);
     // the changed substrings inverse when the strings share any; trailing spaces as `·`
     const diffs = __diffStringsRaw(expected, received);
@@ -8719,9 +8896,9 @@ function __retryAttempt(task, run) {
   run.retries++;
   return false;
 }
-// a test that runs: its repeats and attempts (retries), then its record; returns whether it failed
-async function __runTest(t, chain, summary, label, suiteTask) {
-  const attempts = __testRetry(t) + 1;
+// Pre-await bookkeeping for __runTest: sets up `task.result`, the retry state and the global
+// log context. Kept sync so __runTest's first suspension is the same `await null` as before.
+function __runTestSetup(t, chain) {
   // timeout (ms): per-test `{ timeout }` wins; else the --testTimeout/5000 default.
   const timeoutMs = typeof t.timeout === 'number' ? t.timeout : __defaultTimeout();
   // vitest keeps every failed attempt's error and counts the retries (`(retry x1)`)
@@ -8747,9 +8924,15 @@ async function __runTest(t, chain, summary, label, suiteTask) {
     task.result.state = 'fail';
     task.result.errors = run.attemptErrors;
   };
-  await null;
   // `{ repeats: n }` (turbo-test#257): 1 + n repeats, each retried up to `retry` times
   const repeats = t.repeats > 0 ? t.repeats : 0;
+  return { timeoutMs, run, t0, start, logs, ctx, task, repeats };
+}
+// a test that runs: its repeats and attempts (retries), then its record; returns whether it failed
+async function __runTest(t, chain, summary, label, suiteTask) {
+  const attempts = __testRetry(t) + 1;
+  const { timeoutMs, run, t0, start, logs, ctx, task, repeats } = __runTestSetup(t, chain);
+  await null;
   let failed = false;
   for (let r = 0; r <= repeats && !task.result.pending; r++) {
     for (let a = 0; a < attempts; a++) {
@@ -8864,6 +9047,15 @@ function __suiteClose(st) {
   return st.failed;
 }
 // a running suite: its beforeAll hooks, its tasks (each as vitest's runSuiteChild runs it), its
+// The conditional awaits after __runSuiteBody's afterAll hook: the beforeAll cleanups (when
+// any ran) and a root-suite microtask tick. A plain lambda list keeps microtask ordering
+// identical to the inline `if await` pair while taking those two branches out of __runSuiteBody.
+function __suiteAfterAllSteps(baCleanups, st) {
+  const steps = [];
+  if (baCleanups.length) steps.push(() => __vtCleanups(baCleanups, false));
+  if (!st.ancestors.length) steps.push(() => null);
+  return steps;
+}
 // afterAll hooks, then the functions its beforeAll hooks returned (last first: vitest's
 // `sequence.hooks: 'stack'`; a throwing beforeAll drops them all, turbo-test#101). A throwing
 // hook stops the hooks after it.
@@ -8878,7 +9070,6 @@ async function __runSuiteBody(st) {
   }
   if (st.hookFailed) __idleTasks(st);
   else {
-    // vitest's partitionSuiteChildren: a run of concurrent children runs together
     for (const group of __partition(suite.tasks)) {
       if (group[0].concurrent === true) {
         if (await __runConcurrent(group, st)) st.failed = true;
@@ -8889,10 +9080,10 @@ async function __runSuiteBody(st) {
       }
     }
   }
+  const afterSteps = __suiteAfterAllSteps(baCleanups, st);
   try {
     await __vtSuiteHook([suite], 0, 'aa', []);
-    if (baCleanups.length) await __vtCleanups(baCleanups, false);
-    if (!st.ancestors.length) await null;
+    for (const step of afterSteps) await step();
   } catch (e) {
     __suiteHookError(suite, summary, suiteErrors, 'afterAll', e);
     st.failed = true;
@@ -8947,11 +9138,17 @@ function __onlyForbiddenError() {
   const e = new Error(__ONLY_FORBIDDEN);
   return String(e.stack || `Error: ${__ONLY_FORBIDDEN}`);
 }
+// __interpretOnly's inclusion rule for `t` inside its suite: inside a suite that holds any
+// `.only` task, only those run; otherwise an enclosing `.only` (via suiteIsOnly) runs every child.
+function __interpretInclude(t, hasSomeOnly, suiteIsOnly) {
+  if (hasSomeOnly) return !!t.only || (!!t.suite && __someOnly(t));
+  return suiteIsOnly || !!t.only;
+}
 function __interpretOnly(suite, parentIsOnly, forbid) {
   const suiteIsOnly = parentIsOnly || !!suite.only;
   const hasSomeOnly = __someOnly(suite);
   for (const t of suite.tasks) {
-    const include = hasSomeOnly ? !!t.only || (!!t.suite && __someOnly(t)) : suiteIsOnly || !!t.only;
+    const include = __interpretInclude(t, hasSomeOnly, suiteIsOnly);
     if (forbid && t.only) t.forbiddenOnly = true;
     if (t.suite) __interpretOnly(t, include, forbid && !t.mode);
     else if (!include) t.notOnly = true;
@@ -9013,6 +9210,15 @@ globalThis.__ttCaptureHookBaseline = () => {
   };
 };
 
+// the next file starts from the worker's config after its setup files (vitest re-runs them per
+// file), saved copy included (vitest's resetConfig copy outlives a file), or the defaults; the
+// runner applies this file's config next (__ttApplyConfig, turbo-test#180)
+function __ttApplyConfigBaseline() {
+  const b = __ttConfigBaseline;
+  __ttConfig = b ? __ttCloneConfig(b.config) : __ttConfigDefaults();
+  __ttConfigSaved = b && b.saved ? __ttCloneConfig(b.saved) : null;
+  __ttZeroDelay = b ? b.zero : true;
+}
 // Per-file reset, modeled on vitest's isolate:false loop (vitest/dist .../base*.js): with
 // isolation OFF, vitest does NOT reset modules, the DOM, spies, timers or globals between files
 // — it only calls `vi.resetConfig()` + `vi.restoreAllMocks()`, and its runner scopes test
@@ -9062,13 +9268,7 @@ globalThis.__ttResetForNextFile = () => {
   // left on would otherwise hold every timer of the next one (turbo-test#168)
   if (__loop.fake) __uninstallFake();
   try { globalThis.vi && globalThis.vi.resetConfig && globalThis.vi.resetConfig(); } catch (e) {}
-  // the next file starts from the worker's config after its setup files (vitest re-runs them per
-  // file), saved copy included (vitest's resetConfig copy outlives a file), or the defaults; the
-  // runner applies this file's config next (__ttApplyConfig, turbo-test#180)
-  const b = __ttConfigBaseline;
-  __ttConfig = b ? __ttCloneConfig(b.config) : __ttConfigDefaults();
-  __ttConfigSaved = b && b.saved ? __ttCloneConfig(b.saved) : null;
-  __ttZeroDelay = b ? b.zero : true;
+  __ttApplyConfigBaseline();
   // NOTE: we do NOT call restoreAllMocks() here. A spyOn spy's mockRestore() redefines a
   // (possibly shared, cached) module export back to the `orig` captured at spy time. This
   // suite's own setup.ts afterEach already restores per test; calling it again between files
@@ -9292,6 +9492,19 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
       }
       return block;
     };
+    // Does `key` look like a camelCase CSS property we should intercept? Skip numeric indices,
+    // the `length` / `cssText` accessor members, and anything that isn't a plain identifier.
+    const cssKey = (key) => (typeof key === 'string' && key !== 'length' && key !== 'cssText' && !/^\d+$/.test(key) && /^-?-?[a-zA-Z][\w-]*$/.test(key));
+    // Read `key` as a CSS property (falling back to the proxy target for non-string values and
+    // function members, which are bound to the target so getPropertyValue etc. keep working).
+    const cssGet = (target, key) => {
+      const orig = Reflect.get(target, key, target);
+      if (typeof orig === 'string' || orig === undefined) {
+        const v = value(decl, kebab(key), scratch, target);
+        if (v !== undefined) return v;
+      }
+      return typeof orig === 'function' ? orig.bind(target) : orig;
+    };
     return new Proxy(cs, {
       get(target, key) {
         if (key === 'getPropertyValue') {
@@ -9300,14 +9513,7 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
             return v !== undefined ? v : target.getPropertyValue(name);
           };
         }
-        if (typeof key === 'string' && key !== 'length' && key !== 'cssText' && !/^\d+$/.test(key) && /^-?-?[a-zA-Z][\w-]*$/.test(key)) {
-          const orig = Reflect.get(target, key, target);
-          if (typeof orig === 'string' || orig === undefined) {
-            const v = value(decl, kebab(key), scratch, target);
-            if (v !== undefined) return v;
-          }
-          return typeof orig === 'function' ? orig.bind(target) : orig;
-        }
+        if (cssKey(key)) return cssGet(target, key);
         const orig = Reflect.get(target, key, target);
         return typeof orig === 'function' ? orig.bind(target) : orig;
       },
