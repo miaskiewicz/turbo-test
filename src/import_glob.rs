@@ -1113,10 +1113,7 @@ fn parse_call(it: &CallExpression) -> Option<Parsed> {
 
 /// Collect the first-argument glob literals (single string or array of strings) into `call`.
 /// Returns the vite-shaped error message on syntax failure.
-fn collect_glob_patterns(
-    arg: &oxc_ast::ast::Argument,
-    call: &mut Call,
-) -> Result<(), String> {
+fn collect_glob_patterns(arg: &oxc_ast::ast::Argument, call: &mut Call) -> Result<(), String> {
     let literals = || "Could only use literals".to_string();
     match arg.as_expression().map(|e| e.get_inner_expression()) {
         Some(Expression::ArrayExpression(a)) => {

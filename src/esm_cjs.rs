@@ -1852,13 +1852,7 @@ fn string_key(b: &[u8], at: usize) -> Option<(Option<String>, usize)> {
 }
 
 /// Consume one character (plain run or escape) at `i`, appending to `units`; `None` if truncated.
-fn advance_string_unit(
-    b: &[u8],
-    q: u8,
-    i: &mut usize,
-    c: u8,
-    units: &mut Vec<u16>,
-) -> Option<()> {
+fn advance_string_unit(b: &[u8], q: u8, i: &mut usize, c: u8, units: &mut Vec<u16>) -> Option<()> {
     if c != b'\\' {
         *i += extend_plain_run(b, q, *i, units)?;
         return Some(());

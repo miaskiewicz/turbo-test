@@ -2131,7 +2131,7 @@ fn run_setup_file(
     // vitest hoists the setup's vi.mock calls above its imports here too (turbo-test#194): the
     // mock prepass registers them before the bundle's externalized imports load (every loader
     // path: turbo-test#196)
-    run_entry_mocks(scope, file).or_else(&failed)?;
+    run_entry_mocks(scope, file).or_else(failed)?;
     run_js(
         scope,
         "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;",
@@ -2163,8 +2163,7 @@ fn run_setup_file_mr(
         if loaded {
             tc.perform_microtask_checkpoint();
         }
-        caught_message(tc, "load failed")
-            .or_else(|| (!loaded).then(|| "load failed".to_string()))
+        caught_message(tc, "load failed").or_else(|| (!loaded).then(|| "load failed".to_string()))
     };
     run_js(
         scope,
@@ -2588,9 +2587,10 @@ fn run_prepass_wrapper(scope: &mut v8::PinScope, entry: &Path, dir: &Path, raw: 
 /// fresh vi.hoisted cache for this file; the prepass fills it (the entry
 /// reuses it by index so `const x = vi.hoisted(...)` is one shared object).
 fn prepass_reset_hoisted(tc: &mut v8::PinScope) {
-    let Some(code) =
-        v8::String::new(tc, "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;")
-    else {
+    let Some(code) = v8::String::new(
+        tc,
+        "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;",
+    ) else {
         return;
     };
     if let Some(s) = v8::Script::compile(tc, code, None) {
@@ -3219,8 +3219,15 @@ fn esbuild_cjs_run(
     tsconfig: Option<PathBuf>,
 ) -> Option<String> {
     let (input, expanded) = esbuild_cjs_input(file, raw, cache)?;
-    let mut cmd =
-        build_esbuild_cjs_cmd(&input, file, root, esbuild, cov, tsconfig.as_ref(), expanded);
+    let mut cmd = build_esbuild_cjs_cmd(
+        &input,
+        file,
+        root,
+        esbuild,
+        cov,
+        tsconfig.as_ref(),
+        expanded,
+    );
     let out = cmd.stderr(std::process::Stdio::null()).output();
     if expanded {
         let _ = std::fs::remove_file(&input);
@@ -4630,7 +4637,9 @@ fn scan_mock_args(src: &str, bytes: &[u8], start: usize) -> MockArgs {
     let Some((spec, len)) = js_string_literal_at(q) else {
         return MockArgs::Skip(start);
     };
-    let Some(len) = len else { return MockArgs::Done };
+    let Some(len) = len else {
+        return MockArgs::Done;
+    };
     let j = start + lead + len;
     // the next token after the specifier decides: ',' -> a factory follows, anything else
     // (normally ')') -> no factory.
@@ -4642,7 +4651,11 @@ fn scan_mock_args(src: &str, bytes: &[u8], start: usize) -> MockArgs {
     let fstart = j + ws + 1;
     // balance parens from fstart until matching close of vi.mock( (we're inside it, depth starts at 1)
     let (factory_end, after) = balance_factory_parens(bytes, fstart);
-    let factory = src.get(fstart..factory_end).unwrap_or("").trim().to_string();
+    let factory = src
+        .get(fstart..factory_end)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     MockArgs::Entry(spec, factory, after)
 }
 
@@ -5470,10 +5483,7 @@ struct CjsCallCtx<'s> {
     require: v8::Local<'s, v8::Value>,
 }
 
-fn build_cjs_call_ctx<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    abs: &Path,
-) -> Option<CjsCallCtx<'s>> {
+fn build_cjs_call_ctx<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path) -> Option<CjsCallCtx<'s>> {
     let dir = abs.parent().unwrap();
     let dir_str = v8::String::new(scope, &dir.to_string_lossy())?;
     let global = scope.get_current_context().global(scope);
@@ -7992,7 +8002,12 @@ fn import_not_found(
 
 /// The id vite names in `import_not_found`'s message: `spec` for an absolute or static import,
 /// the URL-resolved path for a dot-relative dynamic import, `None` for a bare specifier.
-fn import_not_found_id(spec: &str, importer: &str, root: &Path, as_written: bool) -> Option<String> {
+fn import_not_found_id(
+    spec: &str,
+    importer: &str,
+    root: &Path,
+    as_written: bool,
+) -> Option<String> {
     if spec.starts_with('/') || (as_written && (spec.starts_with("./") || spec.starts_with("../")))
     {
         return Some(spec.to_string());
@@ -9311,9 +9326,7 @@ fn read_node_builtin_exports<'s>(
     let builtins = v8::Local::<v8::Object>::try_from(global.get(scope, bk.into())?).ok()?;
     let lookup_name = spec.strip_prefix("node:").unwrap_or(spec);
     let nk = v8::String::new(scope, lookup_name)?;
-    builtins
-        .get(scope, nk.into())
-        .filter(|v| !v.is_undefined())
+    builtins.get(scope, nk.into()).filter(|v| !v.is_undefined())
 }
 
 #[derive(Debug, Default)]
@@ -9854,9 +9867,9 @@ fn reset_hoisted_idx(scope: &mut v8::PinScope) {
 }
 
 /// Load + run the test module (its mocks already registered), then drive its tests.
-fn load_and_drive_entry<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    global: v8::Local<'s, v8::Object>,
+fn load_and_drive_entry(
+    scope: &mut v8::PinScope,
+    global: v8::Local<v8::Object>,
     entry_abs: &Path,
     load_target: &Path,
 ) -> Result<TestReport, String> {
@@ -9902,9 +9915,9 @@ fn load_and_drive_entry<'s>(
 }
 
 /// The module-runner entry: load it as CJS, then drive its tests.
-fn load_and_drive_cjs_entry<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    global: v8::Local<'s, v8::Object>,
+fn load_and_drive_cjs_entry(
+    scope: &mut v8::PinScope,
+    global: v8::Local<v8::Object>,
     entry_abs: &Path,
 ) -> Result<TestReport, String> {
     let err = {
@@ -10009,9 +10022,9 @@ fn run_test_file_isolated(entry_abs: &Path, plan: &EntryPlan) -> Result<TestRepo
 
 /// The fresh path's per-file work: DOM, config, setup files, serializers, entry mocks, then
 /// the entry itself.
-fn run_fresh_file<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    global: v8::Local<'s, v8::Object>,
+fn run_fresh_file(
+    scope: &mut v8::PinScope,
+    global: v8::Local<v8::Object>,
     dom: bool,
     entry_abs: &Path,
     plan: &EntryPlan,
@@ -10105,9 +10118,9 @@ fn run_setup_files_once(scope: &mut v8::PinScope, plan: &EntryPlan) {
 
 /// The reuse path's per-file work: DOM (once per worker), setup files (once), entry mocks, then
 /// the entry itself.
-fn run_reused_file<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    global: v8::Local<'s, v8::Object>,
+fn run_reused_file(
+    scope: &mut v8::PinScope,
+    global: v8::Local<v8::Object>,
     entry_abs: &Path,
     first_file: bool,
     plan: &EntryPlan,
@@ -10333,9 +10346,9 @@ fn run_fresh_with(
     }
 }
 
-fn drive_tests<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    global: v8::Local<'s, v8::Object>,
+fn drive_tests(
+    scope: &mut v8::PinScope,
+    global: v8::Local<v8::Object>,
     entry_abs: &Path,
 ) -> Result<TestReport, String> {
     let report = drive_tests_bounded(scope, global, entry_abs, 2_000_000);
@@ -10542,28 +10555,65 @@ fn test_case_of<'s>(scope: &mut v8::PinScope<'s, '_>, o: v8::Local<'s, v8::Objec
 }
 
 /// `drive_tests` with the event-loop turn budget injected (unit tests use a tiny one).
-fn drive_tests_bounded<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    global: v8::Local<'s, v8::Object>,
+fn drive_tests_bounded(
+    scope: &mut v8::PinScope,
+    global: v8::Local<v8::Object>,
     entry_abs: &Path,
     max_turns: u32,
 ) -> Result<TestReport, String> {
     set_test_file_globals(scope, entry_abs);
-    let promise = invoke_tt_run(scope, global)?;
+    let promise = invoke_tt_run_promise(scope)?;
     // run() returns a Promise<summary>. Drive the event loop with Node ordering:
     // drain process.nextTick + Promise microtasks to a fixpoint, then run ONE macrotask
     // (timer), and repeat. Between every macrotask the micro/nextTick queues fully drain.
     run_event_loop(scope, global, promise, max_turns)?;
     let summary = v8::Local::<v8::Object>::try_from(promise.result(scope))
         .map_err(|_| "summary not object")?;
-    Ok(build_test_report(scope, summary))
+
+    let get_num = |scope: &mut v8::PinScope, key: &str| -> u32 {
+        let k = v8::String::new(scope, key).unwrap();
+        summary
+            .get(scope, k.into())
+            .and_then(|v| v.number_value(scope))
+            .unwrap_or(0.0) as u32
+    };
+    let passed = get_num(scope, "passed");
+    let failed = get_num(scope, "failed");
+
+    let failures = string_array(scope, summary, "failures");
+    let suites = string_array(scope, summary, "suites");
+    let tests = test_cases_of(scope, summary);
+    let snapshot = snapshot_of(scope, summary);
+    let suite_errors = suite_errors_of(scope, summary);
+    let empty_suites = string_array(scope, summary, "empty_suites");
+    let logs = string_tuples(scope, summary, "logs")
+        .into_iter()
+        .map(|mut l| {
+            l.resize(3, String::new());
+            (l.remove(0), l.remove(0), l.remove(0))
+        })
+        .collect();
+    let waited_ms = f64::from(get_num(scope, "waited_ms"));
+    Ok(TestReport {
+        passed,
+        failed,
+        failures,
+        tests,
+        suites,
+        snapshot,
+        setup_us: 0.0,
+        suite_errors,
+        empty_suites,
+        logs,
+        waited_ms,
+    })
 }
 
-/// Locate `globalThis.__tt.run` and invoke it, returning its promise.
-fn invoke_tt_run<'s>(
+/// Call `globalThis.__tt.run()` and return the resulting Promise.
+fn invoke_tt_run_promise<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    global: v8::Local<'s, v8::Object>,
 ) -> Result<v8::Local<'s, v8::Promise>, String> {
+    let global = scope.get_current_context().global(scope);
     let tt_key = v8::String::new(scope, "__tt").unwrap();
     let tt = v8::Local::<v8::Object>::try_from(global.get(scope, tt_key.into()).ok_or("no __tt")?)
         .map_err(|_| "__tt not object")?;
@@ -10572,41 +10622,6 @@ fn invoke_tt_run<'s>(
         .map_err(|_| "run not fn")?;
     let result = run.call(scope, tt.into(), &[]).ok_or("run() threw")?;
     v8::Local::<v8::Promise>::try_from(result).map_err(|_| "run() not promise".to_string())
-}
-
-/// Shape the runtime's `summary` object into a `TestReport`.
-fn build_test_report<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    summary: v8::Local<'s, v8::Object>,
-) -> TestReport {
-    let get_num = |scope: &mut v8::PinScope, key: &str| -> u32 {
-        let k = v8::String::new(scope, key).unwrap();
-        summary
-            .get(scope, k.into())
-            .and_then(|v| v.number_value(scope))
-            .unwrap_or(0.0) as u32
-    };
-    let logs = string_tuples(scope, summary, "logs")
-        .into_iter()
-        .map(|mut l| {
-            l.resize(3, String::new());
-            (l.remove(0), l.remove(0), l.remove(0))
-        })
-        .collect();
-    TestReport {
-        passed: get_num(scope, "passed"),
-        failed: get_num(scope, "failed"),
-        failures: string_array(scope, summary, "failures"),
-        tests: test_cases_of(scope, summary),
-        // One state per describe block ('pass' / 'fail' / 'skip' / 'todo').
-        suites: string_array(scope, summary, "suites"),
-        snapshot: snapshot_of(scope, summary),
-        setup_us: 0.0,
-        suite_errors: suite_errors_of(scope, summary),
-        empty_suites: string_array(scope, summary, "empty_suites"),
-        logs,
-        waited_ms: f64::from(get_num(scope, "waited_ms")),
-    }
 }
 
 /// The items of the array `obj[key]` (none when it is not an array).

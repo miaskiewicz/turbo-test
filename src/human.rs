@@ -186,10 +186,7 @@ fn default_test_line(c: &Colors, kind: Kind, r: &FileResult, t: &TestCase) -> Op
         return None;
     }
     if t.duration_ms > SLOW_MS {
-        return Some(format!(
-            " {pad}{} {title} {suffix}",
-            c.yellow(&c.dim("✓"))
-        ));
+        return Some(format!(" {pad}{} {title} {suffix}", c.yellow(&c.dim("✓"))));
     }
     if r.failed_file {
         return Some(format!(" {pad}{} {title}{suffix}", symbol(c, t)));
@@ -480,10 +477,7 @@ fn snapshot_totals(res: &[FileResult], run: &Run) -> (SnapshotTotals, Vec<String
             );
         }
     }
-    (
-        (added, unmatched, updated, unchecked, files_removed),
-        keys,
-    )
+    ((added, unmatched, updated, unchecked, files_removed), keys)
 }
 
 /// vitest's formatTestPath for a root-relative file: `dir/` dim, the base name bold, a

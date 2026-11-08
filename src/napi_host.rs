@@ -3939,7 +3939,7 @@ pub unsafe extern "C" fn napi_define_class(
         }
         let ctor = ctor.ok_or(napi_invalid_arg)?;
         let props = descriptors(property_count, properties)?;
-        let tpl = build_class_template(s, env, ctor, data, name, len, &props)?;
+        let tpl = build_class_template(s, env, ctor, data, name, len, props)?;
         let class = tpl.get_function(s).ok_or(napi_generic_failure)?;
         put(out, class.into());
         let statics: Vec<napi_property_descriptor> = props

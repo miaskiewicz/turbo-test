@@ -1027,16 +1027,17 @@ pub fn render_junit(names: &[PathBuf], res: &[FileResult], root: &Path) -> Strin
 }
 
 /// Cases and counters for one file's `<testsuite>`.
-fn junit_cases(
-    r: &FileResult,
-    name: &str,
-    root: &Path,
-) -> (Vec<String>, usize, usize, usize) {
+fn junit_cases(r: &FileResult, name: &str, root: &Path) -> (Vec<String>, usize, usize, usize) {
     let mut cases: Vec<String> = Vec::new();
     let (mut n, mut failed, mut skipped) = (0usize, 0usize, 0usize);
     for t in &r.tests {
         junit_count_test(t, &mut n, &mut failed, &mut skipped);
-        cases.push(testcase(name, &t.name, t.duration_ms, junit_test_body(t, root)));
+        cases.push(testcase(
+            name,
+            &t.name,
+            t.duration_ms,
+            junit_test_body(t, root),
+        ));
     }
     for se in &r.suite_errors {
         n += 1;

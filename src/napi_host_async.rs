@@ -424,7 +424,10 @@ unsafe fn make_bound_call<'s>(
     f.call(s, recv.into(), &args).ok_or(V8_GAVE_NOTHING)
 }
 
-unsafe fn collect_arg_locals(argc: usize, argv: *const napi_value) -> Vec<v8::Local<'static, v8::Value>> {
+unsafe fn collect_arg_locals(
+    argc: usize,
+    argv: *const napi_value,
+) -> Vec<v8::Local<'static, v8::Value>> {
     (0..argc).map(|i| to_local(*argv.add(i))).collect()
 }
 
@@ -627,7 +630,9 @@ pub unsafe extern "C" fn napi_call_threadsafe_function(
 }
 
 fn queue_full_and_open(t: &Tsfn, shared: &TsfnShared) -> bool {
-    t.max_queue_size > 0 && shared.queue.len() >= t.max_queue_size && shared.state == TsfnState::Open
+    t.max_queue_size > 0
+        && shared.queue.len() >= t.max_queue_size
+        && shared.state == TsfnState::Open
 }
 
 /// Shared tail: the thread letting go of a closing tsfn; drops it when it was the last.

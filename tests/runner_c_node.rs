@@ -568,55 +568,62 @@ test('env', () => {{
         ("1", Some("production"), ["0", "0"]),
         ("1", Some("staging"), ["0", "0"]),
     ] {
-        let mut env = vec![("TURBO_JOBS", "1")];
-        if reuse == "1" {
-            env.push(("TURBO_REUSE_ISOLATE", "1"));
-        }
-        if let Some(v) = node_env {
-            env.push(("NODE_ENV", v));
-        }
-        let r = turbo_test(&p.dir, &["a.test.js", "b.test.js"], &env);
-        assert_eq!(r.code, Some(0), "{}", r.all());
-        let prod = node_env == Some("production");
-        let (dev, prod_s, dev_b, prod_b) = if prod {
-            ("", "1", "false", "true")
-        } else {
-            ("1", "", "true", "false")
-        };
-        // with a host NODE_ENV it is a host key, so vitest's own keys follow it
-        let tail = if node_env.is_some() {
-            format!("…,{host_keys}")
-        } else {
-            keys.to_string()
-        };
-        let mut workers: Vec<String> = Vec::new();
-        for f in ["a", "b"] {
-            let v: serde_json::Value = serde_json::from_str(&read(f)).unwrap();
-            let a = v.as_array().unwrap();
-            let s = |i: usize| a[i].to_string();
-            assert_eq!(
-                [s(0), s(1), s(2), s(3), s(5), s(6), s(7), s(8)],
-                [
-                    "\"true\"".into(),
-                    "\"RUN\"".into(),
-                    "\"\"".into(),
-                    "\"1\"".into(),
-                    format!("\"{dev}\""),
-                    format!("\"{prod_s}\""),
-                    dev_b.to_string(),
-                    prod_b.to_string(),
-                ],
-                "{f} NODE_ENV={node_env:?}"
-            );
-            let last = a[9].as_str().unwrap();
-            if node_env.is_some() {
-                assert!(last.ends_with(host_keys), "{last} / {tail}");
-            } else {
-                assert_eq!(last, keys);
-            }
-            workers.push(a[4].as_str().unwrap().to_string());
-        }
-        workers.sort();
-        assert_eq!(workers, ids, "reuse={reuse}");
+        run_worker_env_case(&p, &read, keys, host_keys, reuse, node_env, ids);
     }
+}
+
+fn run_worker_env_case(
+    p: &Project,
+    read: &dyn Fn(&str) -> String,
+    keys: &str,
+    host_keys: &str,
+    reuse: &str,
+    node_env: Option<&str>,
+    ids: [&str; 2],
+) {
+    let mut env = vec![("TURBO_JOBS", "1")];
+    if reuse == "1" {
+        env.push(("TURBO_REUSE_ISOLATE", "1"));
+    }
+    if let Some(v) = node_env {
+        env.push(("NODE_ENV", v));
+    }
+    let r = turbo_test(&p.dir, &["a.test.js", "b.test.js"], &env);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let prod = node_env == Some("production");
+    let (dev, prod_s, dev_b, prod_b) = if prod {
+        ("", "1", "false", "true")
+    } else {
+        ("1", "", "true", "false")
+    };
+    let mut workers: Vec<String> = Vec::new();
+    for f in ["a", "b"] {
+        let v: serde_json::Value = serde_json::from_str(&read(f)).unwrap();
+        let a = v.as_array().unwrap();
+        let s = |i: usize| a[i].to_string();
+        assert_eq!(
+            [s(0), s(1), s(2), s(3), s(5), s(6), s(7), s(8)],
+            [
+                "\"true\"".into(),
+                "\"RUN\"".into(),
+                "\"\"".into(),
+                "\"1\"".into(),
+                format!("\"{dev}\""),
+                format!("\"{prod_s}\""),
+                dev_b.to_string(),
+                prod_b.to_string(),
+            ],
+            "{f} NODE_ENV={node_env:?}"
+        );
+        let last = a[9].as_str().unwrap();
+        if node_env.is_some() {
+            // with a host NODE_ENV it is a host key, so vitest's own keys follow it
+            assert!(last.ends_with(host_keys), "{last} / …,{host_keys}");
+        } else {
+            assert_eq!(last, keys);
+        }
+        workers.push(a[4].as_str().unwrap().to_string());
+    }
+    workers.sort();
+    assert_eq!(workers, ids, "reuse={reuse}");
 }
