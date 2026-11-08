@@ -1945,6 +1945,9 @@ if (typeof globalThis.Buffer === 'undefined') {
     static from(d, enc) {
       if (typeof d === 'string') {
         if (enc === 'base64') { return new Buffer(globalThis.__b64decodeToBytes(d)); }
+        // base64url: RFC 4648 §5 — `-`/`_` instead of `+`/`/`, optional padding. Node's base64
+        // decoder tolerates either, so normalise to standard base64 and reuse the same path.
+        if (enc === 'base64url') { return new Buffer(globalThis.__b64decodeToBytes(d.replace(/-/g, '+').replace(/_/g, '/'))); }
         if (enc === 'hex') { const b = new Buffer(d.length / 2); for (let i = 0; i < b.length; i++) b[i] = parseInt(d.substr(i * 2, 2), 16); return b; }
         return new Buffer(new globalThis.TextEncoder().encode(d));
       }
@@ -1959,6 +1962,8 @@ if (typeof globalThis.Buffer === 'undefined') {
     toString(enc) {
       if (enc === 'hex') return Array.from(this).map((b) => b.toString(16).padStart(2, '0')).join('');
       if (enc === 'base64') return globalThis.__b64encodeBytes(Array.from(this));
+      // base64url: RFC 4648 §5 — `+` → `-`, `/` → `_`, no `=` padding (Node WHATWG, turbo-test#260).
+      if (enc === 'base64url') return globalThis.__b64encodeBytes(Array.from(this)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
       return new globalThis.TextDecoder('utf-8', { ignoreBOM: true }).decode(this); // Node keeps a BOM
     }
     toJSON() { return { type: 'Buffer', data: Array.from(this) }; }

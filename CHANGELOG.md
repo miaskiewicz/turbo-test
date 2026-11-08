@@ -74,6 +74,12 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   hook's registration); a beforeEach / afterEach timing out aborts the test's `signal`. Tests:
   `hooks_time_out_as_vitest` and `hook_timeout_defaults_to_ten_seconds_and_follows_the_flag` in
   `tests/runner_c_vitest_gaps.rs` (recorded from vitest 4.1.12).
+- `Buffer#toString('base64url')` and `Buffer.from(str, 'base64url')` encode and decode per
+  RFC 4648 §5 (`+` → `-`, `/` → `_`, no `=` padding on encode; tolerate missing padding on
+  decode), as Node's WHATWG Buffer does (#260). Before, `toString` fell through to
+  `TextDecoder` and returned the raw UTF-8 text; `from` ignored the encoding. Found in the
+  0.8.0 review (round 2). Covered by the expanded `test('buffer', ...)` in
+  `tests/runner_c_node.rs::BUILTINS_TEST` (vitest 4.1.12 oracle).
 - Concurrent tests run concurrently, as vitest (#256). `it.concurrent`, `describe.concurrent`
   and `sequence.concurrent` were accepted but a file's tests ran one after another, so suites
   relying on concurrency (a test awaiting another's progress, timing-sensitive interleavings)
