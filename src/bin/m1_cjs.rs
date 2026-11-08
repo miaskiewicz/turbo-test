@@ -316,23 +316,34 @@ fn load_graph<'s>(
         reg.path_by_hash.insert(hash, abs.to_path_buf());
     });
 
-    let requests = module.get_module_requests();
     let dir = abs.parent().unwrap().to_path_buf();
+    load_module_requests(scope, module, &dir)?;
+    Some(module)
+}
+
+/// Resolve and load every dependency the module declares.
+fn load_module_requests<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    module: v8::Local<'s, v8::Module>,
+    dir: &Path,
+) -> Option<()> {
+    let requests = module.get_module_requests();
     for i in 0..requests.length() {
         let req =
             v8::Local::<v8::ModuleRequest>::try_from(requests.get(scope, i).unwrap()).unwrap();
         let spec = req.get_specifier().to_rust_string_lossy(scope);
-        let dep = resolve_spec(&spec, &dir)?;
-        match kind_of(&dep) {
-            Kind::Esm => {
-                load_graph(scope, &dep)?;
-            }
-            Kind::Cjs => {
-                load_cjs(scope, &dep)?;
-            }
-        }
+        let dep = resolve_spec(&spec, dir)?;
+        load_dep(scope, &dep)?;
     }
-    Some(module)
+    Some(())
+}
+
+/// Load a dependency as ESM or CJS synthetic depending on its kind.
+fn load_dep<'s>(scope: &mut v8::PinScope<'s, '_>, dep: &Path) -> Option<()> {
+    match kind_of(dep) {
+        Kind::Esm => load_graph(scope, dep).map(|_| ()),
+        Kind::Cjs => load_cjs(scope, dep).map(|_| ()),
+    }
 }
 
 /// Resolve callback: returns ESM module or CJS synthetic module from the registry.

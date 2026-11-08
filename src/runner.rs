@@ -726,25 +726,32 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
     }
     // fallback: manual probing for local files oxc may skip (incl. bare "." / ".." directory specs)
     if spec.starts_with('.') || spec.starts_with('/') {
-        let base = from_dir.join(spec);
-        for c in [
-            base.clone(),
-            base.with_extension("mjs"),
-            base.with_extension("js"),
-            base.with_extension("mts"),
-            base.with_extension("ts"),
-            base.with_extension("tsx"),
-            base.with_extension("cjs"),
-            base.join("index.mjs"),
-            base.join("index.js"),
-            base.join("index.ts"),
-            base.join("index.tsx"),
-            base.join("index.jsx"),
-            base.join("index.cjs"),
-        ] {
-            if c.is_file() {
-                return crate::canon::canonicalize(c).ok();
-            }
+        return probe_local_file(from_dir, spec);
+    }
+    None
+}
+
+/// Try each extension / index.* form that a Node-style local import may actually mean, returning
+/// the first file that exists (canonicalized). Only used for `./` / `/` specs.
+fn probe_local_file(from_dir: &Path, spec: &str) -> Option<PathBuf> {
+    let base = from_dir.join(spec);
+    for c in [
+        base.clone(),
+        base.with_extension("mjs"),
+        base.with_extension("js"),
+        base.with_extension("mts"),
+        base.with_extension("ts"),
+        base.with_extension("tsx"),
+        base.with_extension("cjs"),
+        base.join("index.mjs"),
+        base.join("index.js"),
+        base.join("index.ts"),
+        base.join("index.tsx"),
+        base.join("index.jsx"),
+        base.join("index.cjs"),
+    ] {
+        if c.is_file() {
+            return crate::canon::canonicalize(c).ok();
         }
     }
     None
@@ -1454,15 +1461,23 @@ fn needs_dom(file: &Path) -> bool {
     ) {
         return true;
     }
-    s.contains("@testing-library")
-        || s.contains("react-dom")
-        || s.contains("ReactDOM")
-        || s.contains("document")
-        || s.contains("window.")
-        || s.contains("getComputedStyle")
-        || s.contains("happy-dom")
-        || s.contains("jsdom")
-        || s.contains("@vitest-environment")
+    source_mentions_dom(&s)
+}
+
+/// Whether `s` mentions any of the DOM-API fingerprints that make the content heuristic flip on.
+fn source_mentions_dom(s: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "@testing-library",
+        "react-dom",
+        "ReactDOM",
+        "document",
+        "window.",
+        "getComputedStyle",
+        "happy-dom",
+        "jsdom",
+        "@vitest-environment",
+    ];
+    NEEDLES.iter().any(|n| s.contains(n))
 }
 
 /// Whether the project asks for non-isolated runs (`isolate: false`) in any of its vitest
@@ -1599,35 +1614,8 @@ use crate::launcher::VITEST_CONFIG_FILES;
 fn vitest_setup_files_uncached(entry: &Path) -> Vec<PathBuf> {
     let mut dir = entry.parent();
     while let Some(d) = dir {
-        for cfg in VITEST_CONFIG_FILES {
-            let p = d.join(cfg);
-            if let Ok(s) = std::fs::read_to_string(&p) {
-                if let Some(start) = find_config_key(&s, "setupFiles") {
-                    // grab the [...] (or single quoted) right after setupFiles
-                    let tail = &s[start..];
-                    if let Some(lb) = tail.find('[') {
-                        if let Some(rb) = tail[lb..].find(']') {
-                            let inner = &tail[lb + 1..lb + rb];
-                            let mut out = Vec::new();
-                            for part in inner.split(',') {
-                                let q = part
-                                    .trim()
-                                    .trim_matches(|c| c == '\'' || c == '"' || c == '`');
-                                if q.is_empty() {
-                                    continue;
-                                }
-                                if let Some(abs) = resolve_spec(q, d) {
-                                    out.push(abs);
-                                }
-                            }
-                            if !out.is_empty() {
-                                return out;
-                            }
-                        }
-                    }
-                }
-                return Vec::new(); // config found, no setupFiles
-            }
+        if let Some(out) = vitest_setup_files_in_dir(d) {
+            return out;
         }
         // No vitest config in this dir — try a jest config (drop-in for jest projects).
         if let Some(found) = jest_setup_files(d) {
@@ -1636,6 +1624,48 @@ fn vitest_setup_files_uncached(entry: &Path) -> Vec<PathBuf> {
         dir = d.parent();
     }
     Vec::new()
+}
+
+/// `setupFiles` resolved against directory `d` if any vitest config lives here; `None` when none
+/// does (so the caller keeps walking up). An empty vec means "config found, no setupFiles".
+fn vitest_setup_files_in_dir(d: &Path) -> Option<Vec<PathBuf>> {
+    for cfg in VITEST_CONFIG_FILES {
+        let p = d.join(cfg);
+        let Ok(s) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        return Some(parse_setup_files_array(&s, d));
+    }
+    None
+}
+
+/// The `setupFiles: [...]` entries in `s`, each resolved against `d`; an empty vec means no
+/// resolvable entries (or no `setupFiles` key at all — vitest's default).
+fn parse_setup_files_array(s: &str, d: &Path) -> Vec<PathBuf> {
+    let Some(start) = find_config_key(s, "setupFiles") else {
+        return Vec::new();
+    };
+    let tail = &s[start..];
+    let Some(lb) = tail.find('[') else {
+        return Vec::new();
+    };
+    let Some(rb) = tail[lb..].find(']') else {
+        return Vec::new();
+    };
+    let inner = &tail[lb + 1..lb + rb];
+    let mut out = Vec::new();
+    for part in inner.split(',') {
+        let q = part
+            .trim()
+            .trim_matches(|c| c == '\'' || c == '"' || c == '`');
+        if q.is_empty() {
+            continue;
+        }
+        if let Some(abs) = resolve_spec(q, d) {
+            out.push(abs);
+        }
+    }
+    out
 }
 
 /// vitest's `snapshotSerializers` (turbo-test#167): the paths in the nearest vitest config,
@@ -3460,34 +3490,34 @@ fn shared_let_name(
     if name.is_empty() || seen.contains(&name) {
         return None;
     }
-    // let/var: share when the factory ASSIGNS the name (`name = ...`, the capture pattern).
-    // const: can't be reassigned, so share only an empty-collection accumulator (`= []`/
-    // `{}`/`null`) the factory mutates/reads (e.g. `capturedQueryFns.push(...)`). The
-    // length gate + literal-collection gate keep short/common/value names safe.
     let shareable = if is_const {
-        // const can't be reassigned → only an ARRAY accumulator (`= []`) the factory
-        // mutates/reads. Arrays (`.push`) are rarely used in object shorthand/keys, so
-        // word-replacing them is safe; objects/values are NOT (`{ x }`, `x:` would break).
-        // array accumulator only (`= []`), tolerating a TS type annotation whose `=>`
-        // would fool a naive split. len>=12: only long unique names; short ones (or mock
-        // fns used in shorthand/strings) risk corrupting other code.
-        let is_array =
-            rest.contains("= []") || rest.contains("= [\n") || rest.trim_end().ends_with("= [");
-        name.len() >= 12 && is_array && contains_word(factories, &name)
+        const_name_shareable(&name, rest, factories)
     } else {
-        // let/var: share when the factory REFERENCES the binding (reads or writes) and
-        // it's assigned somewhere — either by the factory itself (the capture pattern: the
-        // factory writes, the test reads) or by the test bodies (the inverse: the factory
-        // closes over a mutable `let` that beforeEach/it reassign, e.g.
-        // `let hookValue; vi.mock(..., () => ({ useX: () => hookValue })); it(() => { hookValue = ... })`).
-        // Without sharing, the prepass factory runs in a scope where the let isn't bound →
-        // `hookValue is not defined`. assigns_word(src) covers both directions (src includes
-        // the factory); contains_word(factories) keeps it to bindings the factory actually uses.
-        name.len() >= 6 && contains_word(factories, &name) && assigns_word(src, &name)
+        let_name_shareable(&name, src, factories)
     };
     // Skip if the name is used in object-literal shorthand (`{ name }`) — word-replacing
     // it to `globalThis.__ms.name` there is invalid JS (would break the whole file).
     (shareable && !used_in_shorthand(src, &name)).then_some(name)
+}
+
+/// `const` can't be reassigned → only an ARRAY accumulator (`= []`) the factory
+/// mutates/reads. Arrays (`.push`) are rarely used in object shorthand/keys, so
+/// word-replacing them is safe; objects/values are NOT (`{ x }`, `x:` would break).
+/// `rest` is the text after `const`. `len>=12`: only long unique names; short ones (or mock
+/// fns used in shorthand/strings) risk corrupting other code.
+fn const_name_shareable(name: &str, rest: &str, factories: &str) -> bool {
+    let is_array =
+        rest.contains("= []") || rest.contains("= [\n") || rest.trim_end().ends_with("= [");
+    name.len() >= 12 && is_array && contains_word(factories, name)
+}
+
+/// `let`/`var`: share when the factory REFERENCES the binding and it's assigned somewhere —
+/// either by the factory itself (the capture pattern) or by the test bodies (the factory
+/// closes over a mutable `let` that beforeEach/it reassign). `assigns_word(src)` covers both
+/// directions (src includes the factory); `contains_word(factories)` keeps it to bindings
+/// the factory actually uses.
+fn let_name_shareable(name: &str, src: &str, factories: &str) -> bool {
+    name.len() >= 6 && contains_word(factories, name) && assigns_word(src, name)
 }
 
 /// True if `word` appears as object-literal shorthand (`{ word }`, `{ word, ...}`, `..., word }`):
@@ -3495,26 +3525,39 @@ fn shared_let_name(
 /// rewritten to `globalThis.__ms.word`.
 fn used_in_shorthand(text: &str, word: &str) -> bool {
     let b = text.as_bytes();
-    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
     let mut i = 0;
     while let Some(p) = text[i..].find(word) {
         let at = i + p;
         i = at + 1;
-        if at > 0 && ident(b[at - 1]) {
+        if !is_whole_word_at(b, at, word.len()) {
             continue;
         }
-        let end = at + word.len();
-        if end < b.len() && ident(b[end]) {
-            continue;
-        }
-        let (left, right) = neighbours_past_ws(b, at, end);
-        // Object-literal shorthand: `{ word }`, `{ word, ...}`, `{..., word }`. (`,word,` middle
-        // is ambiguous with an arg list, so left alone.) `[`/`]` are array elements — safe.
-        if (left == b'{' && (right == b'}' || right == b',')) || (left == b',' && right == b'}') {
+        let (left, right) = neighbours_past_ws(b, at, at + word.len());
+        if is_shorthand_bracket(left, right) {
             return true;
         }
     }
     false
+}
+
+/// A word of length `len` at byte offset `at` in `b` is a whole identifier (not glued to any
+/// surrounding identifier chars on either side).
+fn is_whole_word_at(b: &[u8], at: usize, len: usize) -> bool {
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    if at > 0 && ident(b[at - 1]) {
+        return false;
+    }
+    let end = at + len;
+    if end < b.len() && ident(b[end]) {
+        return false;
+    }
+    true
+}
+
+/// Object-literal shorthand bracketing: `{ word }`, `{ word, …}`, `{…, word }`.
+/// (`,word,` middle is ambiguous with an arg list, so left alone.)
+fn is_shorthand_bracket(left: u8, right: u8) -> bool {
+    (left == b'{' && (right == b'}' || right == b',')) || (left == b',' && right == b'}')
 }
 
 /// The bytes before `at` and from `end` after skipping whitespace (incl newlines); 0 at an edge.
@@ -3550,18 +3593,14 @@ fn assigns_word(text: &str, word: &str) -> bool {
 /// A bare `word` of length `word_len` found at byte `at` in `b` is being assigned to: it is a
 /// whole identifier and is followed by `[ \t]*=` where the `=` is not the `==`/`=>` punctuator.
 fn is_word_assignment(b: &[u8], at: usize, word_len: usize) -> bool {
-    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
-    if at > 0 && ident(b[at - 1]) {
+    if !is_whole_word_at(b, at, word_len) {
         return false;
     }
     let mut j = at + word_len;
-    if j < b.len() && ident(b[j]) {
-        return false;
-    }
     while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
         j += 1;
     }
-    j < b.len() && b[j] == b'=' && b.get(j + 1) != Some(&b'=') && b.get(j + 1) != Some(&b'>')
+    j < b.len() && b[j] == b'=' && !matches!(b.get(j + 1), Some(b'=') | Some(b'>'))
 }
 
 /// True if `word` appears in `text` bounded by non-identifier chars.
@@ -3769,16 +3808,7 @@ fn replace_word(text: &str, word: &str, repl: &str) -> String {
         // escapes. (Template `${...}` expressions are skipped too — a missed interpolation would
         // surface as a visible ReferenceError, never the silent corruption of a rewritten string.)
         let c = b[i];
-        // comments are copied as they are: a quote or backtick in one opens no string, and a
-        // name in one is not a reference (turbo-test#209)
-        if c == b'/' && i + 1 < b.len() && (b[i + 1] == b'/' || b[i + 1] == b'*') {
-            let end = if b[i + 1] == b'/' {
-                text[i..].find('\n').map_or(text.len(), |n| i + n)
-            } else {
-                text[i + 2..]
-                    .find("*/")
-                    .map_or(text.len(), |n| i + 2 + n + 2)
-            };
+        if let Some(end) = comment_run_end(text, b, i, c) {
             out.push_str(&text[i..end]);
             i = end;
             continue;
@@ -3799,6 +3829,23 @@ fn replace_word(text: &str, word: &str, repl: &str) -> String {
         i += ch.len_utf8();
     }
     out
+}
+
+/// If `i` points at a `//` or `/* … */` comment, return the byte just past it. `None` otherwise.
+/// Comments are copied as they are: a quote or backtick in one opens no string, and a name in
+/// one is not a reference (turbo-test#209).
+fn comment_run_end(text: &str, b: &[u8], i: usize, c: u8) -> Option<usize> {
+    if c != b'/' || i + 1 >= b.len() || (b[i + 1] != b'/' && b[i + 1] != b'*') {
+        return None;
+    }
+    if b[i + 1] == b'/' {
+        return Some(text[i..].find('\n').map_or(text.len(), |n| i + n));
+    }
+    Some(
+        text[i + 2..]
+            .find("*/")
+            .map_or(text.len(), |n| i + 2 + n + 2),
+    )
 }
 
 /// End (exclusive) of the string literal opening at `i` (honoring `\` escapes; end of text when
@@ -5131,25 +5178,8 @@ fn load_cjs_inner<'s>(
     if REGISTRY.with(|r| r.borrow().cjs_synth_by_path.contains_key(abs)) {
         return Some(());
     }
-    let Some(module) = module_source_for(abs, prefer_metadata) else {
-        throw_transform_failure(scope, abs);
-        return None;
-    };
-    let code = source_string(scope, &module)?;
-    // Under --coverage, give the script an origin named after the file so V8's precise-coverage
-    // report carries a URL we can map back to source. Off by default (origin None) — zero change.
-    // (compiled script, the compile error when neither the native output nor the esbuild retry
-    // compiles: re-thrown below, outside this TryCatch, as the load's cause)
-    let (script, compile_exc) = compile_cjs_module(scope, abs, &module, code, prefer_metadata);
-    throw_compile_exc(scope, abs, compile_exc);
-    let script = v8::Local::new(scope, &script?);
-    let wrapper = v8::Local::<v8::Function>::try_from(script.run(scope)?).ok()?;
-
-    let exports_obj = v8::Object::new(scope);
-    let module_obj = v8::Object::new(scope);
-    let exports_key = v8::String::new(scope, "exports")?;
-    module_obj.set(scope, exports_key.into(), exports_obj.into());
-
+    let wrapper = compile_cjs_wrapper(scope, abs, prefer_metadata)?;
+    let (exports_obj, module_obj, exports_key) = build_cjs_module_object(scope)?;
     let dir = abs.parent().unwrap();
     let dir_str = v8::String::new(scope, &dir.to_string_lossy())?;
     let global = scope.get_current_context().global(scope);
@@ -5162,6 +5192,75 @@ fn load_cjs_inner<'s>(
         global.set(scope, k.into(), dir_str.into());
         prev
     });
+    let (call_ok, body_exc) = run_cjs_body_scope(
+        scope,
+        abs,
+        wrapper,
+        module_obj,
+        exports_obj,
+        require,
+        filename,
+        dir_str,
+    );
+    restore_tt_dir(scope, global, prev_dir);
+    if !call_ok {
+        return handle_cjs_body_throw(scope, abs, drain_mocks, prefer_metadata, body_exc);
+    }
+    settle_module_mocks(scope, abs, drain_mocks);
+    let final_exports = module_obj.get(scope, exports_key.into())?;
+    register_cjs_exports(scope, global, abs, final_exports)
+}
+
+/// Read and compile a CJS module's wrapper function (`(function (exports, module, …) { … })`).
+/// Throws vite's transform / compile error on the scope when it fails, mirroring the native
+/// load path.
+fn compile_cjs_wrapper<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+    prefer_metadata: bool,
+) -> Option<v8::Local<'s, v8::Function>> {
+    let Some(module) = module_source_for(abs, prefer_metadata) else {
+        throw_transform_failure(scope, abs);
+        return None;
+    };
+    let code = source_string(scope, &module)?;
+    // Under --coverage, give the script an origin named after the file so V8's precise-coverage
+    // report carries a URL we can map back to source. Off by default (origin None) — zero change.
+    // (compiled script, the compile error when neither the native output nor the esbuild retry
+    // compiles: re-thrown below, outside this TryCatch, as the load's cause)
+    let (script, compile_exc) = compile_cjs_module(scope, abs, &module, code, prefer_metadata);
+    throw_compile_exc(scope, abs, compile_exc);
+    let script = v8::Local::new(scope, &script?);
+    v8::Local::<v8::Function>::try_from(script.run(scope)?).ok()
+}
+
+/// Build the CJS `module` / `module.exports` object pair plus the `"exports"` key.
+fn build_cjs_module_object<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> Option<(
+    v8::Local<'s, v8::Object>,
+    v8::Local<'s, v8::Object>,
+    v8::Local<'s, v8::String>,
+)> {
+    let exports_obj = v8::Object::new(scope);
+    let module_obj = v8::Object::new(scope);
+    let exports_key = v8::String::new(scope, "exports")?;
+    module_obj.set(scope, exports_key.into(), exports_obj.into());
+    Some((exports_obj, module_obj, exports_key))
+}
+
+/// Run the CJS body inside the loading / require-stack bookkeeping.
+#[allow(clippy::too_many_arguments)]
+fn run_cjs_body_scope<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+    wrapper: v8::Local<'s, v8::Function>,
+    module_obj: v8::Local<'s, v8::Object>,
+    exports_obj: v8::Local<'s, v8::Object>,
+    require: v8::Local<'s, v8::Value>,
+    filename: v8::Local<'s, v8::String>,
+    dir_str: v8::Local<'s, v8::String>,
+) -> (bool, Option<v8::Global<v8::Value>>) {
     // mark in-progress (with its module object) so a circular require() returns live exports
     let module_global = v8::Global::new(scope, module_obj);
     REGISTRY.with(|r| {
@@ -5171,7 +5270,7 @@ fn load_cjs_inner<'s>(
     });
     REQUIRE_STACK.with(|st| st.borrow_mut().push(abs.to_path_buf()));
     // (body result, the body's exception: re-thrown below unless the decorator retry runs)
-    let (call_ok, body_exc) = call_cjs_body(
+    let out = call_cjs_body(
         scope,
         abs,
         wrapper,
@@ -5185,13 +5284,7 @@ fn load_cjs_inner<'s>(
     );
     REGISTRY.with(|r| r.borrow_mut().loading.remove(abs));
     REQUIRE_STACK.with(|st| st.borrow_mut().pop());
-    restore_tt_dir(scope, global, prev_dir);
-    if !call_ok {
-        return handle_cjs_body_throw(scope, abs, drain_mocks, prefer_metadata, body_exc);
-    }
-    settle_module_mocks(scope, abs, drain_mocks);
-    let final_exports = module_obj.get(scope, exports_key.into())?;
-    register_cjs_exports(scope, global, abs, final_exports)
+    out
 }
 
 /// The module body threw. If it is a decorator file in an `emitDecoratorMetadata` project and we
@@ -5266,30 +5359,48 @@ fn compile_cjs_module<'s>(
             // uses when native is disabled), so a file that only the native path mangled now
             // loads; a genuinely-broken source still fails (esbuild can't compile it either).
             let native_err = tc.exception().map(|e| v8::Global::new(tc, e));
-            let native_exc = tc
-                .exception()
-                .map(|e| e.to_rust_string_lossy(tc))
-                .unwrap_or_default();
-            let fb = esbuild_cjs_fallback(abs, prefer_metadata).and_then(|src| {
-                let wrapped_fb = format!(
-                    "(function (exports, module, require, __filename, __dirname) {{\n{src}\n}})"
-                );
-                if wrapped_fb == module.wrapped {
-                    return None; // native wasn't the source (output identical) — no point retrying
-                }
-                let code_fb = v8::String::new(tc, &wrapped_fb)?;
-                v8::Script::compile(tc, code_fb, None).map(|s| v8::Global::new(tc, s))
-            });
+            let fb = esbuild_fallback_script(tc, abs, module, prefer_metadata);
             if fb.is_none() {
-                if loader_debug() {
-                    eprintln!("  cjs compile failed: {} :: {native_exc}", abs.display());
-                }
-                (None, native_err)
-            } else {
-                (fb, None)
+                debug_cjs_compile_failure(tc, abs);
+                return (None, native_err);
             }
+            (fb, None)
         }
     }
+}
+
+/// Compile `abs` through esbuild (the pre-transform CJS source) and return its script, or
+/// `None` when esbuild produces the same wrapped text we already tried (output identical) or
+/// esbuild itself compiles nothing. Used only as a fallback inside `compile_cjs_module`.
+fn esbuild_fallback_script(
+    tc: &mut v8::PinnedRef<'_, v8::TryCatch<'_, '_, v8::HandleScope<'_>>>,
+    abs: &Path,
+    module: &Arc<ModuleSource>,
+    prefer_metadata: bool,
+) -> Option<v8::Global<v8::Script>> {
+    let src = esbuild_cjs_fallback(abs, prefer_metadata)?;
+    let wrapped_fb =
+        format!("(function (exports, module, require, __filename, __dirname) {{\n{src}\n}})");
+    if wrapped_fb == module.wrapped {
+        return None; // native wasn't the source (output identical) — no point retrying
+    }
+    let code_fb = v8::String::new(tc, &wrapped_fb)?;
+    v8::Script::compile(tc, code_fb, None).map(|s| v8::Global::new(tc, s))
+}
+
+/// Log the native compile failure's exception text when the loader-debug env is on.
+fn debug_cjs_compile_failure(
+    tc: &mut v8::PinnedRef<'_, v8::TryCatch<'_, '_, v8::HandleScope<'_>>>,
+    abs: &Path,
+) {
+    if !loader_debug() {
+        return;
+    }
+    let native_exc = tc
+        .exception()
+        .map(|e| e.to_rust_string_lossy(tc))
+        .unwrap_or_default();
+    eprintln!("  cjs compile failed: {} :: {native_exc}", abs.display());
 }
 
 /// Put back the `__ttDir` a CJS module load replaced.
@@ -5584,23 +5695,34 @@ fn synth_eval<'s>(
     };
     module.set_synthetic_module_export(scope, dkey, default)?;
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(exports) {
-        for n in names {
-            if n == "default" {
-                continue;
-            }
-            let k = v8::String::new(scope, &n)?;
-            // A name the object lacks (requested by an importer, missing from a mock factory)
-            // stays undefined without being read: an ES import binding is vitest-lenient at link
-            // time, and a strict mock's missing-export throw must not fire while linking.
-            if !obj.has(scope, k.into()).unwrap_or(false) {
-                continue;
-            }
-            if let Some(v) = obj.get(scope, k.into()) {
-                module.set_synthetic_module_export(scope, k, v)?;
-            }
-        }
+        set_synthetic_named_exports(scope, module, obj, &names)?;
     }
     Some(v8::undefined(scope).into())
+}
+
+/// Bind every non-default name the CJS object actually carries as a synthetic export. A name
+/// the object lacks (requested by an importer, missing from a mock factory) stays undefined
+/// without being read: an ES import binding is vitest-lenient at link time, and a strict
+/// mock's missing-export throw must not fire while linking.
+fn set_synthetic_named_exports<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    module: v8::Local<v8::Module>,
+    obj: v8::Local<v8::Object>,
+    names: &[String],
+) -> Option<()> {
+    for n in names {
+        if n == "default" {
+            continue;
+        }
+        let k = v8::String::new(scope, n)?;
+        if !obj.has(scope, k.into()).unwrap_or(false) {
+            continue;
+        }
+        if let Some(v) = obj.get(scope, k.into()) {
+            module.set_synthetic_module_export(scope, k, v)?;
+        }
+    }
+    Some(())
 }
 
 /// runtime.js's `__ttMockDefault(exports)`: the default export of a mock whose factory returned
@@ -7171,27 +7293,7 @@ fn resolve_callback<'s>(
 ) -> Option<v8::Local<'s, v8::Module>> {
     v8::callback_scope!(unsafe scope, context);
     let spec = specifier.to_rust_string_lossy(scope);
-    let lookup = if is_test_api_module(&spec) {
-        ensure_vitest_builtin(scope);
-        Some(vitest_key())
-    } else if is_node_builtin(&spec) {
-        ensure_node_builtin(scope, &spec);
-        Some(PathBuf::from(format!("<node:{spec}>")))
-    } else {
-        let ref_hash = referrer.get_identity_hash().get();
-        REGISTRY.with(|r| {
-            let reg = r.borrow();
-            let from = reg.path_by_hash.get(&ref_hash)?;
-            // A generated bundle lives in the cache dir (no node_modules beside it); resolve its
-            // externalized bare imports relative to the recorded source dir instead.
-            let base = reg
-                .bundle_src_dir
-                .get(from)
-                .cloned()
-                .or_else(|| from.parent().map(|p| p.to_path_buf()))?;
-            resolve_spec(&spec, &base)
-        })
-    };
+    let lookup = resolve_spec_lookup(scope, referrer, &spec);
     let abs = query_mock_variant(&spec, lookup?);
     // a mock factory that threw: linking the importer fails with its error (vitest)
     if let Some(e) = mock_factory_error(scope, &abs) {
@@ -7208,15 +7310,8 @@ fn resolve_callback<'s>(
             return Some(m);
         }
     }
-    // Already loaded?
-    if let Some(g) = REGISTRY.with(|r| {
-        let reg = r.borrow();
-        reg.esm_by_path
-            .get(&abs)
-            .or_else(|| reg.cjs_synth_by_path.get(&abs))
-            .cloned()
-    }) {
-        return Some(v8::Local::new(scope, &g));
+    if let Some(m) = loaded_module(scope, &abs) {
+        return Some(m);
     }
     // Externalized package not loaded yet (a setup bundle's `import 'react'` etc. under
     // --packages=external): lazy-load it now via the shared loaders so the bundle binds to the
@@ -7226,13 +7321,53 @@ fn resolve_callback<'s>(
     } else {
         load_dep(scope, &abs);
     }
+    loaded_module(scope, &abs)
+}
+
+/// The registry key for a `resolve_callback` specifier: vitest / node builtins resolve to
+/// their `<...>` key (also ensuring the builtin is installed), any other spec is resolved from
+/// the referrer's source dir (or its recorded bundle source dir, for a generated bundle).
+fn resolve_spec_lookup<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    referrer: v8::Local<'s, v8::Module>,
+    spec: &str,
+) -> Option<PathBuf> {
+    if is_test_api_module(spec) {
+        ensure_vitest_builtin(scope);
+        return Some(vitest_key());
+    }
+    if is_node_builtin(spec) {
+        ensure_node_builtin(scope, spec);
+        return Some(PathBuf::from(format!("<node:{spec}>")));
+    }
+    let ref_hash = referrer.get_identity_hash().get();
     REGISTRY.with(|r| {
         let reg = r.borrow();
-        reg.esm_by_path
-            .get(&abs)
-            .or_else(|| reg.cjs_synth_by_path.get(&abs))
-            .map(|g| v8::Local::new(scope, g))
+        let from = reg.path_by_hash.get(&ref_hash)?;
+        // A generated bundle lives in the cache dir (no node_modules beside it); resolve its
+        // externalized bare imports relative to the recorded source dir instead.
+        let base = reg
+            .bundle_src_dir
+            .get(from)
+            .cloned()
+            .or_else(|| from.parent().map(|p| p.to_path_buf()))?;
+        resolve_spec(spec, &base)
     })
+}
+
+/// The already-registered ESM or CJS synthetic module for `abs`, if the registry has one.
+fn loaded_module<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+) -> Option<v8::Local<'s, v8::Module>> {
+    let g = REGISTRY.with(|r| {
+        let reg = r.borrow();
+        reg.esm_by_path
+            .get(abs)
+            .or_else(|| reg.cjs_synth_by_path.get(abs))
+            .cloned()
+    })?;
+    Some(v8::Local::new(scope, &g))
 }
 
 /// The REAL module an external package's static `import` of a vi.mock'ed ES module links
@@ -7559,26 +7694,9 @@ fn dynamic_import<'s>(
             return Some(promise);
         }
     }
-    // dynamic import of builtins (e.g. turbo-dom's `await import('node:module')`) + vitest
-    let (abs, is_builtin) = if is_test_api_module(&spec) {
-        ensure_vitest_builtin(scope);
-        (Some(vitest_key()), true)
-    } else if is_node_builtin(&spec) {
-        ensure_node_builtin(scope, &spec);
-        (Some(PathBuf::from(format!("<node:{spec}>"))), true)
-    } else {
-        let abs = from_dir.as_deref().and_then(|d| resolve_spec(&spec, d));
-        (abs.map(|a| query_mock_variant(&spec, a)), false)
-    };
+    let (abs, is_builtin) = dynamic_import_target(scope, &spec, from_dir.as_deref());
     let Some(abs) = abs else {
-        let root = std::env::current_dir().unwrap_or_default();
-        let (message, code) = import_not_found(&spec, &referrer, &root, false);
-        let message = v8::String::new(scope, &message)?;
-        let exc = v8::Exception::error(scope, message);
-        let key = v8::String::new(scope, "code")?;
-        let code = v8::String::new(scope, code)?;
-        exc.cast::<v8::Object>().set(scope, key.into(), code.into());
-        resolver.reject(scope, exc);
+        reject_not_found(scope, &resolver, &spec, &referrer)?;
         return Some(promise);
     };
 
@@ -7629,6 +7747,44 @@ fn dynamic_import<'s>(
         }
     }
     Some(promise)
+}
+
+/// Resolve a `dynamic_import` specifier to a registry key plus whether it's a builtin (which
+/// also ensures the builtin is installed). Dynamic imports of builtins such as turbo-dom's
+/// `await import('node:module')` or vitest's API go through here.
+fn dynamic_import_target<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    spec: &str,
+    from_dir: Option<&Path>,
+) -> (Option<PathBuf>, bool) {
+    if is_test_api_module(spec) {
+        ensure_vitest_builtin(scope);
+        return (Some(vitest_key()), true);
+    }
+    if is_node_builtin(spec) {
+        ensure_node_builtin(scope, spec);
+        return (Some(PathBuf::from(format!("<node:{spec}>"))), true);
+    }
+    let abs = from_dir.and_then(|d| resolve_spec(spec, d));
+    (abs.map(|a| query_mock_variant(spec, a)), false)
+}
+
+/// Reject `resolver` with the Node-style `ERR_MODULE_NOT_FOUND` for a missing dynamic import.
+fn reject_not_found<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    resolver: &v8::Local<'s, v8::PromiseResolver>,
+    spec: &str,
+    referrer: &str,
+) -> Option<()> {
+    let root = std::env::current_dir().unwrap_or_default();
+    let (message, code) = import_not_found(spec, referrer, &root, false);
+    let message = v8::String::new(scope, &message)?;
+    let exc = v8::Exception::error(scope, message);
+    let key = v8::String::new(scope, "code")?;
+    let code = v8::String::new(scope, code)?;
+    exc.cast::<v8::Object>().set(scope, key.into(), code.into());
+    resolver.reject(scope, exc);
+    Some(())
 }
 
 /// Whether the registered mock `m` is a vi.mock factory's without `default` (runtime.js
@@ -8150,11 +8306,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
 /// Stack / CI / snapshot-update / name-pattern globals for the runtime, from the CLI's env.
 fn install_runtime_flags(scope: &mut v8::PinScope) {
     if std::env::var("TURBO_STACK").is_ok() {
-        if let Some(code) = v8::String::new(scope, "globalThis.__TT_STACK=true") {
-            if let Some(s) = v8::Script::compile(scope, code, None) {
-                s.run(scope);
-            }
-        }
+        compile_and_run(scope, "globalThis.__TT_STACK=true");
     }
     // `-u/--update` → write/overwrite obsolete-or-missing snapshots instead of failing the
     // comparison (vitest's --update semantics). Plumbed via TURBO_UPDATE_SNAPSHOTS env (set by
@@ -8164,20 +8316,22 @@ fn install_runtime_flags(scope: &mut v8::PinScope) {
         run_js(scope, "globalThis.__TT_CI=true;");
     }
     if std::env::var("TURBO_UPDATE_SNAPSHOTS").is_ok() {
-        if let Some(code) = v8::String::new(scope, "globalThis.__TT_UPDATE_SNAPSHOTS=true") {
-            if let Some(s) = v8::Script::compile(scope, code, None) {
-                s.run(scope);
-            }
-        }
+        compile_and_run(scope, "globalThis.__TT_UPDATE_SNAPSHOTS=true");
     }
     // `-t/--testNamePattern` → expose the regex source to the runtime, which compiles it once and
     // skips non-matching tests. JSON-encode so any regex metacharacter survives the JS literal.
     if let Ok(pat) = std::env::var("TURBO_TEST_NAME_PATTERN") {
         let js = format!("globalThis.__TT_NAME_PATTERN={};", json_string(&pat));
-        if let Some(code) = v8::String::new(scope, &js) {
-            if let Some(s) = v8::Script::compile(scope, code, None) {
-                s.run(scope);
-            }
+        compile_and_run(scope, &js);
+    }
+}
+
+/// Compile `src` and run it; silently drop a compile-time or runtime failure (the installer
+/// paths are best-effort — a knob that fails to install leaves the runtime at its default).
+fn compile_and_run(scope: &mut v8::PinScope, src: &str) {
+    if let Some(code) = v8::String::new(scope, src) {
+        if let Some(s) = v8::Script::compile(scope, code, None) {
+            s.run(scope);
         }
     }
 }
@@ -8208,33 +8362,33 @@ fn runtime_prelude() -> String {
             prelude.push_str(&format!("globalThis.{global}=Infinity;"));
         }
     }
-    if std::env::var("TURBO_SEQUENCE_CONCURRENT").is_ok() {
-        prelude.push_str("globalThis.__TT_SEQUENCE_CONCURRENT=true;");
-    }
-    if std::env::var("TURBO_TEST_SILENT").is_ok() {
-        prelude.push_str("globalThis.__TT_SILENT=true;");
-    }
-    if std::env::var("TURBO_TEST_FORBID_ONLY").is_ok() {
-        prelude.push_str("globalThis.__TT_FORBID_ONLY=true;");
+    append_boolean_flags(&mut prelude);
+    prelude
+}
+
+/// Emit `globalThis.__TT_X=true;` for every boolean knob the runtime reads from env/config.
+fn append_boolean_flags(prelude: &mut String) {
+    const ENV_FLAGS: &[(&str, &str)] = &[
+        ("TURBO_SEQUENCE_CONCURRENT", "__TT_SEQUENCE_CONCURRENT"),
+        ("TURBO_TEST_SILENT", "__TT_SILENT"),
+        ("TURBO_TEST_FORBID_ONLY", "__TT_FORBID_ONLY"),
+        // --reporter junit → each test's console output goes to the report (turbo-test#81)
+        ("TURBO_CAPTURE_LOGS", "__TT_CAPTURE_LOGS"),
+        // vitest's human reporters with colours on (turbo-test#94) → console values and diffs
+        // are coloured as vitest's worker colours them
+        ("TURBO_COLORS", "__TT_COLORS"),
+        // --passWithNoTests (launcher) → a file with no tests at all passes instead of failing
+        ("TURBO_PASS_WITH_NO_TESTS", "__TT_PASS_WITH_NO_TESTS"),
+    ];
+    for (var, global) in ENV_FLAGS {
+        if std::env::var(var).is_ok() {
+            prelude.push_str(&format!("globalThis.{global}=true;"));
+        }
     }
     // --includeTaskLocation / test.includeTaskLocation → record each test's call site
     if crate::location::enabled() {
         prelude.push_str("globalThis.__TT_TASK_LOCATION=true;");
     }
-    // --reporter junit → each test's console output goes to the report (turbo-test#81)
-    if std::env::var("TURBO_CAPTURE_LOGS").is_ok() {
-        prelude.push_str("globalThis.__TT_CAPTURE_LOGS=true;");
-    }
-    // vitest's human reporters with colours on (turbo-test#94) → console values and diffs are
-    // coloured as vitest's worker colours them
-    if std::env::var("TURBO_COLORS").is_ok() {
-        prelude.push_str("globalThis.__TT_COLORS=true;");
-    }
-    // --passWithNoTests (launcher) → a file with no tests at all passes instead of failing
-    if std::env::var("TURBO_PASS_WITH_NO_TESTS").is_ok() {
-        prelude.push_str("globalThis.__TT_PASS_WITH_NO_TESTS=true;");
-    }
-    prelude
 }
 
 /// process.env as vitest's (turbo-test#143, #156): the environment turbo-test was started with, in

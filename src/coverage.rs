@@ -242,50 +242,61 @@ fn double_star_match(rest: &[u8], path: &[u8]) -> bool {
     (0..=path.len()).any(|k| simple_match(rest, &path[k..]))
 }
 
+/// One step result of the simple_match loop.
+enum MatchStep {
+    /// Return this verdict immediately.
+    Done(bool),
+    /// Advance state (new pi, si, star, star_si) and continue.
+    Advance(usize, usize, Option<usize>, usize),
+}
+
+/// Try consuming one pattern byte against one path byte; also handles `*` bookkeeping.
+fn simple_step(
+    pat: &[u8],
+    path: &[u8],
+    pi: usize,
+    si: usize,
+    star: Option<usize>,
+    star_si: usize,
+) -> MatchStep {
+    if pi < pat.len() {
+        match pat[pi] {
+            b'*' => {
+                if pi + 1 < pat.len() && pat[pi + 1] == b'*' {
+                    return MatchStep::Done(double_star_match(&pat[pi + 2..], &path[si..]));
+                }
+                // single `*` — matches zero+ non-separator chars
+                return MatchStep::Advance(pi + 1, si, Some(pi), si);
+            }
+            b'?' if path[si] != b'/' => return MatchStep::Advance(pi + 1, si + 1, star, star_si),
+            c if c == path[si] => return MatchStep::Advance(pi + 1, si + 1, star, star_si),
+            _ => {}
+        }
+    }
+    // mismatch — backtrack into the last single `*` if any (but never across '/')
+    if let Some(sp) = star {
+        if path[star_si] != b'/' {
+            return MatchStep::Advance(sp + 1, star_si + 1, star, star_si + 1);
+        }
+    }
+    MatchStep::Done(false)
+}
+
 /// Match a brace-free glob (`**` spans path separators, `*`/`?` do not) against a path.
 fn simple_match(pat: &[u8], path: &[u8]) -> bool {
     let (mut pi, mut si) = (0usize, 0usize);
     // backtrack state for the most recent `*` (single-segment star)
     let (mut star, mut star_si): (Option<usize>, usize) = (None, 0);
     while si < path.len() {
-        if pi < pat.len() {
-            match pat[pi] {
-                b'*' => {
-                    if pi + 1 < pat.len() && pat[pi + 1] == b'*' {
-                        return double_star_match(&pat[pi + 2..], &path[si..]);
-                    }
-                    // single `*` — matches zero+ non-separator chars
-                    star = Some(pi);
-                    star_si = si;
-                    pi += 1;
-                    continue;
-                }
-                b'?' => {
-                    if path[si] != b'/' {
-                        pi += 1;
-                        si += 1;
-                        continue;
-                    }
-                }
-                c => {
-                    if c == path[si] {
-                        pi += 1;
-                        si += 1;
-                        continue;
-                    }
-                }
+        match simple_step(pat, path, pi, si, star, star_si) {
+            MatchStep::Done(v) => return v,
+            MatchStep::Advance(npi, nsi, nstar, nstar_si) => {
+                pi = npi;
+                si = nsi;
+                star = nstar;
+                star_si = nstar_si;
             }
         }
-        // mismatch — backtrack into the last single `*` if any (but never across '/')
-        if let Some(sp) = star {
-            if path[star_si] != b'/' {
-                pi = sp + 1;
-                star_si += 1;
-                si = star_si;
-                continue;
-            }
-        }
-        return false;
     }
     // consume trailing `*` / `**` in the pattern
     while pi < pat.len() && pat[pi] == b'*' {
@@ -728,35 +739,50 @@ pub(crate) fn mappings_segments(mappings: &str) -> Segments {
     parse_mappings_full(mappings).1
 }
 
+/// Cumulative VLQ state threaded across every segment of the mappings string.
+#[derive(Default)]
+struct MapState {
+    src_idx: i64,
+    src_line: i64,
+    src_col: i64,
+    gen_col: i64,
+}
+
+/// Decode one segment, update `st` and append a row entry; returns the row's first src line (once).
+fn parse_segment(seg: &str, st: &mut MapState, row: &mut Vec<(u32, u32, u32)>) -> Option<i64> {
+    if seg.is_empty() {
+        return None;
+    }
+    let vals = vlq_decode(seg);
+    if vals.is_empty() {
+        return None;
+    }
+    st.gen_col += vals[0];
+    if vals.len() < 4 {
+        return None;
+    }
+    st.src_idx += vals[1];
+    st.src_line += vals[2];
+    st.src_col += vals[3];
+    if st.src_line >= 0 && st.src_col >= 0 && st.gen_col >= 0 {
+        row.push((st.gen_col as u32, st.src_line as u32, st.src_col as u32));
+    }
+    (st.src_line >= 0).then_some(st.src_line)
+}
+
 fn parse_mappings_full(mappings: &str) -> (GenMap, Segments) {
     let mut genmap = HashMap::new();
     let mut segs: Segments = Vec::new();
     // src_line/col/idx are cumulative across the WHOLE mappings string; gen_col resets per line.
-    let (mut src_idx, mut src_line, mut src_col) = (0i64, 0i64, 0i64);
+    let mut st = MapState::default();
     for (gen_line, line) in mappings.split(';').enumerate() {
-        let mut gen_col = 0i64;
+        st.gen_col = 0;
         let mut row: Vec<(u32, u32, u32)> = Vec::new();
         let mut first: Option<i64> = None;
         for seg in line.split(',') {
-            if seg.is_empty() {
-                continue;
-            }
-            let vals = vlq_decode(seg);
-            if vals.is_empty() {
-                continue;
-            }
-            gen_col += vals[0];
-            if vals.len() >= 4 {
-                src_idx += vals[1];
-                src_line += vals[2];
-                src_col += vals[3];
-                let _ = src_idx;
-                if src_line >= 0 && src_col >= 0 && gen_col >= 0 {
-                    row.push((gen_col as u32, src_line as u32, src_col as u32));
-                }
-                if first.is_none() && src_line >= 0 {
-                    first = Some(src_line);
-                }
+            let first_in_seg = parse_segment(seg, &mut st, &mut row);
+            if first.is_none() {
+                first = first_in_seg;
             }
         }
         if let Some(sl) = first {
@@ -1038,42 +1064,62 @@ pub fn report() -> bool {
     let out_dir = out_dir();
     let _ = std::fs::create_dir_all(&out_dir);
     let reporters = reporters();
-    let has = |r: &str| reporters.iter().any(|x| x == r);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    write_reports(&reporters, &out_dir, &lcov, &total, &rows, &cwd);
+
+    // ---- threshold gate ----
+    gate(&total, &rows, &cwd)
+}
+
+/// Write each configured reporter artifact and, when `text` is on, print the terminal summary.
+fn write_reports(
+    reporters: &[String],
+    out_dir: &Path,
+    lcov: &str,
+    total: &Row,
+    rows: &[Row],
+    cwd: &Path,
+) {
+    let has = |r: &str| reporters.iter().any(|x| x == r);
 
     // ---- lcov ----
     let lcov_path = out_dir.join("lcov.info");
     if has("lcov") {
-        let _ = std::fs::write(&lcov_path, &lcov);
+        let _ = std::fs::write(&lcov_path, lcov);
     }
     // ---- json-summary (vitest/c8 shape; no `statements` — V8 has no statement metric) ----
     if has("json-summary") || has("json") {
         let json_path = out_dir.join("coverage-summary.json");
-        let _ = std::fs::write(&json_path, json_summary(&total, &rows));
+        let _ = std::fs::write(&json_path, json_summary(total, rows));
     }
     // ---- html (browsable overview table) ----
     if has("html") {
         let html_path = out_dir.join("index.html");
-        let _ = std::fs::write(&html_path, html_summary(&total, &rows, &cwd));
+        let _ = std::fs::write(&html_path, html_summary(total, rows, cwd));
     }
 
     // ---- text (terminal summary) — on by default, suppress only if reporters set without it ----
     if has("text") {
-        let mut outs: Vec<String> = Vec::new();
-        if has("lcov") {
-            outs.push(lcov_path.display().to_string());
-        }
-        if has("json-summary") || has("json") {
-            outs.push(out_dir.join("coverage-summary.json").display().to_string());
-        }
-        if has("html") {
-            outs.push(out_dir.join("index.html").display().to_string());
-        }
-        print!("{}", text_summary(&total, &rows, &cwd, &outs));
+        let outs = text_artifact_paths(reporters, out_dir, &lcov_path);
+        print!("{}", text_summary(total, rows, cwd, &outs));
     }
+}
 
-    // ---- threshold gate ----
-    gate(&total, &rows, &cwd)
+/// The artifact paths to list under the text summary ("… report written to …").
+fn text_artifact_paths(reporters: &[String], out_dir: &Path, lcov_path: &Path) -> Vec<String> {
+    let has = |r: &str| reporters.iter().any(|x| x == r);
+    let mut outs: Vec<String> = Vec::new();
+    if has("lcov") {
+        outs.push(lcov_path.display().to_string());
+    }
+    if has("json-summary") || has("json") {
+        outs.push(out_dir.join("coverage-summary.json").display().to_string());
+    }
+    if has("html") {
+        outs.push(out_dir.join("index.html").display().to_string());
+    }
+    outs
 }
 
 /// Check global (and, under `--coverage-per-file`, per-file) thresholds. Prints each unmet metric

@@ -551,58 +551,86 @@ pub(crate) fn strip_comments(s: &str) -> String {
     let mut w = Words::default();
     while let Some(c) = chars.next() {
         if let Some(q) = quote {
-            out.push(c);
-            if c == '\\' {
-                if let Some(n) = chars.next() {
-                    out.push(n);
-                }
-            } else if c == q {
-                quote = None;
-            }
+            step_in_quote(c, q, &mut chars, &mut out, &mut quote);
             continue;
         }
-        match c {
-            '\'' | '"' | '`' => {
-                quote = Some(c);
-                out.push(c);
-                w.reset(c);
-            }
-            '/' if chars.peek() == Some(&'/') => {
-                for n in chars.by_ref() {
-                    if n == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                let mut prev = ' ';
-                for n in chars.by_ref() {
-                    if prev == '*' && n == '/' {
-                        break;
-                    }
-                    prev = n;
-                }
-                out.push(' ');
-            }
-            // Regex literal (only in expression position): BLANK it (emit spaces). It must not be
-            // copied verbatim — a regex body can contain `'`/`"`/`` ` `` (e.g. `/"/g`, `/'/g`), and
-            // the downstream block scanners are quote-aware but NOT regex-aware, so a surviving quote
-            // char would flip their string state and swallow the real `alias` block. Blanking keeps
-            // the regex out of their way entirely.
-            '/' if w.regex_starts() => {
-                out.push(' ');
-                blank_regex(&mut chars, &mut out);
-                w.reset('/');
-            }
-            _ => {
-                out.push(c);
-                w.push(c);
-            }
-        }
+        step_outside_quote(c, &mut chars, &mut out, &mut quote, &mut w);
     }
     out
+}
+
+/// One `strip_comments` iteration while inside a quoted string/template literal.
+fn step_in_quote(
+    c: char,
+    q: char,
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    out: &mut String,
+    quote: &mut Option<char>,
+) {
+    out.push(c);
+    if c == '\\' {
+        if let Some(n) = chars.next() {
+            out.push(n);
+        }
+    } else if c == q {
+        *quote = None;
+    }
+}
+
+/// One `strip_comments` iteration while outside any quote.
+fn step_outside_quote(
+    c: char,
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    out: &mut String,
+    quote: &mut Option<char>,
+    w: &mut Words,
+) {
+    match c {
+        '\'' | '"' | '`' => {
+            *quote = Some(c);
+            out.push(c);
+            w.reset(c);
+        }
+        '/' if chars.peek() == Some(&'/') => skip_line_comment(chars, out),
+        '/' if chars.peek() == Some(&'*') => skip_block_comment(chars, out),
+        // Regex literal (only in expression position): BLANK it (emit spaces). It must not be
+        // copied verbatim — a regex body can contain `'`/`"`/`` ` `` (e.g. `/"/g`, `/'/g`), and
+        // the downstream block scanners are quote-aware but NOT regex-aware, so a surviving quote
+        // char would flip their string state and swallow the real `alias` block. Blanking keeps
+        // the regex out of their way entirely.
+        '/' if w.regex_starts() => {
+            out.push(' ');
+            blank_regex(chars, out);
+            w.reset('/');
+        }
+        _ => {
+            out.push(c);
+            w.push(c);
+        }
+    }
+}
+
+/// Consume a `//` line comment; emit a single `\n` if we reach one.
+fn skip_line_comment(chars: &mut std::iter::Peekable<std::str::Chars>, out: &mut String) {
+    for n in chars.by_ref() {
+        if n == '\n' {
+            out.push('\n');
+            break;
+        }
+    }
+}
+
+/// Consume a `/* … */` block comment (the leading `/` is already consumed); emit one space.
+fn skip_block_comment(chars: &mut std::iter::Peekable<std::str::Chars>, out: &mut String) {
+    chars.next();
+    let mut prev = ' ';
+    for n in chars.by_ref() {
+        if prev == '*' && n == '/' {
+            break;
+        }
+        prev = n;
+    }
+    out.push(' ');
 }
 
 /// The tokens before a `/` in [`strip_comments`], to tell a regex from division.
@@ -807,12 +835,11 @@ fn find_key_blocks(text: &str, key: &str) -> Vec<String> {
 /// (its inner text, the offset of its close).
 fn key_block_at(text: &str, i: usize, len: usize) -> Option<(String, usize)> {
     let b = text.as_bytes();
-    let prev_ok = i == 0 || {
-        let p = b[i - 1];
-        p != b'.' && p != b'_' && p != b'$' && !p.is_ascii_alphanumeric()
-    };
+    if !is_word_boundary_before(b, i) {
+        return None;
+    }
     let j = skip_ws(b, i + len);
-    if !(prev_ok && j < b.len() && b[j] == b':') {
+    if j >= b.len() || b[j] != b':' {
         return None;
     }
     let k = skip_ws(b, j + 1);
@@ -821,6 +848,15 @@ fn key_block_at(text: &str, i: usize, len: usize) -> Option<(String, usize)> {
     } else {
         None
     }
+}
+
+/// Whether the byte before offset `i` is not part of an identifier (so `i` starts a fresh word).
+fn is_word_boundary_before(b: &[u8], i: usize) -> bool {
+    if i == 0 {
+        return true;
+    }
+    let p = b[i - 1];
+    p != b'.' && p != b'_' && p != b'$' && !p.is_ascii_alphanumeric()
 }
 
 /// Parse `resolve.alias` and `test.alias` into `(find, resolved-target)` pairs. Supports the object

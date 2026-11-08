@@ -419,47 +419,22 @@ fn lex(src: &str) -> Lexed {
     while i < b.len() {
         let c = b[i];
         let after_import_call = std::mem::take(&mut import_call);
-        match c {
-            b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
-                import_call = after_import_call;
-                i += 1;
-                continue;
-            }
-            b'(' | b'{' => {
-                import_call = c == b'(' && last == Some(b'w') && last_word == "import";
-                open.push(false);
-            }
-            b')' | b'}' => match open.pop() {
-                None => return failed(i, imports),
-                // back in the template after `${ … }`
-                Some(true) if c == b'}' => template_at = Some(i + 1),
-                Some(_) => {}
-            },
-            b'\'' | b'"' => {
-                match lex_string(b, i, c, after_import_call, last, &last_word, &mut imports) {
-                    Ok(j) => i = j + 1,
-                    Err(at) => return failed(at, imports),
-                }
-                last = Some(b'w');
-                last_word.clear();
-                continue;
-            }
-            b'`' => template_at = Some(i + 1),
-            b'/' if matches!(b.get(i + 1), Some(b'/' | b'*')) => {
-                i = comment_end(src, i);
-                import_call = after_import_call;
-                continue;
-            }
-            b'/' if regex_allowed(last, &last_word) => {
-                match regex_end(b, i) {
-                    Ok(j) => i = j + 1,
-                    Err(at) => return failed(at, imports),
-                }
-                last = Some(b'w');
-                last_word.clear();
-                continue;
-            }
-            _ => {}
+        match lex_byte(
+            src,
+            b,
+            &mut i,
+            c,
+            after_import_call,
+            &mut open,
+            &mut last,
+            &mut last_word,
+            &mut template_at,
+            &mut import_call,
+            &mut imports,
+        ) {
+            StepKind::Continue => continue,
+            StepKind::Fail(at) => return failed(at, imports),
+            StepKind::Fallthrough => {}
         }
         if let Some(at) = template_at.take() {
             let Some(next) = template(b, at, &mut open) else {
@@ -486,6 +461,83 @@ fn lex(src: &str) -> Lexed {
     Lexed {
         error: (!open.is_empty()).then_some(0),
         imports,
+    }
+}
+
+/// What the main `lex` loop should do with the current byte after `lex_byte` returns.
+enum StepKind {
+    /// Reloop immediately (state already advanced).
+    Continue,
+    /// The loop body's shared tail (template / word / fallthrough) still needs to run.
+    Fallthrough,
+    /// Lexer failed at this offset — caller returns `failed(at, imports)`.
+    Fail(usize),
+}
+
+/// One byte-dispatch step of `lex`: handles whitespace, bracketing, strings, templates,
+/// comments and regexes. On fallthrough the outer loop's template/word handling applies.
+#[allow(clippy::too_many_arguments)]
+fn lex_byte(
+    src: &str,
+    b: &[u8],
+    i: &mut usize,
+    c: u8,
+    after_import_call: bool,
+    open: &mut Vec<bool>,
+    last: &mut Option<u8>,
+    last_word: &mut String,
+    template_at: &mut Option<usize>,
+    import_call: &mut bool,
+    imports: &mut Vec<std::ops::Range<usize>>,
+) -> StepKind {
+    match c {
+        b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
+            *import_call = after_import_call;
+            *i += 1;
+            StepKind::Continue
+        }
+        b'(' | b'{' => {
+            *import_call = c == b'(' && *last == Some(b'w') && last_word == "import";
+            open.push(false);
+            StepKind::Fallthrough
+        }
+        b')' | b'}' => {
+            match open.pop() {
+                None => return StepKind::Fail(*i),
+                // back in the template after `${ … }`
+                Some(true) if c == b'}' => *template_at = Some(*i + 1),
+                Some(_) => {}
+            }
+            StepKind::Fallthrough
+        }
+        b'\'' | b'"' => {
+            match lex_string(b, *i, c, after_import_call, *last, last_word, imports) {
+                Ok(j) => *i = j + 1,
+                Err(at) => return StepKind::Fail(at),
+            }
+            *last = Some(b'w');
+            last_word.clear();
+            StepKind::Continue
+        }
+        b'`' => {
+            *template_at = Some(*i + 1);
+            StepKind::Fallthrough
+        }
+        b'/' if matches!(b.get(*i + 1), Some(b'/' | b'*')) => {
+            *i = comment_end(src, *i);
+            *import_call = after_import_call;
+            StepKind::Continue
+        }
+        b'/' if regex_allowed(*last, last_word) => {
+            match regex_end(b, *i) {
+                Ok(j) => *i = j + 1,
+                Err(at) => return StepKind::Fail(at),
+            }
+            *last = Some(b'w');
+            last_word.clear();
+            StepKind::Continue
+        }
+        _ => StepKind::Fallthrough,
     }
 }
 
