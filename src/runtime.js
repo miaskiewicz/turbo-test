@@ -5604,12 +5604,13 @@ function __mockConstructorError(shorthand) {
   return new TypeError(`Cannot use \`${shorthand}\` when called with \`new\`. Use \`mockImplementation\` with a \`class\` keyword instead. See https://vitest.dev/api/mock#class-support for more information.`);
 }
 // makeSpy: the original's (or implementation's) own and inherited statics onto the mock
+function __copyMockStaticKey(fn, src, k) {
+  if (__mockStatic.has(k) || __mockDescriptor(fn, k)) return;
+  try { Object.defineProperty(fn, k, Object.getOwnPropertyDescriptor(src, k)); } catch (e) {}
+}
 function __copyMockStatics(fn, from) {
   for (let src = from; src && src !== Object.prototype && src !== Function.prototype; src = Object.getPrototypeOf(src)) {
-    for (const k of [...Object.getOwnPropertyNames(src), ...Object.getOwnPropertySymbols(src)]) {
-      if (__mockStatic.has(k) || __mockDescriptor(fn, k)) continue;
-      try { Object.defineProperty(fn, k, Object.getOwnPropertyDescriptor(src, k)); } catch (e) {}
-    }
+    for (const k of [...Object.getOwnPropertyNames(src), ...Object.getOwnPropertySymbols(src)]) __copyMockStaticKey(fn, src, k);
   }
 }
 const __mockLength = (impl, original) => ((impl || original) ? (impl || original).length : 0);
@@ -5624,56 +5625,71 @@ function __handleMockError(e, result, settled, fn) {
     globalThis.console.warn(`[vitest] The ${fn.getMockName()} mock did not use 'function' or 'class' in its implementation, see https://vitest.dev/api/vi#vi-spyon for examples.`);
   }
 }
-function makeSpy(impl, opts) {
-  opts = opts || {};
-  const original = opts.original;
-  if (opts.restore) __mockRestores.add(opts.restore);
-  const config = { impl: undefined, once: [], name: 'vi.fn()' };
-  // spyOn's original: jest.fn()'s whenCalledWith (__jestWhen) falls through to it
-  Object.defineProperty(config, 'original', { value: original });
+function __mockMakeState() {
   const state = {
     calls: [], contexts: [], instances: [], invocationCallOrder: [], settledResults: [], results: [],
     get lastCall() { return state.calls[state.calls.length - 1]; },
   };
-  const name = (original && original.name) || 'Mock';
-  const fn = { [name]: function (...args) {
-    state.calls.push(args);
-    state.invocationCallOrder.push(++__mockCallOrder);
-    const result = { type: 'incomplete', value: undefined };
-    // vitest's settledResults: 'incomplete' until the returned promise settles
-    const settled = { type: 'incomplete', value: undefined };
-    state.results.push(result);
-    state.settledResults.push(settled);
-    const context = new.target ? undefined : this;
-    const at = state.instances.push(context);
-    state.contexts.push(context);
-    const implementation = config.once.shift() || config.impl || original || function () {};
-    let ret;
-    try {
-      // `new spy()` constructs the implementation (a class cannot be called with .apply)
-      ret = new.target ? Reflect.construct(implementation, args, new.target) : implementation.apply(this, args);
-    } catch (e) {
-      __handleMockError(e, result, settled, fn);
-      throw e;
-    }
-    result.type = 'return';
-    result.value = ret;
-    if (new.target) {
-      state.contexts[at - 1] = ret;
-      state.instances[at - 1] = ret;
-    }
-    if (ret instanceof Promise) {
-      ret.then((v) => { settled.type = 'fulfilled'; settled.value = v; }, (e) => { settled.type = 'rejected'; settled.value = e; });
-    } else {
-      settled.type = 'fulfilled';
-      settled.value = ret;
-    }
-    return ret;
-  } }[name];
+  return state;
+}
+function __mockSettleResult(settled, ret) {
+  if (ret instanceof Promise) {
+    ret.then((v) => { settled.type = 'fulfilled'; settled.value = v; }, (e) => { settled.type = 'rejected'; settled.value = e; });
+    return;
+  }
+  settled.type = 'fulfilled';
+  settled.value = ret;
+}
+function __mockRecordCall(state, args, ctx, newTarget) {
+  state.calls.push(args);
+  state.invocationCallOrder.push(++__mockCallOrder);
+  const result = { type: 'incomplete', value: undefined };
+  const settled = { type: 'incomplete', value: undefined };
+  state.results.push(result);
+  state.settledResults.push(settled);
+  const context = newTarget ? undefined : ctx;
+  const at = state.instances.push(context);
+  state.contexts.push(context);
+  return { result, settled, at };
+}
+function __mockApplyImpl(config, original, args, newTarget, ctx) {
+  const implementation = config.once.shift() || config.impl || original || function () {};
+  if (newTarget) return Reflect.construct(implementation, args, newTarget);
+  return implementation.apply(ctx, args);
+}
+function __mockInvoke(fn, state, config, original, args, newTarget, ctx) {
+  const { result, settled, at } = __mockRecordCall(state, args, ctx, newTarget);
+  let ret;
+  try { ret = __mockApplyImpl(config, original, args, newTarget, ctx); }
+  catch (e) { __handleMockError(e, result, settled, fn); throw e; }
+  result.type = 'return';
+  result.value = ret;
+  if (newTarget) { state.contexts[at - 1] = ret; state.instances[at - 1] = ret; }
+  __mockSettleResult(settled, ret);
+  return ret;
+}
+function __mockMakeConfig(original) {
+  const config = { impl: undefined, once: [], name: 'vi.fn()' };
+  // spyOn's original: jest.fn()'s whenCalledWith (__jestWhen) falls through to it
+  Object.defineProperty(config, 'original', { value: original });
+  return config;
+}
+function __mockSpyName(original) { return (original && original.name) || 'Mock'; }
+function __mockInitOpts(opts, config, original, fn) {
+  if (opts.restore) __mockRestores.add(opts.restore);
+  if (opts.keepName) config.name = fn.name || 'vi.fn()';
+}
+function makeSpy(impl, opts) {
+  opts = opts || {};
+  const original = opts.original;
+  const config = __mockMakeConfig(original);
+  const state = __mockMakeState();
+  const name = __mockSpyName(original);
+  const fn = { [name]: function (...args) { return __mockInvoke(fn, state, config, original, args, new.target, this); } }[name];
   // the original's (or implementation's) own and inherited statics, as vitest copies them
   __copyMockStatics(fn, original || impl);
   Object.defineProperty(fn, 'length', { writable: true, enumerable: false, configurable: true, value: __mockLength(impl, original) });
-  if (opts.keepName) config.name = fn.name || 'vi.fn()';
+  __mockInitOpts(opts, config, original, fn);
   fn._isMockFunction = true;
   // the closure's state, for jest.fn()'s whenCalledWith (__jestWhen); a symbol, so no member
   Object.defineProperty(fn, __mockConfigKey, { value: config });
@@ -5737,13 +5753,14 @@ function __isBuiltinProto(p) {
   if (p === Object.prototype || p === Function.prototype) return true;
   try { return typeof p.constructor === 'function' && /\{\s*\[native code\]\s*\}$/.test(Function.prototype.toString.call(p.constructor)); } catch (e) { return true; }
 }
+function __automockProtoKey(target, p, k, spy) {
+  if (k === 'constructor' || Object.prototype.hasOwnProperty.call(target, k)) return;
+  const d = Object.getOwnPropertyDescriptor(p, k);
+  if (typeof d.value === 'function') target[k] = __trackSpy(makeSpy(undefined, { original: spy ? d.value : undefined }));
+}
 function __automockProtoMethods(target, proto, spy) {
   for (let p = proto; p && !__isBuiltinProto(p); p = Object.getPrototypeOf(p)) {
-    for (const k of Object.getOwnPropertyNames(p)) {
-      if (k === 'constructor' || Object.prototype.hasOwnProperty.call(target, k)) continue;
-      const d = Object.getOwnPropertyDescriptor(p, k);
-      if (typeof d.value === 'function') { target[k] = __trackSpy(makeSpy(undefined, { original: spy ? d.value : undefined })); }
-    }
+    for (const k of Object.getOwnPropertyNames(p)) __automockProtoKey(target, p, k, spy);
   }
 }
 // A mock's names an ES import may name although the mock lacks them (the ESM graph's synthetic
@@ -6041,15 +6058,13 @@ globalThis.__ttToESMDep = (m, node) => {
   return __ttBundlerNs(m);
 };
 // __ttToESMDep's bundler interop of a package's CommonJS module
+function __ttBundlerEsMod(m) { return ('default' in m || m.default !== undefined) ? m : __ttCjsView(m); }
+function __ttBundlerDefault(m) { return m.default === m || !__ttExternalCjs.has(m) ? m : __ttCjsView(m); }
 function __ttBundlerNs(m) {
-  if (m.__esModule || '__esModule' in m) return ('default' in m || m.default !== undefined) ? m : __ttCjsView(m);
-  if ('default' in m) return m.default === m || !__ttExternalCjs.has(m) ? m : __ttCjsView(m);
-  try {
-    Object.defineProperty(m, 'default', { value: m, configurable: true });
-    return m;
-  } catch (e) {
-    return __ttCjsView(m);
-  }
+  if (m.__esModule || '__esModule' in m) return __ttBundlerEsMod(m);
+  if ('default' in m) return __ttBundlerDefault(m);
+  try { Object.defineProperty(m, 'default', { value: m, configurable: true }); return m; }
+  catch (e) { return __ttCjsView(m); }
 }
 // Modules (resolved absolute paths) the entry's mock prepass registered for the current file.
 // vitest calls a hoisted factory ONCE; the module's own hoisted vi.mock call for such a module
@@ -6153,6 +6168,9 @@ function __ttFactoryExports(spec, factory, vitest, isDoMock, dir) {
       : __ttFactoryErrorMock(e, vitest)];
   }
 }
+function __ttMockMake(spec, factory, vitest, isDoMock, dir) {
+  return factory === undefined ? __ttAutomockOf(dir, spec) : __ttFactoryExports(spec, factory, vitest, isDoMock, dir);
+}
 function __ttMock(spec, factory, vitest, isDoMock) {
   const key = (globalThis.__ttDir || '') + '\0' + String(spec);
   // The calling module's dir: the module-runner's __ttDir, else (ESM graph, where modules have
@@ -6163,7 +6181,7 @@ function __ttMock(spec, factory, vitest, isDoMock) {
   // jest 30: `jest.mock(spec, factory)` defers the factory to the module's first require
   // (turbo-test#275). `vi.mock` keeps its eager hoist-time semantics.
   if (__ttJestLazyRegister(spec, factory, vitest, isDoMock, dir, key)) return;
-  const [ok, made] = factory === undefined ? __ttAutomockOf(dir, spec) : __ttFactoryExports(spec, factory, vitest, isDoMock, dir);
+  const [ok, made] = __ttMockMake(spec, factory, vitest, isDoMock, dir);
   if (ok) __ttMockRegister(spec, factory, vitest, isDoMock, dir, key, made);
 }
 // jest 30's lazy `jest.mock(spec, factory)`: the factory runs on the module's first require,
@@ -6176,13 +6194,16 @@ globalThis.__ttJestLazy = __ttJestLazy;
 function __ttJestLazyKey(dir, spec) {
   return (dir && globalThis.__ttResolveSpec(dir, String(spec))) || '\0' + String(spec);
 }
-function __ttJestLazyRegister(spec, factory, vitest, isDoMock, dir, key) {
+function __ttJestLazyEligible(factory, vitest, isDoMock) {
   if (vitest || isDoMock || typeof factory !== 'function') return false;
   // Both prepasses (the esbuild-MR one via __ttMockPrepass, and the untransformed ESM-graph
   // one via __ttNoLazyJestMock) run factories eagerly so the mock is in place before module
   // imports resolve: jest 30 lazy semantics only kick in from the module's own body call,
   // where the module's bindings exist.
-  if (globalThis.__ttMockPrepass || globalThis.__ttNoLazyJestMock) return false;
+  return !(globalThis.__ttMockPrepass || globalThis.__ttNoLazyJestMock);
+}
+function __ttJestLazyRegister(spec, factory, vitest, isDoMock, dir, key) {
+  if (!__ttJestLazyEligible(factory, vitest, isDoMock)) return false;
   __ttLenientMockKeys.add(key);
   __ttJestLazy.set(__ttJestLazyKey(dir, spec), { spec: String(spec), factory, dir, key });
   if (globalThis.__ttRegisterMock && dir) {
@@ -6207,6 +6228,9 @@ function __ttRegisterAsyncMock(spec, vitest, isDoMock, dir, key, exports) {
   __ttQueueMock(spec, exports, vitest, key);
 }
 // __ttMock's registration of the made mock
+function __ttTryRegisterNow(dir, spec, exports, key) {
+  return globalThis.__ttRegisterMock && dir && __ttRegisterMockNow(dir, spec, exports, key);
+}
 function __ttMockRegister(spec, factory, vitest, isDoMock, dir, key, exports) {
   // Sync factory: register IMMEDIATELY in the calling module's dir (vi.mock is hoisted above
   // the module's consumer requires, so the mock is in place before they load — and the factory
@@ -6214,9 +6238,9 @@ function __ttMockRegister(spec, factory, vitest, isDoMock, dir, key, exports) {
   // queue for __resolvePendingMocks (run_entry_mocks prepass / drain).
   if (globalThis.__ttMockPrepass) __ttPrepassMocks.add(__ttPrepassKey(spec));
   if (exports && typeof exports.then === 'function') return __ttRegisterAsyncMock(spec, vitest, isDoMock, dir, key, exports);
-  if (factory !== undefined) exports = __ttStrictMock(exports, key, String(spec), vitest);
-  if (globalThis.__ttRegisterMock && dir && __ttRegisterMockNow(dir, spec, exports, key)) return;
-  __ttQueueMock(spec, exports, vitest, key);
+  const final = factory !== undefined ? __ttStrictMock(exports, key, String(spec), vitest) : exports;
+  if (__ttTryRegisterNow(dir, spec, final, key)) return;
+  __ttQueueMock(spec, final, vitest, key);
 }
 // vi.dynamicImportSettled (vitest's waitForImportsToResolve): wait a macrotask on the real
 // clock (vitest's safe timers, so fake timers do not hold it), then for every import() still
@@ -6367,10 +6391,18 @@ function __viSpyOnCheck(originalImpl, accessType, original) {
 // @vitest/spy's spyOn: `accessor` 'get' / 'set' spies on an accessor; a getter holding a
 // function (a live re-export) is spied through it; the original descriptor comes back on
 // restore (a method found on a prototype is deleted from the object again)
-function __viSpyOn(obj, key, accessor) {
+function __viUnmockClear(spec) {
+  if (globalThis.__pendingMocks) globalThis.__pendingMocks = globalThis.__pendingMocks.filter((m) => m.spec !== String(spec));
+  const pending = __ttDoMockKey(globalThis.__ttDir || globalThis.__ttEntryDir, spec);
+  if (pending) __ttDoMockWaits.delete(pending);
+}
+function __viUnmock(spec) {
+  __viUnmockClear(spec);
+  const dir = globalThis.__ttDir || globalThis.__cwd;
+  if (globalThis.__ttUnmock && dir) { try { globalThis.__ttUnmock(dir, String(spec)); } catch (e) {} }
+}
+function __viSpyLookup(obj, key, accessor) {
   __spyCheckTarget(obj);
-  // a registered ESM-graph namespace: the spy is its override (esm_spy.rs, turbo-test#131,
-  // #146); its current value (a spy already set on it included) is the original
   const nsRaw = typeof obj === 'object' ? __ttNsRaw.get(obj) || obj : obj;
   const isNs = __spyIsNs(nsRaw, key, accessor);
   const found = isNs ? undefined : __mockDescriptor(obj, key);
@@ -6379,16 +6411,24 @@ function __viSpyOn(obj, key, accessor) {
   const [accessType, ssr] = __spyAccess(accessor, desc);
   const original = __spyOriginal(isNs, nsRaw, obj, key, desc, accessType);
   const originalImpl = ssr && original ? original.call(obj) : original;
+  return { nsRaw, isNs, descObj, desc, accessType, ssr, original, originalImpl };
+}
+function __viSpyReassign(obj, key, isNs, desc, accessType, cb) {
+  if (isNs) { globalThis.__ttNsSet(obj, key, cb); return; }
+  const d = Object.assign({}, desc || { configurable: true, writable: true });
+  delete d.value;
+  if (accessType !== 'value') delete d.writable;
+  d[accessType] = cb;
+  Object.defineProperty(obj, key, d);
+}
+// @vitest/spy's spyOn: `accessor` 'get' / 'set' spies on an accessor; a getter holding a
+// function (a live re-export) is spied through it; the original descriptor comes back on
+// restore (a method found on a prototype is deleted from the object again)
+function __viSpyOn(obj, key, accessor) {
+  const { isNs, descObj, desc, accessType, ssr, original, originalImpl } = __viSpyLookup(obj, key, accessor);
   __viSpyOnCheck(originalImpl, accessType, original);
   if (globalThis.vi.isMockFunction(originalImpl)) return originalImpl;
-  const reassign = (cb) => {
-    if (isNs) { globalThis.__ttNsSet(obj, key, cb); return; }
-    const d = Object.assign({}, desc || { configurable: true, writable: true });
-    delete d.value;
-    if (accessType !== 'value') delete d.writable;
-    d[accessType] = cb;
-    Object.defineProperty(obj, key, d);
-  };
+  const reassign = (cb) => __viSpyReassign(obj, key, isNs, desc, accessType, cb);
   const restore = () => {
     if (!isNs && descObj !== obj) Reflect.deleteProperty(obj, key);
     else if (!isNs && desc && !original) Object.defineProperty(obj, key, desc);
@@ -6409,13 +6449,7 @@ globalThis.vi = {
   // module runs, registering the mock keyed by the resolved absolute path. The factory runs
   // here, in the calling module's scope (so closures over setup-file vars work).
   mock: (spec, factory) => __ttMock(spec, factory, true),
-  unmock: (spec) => {
-    if (globalThis.__pendingMocks) globalThis.__pendingMocks = globalThis.__pendingMocks.filter((m) => m.spec !== String(spec));
-    const pending = __ttDoMockKey(globalThis.__ttDir || globalThis.__ttEntryDir, spec);
-    if (pending) __ttDoMockWaits.delete(pending);
-    const dir = globalThis.__ttDir || globalThis.__cwd;
-    if (globalThis.__ttUnmock && dir) { try { globalThis.__ttUnmock(dir, String(spec)); } catch (e) {} }
-  },
+  unmock: (spec) => __viUnmock(spec),
   // vitest's: a string path or a TypeError; the result disposes the mock (`using`)
   doMock: (spec, factory) => {
     __viPath('doMock', spec);
@@ -6605,14 +6639,17 @@ function __jestApplyConfig(ft) {
   __jestTimerDefaults = ft && typeof ft === 'object' ? ft : {};
   if (__jestTimerDefaults.enableGlobally === true) __jestInstallFake();
 }
+function __jestFakeSkip(legacy, c) {
+  if (legacy) return new Set(['Date', 'performance', 'hrtime']);
+  return new Set(Array.isArray(c.doNotFake) ? c.doNotFake : []);
+}
 function __jestInstallFake(cfg) {
   const c = Object.assign({}, __jestTimerDefaults, cfg);
   const legacy = c.legacyFakeTimers === true;
-  const skip = new Set(legacy ? ['Date', 'performance', 'hrtime'] : Array.isArray(c.doNotFake) ? c.doNotFake : []);
-  const at = c.now === undefined ? undefined : c.now;
+  const skip = __jestFakeSkip(legacy, c);
   const delta = typeof c.advanceTimers === 'number' ? c.advanceTimers : undefined;
   __installFake({
-    now: legacy ? undefined : at,
+    now: legacy ? undefined : c.now,
     toFake: __TO_FAKE.filter((k) => !skip.has(k)),
     loopLimit: c.timerLimit || 100000,
     shouldAdvanceTime: !legacy && (c.advanceTimers === true || delta !== undefined),
