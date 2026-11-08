@@ -4506,9 +4506,9 @@ function __arrayBufferEquality(a, b) {
 function __subsetEquality(object, subset, testers = []) {
   const inner = testers.filter((t) => t !== __subsetEquality);
   const inObj = (o, k) => !!o && typeof o === 'object' && o !== Object.prototype && (__hasKey(o, k) || inObj(Object.getPrototypeOf(o), k));
+  const isPlainSubsetTarget = (sub) => sub !== null && typeof sub === 'object' && !__isError(sub) && !Array.isArray(sub) && !(sub instanceof Date) && !(sub instanceof Set) && !(sub instanceof Map);
   const withSeen = (seen = new WeakMap()) => (obj, sub) => {
-    if (!(sub !== null && typeof sub === 'object' && !__isError(sub) && !Array.isArray(sub) &&
-      !(sub instanceof Date) && !(sub instanceof Set) && !(sub instanceof Map))) return undefined;
+    if (!isPlainSubsetTarget(sub)) return undefined;
     return Object.keys(sub).every((k) => {
       if (sub[k] != null && typeof sub[k] === 'object') {
         if (seen.has(sub[k])) return __equals(obj[k], sub[k], inner);
@@ -4596,25 +4596,27 @@ function __natCharCode(c) {
   for (const [hi, delta] of __NAT_RANGES) if (c < hi) return c + delta;
   return c - 63;
 }
+const __isDigitCode = (c) => c < 76 && c > 65;
 // natural-compare-lite, the order vitest writes snapshot keys in.
 function __naturalCompare(a, b) {
   let i, codeA, codeB = 1, posA = 0, posB = 0;
   const code = (str, pos, num) => {
     if (num) {
-      for (i = pos; (num = code(str, i)), num < 76 && num > 65;) ++i;
+      for (i = pos; (num = code(str, i)), __isDigitCode(num);) ++i;
       return +str.slice(pos - 1, i);
     }
     return __natCharCode(str.charCodeAt(pos) || 0);
+  };
+  const promoteDigits = () => {
+    codeA = code(a, posA, posA);
+    codeB = code(b, posB, (posA = i));
+    posB = i;
   };
   if ((a += '') !== (b += '')) {
     for (; codeB;) {
       codeA = code(a, posA++);
       codeB = code(b, posB++);
-      if (codeA < 76 && codeB < 76 && codeA > 66 && codeB > 66) {
-        codeA = code(a, posA, posA);
-        codeB = code(b, posB, (posA = i));
-        posB = i;
-      }
+      if (__isDigitCode(codeA) && __isDigitCode(codeB)) promoteDigits();
       if (codeA !== codeB) return codeA < codeB ? -1 : 1;
     }
   }
@@ -4807,12 +4809,16 @@ function __snapCheckSkipped(st, skipped) {
 }
 // __snapFinish's save of the snapshot file (or, under -u, delete of an emptied one); returns
 // whether the file counts as deleted
+function __snapWriteExternal(st) {
+  globalThis.__fs_mkdir(st.sf.dir, true);
+  globalThis.__fs_writeFile(st.sf.path, __serializeSnapFile(st.data), false);
+}
+function __snapHasPendingWrite(st, external) {
+  return (st.dirty || st.unchecked.size) && (external || st.inline || st.raw);
+}
 function __snapSave(st, external, mode) {
-  if ((st.dirty || st.unchecked.size) && (external || st.inline || st.raw)) {
-    if (external) {
-      globalThis.__fs_mkdir(st.sf.dir, true);
-      globalThis.__fs_writeFile(st.sf.path, __serializeSnapFile(st.data), false);
-    }
+  if (__snapHasPendingWrite(st, external)) {
+    if (external) __snapWriteExternal(st);
     return false;
   }
   if (!external && st.exists) {
@@ -4823,6 +4829,11 @@ function __snapSave(st, external, mode) {
 }
 // End of the file: mark the snapshots of skipped tests checked, drop the obsolete ones under -u,
 // save (or, under -u, delete an emptied file) and report the counts.
+function __snapDropObsolete(st, uncheckedKeys) {
+  for (const k of uncheckedKeys) delete st.data[k];
+  st.dirty = true;
+  st.unchecked.clear();
+}
 function __snapFinish(skipped) {
   const st = __snapState;
   if (!st.loaded) {
@@ -4833,11 +4844,7 @@ function __snapFinish(skipped) {
   __snapCheckSkipped(st, skipped);
   const mode = __snapMode();
   const uncheckedKeys = [...st.unchecked];
-  if (uncheckedKeys.length && mode === 'all') {
-    for (const k of uncheckedKeys) delete st.data[k];
-    st.dirty = true;
-    st.unchecked.clear();
-  }
+  if (uncheckedKeys.length && mode === 'all') __snapDropObsolete(st, uncheckedKeys);
   __writeInlineSnapshots(st.inlineWrites);
   const external = Object.keys(st.data).length;
   const deleted = __snapSave(st, external, mode);
@@ -4854,28 +4861,43 @@ function __thrownBy(actual) {
   if (actual instanceof Error) return [true, actual];
   return [false, undefined];
 }
+function __isDomContain(actual) { return typeof Node !== 'undefined' && actual instanceof Node; }
+function __toContainDom(c, actual, x) {
+  if (!(x instanceof Node)) throw new TypeError(`toContain() expected a DOM node as the argument, but got ${typeof x}`);
+  return c(actual.contains(x), 'expected #{this} to contain element #{exp}', 'expected #{this} not to contain element #{exp}', x);
+}
 // toThrow() / toThrow(string) / toThrow(RegExp), as chai's `throws` with vitest's messages
+function __throwShown(x) {
+  if (x instanceof Error) return x.toString();
+  if (typeof x === 'string') return x;
+  return x && x.constructor && x.constructor.name;
+}
+function __throwMessage(err) {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'string') return err;
+  return String(err);
+}
 function __toThrowChai(negated, expected, threw, err, fnShown) {
-  const shown = (x) => (x instanceof Error ? x.toString() : typeof x === 'string' ? x : x && x.constructor && x.constructor.name);
   if (expected === undefined) {
-    return __chaiAssert(negated, threw, 'expected #{this} to throw an error', 'expected #{this} to not throw an error but #{act} was thrown', fnShown, undefined, shown(err));
+    return __chaiAssert(negated, threw, 'expected #{this} to throw an error', 'expected #{this} to not throw an error but #{act} was thrown', fnShown, undefined, __throwShown(err));
   }
   if (!threw) {
     if (negated) return;
     throw new __ChaiAssertionError(__chaiMsg('expected #{this} to throw an error', fnShown));
   }
-  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : String(err);
+  const message = __throwMessage(err);
   const re = expected === '' ? /^$/ : expected;
   const matches = re instanceof RegExp ? re.test(message) : message.includes(re);
   const verb = re instanceof RegExp ? 'matching' : 'including';
   return __chaiAssert(negated, matches, `expected #{this} to throw error ${verb} #{exp} but got #{act}`, `expected #{this} to throw error not ${verb} #{exp}`, fnShown, re, message);
 }
 // toThrow(class / Error / asymmetric matcher / value); `c` is the matcher's chai assert
+function __toThrowFn(c, expected, threw, err) {
+  const name = expected.name || expected.prototype.constructor.name;
+  return c(threw && err instanceof expected, `expected error to be instance of ${name}`, `expected error not to be instance of ${name}`, expected, err);
+}
 function __toThrowValue(c, testers, expected, threw, err) {
-  if (typeof expected === 'function') {
-    const name = expected.name || expected.prototype.constructor.name;
-    return c(threw && err instanceof expected, `expected error to be instance of ${name}`, `expected error not to be instance of ${name}`, expected, err);
-  }
+  if (typeof expected === 'function') return __toThrowFn(c, expected, threw, err);
   // an Error or any other value: vitest's `equals(thrown, expected, [iterableEquality])`
   // (Errors by name / message / cause / own props; a plain object never equals an Error)
   if (__isError(expected)) {
@@ -4888,7 +4910,9 @@ function __toThrowValue(c, testers, expected, threw, err) {
 }
 // The jest-style matchers of one call on a chai Assertion (__attachMatcher): `actual`, `negated`,
 // `message` and `promise` are the assertion's object / negate / message / promise flags.
-function makeExpect(actual, negated = false, message = undefined, promise = '') {
+function makeExpect(actual, negated, message, promise) {
+  negated = negated === true;
+  promise = promise || '';
   // `msg` is a thunk: the failure message (and the formatting of the operands in it) is built
   // only when the assertion fails, as vitest does — formatting can throw (a native class
   // prototype whose members check their receiver) and must not fail a passing assertion.
@@ -4945,15 +4969,11 @@ function makeExpect(actual, negated = false, message = undefined, promise = '') 
       cn(pass, `expected #{this} to be close to #{exp}, received difference is ${receivedDiff}, but expected ${expectedDiff}`, `expected #{this} to not be close to #{exp}, received difference is ${receivedDiff}, but expected ${expectedDiff}`, n);
     },
     toContain(x) {
-      if (typeof Node !== 'undefined' && actual instanceof Node) {
-        if (!(x instanceof Node)) throw new TypeError(`toContain() expected a DOM node as the argument, but got ${typeof x}`);
-        return c(actual.contains(x), 'expected #{this} to contain element #{exp}', 'expected #{this} not to contain element #{exp}', x);
-      }
+      if (__isDomContain(actual)) return __toContainDom(c, actual, x);
       if (typeof actual === 'string' && typeof x === 'string') return c(actual.includes(x), 'expected #{this} to contain #{exp}', 'expected #{this} not to contain #{exp}', x);
       // chai's include on the value made indexable (vitest: Array.from)
       const list = actual != null && typeof actual !== 'string' ? Array.from(actual) : actual;
-      const pass = list != null && list.includes(x);
-      __chaiAssert(negated, pass, 'expected #{this} to include #{exp}', 'expected #{this} to not include #{exp}', list, x, list);
+      __chaiAssert(negated, list != null && list.includes(x), 'expected #{this} to include #{exp}', 'expected #{this} to not include #{exp}', list, x, list);
     },
     toContainEqual(x) { c(actual != null && Array.from(actual).some((a) => __equals(a, x, testers)), 'expected #{this} to deep equally contain #{exp}', 'expected #{this} to not deep equally contain #{exp}', x); },
     toBeInstanceOf(ctor) {
@@ -5235,16 +5255,19 @@ function __hintHead(matcherName, received, o, dim) {
   else { hint += dim(`${dimString}.`) + matcherName; dimString = ''; }
   return [hint, dimString];
 }
+function __hintExpectedPart(o, dim, expected, dimString) {
+  if (expected === '') return { hint: '', dimString: dimString + '()' };
+  let hint = dim(`${dimString}(`) + o.expectedColor(expected);
+  if (o.secondArgument) hint += dim(', ') + o.secondArgumentColor(o.secondArgument);
+  return { hint, dimString: ')' };
+}
 function __matcherHint(matcherName, received = 'received', expected = 'expected', options = {}) {
   const o = __hintOptions(options);
   const dim = __dcol.dim;
   let [hint, dimString] = __hintHead(matcherName, received, o, dim);
-  if (expected === '') dimString += '()';
-  else {
-    hint += dim(`${dimString}(`) + o.expectedColor(expected);
-    if (o.secondArgument) hint += dim(', ') + o.secondArgumentColor(o.secondArgument);
-    dimString = ')';
-  }
+  const part = __hintExpectedPart(o, dim, expected, dimString);
+  hint += part.hint;
+  dimString = part.dimString;
   if (o.comment !== '') dimString += ` // ${o.comment}`;
   if (dimString !== '') hint += dim(dimString);
   return hint;
@@ -5446,17 +5469,25 @@ globalThis.expect.poll = function poll(fn, options = {}) {
   if (!test) throw new Error('expect.poll() must be called inside a test');
   const assertion = __chai.expect(null, message);
   fn = fn.bind(assertion);
-  const proxy = new Proxy(assertion, { get(target, key, receiver) {
+  const __pollRejectKey = (key) => {
     if (key === 'resolves' || key === 'rejects') throw new SyntaxError(`expect.poll() is not supported in combination with .${key}`);
+    if (typeof key === 'string' && __pollUnsupported.includes(key)) throw new SyntaxError(`expect.poll() is not supported in combination with .${key}(). Use vi.waitFor() if your assertion condition is unstable.`);
+  };
+  const proxy = new Proxy(assertion, { get(target, key, receiver) {
+    __pollRejectKey(key);
     const matcher = Reflect.get(target, key, receiver);
     if (typeof matcher !== 'function') return matcher instanceof __chai.Assertion ? proxy : matcher;
     if (key === 'assert') return matcher;
-    if (typeof key === 'string' && __pollUnsupported.includes(key)) throw new SyntaxError(`expect.poll() is not supported in combination with .${key}(). Use vi.waitFor() if your assertion condition is unstable.`);
     return function __VITEST_POLL_CHAIN__(...args) {
       const STACK_TRACE_ERROR = new Error('STACK_TRACE_ERROR');
       const withStack = (err) => {
         if (err && typeof err === 'object' && STACK_TRACE_ERROR.stack !== undefined) err.stack = STACK_TRACE_ERROR.stack.replace(STACK_TRACE_ERROR.message, err.message);
         return err;
+      };
+      const onPollFail = (err, last) => {
+        if (!last) return false;
+        if (err && typeof err === 'object' && err.cause == null) err.cause = new Error('Matcher did not succeed in time.');
+        throw withStack(err);
       };
       const run = async () => {
         let timedOut = false;
@@ -5469,10 +5500,7 @@ globalThis.expect.poll = function poll(fn, options = {}) {
               __cu.flag(assertion, 'object', obj);
               return await matcher.call(assertion, ...args);
             } catch (err) {
-              if (last) {
-                if (err && typeof err === 'object' && err.cause == null) err.cause = new Error('Matcher did not succeed in time.');
-                throw withStack(err);
-              }
+              onPollFail(err, last);
               await new Promise((resolve) => __scheduleInternal(resolve, interval));
               if (__loop.fake) __loop.advance(interval);
             }
