@@ -4403,8 +4403,8 @@ function __eq(a, b, aStack, bStack, testers, hasKey) {
   if (fast !== __EQ_NEXT) return fast;
   return __eqWalk(a, b, aStack, bStack, testers, hasKey, cls);
 }
-const __bothIterable = (a, b) => !(typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) || Array.isArray(b) ||
-  a == null || b == null || !a[Symbol.iterator] || !b[Symbol.iterator]);
+const __isComparableIter = (v) => v != null && typeof v === 'object' && !Array.isArray(v) && !!v[Symbol.iterator];
+const __bothIterable = (a, b) => __isComparableIter(a) && __isComparableIter(b);
 // iterableEquality of two Sets: every member of `a` is in `b` or deep-equals one there
 function __iterSetEq(a, b, inner) {
   for (const av of a) {
@@ -4417,13 +4417,14 @@ function __iterSetEq(a, b, inner) {
   return true;
 }
 // iterableEquality of two Maps: every entry of `a` is in `b` or deep-equals one there
+function __iterMapHit(ak, av, b, inner) {
+  for (const [bk, bv] of b) if (__equals(ak, bk, inner) === true && __equals(av, bv, inner) === true) return true;
+  return false;
+}
 function __iterMapEq(a, b, inner) {
   for (const [ak, av] of a) {
-    if (!b.has(ak) || !__equals(av, b.get(ak), inner)) {
-      let has = false;
-      for (const [bk, bv] of b) if (__equals(ak, bk, inner) === true && __equals(av, bv, inner) === true) has = true;
-      if (!has) return false;
-    }
+    if (b.has(ak) && __equals(av, b.get(ak), inner)) continue;
+    if (!__iterMapHit(ak, av, b, inner)) return false;
   }
   return true;
 }
@@ -4462,10 +4463,15 @@ function __iterableEqualityCompare(a, b, testers, aStack, bStack) {
 // vitest iterableEquality: two non-array iterables of the same constructor — Sets by members and
 // Maps by entries (in any order, deep-equal members match), others in iteration order plus their
 // enumerable own entries.
+function __iterStackHit(a, b, aStack, bStack) {
+  for (let i = aStack.length; i--;) if (aStack[i] === a) return bStack[i] === b;
+  return __EQ_NEXT;
+}
 function __iterableEquality(a, b, testers = [], aStack = [], bStack = []) {
   if (!__bothIterable(a, b)) return undefined;
   if (a.constructor !== b.constructor) return false;
-  for (let i = aStack.length; i--;) if (aStack[i] === a) return bStack[i] === b;
+  const seen = __iterStackHit(a, b, aStack, bStack);
+  if (seen !== __EQ_NEXT) return seen;
   aStack.push(a);
   bStack.push(b);
   return __iterableEqualityCompare(a, b, testers, aStack, bStack);
@@ -4480,13 +4486,16 @@ function __sparseArrayEquality(a, b, testers = []) {
   if (!Array.isArray(a) || !Array.isArray(b)) return undefined;
   return __equals(a, b, testers.filter((t) => t !== __sparseArrayEquality), true) && __equals(Object.keys(a), Object.keys(b));
 }
+function __arrayBufferViews(a, b) {
+  if (a instanceof DataView && b instanceof DataView) return [a, b];
+  if (!(a instanceof ArrayBuffer) || !(b instanceof ArrayBuffer)) return null;
+  try { return [new DataView(a), new DataView(b)]; } catch { return null; }
+}
 // vitest arrayBufferEquality: ArrayBuffers / DataViews by their bytes.
 function __arrayBufferEquality(a, b) {
-  let x = a, y = b;
-  if (!(a instanceof DataView && b instanceof DataView)) {
-    if (!(a instanceof ArrayBuffer) || !(b instanceof ArrayBuffer)) return undefined;
-    try { x = new DataView(a); y = new DataView(b); } catch { return undefined; }
-  }
+  const views = __arrayBufferViews(a, b);
+  if (views === null) return undefined;
+  const [x, y] = views;
   if (x.byteLength !== y.byteLength) return false;
   for (let i = 0; i < x.byteLength; i++) if (x.getUint8(i) !== y.getUint8(i)) return false;
   return true;
@@ -4580,15 +4589,11 @@ function __parseSnapFile(text) {
 }
 // natural-compare-lite's char-code mapping: lifts digits/letters into one monotonic range so
 // mixed alphanumeric strings compare in natural order (kept exactly as the upstream expression).
+// Each entry: [upper bound, delta]. c < hi → c + delta. The final branch handles c ≥ 123 as c - 63.
+const __NAT_RANGES = [[46, 20], [48, -1], [58, 18], [65, -11], [91, 11], [97, -37], [123, 5]];
 function __natCharCode(c) {
   if (c < 45 || c > 127) return c;
-  if (c < 46) return 65;
-  if (c < 48) return c - 1;
-  if (c < 58) return c + 18;
-  if (c < 65) return c - 11;
-  if (c < 91) return c + 11;
-  if (c < 97) return c - 37;
-  if (c < 123) return c + 5;
+  for (const [hi, delta] of __NAT_RANGES) if (c < hi) return c + delta;
   return c - 63;
 }
 // natural-compare-lite, the order vitest writes snapshot keys in.
@@ -4640,19 +4645,23 @@ function __snapApplyProps(received, props) {
   if (!__subsetMatches(received, props)) throw new Error('Snapshot properties mismatched');
   return __snapMerge(received, props);
 }
+const __snapIsObj = (x) => x != null && typeof x === 'object' && !Array.isArray(x) && !__isAsym(x);
+function __snapMergeEntry(target, source) {
+  if (__snapIsObj(source) && __snapIsObj(target)) return __snapMerge(target, source);
+  if (Array.isArray(source)) return __snapMerge(target, source);
+  return source;
+}
+function __snapMergeArrays(target, source) {
+  const out = Array.from(target);
+  source.forEach((s, i) => { out[i] = __snapMergeEntry(out[i], s); });
+  return out;
+}
 // vitest deepMergeSnapshot: the property matchers replace the received values they name
 function __snapMerge(target, source) {
-  const isObj = (x) => x != null && typeof x === 'object' && !Array.isArray(x) && !__isAsym(x);
-  if (Array.isArray(target) && Array.isArray(source)) {
-    const out = Array.from(target);
-    source.forEach((s, i) => { out[i] = isObj(s) && isObj(out[i]) ? __snapMerge(out[i], s) : Array.isArray(s) ? __snapMerge(out[i], s) : s; });
-    return out;
-  }
-  if (!isObj(target) || !isObj(source)) return source === undefined ? target : source;
+  if (Array.isArray(target) && Array.isArray(source)) return __snapMergeArrays(target, source);
+  if (!__snapIsObj(target) || !__snapIsObj(source)) return source === undefined ? target : source;
   const out = { ...target };
-  for (const k of Object.keys(source)) {
-    out[k] = isObj(source[k]) && isObj(target[k]) ? __snapMerge(target[k], source[k]) : Array.isArray(source[k]) ? __snapMerge(target[k], source[k]) : source[k];
-  }
+  for (const k of Object.keys(source)) out[k] = __snapMergeEntry(target[k], source[k]);
   return out;
 }
 
@@ -4682,34 +4691,41 @@ function __snapLoad() {
 }
 // @vitest/snapshot `_reconcile`: whether the snapshot passes, counting it and adding / updating
 // it (`add`) when the mode allows.
+function __snapReconcileWrite(st, pass, hasSnapshot, add, mode) {
+  if (mode !== 'all') { add(); st.added++; return; }
+  if (pass) { st.matched++; return; }
+  if (hasSnapshot) st.updated++; else st.added++;
+  add();
+}
 function __snapReconcile(st, pass, hasSnapshot, add) {
   const mode = __snapMode();
   if ((hasSnapshot && mode === 'all') || (!hasSnapshot && mode !== 'none')) {
-    if (mode === 'all') {
-      if (!pass) { if (hasSnapshot) st.updated++; else st.added++; add(); }
-      else st.matched++;
-    } else { add(); st.added++; }
+    __snapReconcileWrite(st, pass, hasSnapshot, add, mode);
     return true;
   }
   if (!pass) { st.unmatched++; return false; }
   st.matched++;
   return true;
 }
-// @vitest/snapshot stripSnapshotIndentation
+// @vitest/snapshot stripSnapshotIndentation — returns the stripped lines or null when the
+// snapshot shouldn't be stripped (keeps its original indent instead).
+function __stripSnapLines(lines, indent) {
+  for (let i = 1; i < lines.length - 1; i++) {
+    if (lines[i] === '') continue;
+    if (lines[i].indexOf(indent) !== 0) return null;
+    lines[i] = lines[i].substring(indent.length);
+  }
+  return lines;
+}
 function __stripSnapIndent(snap) {
   const m = snap.match(/^([^\S\n]*)\S/m);
   if (!m || !m[1]) return snap;
-  const indent = m[1];
   const lines = snap.split(/\n/g);
   if (lines.length <= 2 || lines[0].trim() !== '' || lines[lines.length - 1].trim() !== '') return snap;
-  for (let i = 1; i < lines.length - 1; i++) {
-    if (lines[i] !== '') {
-      if (lines[i].indexOf(indent) !== 0) return snap;
-      lines[i] = lines[i].substring(indent.length);
-    }
-  }
-  lines[lines.length - 1] = '';
-  return lines.join('\n');
+  const stripped = __stripSnapLines(lines, m[1]);
+  if (stripped === null) return snap;
+  stripped[stripped.length - 1] = '';
+  return stripped.join('\n');
 }
 // @vitest/snapshot prepareSnapString: the snapshot as a template literal indented like its line
 function __snapLiteral(snap, code, index) {
