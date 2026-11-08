@@ -523,16 +523,20 @@ fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -
     };
     let map_src = if with_map { Some((path, src)) } else { None };
     let (parts, mappings) = lower(ast, scoping, &ctx, &mut program, map_src)?;
+    Some(assemble_output(path, parts, mappings.as_ref()))
+}
 
-    // No ESM module syntax → CJS/script: return the transformed body unwrapped (no preamble), with
-    // just the `__toESM` helper prepended when a lowered `import()` calls it.
+/// Assemble the final output source for `emit_inner`, appending the inline source map when one was
+/// produced. Chooses the unwrapped (script / CJS) shape when the module has no ESM syntax, else the
+/// `assemble` wrapper.
+fn assemble_output(path: &Path, parts: ModuleParts, mappings: Option<&String>) -> String {
     if !parts.has_module_syntax {
         let helper = if parts.uses_to_esm { TO_ESM_HELPER } else { "" };
         let mut out = format!("{helper}{}", parts.body_code);
-        if let Some(m) = &mappings {
+        if let Some(m) = mappings {
             append_inline_map(&mut out, path, helper.matches('\n').count(), m);
         }
-        return Some(out);
+        return out;
     }
     let mut out = assemble(
         &parts.requires,
@@ -540,7 +544,7 @@ fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -
         &parts.exports,
         &parts.body_code,
     );
-    if let Some(m) = &mappings {
+    if let Some(m) = mappings {
         // lines before body_code in the output = preamble + the assembled-module prefix.
         let prefix = PREAMBLE.matches('\n').count()
             + assemble_module(&parts.requires, &parts.re_exports, &parts.exports, "")
@@ -548,7 +552,7 @@ fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -
                 .count();
         append_inline_map(&mut out, path, prefix, m);
     }
-    Some(out)
+    out
 }
 
 /// Parse `js` (already TS/JSX-stripped, plain JS) and lower to `ModuleParts` under `ctx`. Used by

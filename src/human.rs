@@ -496,6 +496,47 @@ fn test_file_path(c: &Colors, name: &str) -> String {
 /// properties (vitest's `printProperties: verbose`, turbo-test#97).
 fn errors_summary(res: &[FileResult], run: &Run, verbose: bool) -> String {
     let c = &run.colors;
+    let (suites, tests) = collect_failed_sections(res, run);
+    let total: usize = suites.iter().chain(&tests).map(|t| t.1.len()).sum();
+    let mut out = String::new();
+    let mut n = 0;
+    for (title, tasks) in [("Failed Suites", &suites), ("Failed Tests", &tests)] {
+        if tasks.is_empty() {
+            continue;
+        }
+        // errorBanner: divider(c.bold(c.bgRed(` ${title} `)), null, null, c.red)
+        let banner = c.bold(&c.bg_red(&format!(" {title} {} ", tasks.len())));
+        out.push_str(&format!("\n{}\n\n", divider(&banner, None, &|t| c.red(t))));
+        let queue = merge_section_errors(tasks);
+        for (error, names, notes, file) in queue {
+            n += 1;
+            for name in names {
+                out.push_str(&format!("{} {name}\n", c.bg_red(&c.bold(" FAIL "))));
+            }
+            out.push_str(&print_error(error, run.root, true, verbose, "", c));
+            if !notes.is_empty() {
+                out.push_str(&annotation_lines(c, notes, file, 1));
+                out.push('\n');
+            }
+            let bar = divider(&format!("[{n}/{total}]"), Some(1), &|t| t.to_string());
+            out.push_str(&format!("{}\n\n", c.red(&c.dim(&bar))));
+        }
+    }
+    out
+}
+
+/// One entry per failed task: `(full name, its errors, its annotations, the file's display name)`.
+/// The two sections of `errors_summary` — Failed Suites / Failed Tests.
+type FailedTask<'a> = (String, Vec<ErrorInfo>, &'a [Annotation], String);
+
+/// Walk every `FileResult` once and split its failures into the Failed Suites / Failed Tests
+/// buckets in the order `errors_summary` prints them. A file whose top-level setup failed goes in
+/// suites under its own `[ name ]`; a `SuiteError` goes in suites; a failed test goes in tests.
+fn collect_failed_sections<'a>(
+    res: &'a [FileResult],
+    run: &Run,
+) -> (Vec<FailedTask<'a>>, Vec<FailedTask<'a>>) {
+    let c = &run.colors;
     let sep = c.dim(" > ");
     let full = |name: &str, path: &str| {
         format!(
@@ -503,10 +544,8 @@ fn errors_summary(res: &[FileResult], run: &Run, verbose: bool) -> String {
             path.split(" > ").collect::<Vec<_>>().join(&sep)
         )
     };
-    // (task name, its errors) per section
-    // (task name, its errors, its annotations and the file's name) per section
-    let mut suites: Vec<(String, Vec<ErrorInfo>, &[Annotation], String)> = Vec::new();
-    let mut tests: Vec<(String, Vec<ErrorInfo>, &[Annotation], String)> = Vec::new();
+    let mut suites: Vec<FailedTask<'a>> = Vec::new();
+    let mut tests: Vec<FailedTask<'a>> = Vec::new();
     for r in res {
         let name = run.names[r.idx].to_string_lossy().to_string();
         if r.failed_file && r.tests.is_empty() && r.suite_errors.is_empty() {
@@ -530,42 +569,27 @@ fn errors_summary(res: &[FileResult], run: &Run, verbose: bool) -> String {
             tests.push((task, errors(t), &t.annotations, name.clone()));
         }
     }
-    let total: usize = suites.iter().chain(&tests).map(|t| t.1.len()).sum();
-    let mut out = String::new();
-    let mut n = 0;
-    for (title, tasks) in [("Failed Suites", &suites), ("Failed Tests", &tests)] {
-        if tasks.is_empty() {
-            continue;
-        }
-        // errorBanner: divider(c.bold(c.bgRed(` ${title} `)), null, null, c.red)
-        let banner = c.bold(&c.bg_red(&format!(" {title} {} ", tasks.len())));
-        out.push_str(&format!("\n{}\n\n", divider(&banner, None, &|t| c.red(t))));
-        // an error merges with an identical one of a task with the same annotations
-        type Queued<'q> = (&'q ErrorInfo, Vec<&'q str>, &'q [Annotation], &'q str);
-        let mut queue: Vec<Queued> = Vec::new();
-        for (name, errors, notes, file) in tasks.iter() {
-            for e in errors {
-                match queue.iter_mut().find(|q| q.0 == e && q.2 == *notes) {
-                    Some(q) => q.1.push(name),
-                    None => queue.push((e, vec![name], notes, file)),
-                }
+    (suites, tests)
+}
+
+/// One merged entry in a section's print queue: `(the error, the names of the tasks that share
+/// it, its annotations, the file the first such task belongs to)`.
+type MergedError<'q> = (&'q ErrorInfo, Vec<&'q str>, &'q [Annotation], &'q str);
+
+/// Merge identical errors across a section's tasks: an error merges with one already in the queue
+/// when both the error and the annotations match. The second task's name is then appended under
+/// the first task's `FAIL` banner rather than the error being printed again.
+fn merge_section_errors<'q>(tasks: &'q [FailedTask<'_>]) -> Vec<MergedError<'q>> {
+    let mut queue: Vec<MergedError<'q>> = Vec::new();
+    for (name, errs, notes, file) in tasks.iter() {
+        for e in errs {
+            match queue.iter_mut().find(|q| q.0 == e && q.2 == *notes) {
+                Some(q) => q.1.push(name),
+                None => queue.push((e, vec![name], notes, file)),
             }
-        }
-        for (error, names, notes, file) in queue {
-            n += 1;
-            for name in names {
-                out.push_str(&format!("{} {name}\n", c.bg_red(&c.bold(" FAIL "))));
-            }
-            out.push_str(&print_error(error, run.root, true, verbose, "", c));
-            if !notes.is_empty() {
-                out.push_str(&annotation_lines(c, notes, file, 1));
-                out.push('\n');
-            }
-            let bar = divider(&format!("[{n}/{total}]"), Some(1), &|t| t.to_string());
-            out.push_str(&format!("{}\n\n", c.red(&c.dim(&bar))));
         }
     }
-    out
+    queue
 }
 
 /// A string's length in UTF-16 code units (JavaScript's `length`).
@@ -622,12 +646,32 @@ pub fn print_error(
     if !e.diff.is_empty() {
         out.push_str(&format!("\n{}\n\n", e.diff));
     }
-    // vitest's nearest frame is the first in a file vite transformed: not an external
-    // node_modules one (turbo-test#173)
+    out.push_str(&render_frames(e, root, code_frame, c));
+    if let (true, Some(props)) = (properties, &e.properties) {
+        // printStack: c.red(c.dim(divider())), then c.red(c.bold('Serialized Error:')), c.gray(…)
+        out.push_str(&format!(
+            "{}\n{} {}\n",
+            c.red(&c.dim(&divider("", None, &|t| t.to_string()))),
+            c.red(&c.bold("Serialized Error:")),
+            c.gray(props)
+        ));
+    }
+    if let Some(cause) = &e.cause {
+        out.push_str(&print_error(cause, root, false, true, "Caused by: ", c));
+    }
+    out
+}
+
+/// Render the `❯ method file:line:col` frame lines for `e.frames`, the highlighted code frame
+/// for the nearest frame (when `code_frame` is on), and the trailing blank line. The nearest
+/// frame is the first `FileResult` in a file vite transformed — not an external `node_modules`
+/// one (turbo-test#173); it is cyan, the others are gray.
+fn render_frames(e: &ErrorInfo, root: &Path, code_frame: bool, c: &Colors) -> String {
     let frames: Vec<&Frame> = e.frames.iter().collect();
     let nearest = frames.iter().position(|f| {
         f.file.is_file() && !f.file.components().any(|c| c.as_os_str() == "node_modules")
     });
+    let mut out = String::new();
     for (i, f) in frames.iter().enumerate() {
         let path = f.file.strip_prefix(root).unwrap_or(&f.file);
         let at = format!(
@@ -653,18 +697,6 @@ pub fn print_error(
     }
     if !frames.is_empty() {
         out.push('\n');
-    }
-    if let (true, Some(props)) = (properties, &e.properties) {
-        // printStack: c.red(c.dim(divider())), then c.red(c.bold('Serialized Error:')), c.gray(…)
-        out.push_str(&format!(
-            "{}\n{} {}\n",
-            c.red(&c.dim(&divider("", None, &|t| t.to_string()))),
-            c.red(&c.bold("Serialized Error:")),
-            c.gray(props)
-        ));
-    }
-    if let Some(cause) = &e.cause {
-        out.push_str(&print_error(cause, root, false, true, "Caused by: ", c));
     }
     out
 }

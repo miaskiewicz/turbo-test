@@ -32,7 +32,7 @@ use std::path::Path;
 /// namespace registered, or `None` when there is nothing to do (or it does not parse).
 /// The returned shifts are the in-line edits (location.rs maps V8's columns back through them).
 pub fn spyable(file: &Path, code: &str) -> Option<(String, Vec<crate::location::Shift>)> {
-    if !code.contains("import") && !code.contains("export") {
+    if !has_module_syntax(code) {
         return None;
     }
     let allocator = Allocator::default();
@@ -110,16 +110,33 @@ pub fn spyable(file: &Path, code: &str) -> Option<(String, Vec<crate::location::
     for (s, e, text) in edits.into_iter().rev() {
         out.replace_range(s as usize..e as usize, &text);
     }
-    // the registration, after the last line
+    append_registration(&mut out, &mut m, file, exporter)?;
+    Some((out, shifts))
+}
+
+/// Cheap pre-parse filter: `spyable` only has work to do on files that use ESM module syntax.
+fn has_module_syntax(code: &str) -> bool {
+    code.contains("import") || code.contains("export")
+}
+
+/// Append `m.registration(file, exporter)` to `out` (ensuring a leading newline), or return `None`
+/// when the registration itself failed. A missing-but-successful registration is a no-op.
+fn append_registration(
+    out: &mut String,
+    m: &mut Module,
+    file: &Path,
+    exporter: bool,
+) -> Option<()> {
     let tail = m.registration(file, exporter)?;
-    if !tail.is_empty() {
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str(&tail);
+    if tail.is_empty() {
+        return Some(());
+    }
+    if !out.ends_with('\n') {
         out.push('\n');
     }
-    Some((out, shifts))
+    out.push_str(&tail);
+    out.push('\n');
+    Some(())
 }
 
 fn lit(s: &str) -> String {

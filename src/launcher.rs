@@ -389,30 +389,45 @@ fn scan_number(text: &str, key: &str) -> Option<String> {
     let mut from = 0usize;
     while let Some(rel) = text[from..].find(key) {
         let at = from + rel;
-        // guard: preceding char must not be '.', '_', alphanumeric (i.e. not part of a longer word)
-        let ok_prev = at == 0 || {
-            let p = b[at - 1];
-            p != b'.' && p != b'_' && !p.is_ascii_alphanumeric()
-        };
         let after = at + key.len();
-        if ok_prev {
-            let i = skip_ws(b, after);
-            if i < b.len() && b[i] == b':' {
-                let mut i = skip_ws(b, i + 1);
-                let start = i;
-                while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.') {
-                    i += 1;
-                }
-                if i > start {
-                    return Some(text[start..i].to_string());
-                }
-                // turbo-test#273: accept `Infinity` as a numeric value (no timeout).
-                if text[start..].starts_with("Infinity") {
-                    return Some("Infinity".to_string());
-                }
+        if is_key_boundary_prev(b, at) {
+            if let Some(v) = number_value_after_colon(text, b, after) {
+                return Some(v);
             }
         }
         from = after;
+    }
+    None
+}
+
+/// `key` matched at `at` is a real key, not the tail of another identifier: its preceding char
+/// (if any) is not `.`, `_` or alphanumeric.
+fn is_key_boundary_prev(b: &[u8], at: usize) -> bool {
+    if at == 0 {
+        return true;
+    }
+    let p = b[at - 1];
+    p != b'.' && p != b'_' && !p.is_ascii_alphanumeric()
+}
+
+/// From `after` (just past a matched key), look for `: <digits+dot-run or "Infinity">` and
+/// return the value as a string. `None` when there is no `:` or no value after it.
+fn number_value_after_colon(text: &str, b: &[u8], after: usize) -> Option<String> {
+    let i = skip_ws(b, after);
+    if i >= b.len() || b[i] != b':' {
+        return None;
+    }
+    let mut j = skip_ws(b, i + 1);
+    let start = j;
+    while j < b.len() && (b[j].is_ascii_digit() || b[j] == b'.') {
+        j += 1;
+    }
+    if j > start {
+        return Some(text[start..j].to_string());
+    }
+    // turbo-test#273: accept `Infinity` as a numeric value (no timeout).
+    if text[start..].starts_with("Infinity") {
+        return Some("Infinity".to_string());
     }
     None
 }
@@ -1429,26 +1444,39 @@ fn plan_arg(
         return i;
     }
     if !flag_takes_value(&a) {
-        if a.starts_with('-') {
-            forward.push(a);
-        } else if !a.is_empty() {
-            // skip empty args (e.g. a stray "" from a shell wrapper) — as a filter one would
-            // match every test file.
-            files.push(a);
-        }
+        push_plain_arg(a, forward, files);
         return i;
     }
-    // forward a value-flag's following value too (so it isn't seen as a file).
+    forward_value_flag(raw, i, a, forward, messages)
+}
+
+/// Dispatch a non-value-taking argument: a flag goes to `forward`, a non-empty bare token to
+/// `files`. An empty token (a stray `""` from a shell wrapper) is dropped — as a filter it would
+/// match every test file.
+fn push_plain_arg(a: String, forward: &mut Vec<String>, files: &mut Vec<String>) {
+    if a.starts_with('-') {
+        forward.push(a);
+    } else if !a.is_empty() {
+        files.push(a);
+    }
+}
+
+/// Forward a value-taking flag `a` at `i`, consuming its following value when one is present
+/// (so the runner does not misread a test-file path as the value). Returns the new `i`. When no
+/// value follows, the flag is dropped with a message (a `--coverage-*` one still implies
+/// `--coverage`, as it does in the runner).
+fn forward_value_flag(
+    raw: &[String],
+    i: usize,
+    a: String,
+    forward: &mut Vec<String>,
+    messages: &mut Vec<String>,
+) -> usize {
     if i + 1 < raw.len() && !raw[i + 1].starts_with('-') {
         forward.push(a);
         forward.push(raw[i + 1].clone());
         return i + 1;
     }
-    // No value (last token, or another flag follows). Forwarded alone it would sit
-    // right before the appended test files and the runner would take the first FILE
-    // as its value (`a.test.js --reporter` → usage error; `-t` → the path became the
-    // name pattern). Drop it with a warning; a `--coverage-*` one still implies
-    // --coverage, as it does in the runner.
     messages.push(format!("turbo-test: ignoring '{a}': missing value"));
     if a.starts_with("--coverage") {
         forward.push("--coverage".to_string());

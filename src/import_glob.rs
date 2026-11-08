@@ -25,10 +25,10 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrayExpression, ArrayExpressionElement, BinaryOperator, CallExpression,
+    ArrayExpression, ArrayExpressionElement, BinaryExpression, BinaryOperator, CallExpression,
     ComputedMemberExpression, ConditionalExpression, Expression, LogicalExpression,
     LogicalOperator, ObjectExpression, ObjectProperty, ObjectPropertyKind, PropertyKey,
-    PropertyKind, TemplateLiteral, UnaryExpression, UnaryOperator,
+    PropertyKind, StaticMemberExpression, TemplateLiteral, UnaryExpression, UnaryOperator,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
@@ -603,18 +603,26 @@ fn eval(e: &Expression) -> Result<Value, Eval> {
         Expression::TemplateLiteral(t) => eval_template(t)?,
         Expression::Identifier(id) => eval_identifier(&id.name)?,
         Expression::UnaryExpression(u) => eval_unary(u)?,
-        Expression::BinaryExpression(b) => {
-            let l = eval(&b.left)?;
-            binary(b.operator, l, eval(&b.right)?)?
-        }
+        Expression::BinaryExpression(b) => eval_binary(b)?,
         Expression::LogicalExpression(l) => eval_logical(l)?,
         Expression::ConditionalExpression(c) => eval_conditional(c)?,
-        Expression::StaticMemberExpression(m) => member(eval(&m.object)?, &m.property.name)?,
+        Expression::StaticMemberExpression(m) => eval_static_member(m)?,
         Expression::ComputedMemberExpression(m) => eval_computed(m)?,
         Expression::ArrayExpression(a) => eval_array(a)?,
         Expression::ObjectExpression(o) => eval_object(o)?,
         _ => return Err(Eval::Unsupported),
     })
+}
+
+/// A binary expression: evaluate both sides in source order, then combine with `binary`.
+fn eval_binary(b: &BinaryExpression) -> Result<Value, Eval> {
+    let l = eval(&b.left)?;
+    binary(b.operator, l, eval(&b.right)?)
+}
+
+/// A `.name` member access on a statically known object.
+fn eval_static_member(m: &StaticMemberExpression) -> Result<Value, Eval> {
+    member(eval(&m.object)?, &m.property.name)
 }
 
 fn eval_conditional(c: &ConditionalExpression) -> Result<Value, Eval> {
@@ -1020,41 +1028,65 @@ fn parse_call(it: &CallExpression) -> Option<Parsed> {
         None => return syntax(literals),
     }
     if let Some(arg) = it.arguments.get(1) {
-        let opts = match arg.as_expression() {
-            Some(e) => match e.get_inner_expression() {
-                Expression::ObjectExpression(_) => e,
-                e => {
-                    return syntax(format!(
-                        "Expected the second argument to be an object literal, but got \"{}\"",
-                        estree_type(e)
-                    ))
-                }
-            },
-            None => return syntax(
-                "Expected the second argument to be an object literal, but got \"SpreadElement\""
-                    .to_string(),
-            ),
-        };
-        if let Some(closer) = first_call_closer(opts) {
-            return Some(Parsed::Error(format!(
-                "Parse failed with 1 error:\nExpected `{closer}` but found `EOF`"
-            )));
-        }
-        let opts = match eval(opts) {
-            Ok(Value::Object(o)) => o,
-            Err(Eval::NotStatic) => {
-                return Some(Parsed::Error(
-                    "Vite is unable to parse the glob options as the value is not static"
-                        .to_string(),
-                ))
-            }
-            _ => return None,
-        };
-        if let Err(m) = glob_options(&opts, &mut call) {
-            return Some(Parsed::Error(m));
+        match apply_glob_options_arg(arg, &mut call) {
+            OptsOutcome::Ok => {}
+            OptsOutcome::Error(e) => return Some(e),
+            OptsOutcome::Skip => return None,
         }
     }
     Some(Parsed::Call(call))
+}
+
+/// Outcome of parsing the second argument of `import.meta.glob(...)`: the options were applied in
+/// place, a propagatable error occurred, or the call should be left to vite's own transform (opts
+/// that don't evaluate to an object literal).
+enum OptsOutcome {
+    Ok,
+    Error(Parsed),
+    Skip,
+}
+
+/// Parse the second argument of `import.meta.glob(...)` and fold its known options into `call`.
+/// Returns `OptsOutcome::Error(Parsed::Error)` on a syntax / static-eval failure so `parse_call`
+/// can propagate it, `OptsOutcome::Ok` on success (call mutated in place), and `OptsOutcome::Skip`
+/// when the options evaluate to something other than an object literal — vite silently leaves
+/// such calls to its own transform.
+fn apply_glob_options_arg(arg: &oxc_ast::ast::Argument, call: &mut Call) -> OptsOutcome {
+    let opts = match arg.as_expression() {
+        Some(e) => match e.get_inner_expression() {
+            Expression::ObjectExpression(_) => e,
+            e => {
+                return OptsOutcome::Error(Parsed::Error(format!(
+                    "Invalid glob import syntax: Expected the second argument to be an object literal, but got \"{}\"",
+                    estree_type(e)
+                )))
+            }
+        },
+        None => {
+            return OptsOutcome::Error(Parsed::Error(
+                "Invalid glob import syntax: Expected the second argument to be an object literal, but got \"SpreadElement\""
+                    .to_string(),
+            ))
+        }
+    };
+    if let Some(closer) = first_call_closer(opts) {
+        return OptsOutcome::Error(Parsed::Error(format!(
+            "Parse failed with 1 error:\nExpected `{closer}` but found `EOF`"
+        )));
+    }
+    let opts = match eval(opts) {
+        Ok(Value::Object(o)) => o,
+        Err(Eval::NotStatic) => {
+            return OptsOutcome::Error(Parsed::Error(
+                "Vite is unable to parse the glob options as the value is not static".to_string(),
+            ))
+        }
+        _ => return OptsOutcome::Skip,
+    };
+    if let Err(m) = glob_options(&opts, call) {
+        return OptsOutcome::Error(Parsed::Error(m));
+    }
+    OptsOutcome::Ok
 }
 
 /// The call's matches as (key, import specifier from the module), sorted by key; `None` when a
@@ -1094,29 +1126,61 @@ fn matches(
     };
     let mut found: Vec<(String, String)> = Vec::new();
     for (start, rest, relative) in &pos {
-        let dots = call.exhaustive || rest.starts_with('.') || rest.contains("/.");
-        let mut files = Vec::new();
-        walk_dir(start, "", dots, call.exhaustive, &mut files);
-        for (rel, abs) in files {
-            let excluded = neg.iter().any(|(nd, nrest, _)| {
-                abs.strip_prefix(nd)
-                    .is_ok_and(|r| glob(nrest, &crate::coverage::slash_path(r)))
-            });
-            if !glob(rest, &rel)
-                || excluded
-                || crate::canon::canonicalize(&abs).unwrap_or_else(|_| abs.clone()) == me
-            {
-                continue;
-            }
-            let key = match_key(base.as_deref(), *relative, dir, root, &abs);
-            if found.iter().any(|(k, _)| *k == key) {
-                continue;
-            }
-            found.push((key, relative_spec(dir, &abs)));
-        }
+        collect_pattern_matches(
+            call,
+            start,
+            rest,
+            *relative,
+            &neg,
+            &me,
+            base.as_deref(),
+            dir,
+            root,
+            &glob,
+            &mut found,
+        );
     }
     found.sort();
     Some(found)
+}
+
+/// Walk one positive pattern's directory and append its matches to `found`: skipping dotfile
+/// entries unless the pattern asks for them, honouring the negative patterns, dropping the module
+/// doing the glob, and deduplicating keys (first match wins, mirroring vite).
+#[allow(clippy::too_many_arguments)]
+fn collect_pattern_matches(
+    call: &Call,
+    start: &Path,
+    rest: &str,
+    relative: bool,
+    neg: &[(PathBuf, String, bool)],
+    me: &Path,
+    base: Option<&Path>,
+    dir: &Path,
+    root: &Path,
+    glob: &dyn Fn(&str, &str) -> bool,
+    found: &mut Vec<(String, String)>,
+) {
+    let dots = call.exhaustive || rest.starts_with('.') || rest.contains("/.");
+    let mut files = Vec::new();
+    walk_dir(start, "", dots, call.exhaustive, &mut files);
+    for (rel, abs) in files {
+        let excluded = neg.iter().any(|(nd, nrest, _)| {
+            abs.strip_prefix(nd)
+                .is_ok_and(|r| glob(nrest, &crate::coverage::slash_path(r)))
+        });
+        if !glob(rest, &rel)
+            || excluded
+            || crate::canon::canonicalize(&abs).unwrap_or_else(|_| abs.clone()) == me
+        {
+            continue;
+        }
+        let key = match_key(base, relative, dir, root, &abs);
+        if found.iter().any(|(k, _)| *k == key) {
+            continue;
+        }
+        found.push((key, relative_spec(dir, &abs)));
+    }
 }
 
 /// The key vite writes for match `abs`: relative to `base` when there is one, else to the
