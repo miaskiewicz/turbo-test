@@ -402,15 +402,30 @@ pub unsafe extern "C" fn napi_make_callback(
         if recv.is_null() || (argc > 0 && argv.is_null()) {
             return Err(napi_invalid_arg);
         }
-        let recv = to_object(s, recv)?;
-        let f: v8::Local<v8::Function> = val_arg(func)?.try_into().map_err(|_| napi_invalid_arg)?;
-        let args: Vec<v8::Local<v8::Value>> = (0..argc).map(|i| to_local(*argv.add(i))).collect();
-        // (Node runs the nextTicks and microtasks the call queued when its outermost callback
-        // scope closes: here, when the native call returns to JS or to the event loop)
-        let ret = f.call(s, recv.into(), &args).ok_or(V8_GAVE_NOTHING)?;
+        let ret = make_bound_call(s, recv, func, argc, argv)?;
         put(result, ret);
         Ok(())
     })
+}
+
+/// `func.call(recv, argv)` — the input conversions for `napi_make_callback`.
+unsafe fn make_bound_call<'s>(
+    s: &mut v8::PinScope<'static, 'static>,
+    recv: napi_value,
+    func: napi_value,
+    argc: usize,
+    argv: *const napi_value,
+) -> Result<v8::Local<'s, v8::Value>, napi_status> {
+    let recv = to_object(s, recv)?;
+    let f: v8::Local<v8::Function> = val_arg(func)?.try_into().map_err(|_| napi_invalid_arg)?;
+    let args = collect_arg_locals(argc, argv);
+    // (Node runs the nextTicks and microtasks the call queued when its outermost callback
+    // scope closes: here, when the native call returns to JS or to the event loop)
+    f.call(s, recv.into(), &args).ok_or(V8_GAVE_NOTHING)
+}
+
+unsafe fn collect_arg_locals(argc: usize, argv: *const napi_value) -> Vec<v8::Local<'static, v8::Value>> {
+    (0..argc).map(|i| to_local(*argv.add(i))).collect()
 }
 
 /// A napi_callback_scope (counted: a close without an open one is
@@ -528,15 +543,7 @@ pub unsafe extern "C" fn napi_create_threadsafe_function(
             return Err(napi_invalid_arg);
         }
         let result = out_arg(result)?;
-        let s = scope(env);
-        let func = if func.is_null() {
-            call_js_cb.ok_or(napi_invalid_arg)?;
-            None
-        } else {
-            let f: v8::Local<v8::Function> =
-                to_local(func).try_into().map_err(|_| napi_invalid_arg)?;
-            Some(v8::Global::new(s, f))
-        };
+        let func = normalize_tsfn_func(env, func, call_js_cb)?;
         resource_and_name(env, async_resource, async_resource_name)?;
         let tsfn = Box::into_raw(Box::new(Tsfn {
             env,
@@ -565,6 +572,21 @@ pub unsafe extern "C" fn napi_create_threadsafe_function(
     })
 }
 
+/// Turn the tsfn's JS callback into a Global, or `None` when there is only a native `call_js` cb.
+unsafe fn normalize_tsfn_func(
+    env: napi_env,
+    func: napi_value,
+    call_js_cb: Option<CallJsFn>,
+) -> Result<Option<v8::Global<v8::Function>>, napi_status> {
+    if func.is_null() {
+        call_js_cb.ok_or(napi_invalid_arg)?;
+        return Ok(None);
+    }
+    let s = scope(env);
+    let f: v8::Local<v8::Function> = to_local(func).try_into().map_err(|_| napi_invalid_arg)?;
+    Ok(Some(v8::Global::new(s, f)))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_threadsafe_function_context(
     func: *mut Tsfn,
@@ -590,10 +612,7 @@ pub unsafe extern "C" fn napi_call_threadsafe_function(
     let t = &*func;
     let mut shared = t.lock();
     // a full queue: napi_queue_full, or (napi_tsfn_blocking) wait for space
-    while t.max_queue_size > 0
-        && shared.queue.len() >= t.max_queue_size
-        && shared.state == TsfnState::Open
-    {
+    while queue_full_and_open(t, &shared) {
         if is_blocking == 0 {
             return napi_queue_full;
         }
@@ -604,7 +623,18 @@ pub unsafe extern "C" fn napi_call_threadsafe_function(
         t.send(&mut shared);
         return napi_ok;
     }
-    // closing: the calling thread lets go of it
+    call_release_closing(func, shared)
+}
+
+fn queue_full_and_open(t: &Tsfn, shared: &TsfnShared) -> bool {
+    t.max_queue_size > 0 && shared.queue.len() >= t.max_queue_size && shared.state == TsfnState::Open
+}
+
+/// Shared tail: the thread letting go of a closing tsfn; drops it when it was the last.
+unsafe fn call_release_closing(
+    func: *mut Tsfn,
+    mut shared: std::sync::MutexGuard<TsfnShared>,
+) -> napi_status {
     if shared.thread_count == 0 {
         return napi_invalid_arg;
     }
@@ -644,21 +674,25 @@ pub unsafe extern "C" fn napi_release_threadsafe_function(
         return napi_invalid_arg;
     }
     shared.thread_count -= 1;
-    // the last thread, or napi_tsfn_abort: no more calls; the JS thread closes it
-    let abort = mode == 1;
-    if (shared.thread_count == 0 || abort) && shared.state == TsfnState::Open {
-        if abort {
-            shared.state = TsfnState::Closing;
-            t.space.notify_all();
-        }
-        t.send(&mut shared);
-    }
+    release_notify(t, &mut shared, mode == 1);
     let last = shared.state == TsfnState::Closed && shared.thread_count == 0;
     drop(shared);
     if last {
         drop(Box::from_raw(func));
     }
     napi_ok
+}
+
+/// The last thread or `napi_tsfn_abort`: no more calls; the JS thread closes it.
+fn release_notify(t: &Tsfn, shared: &mut TsfnShared, abort: bool) {
+    if (shared.thread_count != 0 && !abort) || shared.state != TsfnState::Open {
+        return;
+    }
+    if abort {
+        shared.state = TsfnState::Closing;
+        t.space.notify_all();
+    }
+    t.send(shared);
 }
 
 #[no_mangle]
@@ -689,42 +723,58 @@ pub unsafe extern "C" fn napi_unref_threadsafe_function(
 /// and no thread holds it any more, its handles close.
 unsafe fn dispatch_one(scope: &mut v8::PinScope, tsfn: *mut Tsfn) {
     let t = &mut *tsfn;
-    let (data, more) = {
-        let mut shared = t.lock();
-        shared.dispatch_posted = false;
-        let mut data = None;
-        if shared.state == TsfnState::Open {
-            data = shared.queue.pop_front();
-            if data.is_some() && t.max_queue_size > 0 {
-                t.space.notify_all();
-            }
-            if shared.queue.is_empty() && shared.thread_count == 0 {
-                shared.state = TsfnState::Closing;
-                t.space.notify_all();
-                close_handles(tsfn);
-            }
-        } else {
-            close_handles(tsfn);
-        }
-        let more = !shared.queue.is_empty() && shared.state == TsfnState::Open;
-        if more {
-            t.send(&mut shared);
-        }
-        (data, more)
-    };
-    let _ = more;
+    let data = dispatch_pop(t, tsfn);
     if let Some(data) = data {
-        let env = t.env;
-        in_env_scope(scope, env, || {
-            let s = scope_of(env);
-            let js_callback = t.func.as_ref().map_or(std::ptr::null_mut(), |f| {
-                to_napi(v8::Local::new(s, f).into())
-            });
-            let call_js = t.call_js.unwrap_or(default_call_js);
-            let _ = call_addon(|| call_js(env, js_callback, t.context, data.0));
-            callback_exception(env, false);
-        });
+        dispatch_run(scope, t, data);
     }
+}
+
+/// Pop one queued call from the tsfn; close handles when the queue drains, and re-post when more
+/// work remains.
+unsafe fn dispatch_pop(t: &Tsfn, tsfn: *mut Tsfn) -> Option<SendPtr<c_void>> {
+    let mut shared = t.lock();
+    shared.dispatch_posted = false;
+    let data = pop_queued_call(t, tsfn, &mut shared);
+    if !shared.queue.is_empty() && shared.state == TsfnState::Open {
+        t.send(&mut shared);
+    }
+    data
+}
+
+/// The open-state branch: pop one entry and, when draining the queue, mark the tsfn closing.
+unsafe fn pop_queued_call(
+    t: &Tsfn,
+    tsfn: *mut Tsfn,
+    shared: &mut TsfnShared,
+) -> Option<SendPtr<c_void>> {
+    if shared.state != TsfnState::Open {
+        close_handles(tsfn);
+        return None;
+    }
+    let data = shared.queue.pop_front();
+    if data.is_some() && t.max_queue_size > 0 {
+        t.space.notify_all();
+    }
+    if shared.queue.is_empty() && shared.thread_count == 0 {
+        shared.state = TsfnState::Closing;
+        t.space.notify_all();
+        close_handles(tsfn);
+    }
+    data
+}
+
+/// Run one dispatched call on the JS thread, inside the tsfn's env scope.
+unsafe fn dispatch_run(scope: &mut v8::PinScope, t: &Tsfn, data: SendPtr<c_void>) {
+    let env = t.env;
+    in_env_scope(scope, env, || {
+        let s = scope_of(env);
+        let js_callback = t.func.as_ref().map_or(std::ptr::null_mut(), |f| {
+            to_napi(v8::Local::new(s, f).into())
+        });
+        let call_js = t.call_js.unwrap_or(default_call_js);
+        let _ = call_addon(|| call_js(env, js_callback, t.context, data.0));
+        callback_exception(env, false);
+    });
 }
 
 /// The env's current scope.
