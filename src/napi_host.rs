@@ -3831,15 +3831,11 @@ pub unsafe extern "C" fn napi_define_class(
     out: *mut napi_value,
 ) -> napi_status {
     js_call(env, |s| {
-        if out.is_null() {
+        if out.is_null() || name.is_null() {
             return Err(napi_invalid_arg);
         }
         let ctor = ctor.ok_or(napi_invalid_arg)?;
         let props = descriptors(property_count, properties)?;
-        // as Node's CHECK_NEW_FROM_UTF8_LEN: the class name is required
-        if name.is_null() {
-            return Err(napi_invalid_arg);
-        }
         let tpl = callback_template(s, env, ctor, data, None);
         let class_name =
             v8::String::new_from_utf8(s, utf8_arg(name, len), v8::NewStringType::Internalized)
@@ -3847,28 +3843,7 @@ pub unsafe extern "C" fn napi_define_class(
         tpl.set_class_name(class_name);
         let proto = tpl.prototype_template(s);
         for p in props.iter().filter(|p| p.attributes & napi_static == 0) {
-            let key = property_name(s, p)?;
-            let attr = template_attributes(p);
-            if p.getter.is_some() || p.setter.is_some() {
-                let getter = p
-                    .getter
-                    .map(|cb| callback_template(s, env, cb, p.data, None));
-                let setter = p
-                    .setter
-                    .map(|cb| callback_template(s, env, cb, p.data, None));
-                proto.set_accessor_property(key, getter, setter, attr);
-            } else if let Some(method) = p.method {
-                let sig = v8::Signature::new(s, tpl);
-                let t = callback_template(s, env, method, p.data, Some(sig));
-                proto.set_with_attr(key, t.into(), attr);
-            } else {
-                // A template holds only primitives: V8 aborts the process on an object (Node
-                // crashes there); refuse it instead.
-                if p.value.is_null() || to_local(p.value).is_object() {
-                    return Err(napi_invalid_arg);
-                }
-                proto.set_with_attr(key, to_local(p.value).into(), attr);
-            }
+            define_class_proto_entry(s, env, tpl, proto, p)?;
         }
         let class = tpl.get_function(s).ok_or(napi_generic_failure)?;
         put(out, class.into());
@@ -3879,6 +3854,40 @@ pub unsafe extern "C" fn napi_define_class(
             .collect();
         define_properties(s, env, class.into(), &statics)
     })
+}
+
+/// Install one instance property on the class template's prototype. Accessor pairs become an
+/// accessor property; a method becomes a signed function template (so the receiver must be an
+/// instance); a data property is set verbatim — but V8 aborts the process on an object value in
+/// a template, so an object (or a NULL) is refused with `napi_invalid_arg`.
+unsafe fn define_class_proto_entry(
+    s: &mut v8::PinScope<'static, 'static>,
+    env: napi_env,
+    tpl: v8::Local<'static, v8::FunctionTemplate>,
+    proto: v8::Local<'static, v8::ObjectTemplate>,
+    p: &napi_property_descriptor,
+) -> NapiResult {
+    let key = property_name(s, p)?;
+    let attr = template_attributes(p);
+    if p.getter.is_some() || p.setter.is_some() {
+        let getter = p
+            .getter
+            .map(|cb| callback_template(s, env, cb, p.data, None));
+        let setter = p
+            .setter
+            .map(|cb| callback_template(s, env, cb, p.data, None));
+        proto.set_accessor_property(key, getter, setter, attr);
+    } else if let Some(method) = p.method {
+        let sig = v8::Signature::new(s, tpl);
+        let t = callback_template(s, env, method, p.data, Some(sig));
+        proto.set_with_attr(key, t.into(), attr);
+    } else {
+        if p.value.is_null() || to_local(p.value).is_object() {
+            return Err(napi_invalid_arg);
+        }
+        proto.set_with_attr(key, to_local(p.value).into(), attr);
+    }
+    Ok(())
 }
 
 #[no_mangle]
@@ -3934,44 +3943,89 @@ unsafe fn define_properties(
     props: &[napi_property_descriptor],
 ) -> NapiResult {
     for p in props {
-        let key = property_name(s, p)?;
-        let enumerable = p.attributes & napi_enumerable != 0;
-        let configurable = p.attributes & napi_configurable != 0;
-        let writable = p.attributes & napi_writable != 0;
-        let (mut desc, refused) = if p.getter.is_some() || p.setter.is_some() {
-            // as Node: a missing half is an empty handle, left out of the definition (an existing
-            // accessor keeps that half), not `undefined`
-            let mut accessor = |cb: Option<napi_callback>| match cb {
-                Some(cb) => new_function(s, env, cb, p.data).map(|f| Some(f.into())),
-                None => Ok(None),
-            };
-            let (get, set) = (accessor(p.getter)?, accessor(p.setter)?);
-            (accessor_descriptor(get, set), napi_invalid_arg)
-        } else if let Some(method) = p.method {
-            let f = new_function(s, env, method, p.data)?;
-            let desc = v8::PropertyDescriptor::new_from_value_writable(f.into(), writable);
-            (desc, napi_generic_failure)
-        } else {
-            if p.value.is_null() {
-                return Err(napi_invalid_arg);
-            }
-            let value = to_local(p.value);
-            if enumerable && writable && configurable {
-                if obj.create_data_property(s, key, value) != Some(true) {
-                    return Err(napi_invalid_arg);
-                }
-                continue;
-            }
-            let desc = v8::PropertyDescriptor::new_from_value_writable(value, writable);
-            (desc, napi_invalid_arg)
-        };
-        desc.set_enumerable(enumerable);
-        desc.set_configurable(configurable);
-        if obj.define_property(s, key, &desc) != Some(true) {
-            return Err(refused);
-        }
+        define_one_property(s, env, obj, p)?;
     }
     Ok(())
+}
+
+/// Install one property descriptor on `obj`. Returns `Ok` when the descriptor was applied (the
+/// fully-defaulted-data fast path takes `CreateDataProperty`; every other case builds a
+/// `PropertyDescriptor` and takes `DefineProperty`). On V8 refusal, the error is
+/// `napi_invalid_arg`, except for a method where Node maps the same refusal to
+/// `napi_generic_failure`.
+unsafe fn define_one_property(
+    s: &mut v8::PinScope<'static, 'static>,
+    env: napi_env,
+    obj: v8::Local<'static, v8::Object>,
+    p: &napi_property_descriptor,
+) -> NapiResult {
+    let key = property_name(s, p)?;
+    let enumerable = p.attributes & napi_enumerable != 0;
+    let configurable = p.attributes & napi_configurable != 0;
+    let writable = p.attributes & napi_writable != 0;
+    let built = build_property_descriptor(s, env, p, key, obj, enumerable, writable, configurable)?;
+    let (mut desc, refused) = match built {
+        DescBuilt::Applied => return Ok(()),
+        DescBuilt::Descriptor(desc, refused) => (desc, refused),
+    };
+    desc.set_enumerable(enumerable);
+    desc.set_configurable(configurable);
+    if obj.define_property(s, key, &desc) != Some(true) {
+        return Err(refused);
+    }
+    Ok(())
+}
+
+/// The outcome of building a property descriptor: already applied via `CreateDataProperty` (the
+/// `{enumerable, writable, configurable}` fast path), or a `PropertyDescriptor` and the error
+/// code to use when V8 refuses it.
+enum DescBuilt {
+    Applied,
+    Descriptor(v8::PropertyDescriptor, napi_status),
+}
+
+/// Build (or directly apply, when possible) a `v8::PropertyDescriptor` for `p` on `obj`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn build_property_descriptor(
+    s: &mut v8::PinScope<'static, 'static>,
+    env: napi_env,
+    p: &napi_property_descriptor,
+    key: v8::Local<'static, v8::Name>,
+    obj: v8::Local<'static, v8::Object>,
+    enumerable: bool,
+    writable: bool,
+    configurable: bool,
+) -> Result<DescBuilt, napi_status> {
+    if p.getter.is_some() || p.setter.is_some() {
+        // as Node: a missing half is an empty handle, left out of the definition (an existing
+        // accessor keeps that half), not `undefined`
+        let mut accessor = |cb: Option<napi_callback>| match cb {
+            Some(cb) => new_function(s, env, cb, p.data).map(|f| Some(f.into())),
+            None => Ok(None),
+        };
+        let (get, set) = (accessor(p.getter)?, accessor(p.setter)?);
+        return Ok(DescBuilt::Descriptor(
+            accessor_descriptor(get, set),
+            napi_invalid_arg,
+        ));
+    }
+    if let Some(method) = p.method {
+        let f = new_function(s, env, method, p.data)?;
+        let desc = v8::PropertyDescriptor::new_from_value_writable(f.into(), writable);
+        return Ok(DescBuilt::Descriptor(desc, napi_generic_failure));
+    }
+    if p.value.is_null() {
+        return Err(napi_invalid_arg);
+    }
+    let value = to_local(p.value);
+    if enumerable && writable && configurable {
+        if obj.create_data_property(s, key, value) != Some(true) {
+            return Err(napi_invalid_arg);
+        }
+        return Ok(DescBuilt::Applied);
+    }
+    let desc = v8::PropertyDescriptor::new_from_value_writable(value, writable);
+    Ok(DescBuilt::Descriptor(desc, napi_invalid_arg))
 }
 
 // ---- versions --------------------------------------------------------------------

@@ -436,16 +436,10 @@ fn lex(src: &str) -> Lexed {
                 Some(_) => {}
             },
             b'\'' | b'"' => {
-                let j = match string_end(b, i, c) {
-                    Ok(j) => j,
+                match lex_string(b, i, c, after_import_call, last, &last_word, &mut imports) {
+                    Ok(j) => i = j + 1,
                     Err(at) => return failed(at, imports),
-                };
-                let specifier = after_import_call
-                    || (last == Some(b'w') && matches!(last_word.as_str(), "from" | "import"));
-                if specifier {
-                    imports.push(i..j + 1);
                 }
-                i = j + 1;
                 last = Some(b'w');
                 last_word.clear();
                 continue;
@@ -507,6 +501,27 @@ fn comment_end(src: &str, i: usize) -> usize {
 /// A byte of a word, a number or a non-ASCII character.
 fn is_word_byte(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80
+}
+
+/// Consume a `q`-quoted string starting at `i` and, when it is the specifier of a (dynamic)
+/// import, record its span into `imports`. Returns the index of the closing quote on success; the
+/// lexer-fail offset on an unterminated / multiline string.
+fn lex_string(
+    b: &[u8],
+    i: usize,
+    q: u8,
+    after_import_call: bool,
+    last: Option<u8>,
+    last_word: &str,
+    imports: &mut Vec<std::ops::Range<usize>>,
+) -> Result<usize, usize> {
+    let j = string_end(b, i, q)?;
+    let specifier =
+        after_import_call || (last == Some(b'w') && matches!(last_word, "from" | "import"));
+    if specifier {
+        imports.push(i..j + 1);
+    }
+    Ok(j)
 }
 
 /// The offset of the closing quote `q` of the string opening at `i`; `Err` the offset the

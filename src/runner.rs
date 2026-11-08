@@ -3536,28 +3536,32 @@ fn neighbours_past_ws(b: &[u8], at: usize, end: usize) -> (u8, u8) {
 /// True if `text` assigns `word` (`word =`, not `==`/`===`/`<=`/`>=`/`!=`), as a whole word.
 fn assigns_word(text: &str, word: &str) -> bool {
     let b = text.as_bytes();
-    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
     let mut i = 0;
     while let Some(p) = text[i..].find(word) {
         let at = i + p;
         i = at + 1;
-        if at > 0 && ident(b[at - 1]) {
-            continue;
-        }
-        let mut j = at + word.len();
-        if j < b.len() && ident(b[j]) {
-            continue;
-        }
-        while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
-            j += 1;
-        }
-        // `=` that is not part of ==, =>, etc.; and the char before `=` isn't !,<,>
-        if j < b.len() && b[j] == b'=' && b.get(j + 1) != Some(&b'=') && b.get(j + 1) != Some(&b'>')
-        {
+        if is_word_assignment(b, at, word.len()) {
             return true;
         }
     }
     false
+}
+
+/// A bare `word` of length `word_len` found at byte `at` in `b` is being assigned to: it is a
+/// whole identifier and is followed by `[ \t]*=` where the `=` is not the `==`/`=>` punctuator.
+fn is_word_assignment(b: &[u8], at: usize, word_len: usize) -> bool {
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    if at > 0 && ident(b[at - 1]) {
+        return false;
+    }
+    let mut j = at + word_len;
+    if j < b.len() && ident(b[j]) {
+        return false;
+    }
+    while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
+        j += 1;
+    }
+    j < b.len() && b[j] == b'=' && b.get(j + 1) != Some(&b'=') && b.get(j + 1) != Some(&b'>')
 }
 
 /// True if `word` appears in `text` bounded by non-identifier chars.
@@ -3666,36 +3670,48 @@ fn balanced_call_end(b: &[u8], j: usize) -> usize {
                     break;
                 }
             }
-            b'\'' | b'"' | b'`' => {
-                let q = b[k];
-                k += 1;
-                while k < b.len() {
-                    if b[k] == b'\\' {
-                        k += 2;
-                        continue;
-                    } else if b[k] == q {
-                        break;
-                    }
-                    k += 1;
-                }
-            }
-            b'/' if k + 1 < b.len() && b[k + 1] == b'/' => {
-                while k < b.len() && b[k] != b'\n' {
-                    k += 1;
-                }
-            }
-            b'/' if k + 1 < b.len() && b[k + 1] == b'*' => {
-                k += 2;
-                while k + 1 < b.len() && !(b[k] == b'*' && b[k + 1] == b'/') {
-                    k += 1;
-                }
-                k += 1;
-            }
+            b'\'' | b'"' | b'`' => k = skip_string_body(b, k),
+            b'/' if k + 1 < b.len() && b[k + 1] == b'/' => k = skip_line_comment(b, k),
+            b'/' if k + 1 < b.len() && b[k + 1] == b'*' => k = skip_block_comment(b, k),
             _ => {}
         }
         k += 1;
     }
     k
+}
+
+/// `balanced_call_end` string-body pass: `b[k]` is the opening quote; walk to the first matching
+/// unescaped quote (or the end of `b`) and return its index.
+fn skip_string_body(b: &[u8], k: usize) -> usize {
+    let q = b[k];
+    let mut k = k + 1;
+    while k < b.len() {
+        if b[k] == b'\\' {
+            k += 2;
+            continue;
+        } else if b[k] == q {
+            break;
+        }
+        k += 1;
+    }
+    k
+}
+
+/// `balanced_call_end` line-comment pass: walk to the next `\n` (or the end of `b`).
+fn skip_line_comment(b: &[u8], mut k: usize) -> usize {
+    while k < b.len() && b[k] != b'\n' {
+        k += 1;
+    }
+    k
+}
+
+/// `balanced_call_end` block-comment pass: walk past the closing `*/` (or to the end of `b`).
+fn skip_block_comment(b: &[u8], mut k: usize) -> usize {
+    k += 2;
+    while k + 1 < b.len() && !(b[k] == b'*' && b[k + 1] == b'/') {
+        k += 1;
+    }
+    k + 1
 }
 
 /// The end (exclusive) of the `//` / `/* */` comment or `'` / `"` / `` ` `` string literal that
@@ -5171,26 +5187,34 @@ fn load_cjs_inner<'s>(
     REQUIRE_STACK.with(|st| st.borrow_mut().pop());
     restore_tt_dir(scope, global, prev_dir);
     if !call_ok {
-        // The module body threw. If it's a decorator file in an emitDecoratorMetadata project and
-        // we haven't already retried, the throw is often a missing-`design:type` error (Mongoose
-        // @Prop / Sequelize @Column read metadata at class-definition). Re-transform THIS file via
-        // the metadata path (ts.transpileModule) and re-run once. Scoped to this file only — its
-        // require()d deps still load on the default esbuild path, so files that load fine without
-        // metadata never change (no regression).
-        if !prefer_metadata && wants_metadata_retry(abs) {
-            return load_cjs_inner(scope, abs, drain_mocks, true);
-        }
-        // Re-throw the module's own error (Node/vitest: `require()` / the importing module /
-        // the entry load fail with it), instead of a generic "failed to load" with no cause.
-        if let Some(e) = body_exc {
-            let e = v8::Local::new(scope, &e);
-            scope.throw_exception(e);
-        }
-        return None;
+        return handle_cjs_body_throw(scope, abs, drain_mocks, prefer_metadata, body_exc);
     }
     settle_module_mocks(scope, abs, drain_mocks);
     let final_exports = module_obj.get(scope, exports_key.into())?;
     register_cjs_exports(scope, global, abs, final_exports)
+}
+
+/// The module body threw. If it is a decorator file in an `emitDecoratorMetadata` project and we
+/// have not already retried, re-transform THIS file via the metadata path (ts.transpileModule)
+/// and re-run once — the throw is often a missing-`design:type` error (Mongoose `@Prop` /
+/// Sequelize `@Column` read metadata at class-definition). Otherwise re-throw the module's own
+/// error so `require()` / the importing module / the entry load fail with it (Node/vitest), not
+/// with a generic "failed to load" that has no cause.
+fn handle_cjs_body_throw<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+    drain_mocks: bool,
+    prefer_metadata: bool,
+    body_exc: Option<v8::Global<v8::Value>>,
+) -> Option<()> {
+    if !prefer_metadata && wants_metadata_retry(abs) {
+        return load_cjs_inner(scope, abs, drain_mocks, true);
+    }
+    if let Some(e) = body_exc {
+        let e = v8::Local::new(scope, &e);
+        scope.throw_exception(e);
+    }
+    None
 }
 
 /// Compile `load_cjs_inner`'s wrapped module (named origin when coverage / locations need it),
@@ -5847,31 +5871,15 @@ fn native_require(
     // a mocks entry without them would load the real module rather than serve an empty `{}`.
     // (an entry the test put into require.cache is served like a mock)
     let put = CACHE_PUT.with(|c| c.borrow().contains(&abs));
-    // A package's own require() sees no vi.mock: vitest loads an external through Node, which
-    // never consults the mock registry (turbo-test#135).
-    if !put
-        && dir.contains("/node_modules/")
-        && !inlined_dep(Path::new(&dir))
-        && REGISTRY.with(|r| r.borrow().mocks.contains_key(&abs))
-    {
-        if let Some(g) = actual_exports(scope, &abs) {
-            rv.set(v8::Local::new(scope, &g));
-            return;
-        }
+    if require_bypass_mock_for_external(scope, &mut rv, &dir, &abs, put) {
+        return;
     }
     let mocked = REGISTRY.with(|r| {
         let reg = r.borrow();
         (put || reg.mocks.contains_key(&abs)) && reg.cjs_exports.contains_key(&abs)
     });
-    if !mocked {
-        if mr_enabled() || detect_kind(&abs) == Kind::Cjs {
-            if !require_load_cjs(scope, &args, &abs, &spec) {
-                return;
-            }
-        } else {
-            require_load_esm(scope, &mut rv, &abs, &spec);
-            return;
-        }
+    if !mocked && !require_load_for_kind(scope, &mut rv, &args, &abs, &spec) {
+        return;
     }
     // a mock factory that threw: the import fails with its error (vitest)
     if let Some(e) = mock_factory_error(scope, &abs) {
@@ -5879,6 +5887,50 @@ fn native_require(
         return;
     }
     set_cjs_exports(scope, &mut rv, &abs);
+}
+
+/// A package's own `require()` sees no `vi.mock`: vitest loads an external through Node, which
+/// never consults the mock registry (turbo-test#135). When the current importer is such a
+/// node_modules package and `abs` has a registered mock, this serves the REAL module's exports
+/// and returns `true`. `put` entries (the test put the key into `require.cache`) opt out and
+/// keep the mock.
+fn require_bypass_mock_for_external(
+    scope: &mut v8::PinScope,
+    rv: &mut v8::ReturnValue,
+    dir: &str,
+    abs: &Path,
+    put: bool,
+) -> bool {
+    if put
+        || !dir.contains("/node_modules/")
+        || inlined_dep(Path::new(dir))
+        || !REGISTRY.with(|r| r.borrow().mocks.contains_key(abs))
+    {
+        return false;
+    }
+    if let Some(g) = actual_exports(scope, abs) {
+        rv.set(v8::Local::new(scope, &g));
+        return true;
+    }
+    false
+}
+
+/// Load the module at `abs` on the CJS or ESM path (deciding by `mr_enabled()` and `detect_kind`).
+/// Returns `false` when the load errored (the exception is already set / returned) and
+/// `native_require` must stop; `true` when loading succeeded and the caller should serve its
+/// exports.
+fn require_load_for_kind(
+    scope: &mut v8::PinScope,
+    rv: &mut v8::ReturnValue,
+    args: &v8::FunctionCallbackArguments,
+    abs: &Path,
+    spec: &str,
+) -> bool {
+    if mr_enabled() || detect_kind(abs) == Kind::Cjs {
+        return require_load_cjs(scope, args, abs, spec);
+    }
+    require_load_esm(scope, rv, abs, spec);
+    false
 }
 
 /// Set `rv` to the registered CJS exports of `key`; whether there were any.
@@ -6511,41 +6563,54 @@ fn vite_error_value<'s>(
     let message = v8::String::new(scope, &vite.message)?;
     let e = v8::Exception::error(scope, message);
     let o = e.cast::<v8::Object>();
-    fn set<'s>(
-        scope: &mut v8::PinScope<'s, '_>,
-        o: v8::Local<'s, v8::Object>,
-        k: &str,
-        v: v8::Local<'s, v8::Value>,
-    ) {
-        if let Some(k) = v8::String::new(scope, k) {
-            o.set(scope, k.into(), v);
-        }
-    }
     if vite.name != "Error" {
         let name = v8::String::new(scope, vite.name)?;
-        set(scope, o, "name", name.into());
+        set_prop(scope, o, "name", name.into());
     }
+    let details = build_vite_rollup_details(scope, &vite)?;
+    set_prop(scope, o, "__vitest_rollup_error__", details.into());
+    Some(e)
+}
+
+/// Set `o[k] = v`, skipping silently when the key fails to allocate. The `vite_error_value`
+/// helpers reuse this instead of unwrapping the key allocation at every assignment.
+fn set_prop<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    o: v8::Local<'s, v8::Object>,
+    k: &str,
+    v: v8::Local<'s, v8::Value>,
+) {
+    if let Some(k) = v8::String::new(scope, k) {
+        o.set(scope, k.into(), v);
+    }
+}
+
+/// Build the `__vitest_rollup_error__` details object vite's plugin container attaches to the
+/// error: `plugin` (when set), `id`, `loc: {line, column}` (when set), and `frame` (when set).
+fn build_vite_rollup_details<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    vite: &crate::parse_error::ViteError,
+) -> Option<v8::Local<'s, v8::Object>> {
     let details = v8::Object::new(scope);
     if let Some(plugin) = vite.plugin {
         let v = v8::String::new(scope, plugin)?;
-        set(scope, details, "plugin", v.into());
+        set_prop(scope, details, "plugin", v.into());
     }
     let id = v8::String::new(scope, &vite.id)?;
-    set(scope, details, "id", id.into());
+    set_prop(scope, details, "id", id.into());
     if let Some((line, column)) = vite.loc {
         let loc = v8::Object::new(scope);
         let line = v8::Number::new(scope, line as f64);
-        set(scope, loc, "line", line.into());
+        set_prop(scope, loc, "line", line.into());
         let column = v8::Number::new(scope, column as f64);
-        set(scope, loc, "column", column.into());
-        set(scope, details, "loc", loc.into());
+        set_prop(scope, loc, "column", column.into());
+        set_prop(scope, details, "loc", loc.into());
     }
     if let Some(frame) = &vite.frame {
         let v = v8::String::new(scope, frame)?;
-        set(scope, details, "frame", v.into());
+        set_prop(scope, details, "frame", v.into());
     }
-    set(scope, o, "__vitest_rollup_error__", details.into());
-    Some(e)
+    Some(details)
 }
 
 /// TURBO_CJS_DEBUG: print the loaders' diagnostics (failed reads, transforms, compiles, module
@@ -6632,46 +6697,18 @@ fn load_graph<'s>(
         }
         return None;
     };
-    // reads of a no-default mock's default throw (turbo-test#151); first, so the spy rewrite
-    // below reads the guarded value through the overrides
-    let raw = guard_mock_default_reads(scope, abs, &raw).unwrap_or(raw);
-    // vi.spyOn on an app module's namespace reaches its importers (turbo-test#131, #146); test
-    // locations / failure frames map V8's columns back through the in-line edits
-    let raw = spyable_app_module(abs, raw);
     // A generated bundle in the cache dir has no node_modules beside it; resolve its externalized
     // bare imports relative to the recorded source dir (set by esbuild_bundle_full).
     let dir = REGISTRY
         .with(|r| r.borrow().bundle_src_dir.get(abs).cloned())
         .or_else(|| abs.parent().map(|p| p.to_path_buf()))
         .unwrap();
-    let raw = graph_interop(abs, &dir, &raw).unwrap_or(raw);
-    // CJS gets __dirname/__filename via the wrapper params; a real ES module has neither in scope.
-    // App code authored for the CJS world (NestJS seed runners, country-config loaders) reads them
-    // at top level, so inject Node-CJS-equivalent module-local bindings when referenced.
-    let raw = inject_dirname_esm(abs, &raw).unwrap_or(raw);
+    let raw = graph_source_rewrites(scope, abs, &dir, raw);
     let code = v8::String::new(scope, &raw)?;
     let name = v8::String::new(scope, &abs.to_string_lossy())?;
     let origin = module_origin(scope, name);
     let mut source = v8::script_compiler::Source::new(code, Some(&origin));
-    let compiled = {
-        let tc = std::pin::pin!(v8::TryCatch::new(scope));
-        let tc = &mut tc.init();
-        match v8::script_compiler::compile_module(tc, &mut source) {
-            Some(m) => Ok(v8::Global::new(tc, m)),
-            None => Err(tc.exception().map(|e| v8::Global::new(tc, e))),
-        }
-    };
-    let module = match compiled {
-        Ok(m) => v8::Local::new(scope, &m),
-        Err(exc) => {
-            if let Some(exc) = exc {
-                let exc = v8::Local::new(scope, &exc);
-                let exc = vite_compile_error(scope, abs, exc);
-                scope.throw_exception(exc);
-            }
-            return None;
-        }
-    };
+    let module = compile_graph_module(scope, abs, &mut source)?;
 
     let hash = module.get_identity_hash().get();
     let global = v8::Global::new(scope, module);
@@ -6681,6 +6718,62 @@ fn load_graph<'s>(
         reg.path_by_hash.insert(hash, abs.to_path_buf());
     });
 
+    load_module_requests(scope, abs, &dir, module)?;
+    Some(module)
+}
+
+/// Run `load_graph`'s source rewrites on an app module's raw text: the mock-default-reads guard
+/// (turbo-test#151), the `vi.spyOn` namespace rewrite (turbo-test#131/#146), the CJS graph
+/// interop rewrite, and the ESM `__dirname` / `__filename` injection. Each pass leaves the source
+/// unchanged when it does not apply.
+fn graph_source_rewrites(scope: &mut v8::PinScope, abs: &Path, dir: &Path, raw: String) -> String {
+    // reads of a no-default mock's default throw (turbo-test#151); first, so the spy rewrite
+    // below reads the guarded value through the overrides
+    let raw = guard_mock_default_reads(scope, abs, &raw).unwrap_or(raw);
+    // vi.spyOn on an app module's namespace reaches its importers (turbo-test#131, #146); test
+    // locations / failure frames map V8's columns back through the in-line edits
+    let raw = spyable_app_module(abs, raw);
+    let raw = graph_interop(abs, dir, &raw).unwrap_or(raw);
+    // CJS gets __dirname/__filename via the wrapper params; a real ES module has neither in scope.
+    inject_dirname_esm(abs, &raw).unwrap_or(raw)
+}
+
+/// Compile the prepared source under a `TryCatch` and, on V8 failure, re-throw either vite's
+/// error (turbo-test#113) or V8's own compile exception.
+fn compile_graph_module<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+    source: &mut v8::script_compiler::Source,
+) -> Option<v8::Local<'s, v8::Module>> {
+    let compiled = {
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let tc = &mut tc.init();
+        match v8::script_compiler::compile_module(tc, source) {
+            Some(m) => Ok(v8::Global::new(tc, m)),
+            None => Err(tc.exception().map(|e| v8::Global::new(tc, e))),
+        }
+    };
+    match compiled {
+        Ok(m) => Some(v8::Local::new(scope, &m)),
+        Err(exc) => {
+            if let Some(exc) = exc {
+                let exc = v8::Local::new(scope, &exc);
+                let exc = vite_compile_error(scope, abs, exc);
+                scope.throw_exception(exc);
+            }
+            None
+        }
+    }
+}
+
+/// Walk the module's static imports and load each one (or its builtin shim). A static import that
+/// does not resolve throws vitest's error (turbo-test#108).
+fn load_module_requests(
+    scope: &mut v8::PinScope,
+    abs: &Path,
+    dir: &Path,
+    module: v8::Local<v8::Module>,
+) -> Option<()> {
     let requests = module.get_module_requests();
     for i in 0..requests.length() {
         let req =
@@ -6694,8 +6787,7 @@ fn load_graph<'s>(
             ensure_node_builtin(scope, &spec)?;
             continue;
         }
-        let Some(dep) = resolve_spec(&spec, &dir) else {
-            // vitest's error for a static import that does not resolve (turbo-test#108)
+        let Some(dep) = resolve_spec(&spec, dir) else {
             let root = std::env::current_dir().unwrap_or_default();
             let (message, code) = import_not_found(&spec, &abs.to_string_lossy(), &root, true);
             throw_with_code(scope, &message, code);
@@ -6703,7 +6795,7 @@ fn load_graph<'s>(
         };
         load_dep(scope, &dep)?;
     }
-    Some(module)
+    Some(())
 }
 
 /// `esm_cjs::graph_interop_rewrite` of a graph module's source: its requests of a CommonJS module
@@ -6855,34 +6947,60 @@ fn variant_eval<'s>(
     // a module whose exports were dropped (a reused isolate's reset) fails its importer, as in
     // synth_eval
     let (exports, kind, names) = entry.or_else(|| throw_none(scope, UNLOADED))?;
-    let view = match exports {
-        Ok(exports) => {
-            let exports = v8::Local::new(scope, &exports);
-            variant_view(scope, exports, kind)?
-        }
-        Err((module, path)) => {
-            let module = v8::Local::new(scope, &module);
-            let ns = module.get_module_namespace();
-            ordered_namespace(scope, &path, ns)?
-        }
-    };
+    let view = variant_eval_view(scope, exports, kind)?;
     if kind == Variant::Ns {
         let k = v8::String::new(scope, "default")?;
         module.set_synthetic_module_export(scope, k, view)?;
         return Some(v8::undefined(scope).into());
     }
-    if let Ok(obj) = v8::Local::<v8::Object>::try_from(view) {
-        for n in names {
-            let k = v8::String::new(scope, &n)?;
-            // a name a mock lacks stays undefined without being read (see synth_eval)
-            if obj.has(scope, k.into()).unwrap_or(false) {
-                if let Some(v) = obj.get(scope, k.into()) {
-                    module.set_synthetic_module_export(scope, k, v)?;
+    copy_variant_named_exports(scope, module, view, &names);
+    Some(v8::undefined(scope).into())
+}
+
+/// Build the `view` that `variant_eval`'s named-export copy reads from: either CJS exports as
+/// seen through vitest's / Node's interop (`variant_view`), or an ES module's namespace in source
+/// order (`ordered_namespace`).
+fn variant_eval_view<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    exports: Result<v8::Global<v8::Value>, (v8::Global<v8::Module>, PathBuf)>,
+    kind: Variant,
+) -> Option<v8::Local<'s, v8::Value>> {
+    match exports {
+        Ok(exports) => {
+            let exports = v8::Local::new(scope, &exports);
+            variant_view(scope, exports, kind)
+        }
+        Err((module, path)) => {
+            let module = v8::Local::new(scope, &module);
+            let ns = module.get_module_namespace();
+            ordered_namespace(scope, &path, ns)
+        }
+    }
+}
+
+/// Copy each name in `names` from the `view` object to the synthetic module's own exports. A
+/// name the view lacks stays undefined without being read (see `synth_eval`).
+fn copy_variant_named_exports<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    module: v8::Local<v8::Module>,
+    view: v8::Local<'s, v8::Value>,
+    names: &[String],
+) {
+    let Ok(obj) = v8::Local::<v8::Object>::try_from(view) else {
+        return;
+    };
+    for n in names {
+        let Some(k) = v8::String::new(scope, n) else {
+            return;
+        };
+        if obj.has(scope, k.into()).unwrap_or(false) {
+            if let Some(v) = obj.get(scope, k.into()) {
+                if module.set_synthetic_module_export(scope, k, v).is_none() {
+                    return;
                 }
             }
         }
     }
-    Some(v8::undefined(scope).into())
 }
 
 thread_local! {
@@ -9587,14 +9705,7 @@ fn run_event_loop(
         if guard > max_turns {
             return Err("event loop did not settle (possible infinite timers)".into());
         }
-        loop {
-            let ran = call_global_bool(scope, global, "__drainNextTicks");
-            scope.perform_microtask_checkpoint();
-            let pending = call_global_bool(scope, global, "__hasNextTicks");
-            if !ran && !pending {
-                break;
-            }
-        }
+        drain_microtasks(scope, global);
         // The task and its microtasks are done: settle the DOM ownership work a long run of
         // mutating calls on a large tree deferred, so what the task detached is collectable
         // before the next one (turbo-dom#112).
@@ -9604,36 +9715,64 @@ fn run_event_loop(
         if promise.state() != v8::PromiseState::Pending {
             break;
         }
-        // Native addons' callbacks for this thread (async work done, threadsafe-function
-        // calls) run one per turn; while their work is in flight they keep the loop alive, as
-        // libuv's handles do: wait for one, up to the delay of the next timer.
-        if crate::napi_host::run_native_task(scope) {
+        if step_macrotask(scope, global) {
             continue;
         }
-        if crate::napi_host::keeps_loop_alive(scope) {
-            let delay = call_global_number(scope, global, "__ttNextMacroDelay");
-            let timeout =
-                (delay >= 0.0).then(|| std::time::Duration::from_secs_f64(delay / 1000.0));
-            if crate::napi_host::wait_native_task(scope, timeout) {
-                continue;
-            }
-        }
-        if !call_global_bool(scope, global, "__stepMacro") {
-            break;
+        break;
+    }
+    finalize_promise_state(scope, promise)
+}
+
+/// Drain `process.nextTick` plus Promise microtasks to a fixpoint. Each pass runs a batch of
+/// nextTicks (through the runtime hook), then one microtask checkpoint; the loop ends when a
+/// pass neither ran a nextTick nor left one pending.
+fn drain_microtasks(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+    loop {
+        let ran = call_global_bool(scope, global, "__drainNextTicks");
+        scope.perform_microtask_checkpoint();
+        let pending = call_global_bool(scope, global, "__hasNextTicks");
+        if !ran && !pending {
+            return;
         }
     }
-    if promise.state() != v8::PromiseState::Fulfilled {
-        let reason = if promise.state() == v8::PromiseState::Rejected {
-            format!(
-                "rejected: {}",
-                promise.result(scope).to_rust_string_lossy(scope)
-            )
-        } else {
-            "still pending".to_string()
-        };
-        return Err(format!("test run promise did not fulfill ({reason})"));
+}
+
+/// Run one macrotask: a pending native-addon callback for this thread first (while addon work is
+/// in flight it keeps the loop alive, as libuv's handles do, waiting up to the next timer's
+/// delay), then the runtime's `__stepMacro`. Returns `true` when something ran and the outer
+/// loop should spin again, `false` when nothing was pending.
+fn step_macrotask(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bool {
+    if crate::napi_host::run_native_task(scope) {
+        return true;
     }
-    Ok(())
+    if crate::napi_host::keeps_loop_alive(scope) {
+        let delay = call_global_number(scope, global, "__ttNextMacroDelay");
+        let timeout = (delay >= 0.0).then(|| std::time::Duration::from_secs_f64(delay / 1000.0));
+        if crate::napi_host::wait_native_task(scope, timeout) {
+            return true;
+        }
+    }
+    call_global_bool(scope, global, "__stepMacro")
+}
+
+/// Convert the final promise state into the `run_event_loop` result: `Ok(())` on fulfilled, a
+/// `rejected: …` / `still pending` message otherwise.
+fn finalize_promise_state(
+    scope: &mut v8::PinScope,
+    promise: v8::Local<v8::Promise>,
+) -> Result<(), String> {
+    if promise.state() == v8::PromiseState::Fulfilled {
+        return Ok(());
+    }
+    let reason = if promise.state() == v8::PromiseState::Rejected {
+        format!(
+            "rejected: {}",
+            promise.result(scope).to_rust_string_lossy(scope)
+        )
+    } else {
+        "still pending".to_string()
+    };
+    Err(format!("test run promise did not fulfill ({reason})"))
 }
 
 /// Per-test records (runtime.js `__testRecord`) of the run summary, for the per-testcase

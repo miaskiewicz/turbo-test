@@ -283,7 +283,30 @@ fn numeric_literal(s: &str, i: usize) -> Option<usize> {
     let b = s.as_bytes();
     let ch = |j: usize| b.get(j).map(|x| *x as char);
     let dec = |c: char| c.is_ascii_digit();
-    // 0[xX]…|0[oO]…|0[bB]… then n?
+    if let Some(end) = numeric_prefixed_or_bigint(s, i) {
+        return Some(end);
+    }
+    // (?:(?:0(?!\d)|0\d*[89]\d*|[1-9](?:_?\d)*)(?:\.(?:\d(?:_?\d)*)?)?|\.\d(?:_?\d)*)(?:[eE]…)?
+    let int = numeric_int_head(s, i);
+    let mantissa = match int {
+        Some(e) if ch(e) == Some('.') => Some(digits(s, e + 1, dec).unwrap_or(e + 1)),
+        Some(e) => Some(e),
+        None if ch(i) == Some('.') => digits(s, i + 1, dec),
+        None => None,
+    };
+    if let Some(e) = mantissa {
+        return Some(numeric_with_exp(s, e).unwrap_or(e));
+    }
+    // 0[0-7]+ (legacy octal)
+    numeric_legacy_octal(b, i)
+}
+
+/// `0[xX]…|0[oO]…|0[bB]…` with an optional trailing `n`, or `[1-9](?:_?\d)*n` (plain `BigInt`).
+/// `None` when nothing in this alternative matches at `i`.
+fn numeric_prefixed_or_bigint(s: &str, i: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let ch = |j: usize| b.get(j).map(|x| *x as char);
+    let dec = |c: char| c.is_ascii_digit();
     if ch(i) == Some('0') {
         let radix: Option<fn(char) -> bool> = match ch(i + 1) {
             Some('x' | 'X') => Some(|c: char| c.is_ascii_hexdigit()),
@@ -298,14 +321,22 @@ fn numeric_literal(s: &str, i: usize) -> Option<usize> {
             return Some(i + 2);
         }
     }
-    // [1-9](?:_?\d)*n
     if ch(i).is_some_and(|c| ('1'..='9').contains(&c)) {
         if let Some(e) = digits(s, i, dec).filter(|e| ch(*e) == Some('n')) {
             return Some(e + 1);
         }
     }
-    // (?:(?:0(?!\d)|0\d*[89]\d*|[1-9](?:_?\d)*)(?:\.(?:\d(?:_?\d)*)?)?|\.\d(?:_?\d)*)(?:[eE]…)?
-    let int = match ch(i) {
+    None
+}
+
+/// The integer head of a plain-decimal numeric literal (no base prefix, no leading dot): either
+/// `0` not followed by a digit, a legacy-octal-falling-through-to-decimal `0\d*[89]\d*` run, or
+/// `[1-9](?:_?\d)*`.
+fn numeric_int_head(s: &str, i: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let ch = |j: usize| b.get(j).map(|x| *x as char);
+    let dec = |c: char| c.is_ascii_digit();
+    match ch(i) {
         Some('0') if !ch(i + 1).is_some_and(dec) => Some(i + 1),
         Some('0') => {
             let run = i + 1 + b[i + 1..].iter().take_while(|x| x.is_ascii_digit()).count();
@@ -317,33 +348,32 @@ fn numeric_literal(s: &str, i: usize) -> Option<usize> {
         }
         Some('1'..='9') => digits(s, i, dec),
         _ => None,
-    };
-    let mantissa = match int {
-        Some(e) if ch(e) == Some('.') => Some(digits(s, e + 1, dec).unwrap_or(e + 1)),
-        Some(e) => Some(e),
-        None if ch(i) == Some('.') => digits(s, i + 1, dec),
-        None => None,
-    };
-    if let Some(e) = mantissa {
-        if matches!(ch(e), Some('e' | 'E')) {
-            let sign = usize::from(matches!(ch(e + 1), Some('+' | '-')));
-            if let Some(x) = digits(s, e + 1 + sign, dec) {
-                return Some(x);
-            }
-        }
-        return Some(e);
     }
-    // 0[0-7]+
-    if ch(i) == Some('0') {
-        let n = b[i + 1..]
-            .iter()
-            .take_while(|x| (b'0'..=b'7').contains(x))
-            .count();
-        if n > 0 {
-            return Some(i + 1 + n);
-        }
+}
+
+/// Extend `e` through an optional `[eE][+-]?\d(?:_?\d)*` exponent, returning the end of the
+/// exponent on a match, `None` when there is no exponent (or it did not complete).
+fn numeric_with_exp(s: &str, e: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let ch = |j: usize| b.get(j).map(|x| *x as char);
+    let dec = |c: char| c.is_ascii_digit();
+    if !matches!(ch(e), Some('e' | 'E')) {
+        return None;
     }
-    None
+    let sign = usize::from(matches!(ch(e + 1), Some('+' | '-')));
+    digits(s, e + 1 + sign, dec)
+}
+
+/// Legacy `0[0-7]+` octal end, or `None` when the bytes at `i` do not start one.
+fn numeric_legacy_octal(b: &[u8], i: usize) -> Option<usize> {
+    if b.get(i).copied() != Some(b'0') {
+        return None;
+    }
+    let n = b[i + 1..]
+        .iter()
+        .take_while(|x| (b'0'..=b'7').contains(x))
+        .count();
+    (n > 0).then_some(i + 1 + n)
 }
 
 /// ``[`}](?:[^`\\$]|\\[^]|\$(?!\{))*(`|\$\{)?``: the end and how it ends (`` ` ``, `${` or
@@ -499,22 +529,7 @@ impl<'a> Lexer<'a> {
             return true;
         }
         if let Some((e, private)) = identifier(input, i) {
-            let word = &input[i..e];
-            let mut next_last = word.to_string();
-            if matches!(word, "for" | "if" | "while" | "with")
-                && self.last != "."
-                && self.last != "?."
-            {
-                next_last = "?NonExpressionParenKeyword".into();
-            }
-            self.last = next_last;
-            self.postfix_inc_dec = !keyword_with_expression_after(word);
-            let kind = if private {
-                Kind::PrivateIdentifier
-            } else {
-                Kind::IdentifierName
-            };
-            self.push(kind, e);
+            self.js_identifier(e, private);
             return true;
         }
         if let Some(e) = string_literal(input, i) {
@@ -528,21 +543,48 @@ impl<'a> Lexer<'a> {
             return true;
         }
         if let Some((e, end)) = template(input, i) {
-            if end == "${" {
-                self.last = "?InterpolationInTemplate".into();
-                self.stack.push(Mode {
-                    tag: Tag::InterpolationInTemplate,
-                    nesting: self.braces.len(),
-                });
-                self.postfix_inc_dec = false;
-                self.push(Kind::TemplateHead, e);
-            } else {
-                self.postfix_inc_dec = true;
-                self.push_last(Kind::NoSubstitutionTemplate, e);
-            }
+            self.js_template(e, end);
             return true;
         }
         false
+    }
+
+    /// Record the identifier/keyword `input[i..e]` found by `js`, tracking the lookahead flag used
+    /// by `js_punctuator` to tell `for (…)`/`if (…)`/`while (…)`/`with (…)` from an expression
+    /// paren. `private` turns a leading `#` into `PrivateIdentifier`.
+    fn js_identifier(&mut self, e: usize, private: bool) {
+        let word = &self.input[self.i..e];
+        let mut next_last = word.to_string();
+        if matches!(word, "for" | "if" | "while" | "with") && self.last != "." && self.last != "?."
+        {
+            next_last = "?NonExpressionParenKeyword".into();
+        }
+        self.last = next_last;
+        self.postfix_inc_dec = !keyword_with_expression_after(word);
+        let kind = if private {
+            Kind::PrivateIdentifier
+        } else {
+            Kind::IdentifierName
+        };
+        self.push(kind, e);
+    }
+
+    /// Push the template-literal token `js` found ending at `e`. `end == "${"` opens an
+    /// `InterpolationInTemplate` scope and emits `TemplateHead`; otherwise it is a
+    /// `NoSubstitutionTemplate`.
+    fn js_template(&mut self, e: usize, end: &'static str) {
+        if end == "${" {
+            self.last = "?InterpolationInTemplate".into();
+            self.stack.push(Mode {
+                tag: Tag::InterpolationInTemplate,
+                nesting: self.braces.len(),
+            });
+            self.postfix_inc_dec = false;
+            self.push(Kind::TemplateHead, e);
+        } else {
+            self.postfix_inc_dec = true;
+            self.push_last(Kind::NoSubstitutionTemplate, e);
+        }
     }
 
     /// The punctuator from `i` to `e`.
@@ -948,23 +990,12 @@ pub fn highlight(c: &Colors, code: &str, jsx: bool) -> String {
             pending = Some(t);
             continue;
         }
-        if pending.is_some()
-            && (matches!(t.kind, Kind::WhiteSpace | Kind::LineTerminatorSequence)
-                || t.kind == Kind::Punctuator && (t.value == "?." || t.value == "!"))
-        {
+        if pending.is_some() && is_pending_passthrough(&t) {
             stacked.push_str(&colorize(c, ty, t.value));
             continue;
         }
         if let Some(p) = pending.take() {
-            let pty = if t.kind == Kind::Punctuator && t.value == "(" {
-                if p.kind == Kind::PrivateIdentifier {
-                    Type::PrivateIdentifierCallable
-                } else {
-                    Type::IdentifierCallable
-                }
-            } else {
-                token_type(&p)
-            };
+            let pty = pending_type_against(&p, &t);
             out.push_str(&colorize(c, pty, p.value));
             out.push_str(&stacked);
             stacked.clear();
@@ -972,6 +1003,27 @@ pub fn highlight(c: &Colors, code: &str, jsx: bool) -> String {
         out.push_str(&colorize(c, ty, t.value));
     }
     out
+}
+
+/// A token that `highlight` carries over a pending identifier without flushing it: whitespace, a
+/// line terminator, or the `?.` / `!` optional-chain / non-null punctuator.
+fn is_pending_passthrough(t: &Token) -> bool {
+    matches!(t.kind, Kind::WhiteSpace | Kind::LineTerminatorSequence)
+        || t.kind == Kind::Punctuator && (t.value == "?." || t.value == "!")
+}
+
+/// The `Type` to color the pending identifier `p` with, now that `t` follows: a `(` after it turns
+/// it into a callable; otherwise it keeps its own `token_type`.
+fn pending_type_against(p: &Token, t: &Token) -> Type {
+    if t.kind == Kind::Punctuator && t.value == "(" {
+        if p.kind == Kind::PrivateIdentifier {
+            Type::PrivateIdentifierCallable
+        } else {
+            Type::IdentifierCallable
+        }
+    } else {
+        token_type(p)
+    }
 }
 
 /// vitest's `highlightCode`: `source` highlighted when `file` is JS / TS (JSX for `…x`).

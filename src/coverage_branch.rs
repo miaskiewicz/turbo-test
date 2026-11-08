@@ -25,36 +25,38 @@ struct Collector {
     stmts: Vec<u32>, // executable statement starts (Istanbul/c8 "statements")
 }
 
+/// True for statement kinds that are NOT executable statements by Istanbul/c8's rule (container /
+/// declaration / module-structure / TS type-only), so they never get a statement counter. The
+/// executable statements INSIDE them are still visited and counted by `visit_statement`'s recurse.
+fn skip_as_statement(s: &Statement<'_>) -> bool {
+    matches!(
+        s,
+        Statement::BlockStatement(_)
+            | Statement::EmptyStatement(_)
+            | Statement::FunctionDeclaration(_)
+            | Statement::ClassDeclaration(_)
+            | Statement::ImportDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportDefaultDeclaration(_)
+            | Statement::ExportAllDeclaration(_)
+            | Statement::TSTypeAliasDeclaration(_)
+            | Statement::TSInterfaceDeclaration(_)
+            | Statement::TSEnumDeclaration(_)
+            | Statement::TSModuleDeclaration(_)
+            | Statement::TSImportEqualsDeclaration(_)
+    )
+}
+
 impl<'a> Visit<'a> for Collector {
     fn visit_statement(&mut self, s: &Statement<'a>) {
-        // Count executable statements only, matching Istanbul/c8. The following are NOT statements
-        // (they go in the function map, or are module/type structure) and must be skipped — but we
-        // still recurse so the executable statements INSIDE them are counted:
-        //   - BlockStatement / EmptyStatement   — container / bare `;`
-        //   - Function / Class declarations      — belong to function coverage, not statements
-        //   - import / export* declarations      — module structure (the export-wrapped *value*
-        //                                          declaration is counted separately, below)
-        //   - TS type-only declarations          — erased at runtime, never executed
-        // (one single-pattern `matches!` per line: or-pattern alternatives get no coverage counter)
-        let skip = matches!(s, Statement::BlockStatement(_))
-            || matches!(s, Statement::EmptyStatement(_))
-            || matches!(s, Statement::FunctionDeclaration(_))
-            || matches!(s, Statement::ClassDeclaration(_))
-            || matches!(s, Statement::ImportDeclaration(_))
-            || matches!(s, Statement::ExportNamedDeclaration(_))
-            || matches!(s, Statement::ExportDefaultDeclaration(_))
-            || matches!(s, Statement::ExportAllDeclaration(_))
-            || matches!(s, Statement::TSTypeAliasDeclaration(_))
-            || matches!(s, Statement::TSInterfaceDeclaration(_))
-            || matches!(s, Statement::TSEnumDeclaration(_))
-            || matches!(s, Statement::TSModuleDeclaration(_))
-            || matches!(s, Statement::TSImportEqualsDeclaration(_));
-        if !skip {
+        // Count executable statements only, matching Istanbul/c8. Container / declaration /
+        // module-structure / TS type-only kinds are skipped by `skip_as_statement`, but we still
+        // recurse so executable statements INSIDE them are counted: the variable declaration inside
+        // `export const x = …` is reached here as a statement on its own, so export-const is
+        // counted while export-function is not — no special-casing needed.
+        if !skip_as_statement(s) {
             self.stmts.push(s.span().start);
         }
-        // Recurse regardless: the executable statements INSIDE a skipped wrapper still count, and
-        // the variable declaration inside `export const x = …` is reached here as a statement on
-        // its own (so export-const is counted, export-function is not — no special-casing needed).
         walk::walk_statement(self, s);
     }
 

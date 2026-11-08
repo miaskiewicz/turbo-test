@@ -88,32 +88,50 @@ pub fn value(id: &Path, root: &Path) -> Option<String> {
     if !url_flag && !known(file) {
         return None;
     }
-    if file.ends_with(".svg") && !has_flag(query, "no-inline") && !id.contains('#') {
-        let content = std::fs::read(crate::coverage::native_path(file)).ok()?;
-        if content.len() < INLINE_LIMIT
-            && !content.starts_with(b"version https://git-lfs.github.com")
-        {
-            return Some(svg_data_url(&content));
-        }
+    if let Some(inline) = try_inline_svg(&id, file, query) {
+        return Some(inline);
     }
-    // the `url` flag itself is dropped from the URL, any other query kept
+    let rest = url_query_tail(query);
+    let path = url_path_for(file, root);
+    Some(format!("{path}{rest}"))
+}
+
+/// A `.svg` file imported without `?no-inline`/`#fragment` is inlined as a `data:` URL when it is
+/// small enough and not a git-lfs pointer. `None` for any other case (including read errors).
+fn try_inline_svg(id: &str, file: &str, query: Option<&str>) -> Option<String> {
+    if !file.ends_with(".svg") || has_flag(query, "no-inline") || id.contains('#') {
+        return None;
+    }
+    let content = std::fs::read(crate::coverage::native_path(file)).ok()?;
+    if content.len() < INLINE_LIMIT && !content.starts_with(b"version https://git-lfs.github.com") {
+        return Some(svg_data_url(&content));
+    }
+    None
+}
+
+/// The query string to append to the asset URL, with vite's own `url` flag dropped. Empty when
+/// nothing remains.
+fn url_query_tail(query: Option<&str>) -> String {
     let rest: Vec<&str> = query
         .map(|q| q.split('&').filter(|t| *t != "url").collect())
         .unwrap_or_default();
-    let rest = if rest.is_empty() {
+    if rest.is_empty() {
         String::new()
     } else {
         format!("?{}", rest.join("&"))
-    };
-    let path = match crate::coverage::native_path(file).strip_prefix(root) {
+    }
+}
+
+/// `file` as vite serves it: root-relative when it is inside `root`, else via vite's `/@fs/`
+/// prefix (`/@fs/C:/x` on Windows).
+fn url_path_for(file: &str, root: &Path) -> String {
+    match crate::coverage::native_path(file).strip_prefix(root) {
         Ok(rel) => format!("/{}", crate::coverage::slash_path(rel)),
         Err(_) => {
-            // vite's FS_PREFIX `/@fs/` + the normalised absolute path (`/@fs/C:/x` on Windows)
             let abs = crate::coverage::slash_path(Path::new(file));
             format!("/@fs/{}", abs.trim_start_matches('/'))
         }
-    };
-    Some(format!("{path}{rest}"))
+    }
 }
 
 /// vite's svgToDataURL.
@@ -124,8 +142,13 @@ fn svg_data_url(content: &[u8]) -> String {
         let b64 = base64::engine::general_purpose::STANDARD.encode(content);
         return format!("data:image/svg+xml;base64,{b64}");
     }
-    // `>\s+<` -> `><`
-    let trimmed = s.trim();
+    let joined = svg_strip_between_tags(s.trim());
+    svg_percent_encode(&joined)
+}
+
+/// Collapse `>\s+<` to `><` (vite's whitespace-between-tags pass) while keeping text content
+/// intact.
+fn svg_strip_between_tags(trimmed: &str) -> String {
     let mut joined = String::new();
     let mut chars = trimmed.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
@@ -140,6 +163,13 @@ fn svg_data_url(content: &[u8]) -> String {
             }
         }
     }
+    joined
+}
+
+/// vite's svg-to-`data:` encoder on the whitespace-collapsed SVG: runs of whitespace collapse to a
+/// single `%20`, `"` becomes `'`, and the markup-significant bytes `%`, `#`, `<`, `>` are
+/// percent-escaped.
+fn svg_percent_encode(joined: &str) -> String {
     let mut out = String::from("data:image/svg+xml,");
     let mut in_ws = false;
     for c in joined.chars() {
