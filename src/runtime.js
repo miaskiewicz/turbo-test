@@ -7487,6 +7487,14 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     const iR = (d - 1 - (kF + baDeltaLength)) / 2;
     return iR <= iMaxR && aIndexesR[iR] - 1 <= aLast;
   };
+  const overlapFStep = (iF, d, aIndexPrev1, aIndexesF, aEnd, bEnd, bF, kF, common) => {
+    const insert = iF === 0 || (iF !== d && aIndexPrev1 < aIndexesF[iF]);
+    const aLastPrev = insert ? aIndexesF[iF] : aIndexPrev1;
+    const aFirst = insert ? aLastPrev : aLastPrev + 1;
+    const bFirst = bF + aFirst - kF;
+    const nCommonF = countF(aFirst + 1, aEnd, bFirst + 1, bEnd, common);
+    return { insert, aLastPrev, aFirst, bFirst, nCommonF, aLast: aFirst + nCommonF };
+  };
   const overlapF = (d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division) => {
     const bF = bStart - aStart;
     const baDeltaLength = (bEnd - bStart) - (aEnd - aStart);
@@ -7495,16 +7503,11 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     let aIndexPrev1 = 0;
     const nF = d < iMaxF ? d : iMaxF;
     for (let iF = 0, kF = -d; iF <= nF; iF += 1, kF += 2) {
-      const insert = iF === 0 || (iF !== d && aIndexPrev1 < aIndexesF[iF]);
-      const aLastPrev = insert ? aIndexesF[iF] : aIndexPrev1;
-      const aFirst = insert ? aLastPrev : aLastPrev + 1;
-      const bFirst = bF + aFirst - kF;
-      const nCommonF = countF(aFirst + 1, aEnd, bFirst + 1, bEnd, common);
-      const aLast = aFirst + nCommonF;
+      const s = overlapFStep(iF, d, aIndexPrev1, aIndexesF, aEnd, bEnd, bF, kF, common);
       aIndexPrev1 = aIndexesF[iF];
-      aIndexesF[iF] = aLast;
-      if (overlapFReached(kF, kMin, kMax, iMaxR, d, baDeltaLength, aIndexesR, aLast)) {
-        divisionF(d, aStart, aEnd, bStart, bEnd, common, division, bF, aLastPrev, insert, kF, aFirst, bFirst, nCommonF, aLast);
+      aIndexesF[iF] = s.aLast;
+      if (overlapFReached(kF, kMin, kMax, iMaxR, d, baDeltaLength, aIndexesR, s.aLast)) {
+        divisionF(d, aStart, aEnd, bStart, bEnd, common, division, bF, s.aLastPrev, s.insert, kF, s.aFirst, s.bFirst, s.nCommonF, s.aLast);
         return true;
       }
     }
@@ -7516,6 +7519,14 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     const iF = (d + (kR - baDeltaLength)) / 2;
     return iF <= iMaxF && aLast - 1 <= aIndexesF[iF];
   };
+  const overlapRStep = (iR, d, aIndexPrev1, aIndexesR, aStart, bStart, bR, kR, common) => {
+    const insert = iR === 0 || (iR !== d && aIndexesR[iR] < aIndexPrev1);
+    const aLastPrev = insert ? aIndexesR[iR] : aIndexPrev1;
+    const aFirst = insert ? aLastPrev : aLastPrev - 1;
+    const bFirst = bR + aFirst - kR;
+    const nCommonR = countR(aStart, aFirst - 1, bStart, bFirst - 1, common);
+    return { insert, aLastPrev, aFirst, bFirst, nCommonR, aLast: aFirst - nCommonR };
+  };
   const overlapR = (d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division) => {
     const bR = bEnd - aEnd;
     const baDeltaLength = (bEnd - bStart) - (aEnd - aStart);
@@ -7524,18 +7535,39 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     let aIndexPrev1 = 0;
     const nR = d < iMaxR ? d : iMaxR;
     for (let iR = 0, kR = d; iR <= nR; iR += 1, kR -= 2) {
-      const insert = iR === 0 || (iR !== d && aIndexesR[iR] < aIndexPrev1);
-      const aLastPrev = insert ? aIndexesR[iR] : aIndexPrev1;
-      const aFirst = insert ? aLastPrev : aLastPrev - 1;
-      const bFirst = bR + aFirst - kR;
-      const nCommonR = countR(aStart, aFirst - 1, bStart, bFirst - 1, common);
-      const aLast = aFirst - nCommonR;
+      const s = overlapRStep(iR, d, aIndexPrev1, aIndexesR, aStart, bStart, bR, kR, common);
       aIndexPrev1 = aIndexesR[iR];
-      aIndexesR[iR] = aLast;
-      if (overlapRReached(kR, kMin, kMax, iMaxF, d, baDeltaLength, aIndexesF, aLast)) {
-        divisionR(d, aStart, aEnd, bStart, bEnd, common, division, bR, aLastPrev, insert, kR, bFirst, nCommonR, aLast);
+      aIndexesR[iR] = s.aLast;
+      if (overlapRReached(kR, kMin, kMax, iMaxF, d, baDeltaLength, aIndexesF, s.aLast)) {
+        divisionR(d, aStart, aEnd, bStart, bEnd, common, division, bR, s.aLastPrev, s.insert, kR, s.bFirst, s.nCommonR, s.aLast);
         return true;
       }
+    }
+    return false;
+  };
+  const divideEven = (ctx, division) => {
+    const { nChange, aStart, aEnd, bStart, bEnd, aLength, bLength, bR, bF, common, aIndexesF, aIndexesR, baDeltaLength } = ctx;
+    const dMin = (nChange || baDeltaLength) / 2;
+    const dMax = (aLength + bLength) / 2;
+    let iMaxF = aLength, iMaxR = aLength;
+    for (let d = 1; d <= dMax; d += 1) {
+      iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
+      if (d < dMin) iMaxR = extendR(d, aStart, bStart, bR, common, aIndexesR, iMaxR);
+      else if (overlapR(d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division)) return true;
+    }
+    return false;
+  };
+  const divideOdd = (ctx, division) => {
+    const { nChange, aStart, aEnd, bStart, bEnd, aLength, bLength, bR, bF, common, aIndexesF, aIndexesR, baDeltaLength } = ctx;
+    const dMin = ((nChange || baDeltaLength) + 1) / 2;
+    const dMax = (aLength + bLength + 1) / 2;
+    let iMaxF = aLength, iMaxR = aLength;
+    let d = 1;
+    iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
+    for (d += 1; d <= dMax; d += 1) {
+      iMaxR = extendR(d - 1, aStart, bStart, bR, common, aIndexesR, iMaxR);
+      if (d < dMin) iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
+      else if (overlapF(d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division)) return true;
     }
     return false;
   };
@@ -7545,29 +7577,10 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     const aLength = aEnd - aStart;
     const bLength = bEnd - bStart;
     const baDeltaLength = bLength - aLength;
-    let iMaxF = aLength;
-    let iMaxR = aLength;
     aIndexesF[0] = aStart - 1;
     aIndexesR[0] = aEnd;
-    if (baDeltaLength % 2 === 0) {
-      const dMin = (nChange || baDeltaLength) / 2;
-      const dMax = (aLength + bLength) / 2;
-      for (let d = 1; d <= dMax; d += 1) {
-        iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
-        if (d < dMin) iMaxR = extendR(d, aStart, bStart, bR, common, aIndexesR, iMaxR);
-        else if (overlapR(d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division)) return;
-      }
-    } else {
-      const dMin = ((nChange || baDeltaLength) + 1) / 2;
-      const dMax = (aLength + bLength + 1) / 2;
-      let d = 1;
-      iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
-      for (d += 1; d <= dMax; d += 1) {
-        iMaxR = extendR(d - 1, aStart, bStart, bR, common, aIndexesR, iMaxR);
-        if (d < dMin) iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
-        else if (overlapF(d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division)) return;
-      }
-    }
+    const ctx = { nChange, aStart, aEnd, bStart, bEnd, aLength, bLength, bR, bF, common, aIndexesF, aIndexesR, baDeltaLength };
+    if (baDeltaLength % 2 === 0 ? divideEven(ctx, division) : divideOdd(ctx, division)) return;
     throw new Error(`diff-sequences: no overlap aStart=${aStart} aEnd=${aEnd} bStart=${bStart} bEnd=${bEnd}`);
   };
   // Transpose the halves so that `a` is the shorter sequence, lazily installing the mirrored
@@ -7580,16 +7593,20 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     }
     return [bStart, bEnd, aStart, aEnd, t];
   };
+  const findEmit = (division, found) => {
+    const { nCommonPreceding, aCommonPreceding, bCommonPreceding, nCommonFollowing, aCommonFollowing, bCommonFollowing } = division;
+    if (nCommonPreceding !== 0) found(nCommonPreceding, aCommonPreceding, bCommonPreceding);
+    if (nCommonFollowing !== 0) found(nCommonFollowing, aCommonFollowing, bCommonFollowing);
+  };
   const find = (nChange, aStart, aEnd, bStart, bEnd, transposed, callbacks, aIndexesF, aIndexesR, division) => {
     if (bEnd - bStart < aEnd - aStart) {
       [aStart, aEnd, bStart, bEnd, transposed] = transposeHalves(aStart, aEnd, bStart, bEnd, transposed, callbacks);
     }
     const { found, common } = callbacks[transposed ? 1 : 0];
     divide(nChange, aStart, aEnd, bStart, bEnd, common, aIndexesF, aIndexesR, division);
-    const { nChangePreceding, aEndPreceding, bEndPreceding, nCommonPreceding, aCommonPreceding, bCommonPreceding, nCommonFollowing, aCommonFollowing, bCommonFollowing, nChangeFollowing, aStartFollowing, bStartFollowing } = division;
+    const { nChangePreceding, aEndPreceding, bEndPreceding, nChangeFollowing, aStartFollowing, bStartFollowing } = division;
     if (aStart < aEndPreceding && bStart < bEndPreceding) find(nChangePreceding, aStart, aEndPreceding, bStart, bEndPreceding, transposed, callbacks, aIndexesF, aIndexesR, division);
-    if (nCommonPreceding !== 0) found(nCommonPreceding, aCommonPreceding, bCommonPreceding);
-    if (nCommonFollowing !== 0) found(nCommonFollowing, aCommonFollowing, bCommonFollowing);
+    findEmit(division, found);
     if (aStartFollowing < aEnd && bStartFollowing < bEnd) find(nChangeFollowing, aStartFollowing, aEnd, bStartFollowing, bEnd, transposed, callbacks, aIndexesF, aIndexesR, division);
   };
   const nCommonF = countF(0, aLength, 0, bLength, isCommon);
@@ -7629,28 +7646,36 @@ const __annotation = () => `${__dcol.green(`- ${__diffAnno[0]}`)}\n${__dcol.red(
 // jest-diff `joinAlignedDiffsNoExpand` (5 context lines, `@@` patch marks), each line as
 // printDiffLine colours it: deleted green, inserted red, common dim, the marks yellow.
 // joinAlignedDiffsNoExpand: whether common runs longer than the context are cut (`@@` marks)
+function __diffsPatchHit(start, i, len, ctx, ctx2) {
+  if (start === i) return false;
+  const k = i - start;
+  return k > (start === 0 || i === len ? ctx : ctx2);
+}
 function __diffsNeedPatch(diffs, ctx, ctx2) {
   const len = diffs.length;
   let i = 0;
   while (i !== len) {
     const start = i;
     while (i !== len && diffs[i][0] === 0) i++;
-    const k = i - start;
-    if (start !== i && k > (start === 0 || i === len ? ctx : ctx2)) return true;
+    if (__diffsPatchHit(start, i, len, ctx, ctx2)) return true;
     while (i !== len && diffs[i][0] !== 0) i++;
   }
   return false;
 }
 // __joinDiffs's main pass over the (op, line) sequence: a run of common lines first (deferred to
 // commonRun), then every immediately-adjacent `-` and `+` as consecutive del/ins blocks.
+function __joinDiffsOpRun(diffs, i, len, op, emit) {
+  while (i !== len && diffs[i][0] === op) { emit(diffs[i][1]); i++; }
+  return i;
+}
 function __joinDiffsLoop(diffs, len, commonRun, del, ins) {
   let i = 0;
   while (i !== len) {
     const start = i;
     while (i !== len && diffs[i][0] === 0) i++;
     if (start !== i) commonRun(start, i);
-    while (i !== len && diffs[i][0] === -1) { del(diffs[i][1]); i++; }
-    while (i !== len && diffs[i][0] === 1) { ins(diffs[i][1]); i++; }
+    i = __joinDiffsOpRun(diffs, i, len, -1, del);
+    i = __joinDiffsOpRun(diffs, i, len, 1, ins);
   }
 }
 function __joinDiffs(diffs) {
@@ -7742,14 +7767,12 @@ function __commonSuffix(t1, t2) {
   }
   return mid;
 }
-function __commonOverlap(t1, t2) {
-  const l1 = t1.length;
-  const l2 = t2.length;
-  if (l1 === 0 || l2 === 0) return 0;
-  if (l1 > l2) t1 = t1.substring(l1 - l2);
-  else if (l1 < l2) t2 = t2.substring(0, l1);
-  const len = Math.min(l1, l2);
-  if (t1 === t2) return len;
+function __commonOverlapTrim(t1, t2, l1, l2) {
+  if (l1 > l2) return [t1.substring(l1 - l2), t2];
+  if (l1 < l2) return [t1, t2.substring(0, l1)];
+  return [t1, t2];
+}
+function __commonOverlapLoop(t1, t2, len) {
   let best = 0;
   let length = 1;
   for (;;) {
@@ -7758,6 +7781,15 @@ function __commonOverlap(t1, t2) {
     length += found;
     if (found === 0 || t1.substring(len - length) === t2.substring(0, length)) { best = length; length++; }
   }
+}
+function __commonOverlap(t1, t2) {
+  const l1 = t1.length;
+  const l2 = t2.length;
+  if (l1 === 0 || l2 === 0) return 0;
+  [t1, t2] = __commonOverlapTrim(t1, t2, l1, l2);
+  const len = Math.min(l1, l2);
+  if (t1 === t2) return len;
+  return __commonOverlapLoop(t1, t2, len);
 }
 // semanticScore's classes of the character at a boundary: non-alphanumeric, whitespace, line
 // break, blank line (`blank`: the text's blank-line test at that end)
@@ -7770,13 +7802,13 @@ function __scoreSide(c, text, blank) {
 // True when either edge has the flag — the symmetric half of __semanticRank's table.
 function __semanticEither(x, y, key) { return x[key] || y[key]; }
 // __semanticScore's rank table over the two edges' character classes.
+const __semanticSplit = (x, y) => x.nonAlnum && !x.ws && y.ws;
 function __semanticRank(x, y) {
   if (__semanticEither(x, y, 'blank')) return 5;
   if (__semanticEither(x, y, 'lb')) return 4;
-  if (x.nonAlnum && !x.ws && y.ws) return 3;
+  if (__semanticSplit(x, y)) return 3;
   if (__semanticEither(x, y, 'ws')) return 2;
-  if (__semanticEither(x, y, 'nonAlnum')) return 1;
-  return 0;
+  return __semanticEither(x, y, 'nonAlnum') ? 1 : 0;
 }
 function __semanticScore(one, two) {
   if (!one || !two) return 6;
@@ -7784,38 +7816,40 @@ function __semanticScore(one, two) {
   const y = __scoreSide(two.charAt(0), two, /^\r?\n\r?\n/);
   return __semanticRank(x, y);
 }
+function __losslessShiftSuffix(eq1, edit, eq2) {
+  const off = __commonSuffix(eq1, edit);
+  if (!off) return { eq1, edit, eq2 };
+  const common = edit.substring(edit.length - off);
+  return { eq1: eq1.substring(0, eq1.length - off), edit: common + edit.substring(0, edit.length - off), eq2: common + eq2 };
+}
+function __losslessBestShift(eq1, edit, eq2) {
+  let bestEq1 = eq1, bestEdit = edit, bestEq2 = eq2;
+  let bestScore = __semanticScore(eq1, edit) + __semanticScore(edit, eq2);
+  while (edit.charAt(0) === eq2.charAt(0)) {
+    eq1 += edit.charAt(0);
+    edit = edit.substring(1) + eq2.charAt(0);
+    eq2 = eq2.substring(1);
+    const score = __semanticScore(eq1, edit) + __semanticScore(edit, eq2);
+    if (score >= bestScore) { bestScore = score; bestEq1 = eq1; bestEdit = edit; bestEq2 = eq2; }
+  }
+  return { bestEq1, bestEdit, bestEq2 };
+}
+function __losslessApply(diffs, pointer, best) {
+  if (diffs[pointer - 1][1] === best.bestEq1) return pointer;
+  if (best.bestEq1) diffs[pointer - 1][1] = best.bestEq1;
+  else { diffs.splice(pointer - 1, 1); pointer--; }
+  diffs[pointer][1] = best.bestEdit;
+  if (best.bestEq2) diffs[pointer + 1][1] = best.bestEq2;
+  else { diffs.splice(pointer + 1, 1); pointer--; }
+  return pointer;
+}
 function __cleanupSemanticLossless(diffs) {
   let pointer = 1;
   while (pointer < diffs.length - 1) {
     if (diffs[pointer - 1][0] === 0 && diffs[pointer + 1][0] === 0) {
-      let eq1 = diffs[pointer - 1][1];
-      let edit = diffs[pointer][1];
-      let eq2 = diffs[pointer + 1][1];
-      const off = __commonSuffix(eq1, edit);
-      if (off) {
-        const common = edit.substring(edit.length - off);
-        eq1 = eq1.substring(0, eq1.length - off);
-        edit = common + edit.substring(0, edit.length - off);
-        eq2 = common + eq2;
-      }
-      let bestEq1 = eq1;
-      let bestEdit = edit;
-      let bestEq2 = eq2;
-      let bestScore = __semanticScore(eq1, edit) + __semanticScore(edit, eq2);
-      while (edit.charAt(0) === eq2.charAt(0)) {
-        eq1 += edit.charAt(0);
-        edit = edit.substring(1) + eq2.charAt(0);
-        eq2 = eq2.substring(1);
-        const score = __semanticScore(eq1, edit) + __semanticScore(edit, eq2);
-        if (score >= bestScore) { bestScore = score; bestEq1 = eq1; bestEdit = edit; bestEq2 = eq2; }
-      }
-      if (diffs[pointer - 1][1] !== bestEq1) {
-        if (bestEq1) diffs[pointer - 1][1] = bestEq1;
-        else { diffs.splice(pointer - 1, 1); pointer--; }
-        diffs[pointer][1] = bestEdit;
-        if (bestEq2) diffs[pointer + 1][1] = bestEq2;
-        else { diffs.splice(pointer + 1, 1); pointer--; }
-      }
+      const shifted = __losslessShiftSuffix(diffs[pointer - 1][1], diffs[pointer][1], diffs[pointer + 1][1]);
+      const best = __losslessBestShift(shifted.eq1, shifted.edit, shifted.eq2);
+      pointer = __losslessApply(diffs, pointer, best);
     }
     pointer++;
   }
@@ -7840,15 +7874,16 @@ function __mergeFactor(diffs, pointer, nDel, nIns, tIns, tDel) {
 }
 // cleanupMerge at an equality ending a run of edits: the run as one deletion and one insertion
 // (or the equality merged into the previous one); returns the new pointer
+function __mergeRunMulti(diffs, pointer, nDel, nIns, tDel, tIns) {
+  if (nDel !== 0 && nIns !== 0) [pointer, tIns, tDel] = __mergeFactor(diffs, pointer, nDel, nIns, tIns, tDel);
+  pointer -= nDel + nIns;
+  diffs.splice(pointer, nDel + nIns);
+  if (tDel.length) { diffs.splice(pointer, 0, [-1, tDel]); pointer++; }
+  if (tIns.length) { diffs.splice(pointer, 0, [1, tIns]); pointer++; }
+  return pointer + 1;
+}
 function __mergeRun(diffs, pointer, nDel, nIns, tDel, tIns) {
-  if (nDel + nIns > 1) {
-    if (nDel !== 0 && nIns !== 0) [pointer, tIns, tDel] = __mergeFactor(diffs, pointer, nDel, nIns, tIns, tDel);
-    pointer -= nDel + nIns;
-    diffs.splice(pointer, nDel + nIns);
-    if (tDel.length) { diffs.splice(pointer, 0, [-1, tDel]); pointer++; }
-    if (tIns.length) { diffs.splice(pointer, 0, [1, tIns]); pointer++; }
-    return pointer + 1;
-  }
+  if (nDel + nIns > 1) return __mergeRunMulti(diffs, pointer, nDel, nIns, tDel, tIns);
   if (pointer !== 0 && diffs[pointer - 1][0] === 0) {
     diffs[pointer - 1][1] += diffs[pointer][1];
     diffs.splice(pointer, 1);
@@ -7882,85 +7917,82 @@ function __mergeShifts(diffs) {
   }
   return changes;
 }
+function __cleanupMergeStep(state, diffs) {
+  const op = diffs[state.pointer][0];
+  if (op === 1) { state.nIns++; state.tIns += diffs[state.pointer][1]; state.pointer++; return; }
+  if (op === -1) { state.nDel++; state.tDel += diffs[state.pointer][1]; state.pointer++; return; }
+  state.pointer = __mergeRun(diffs, state.pointer, state.nDel, state.nIns, state.tDel, state.tIns);
+  state.nIns = 0; state.nDel = 0; state.tDel = ''; state.tIns = '';
+}
 function __cleanupMerge(diffs) {
   diffs.push([0, '']);
-  let pointer = 0;
-  let nDel = 0;
-  let nIns = 0;
-  let tDel = '';
-  let tIns = '';
-  while (pointer < diffs.length) {
-    switch (diffs[pointer][0]) {
-      case 1: nIns++; tIns += diffs[pointer][1]; pointer++; break;
-      case -1: nDel++; tDel += diffs[pointer][1]; pointer++; break;
-      case 0:
-        pointer = __mergeRun(diffs, pointer, nDel, nIns, tDel, tIns);
-        nIns = 0; nDel = 0; tDel = ''; tIns = '';
-        break;
-    }
-  }
+  const state = { pointer: 0, nDel: 0, nIns: 0, tDel: '', tIns: '' };
+  while (state.pointer < diffs.length) __cleanupMergeStep(state, diffs);
   if (diffs.at(-1)?.[1] === '') diffs.pop();
   if (__mergeShifts(diffs)) __cleanupMerge(diffs);
 }
 // cleanupSemantic's last step: a deletion and insertion overlapping by at least half of either
 // become deletion, equality, insertion
+function __overlapsForward(diffs, pointer, deletion, insertion, o1) {
+  diffs.splice(pointer, 0, [0, insertion.substring(0, o1)]);
+  diffs[pointer - 1][1] = deletion.substring(0, deletion.length - o1);
+  diffs[pointer + 1][1] = insertion.substring(o1);
+}
+function __overlapsReverse(diffs, pointer, deletion, insertion, o2) {
+  diffs.splice(pointer, 0, [0, deletion.substring(0, o2)]);
+  diffs[pointer - 1][0] = 1;
+  diffs[pointer - 1][1] = insertion.substring(0, insertion.length - o2);
+  diffs[pointer + 1][0] = -1;
+  diffs[pointer + 1][1] = deletion.substring(o2);
+}
+function __overlapsAt(diffs, pointer) {
+  const deletion = diffs[pointer - 1][1];
+  const insertion = diffs[pointer][1];
+  const o1 = __commonOverlap(deletion, insertion);
+  const o2 = __commonOverlap(insertion, deletion);
+  if (o1 >= o2) {
+    if (o1 >= deletion.length / 2 || o1 >= insertion.length / 2) { __overlapsForward(diffs, pointer, deletion, insertion, o1); return true; }
+    return false;
+  }
+  if (o2 >= deletion.length / 2 || o2 >= insertion.length / 2) { __overlapsReverse(diffs, pointer, deletion, insertion, o2); return true; }
+  return false;
+}
 function __cleanupOverlaps(diffs) {
   let pointer = 1;
   while (pointer < diffs.length) {
     if (diffs[pointer - 1][0] === -1 && diffs[pointer][0] === 1) {
-      const deletion = diffs[pointer - 1][1];
-      const insertion = diffs[pointer][1];
-      const o1 = __commonOverlap(deletion, insertion);
-      const o2 = __commonOverlap(insertion, deletion);
-      if (o1 >= o2) {
-        if (o1 >= deletion.length / 2 || o1 >= insertion.length / 2) {
-          diffs.splice(pointer, 0, [0, insertion.substring(0, o1)]);
-          diffs[pointer - 1][1] = deletion.substring(0, deletion.length - o1);
-          diffs[pointer + 1][1] = insertion.substring(o1);
-          pointer++;
-        }
-      } else if (o2 >= deletion.length / 2 || o2 >= insertion.length / 2) {
-        diffs.splice(pointer, 0, [0, deletion.substring(0, o2)]);
-        diffs[pointer - 1][0] = 1;
-        diffs[pointer - 1][1] = insertion.substring(0, insertion.length - o2);
-        diffs[pointer + 1][0] = -1;
-        diffs[pointer + 1][1] = deletion.substring(o2);
-        pointer++;
-      }
+      if (__overlapsAt(diffs, pointer)) pointer++;
       pointer++;
     }
     pointer++;
   }
 }
-function __cleanupSemantic(diffs) {
-  let changes = false;
-  const equalities = [];
-  let nEq = 0;
-  let lastEquality = null;
-  let pointer = 0;
-  let ins1 = 0, del1 = 0, ins2 = 0, del2 = 0;
-  while (pointer < diffs.length) {
-    if (diffs[pointer][0] === 0) {
-      equalities[nEq++] = pointer;
-      ins1 = ins2; del1 = del2; ins2 = 0; del2 = 0;
-      lastEquality = diffs[pointer][1];
-    } else {
-      if (diffs[pointer][0] === 1) ins2 += diffs[pointer][1].length;
-      else del2 += diffs[pointer][1].length;
-      if (lastEquality && lastEquality.length <= Math.max(ins1, del1) && lastEquality.length <= Math.max(ins2, del2)) {
-        diffs.splice(equalities[nEq - 1], 0, [-1, lastEquality]);
-        diffs[equalities[nEq - 1] + 1][0] = 1;
-        nEq--;
-        nEq--;
-        pointer = nEq > 0 ? equalities[nEq - 1] : -1;
-        ins1 = 0; del1 = 0; ins2 = 0; del2 = 0;
-        lastEquality = null;
-        changes = true;
-      }
-    }
-    pointer++;
+function __cleanupSemEqualityHit(lastEquality, ins1, del1, ins2, del2) {
+  return lastEquality && lastEquality.length <= Math.max(ins1, del1) && lastEquality.length <= Math.max(ins2, del2);
+}
+function __cleanupSemStep(state, diffs) {
+  const d = diffs[state.pointer];
+  if (d[0] === 0) {
+    state.equalities[state.nEq++] = state.pointer;
+    state.ins1 = state.ins2; state.del1 = state.del2; state.ins2 = 0; state.del2 = 0;
+    state.lastEquality = d[1];
+    return;
   }
-  if (changes) __cleanupMerge(diffs);
+  if (d[0] === 1) state.ins2 += d[1].length;
+  else state.del2 += d[1].length;
+  if (!__cleanupSemEqualityHit(state.lastEquality, state.ins1, state.del1, state.ins2, state.del2)) return;
+  diffs.splice(state.equalities[state.nEq - 1], 0, [-1, state.lastEquality]);
+  diffs[state.equalities[state.nEq - 1] + 1][0] = 1;
+  state.nEq -= 2;
+  state.pointer = state.nEq > 0 ? state.equalities[state.nEq - 1] : -1;
+  state.ins1 = 0; state.del1 = 0; state.ins2 = 0; state.del2 = 0;
+  state.lastEquality = null;
+  state.changes = true;
+}
+function __cleanupSemantic(diffs) {
+  const state = { changes: false, equalities: [], nEq: 0, lastEquality: null, pointer: 0, ins1: 0, del1: 0, ins2: 0, del2: 0 };
+  while (state.pointer < diffs.length) { __cleanupSemStep(state, diffs); state.pointer++; }
+  if (state.changes) __cleanupMerge(diffs);
   __cleanupSemanticLossless(diffs);
   __cleanupOverlaps(diffs);
 }
