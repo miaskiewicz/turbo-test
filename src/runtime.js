@@ -1113,9 +1113,24 @@ if (typeof globalThis.URL === 'undefined') {
     _setHostName(name, port, withPort) {
       if (port !== undefined && (!withPort || this._isFile)) return null;
       if (name === '' && this._special && !this._isFile) return null;
-      if (this._special) name = name.toLowerCase();
+      if (this._special) name = URL._idnAscii(name);
       if (this._isFile && name === 'localhost') return '';
       return name;
+    }
+    // WHATWG `domain to ASCII` for a special URL's host (turbo-test#259): Node runs an IDN
+    // hostname through UTS#46 ToASCII (`new URL('http://ü.com').host === 'xn--tda.com'`); the
+    // lowercase that was here before did the ASCII half of that. IPv6 brackets skip the IDN
+    // pass (the brackets' contents are not a domain); a pure-ASCII name without an `xn--`
+    // label is lower-cased directly (ToASCII is a no-op on it, and the native call isn't
+    // free); otherwise ToASCII runs through `__ttIdnaToAscii`, with a fallback to the
+    // lower-cased name if the native is missing or rejects the input — the host parse
+    // already stripped forbidden code points.
+    static _idnAscii(name) {
+      const lower = name.toLowerCase();
+      if (lower.startsWith('[')) return lower;
+      if (/^[\x00-\x7f]*$/.test(lower) && !lower.includes('xn--')) return lower;
+      const ascii = globalThis.__ttIdnaToAscii ? globalThis.__ttIdnaToAscii(lower) : undefined;
+      return ascii === undefined ? lower : ascii;
     }
     // the leading digits of `v`; a scheme's default port serializes as no port
     _setPort(v) {

@@ -69,6 +69,56 @@ fn url_resolves_relative_references_like_node() {
     }
 }
 
+/// The IDN host cases: expected values captured from Node 22+ (UTS#46 non-transitional).
+const URL_IDN_TEST: &str = r##"// Node applies UTS#46 ToASCII to a special URL's host, so an IDN hostname comes back
+// as its Punycode serialization (`xn--…`). ASCII hosts keep the pre-IDN behavior
+// (lower-case, trailing dot preserved, empty labels preserved).
+const CASES = [
+  ['http://ü.com/',                 'xn--tda.com',                  'http://xn--tda.com/'],
+  ['http://例え.テスト/',             'xn--r8jz45g.xn--zckzah',       'http://xn--r8jz45g.xn--zckzah/'],
+  ['http://مثال.إختبار/',             'xn--mgbh0fb.xn--kgbechtv',     'http://xn--mgbh0fb.xn--kgbechtv/'],
+  ['http://пример.испытание/',       'xn--e1afmkfd.xn--80akhbyknj4f','http://xn--e1afmkfd.xn--80akhbyknj4f/'],
+  ['http://über.com/p?q=1#h',        'xn--ber-goa.com',              'http://xn--ber-goa.com/p?q=1#h'],
+  ['http://xn--tda.com/',            'xn--tda.com',                  'http://xn--tda.com/'],
+  ['http://Example.COM/',            'example.com',                  'http://example.com/'],
+  ['http://foo.example.com./',       'foo.example.com.',             'http://foo.example.com./'],
+  ['http://a..b/',                   'a..b',                         'http://a..b/'],
+];
+test('URL host is UTS#46 ToASCII like Node', () => {
+  for (const [input, host, href] of CASES) {
+    const u = new URL(input);
+    expect(`${input} host=${u.host}`).toBe(`${input} host=${host}`);
+    expect(`${input} hostname=${u.hostname}`).toBe(`${input} hostname=${host}`);
+    expect(`${input} href=${u.href}`).toBe(`${input} href=${href}`);
+  }
+  // The hostname setter runs through the same IDN path (WHATWG host parser).
+  const u = new URL('http://example.com/');
+  u.hostname = 'ü.com';
+  expect(u.host).toBe('xn--tda.com');
+  expect(u.href).toBe('http://xn--tda.com/');
+  // A file: URL is not a host-bearing special scheme for IDN; its empty / localhost host
+  // continues to parse as the empty host.
+  expect(new URL('file:///x').host).toBe('');
+});
+"##;
+
+#[test]
+fn url_host_is_uts46_to_ascii_like_node() {
+    // turbo-test#259: a URL with a non-ASCII hostname kept the raw UTF-8 instead of running it
+    // through UTS#46 ToASCII — `new URL('http://ü.com').host` was `ü.com`, not `xn--tda.com`.
+    for esbuild in [false, true] {
+        let p = Project::new("rc-url-idn");
+        if esbuild {
+            p.with_esbuild();
+            p.file("package.json", r#"{"name":"r259"}"#);
+        } else {
+            p.file("package.json", r#"{"name":"r259","type":"module"}"#);
+        }
+        p.file("a.test.js", URL_IDN_TEST);
+        assert_passes(&turbo_test(&p.dir, &["a.test.js"], &[]), 1);
+    }
+}
+
 #[test]
 fn an_entry_mock_factory_runs_once() {
     // turbo-test#38 item 2: the entry's hoisted factories ran in the mock prepass AND again in

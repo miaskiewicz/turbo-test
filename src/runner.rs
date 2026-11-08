@@ -8286,6 +8286,12 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         "__ttTextDecode",
         crate::text_decoder::native_text_decode,
     );
+    bind_fn(
+        scope,
+        global,
+        "__ttIdnaToAscii",
+        crate::idna::native_idna_to_ascii,
+    );
     install_runtime_flags(scope);
     let prelude = runtime_prelude();
     if !prelude.is_empty() {

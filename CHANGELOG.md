@@ -3,6 +3,20 @@
 All notable changes to `@miaskiewicz/turbo-test`. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+- A special URL's host is now UTS#46 ToASCII, as Node/vitest's WHATWG URL serializes it (#259).
+  Before, the runtime's `URL` polyfill only ASCII-lowercased the hostname, so
+  `new URL('http://ü.com').host` was `ü.com` (vitest: `xn--tda.com`) and a validator built on
+  `new URL()` saw a different host for the same URL under the two runners. The host parser now
+  runs a special, non-file, non-IPv6 name through a native `__ttIdnaToAscii` binding (Rust
+  `idna::domain_to_ascii`, the UTS#46 non-transitional ToASCII the WHATWG URL spec's
+  domain-to-ASCII step calls for). Pure-ASCII names without an `xn--` label keep the lowercase
+  fast path (no native round-trip). IPv6 bracketed hosts, trailing dots, empty labels and
+  already-`xn--`-encoded labels are unchanged. Not a 0.8.0 regression — the same bug ships in
+  0.7.1.
+
 ## [0.8.0] — 2026-11-05 — complexity gates blocking, jest whenCalledWith / fakeTimers config, turbo-dom 0.8
 
 ### Changed
