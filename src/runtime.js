@@ -1352,17 +1352,21 @@ if (typeof globalThis.Blob === 'undefined') {
     if (typeof bp !== 'object' && typeof bp !== 'function') return false;
     return typeof bp[Symbol.iterator] === 'function';
   };
+  const isDictLike = (v) => v == null || typeof v === 'object' || typeof v === 'function';
+  const blobEndings = (o) => {
+    const endings = o.endings === undefined ? 'transparent' : String(o.endings);
+    if (endings !== 'transparent' && endings !== 'native')
+      throw __codecError(TypeError, 'ERR_INVALID_ARG_VALUE', `The property 'options.endings' is invalid. Received '${endings}'`);
+    return endings;
+  };
   // the Blob constructor's argument checks; returns [options, endings]
   const blobOptions = (blobParts, options) => {
     if (!isIterableParts(blobParts))
       throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'Value cannot be converted to sequence.');
-    if (options != null && typeof options !== 'object' && typeof options !== 'function')
+    if (options != null && !isDictLike(options))
       throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "options" argument must be a dictionary. Received ' + received(options));
     const o = options == null ? {} : options;
-    const endings = o.endings === undefined ? 'transparent' : String(o.endings);
-    if (endings !== 'transparent' && endings !== 'native')
-      throw __codecError(TypeError, 'ERR_INVALID_ARG_VALUE', `The property 'options.endings' is invalid. Received '${endings}'`);
-    return [o, endings];
+    return [o, blobEndings(o)];
   };
   globalThis.Blob = class Blob {
     #chunks = [];
@@ -1374,29 +1378,40 @@ if (typeof globalThis.Blob === 'undefined') {
       const add = (c) => { if (c.length) { this.#chunks.push(c); this.#size += c.length; } };
       for (const p of blobParts === undefined ? [] : blobParts) Blob.#addPart(p, endings, add);
     }
+    static #isArrayBufferLike(p) {
+      return p instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && p instanceof SharedArrayBuffer);
+    }
+    static #addStringPart(p, endings, add) {
+      let s = String(p);
+      if (endings === 'native') s = s.replace(/\r\n?/g, '\n');
+      add(new globalThis.TextEncoder().encode(s));
+    }
     // one blob part's bytes, to `add`
     static #addPart(p, endings, add) {
-      if (p instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && p instanceof SharedArrayBuffer)) add(new Uint8Array(p.slice(0)));
+      if (Blob.#isArrayBufferLike(p)) add(new Uint8Array(p.slice(0)));
       else if (ArrayBuffer.isView(p)) add(new Uint8Array(p.buffer, p.byteOffset, p.byteLength).slice());
       else if (p !== null && typeof p === 'object' && #chunks in p) p.#chunks.forEach(add);
-      else {
-        let s = String(p);
-        if (endings === 'native') s = s.replace(/\r\n?/g, '\n');
-        add(new globalThis.TextEncoder().encode(s));
-      }
+      else Blob.#addStringPart(p, endings, add);
     }
     get type() { if (!(#chunks in this)) throw thisErr('Blob'); return this.#type; }
     get size() { if (!(#chunks in this)) throw thisErr('Blob'); return this.#size; }
-    slice(start = undefined, end = undefined, contentType = undefined) {
+    #sliceRel(v, dflt) {
+      if (v === undefined) return dflt;
+      const n = clamp(v);
+      return n < 0 ? Math.max(this.#size + n, 0) : Math.min(n, this.#size);
+    }
+    #appendSliceChunk(out, c, lo, hi) {
+      out.#chunks.push(lo === 0 && hi === c.length ? c : c.subarray(lo, hi));
+      out.#size += hi - lo;
+    }
+    slice(start, end, contentType) {
       if (!(#chunks in this)) throw thisErr('Blob');
-      const size = this.#size;
-      const rel = (v, dflt) => { if (v === undefined) return dflt; const n = clamp(v); return n < 0 ? Math.max(size + n, 0) : Math.min(n, size); };
-      const from = rel(start, 0), to = rel(end, size);
+      const from = this.#sliceRel(start, 0), to = this.#sliceRel(end, this.#size);
       const out = new Blob([], contentType === undefined ? undefined : { type: contentType });
       let at = 0;
       for (const c of this.#chunks) {
         const lo = Math.max(from - at, 0), hi = Math.min(to - at, c.length);
-        if (lo < hi) { out.#chunks.push(lo === 0 && hi === c.length ? c : c.subarray(lo, hi)); out.#size += hi - lo; }
+        if (lo < hi) this.#appendSliceChunk(out, c, lo, hi);
         at += c.length;
       }
       return out;
@@ -1504,13 +1519,23 @@ if (typeof globalThis.FileReader === 'undefined') {
     Object.defineProperty(e, 'code', { value: 11, configurable: true });
     return e;
   };
+  const BOMS = [
+    [[0xef, 0xbb, 0xbf], 'utf-8'],
+    [[0xff, 0xfe], 'utf-16le'],
+    [[0xfe, 0xff], 'utf-16be'],
+  ];
+  const bomMatches = (b, bytes) => bytes.every((v, i) => b[i] === v);
+  const bomEncoding = (b) => {
+    for (const [bytes, enc] of BOMS) if (bomMatches(b, bytes)) return enc;
+    return null;
+  };
+  const labelEncoding = (label) => {
+    if (label === undefined) return 'utf-8';
+    try { return new globalThis.TextDecoder(String(label)).encoding; } catch { return 'utf-8'; }
+  };
   // the encoding readAsText decodes with: a UTF-8 / UTF-16 BOM wins, then the label, then UTF-8
   const textOf = (b, label) => {
-    let enc = 'utf-8';
-    if (b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf) enc = 'utf-8';
-    else if (b[0] === 0xff && b[1] === 0xfe) enc = 'utf-16le';
-    else if (b[0] === 0xfe && b[1] === 0xff) enc = 'utf-16be';
-    else if (label !== undefined) { try { enc = new globalThis.TextDecoder(String(label)).encoding; } catch {} }
+    const enc = bomEncoding(b) || labelEncoding(label);
     return new globalThis.TextDecoder(enc).decode(b);
   };
   // bytes[] -> FileReader#result for the four read kinds
@@ -1560,6 +1585,25 @@ if (typeof globalThis.FileReader === 'undefined') {
         Object.defineProperty(ev, k, { value: v, configurable: true, enumerable: true });
       this.dispatchEvent(ev);
     }
+    async #readBytes(blob) {
+      // the Blob's bytes, not char codes of its decoded text (turbo-test#132)
+      return typeof blob.bytes === 'function' ? await blob.bytes() : new Uint8Array(await blob.arrayBuffer());
+    }
+    #onReadError(gen, e) {
+      if (gen !== this.#gen) return;
+      this.readyState = 2; this.error = e;
+      this.#fire('loadstart'); this.#fire('error'); this.#fire('loadend');
+    }
+    #onReadSuccess(gen, bytes, blob, kind, label) {
+      if (gen !== this.#gen) return;
+      this.#fire('loadstart');
+      if (gen !== this.#gen) return;
+      if (bytes.length) { this.#fire('progress', bytes.length, bytes.length, true); if (gen !== this.#gen) return; }
+      this.result = decodeReadResult(bytes, blob, kind, label);
+      this.readyState = 2;
+      this.#fire('load');
+      this.#fire('loadend');
+    }
     #read(blob, kind, label) {
       if (blob === null || typeof blob !== 'object' || typeof blob.arrayBuffer !== 'function')
         throw new TypeError(`Failed to execute '${kind}' on 'FileReader': parameter 1 is not of type 'Blob'.`);
@@ -1570,23 +1614,9 @@ if (typeof globalThis.FileReader === 'undefined') {
       this.error = null;
       Promise.resolve().then(async () => {
         let bytes;
-        try {
-          // the Blob's bytes, not char codes of its decoded text (turbo-test#132)
-          bytes = typeof blob.bytes === 'function' ? await blob.bytes() : new Uint8Array(await blob.arrayBuffer());
-        } catch (e) {
-          if (gen !== this.#gen) return;
-          this.readyState = 2; this.error = e;
-          this.#fire('loadstart'); this.#fire('error'); this.#fire('loadend');
-          return;
-        }
-        if (gen !== this.#gen) return;
-        this.#fire('loadstart');
-        if (gen !== this.#gen) return;
-        if (bytes.length) { this.#fire('progress', bytes.length, bytes.length, true); if (gen !== this.#gen) return; }
-        this.result = decodeReadResult(bytes, blob, kind, label);
-        this.readyState = 2;
-        this.#fire('load');
-        this.#fire('loadend');
+        try { bytes = await this.#readBytes(blob); }
+        catch (e) { this.#onReadError(gen, e); return; }
+        this.#onReadSuccess(gen, bytes, blob, kind, label);
       });
     }
     readAsArrayBuffer(blob) { this.#read(blob, 'readAsArrayBuffer'); }
@@ -1637,24 +1667,47 @@ if (typeof globalThis.fetch === 'undefined') {
     getSetCookie() { const v = this._.get('set-cookie'); return v ? [v] : []; }
     [Symbol.iterator]() { return this._.entries(); }
   };
+  const __requestUrl = (url) => {
+    if (typeof url !== 'object' || !url) return String(url);
+    return String(url.url || url.href || url);
+  };
+  const __requestHeaders = (h) => {
+    if (h instanceof globalThis.Headers) return h;
+    const out = new globalThis.Headers();
+    if (h) for (const k of Object.keys(h)) out.set(k, h[k]);
+    return out;
+  };
   globalThis.Request = class Request {
     constructor(url, init) {
       init = init || {};
       // define url as an own, writable, configurable prop — a plain `this.url = x` would invoke
       // a getter-only `url` on a subclass prototype (e.g. Next's NextRequest) and throw.
-      const u = typeof url === 'object' && url ? String(url.url || url.href || url) : String(url);
+      const u = __requestUrl(url);
       try { Object.defineProperty(this, 'url', { value: u, writable: true, configurable: true, enumerable: true }); }
       catch (e) {}
       this.method = init.method || 'GET';
-      this.headers = init.headers instanceof globalThis.Headers ? init.headers : (() => { const h = new globalThis.Headers(); if (init.headers) for (const k of Object.keys(init.headers)) h.set(k, init.headers[k]); return h; })();
+      this.headers = __requestHeaders(init.headers);
       this._body = init.body;
     }
     json() { return Promise.resolve(typeof this._body === 'string' ? JSON.parse(this._body) : this._body); }
     text() { return Promise.resolve(this._body == null ? '' : String(this._body)); }
     clone() { return new globalThis.Request(this.url, { method: this.method, headers: this.headers, body: this._body }); }
   };
+  const __responseStatus = (init) => (init && init.status) || 200;
+  const __responseStatusText = (init, status) => (init && init.statusText) || globalThis.__STATUS_TEXT[status] || '';
+  const __responseHeaders = (init) => {
+    if (init && init.headers instanceof globalThis.Headers) return init.headers;
+    return new globalThis.Headers(init && init.headers);
+  };
   globalThis.Response = class Response {
-    constructor(body, init) { this.body = body; this._body = body; this.status = (init && init.status) || 200; this.statusText = (init && init.statusText) || globalThis.__STATUS_TEXT[this.status] || ''; this.ok = this.status >= 200 && this.status < 300; this.headers = (init && init.headers instanceof globalThis.Headers) ? init.headers : new globalThis.Headers(init && init.headers); }
+    constructor(body, init) {
+      this.body = body;
+      this._body = body;
+      this.status = __responseStatus(init);
+      this.statusText = __responseStatusText(init, this.status);
+      this.ok = this.status >= 200 && this.status < 300;
+      this.headers = __responseHeaders(init);
+    }
     json() { return Promise.resolve(typeof this._body === 'string' ? JSON.parse(this._body) : this._body); }
     text() { return Promise.resolve(this._body == null ? '' : String(this._body)); }
     clone() { return new globalThis.Response(this._body, { status: this.status }); }
@@ -1669,14 +1722,17 @@ if (typeof globalThis.FormData === 'undefined') {
 if (typeof globalThis.structuredClone === 'undefined') {
   // V8's structured clone (src/structured_clone.rs), with Node's argument checks: the ArrayBuffers
   // of `transfer` move to the clone
+  const __isIterableValue = (t) => {
+    if (t === null) return false;
+    if (typeof t !== 'object' && typeof t !== 'function') return false;
+    return typeof t[Symbol.iterator] === 'function';
+  };
   globalThis.structuredClone = function structuredClone(value, options) {
     if (arguments.length === 0) throw new TypeError('The "The value argument must be specified" argument must be specified');
-    let transfer = [];
     const t = options == null ? undefined : options.transfer;
+    let transfer = [];
     if (t !== undefined) {
-      if (t === null || (typeof t !== 'object' && typeof t !== 'function') || typeof t[Symbol.iterator] !== 'function') {
-        throw new TypeError("Failed to execute 'structuredClone': transfer in Options cannot be converted to sequence.");
-      }
+      if (!__isIterableValue(t)) throw new TypeError("Failed to execute 'structuredClone': transfer in Options cannot be converted to sequence.");
       transfer = [...t];
     }
     return globalThis.__ttStructuredClone(value, transfer);
