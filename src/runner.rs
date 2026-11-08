@@ -2328,7 +2328,8 @@ fn run_entry_mocks_untransformed(
         scope,
         &format!(
             "globalThis.__ttPrevDir = globalThis.__ttDir; globalThis.__ttDir = {entry_dir}; \
-             globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;"
+             globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0; \
+             globalThis.__ttNoLazyJestMock = true;"
         ),
     );
     // the factories see the file's top-level bindings through its scope (mock_scope.rs)
@@ -2342,7 +2343,10 @@ fn run_entry_mocks_untransformed(
         &scoped(format!("(() => {{\n{hoisted}\n{calls}}})();")),
         &scoped(format!("(() => {{\n{calls}}})();")),
     );
-    run_js(scope, "globalThis.__ttDir = globalThis.__ttPrevDir;");
+    run_js(
+        scope,
+        "globalThis.__ttDir = globalThis.__ttPrevDir; globalThis.__ttNoLazyJestMock = false;",
+    );
     prepass?;
     resolve_pending_mocks(scope);
     drain_pending_mocks(scope, dir, false);

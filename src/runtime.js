@@ -3856,8 +3856,8 @@ const __ttRequireEsm = (m) => {
 };
 globalThis.__mkRequire = (dir, isEsm, importer) => {
   const req = isEsm === false
-    ? (spec) => __ttRequireEsm(globalThis.__nativeRequire(dir, spec, false, importer))
-    : (spec) => globalThis.__nativeRequire(dir, spec, isEsm, importer);
+    ? (spec) => { __ttJestLazyRun && __ttJestLazyRun(dir, spec); return __ttRequireEsm(globalThis.__nativeRequire(dir, spec, false, importer)); }
+    : (spec) => { __ttJestLazyRun && __ttJestLazyRun(dir, spec); return globalThis.__nativeRequire(dir, spec, isEsm, importer); };
   // as Node: the resolved path (a builtin stays its name); MODULE_NOT_FOUND when nothing resolves
   req.resolve = (spec) => {
     const r = globalThis.__ttRequireResolve(dir, String(spec), isEsm === undefined ? true : !!isEsm);
@@ -5923,9 +5923,46 @@ function __ttMock(spec, factory, vitest, isDoMock) {
   // of the module sees it.
   const dir = globalThis.__ttDir || globalThis.__ttEntryDir;
   if (!globalThis.__ttMockPrepass && __ttMockPrepassed(spec, vitest, key, dir)) return;
+  // jest 30: `jest.mock(spec, factory)` defers the factory to the module's first require
+  // (turbo-test#275). `vi.mock` keeps its eager hoist-time semantics.
+  if (__ttJestLazyRegister(spec, factory, vitest, isDoMock, dir, key)) return;
   const [ok, made] = factory === undefined ? __ttAutomockOf(dir, spec) : __ttFactoryExports(spec, factory, vitest, isDoMock, dir);
   if (ok) __ttMockRegister(spec, factory, vitest, isDoMock, dir, key, made);
 }
+// jest 30's lazy `jest.mock(spec, factory)`: the factory runs on the module's first require,
+// closing over bindings the test file has by then initialised (turbo-test#275). The prepass
+// runs factories outside the module's scope, so the prepass form is a no-op — the module's own
+// `jest.mock` call does the registration below. `vi.mock`, `jest.doMock` (runtime), and
+// `jest.mock(spec)` without a factory (automock) keep the eager path.
+const __ttJestLazy = new Map();
+globalThis.__ttJestLazy = __ttJestLazy;
+function __ttJestLazyKey(dir, spec) {
+  return (dir && globalThis.__ttResolveSpec(dir, String(spec))) || '\0' + String(spec);
+}
+function __ttJestLazyRegister(spec, factory, vitest, isDoMock, dir, key) {
+  if (vitest || isDoMock || typeof factory !== 'function') return false;
+  // Both prepasses (the esbuild-MR one via __ttMockPrepass, and the untransformed ESM-graph
+  // one via __ttNoLazyJestMock) run factories eagerly so the mock is in place before module
+  // imports resolve: jest 30 lazy semantics only kick in from the module's own body call,
+  // where the module's bindings exist.
+  if (globalThis.__ttMockPrepass || globalThis.__ttNoLazyJestMock) return false;
+  __ttLenientMockKeys.add(key);
+  __ttJestLazy.set(__ttJestLazyKey(dir, spec), { spec: String(spec), factory, dir, key });
+  if (globalThis.__ttRegisterMock && dir) {
+    try { globalThis.__ttRegisterMock(dir, String(spec), {}); } catch (e) {}
+  }
+  return true;
+}
+function __ttJestLazyRun(dir, spec) {
+  if (!__ttJestLazy.size) return;
+  const k = __ttJestLazyKey(dir, spec);
+  const entry = __ttJestLazy.get(k);
+  if (!entry) return;
+  __ttJestLazy.delete(k);
+  const [ok, made] = __ttFactoryExports(entry.spec, entry.factory, false, false, entry.dir);
+  if (ok) __ttMockRegister(entry.spec, entry.factory, false, false, entry.dir, entry.key, made);
+}
+globalThis.__ttJestLazyRun = __ttJestLazyRun;
 // Async (Promise) factory branch of __ttMockRegister: a doMock (not hoisted: it applies to
 // later imports) waits on its own; a hoisted vi.mock is awaited by the loader's resolve + drain.
 function __ttRegisterAsyncMock(spec, vitest, isDoMock, dir, key, exports) {

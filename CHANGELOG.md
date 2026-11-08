@@ -27,6 +27,18 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   fast path (no native round-trip). IPv6 bracketed hosts, trailing dots, empty labels and
   already-`xn--`-encoded labels are unchanged. Not a 0.8.0 regression — the same bug ships in
   0.7.1.
+- `jest.mock(spec, factory)` now defers the factory to the module's first `require`, matching
+  jest 30.5.2 (#275). Before, the factory ran at hoist time — the factory in
+  ```js
+  const order = []
+  jest.mock('./m', () => { order.push('factory'); return 'x' })
+  order.push('top')
+  require('./m')
+  ```
+  pushed `'factory'` before `'top'`; now `order` is `['top', 'factory']` as jest produces.
+  The hoist of the `jest.mock` call itself is unchanged; only the factory's invocation moves
+  to the first `require` of the module. `vi.mock` keeps vitest's eager hoist-time semantics;
+  `jest.doMock` (runtime) and factory-less `jest.mock(spec)` automocks also keep eager.
 
 ## [0.8.0] — 2026-11-05 — complexity gates blocking, jest whenCalledWith / fakeTimers config, turbo-dom 0.8
 
