@@ -239,6 +239,101 @@ fn jest_module_members_are_jests() {
     assert_eq!(rows_diff(&want, &read(&p, "tt.json")), Vec::<String>::new());
 }
 
+#[test]
+fn jest_fn_when_called_with_is_jests() {
+    // turbo-test#185: jest.fn() / jest.spyOn() mocks have jest-mock's whenCalledWith(...matchers),
+    // a sub-mock answering the calls whose arguments equal the matchers (asymmetric ones too):
+    // the parent's own onces first, then the earliest matching branch with a queued once, then
+    // the last-registered matching branch with an implementation, then the implementation the
+    // mock had (mockImplementation after whenCalledWith sets that fall-through); mockReset drops
+    // every branch and resets each sub-mock.
+    let p = jest_project("rc-jest-when");
+    p.file(
+        "when.test.js",
+        include_str!("data/vi_surface/jest_when.test.js"),
+    );
+    let r = turbo_test(&p.dir, &["when.test.js"], &[("OUT", "tt.json")]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let want: Value = serde_json::from_str(include_str!("data/vi_surface/when.jest.json")).unwrap();
+    assert_eq!(rows_diff(&want, &read(&p, "tt.json")), Vec::<String>::new());
+}
+
+#[test]
+fn jest_mock_reset_is_jests() {
+    // turbo-test#254: jest-mock's mockReset / resetAllMocks (and mockRestore on a jest.fn) drop
+    // the implementation — jest.fn(impl) and a reset spy return undefined, whenCalledWith
+    // branches go — while restoreAllMocks only puts spies back. Recorded with jest 30.5.2.
+    let p = jest_project("rc-jest-reset");
+    p.file(
+        "reset.test.js",
+        include_str!("data/vi_surface/jest_reset.test.js"),
+    );
+    let r = turbo_test(&p.dir, &["reset.test.js"], &[("OUT", "tt.json")]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let want: Value =
+        serde_json::from_str(include_str!("data/vi_surface/reset.jest.json")).unwrap();
+    assert_eq!(rows_diff(&want, &read(&p, "tt.json")), Vec::<String>::new());
+    // guard: vi.fn / vi.spyOn keep vitest 4.1.12's reset (back to the original implementation)
+    p.file(
+        "sub/vitest.config.js",
+        "export default { test: { environment: 'node' } }\n",
+    );
+    p.file(
+        "sub/vi.test.js",
+        r#"import { test, vi, expect } from 'vitest'
+test('vitest reset', () => {
+  const f = vi.fn(() => 'base'); f.mockReturnValue('rv'); f.mockReset()
+  const g = vi.fn(() => 'base'); g.mockReturnValue('rv'); vi.resetAllMocks()
+  const o = { m: (x) => 'real' + x }; const s = vi.spyOn(o, 'm').mockReturnValue('spied'); s.mockReset()
+  const h = vi.fn(); h.mockReturnValue('rv'); h.mockReset()
+  expect([f(), g(), o.m(1), h()]).toEqual(['base', 'base', 'real1', undefined])
+})
+"#,
+    );
+    let r = turbo_test(&p.path("sub"), &["vi.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+}
+
+#[test]
+fn jest_config_fake_timers_are_jests() {
+    // turbo-test#186: a jest config's `fakeTimers` — `enableGlobally: true` fakes the timers
+    // before the test file loads (and they stay faked across its tests), and `now` /
+    // `doNotFake` / `timerLimit` are the defaults of every jest.useFakeTimers() (its argument
+    // over them); without enableGlobally the timers start real. Recorded with jest 30.5.2.
+    for (mode, enable, data) in [
+        (
+            "on",
+            "enableGlobally: true, ",
+            include_str!("data/vi_surface/config_timers_on.jest.json"),
+        ),
+        (
+            "off",
+            "",
+            include_str!("data/vi_surface/config_timers_off.jest.json"),
+        ),
+    ] {
+        let p = jest_project(&format!("rc-jest-cfg-timers-{mode}"));
+        p.file(
+            "jest.config.js",
+            &format!(
+                "export default {{ fakeTimers: {{ {enable}now: 1000, doNotFake: ['queueMicrotask'], timerLimit: 10 }} }}\n"
+            ),
+        );
+        p.file(
+            "timers.test.js",
+            include_str!("data/vi_surface/jest_config_timers.test.js"),
+        );
+        let r = turbo_test(&p.dir, &["timers.test.js"], &[("OUT", "tt.json")]);
+        assert_eq!(r.code, Some(0), "{mode}: {}", r.all());
+        let want: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(
+            rows_diff(&want, &read(&p, "tt.json")),
+            Vec::<String>::new(),
+            "{mode}"
+        );
+    }
+}
+
 /// The `Failed Tests` block of a human report (through the last error's `[n/n]` separator).
 fn failed_block(out: &str) -> String {
     let start = out.find("⎯⎯⎯⎯⎯⎯⎯ Failed Tests").unwrap_or(0);
@@ -247,6 +342,52 @@ fn failed_block(out: &str) -> String {
         e + rest[e..].find('\n').unwrap_or(rest.len() - e) + 1
     });
     rest[..end].to_string()
+}
+
+/// turbo-test#273: `jest.setTimeout(ms)` sets the default per-test timeout for the file, as jest
+/// 30.5.2 does. Before the fix the call was a no-op and a slow test ran to the 5 000 ms default.
+/// Probe: `jest.setTimeout(100)` + a test that awaits 300 ms; jest reports
+/// `Exceeded timeout of 100 ms`, so turbo-test must time out at 100 ms too.
+#[test]
+fn jest_set_timeout_overrides_the_default_as_jest() {
+    let p = jest_project("rc-jest-set-timeout");
+    p.file(
+        "set_timeout.test.js",
+        include_str!("data/vi_surface/jest_set_timeout.test.js"),
+    );
+    let r = turbo_test(&p.dir, &["set_timeout.test.js"], &[]);
+    assert_ne!(r.code, Some(0), "expected non-zero exit: {}", r.all());
+    assert!(
+        r.all().contains("Test timed out in 100ms"),
+        "expected 'Test timed out in 100ms' in output: {}",
+        r.all()
+    );
+}
+
+/// turbo-test#273: `jest.retryTimes(n)` retries a failing test n more times, as jest 30.5.2 does.
+/// Before the fix the call was a no-op, so a test failing twice then passing failed the run.
+#[test]
+fn jest_retry_times_retries_the_failing_test_as_jest() {
+    let p = jest_project("rc-jest-retry");
+    p.file(
+        "retry.test.js",
+        include_str!("data/vi_surface/jest_retry_times.test.js"),
+    );
+    let r = turbo_test(&p.dir, &["retry.test.js"], &[("OUT", "r.log")]);
+    assert_eq!(
+        r.code,
+        Some(0),
+        "expected pass after 3 retries: {}",
+        r.all()
+    );
+    let log = std::fs::read_to_string(p.dir.join("r.log")).unwrap_or_default();
+    assert_eq!(
+        log,
+        "aaa",
+        "expected three attempts recorded: {:?}\n{}",
+        log,
+        r.all()
+    );
 }
 
 #[test]
@@ -308,4 +449,28 @@ fn config_clears_restores_and_unstubs_before_each_test() {
         let r = turbo_test(&p.dir, &[file], &[]);
         assert_eq!(r.code, Some(0), "{name}: {}", r.all());
     }
+}
+
+#[test]
+fn jest_fake_timers_do_not_apply_under_a_vitest_config() {
+    // A jest config's `fakeTimers` (turbo-test#186) is read only when no vitest config governs
+    // the project: with a vitest.config.js in a parent dir, a package.json `"jest"` block's
+    // `enableGlobally: true` is ignored and the timers stay real, as in vitest 4.1.12.
+    let p = Project::new("rc-jest-timers-under-vitest");
+    p.file("vitest.config.js", "export default { test: {} }\n");
+    p.file(
+        "pkg/package.json",
+        r#"{ "type": "module", "jest": { "fakeTimers": { "enableGlobally": true } } }"#,
+    );
+    p.file(
+        "pkg/real.test.js",
+        r#"import { test, vi, expect } from 'vitest'
+test('timers are real', async () => {
+  expect(vi.isFakeTimers()).toBe(false)
+  await new Promise((r) => setTimeout(r, 20))
+})
+"#,
+    );
+    let r = turbo_test(&p.path("pkg"), &["real.test.js"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
 }

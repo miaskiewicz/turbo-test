@@ -47,20 +47,7 @@ pub fn guard_default_reads(src: &str, guarded: &dyn Fn(&str) -> bool) -> Option<
         if !guarded(i.source.value.as_str()) {
             continue;
         }
-        for s in i.specifiers.iter().flatten() {
-            let local = match s {
-                ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => &s.local,
-                ImportDeclarationSpecifier::ImportSpecifier(s)
-                    if s.imported.name() == "default" =>
-                {
-                    &s.local
-                }
-                _ => continue,
-            };
-            if let Some(sym) = local.symbol_id.get() {
-                symbols.insert(sym);
-            }
-        }
+        collect_default_symbols(i, &mut symbols);
     }
     if symbols.is_empty() {
         return None;
@@ -80,6 +67,23 @@ pub fn guard_default_reads(src: &str, guarded: &dyn Fn(&str) -> bool) -> Option<
         out.replace_range(start as usize..end as usize, &text);
     }
     Some(out)
+}
+
+/// Record the symbol ids of every `import X from …` / `import { default as X } from …` local
+/// introduced by `imp` into `symbols`.
+fn collect_default_symbols(imp: &oxc_ast::ast::ImportDeclaration, symbols: &mut HashSet<SymbolId>) {
+    for s in imp.specifiers.iter().flatten() {
+        let local = match s {
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => &s.local,
+            ImportDeclarationSpecifier::ImportSpecifier(s) if s.imported.name() == "default" => {
+                &s.local
+            }
+            _ => continue,
+        };
+        if let Some(sym) = local.symbol_id.get() {
+            symbols.insert(sym);
+        }
+    }
 }
 
 struct Reads<'s> {

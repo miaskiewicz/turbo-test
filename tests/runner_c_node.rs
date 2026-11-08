@@ -95,6 +95,13 @@ test('buffer', () => {
   expect(btoa('hi')).toBe('aGk=');
   expect(atob('aGk=')).toBe('hi');
   expect(Blob).toBe(globalThis.Blob);
+  // base64url: `+` → `-`, `/` → `_`, no `=` padding (Node WHATWG + RFC 4648 §5, turbo-test#260).
+  expect(Buffer.from('hi?>').toString('base64url')).toBe('aGk_Pg');
+  expect(Buffer.from([251, 255, 191]).toString('base64url')).toBe('-_-_');
+  expect(Buffer.from('aGk_Pg', 'base64url').toString()).toBe('hi?>');
+  expect(Array.from(Buffer.from('-_-_', 'base64url'))).toEqual([251, 255, 191]);
+  // round-trip: base64 and base64url decode the same bytes (either padded or unpadded accepted).
+  expect(Buffer.from(Buffer.from([1, 2, 3, 4]).toString('base64url'), 'base64url').toString('hex')).toBe('01020304');
 });
 test('fs/promises', async () => {
   expect(fsp).toBe(fs.promises);

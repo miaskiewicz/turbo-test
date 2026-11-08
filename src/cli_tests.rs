@@ -120,6 +120,25 @@ fn parse_timeout_retry_bail() {
     let o = parse(&["--testTimeout", "soon", "--retry", "-1", "f.test.ts"]);
     assert!(o.env.is_empty());
     assert_eq!(o.files, vec![PathBuf::from("f.test.ts")]);
+    // --hookTimeout (turbo-test#255), --maxConcurrency / --sequence.concurrent (#256)
+    let o = parse(&[
+        "--hookTimeout",
+        "40",
+        "--maxConcurrency=2",
+        "--sequence.concurrent",
+        "--maxConcurrency",
+        "x",
+        "f.test.ts",
+    ]);
+    assert_eq!(
+        o.env,
+        vec![
+            ("TURBO_HOOK_TIMEOUT", "40".to_string()),
+            ("TURBO_MAX_CONCURRENCY", "2".to_string()),
+            ("TURBO_SEQUENCE_CONCURRENT", "1".to_string()),
+        ]
+    );
+    assert_eq!(o.files, vec![PathBuf::from("f.test.ts")]);
     // missing values
     assert!(parse(&["--testTimeout"]).env.is_empty());
     assert!(parse(&["--retry"]).env.is_empty());
@@ -286,13 +305,7 @@ fn parse_coverage_flags() {
 #[test]
 fn parse_ignored_vitest_flags() {
     // value-taking no-ops consume their value
-    for f in [
-        "--pool",
-        "--mode",
-        "--project",
-        "--exclude",
-        "--maxConcurrency",
-    ] {
+    for f in ["--pool", "--mode", "--project", "--exclude"] {
         let o = parse(&[f, "v", "a.test.ts"]);
         assert_eq!(o.files, vec![PathBuf::from("a.test.ts")], "{f}");
         assert!(o.warnings.is_empty(), "{f}");
@@ -315,7 +328,6 @@ fn parse_ignored_vitest_flags() {
         "--mode=dev",
         "--project=p",
         "--exclude=e",
-        "--maxConcurrency=2",
         "--sequence.shuffle",
         "--inspect-brk",
         "--browser.name=x",

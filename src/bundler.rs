@@ -141,6 +141,59 @@ enum Module {
     },
 }
 
+/// A module's JavaScript (transformed when it needs it).
+fn module_js(p: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(p).ok()?;
+    if crate::transform::needs_transform(p) {
+        crate::transform::transform(p, &raw).ok()
+    } else {
+        Some(raw)
+    }
+}
+
+/// A walked module's text for its `__commonJS` wrapper and the lexical helpers it takes; `path`
+/// is its file, `id_of` every walked module's id.
+fn module_text(
+    module: &Module,
+    path: &Path,
+    id_of: &HashMap<PathBuf, usize>,
+) -> Option<(String, Vec<&'static str>)> {
+    let (js, edges) = match module {
+        Module::Stub(stub) => return Some((stub.to_string(), Vec::new())),
+        Module::Js { js, edges } => (js, edges),
+    };
+    // relative spec → bundled module (require_<id>()); everything else external.
+    let resolve = |spec: &str| -> SourceRef {
+        if let Some(abs) = edges.get(spec) {
+            if let Some(&tid) = id_of.get(abs) {
+                return SourceRef::BundledCjs {
+                    id: format!("m{tid}"),
+                };
+            }
+        }
+        SourceRef::External
+    };
+    let ctx = LowerCtx {
+        exports_obj: "__tt_exports".to_string(),
+        resolve: Some(&resolve),
+        // the bundle runs in the entry's wrapper: each module names its own path
+        module_path: Some(path.to_string_lossy().into_owned()),
+    };
+    let parts = esm_cjs::transform_to_parts(js, &ctx)?;
+    let lexical = parts.lexical_helpers.clone();
+    let text = if parts.has_module_syntax {
+        esm_cjs::assemble_module(
+            &parts.requires,
+            &parts.re_exports,
+            &parts.exports,
+            &parts.body_code,
+        )
+    } else {
+        parts.body_code
+    };
+    Some((text, lexical))
+}
+
 /// Bundle a node_modules package starting at `entry`. `None` → fall back to the esbuild bundle.
 pub fn bundle(entry: &Path) -> Option<String> {
     bundle_capped(entry, MAX_MODULES)
@@ -165,72 +218,20 @@ fn bundle_capped(entry: &Path, max_modules: usize) -> Option<String> {
         if order.len() >= max_modules {
             return None;
         }
-        id_of.insert(p.clone(), order.len());
-        order.push(p.clone());
-
-        if let Some(stub) = asset_stub(&p) {
-            modules.push(Module::Stub(stub));
-            continue;
-        }
-
-        let raw = std::fs::read_to_string(&p).ok()?;
-        let js = if crate::transform::needs_transform(&p) {
-            crate::transform::transform(&p, &raw).ok()?
-        } else {
-            raw
-        };
-
-        let mut edges = HashMap::new();
-        for spec in collect_relative_specs(&js) {
-            if let Some(abs) = resolve_rel(&resolver, &p, &spec) {
-                if !id_of.contains_key(&abs) {
-                    queue.push(abs.clone());
-                }
-                edges.insert(spec, abs);
-            }
-            // an unresolvable relative spec stays `External` (runtime require) — rare; harness gates.
-        }
-        modules.push(Module::Js { js, edges });
+        visit_module(
+            &resolver,
+            p,
+            &mut order,
+            &mut id_of,
+            &mut modules,
+            &mut queue,
+        )?;
     }
 
     // Pass 2: transform + wrap each module.
     let mut out = String::from(esm_cjs::PREAMBLE);
     for (idx, module) in modules.iter().enumerate() {
-        let mut lexical: Vec<&str> = Vec::new();
-        let module_text = match module {
-            Module::Stub(stub) => stub.to_string(),
-            Module::Js { js, edges } => {
-                // relative spec → bundled module (require_<id>()); everything else external.
-                let resolve = |spec: &str| -> SourceRef {
-                    if let Some(abs) = edges.get(spec) {
-                        if let Some(&tid) = id_of.get(abs) {
-                            return SourceRef::BundledCjs {
-                                id: format!("m{tid}"),
-                            };
-                        }
-                    }
-                    SourceRef::External
-                };
-                let ctx = LowerCtx {
-                    exports_obj: "__tt_exports".to_string(),
-                    resolve: Some(&resolve),
-                    // the bundle runs in the entry's wrapper: each module names its own path
-                    module_path: Some(order[idx].to_string_lossy().into_owned()),
-                };
-                let parts = esm_cjs::transform_to_parts(js, &ctx)?;
-                lexical = parts.lexical_helpers.clone();
-                if parts.has_module_syntax {
-                    esm_cjs::assemble_module(
-                        &parts.requires,
-                        &parts.re_exports,
-                        &parts.exports,
-                        &parts.body_code,
-                    )
-                } else {
-                    parts.body_code
-                }
-            }
-        };
+        let (module_text, lexical) = module_text(module, &order[idx], &id_of)?;
         let params = helper_params(&lexical);
         out.push_str(&format!(
             "var require_m{idx} = __commonJS((exports, module, {params}) => {{\n{module_text}\n}});\n"
@@ -239,6 +240,50 @@ fn bundle_capped(entry: &Path, max_modules: usize) -> Option<String> {
     // the entry is the first module walked, so its id is always 0.
     out.push_str("module.exports = require_m0();\n");
     Some(out)
+}
+
+/// Record one module (stub or JS) into the walk; push each unseen edge onto the queue.
+fn visit_module(
+    resolver: &oxc_resolver::Resolver,
+    p: PathBuf,
+    order: &mut Vec<PathBuf>,
+    id_of: &mut HashMap<PathBuf, usize>,
+    modules: &mut Vec<Module>,
+    queue: &mut Vec<PathBuf>,
+) -> Option<()> {
+    id_of.insert(p.clone(), order.len());
+    order.push(p.clone());
+
+    if let Some(stub) = asset_stub(&p) {
+        modules.push(Module::Stub(stub));
+        return Some(());
+    }
+
+    let js = module_js(&p)?;
+    let edges = collect_edges(resolver, &p, &js, id_of, queue);
+    modules.push(Module::Js { js, edges });
+    Some(())
+}
+
+/// Resolve each relative spec in `js` against `from`; queue newly seen targets.
+fn collect_edges(
+    resolver: &oxc_resolver::Resolver,
+    from: &Path,
+    js: &str,
+    id_of: &HashMap<PathBuf, usize>,
+    queue: &mut Vec<PathBuf>,
+) -> HashMap<String, PathBuf> {
+    let mut edges = HashMap::new();
+    for spec in collect_relative_specs(js) {
+        if let Some(abs) = resolve_rel(resolver, from, &spec) {
+            if !id_of.contains_key(&abs) {
+                queue.push(abs.clone());
+            }
+            edges.insert(spec, abs);
+        }
+        // an unresolvable relative spec stays `External` (runtime require) — rare; harness gates.
+    }
+    edges
 }
 
 /// A module closure's helper parameters, after `exports, module`: each of

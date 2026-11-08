@@ -51,7 +51,7 @@ Full matrix + quirks: `vitest.compat.md`. Summary:
 
 **CLI flags** ✅ `<file globs>`, `-j/--jobs` (≈ `--maxWorkers`), `--shard i/n`, `--reporter`
 (json/junit/tap/verbose/dot/default) + `--outputFile`, `-t/--testNamePattern`, `--testTimeout`,
-`--retry`, `--bail`, `-c/--config`, `--root`/`--dir`, `--environment`, `--isolate`/`--no-isolate`,
+`--retry`, `--hookTimeout`, `--bail`, `-c/--config`, `--root`/`--dir`, `--environment`, `--isolate`/`--no-isolate`,
 `--changed [since]`, `--passWithNoTests`, `-u/--update`, the `--coverage*` family.
 turbo-test's own: `--zero-delay-timers` / `--no-zero-delay-timers` (`setTimeout(fn, 0)` takes 0 ms
 of the clock in Node's order (default) or Node's 1 ms; also `TURBO_ZERO_DELAY_TIMERS=0|1`, preferred over
@@ -66,10 +66,10 @@ media switch; README "Switches"). Leading
 `run`/`watch`/`dev` accepted-and-stripped. Unknown flags warned + ignored (never treated as files).
 
 **Test / `vi` / `expect` API** ✅
-- `describe`/`it`/`test` + `.skip`/`.only`/`.todo`/`.each`/`.for`/`.skipIf`/`.runIf`/`.concurrent`
-  (concurrent runs sequentially within a file), `it.fails`.
-- hooks `beforeAll`/`afterAll`/`beforeEach`/`afterEach`; per-test `{ timeout }`/`{ retry }`; the test
-  context (`task`, `skip`, `onTestFinished`/`onTestFailed`, `signal`, `expect`, `annotate`).
+- `describe`/`it`/`test` + `.skip`/`.only`/`.todo`/`.each`/`.for`/`.skipIf`/`.runIf`/`.concurrent`/`.sequential`
+  (concurrent tests run together, up to `maxConcurrency`), `it.fails`.
+- hooks `beforeAll`/`afterAll`/`beforeEach`/`afterEach`; per-test `{ timeout }`/`{ retry }`/`{ repeats }`; the test
+  context (`task`, `skip`, `onTestFinished`/`onTestFailed`, also importable from `'vitest'`, `signal`, `expect`, `annotate`).
 - `expect` + a large matcher set, `expect.extend`, `.soft`, asymmetric matchers,
   `expect.assertions`/`hasAssertions` (enforced), `toMatchObject`/`toContainEqual`/`toSatisfy`/
   `toHaveBeenCalledOnce`/`toHaveBeenNthCalledWith`/…

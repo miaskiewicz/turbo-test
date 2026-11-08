@@ -1,0 +1,82 @@
+[
+ [
+  "sub-mock",
+  "value",
+  "[\"function\",true,false,\"function\"]"
+ ],
+ [
+  "match",
+  "value",
+  "[\"one\",\"undef\",\"undef\",\"undef\",4]"
+ ],
+ [
+  "deep / asymmetric",
+  "value",
+  "[\"obj\",\"undef\",\"str\",\"undef\"]"
+ ],
+ [
+  "fallback impl",
+  "value",
+  "[\"one\",\"base\",\"base\"]"
+ ],
+ [
+  "mockImplementation after",
+  "value",
+  "[\"one\",\"later\",\"later\"]"
+ ],
+ [
+  "mockImplementation before",
+  "value",
+  "[\"one\",\"before\"]"
+ ],
+ [
+  "last persistent wins",
+  "value",
+  "[\"one\",\"any\"]"
+ ],
+ [
+  "earliest once first",
+  "value",
+  "[\"any-once\",\"one-once\",\"any\",\"any\"]"
+ ],
+ [
+  "parent once first",
+  "value",
+  "[\"parent-once\",\"one\"]"
+ ],
+ [
+  "empty sub-mock falls through",
+  "value",
+  "[\"base\"]"
+ ],
+ [
+  "sub-mock records",
+  "value",
+  "[[[1]],[[1],[2]],[\"one\"]]"
+ ],
+ [
+  "this",
+  "value",
+  "[\"ctx\"]"
+ ],
+ [
+  "mockReset",
+  "value",
+  "[\"undef\",\"undef\",1]"
+ ],
+ [
+  "mockReset then again",
+  "value",
+  "[\"undef\",\"two\"]"
+ ],
+ [
+  "spyOn",
+  "value",
+  "[\"one\",\"real2\",\"real3\"]"
+ ],
+ [
+  "withImplementation",
+  "value",
+  "[[\"w\",\"w\"],\"one\",\"undef\"]"
+ ]
+]

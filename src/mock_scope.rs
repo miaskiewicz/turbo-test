@@ -15,8 +15,8 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    BindingPattern, Declaration, ExportDefaultDeclarationKind, ImportDeclarationSpecifier,
-    Statement, VariableDeclarationKind,
+    Declaration, ExportDefaultDeclarationKind, ImportDeclarationSpecifier, Statement,
+    VariableDeclarationKind,
 };
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -47,11 +47,6 @@ pub fn bindings(path: &Path, src: &str, factories: &str) -> Vec<Binding> {
             out.push((name.to_string(), assignable));
         }
     };
-    let pattern = |p: &BindingPattern, assignable: bool, add: &mut dyn FnMut(&str, bool)| {
-        for id in p.get_binding_identifiers() {
-            add(id.name.as_str(), assignable);
-        }
-    };
     for stmt in &parsed.program.body {
         let decl = match stmt {
             Statement::ImportDeclaration(i) => {
@@ -73,19 +68,7 @@ pub fn bindings(path: &Path, src: &str, factories: &str) -> Vec<Binding> {
                 None => continue,
             },
             Statement::ExportDefaultDeclaration(e) => {
-                match &e.declaration {
-                    ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
-                        if let Some(id) = &f.id {
-                            add(id.name.as_str(), true);
-                        }
-                    }
-                    ExportDefaultDeclarationKind::ClassDeclaration(c) => {
-                        if let Some(id) = &c.id {
-                            add(id.name.as_str(), false);
-                        }
-                    }
-                    _ => {}
-                }
+                default_binding(&e.declaration, &mut add);
                 continue;
             }
             s => match s.as_declaration() {
@@ -93,31 +76,55 @@ pub fn bindings(path: &Path, src: &str, factories: &str) -> Vec<Binding> {
                 None => continue,
             },
         };
-        match decl {
-            Declaration::VariableDeclaration(v) if !v.declare => {
-                let assignable = matches!(
-                    v.kind,
-                    VariableDeclarationKind::Let | VariableDeclarationKind::Var
-                );
-                for d in &v.declarations {
-                    pattern(&d.id, assignable, &mut add);
-                }
-            }
-            Declaration::FunctionDeclaration(f) if !f.declare => {
-                if let Some(id) = &f.id {
-                    add(id.name.as_str(), true);
-                }
-            }
-            Declaration::ClassDeclaration(c) if !c.declare => {
-                if let Some(id) = &c.id {
-                    add(id.name.as_str(), false);
-                }
-            }
-            Declaration::TSEnumDeclaration(e) if !e.declare => add(e.id.name.as_str(), false),
-            _ => {}
-        }
+        declaration_bindings(decl, &mut add);
     }
     out
+}
+
+/// The binding an `export default` function / class declares.
+fn default_binding(d: &ExportDefaultDeclarationKind, add: &mut dyn FnMut(&str, bool)) {
+    match d {
+        ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+            if let Some(id) = &f.id {
+                add(id.name.as_str(), true);
+            }
+        }
+        ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+            if let Some(id) = &c.id {
+                add(id.name.as_str(), false);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The bindings a top-level declaration declares (`let` / `var` / functions assignable).
+fn declaration_bindings(decl: &Declaration, add: &mut dyn FnMut(&str, bool)) {
+    match decl {
+        Declaration::VariableDeclaration(v) if !v.declare => {
+            let assignable = matches!(
+                v.kind,
+                VariableDeclarationKind::Let | VariableDeclarationKind::Var
+            );
+            for d in &v.declarations {
+                for id in d.id.get_binding_identifiers() {
+                    add(id.name.as_str(), assignable);
+                }
+            }
+        }
+        Declaration::FunctionDeclaration(f) if !f.declare => {
+            if let Some(id) = &f.id {
+                add(id.name.as_str(), true);
+            }
+        }
+        Declaration::ClassDeclaration(c) if !c.declare => {
+            if let Some(id) = &c.id {
+                add(id.name.as_str(), false);
+            }
+        }
+        Declaration::TSEnumDeclaration(e) if !e.declare => add(e.id.name.as_str(), false),
+        _ => {}
+    }
 }
 
 /// Whether `text` mentions `name` as a whole identifier.

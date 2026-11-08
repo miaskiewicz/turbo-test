@@ -414,109 +414,40 @@ fn lex(src: &str) -> Lexed {
     let mut last_word = String::new();
     // the last token is the `(` of `import(`
     let mut import_call = false;
+    // the template text to resume at (after a backtick or a substitution's `}`)
+    let mut template_at = None;
     while i < b.len() {
         let c = b[i];
         let after_import_call = std::mem::take(&mut import_call);
-        match c {
-            b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
-                import_call = after_import_call;
-                i += 1;
-                continue;
-            }
-            b'(' | b'{' => {
-                import_call = c == b'(' && last == Some(b'w') && last_word == "import";
-                open.push(false);
-            }
-            b')' | b'}' => match open.pop() {
-                None => return failed(i, imports),
-                Some(true) if c == b'}' => {
-                    // back in the template after `${ … }`
-                    match template(b, i + 1, &mut open) {
-                        Some(next) => {
-                            i = next;
-                            last = Some(b'w');
-                            last_word.clear();
-                            continue;
-                        }
-                        None => return failed(b.len(), imports),
-                    }
-                }
-                Some(_) => {}
-            },
-            b'\'' | b'"' => {
-                let mut j = i + 1;
-                loop {
-                    match b.get(j) {
-                        None => return failed(b.len(), imports),
-                        Some(b'\n') | Some(b'\r') => return failed(j, imports),
-                        Some(b'\\') => j += 2,
-                        Some(&q) if q == c => break,
-                        Some(_) => j += 1,
-                    }
-                }
-                let specifier = after_import_call
-                    || (last == Some(b'w') && matches!(last_word.as_str(), "from" | "import"));
-                if specifier {
-                    imports.push(i..j + 1);
-                }
-                i = j + 1;
-                last = Some(b'w');
-                last_word.clear();
-                continue;
-            }
-            b'`' => match template(b, i + 1, &mut open) {
-                Some(next) => {
-                    i = next;
-                    last = Some(b'w');
-                    last_word.clear();
-                    continue;
-                }
-                None => return failed(b.len(), imports),
-            },
-            b'/' if b.get(i + 1) == Some(&b'/') => {
-                while i < b.len() && b[i] != b'\n' {
-                    i += 1;
-                }
-                import_call = after_import_call;
-                continue;
-            }
-            b'/' if b.get(i + 1) == Some(&b'*') => {
-                i = src[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2);
-                import_call = after_import_call;
-                continue;
-            }
-            b'/' if regex_allowed(last, &last_word) => {
-                let mut j = i + 1;
-                let mut class = false;
-                loop {
-                    match b.get(j) {
-                        None => return failed(b.len(), imports),
-                        Some(b'\n') | Some(b'\r') => return failed(j, imports),
-                        Some(b'\\') => j += 2,
-                        Some(b'[') => {
-                            class = true;
-                            j += 1;
-                        }
-                        Some(b']') => {
-                            class = false;
-                            j += 1;
-                        }
-                        Some(b'/') if !class => break,
-                        Some(_) => j += 1,
-                    }
-                }
-                i = j + 1;
-                last = Some(b'w');
-                last_word.clear();
-                continue;
-            }
-            _ => {}
+        match lex_byte(
+            src,
+            b,
+            &mut i,
+            c,
+            after_import_call,
+            &mut open,
+            &mut last,
+            &mut last_word,
+            &mut template_at,
+            &mut import_call,
+            &mut imports,
+        ) {
+            StepKind::Continue => continue,
+            StepKind::Fail(at) => return failed(at, imports),
+            StepKind::Fallthrough => {}
         }
-        if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80 {
+        if let Some(at) = template_at.take() {
+            let Some(next) = template(b, at, &mut open) else {
+                return failed(b.len(), imports);
+            };
+            i = next;
+            last = Some(b'w');
+            last_word.clear();
+            continue;
+        }
+        if is_word_byte(c) {
             let s = i;
-            while i < b.len()
-                && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$' || b[i] >= 0x80)
-            {
+            while i < b.len() && is_word_byte(b[i]) {
                 i += 1;
             }
             last_word = src[s..i].to_string();
@@ -530,6 +461,157 @@ fn lex(src: &str) -> Lexed {
     Lexed {
         error: (!open.is_empty()).then_some(0),
         imports,
+    }
+}
+
+/// What the main `lex` loop should do with the current byte after `lex_byte` returns.
+enum StepKind {
+    /// Reloop immediately (state already advanced).
+    Continue,
+    /// The loop body's shared tail (template / word / fallthrough) still needs to run.
+    Fallthrough,
+    /// Lexer failed at this offset — caller returns `failed(at, imports)`.
+    Fail(usize),
+}
+
+/// One byte-dispatch step of `lex`: handles whitespace, bracketing, strings, templates,
+/// comments and regexes. On fallthrough the outer loop's template/word handling applies.
+#[allow(clippy::too_many_arguments)]
+fn lex_byte(
+    src: &str,
+    b: &[u8],
+    i: &mut usize,
+    c: u8,
+    after_import_call: bool,
+    open: &mut Vec<bool>,
+    last: &mut Option<u8>,
+    last_word: &mut String,
+    template_at: &mut Option<usize>,
+    import_call: &mut bool,
+    imports: &mut Vec<std::ops::Range<usize>>,
+) -> StepKind {
+    match c {
+        b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
+            *import_call = after_import_call;
+            *i += 1;
+            StepKind::Continue
+        }
+        b'(' | b'{' => {
+            *import_call = c == b'(' && *last == Some(b'w') && last_word == "import";
+            open.push(false);
+            StepKind::Fallthrough
+        }
+        b')' | b'}' => {
+            match open.pop() {
+                None => return StepKind::Fail(*i),
+                // back in the template after `${ … }`
+                Some(true) if c == b'}' => *template_at = Some(*i + 1),
+                Some(_) => {}
+            }
+            StepKind::Fallthrough
+        }
+        b'\'' | b'"' => {
+            match lex_string(b, *i, c, after_import_call, *last, last_word, imports) {
+                Ok(j) => *i = j + 1,
+                Err(at) => return StepKind::Fail(at),
+            }
+            *last = Some(b'w');
+            last_word.clear();
+            StepKind::Continue
+        }
+        b'`' => {
+            *template_at = Some(*i + 1);
+            StepKind::Fallthrough
+        }
+        b'/' if matches!(b.get(*i + 1), Some(b'/' | b'*')) => {
+            *i = comment_end(src, *i);
+            *import_call = after_import_call;
+            StepKind::Continue
+        }
+        b'/' if regex_allowed(*last, last_word) => {
+            match regex_end(b, *i) {
+                Ok(j) => *i = j + 1,
+                Err(at) => return StepKind::Fail(at),
+            }
+            *last = Some(b'w');
+            last_word.clear();
+            StepKind::Continue
+        }
+        _ => StepKind::Fallthrough,
+    }
+}
+
+/// The end of the `//` or `/*` comment at `i` (a line comment's line break excluded).
+fn comment_end(src: &str, i: usize) -> usize {
+    let b = src.as_bytes();
+    if b[i + 1] == b'/' {
+        return src[i..].find('\n').map_or(b.len(), |e| i + e);
+    }
+    src[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2)
+}
+
+/// A byte of a word, a number or a non-ASCII character.
+fn is_word_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80
+}
+
+/// Consume a `q`-quoted string starting at `i` and, when it is the specifier of a (dynamic)
+/// import, record its span into `imports`. Returns the index of the closing quote on success; the
+/// lexer-fail offset on an unterminated / multiline string.
+fn lex_string(
+    b: &[u8],
+    i: usize,
+    q: u8,
+    after_import_call: bool,
+    last: Option<u8>,
+    last_word: &str,
+    imports: &mut Vec<std::ops::Range<usize>>,
+) -> Result<usize, usize> {
+    let j = string_end(b, i, q)?;
+    let specifier =
+        after_import_call || (last == Some(b'w') && matches!(last_word, "from" | "import"));
+    if specifier {
+        imports.push(i..j + 1);
+    }
+    Ok(j)
+}
+
+/// The offset of the closing quote `q` of the string opening at `i`; `Err` the offset the
+/// lexer fails at (a line break, or the end).
+fn string_end(b: &[u8], i: usize, q: u8) -> Result<usize, usize> {
+    let mut j = i + 1;
+    loop {
+        match b.get(j) {
+            None => return Err(b.len()),
+            Some(b'\n') | Some(b'\r') => return Err(j),
+            Some(b'\\') => j += 2,
+            Some(&c) if c == q => return Ok(j),
+            Some(_) => j += 1,
+        }
+    }
+}
+
+/// The offset of the closing `/` of the regular expression opening at `i` (a `/` inside a
+/// class `[…]` does not close it); `Err` the offset the lexer fails at.
+fn regex_end(b: &[u8], i: usize) -> Result<usize, usize> {
+    let mut j = i + 1;
+    let mut class = false;
+    loop {
+        match b.get(j) {
+            None => return Err(b.len()),
+            Some(b'\n') | Some(b'\r') => return Err(j),
+            Some(b'\\') => j += 2,
+            Some(b'[') => {
+                class = true;
+                j += 1;
+            }
+            Some(b']') => {
+                class = false;
+                j += 1;
+            }
+            Some(b'/') if !class => return Ok(j),
+            Some(_) => j += 1,
+        }
     }
 }
 

@@ -3,6 +3,109 @@
 All notable changes to `@miaskiewicz/turbo-test`. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.8.0] — 2026-11-05 — complexity gates blocking, jest whenCalledWith / fakeTimers config, turbo-dom 0.8
+
+### Changed
+- Every function is at cyclomatic complexity <= 15 and both complexity CI jobs
+  (`complexity / rust (cc <= 15)`, `complexity / js (cc <= 15)`) are now blocking (#240). The
+  0.6.0 gate landed report-only with 43 Rust and 44 JS functions over the limit; they were split
+  into helpers with no behaviour change (full suite and the 99.9 coverage floor unchanged, no
+  re-baselining), so new code can't grow the backlog back. One limit, no allow-list.
+- turbo-dom 0.8.0 (crates.io, npm): turbo-dom#313
+  split CSS `@keyframes` animations off the transitions switch. turbo-test's one switch
+  (`--css-transitions` / `TURBO_CSS_TRANSITIONS` / `test.cssTransitions`) now drives both, so the
+  default stays jsdom's (no transitions, no animations, no Web Animations). Guarded by
+  `transitions_are_jsdom_by_default_and_chrome_on_opt_in`, which fails on the pin alone.
+
+### Fixed
+- `--testTimeout 0` and `Infinity` disable the per-test timeout, as vitest's `withTimeout` does
+  (#273). Mirror of #268 for tests: before, turbo-test fell back to the 5 000 ms default when the
+  env value was `0`/`Infinity`. Covers `test.testTimeout` from the config and the per-test
+  `{ timeout: 0 | Infinity }` option.
+- `test.hookTimeout: Infinity` (and `test.testTimeout: Infinity`) in a vitest config now reaches
+  the runtime instead of being dropped (#273). The launcher's config scan accepts `Infinity` as
+  a value, and the runner's env→global prelude forwards it.
+- `jest.setTimeout(ms)` overrides the default per-test timeout for the file, as jest 30.5.2 does
+  (#273). Before, the call was a no-op and a slow test ran to the 5 s default. Cleared between
+  files, so under isolate reuse one file's override does not leak into the next.
+- `jest.retryTimes(n)` retries a failing test n more times, as jest 30.5.2 does (#273). Before,
+  the call was a no-op. Also per-file.
+- `--hookTimeout 0` and `Infinity` disable the hook timeout, as vitest's `withTimeout` does
+  (#268). Before, turbo-test fell back to the 10 000 ms default when the env value was `0`, so a
+  hook that ran longer than 10 s timed out under `--hookTimeout 0` where vitest would never time
+  out. Test: `hook_timeout_zero_disables_the_timeout_as_vitest` (a 10.2 s beforeEach passes under
+  `--hookTimeout 0`; fails before the fix).
+- Microtasks queued in a hook or test settle where they do on vitest (#251). vitest awaits each
+  phase (beforeAll / beforeEach / test / afterEach / afterAll, retries, `it.fails`, nested
+  describes, cleanups) through @vitest/runner's fixed-depth async chain, so a short promise chain
+  finishes before the next phase and a longer one interleaves with it; turbo-test ran fewer turns
+  between phases, so ordering-sensitive code (async cleanups, React state flushes) could observe a
+  different order. The runner now mirrors @vitest/runner's await structure turn for turn. Test:
+  `tests/runner_c_microtask_order.rs`, five probes recorded from vitest 4.1.12 + jsdom 27.4.0,
+  checked in fresh isolates and under isolate reuse.
+- `jest` mocks reset as jest-mock does (#254). turbo-test's `jest.fn` / `jest.spyOn` sat on
+  vitest 4's mock, whose `mockReset` goes back to `vi.fn(impl)`'s implementation (a spy to its
+  original), so after `mockReset()` / `jest.resetAllMocks()` / `mockRestore()` a jest project's
+  mocks kept returning the old values where jest 30 returns `undefined` — tests relying on a
+  reset to silence a mock passed on jest and not here. Jest mocks now drop the implementation
+  (and their `whenCalledWith` branches) on reset; `vi.fn` / `vi.spyOn` keep vitest's reset. Test:
+  `jest_mock_reset_is_jests` in `tests/runner_c_vi_surface.rs`, recorded with jest 30.5.2.
+- `onTestFinished` / `onTestFailed` can be imported from `'vitest'` (and are globals), as on
+  vitest (#258). Only the context's `ctx.onTestFinished` existed, so a suite importing the
+  standalone hooks — the form vitest's docs show for cleanups registered from helpers — failed to
+  load. They register on the running test (its body, a beforeEach or an afterEach), throw
+  vitest's `Hook onTestFinished() can only be called inside a test` outside one and its
+  TypeError for a non-function. Test: `on_test_finished_and_failed_import_from_vitest` in
+  `tests/runner_c_vitest_gaps.rs` (recorded from vitest 4.1.12).
+- A test's `{ repeats: n }` option runs it 1 + n times, as vitest (#257). turbo-test ignored the
+  option, so a test meant to be repeated (to shake out flakiness or state leaking between runs)
+  ran once and passed where vitest would catch the failure on a later repeat. Each repeat runs
+  with its hooks and handlers, is retried up to `retry` times (`retryCount` counts on across
+  repeats), a failed repeat fails the test, a describe's `repeats` is inherited by its tests, and
+  the reporters print `(repeat xN)`. Tests: `repeats_run_a_test_again_as_vitest` and
+  `repeats_show_in_the_verbose_reporter` in `tests/runner_c_vitest_gaps.rs` (recorded from
+  vitest 4.1.12).
+- Hooks time out as on vitest (#255). A beforeAll / beforeEach / afterEach / afterAll (and a
+  beforeEach's or beforeAll's cleanup, an onTestFinished / onTestFailed handler) that never
+  settled hung its file until the whole file was killed, where vitest fails it after
+  `hookTimeout` with a pointed error. Each now runs under its own timeout argument, else the
+  config's `test.hookTimeout` / `--hookTimeout`, else vitest's 10 s, on turbo-test's virtual
+  clock (no real wait), failing with vitest's `Hook timed out in <n>ms.` error (stack at the
+  hook's registration); a beforeEach / afterEach timing out aborts the test's `signal`. Tests:
+  `hooks_time_out_as_vitest` and `hook_timeout_defaults_to_ten_seconds_and_follows_the_flag` in
+  `tests/runner_c_vitest_gaps.rs` (recorded from vitest 4.1.12).
+- `Buffer#toString('base64url')` and `Buffer.from(str, 'base64url')` encode and decode per
+  RFC 4648 §5 (`+` → `-`, `/` → `_`, no `=` padding on encode; tolerate missing padding on
+  decode), as Node's WHATWG Buffer does (#260). Before, `toString` fell through to
+  `TextDecoder` and returned the raw UTF-8 text; `from` ignored the encoding. Found in the
+  0.8.0 review (round 2). Covered by the expanded `test('buffer', ...)` in
+  `tests/runner_c_node.rs::BUILTINS_TEST` (vitest 4.1.12 oracle).
+- Concurrent tests run concurrently, as vitest (#256). `it.concurrent`, `describe.concurrent`
+  and `sequence.concurrent` were accepted but a file's tests ran one after another, so suites
+  relying on concurrency (a test awaiting another's progress, timing-sensitive interleavings)
+  hung or behaved differently than on vitest. turbo-test now runs a suite's consecutive
+  concurrent children together through @vitest/runner's `limitConcurrency` (at most
+  `maxConcurrency`, default 5: `test.maxConcurrency` / `--maxConcurrency`), honours
+  `.sequential` / `describe.sequential`, `{ concurrent }` options and `test.sequence.concurrent`
+  / `--sequence.concurrent`, and reports them in declaration order. Sequential suites keep their
+  exact microtask order (#251). Tests: `concurrent_tests_run_together_as_vitest`,
+  `max_concurrency_and_sequence_concurrent_come_from_the_config` and
+  `max_concurrency_and_sequence_concurrent_flags` in `tests/runner_c_vitest_gaps.rs` (recorded
+  from vitest 4.1.12).
+
+### Added
+- `jest.fn()` / `jest.spyOn()` mocks have `whenCalledWith(...matchers)` with jest-mock 30.5.2's
+  dispatch (own onces, then the first matching branch's once, then the last matching
+  implementation, then the fallback) (#185). Test: `jest_fn_when_called_with_is_jests` (16 rows
+  recorded from real jest 30.5.2).
+- The jest config's `fakeTimers` is read (#186): `enableGlobally: true` fakes timers before each
+  file; `now`, `doNotFake`, `timerLimit`, `advanceTimers` are `jest.useFakeTimers()`'s defaults.
+  Test: `jest_config_fake_timers_are_jests` (real jest as oracle).
+
+### Not in this release
+- jest automock (#184) needs module-registry-wide automocking in both loaders; moved off the
+  milestone with the reason on the issue.
+
 ## [0.7.1] — 2026-11-04 — Windows paths, timer order, pnpm, bundled helper shadowing, window viewport
 
 Fixes parts 1–3 of #230, reported by nagisokyn-prog in #230 after running a 196-file pnpm

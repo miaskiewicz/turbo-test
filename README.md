@@ -1,13 +1,15 @@
 # turbo-test
 
 **A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
-(and, experimentally, jest).** Release **0.7.1**.
+(and, experimentally, jest).** Release **0.8.0**.
 
 turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
 work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
 bound directly to V8 (no jsdom, no Node). It runs your existing `*.test.ts(x)` files with the same
 `describe` / `it` / `expect` / `vi`, `@testing-library/react` and jest-dom; the `vi`, mock and
 `jest` surface follows vitest 4.1.12 and jest 30.5.2.
+
+> **For AI agents and humans running the common workflows:** see [`docs/AGENTS.md`](docs/AGENTS.md) and the one-shot scripts under [`scripts/agent/`](scripts/agent).
 
 ## Where it sits: turbo-dom is the shared base
 
@@ -28,7 +30,7 @@ copy of the binding or of V8: the binding, its probes and the Chrome-control col
 record their oracles live in turbo-dom's
 [`crates/turbo-dom-browser-env`](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
 — fix DOM behaviour and recollect controls there. turbo-dom-v8 150.4.0 and
-turbo-dom / -layout / -browser-env 0.7.1 come from crates.io.
+turbo-dom / -layout / -browser-env 0.8.0 come from crates.io.
 
 ## Install and run
 
@@ -116,7 +118,7 @@ breakpoint rules such as MUI's `sx={{ display: { xs: 'flex', md: 'none' } }}` ne
 both a mobile and a desktop layout stay in the accessibility tree, which is what tests written
 against vitest expect. Tests that need `matchMedia` mock it, as on jsdom.
 
-Chrome's media (turbo-dom's `MediaMode::Chrome`, the behaviour turbo-dom 0.7.1 has for every
+Chrome's media (turbo-dom's `MediaMode::Chrome`, the behaviour turbo-dom 0.8.0 has for every
 other embedder): `matchMedia` returns a live `MediaQueryList`, and `@media` / `@import` media
 lists are evaluated against the 1024x768 viewport, as in Chrome 156. MUI's `md` rules apply at
 that width, so mobile-only elements are `display: none`. In both modes a test's replacement
@@ -176,7 +178,16 @@ machinery as `vi` (`jest.fn`, `jest.mock`/`doMock`, `jest.spyOn`, `jest.mocked`,
 `jest.isolateModules`, …); the type-only members (`jest.Mock`, `jest.Mocked`, `jest.SpyInstance`)
 are erased by the transform. When there's **no vitest config**, the nearest **jest config**
 (`jest.config.{js,cjs,mjs,ts,json}` or a `package.json` `"jest"` block) is read for `setupFiles` /
-`setupFilesAfterEnv` (with `<rootDir>` resolved), so your existing setup runs unchanged.
+`setupFilesAfterEnv` (with `<rootDir>` resolved), so your existing setup runs unchanged. Its
+`fakeTimers` block is read too (0.8.0+): `enableGlobally: true` fakes the timers before each test
+file loads, and `now` / `doNotFake` / `timerLimit` / `advanceTimers` become the defaults of
+`jest.useFakeTimers()` (the call's own argument wins). Mocks from `jest.fn()` / `jest.spyOn()`
+have jest-mock's `whenCalledWith(...matchers)` (0.8.0+; `vi.fn()` has none, as in vitest).
+Automock (`enableAutomock`, `automock: true`, …) is not supported yet (#184). Under a jest
+project, `mockReset` / `jest.resetAllMocks` / `mockRestore` drop a mock's implementation so it
+returns `undefined` (jest 30 semantics, 0.8.0+); `vi.fn()` / `vi.spyOn()` keep vitest's behaviour
+(the impl stays and a spy keeps calling through). When a vitest config applies, the jest config's
+`fakeTimers` is ignored.
 
 Both the injected globals **and** the explicit-import form work — a suite with `injectGlobals: false`
 that does `import { describe, it, expect, jest } from '@jest/globals'` resolves that specifier from
@@ -449,10 +460,9 @@ npm run complexity:js        # CI job `complexity / js (cc <= 15)`
   attributed through `tarpaulin.toml`'s `objects`; the `#[path]` unit-test modules are excluded.
 - **Lint — blocking.** `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`;
   `npm-lockfile` checks the lock under npm 10 and 11.
-- **Complexity — report-only until the post-0.6.0 refactor.** Every function should have
-  cyclomatic complexity <= 15 (one limit, no allow-list). The two jobs run with
-  `continue-on-error` and list the functions over the limit in their step summary; they become
-  blocking once the refactor clears that backlog. Rust uses turbo-html2pdf's `cc-check` over every
+- **Complexity — blocking (since 0.8.0).** Every function has cyclomatic complexity <= 15 (one
+  limit, no allow-list, no baseline). A failing job lists the functions over the limit in its step
+  summary. Rust uses turbo-html2pdf's `cc-check` over every
   tracked `.rs` file, installed from its home at the rev CI pins:
 
   ```sh
@@ -465,12 +475,12 @@ npm run complexity:js        # CI job `complexity / js (cc <= 15)`
 - **Release** (`v*` tag): `release-guard` (no `[patch]`, no git sources, versions equal the tag),
   then the npm and crates.io publish jobs ([RELEASING.md](RELEASING.md)).
 
-## Status (0.7.1)
+## Status (0.8.0)
 
 - vitest suites: drop-in; the `vi` / mock / `expect` surface is vitest 4.1.12's
   ([vitest.compat.md](vitest.compat.md) lists what is covered and what is approximated).
 - jest suites: experimental (see above).
-- DOM: turbo-dom-browser-env 0.7.0, Chrome 156-controlled in turbo-dom.
+- DOM: turbo-dom-browser-env 0.8.0, Chrome 156-controlled in turbo-dom.
 - Open work is tracked as GitHub issues in this repository and in turbo-dom.
 
 ## License

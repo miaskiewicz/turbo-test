@@ -89,14 +89,7 @@ fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path) -> Option<()> {
         return Some(());
     }
 
-    let raw = std::fs::read_to_string(abs).ok()?;
-    // Classic wrapper: source compiled to a function, then called with the CJS locals.
-    let wrapped =
-        format!("(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})");
-    let code = v8::String::new(scope, &wrapped)?;
-    let script = v8::Script::compile(scope, code, None)?;
-    let wrapper_val = script.run(scope)?;
-    let wrapper = v8::Local::<v8::Function>::try_from(wrapper_val).ok()?;
+    let wrapper = cjs_wrapper(scope, abs)?;
 
     // module = { exports: {} }
     let exports_obj = v8::Object::new(scope);
@@ -108,10 +101,8 @@ fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path) -> Option<()> {
     let dir = abs.parent().unwrap();
     let dir_str = v8::String::new(scope, &dir.to_string_lossy())?;
     let global = scope.get_current_context().global(scope);
-    let mk_key = v8::String::new(scope, "__mkRequire")?;
-    let mk = v8::Local::<v8::Function>::try_from(global.get(scope, mk_key.into())?).ok()?;
+    let require = mk_require(scope, global, dir_str)?;
     let undef = v8::undefined(scope).into();
-    let require = mk.call(scope, undef, &[dir_str.into()])?;
 
     let filename = v8::String::new(scope, &abs.to_string_lossy())?;
     // call wrapper(exports, module, require, __filename, __dirname)
@@ -147,6 +138,32 @@ fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path) -> Option<()> {
         reg.path_by_hash.insert(synth_hash, abs.to_path_buf());
     });
     Some(())
+}
+
+/// `abs`'s source compiled in the classic wrapper: a function, to be called with the CJS locals.
+fn cjs_wrapper<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+) -> Option<v8::Local<'s, v8::Function>> {
+    let raw = std::fs::read_to_string(abs).ok()?;
+    let wrapped =
+        format!("(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})");
+    let code = v8::String::new(scope, &wrapped)?;
+    let script = v8::Script::compile(scope, code, None)?;
+    let wrapper_val = script.run(scope)?;
+    v8::Local::<v8::Function>::try_from(wrapper_val).ok()
+}
+
+/// `__mkRequire(dir)`: the `require` of a module in `dir`.
+fn mk_require<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    global: v8::Local<'s, v8::Object>,
+    dir: v8::Local<'s, v8::String>,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let mk_key = v8::String::new(scope, "__mkRequire")?;
+    let mk = v8::Local::<v8::Function>::try_from(global.get(scope, mk_key.into())?).ok()?;
+    let undef = v8::undefined(scope).into();
+    mk.call(scope, undef, &[dir.into()])
 }
 
 /// Call globalThis.__keys(obj) -> Vec<String> of own enumerable keys.
@@ -299,23 +316,34 @@ fn load_graph<'s>(
         reg.path_by_hash.insert(hash, abs.to_path_buf());
     });
 
-    let requests = module.get_module_requests();
     let dir = abs.parent().unwrap().to_path_buf();
+    load_module_requests(scope, module, &dir)?;
+    Some(module)
+}
+
+/// Resolve and load every dependency the module declares.
+fn load_module_requests<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    module: v8::Local<'s, v8::Module>,
+    dir: &Path,
+) -> Option<()> {
+    let requests = module.get_module_requests();
     for i in 0..requests.length() {
         let req =
             v8::Local::<v8::ModuleRequest>::try_from(requests.get(scope, i).unwrap()).unwrap();
         let spec = req.get_specifier().to_rust_string_lossy(scope);
-        let dep = resolve_spec(&spec, &dir)?;
-        match kind_of(&dep) {
-            Kind::Esm => {
-                load_graph(scope, &dep)?;
-            }
-            Kind::Cjs => {
-                load_cjs(scope, &dep)?;
-            }
-        }
+        let dep = resolve_spec(&spec, dir)?;
+        load_dep(scope, &dep)?;
     }
-    Some(module)
+    Some(())
+}
+
+/// Load a dependency as ESM or CJS synthetic depending on its kind.
+fn load_dep<'s>(scope: &mut v8::PinScope<'s, '_>, dep: &Path) -> Option<()> {
+    match kind_of(dep) {
+        Kind::Esm => load_graph(scope, dep).map(|_| ()),
+        Kind::Cjs => load_cjs(scope, dep).map(|_| ()),
+    }
 }
 
 /// Resolve callback: returns ESM module or CJS synthetic module from the registry.

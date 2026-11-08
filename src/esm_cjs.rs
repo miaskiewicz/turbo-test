@@ -523,16 +523,20 @@ fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -
     };
     let map_src = if with_map { Some((path, src)) } else { None };
     let (parts, mappings) = lower(ast, scoping, &ctx, &mut program, map_src)?;
+    Some(assemble_output(path, parts, mappings.as_ref()))
+}
 
-    // No ESM module syntax → CJS/script: return the transformed body unwrapped (no preamble), with
-    // just the `__toESM` helper prepended when a lowered `import()` calls it.
+/// Assemble the final output source for `emit_inner`, appending the inline source map when one was
+/// produced. Chooses the unwrapped (script / CJS) shape when the module has no ESM syntax, else the
+/// `assemble` wrapper.
+fn assemble_output(path: &Path, parts: ModuleParts, mappings: Option<&String>) -> String {
     if !parts.has_module_syntax {
         let helper = if parts.uses_to_esm { TO_ESM_HELPER } else { "" };
         let mut out = format!("{helper}{}", parts.body_code);
-        if let Some(m) = &mappings {
+        if let Some(m) = mappings {
             append_inline_map(&mut out, path, helper.matches('\n').count(), m);
         }
-        return Some(out);
+        return out;
     }
     let mut out = assemble(
         &parts.requires,
@@ -540,7 +544,7 @@ fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -
         &parts.exports,
         &parts.body_code,
     );
-    if let Some(m) = &mappings {
+    if let Some(m) = mappings {
         // lines before body_code in the output = preamble + the assembled-module prefix.
         let prefix = PREAMBLE.matches('\n').count()
             + assemble_module(&parts.requires, &parts.re_exports, &parts.exports, "")
@@ -548,7 +552,7 @@ fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -
                 .count();
         append_inline_map(&mut out, path, prefix, m);
     }
-    Some(out)
+    out
 }
 
 /// Parse `js` (already TS/JSX-stripped, plain JS) and lower to `ModuleParts` under `ctx`. Used by
@@ -1319,9 +1323,6 @@ pub(crate) fn graph_interop_rewrite(
     if ret.panicked || !ret.errors.is_empty() {
         return None;
     }
-    let lit = |spec: &str, q: &str| json_string(&format!("{spec}{q}"));
-    // (start, end, replacement), in source order
-    let mut edits: Vec<(u32, u32, String)> = Vec::new();
     let kind = |spec: &str| {
         if spec.contains('?') {
             Target::Other
@@ -1329,100 +1330,13 @@ pub(crate) fn graph_interop_rewrite(
             target(spec)
         }
     };
-    for stmt in &ret.program.body {
-        match stmt {
-            Statement::ImportDeclaration(d) if d.with_clause.is_none() => {
-                let spec = d.source.value.as_str();
-                let k = kind(spec);
-                if k == Target::Other || (node && k != Target::Cjs) {
-                    continue;
-                }
-                if node {
-                    edits.push((
-                        d.source.span.start,
-                        d.source.span.end,
-                        lit(spec, NODE_QUERY),
-                    ));
-                    continue;
-                }
-                let Some(specs) = &d.specifiers else { continue };
-                let ns = specs.iter().find_map(|s| match s {
-                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(n) => {
-                        Some(n.local.name.to_string())
-                    }
-                    _ => None,
-                });
-                let Some(ns) = ns else { continue };
-                let default = specs.iter().find_map(|s| match s {
-                    ImportDeclarationSpecifier::ImportDefaultSpecifier(n) => {
-                        Some(n.local.name.to_string())
-                    }
-                    _ => None,
-                });
-                let mut text = String::new();
-                if let Some(def) = default {
-                    text.push_str(&format!("import {def} from {}; ", json_string(spec)));
-                } else if k == Target::AppEsm {
-                    text.push_str(&format!("import {}; ", json_string(spec)));
-                }
-                text.push_str(&format!("import {ns} from {};", lit(spec, NS_QUERY)));
-                edits.push((d.span.start, d.span.end, text));
-            }
-            Statement::ExportAllDeclaration(d) if d.with_clause.is_none() => {
-                let spec = d.source.value.as_str();
-                let k = kind(spec);
-                if k == Target::Other || (node && k != Target::Cjs) {
-                    continue;
-                }
-                if node {
-                    edits.push((
-                        d.source.span.start,
-                        d.source.span.end,
-                        lit(spec, NODE_QUERY),
-                    ));
-                    continue;
-                }
-                match &d.exported {
-                    None if k == Target::Cjs => edits.push((
-                        d.source.span.start,
-                        d.source.span.end,
-                        lit(spec, STAR_QUERY),
-                    )),
-                    None => {}
-                    Some(name) => {
-                        let name = module_export_name(name);
-                        let name = if is_plain_ident(&name) {
-                            name
-                        } else {
-                            json_string(&name)
-                        };
-                        let first = if k == Target::AppEsm {
-                            format!("import {}; ", json_string(spec))
-                        } else {
-                            String::new()
-                        };
-                        edits.push((
-                            d.span.start,
-                            d.span.end,
-                            format!(
-                                "{first}export {{ default as {name} }} from {};",
-                                lit(spec, NS_QUERY)
-                            ),
-                        ));
-                    }
-                }
-            }
-            Statement::ExportNamedDeclaration(d) if node && d.with_clause.is_none() => {
-                if let Some(source) = &d.source {
-                    let spec = source.value.as_str();
-                    if kind(spec) == Target::Cjs {
-                        edits.push((source.span.start, source.span.end, lit(spec, NODE_QUERY)));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
+    // (start, end, replacement), in source order
+    let edits: Vec<(u32, u32, String)> = ret
+        .program
+        .body
+        .iter()
+        .filter_map(|stmt| interop_edit(stmt, &kind, node))
+        .collect();
     if edits.is_empty() {
         return None;
     }
@@ -1440,11 +1354,163 @@ pub(crate) fn graph_interop_rewrite(
     Some(out)
 }
 
+/// `spec` with the query `q`, as a JS string literal.
+fn lit(spec: &str, q: &str) -> String {
+    json_string(&format!("{spec}{q}"))
+}
+
+/// The [`graph_interop_rewrite`] edit of one top-level statement, if it needs one.
+fn interop_edit(
+    stmt: &Statement,
+    kind: &dyn Fn(&str) -> Target,
+    node: bool,
+) -> Option<(u32, u32, String)> {
+    match stmt {
+        Statement::ImportDeclaration(d) if d.with_clause.is_none() => {
+            import_decl_edit(d, kind, node)
+        }
+        Statement::ExportAllDeclaration(d) if d.with_clause.is_none() => {
+            export_all_decl_edit(d, kind, node)
+        }
+        Statement::ExportNamedDeclaration(d) if node && d.with_clause.is_none() => {
+            let source = d.source.as_ref()?;
+            let spec = source.value.as_str();
+            (kind(spec) == Target::Cjs)
+                .then(|| (source.span.start, source.span.end, lit(spec, NODE_QUERY)))
+        }
+        _ => None,
+    }
+}
+
+/// `interop_edit` for an `import …` declaration.
+fn import_decl_edit(
+    d: &ImportDeclaration,
+    kind: &dyn Fn(&str) -> Target,
+    node: bool,
+) -> Option<(u32, u32, String)> {
+    let spec = d.source.value.as_str();
+    let k = kind(spec);
+    if k == Target::Other || (node && k != Target::Cjs) {
+        return None;
+    }
+    if node {
+        return Some((
+            d.source.span.start,
+            d.source.span.end,
+            lit(spec, NODE_QUERY),
+        ));
+    }
+    import_ns_edit(d, spec, k)
+}
+
+/// `interop_edit` for an `export * …` declaration.
+fn export_all_decl_edit(
+    d: &ExportAllDeclaration,
+    kind: &dyn Fn(&str) -> Target,
+    node: bool,
+) -> Option<(u32, u32, String)> {
+    let spec = d.source.value.as_str();
+    let k = kind(spec);
+    if k == Target::Other || (node && k != Target::Cjs) {
+        return None;
+    }
+    if node {
+        return Some((
+            d.source.span.start,
+            d.source.span.end,
+            lit(spec, NODE_QUERY),
+        ));
+    }
+    export_all_edit(d, spec, k)
+}
+
+/// `import * as ns` (with its default import, if any) of the module `spec` of kind `k`.
+fn import_ns_edit(d: &ImportDeclaration, spec: &str, k: Target) -> Option<(u32, u32, String)> {
+    let specs = d.specifiers.as_ref()?;
+    let ns = specs.iter().find_map(|s| match s {
+        ImportDeclarationSpecifier::ImportNamespaceSpecifier(n) => Some(n.local.name.to_string()),
+        _ => None,
+    })?;
+    let default = specs.iter().find_map(|s| match s {
+        ImportDeclarationSpecifier::ImportDefaultSpecifier(n) => Some(n.local.name.to_string()),
+        _ => None,
+    });
+    let mut text = String::new();
+    if let Some(def) = default {
+        text.push_str(&format!("import {def} from {}; ", json_string(spec)));
+    } else if k == Target::AppEsm {
+        text.push_str(&format!("import {}; ", json_string(spec)));
+    }
+    text.push_str(&format!("import {ns} from {};", lit(spec, NS_QUERY)));
+    Some((d.span.start, d.span.end, text))
+}
+
+/// `export *` / `export * as name` from the module `spec` of kind `k`.
+fn export_all_edit(d: &ExportAllDeclaration, spec: &str, k: Target) -> Option<(u32, u32, String)> {
+    let Some(name) = &d.exported else {
+        return (k == Target::Cjs).then(|| {
+            (
+                d.source.span.start,
+                d.source.span.end,
+                lit(spec, STAR_QUERY),
+            )
+        });
+    };
+    let name = module_export_name(name);
+    let name = if is_plain_ident(&name) {
+        name
+    } else {
+        json_string(&name)
+    };
+    let first = if k == Target::AppEsm {
+        format!("import {}; ", json_string(spec))
+    } else {
+        String::new()
+    };
+    Some((
+        d.span.start,
+        d.span.end,
+        format!(
+            "{first}export {{ default as {name} }} from {};",
+            lit(spec, NS_QUERY)
+        ),
+    ))
+}
+
 /// The export names Node's cjs-module-lexer detects in a CommonJS module whose one export form
 /// is `module.exports = { ... }` (turbo-test#133): the object literal's keys up to the first
 /// property whose value is not an identifier (`{ a, b: c, 'd': e, ...f }`; `{ a: 1 }` gives none).
 /// `None` for any other module, whose own enumerable names stand for the lexer's.
 pub(crate) fn cjs_literal_export_names(src: &str) -> Option<Vec<String>> {
+    let b = exports_object_literal(src)?;
+    let mut sc = KeyScan { b, i: 0 };
+    let mut names = Vec::new();
+    loop {
+        sc.ws();
+        if sc.at_end_or(b'}') {
+            break;
+        }
+        let key = match sc.entry()? {
+            Entry::Stop => break,
+            Entry::Spread => None,
+            Entry::Key(k) => Some(k),
+        };
+        sc.ws();
+        if let Some(k) = key {
+            if !sc.value() {
+                break;
+            }
+            names.extend(k);
+        }
+        if !sc.eat(b',') {
+            break;
+        }
+    }
+    Some(names)
+}
+
+/// The text after the `{` of a module's one export form `module.exports = {`.
+fn exports_object_literal(src: &str) -> Option<&[u8]> {
     if src.matches("module.exports").count() != 1
         || src.contains("exports.")
         || src.contains("exports[")
@@ -1458,67 +1524,86 @@ pub(crate) fn cjs_literal_export_names(src: &str) -> Option<Vec<String>> {
     if rest.starts_with('=') {
         return None;
     }
-    let b = rest.trim_start().strip_prefix('{')?.as_bytes();
-    let is_start = |c: u8| c.is_ascii_alphabetic() || c == b'_' || c == b'$';
-    let is_part = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
-    let ws = |i: &mut usize| {
-        while *i < b.len() && b[*i].is_ascii_whitespace() {
-            *i += 1;
+    Some(rest.trim_start().strip_prefix('{')?.as_bytes())
+}
+
+/// A cursor over an object literal's text for [`cjs_literal_export_names`].
+struct KeyScan<'b> {
+    b: &'b [u8],
+    i: usize,
+}
+
+impl KeyScan<'_> {
+    fn ws(&mut self) {
+        while self.i < self.b.len() && self.b[self.i].is_ascii_whitespace() {
+            self.i += 1;
         }
-    };
-    let ident = |i: &mut usize| -> Option<String> {
-        if *i < b.len() && is_start(b[*i]) {
-            let s = *i;
-            while *i < b.len() && is_part(b[*i]) {
-                *i += 1;
-            }
-            Some(String::from_utf8_lossy(&b[s..*i]).into_owned())
-        } else {
-            None
-        }
-    };
-    let mut names = Vec::new();
-    let mut i = 0;
-    loop {
-        ws(&mut i);
-        if i >= b.len() || b[i] == b'}' {
-            break;
-        }
-        // Some(name) for a key (None when it is not a well-formed string), None for a spread
-        let key = if b[i..].starts_with(b"...") {
-            i += 3;
-            ws(&mut i);
-            ident(&mut i)?;
-            None
-        } else if b[i] == b'\'' || b[i] == b'"' {
-            let (key, end) = string_key(b, i)?;
-            i = end;
-            Some(key)
-        } else {
-            match ident(&mut i) {
-                Some(k) => Some(Some(k)),
-                None => break,
-            }
-        };
-        ws(&mut i);
-        if let Some(k) = key {
-            if i < b.len() && b[i] == b':' {
-                i += 1;
-                ws(&mut i);
-                if ident(&mut i).is_none() {
-                    break;
-                }
-                ws(&mut i);
-            }
-            names.extend(k);
-        }
-        if i < b.len() && b[i] == b',' {
-            i += 1;
-            continue;
-        }
-        break;
     }
-    Some(names)
+
+    /// Whether the text ends here or `c` is next.
+    fn at_end_or(&self, c: u8) -> bool {
+        self.i >= self.b.len() || self.b[self.i] == c
+    }
+
+    /// Step over `c` when it is next.
+    fn eat(&mut self, c: u8) -> bool {
+        let next = self.i < self.b.len() && self.b[self.i] == c;
+        if next {
+            self.i += 1;
+        }
+        next
+    }
+
+    fn ident(&mut self) -> Option<String> {
+        let (b, s) = (self.b, self.i);
+        let is_start = |c: u8| c.is_ascii_alphabetic() || c == b'_' || c == b'$';
+        let is_part = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+        if s >= b.len() || !is_start(b[s]) {
+            return None;
+        }
+        while self.i < b.len() && is_part(b[self.i]) {
+            self.i += 1;
+        }
+        Some(String::from_utf8_lossy(&b[s..self.i]).into_owned())
+    }
+
+    /// The next entry (`None` when the scan gives up).
+    fn entry(&mut self) -> Option<Entry> {
+        if self.b[self.i..].starts_with(b"...") {
+            self.i += 3;
+            self.ws();
+            self.ident()?;
+            return Some(Entry::Spread);
+        }
+        if self.b[self.i] == b'\'' || self.b[self.i] == b'"' {
+            let (key, end) = string_key(self.b, self.i)?;
+            self.i = end;
+            return Some(Entry::Key(key));
+        }
+        Some(self.ident().map_or(Entry::Stop, |k| Entry::Key(Some(k))))
+    }
+
+    /// Past a key: its `: identifier` value, if any; `false` when the value is not an identifier.
+    fn value(&mut self) -> bool {
+        if self.eat(b':') {
+            self.ws();
+            if self.ident().is_none() {
+                return false;
+            }
+            self.ws();
+        }
+        true
+    }
+}
+
+/// An object literal entry as [`cjs_literal_export_names`] reads it.
+enum Entry {
+    /// `...name`
+    Spread,
+    /// a key (`None` when it is not a well-formed string)
+    Key(Option<String>),
+    /// anything else: the names stop here
+    Stop,
 }
 
 #[cfg(test)]
@@ -1653,7 +1738,6 @@ fn string_key(b: &[u8], at: usize) -> Option<(Option<String>, usize)> {
     let q = b[at];
     let mut units: Vec<u16> = Vec::new();
     let mut i = at + 1;
-    let hex = |s: &[u8]| u32::from_str_radix(std::str::from_utf8(s).ok()?, 16).ok();
     loop {
         let c = *b.get(i)?;
         if c == q {
@@ -1668,40 +1752,46 @@ fn string_key(b: &[u8], at: usize) -> Option<(Option<String>, usize)> {
         }
         let e = *b.get(i + 1)?;
         i += 2;
-        let cp = match e {
-            b'n' => 0x0a,
-            b't' => 0x09,
-            b'r' => 0x0d,
-            b'b' => 0x08,
-            b'f' => 0x0c,
-            b'v' => 0x0b,
-            b'0' => 0,
-            b'x' => {
-                i += 2;
-                hex(b.get(i - 2..i)?)?
-            }
-            b'u' if b.get(i) == Some(&b'{') => {
-                let len = b[i..].iter().position(|&c| c == b'}')?;
-                let cp = hex(&b[i + 1..i + len])?;
-                i += len + 1;
-                cp
-            }
-            b'u' => {
-                i += 4;
-                hex(b.get(i - 4..i)?)?
-            }
-            _ => {
-                // any other character stands for itself (a line break included)
-                let ch = String::from_utf8_lossy(&b[i - 1..]).chars().next()?;
-                i += ch.len_utf8() - 1;
-                ch as u32
-            }
-        };
+        let cp = escape_code_point(b, &mut i, e)?;
         match char::from_u32(cp) {
             Some(ch) => units.extend(ch.encode_utf16(&mut [0; 2]).iter()),
             None => units.push(cp as u16),
         }
     }
+}
+
+/// The code point of the escape `\e` whose text follows at `*i` (moved past it).
+fn escape_code_point(b: &[u8], i: &mut usize, e: u8) -> Option<u32> {
+    let hex = |s: &[u8]| u32::from_str_radix(std::str::from_utf8(s).ok()?, 16).ok();
+    Some(match e {
+        b'n' => 0x0a,
+        b't' => 0x09,
+        b'r' => 0x0d,
+        b'b' => 0x08,
+        b'f' => 0x0c,
+        b'v' => 0x0b,
+        b'0' => 0,
+        b'x' => {
+            *i += 2;
+            hex(b.get(*i - 2..*i)?)?
+        }
+        b'u' if b.get(*i) == Some(&b'{') => {
+            let len = b[*i..].iter().position(|&c| c == b'}')?;
+            let cp = hex(&b[*i + 1..*i + len])?;
+            *i += len + 1;
+            cp
+        }
+        b'u' => {
+            *i += 4;
+            hex(b.get(*i - 4..*i)?)?
+        }
+        _ => {
+            // any other character stands for itself (a line break included)
+            let ch = String::from_utf8_lossy(&b[*i - 1..]).chars().next()?;
+            *i += ch.len_utf8() - 1;
+            ch as u32
+        }
+    })
 }
 
 #[cfg(test)]

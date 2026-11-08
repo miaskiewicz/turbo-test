@@ -37,6 +37,8 @@ export interface TestOptions {
   timeout?: number;
   retry?: number;
   repeats?: number;
+  concurrent?: boolean;
+  sequential?: boolean;
 }
 
 // `it.each` typing — lifted verbatim from vitest (`@vitest/runner`'s `ExtractEachCallbackArgs` /
@@ -101,6 +103,7 @@ export interface TestAPI {
   skip: TestAPI;
   todo: (name: string, fn?: TestFunction) => void;
   concurrent: TestAPI;
+  sequential: TestAPI;
   fails: TestAPI;
   each: TestEachFunction;
   for: TestForFunction;
@@ -112,6 +115,7 @@ export interface SuiteAPI {
   skip: SuiteAPI;
   todo: (name: string) => void;
   concurrent: SuiteAPI;
+  sequential: SuiteAPI;
   each: TestEachFunction;
   for: SuiteForFunction;
 }
