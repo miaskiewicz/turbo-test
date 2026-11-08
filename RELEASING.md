@@ -75,8 +75,8 @@ Run `npm ci` (npm 10 and npm 11 must both install the committed lock unchanged; 
 nine native DOM compatibility fixtures used by `.github/workflows/ci.yml`, and the
 line-coverage gate (`cargo tarpaulin`, `fail-under = 99.9` in tarpaulin.toml; CI job
 `coverage`), and the lints (`cargo fmt --check`, `cargo clippy --all-targets -- -D
-warnings`; CI job `lint`). The complexity jobs (`complexity / rust (cc <= 15)`,
-`complexity / js (cc <= 15)`) are blocking since 0.8.0: a release needs them green
+warnings`; CI job `lint`). The complexity jobs (`complexity / rust (cc <= 7)`,
+`complexity / js (cc <= 7)`) are blocking since 0.8.0: a release needs them green
 too (README "Gates and CI"). The binding's
 Chrome-parity tests (including the explicit unknown-pseudo CSSOM admission ignore
 and its Chrome-expected failure) now run in turbo-dom-browser-env, not here. Check the actual normalized runner package from a

@@ -445,8 +445,8 @@ npm test                     # node --test test/*.mjs (CLI compat + tsc type che
 cargo tarpaulin              # line-coverage gate (tarpaulin.toml, fail-under = 99.9)
 cargo fmt --check            # CI job `lint`, with:
 cargo clippy --all-targets -- -D warnings
-npm run complexity:rust      # CI job `complexity / rust (cc <= 15)` (needs cc-check, below)
-npm run complexity:js        # CI job `complexity / js (cc <= 15)`
+npm run complexity:rust      # CI job `complexity / rust (cc <= 7)` (needs cc-check, below)
+npm run complexity:js        # CI job `complexity / js (cc <= 7)`
 ```
 
 ### Gates and CI
@@ -460,7 +460,7 @@ npm run complexity:js        # CI job `complexity / js (cc <= 15)`
   attributed through `tarpaulin.toml`'s `objects`; the `#[path]` unit-test modules are excluded.
 - **Lint — blocking.** `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`;
   `npm-lockfile` checks the lock under npm 10 and 11.
-- **Complexity — blocking (since 0.8.0).** Every function has cyclomatic complexity <= 15 (one
+- **Complexity — blocking (since 0.8.0).** Every function has cyclomatic complexity <= 7 (one
   limit, no allow-list, no baseline). A failing job lists the functions over the limit in its step
   summary. Rust uses turbo-html2pdf's `cc-check` over every
   tracked `.rs` file, installed from its home at the rev CI pins:

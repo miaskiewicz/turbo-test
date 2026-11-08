@@ -5,6 +5,15 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Changed
+- Cyclomatic-complexity gate lowered from `<= 10` to `<= 7` for both the Rust and JS sides
+  (#263). The 0.8.0 round of refactors cleared the backlog at `<= 10`; the 0.8.1 round
+  (#294, #295) brings every function in `src/`, `tests/`, `cli.js`, `index.js` and
+  `src/runtime.js` to `<= 7` with no allow-list and no behaviour change (full `cargo test
+  --locked` and the 99.9 coverage floor stay green, no re-baselining). CI job names, the
+  `complexity:rust` / `complexity:js` scripts, `.oxlintrc.complexity.json`, CLAUDE.md,
+  README.md and RELEASING.md are updated; both jobs stay blocking.
+
 ### Added
 - `test.scoped({...})` and `test.override({...})` on a `base.extend({...})` test — vitest 4's
   per-describe fixture overrides (#276). Called inside a `describe` block, they merge the
