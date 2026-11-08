@@ -11,7 +11,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   0.6.0 gate landed report-only with 43 Rust and 44 JS functions over the limit; they were split
   into helpers with no behaviour change (full suite and the 99.9 coverage floor unchanged, no
   re-baselining), so new code can't grow the backlog back. One limit, no allow-list.
-- turbo-dom 0.8 (pinned by git rev to its release/0.8.0 until it is published): turbo-dom#313
+- turbo-dom 0.8.0 (crates.io, npm): turbo-dom#313
   split CSS `@keyframes` animations off the transitions switch. turbo-test's one switch
   (`--css-transitions` / `TURBO_CSS_TRANSITIONS` / `test.cssTransitions`) now drives both, so the
   default stays jsdom's (no transitions, no animations, no Web Animations). Guarded by
