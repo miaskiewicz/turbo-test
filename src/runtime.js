@@ -8133,31 +8133,58 @@ it.fails = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ nam
 // it.extend({...}) — test-context fixtures (best-effort). vitest passes a merged context object as
 // the test fn's first arg; fixtures defined as plain values or `async ({}, use) => use(value)`
 // functions are resolved here and provided. Returns a new test fn with these fixtures baked in.
+// Per-suite fixture overrides from test.scoped / test.override (turbo-test#276), keyed by the
+// extended `test` function. Walking up a test's suite chain picks the closest ancestor's map.
+const __fixtureOverrides = new WeakMap();
+function __closestFixtureOverride(suite, key) {
+  let s = suite;
+  while (s) {
+    const m = __fixtureOverrides.get(s);
+    if (m && m.has(key)) return m.get(key);
+    s = s.parent;
+  }
+  return null;
+}
+async function __applyFixture(ctx, k, f) {
+  if (typeof f !== 'function') { ctx[k] = f; return; }
+  // vitest fixture fn: ({...deps}, use) => { ... await use(value) }. Capture the used value.
+  let captured;
+  const use = (v) => { captured = v; return Promise.resolve(); };
+  const r = f(ctx, use);
+  if (r && typeof r.then === 'function') await r;
+  ctx[k] = captured;
+}
 it.extend = (fixtures) => {
-  // the fixtures are set on the test's context (turbo-test#96), which the fixture functions get
-  const resolveCtx = async (ctx) => {
-    for (const k of Object.keys(fixtures || {})) {
-      const f = fixtures[k];
-      if (typeof f === 'function') {
-        // vitest fixture fn: ({...deps}, use) => { ... await use(value) }. Capture the used value.
-        let captured;
-        const use = (v) => { captured = v; return Promise.resolve(); };
-        const r = f(ctx, use);
-        if (r && typeof r.then === 'function') await r;
-        ctx[k] = captured;
-      } else {
-        ctx[k] = f;
-      }
-    }
+  const base = { ...(fixtures || {}) };
+  // the fixtures are set on the test's context (turbo-test#96), which the fixture functions get.
+  // suite is the describe block the test was registered in (null for root); scoped overrides
+  // registered on that suite or any ancestor take precedence (turbo-test#276).
+  const resolveCtx = async (ctx, suite) => {
+    const fx = __closestFixtureOverride(suite, ext) || base;
+    for (const k of Object.keys(fx)) await __applyFixture(ctx, k, fx[k]);
     return ctx;
   };
-  const wrap = (userFn) => async (ctx) => userFn(await resolveCtx(ctx));
-  const ext = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: false, retry: o.retry || 0, repeats: o.repeats, own: o }); };
-  ext.skip = (name, a, b) => __addTest({ name, fn: wrap(__normTest(a, b).fn), skip: true });
-  ext.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn), skip: false, only: true, retry: o.retry || 0, repeats: o.repeats, own: o }); };
+  const wrap = (userFn, suite) => async (ctx) => userFn(await resolveCtx(ctx, suite));
+  const ext = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn, current), skip: false, only: false, retry: o.retry || 0, repeats: o.repeats, own: o }); };
+  ext.skip = (name, a, b) => __addTest({ name, fn: wrap(__normTest(a, b).fn, current), skip: true });
+  ext.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn: wrap(fn, current), skip: false, only: true, retry: o.retry || 0, repeats: o.repeats, own: o }); };
   ext.each = (cases, ...targs) => __each(ext, cases, targs);
   ext.for = (cases, ...targs) => __for(ext, cases, targs);
-  ext.extend = (more) => it.extend({ ...fixtures, ...more });
+  ext.extend = (more) => it.extend({ ...base, ...more });
+  // test.scoped({...}) / test.override({...}) — override fixture values for the enclosing suite
+  // (turbo-test#276). Merged onto the closest ancestor override (or the base) and stored on the
+  // current suite; nested describes without their own scoped call inherit it via resolveCtx's walk.
+  // `scoped` is vitest's deprecated name for `override` — both set the same overrides.
+  const applyScoped = (overrides) => {
+    const parentFx = __closestFixtureOverride(current.parent, ext) || base;
+    const merged = { ...parentFx, ...(overrides || {}) };
+    let m = __fixtureOverrides.get(current);
+    if (!m) { m = new Map(); __fixtureOverrides.set(current, m); }
+    m.set(ext, merged);
+    return ext;
+  };
+  ext.scoped = applyScoped;
+  ext.override = applyScoped;
   return ext;
 };
 for (const api of [describe, it]) {
