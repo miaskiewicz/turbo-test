@@ -243,6 +243,12 @@ function __fireMacroTimer(m) {
   else m.ord = m.due = __loop.now + m.interval;
   try { m.cb(); } catch (e) { __reportUncaught(e); }
 }
+function __stepMacroPick(m, it) {
+  if (!m && !it) return null;
+  // earliest-due wins; ties favor the user timer (matches scheduling order intent).
+  const useInternal = it && (!m || it.due < m.due);
+  return { useInternal, due: useInternal ? it.due : m.due };
+}
 __loop.stepMacro = function () {
   __loop.ticks++;
   __dropStaleTimers();
@@ -250,12 +256,10 @@ __loop.stepMacro = function () {
   __loop.internal.sort((a, b) => a.due - b.due || a.id - b.id);
   const m = __loop.macro[0];
   const it = __loop.internal[0];
-  if (!m && !it) return false;
-  // earliest-due wins; ties favor the user timer (matches scheduling order intent).
-  const useInternal = it && (!m || it.due < m.due);
-  const due = useInternal ? it.due : m.due;
-  if (due > __loop.now) __loop.waited += due - __loop.now;
-  if (useInternal) __fireInternalTimer(it);
+  const pick = __stepMacroPick(m, it);
+  if (!pick) return false;
+  if (pick.due > __loop.now) __loop.waited += pick.due - __loop.now;
+  if (pick.useInternal) __fireInternalTimer(it);
   else __fireMacroTimer(m);
   return true;
 };
@@ -928,18 +932,19 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
     }
     for (const kv of rec) list.push(kv);
   };
+  const initObjectLike = (init) => (typeof init === 'object' && init !== null) || typeof init === 'function';
+  const fillFromObjectLike = (list, init) => {
+    const m = init[Symbol.iterator];
+    if (m !== undefined && m !== null) fromPairs(list, init, m);
+    else fromRecord(list, init);
+  };
   globalThis.URLSearchParams = class URLSearchParams {
     constructor(init = undefined) {
       // list of [name, value] pairs; not enumerable, as a real URLSearchParams has no own keys
       // (pretty-format prints `URLSearchParams {}`)
       Object.defineProperty(this, '_', { value: [], writable: true, enumerable: false, configurable: true });
       if (init === undefined) return;
-      if ((typeof init === 'object' && init !== null) || typeof init === 'function') {
-        const m = init[Symbol.iterator];
-        if (m !== undefined && m !== null) fromPairs(this._, init, m);
-        else fromRecord(this._, init);
-        return;
-      }
+      if (initObjectLike(init)) { fillFromObjectLike(this._, init); return; }
       const s = usv(init);
       this._ = parse(s.startsWith('?') ? s.slice(1) : s);
     }
@@ -990,8 +995,10 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
     // one pair per line past `breakLength`.
     [Symbol.for('nodejs.util.inspect.custom')](depth, opts) {
       const o = __inspectCustomOpts(opts);
-      if (typeof depth === 'number' && depth < 0) return __sty(o, '[Object]', 'special');
-      if (typeof depth === 'number') o.depth = depth - 1;
+      if (typeof depth === 'number') {
+        if (depth < 0) return __sty(o, '[Object]', 'special');
+        o.depth = depth - 1;
+      }
       const out = this._.map(([k, v]) => `${__nodeInspect(k, o)} => ${__nodeInspect(v, o)}`);
       const len = out.reduce((n, x) => n + __stripAnsi(x).length + 2, -2);
       const name = (this.constructor && this.constructor.name) || 'URLSearchParams';
@@ -1004,18 +1011,20 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
   });
 }
 if (typeof globalThis.URL === 'undefined') {
+  const __urlNormalizeInput = (url, base) => {
+    url = String(url).replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, '').replace(/[\t\n\r]/g, '');
+    if (base !== undefined && !/^[a-z][a-z0-9+.-]*:/i.test(url)) {
+      url = globalThis.URL._resolve(url, new globalThis.URL(String(base)));
+    }
+    if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) throw new TypeError('Invalid URL: ' + url);
+    return url;
+  };
   globalThis.URL = class URL {
     constructor(url, base) {
-      // leading/trailing C0 controls and spaces go, tabs and newlines anywhere (WHATWG)
-      url = String(url).replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, '').replace(/[\t\n\r]/g, '');
-      if (base !== undefined && !/^[a-z][a-z0-9+.-]*:/i.test(url)) {
-        url = URL._resolve(url, new globalThis.URL(String(base)));
-      }
-      // Real URL throws on input without a valid scheme (e.g. "not a url"). Matching this is
-      // required for validators built on `new URL()` (e.g. zod's .url()).
-      if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) {
-        throw new TypeError('Invalid URL: ' + url);
-      }
+      // leading/trailing C0 controls and spaces go, tabs and newlines anywhere (WHATWG);
+      // for base-relative inputs, resolve against the parsed base; reject inputs without a
+      // valid scheme (matches real URL for validators like zod's .url()).
+      url = __urlNormalizeInput(url, base);
       // protocol is the scheme up to the first ':' (works for opaque schemes like
       // javascript:/data:/mailto: that have no '//' authority).
       const scheme = /^([a-z][a-z0-9+.-]*:)/i.exec(url);
@@ -1031,6 +1040,11 @@ if (typeof globalThis.URL === 'undefined') {
     }
     // the constructor's parse of a hierarchical URL (scheme://authority/path?query#hash); returns
     // the search string
+    _rejectBadAuthority(url, hp) {
+      if (this._special && !this._isFile && URL._badHostPort(hp)) {
+        throw new TypeError('Invalid URL: ' + url);
+      }
+    }
     _parseAuthority(url, m) {
       this._hierarchical = true;
       // `user:pass@` before the last '@' is the userinfo, percent-encoded (WHATWG; turbo-test#114)
@@ -1039,10 +1053,7 @@ if (typeof globalThis.URL === 'undefined') {
       const hostport = at < 0 ? m[2] : m[2].slice(at + 1);
       this._parseUserInfo(info);
       // a special host takes no forbidden code point, and a port is digits up to 65535 (WHATWG)
-      const hp = /^(\[[^\]]*\]|[^:]*)(?::(.*))?$/.exec(hostport);
-      if (this._special && !this._isFile && URL._badHostPort(hp)) {
-        throw new TypeError('Invalid URL: ' + url);
-      }
+      this._rejectBadAuthority(url, /^(\[[^\]]*\]|[^:]*)(?::(.*))?$/.exec(hostport));
       // a file URL's `localhost` host is the empty host (WHATWG)
       this._hostname = '';
       this._port = '';
@@ -1093,14 +1104,18 @@ if (typeof globalThis.URL === 'undefined') {
     }
     // protocol/username/password are views too: a set is validated and encoded (WHATWG setters)
     get protocol() { return this._protocol; }
+    _rejectProtocolChange(next) {
+      const special = (p) => /^(https?|wss?|ftp|file):$/.test(p);
+      if (special(next) !== special(this._protocol)) return true;
+      if (next === 'file:' && (this._userinfo || this._port)) return true;
+      if (this._isFile && this._hostname === '') return true;
+      return false;
+    }
     set protocol(v) {
       const m = /^([a-z][a-z0-9+.-]*)(?::|$)/i.exec(String(v));
       if (!m) return;
       const next = m[1].toLowerCase() + ':';
-      const special = (p) => /^(https?|wss?|ftp|file):$/.test(p);
-      if (special(next) !== special(this._protocol)) return;
-      if (next === 'file:' && (this._userinfo || this._port)) return;
-      if (this._isFile && this._hostname === '') return;
+      if (this._rejectProtocolChange(next)) return;
       this._protocol = next;
       if (this._port) this._setPort(this._port);
     }
@@ -1127,9 +1142,13 @@ if (typeof globalThis.URL === 'undefined') {
     }
     // Normalises the host part for _setHost. Returns null to reject the whole set (port present
     // when withPort=false or on a file URL; empty name on a special non-file URL).
+    _rejectHostName(name, port, withPort) {
+      if (port !== undefined && (!withPort || this._isFile)) return true;
+      if (name === '' && this._special && !this._isFile) return true;
+      return false;
+    }
     _setHostName(name, port, withPort) {
-      if (port !== undefined && (!withPort || this._isFile)) return null;
-      if (name === '' && this._special && !this._isFile) return null;
+      if (this._rejectHostName(name, port, withPort)) return null;
       if (this._special) name = URL._idnAscii(name);
       if (this._isFile && name === 'localhost') return '';
       return name;
@@ -1222,31 +1241,38 @@ if (typeof globalThis.URL === 'undefined') {
     // scheme-relative `//h/p`, absolute path `/p`, query-only `?q`, fragment-only `#f`, empty,
     // and a relative path merged with the base path's directory. Dot segments are removed by
     // the caller's pathname normalization. An opaque base (`mailto:x`) only takes a fragment.
+    static _resolveOpaque(rel, noHash) {
+      if (rel.startsWith('#')) return noHash + rel;
+      throw new TypeError('Invalid URL: ' + rel);
+    }
     static _resolve(rel, b) {
       const auth = b.protocol + '//' + b._userinfo + b.host;
       const noHash = b.href.replace(/#.*$/, '');
-      if (!b._hierarchical) {
-        if (rel.startsWith('#')) return noHash + rel;
-        throw new TypeError('Invalid URL: ' + rel);
-      }
+      if (!b._hierarchical) return URL._resolveOpaque(rel, noHash);
       if (rel.startsWith('//')) return b.protocol + rel;
       if (rel.startsWith('/')) return auth + rel;
-      if (rel === '') return noHash;
-      if (rel.startsWith('#')) return noHash + rel;
+      if (rel === '' || rel.startsWith('#')) return noHash + rel;
       if (rel.startsWith('?')) return auth + b.pathname + rel;
       return auth + b.pathname.replace(/[^/]*$/, '') + rel;
     }
     // RFC 3986 / WHATWG dot-segment removal on a path (`/a/./b/../c` -> `/a/c`).
+    static _dotKind(seg) {
+      const lower = seg.toLowerCase();
+      if (seg === '..' || lower === '%2e%2e') return 'up';
+      if (seg === '.' || lower === '%2e') return 'cur';
+      return 'keep';
+    }
     static _removeDots(path) {
       const out = [];
       const segs = path.split('/');
       for (let i = 1; i < segs.length; i++) {
         const seg = segs[i];
         const last = i === segs.length - 1;
-        if (seg === '..' || seg.toLowerCase() === '%2e%2e') {
+        const kind = URL._dotKind(seg);
+        if (kind === 'up') {
           if (out.length) out.pop();
           if (last) out.push('');
-        } else if (seg === '.' || seg.toLowerCase() === '%2e') {
+        } else if (kind === 'cur') {
           if (last) out.push('');
         } else {
           out.push(seg);
