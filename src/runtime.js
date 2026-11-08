@@ -1893,10 +1893,15 @@ if (typeof globalThis.TransformStream === 'undefined') {
     releaseLock() { if (this._s) { this._s._reader = null; this._s = null; } }
   }
 
+  const __rsHwm = (strategy) => (strategy && typeof strategy.highWaterMark === 'number' ? strategy.highWaterMark : 1);
+  const __rsRunStart = (stream) => {
+    if (typeof stream._src.start !== 'function') return;
+    try { stream._startP = stream._src.start(stream._ctrl); } catch (e) { stream._ctrl.error(e); }
+  };
   class ReadableStream {
     constructor(underlyingSource, strategy) {
       this._src = underlyingSource || {};
-      this._hwm = strategy && typeof strategy.highWaterMark === 'number' ? strategy.highWaterMark : 1;
+      this._hwm = __rsHwm(strategy);
       this._queue = [];
       this._pending = [];
       this._closed = false;
@@ -1907,9 +1912,7 @@ if (typeof globalThis.TransformStream === 'undefined') {
       this._closedD = __sDefer(true);
       this._ctrl = new ReadableStreamDefaultController(this);
       this._startP = undefined;
-      if (typeof this._src.start === 'function') {
-        try { this._startP = this._src.start(this._ctrl); } catch (e) { this._ctrl.error(e); }
-      }
+      __rsRunStart(this);
       if (this._startP && typeof this._startP.then === 'function') {
         this._startP.then(() => __rsPull(this), (e) => { try { this._ctrl.error(e); } catch (_) {} });
       } else {
