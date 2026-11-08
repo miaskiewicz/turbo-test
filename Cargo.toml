@@ -62,6 +62,9 @@ encoding_rs = "0.8"
 # JSX module that does not transform fails with its report, as vite's oxc transform does
 # (turbo-test#113)
 ariadne = { package = "rolldown-ariadne", version = "=0.6.0" }
+# UTS#46 ToASCII for the URL polyfill's host parse: `new URL('http://ü.com').host`
+# must come back as `xn--tda.com` like Node/vitest (turbo-test#259).
+idna = "1"
 
 # `cargo tarpaulin` builds with `--cfg tarpaulin` (napi_host's coverage flush before an abort).
 [lints.rust]

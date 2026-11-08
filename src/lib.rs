@@ -18,6 +18,7 @@ pub mod graph;
 pub mod heap_guard;
 pub mod highlight;
 pub mod human;
+pub mod idna;
 pub mod import_glob;
 pub mod launcher;
 pub mod location;
