@@ -773,40 +773,8 @@ pub fn code_frame_of(source: &str, line: u32, column: u32, c: &Colors) -> String
         }
         let lo = i.saturating_sub(2);
         let hi = (i + 2).min(lines.len() - 1);
-        for (j, text) in lines.iter().enumerate().take(hi + 1).skip(lo) {
-            let plain = strip(text);
-            if plain.starts_with("//# sourceMappingURL") {
-                continue;
-            }
-            if js_len(&plain) > 200 {
-                return String::new();
-            }
-            let tabbed = text.replace('\t', " ");
-            let truncated = if js_len(&strip(&tabbed)) <= 71 {
-                tabbed
-            } else {
-                let mut units = 0;
-                let cut: String = strip(&tabbed)
-                    .chars()
-                    .take_while(|ch| {
-                        units += ch.len_utf16();
-                        units <= 70
-                    })
-                    .collect();
-                format!("{cut}…")
-            };
-            let truncated = truncated.trim_end();
-            out.push(if truncated.is_empty() {
-                no(Some(j + 1))
-            } else {
-                format!("{} {truncated}", no(Some(j + 1)))
-            });
-            if j == i {
-                // `start - (count - lineLength) + (nl - 1)`, repeated `pad + 1` times
-                let pad = start as i64 - (count - js_len(l)) as i64 + (nl as i64 - 1);
-                let spaces = " ".repeat((pad + 1).max(0) as usize);
-                out.push(format!("{}{spaces}{}", no(None), c.red("^")));
-            }
+        if !emit_frame_window(&lines, &mut out, lo, hi, i, &no, c, start, count, l, nl) {
+            return String::new();
         }
         break;
     }
@@ -814,6 +782,64 @@ pub fn code_frame_of(source: &str, line: u32, column: u32, c: &Colors) -> String
         .map(|l| format!("    {l}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Emit the (up to) five-line window centered on line `i`. Returns `false` if any line in the
+/// window is over 200 chars (dropping the whole frame, matching vitest).
+#[allow(clippy::too_many_arguments)]
+fn emit_frame_window(
+    lines: &[&str],
+    out: &mut Vec<String>,
+    lo: usize,
+    hi: usize,
+    i: usize,
+    no: &impl Fn(Option<usize>) -> String,
+    c: &Colors,
+    start: usize,
+    count: usize,
+    l: &str,
+    nl: usize,
+) -> bool {
+    for (j, text) in lines.iter().enumerate().take(hi + 1).skip(lo) {
+        let plain = strip(text);
+        if plain.starts_with("//# sourceMappingURL") {
+            continue;
+        }
+        if js_len(&plain) > 200 {
+            return false;
+        }
+        let truncated = truncate_frame_line(text);
+        let truncated = truncated.trim_end();
+        out.push(if truncated.is_empty() {
+            no(Some(j + 1))
+        } else {
+            format!("{} {truncated}", no(Some(j + 1)))
+        });
+        if j == i {
+            // `start - (count - lineLength) + (nl - 1)`, repeated `pad + 1` times
+            let pad = start as i64 - (count - js_len(l)) as i64 + (nl as i64 - 1);
+            let spaces = " ".repeat((pad + 1).max(0) as usize);
+            out.push(format!("{}{spaces}{}", no(None), c.red("^")));
+        }
+    }
+    true
+}
+
+/// Replace tabs with a space and cut over-wide lines to 70 chars + `…`, preserving ANSI colours.
+fn truncate_frame_line(text: &str) -> String {
+    let tabbed = text.replace('\t', " ");
+    if js_len(&strip(&tabbed)) <= 71 {
+        return tabbed;
+    }
+    let mut units = 0;
+    let cut: String = strip(&tabbed)
+        .chars()
+        .take_while(|ch| {
+            units += ch.len_utf16();
+            units <= 70
+        })
+        .collect();
+    format!("{cut}…")
 }
 
 #[cfg(test)]

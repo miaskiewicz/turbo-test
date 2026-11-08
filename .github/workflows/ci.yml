@@ -198,7 +198,7 @@ jobs:
   # oxlint's `complexity` rule (.oxlintrc.complexity.json) over cli.js, index.js and
   # src/runtime.js. On failure the step summary lists every function over the limit.
   complexity-rust:
-    name: complexity / rust (cc <= 12)
+    name: complexity / rust (cc <= 10)
     runs-on: ubuntu-latest
     env:
       CC_CHECK_REV: 923c89f791f3a89cb089a59626a25cef0a9cbd5f
@@ -216,13 +216,13 @@ jobs:
               --git https://github.com/miaskiewicz/turbo-html2pdf --rev "$CC_CHECK_REV" cc-check
           fi
           echo "$HOME/.cc-check/bin" >> "$GITHUB_PATH"
-      - name: cc-check --max 12 (every tracked .rs file)
+      - name: cc-check --max 10 (every tracked .rs file)
         shell: bash  # -eo pipefail: tee must not mask the gate's exit code
         run: npm run -s complexity:rust 2>&1 | tee complexity.txt
       - name: List the functions over the limit
         if: failure()
         run: |
-          { echo '### Rust functions above cc 12'; echo '```'; grep 'cyclomatic complexity' complexity.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '### Rust functions above cc 10'; echo '```'; grep 'cyclomatic complexity' complexity.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   complexity-js:
     name: complexity / js (cc <= 12)

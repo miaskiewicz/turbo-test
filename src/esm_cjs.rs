@@ -1367,34 +1367,10 @@ fn interop_edit(
 ) -> Option<(u32, u32, String)> {
     match stmt {
         Statement::ImportDeclaration(d) if d.with_clause.is_none() => {
-            let spec = d.source.value.as_str();
-            let k = kind(spec);
-            if k == Target::Other || (node && k != Target::Cjs) {
-                return None;
-            }
-            if node {
-                return Some((
-                    d.source.span.start,
-                    d.source.span.end,
-                    lit(spec, NODE_QUERY),
-                ));
-            }
-            import_ns_edit(d, spec, k)
+            import_decl_edit(d, kind, node)
         }
         Statement::ExportAllDeclaration(d) if d.with_clause.is_none() => {
-            let spec = d.source.value.as_str();
-            let k = kind(spec);
-            if k == Target::Other || (node && k != Target::Cjs) {
-                return None;
-            }
-            if node {
-                return Some((
-                    d.source.span.start,
-                    d.source.span.end,
-                    lit(spec, NODE_QUERY),
-                ));
-            }
-            export_all_edit(d, spec, k)
+            export_all_decl_edit(d, kind, node)
         }
         Statement::ExportNamedDeclaration(d) if node && d.with_clause.is_none() => {
             let source = d.source.as_ref()?;
@@ -1404,6 +1380,48 @@ fn interop_edit(
         }
         _ => None,
     }
+}
+
+/// `interop_edit` for an `import …` declaration.
+fn import_decl_edit(
+    d: &ImportDeclaration,
+    kind: &dyn Fn(&str) -> Target,
+    node: bool,
+) -> Option<(u32, u32, String)> {
+    let spec = d.source.value.as_str();
+    let k = kind(spec);
+    if k == Target::Other || (node && k != Target::Cjs) {
+        return None;
+    }
+    if node {
+        return Some((
+            d.source.span.start,
+            d.source.span.end,
+            lit(spec, NODE_QUERY),
+        ));
+    }
+    import_ns_edit(d, spec, k)
+}
+
+/// `interop_edit` for an `export * …` declaration.
+fn export_all_decl_edit(
+    d: &ExportAllDeclaration,
+    kind: &dyn Fn(&str) -> Target,
+    node: bool,
+) -> Option<(u32, u32, String)> {
+    let spec = d.source.value.as_str();
+    let k = kind(spec);
+    if k == Target::Other || (node && k != Target::Cjs) {
+        return None;
+    }
+    if node {
+        return Some((
+            d.source.span.start,
+            d.source.span.end,
+            lit(spec, NODE_QUERY),
+        ));
+    }
+    export_all_edit(d, spec, k)
 }
 
 /// `import * as ns` (with its default import, if any) of the module `spec` of kind `k`.

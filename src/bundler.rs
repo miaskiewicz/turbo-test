@@ -218,27 +218,14 @@ fn bundle_capped(entry: &Path, max_modules: usize) -> Option<String> {
         if order.len() >= max_modules {
             return None;
         }
-        id_of.insert(p.clone(), order.len());
-        order.push(p.clone());
-
-        if let Some(stub) = asset_stub(&p) {
-            modules.push(Module::Stub(stub));
-            continue;
-        }
-
-        let js = module_js(&p)?;
-
-        let mut edges = HashMap::new();
-        for spec in collect_relative_specs(&js) {
-            if let Some(abs) = resolve_rel(&resolver, &p, &spec) {
-                if !id_of.contains_key(&abs) {
-                    queue.push(abs.clone());
-                }
-                edges.insert(spec, abs);
-            }
-            // an unresolvable relative spec stays `External` (runtime require) — rare; harness gates.
-        }
-        modules.push(Module::Js { js, edges });
+        visit_module(
+            &resolver,
+            p,
+            &mut order,
+            &mut id_of,
+            &mut modules,
+            &mut queue,
+        )?;
     }
 
     // Pass 2: transform + wrap each module.
@@ -253,6 +240,50 @@ fn bundle_capped(entry: &Path, max_modules: usize) -> Option<String> {
     // the entry is the first module walked, so its id is always 0.
     out.push_str("module.exports = require_m0();\n");
     Some(out)
+}
+
+/// Record one module (stub or JS) into the walk; push each unseen edge onto the queue.
+fn visit_module(
+    resolver: &oxc_resolver::Resolver,
+    p: PathBuf,
+    order: &mut Vec<PathBuf>,
+    id_of: &mut HashMap<PathBuf, usize>,
+    modules: &mut Vec<Module>,
+    queue: &mut Vec<PathBuf>,
+) -> Option<()> {
+    id_of.insert(p.clone(), order.len());
+    order.push(p.clone());
+
+    if let Some(stub) = asset_stub(&p) {
+        modules.push(Module::Stub(stub));
+        return Some(());
+    }
+
+    let js = module_js(&p)?;
+    let edges = collect_edges(resolver, &p, &js, id_of, queue);
+    modules.push(Module::Js { js, edges });
+    Some(())
+}
+
+/// Resolve each relative spec in `js` against `from`; queue newly seen targets.
+fn collect_edges(
+    resolver: &oxc_resolver::Resolver,
+    from: &Path,
+    js: &str,
+    id_of: &HashMap<PathBuf, usize>,
+    queue: &mut Vec<PathBuf>,
+) -> HashMap<String, PathBuf> {
+    let mut edges = HashMap::new();
+    for spec in collect_relative_specs(js) {
+        if let Some(abs) = resolve_rel(resolver, from, &spec) {
+            if !id_of.contains_key(&abs) {
+                queue.push(abs.clone());
+            }
+            edges.insert(spec, abs);
+        }
+        // an unresolvable relative spec stays `External` (runtime require) — rare; harness gates.
+    }
+    edges
 }
 
 /// A module closure's helper parameters, after `exports, module`: each of

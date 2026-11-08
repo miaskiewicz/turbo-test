@@ -66,24 +66,8 @@ pub fn expand(file: &Path, src: &str, root: &Path, aliases: &[(String, String)])
     // vite fails the module at transform on a call whose arguments or options it rejects
     // (turbo-test#190), then on a pattern it cannot anchor (turbo-test#149): the module throws
     // vite's error when it is evaluated, before any of its code runs
-    let mut calls = Vec::new();
-    let mut invalid = None;
-    for p in parsed {
-        match p {
-            Parsed::Call(c) => calls.push(c),
-            Parsed::Error(m) => {
-                invalid.get_or_insert(m);
-            }
-        }
-    }
-    let invalid = invalid.or_else(|| {
-        calls.iter().flat_map(|c| &c.patterns).find_map(|p| {
-            let p = p.strip_prefix('!').unwrap_or(p);
-            anchor(p, dir, root, aliases).is_none().then(|| {
-                format!("Invalid glob: \"{p}\" (resolved: \"{p}\"). It must start with '/' or './'")
-            })
-        })
-    });
+    let (calls, invalid) = partition_parsed(parsed);
+    let invalid = invalid.or_else(|| first_unanchored(&calls, dir, root, aliases));
     if let Some(message) = invalid {
         let mut out = src.to_string();
         let message = serde_json::to_string(&message).ok()?;
@@ -106,6 +90,36 @@ pub fn expand(file: &Path, src: &str, root: &Path, aliases: &[(String, String)])
     let imports = imports.concat();
     out.insert_str(after_hashbang(&out), &imports);
     Some(out)
+}
+
+/// Split parsed items into successful calls and the first parse-time error (if any).
+fn partition_parsed(parsed: Vec<Parsed>) -> (Vec<Call>, Option<String>) {
+    let mut calls = Vec::new();
+    let mut invalid = None;
+    for p in parsed {
+        match p {
+            Parsed::Call(c) => calls.push(c),
+            Parsed::Error(m) => {
+                invalid.get_or_insert(m);
+            }
+        }
+    }
+    (calls, invalid)
+}
+
+/// The first pattern across every call that cannot be anchored; `None` when every one anchors.
+fn first_unanchored(
+    calls: &[Call],
+    dir: &Path,
+    root: &Path,
+    aliases: &[(String, String)],
+) -> Option<String> {
+    calls.iter().flat_map(|c| &c.patterns).find_map(|p| {
+        let p = p.strip_prefix('!').unwrap_or(p);
+        anchor(p, dir, root, aliases).is_none().then(|| {
+            format!("Invalid glob: \"{p}\" (resolved: \"{p}\"). It must start with '/' or './'")
+        })
+    })
 }
 
 /// The offset of the first line after a hashbang (0 without one).
@@ -595,13 +609,29 @@ fn define(props: &mut Vec<(String, Value)>, key: String, value: Value) {
 
 /// `e` evaluated as vite's `evalValue` does (in source order, so the first unknown name decides).
 fn eval(e: &Expression) -> Result<Value, Eval> {
-    Ok(match e.get_inner_expression() {
+    let inner = e.get_inner_expression();
+    if let Some(v) = eval_literal(inner)? {
+        return Ok(v);
+    }
+    eval_compound(inner)
+}
+
+/// Literals and identifiers: the leaf forms of `eval`. Returns `Ok(None)` when `e` is not one.
+fn eval_literal(e: &Expression) -> Result<Option<Value>, Eval> {
+    Ok(Some(match e {
         Expression::BooleanLiteral(b) => Value::Bool(b.value),
         Expression::NullLiteral(_) => Value::Null,
         Expression::NumericLiteral(n) => Value::Num(n.value),
         Expression::StringLiteral(s) => Value::Str(s.value.to_string()),
         Expression::TemplateLiteral(t) => eval_template(t)?,
         Expression::Identifier(id) => eval_identifier(&id.name)?,
+        _ => return Ok(None),
+    }))
+}
+
+/// Compound expression forms of `eval` (operators, members, collections).
+fn eval_compound(e: &Expression) -> Result<Value, Eval> {
+    Ok(match e {
         Expression::UnaryExpression(u) => eval_unary(u)?,
         Expression::BinaryExpression(b) => eval_binary(b)?,
         Expression::LogicalExpression(l) => eval_logical(l)?,
@@ -917,22 +947,8 @@ fn object_query(q: &[(String, Value)]) -> Result<String, String> {
 }
 
 /// `import` and `query` with the `as` option applied (and `query` given its `?`).
-fn as_option(
-    r#as: String,
-    mut import: String,
-    mut query: String,
-) -> Result<(String, String), String> {
-    if r#as == "raw" || r#as == "url" {
-        if !import.is_empty() && import != "default" && import != "*" {
-            return Err(format!(
-                "Option \"import\" can only be \"default\" or \"*\" when \"as\" is \"{as}\", but got \"{import}\"",
-                as = r#as
-            ));
-        }
-        if import.is_empty() {
-            import = "default".to_string();
-        }
-    }
+fn as_option(r#as: String, import: String, mut query: String) -> Result<(String, String), String> {
+    let import = apply_as_to_import(&r#as, import)?;
     if !r#as.is_empty() {
         if !query.is_empty() {
             return Err("Options \"as\" and \"query\" cannot be used together".to_string());
@@ -943,6 +959,23 @@ fn as_option(
         query = format!("?{query}");
     }
     Ok((import, query))
+}
+
+/// Default `import` to `default` when `as` is `raw`/`url`, and reject non-default/`*` imports.
+fn apply_as_to_import(r#as: &str, mut import: String) -> Result<String, String> {
+    if r#as != "raw" && r#as != "url" {
+        return Ok(import);
+    }
+    if !import.is_empty() && import != "default" && import != "*" {
+        return Err(format!(
+            "Option \"import\" can only be \"default\" or \"*\" when \"as\" is \"{as}\", but got \"{import}\"",
+            as = r#as
+        ));
+    }
+    if import.is_empty() {
+        import = "default".to_string();
+    }
+    Ok(import)
 }
 
 /// vite (4.1.12) cuts the options at the end of their first call and fails its own parse of the

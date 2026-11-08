@@ -1061,45 +1061,61 @@ pub fn render_junit(names: &[PathBuf], res: &[FileResult], root: &Path) -> Strin
 /// A `<testcase>`'s body: its console output, `<skipped/>`, its annotations and its failures.
 fn junit_test_body(t: &TestCase, root: &Path) -> Vec<String> {
     let mut body = Vec::new();
-    for (stream, tag) in [("stdout", "system-out"), ("stderr", "system-err")] {
-        let logs: Vec<&(String, String)> = r_logs(t, stream);
-        if !logs.is_empty() {
-            body.push(format!("            <{tag}>"));
-            for (_, content) in logs {
-                body.push(xml_esc(content));
-            }
-            body.push(format!("            </{tag}>"));
-        }
-    }
+    append_log_streams(&mut body, t);
     if t.status == "skipped" || t.status == "todo" {
         body.push("            <skipped/>".to_string());
     }
-    // its annotations, one property each (turbo-test#96)
-    if !t.annotations.is_empty() {
-        body.push("            <properties>".to_string());
-        for a in &t.annotations {
-            body.push(format!(
-                "                <property name=\"{}\" value=\"{}\">",
-                xml_esc(&a.kind),
-                xml_esc(&a.message)
-            ));
-            body.push("                </property>".to_string());
-        }
-        body.push("            </properties>".to_string());
-    }
+    append_annotations(&mut body, t);
     if t.status == "failed" {
-        // a failure the runtime recorded no error object for (a forbidden `.only`)
-        let fallback = [load_error_info(&t.message)];
-        let errors = if t.errors.is_empty() {
-            &fallback[..]
-        } else {
-            &t.errors[..]
-        };
-        for e in errors {
-            body.extend(failure_element(e, root));
-        }
+        append_failures(&mut body, t, root);
     }
     body
+}
+
+/// Emit `<system-out>` / `<system-err>` blocks for the test's captured logs.
+fn append_log_streams(body: &mut Vec<String>, t: &TestCase) {
+    for (stream, tag) in [("stdout", "system-out"), ("stderr", "system-err")] {
+        let logs: Vec<&(String, String)> = r_logs(t, stream);
+        if logs.is_empty() {
+            continue;
+        }
+        body.push(format!("            <{tag}>"));
+        for (_, content) in logs {
+            body.push(xml_esc(content));
+        }
+        body.push(format!("            </{tag}>"));
+    }
+}
+
+/// Emit a `<properties>` block (one `<property>` per annotation) when the test has annotations.
+fn append_annotations(body: &mut Vec<String>, t: &TestCase) {
+    if t.annotations.is_empty() {
+        return;
+    }
+    body.push("            <properties>".to_string());
+    for a in &t.annotations {
+        body.push(format!(
+            "                <property name=\"{}\" value=\"{}\">",
+            xml_esc(&a.kind),
+            xml_esc(&a.message)
+        ));
+        body.push("                </property>".to_string());
+    }
+    body.push("            </properties>".to_string());
+}
+
+/// Emit `<failure>` elements for a failed test's errors (falling back to its message).
+fn append_failures(body: &mut Vec<String>, t: &TestCase, root: &Path) {
+    // a failure the runtime recorded no error object for (a forbidden `.only`)
+    let fallback = [load_error_info(&t.message)];
+    let errors = if t.errors.is_empty() {
+        &fallback[..]
+    } else {
+        &t.errors[..]
+    };
+    for e in errors {
+        body.extend(failure_element(e, root));
+    }
 }
 
 /// A test's captured console output on `stream`.
@@ -1776,25 +1792,10 @@ pub fn main_with_args(raw: Vec<String>) -> i32 {
 /// Apply `opts` (env, coverage config), run every file and print the reports. Returns the exit
 /// code (2 = usage: no test files).
 pub fn run(opts: Options) -> i32 {
-    for w in &opts.warnings {
-        eprintln!("{w}");
+    if let Some(code) = apply_cli_prelude(&opts) {
+        return code;
     }
-    for (k, v) in &opts.env {
-        std::env::set_var(k, v);
-    }
-    for op in &opts.coverage {
-        op.apply();
-    }
-    if opts.files.is_empty() {
-        eprintln!("{USAGE}");
-        return 2;
-    }
-    // allowOnly off (--no-allowOnly, or vitest's default on CI): plumb to the runtime, which
-    // fails the `.only` tasks.
-    if !opts.allow_only.unwrap_or_else(|| !crate::ci::is_ci_env()) {
-        std::env::set_var("TURBO_TEST_FORBID_ONLY", "1");
-    }
-    let files = apply_shard(opts.files, opts.shard);
+    let files = apply_shard(opts.files.clone(), opts.shard);
     // An artifact printed to stdout must be the ONLY thing there: test console output goes to
     // stderr then (like the summary line below).
     let artifact_on_stdout = opts.reporter.is_artifact() && opts.output_file.is_none();
@@ -1827,36 +1828,99 @@ pub fn run(opts: Options) -> i32 {
 
     let t = tally(&res);
     if let Some(kind) = human {
-        save_durations(&hist_path, &update_history(hist, &files, &res));
-        let root = junit_root();
-        let (test_files, tests) = footer_counts(files.len(), &res, &colors);
-        let run = crate::human::Run {
-            root: &root,
-            names: &names,
-            wall_ms,
-            start: local_hms(start_ms),
-            test_files,
-            tests,
-            did_update: opts.env.iter().any(|(k, _)| *k == "TURBO_UPDATE_SNAPSHOTS"),
-            colors,
-        };
-        let (out, err) = crate::human::render(kind, &res, &run);
-        // vitest's human reporters write no --outputFile
-        print!("{out}");
-        eprint!("{err}");
-        let cov_ok = !coverage::enabled() || coverage::report();
-        return exit_code(&t, cov_ok);
+        return report_human(
+            kind, &opts, &files, &names, &res, &t, &colors, start_ms, wall_ms, &hist_path, hist,
+        );
     }
-    print!("{}", render_human(opts.reporter, &res));
-    save_durations(&hist_path, &update_history(hist, &files, &res));
+    report_machine(
+        &opts, &files, &names, &res, &t, start_ms, wall_ms, jobs, &hist_path, hist,
+    )
+}
+
+/// Apply `opts`'s side effects (warnings, env, coverage, allowOnly). Returns `Some(code)` when
+/// the CLI should exit immediately (no test files → 2).
+fn apply_cli_prelude(opts: &Options) -> Option<i32> {
+    for w in &opts.warnings {
+        eprintln!("{w}");
+    }
+    for (k, v) in &opts.env {
+        std::env::set_var(k, v);
+    }
+    for op in &opts.coverage {
+        op.apply();
+    }
+    if opts.files.is_empty() {
+        eprintln!("{USAGE}");
+        return Some(2);
+    }
+    // allowOnly off (--no-allowOnly, or vitest's default on CI): plumb to the runtime, which
+    // fails the `.only` tasks.
+    if !opts.allow_only.unwrap_or_else(|| !crate::ci::is_ci_env()) {
+        std::env::set_var("TURBO_TEST_FORBID_ONLY", "1");
+    }
+    None
+}
+
+/// `run`'s human-reporter branch (vitest's default / agent reporters).
+#[allow(clippy::too_many_arguments)]
+fn report_human(
+    kind: crate::human::Kind,
+    opts: &Options,
+    files: &[PathBuf],
+    names: &[PathBuf],
+    res: &[FileResult],
+    t: &Totals,
+    colors: &crate::colors::Colors,
+    start_ms: f64,
+    wall_ms: f64,
+    hist_path: &Path,
+    hist: HashMap<String, f64>,
+) -> i32 {
+    save_durations(hist_path, &update_history(hist, files, res));
+    let root = junit_root();
+    let (test_files, tests) = footer_counts(files.len(), res, colors);
+    let run = crate::human::Run {
+        root: &root,
+        names,
+        wall_ms,
+        start: local_hms(start_ms),
+        test_files,
+        tests,
+        did_update: opts.env.iter().any(|(k, _)| *k == "TURBO_UPDATE_SNAPSHOTS"),
+        colors: *colors,
+    };
+    let (out, err) = crate::human::render(kind, res, &run);
+    // vitest's human reporters write no --outputFile
+    print!("{out}");
+    eprint!("{err}");
+    let cov_ok = !coverage::enabled() || coverage::report();
+    exit_code(t, cov_ok)
+}
+
+/// `run`'s machine-reporter / legacy-human branch.
+#[allow(clippy::too_many_arguments)]
+fn report_machine(
+    opts: &Options,
+    files: &[PathBuf],
+    names: &[PathBuf],
+    res: &[FileResult],
+    t: &Totals,
+    start_ms: f64,
+    wall_ms: f64,
+    jobs: usize,
+    hist_path: &Path,
+    hist: HashMap<String, f64>,
+) -> i32 {
+    print!("{}", render_human(opts.reporter, res));
+    save_durations(hist_path, &update_history(hist, files, res));
 
     let did_update = opts.env.iter().any(|(k, _)| *k == "TURBO_UPDATE_SNAPSHOTS");
-    let artifact = render_artifact(opts.reporter, &files, &names, &res, start_ms, did_update);
+    let artifact = render_artifact(opts.reporter, files, names, res, start_ms, did_update);
     let (out, err) = emit_output(
         artifact.as_deref(),
         opts.reporter,
         opts.output_file.as_deref(),
-        &res,
+        res,
     );
     print!("{out}");
     eprint!("{err}");
@@ -1864,7 +1928,7 @@ pub fn run(opts: Options) -> i32 {
 
     let summary = summary(
         files.len(),
-        &t,
+        t,
         jobs,
         wall_ms,
         runner::transform_cache_stats(),
@@ -1876,15 +1940,11 @@ pub fn run(opts: Options) -> i32 {
         eprintln!("{summary}");
     } else {
         // Human reporters get the vitest-style footer; the turbo diagnostic line follows it.
-        println!("{}", footer(files.len(), &res, wall_ms));
+        println!("{}", footer(files.len(), res, wall_ms));
         println!("{summary}");
     }
-    let cov_ok = if coverage::enabled() {
-        coverage::report()
-    } else {
-        true
-    };
-    exit_code(&t, cov_ok && output_ok)
+    let cov_ok = !coverage::enabled() || coverage::report();
+    exit_code(t, cov_ok && output_ok)
 }
 
 /// The colours of the reporters, with the runtime's reporter switches set (`human`: vitest's

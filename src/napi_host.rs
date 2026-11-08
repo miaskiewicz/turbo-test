@@ -686,29 +686,28 @@ pub unsafe extern "C" fn napi_typeof(
     basic(env, || {
         let val = val_arg(v)?;
         let out = out_arg(out)?;
-        *out = if val.is_undefined() {
-            napi_valuetype::Undefined
-        } else if val.is_null() {
-            napi_valuetype::Null
-        } else if val.is_boolean() {
-            napi_valuetype::Boolean
-        } else if val.is_number() {
-            napi_valuetype::Number
-        } else if val.is_string() {
-            napi_valuetype::String
-        } else if val.is_symbol() {
-            napi_valuetype::Symbol
-        } else if val.is_big_int() {
-            napi_valuetype::Bigint
-        } else if val.is_function() {
-            napi_valuetype::Function
-        } else if val.is_external() {
-            napi_valuetype::External
-        } else {
-            napi_valuetype::Object
-        };
+        *out = typeof_of(val);
         Ok(())
     })
+}
+
+/// The napi_valuetype that matches a V8 value, following Node's own switch order.
+fn typeof_of(val: v8::Local<v8::Value>) -> napi_valuetype {
+    let predicates: [(bool, napi_valuetype); 9] = [
+        (val.is_undefined(), napi_valuetype::Undefined),
+        (val.is_null(), napi_valuetype::Null),
+        (val.is_boolean(), napi_valuetype::Boolean),
+        (val.is_number(), napi_valuetype::Number),
+        (val.is_string(), napi_valuetype::String),
+        (val.is_symbol(), napi_valuetype::Symbol),
+        (val.is_big_int(), napi_valuetype::Bigint),
+        (val.is_function(), napi_valuetype::Function),
+        (val.is_external(), napi_valuetype::External),
+    ];
+    predicates
+        .into_iter()
+        .find_map(|(m, t)| m.then_some(t))
+        .unwrap_or(napi_valuetype::Object)
 }
 
 // ---- numbers / strings ----------------------------------------------------
@@ -3997,17 +3996,7 @@ unsafe fn build_property_descriptor(
     configurable: bool,
 ) -> Result<DescBuilt, napi_status> {
     if p.getter.is_some() || p.setter.is_some() {
-        // as Node: a missing half is an empty handle, left out of the definition (an existing
-        // accessor keeps that half), not `undefined`
-        let mut accessor = |cb: Option<napi_callback>| match cb {
-            Some(cb) => new_function(s, env, cb, p.data).map(|f| Some(f.into())),
-            None => Ok(None),
-        };
-        let (get, set) = (accessor(p.getter)?, accessor(p.setter)?);
-        return Ok(DescBuilt::Descriptor(
-            accessor_descriptor(get, set),
-            napi_invalid_arg,
-        ));
+        return build_accessor_descriptor(s, env, p);
     }
     if let Some(method) = p.method {
         let f = new_function(s, env, method, p.data)?;
@@ -4026,6 +4015,24 @@ unsafe fn build_property_descriptor(
     }
     let desc = v8::PropertyDescriptor::new_from_value_writable(value, writable);
     Ok(DescBuilt::Descriptor(desc, napi_invalid_arg))
+}
+
+/// Accessor-property half of [`build_property_descriptor`]: wrap `p.getter` / `p.setter` as JS
+/// functions. As Node: a missing half is an empty handle (not `undefined`).
+unsafe fn build_accessor_descriptor(
+    s: &mut v8::PinScope<'static, 'static>,
+    env: napi_env,
+    p: &napi_property_descriptor,
+) -> Result<DescBuilt, napi_status> {
+    let mut accessor = |cb: Option<napi_callback>| match cb {
+        Some(cb) => new_function(s, env, cb, p.data).map(|f| Some(f.into())),
+        None => Ok(None),
+    };
+    let (get, set) = (accessor(p.getter)?, accessor(p.setter)?);
+    Ok(DescBuilt::Descriptor(
+        accessor_descriptor(get, set),
+        napi_invalid_arg,
+    ))
 }
 
 // ---- versions --------------------------------------------------------------------

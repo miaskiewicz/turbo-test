@@ -98,6 +98,21 @@ fn next(s: &str, i: usize) -> usize {
     i + at(s, i).map_or(0, char::len_utf8)
 }
 
+/// The byte index past the `]` that closes a regex character class starting at `i` (points at
+/// `[`); falls back to `i + 1` when no closing `]` is found on the line (matches the inline loop).
+fn regex_class_end(s: &str, i: usize, plain: impl Fn(char) -> bool) -> usize {
+    let mut j = i + 1;
+    let closed = loop {
+        match at(s, j) {
+            Some(']') => break Some(j + 1),
+            Some('\\') if at(s, j + 1).is_some_and(&plain) => j = next(s, j + 1),
+            Some(c) if c != '\\' && plain(c) => j = next(s, j),
+            _ => break None,
+        }
+    };
+    closed.unwrap_or(i + 1)
+}
+
 /// `/(?![*\/])(?:\[(?:(?![\]\\]).|\\.)*\]|(?![\/\\]).|\\.)*(\/[$_‌‍\p{ID_Continue}]*|\\)?/yu`
 /// at a `/`: the end of the literal.
 fn regex_literal(s: &str, start: usize) -> usize {
@@ -109,19 +124,7 @@ fn regex_literal(s: &str, start: usize) -> usize {
     let plain = |c: char| !is_line_terminator(c);
     loop {
         match at(s, i) {
-            Some('[') => {
-                // a class closes at the first unescaped `]` on the line
-                let mut j = i + 1;
-                let closed = loop {
-                    match at(s, j) {
-                        Some(']') => break Some(j + 1),
-                        Some('\\') if at(s, j + 1).is_some_and(plain) => j = next(s, j + 1),
-                        Some(c) if c != '\\' && plain(c) => j = next(s, j),
-                        _ => break None,
-                    }
-                };
-                i = closed.unwrap_or(i + 1);
-            }
+            Some('[') => i = regex_class_end(s, i, plain),
             Some('\\') if at(s, i + 1).is_some_and(plain) => i = next(s, i + 1),
             Some(c) if c != '/' && c != '\\' && plain(c) => i = next(s, i),
             _ => break,
