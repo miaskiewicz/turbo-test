@@ -176,3 +176,25 @@ describe('two scoped calls', () => {
     );
     assert_passes(&turbo_test(&p.dir, &["a.test.js"], &[]), 1);
 }
+
+#[test]
+fn successive_scoped_calls_in_one_describe_layer_different_keys() {
+    // Two scoped calls in the same describe that override DIFFERENT keys must both take
+    // effect: the baseline for the second call is the first call's merged overrides, not
+    // the parent's (mirrors real vitest 4.1.12).
+    let p = project_with(
+        r#"
+import { describe, expect, test as base } from 'vitest';
+const test = base.extend({ color: 'red', size: 'small' });
+describe('layered scoped calls', () => {
+  test.scoped({ color: 'blue' });
+  test.scoped({ size: 'big' });
+  test('both apply', ({ color, size }) => {
+    expect(color).toBe('blue');
+    expect(size).toBe('big');
+  });
+});
+"#,
+    );
+    assert_passes(&turbo_test(&p.dir, &["a.test.js"], &[]), 1);
+}
