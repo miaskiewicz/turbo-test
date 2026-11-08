@@ -17,6 +17,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `test.scoped` threw `TypeError: test.scoped is not a function`.
 
 ### Fixed
+- Concurrent tests with mismatching inline snapshots each carry their own test label in the
+  error message (#277). `__beginAttempt` wrote the current test name to a shared global, and
+  the `await null` inside `__runAttemptInner` let a concurrent sibling overwrite it before this
+  test's body threw — so both errors printed the second-scheduled test's name. The label is
+  now stashed on the test task and re-installed synchronously before each body runs.
 - A special URL's host is now UTS#46 ToASCII, as Node/vitest's WHATWG URL serializes it (#259).
   Before, the runtime's `URL` polyfill only ASCII-lowercased the hostname, so
   `new URL('http://ü.com').host` was `ü.com` (vitest: `xn--tda.com`) and a validator built on
