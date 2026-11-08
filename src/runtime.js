@@ -9422,8 +9422,24 @@ function __runTestSetup(t, chain) {
   const repeats = t.repeats > 0 ? t.repeats : 0;
   return { timeoutMs, run, t0, start, logs, ctx, task, repeats };
 }
-// a test that runs: its repeats and attempts (retries), then its record; returns whether it failed
-async function __runTestAttempts(t, chain, ctx, timeoutMs, run, label, attempts, repeats, task) {
+// post-loop bookkeeping on run (sync; keeps __runTest's microtask shape identical to vitest's)
+function __finalizeAttempts(run, failed) {
+  run.ok = !failed;
+  if (failed && !run.lastErr) run.lastErr = run.attemptErrors[run.attemptErrors.length - 1];
+}
+// clears the per-test log capture (sync; same reason)
+function __exitTestLogs(logs, suiteTask) {
+  if (__ttTestLogs === logs) __ttTestLogs = null;
+  __ttLogTask = suiteTask;
+}
+// a test that runs: its repeats and attempts (retries), then its record; returns whether it failed.
+// The repeat/attempt loop is inlined (not extracted into an async helper): wrapping it in an async
+// function and `await`-ing it adds a microtask tick per test, which breaks vitest's microtask order
+// (turbo-test#251 probes).
+async function __runTest(t, chain, summary, label, suiteTask) {
+  const attempts = __testRetry(t) + 1;
+  const { timeoutMs, run, t0, start, logs, ctx, task, repeats } = __runTestSetup(t, chain);
+  await null;
   let failed = false;
   for (let r = 0; r <= repeats && !task.result.pending; r++) {
     for (let a = 0; a < attempts; a++) {
@@ -9436,20 +9452,11 @@ async function __runTestAttempts(t, chain, ctx, timeoutMs, run, label, attempts,
       if (a + 1 < attempts) failed = __retryAttempt(task, run);
     }
   }
-  return failed;
-}
-async function __runTest(t, chain, summary, label, suiteTask) {
-  const attempts = __testRetry(t) + 1;
-  const { timeoutMs, run, t0, start, logs, ctx, task, repeats } = __runTestSetup(t, chain);
-  await null;
-  const failed = await __runTestAttempts(t, chain, ctx, timeoutMs, run, label, attempts, repeats, task);
-  run.ok = !failed;
-  if (failed && !run.lastErr) run.lastErr = run.attemptErrors[run.attemptErrors.length - 1];
+  __finalizeAttempts(run, failed);
   if (!task.result.pending) await __vtAfterRunTask();
   const dur = __loop.elapsed() - t0;
   const timing = { duration_ms: dur, start_ms: start, retry_count: run.retries, repeat_count: task.result.repeatCount, logs: logs.map((l) => [l[0], l[1]]) };
-  if (__ttTestLogs === logs) __ttTestLogs = null;
-  __ttLogTask = suiteTask;
+  __exitTestLogs(logs, suiteTask);
   return __recordTest(t, chain, summary, label, run, timing, dur);
 }
 // one test of a suite (not a nested suite): whether it failed, or the promise of that when it runs
@@ -9552,42 +9559,46 @@ function __suiteAfterAllSteps(baCleanups, st) {
   if (!st.ancestors.length) steps.push(() => null);
   return steps;
 }
+// Per-child thunk for each task inside a suite body. A sync generator (not an async helper) is
+// what keeps __runSuiteBody's microtask ticks identical to vitest's: each `await run()` awaits the
+// direct promise of __runConcurrent/__vtChild without an extra async wrapper to resolve first.
+function* __suiteItems(tasks, st) {
+  for (const group of __partition(tasks)) {
+    if (group[0].concurrent === true) yield () => __runConcurrent(group, st);
+    else for (const t of group) yield () => __vtChild(t, () => __suiteChild(t, st));
+  }
+}
+// sync bookkeeping helpers for the beforeAll/afterAll error paths (sync keeps microtask count)
+function __mark(st, failed) { if (failed) st.failed = true; }
+function __baError(st, suite, summary, suiteErrors, e) {
+  __suiteHookError(suite, summary, suiteErrors, 'beforeAll', e);
+  st.hookFailed = st.failed = true;
+}
+function __aaError(st, suite, summary, suiteErrors, e) {
+  __suiteHookError(suite, summary, suiteErrors, 'afterAll', e);
+  st.failed = true;
+}
 // afterAll hooks, then the functions its beforeAll hooks returned (last first: vitest's
 // `sequence.hooks: 'stack'`; a throwing beforeAll drops them all, turbo-test#101). A throwing
-// hook stops the hooks after it.
-async function __runSuiteGroups(st, suite) {
-  for (const group of __partition(suite.tasks)) {
-    if (group[0].concurrent === true) {
-      if (await __runConcurrent(group, st)) st.failed = true;
-      continue;
-    }
-    for (const t of group) {
-      if (await __vtChild(t, () => __suiteChild(t, st))) st.failed = true;
-    }
-  }
-}
-async function __runSuiteAfter(st, suite, summary, suiteErrors, baCleanups) {
-  const afterSteps = __suiteAfterAllSteps(baCleanups, st);
-  try {
-    await __vtSuiteHook([suite], 0, 'aa', []);
-    for (const step of afterSteps) await step();
-  } catch (e) {
-    __suiteHookError(suite, summary, suiteErrors, 'afterAll', e);
-    st.failed = true;
-  }
-}
+// hook stops the hooks after it. Inlined on purpose: wrapping either half in an async helper and
+// `await`-ing it adds a microtask tick per suite body (turbo-test#251 probes).
 async function __runSuiteBody(st) {
   const { suite, summary, suiteErrors } = st;
   let baCleanups = [];
   try {
     baCleanups = await __vtSuiteHook([suite], 0, 'ba', []);
   } catch (e) {
-    __suiteHookError(suite, summary, suiteErrors, 'beforeAll', e);
-    st.hookFailed = st.failed = true;
+    __baError(st, suite, summary, suiteErrors, e);
   }
   if (st.hookFailed) __idleTasks(st);
-  else await __runSuiteGroups(st, suite);
-  await __runSuiteAfter(st, suite, summary, suiteErrors, baCleanups);
+  else for (const run of __suiteItems(suite.tasks, st)) __mark(st, await run());
+  const afterSteps = __suiteAfterAllSteps(baCleanups, st);
+  try {
+    await __vtSuiteHook([suite], 0, 'aa', []);
+    for (const step of afterSteps) await step();
+  } catch (e) {
+    __aaError(st, suite, summary, suiteErrors, e);
+  }
 }
 // a suite's child as vitest's runSuiteChild runs it
 const __suiteChild = (t, st) => (t.suite ? runSuite(t, st.chain, st.summary) : __vtTest(__runSuiteTest(t, st.chain, st.summary, '', false, st.suiteTask)));
