@@ -6030,11 +6030,9 @@ fn require_bypass_mock_for_external(
     {
         return false;
     }
-    if let Some(g) = actual_exports(scope, abs) {
-        rv.set(v8::Local::new(scope, &g));
-        return true;
-    }
-    false
+    actual_exports(scope, abs)
+        .map(|g| rv.set(v8::Local::new(scope, &g)))
+        .is_some()
 }
 
 /// Load the module at `abs` on the CJS or ESM path (deciding by `mr_enabled()` and `detect_kind`).
@@ -6057,12 +6055,10 @@ fn require_load_for_kind(
 
 /// Set `rv` to the registered CJS exports of `key`; whether there were any.
 fn set_cjs_exports(scope: &mut v8::PinScope, rv: &mut v8::ReturnValue, key: &Path) -> bool {
-    if let Some(g) = REGISTRY.with(|r| r.borrow().cjs_exports.get(key).cloned()) {
-        let local = v8::Local::new(scope, &g);
-        rv.set(local);
-        return true;
-    }
-    false
+    REGISTRY
+        .with(|r| r.borrow().cjs_exports.get(key).cloned())
+        .map(|g| rv.set(v8::Local::new(scope, &g)))
+        .is_some()
 }
 
 /// `native_require` of a node builtin, the test API or a lazy-stubbed barrel (true if served).
@@ -7108,17 +7104,16 @@ fn copy_variant_named_exports<'s>(
     view: v8::Local<'s, v8::Value>,
     names: &[String],
 ) {
-    let Ok(obj) = v8::Local::<v8::Object>::try_from(view) else {
-        return;
-    };
-    for n in names {
-        let Some(k) = v8::String::new(scope, n) else {
-            return;
-        };
-        if obj.has(scope, k.into()).unwrap_or(false) {
-            if let Some(v) = obj.get(scope, k.into()) {
-                if module.set_synthetic_module_export(scope, k, v).is_none() {
-                    return;
+    if let Ok(obj) = v8::Local::<v8::Object>::try_from(view) {
+        for n in names {
+            let Some(k) = v8::String::new(scope, n) else {
+                return;
+            };
+            if obj.has(scope, k.into()).unwrap_or(false) {
+                if let Some(v) = obj.get(scope, k.into()) {
+                    if module.set_synthetic_module_export(scope, k, v).is_none() {
+                        return;
+                    }
                 }
             }
         }
