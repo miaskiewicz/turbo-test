@@ -225,14 +225,14 @@ jobs:
           { echo '### Rust functions above cc 10'; echo '```'; grep 'cyclomatic complexity' complexity.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   complexity-js:
-    name: complexity / js (cc <= 12)
+    name: complexity / js (cc <= 10)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: oxlint complexity max 12 (cli.js, index.js, src/runtime.js)
+      - name: oxlint complexity max 10 (cli.js, index.js, src/runtime.js)
         shell: bash  # -eo pipefail: tee must not mask the gate's exit code
         run: npm run -s complexity:js 2>&1 | tee complexity.txt
       - name: List the functions over the limit
