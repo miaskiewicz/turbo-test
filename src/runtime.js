@@ -712,6 +712,13 @@ function __utf8Run(b, start, end, stream, onBad) {
 // UTF-8 decode without BOM handling (Buffer#toString, querystring, URLSearchParams, StringDecoder)
 function __utf8Decode(b, start = 0, end = b.length) { return __utf8Run(b, start, end, false, null)[0]; }
 if (typeof globalThis.TextEncoder === 'undefined') {
+  // Write one code point as `len` UTF-8 bytes into out starting at j; returns new j.
+  const writeCp = (out, j, c, len) => {
+    if (len === 1) { out[j++] = c; return j; }
+    if (len === 2) { out[j++] = 0xc0 | (c >> 6); out[j++] = 0x80 | (c & 0x3f); return j; }
+    if (len === 3) { out[j++] = 0xe0 | (c >> 12); out[j++] = 0x80 | ((c >> 6) & 0x3f); out[j++] = 0x80 | (c & 0x3f); return j; }
+    out[j++] = 0xf0 | (c >> 18); out[j++] = 0x80 | ((c >> 12) & 0x3f); out[j++] = 0x80 | ((c >> 6) & 0x3f); out[j++] = 0x80 | (c & 0x3f); return j;
+  };
   // UTF-8 bytes of s[i..] into out[j..] while they fit; returns [code units read, bytes written]
   const encodeTo = (s, out) => {
     const n = s.length; const max = out.length; let i = 0; let j = 0;
@@ -724,10 +731,7 @@ if (typeof globalThis.TextEncoder === 'undefined') {
       }
       const len = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
       if (j + len > max) break;
-      if (len === 1) out[j++] = c;
-      else if (len === 2) { out[j++] = 0xc0 | (c >> 6); out[j++] = 0x80 | (c & 0x3f); }
-      else if (len === 3) { out[j++] = 0xe0 | (c >> 12); out[j++] = 0x80 | ((c >> 6) & 0x3f); out[j++] = 0x80 | (c & 0x3f); }
-      else { out[j++] = 0xf0 | (c >> 18); out[j++] = 0x80 | ((c >> 12) & 0x3f); out[j++] = 0x80 | ((c >> 6) & 0x3f); out[j++] = 0x80 | (c & 0x3f); }
+      j = writeCp(out, j, c, len);
       i += units;
     }
     return [i, j];
@@ -1074,14 +1078,20 @@ if (typeof globalThis.URL === 'undefined') {
       if (end >= 0) v = v.slice(0, end);
       const m = /^(\[[^\]]*\]|[^:]*)(?::(.*))?$/.exec(v);
       if (!m) return;
-      let name = m[1];
       const port = m[2];
-      if (port !== undefined && (!withPort || this._isFile)) return;
-      if (name === '' && this._special && !this._isFile) return;
-      if (this._special) name = name.toLowerCase();
-      if (this._isFile && name === 'localhost') name = '';
+      const name = this._setHostName(m[1], port, withPort);
+      if (name === null) return;
       this._hostname = name;
       if (port !== undefined && port !== '') this._setPort(port);
+    }
+    // Normalises the host part for _setHost. Returns null to reject the whole set (port present
+    // when withPort=false or on a file URL; empty name on a special non-file URL).
+    _setHostName(name, port, withPort) {
+      if (port !== undefined && (!withPort || this._isFile)) return null;
+      if (name === '' && this._special && !this._isFile) return null;
+      if (this._special) name = name.toLowerCase();
+      if (this._isFile && name === 'localhost') return '';
+      return name;
     }
     // the leading digits of `v`; a scheme's default port serializes as no port
     _setPort(v) {
@@ -1253,9 +1263,16 @@ if (typeof globalThis.Blob === 'undefined') {
     for (const c of chunks) { out.set(c, at); at += c.length; }
     return out;
   };
+  // `blobParts` must be undefined or an iterable (object-ish with Symbol.iterator)
+  const isIterableParts = (bp) => {
+    if (bp === undefined) return true;
+    if (bp === null) return false;
+    if (typeof bp !== 'object' && typeof bp !== 'function') return false;
+    return typeof bp[Symbol.iterator] === 'function';
+  };
   // the Blob constructor's argument checks; returns [options, endings]
   const blobOptions = (blobParts, options) => {
-    if (blobParts !== undefined && (blobParts === null || (typeof blobParts !== 'object' && typeof blobParts !== 'function') || typeof blobParts[Symbol.iterator] !== 'function'))
+    if (!isIterableParts(blobParts))
       throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'Value cannot be converted to sequence.');
     if (options != null && typeof options !== 'object' && typeof options !== 'function')
       throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "options" argument must be a dictionary. Received ' + received(options));
@@ -1414,6 +1431,18 @@ if (typeof globalThis.FileReader === 'undefined') {
     else if (label !== undefined) { try { enc = new globalThis.TextDecoder(String(label)).encoding; } catch {} }
     return new globalThis.TextDecoder(enc).decode(b);
   };
+  // bytes[] -> FileReader#result for the four read kinds
+  const binaryString = (bytes) => {
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+    return s;
+  };
+  const decodeReadResult = (bytes, blob, kind, label) => {
+    if (kind === 'readAsDataURL') return 'data:' + (blob.type || 'application/octet-stream') + ';base64,' + globalThis.__b64encodeBytes(bytes);
+    if (kind === 'readAsArrayBuffer') return bytes.slice().buffer;
+    if (kind === 'readAsBinaryString') return binaryString(bytes);
+    return textOf(bytes, label);
+  };
   globalThis.FileReader = class FileReader {
     #listeners = Object.create(null); // type -> [{ fn }] (an on<type> handler's entry has `on: true`)
     #gen = 0;                          // bumped by every read and abort; a stale read stops
@@ -1472,10 +1501,7 @@ if (typeof globalThis.FileReader === 'undefined') {
         this.#fire('loadstart');
         if (gen !== this.#gen) return;
         if (bytes.length) { this.#fire('progress', bytes.length, bytes.length, true); if (gen !== this.#gen) return; }
-        if (kind === 'readAsDataURL') this.result = 'data:' + (blob.type || 'application/octet-stream') + ';base64,' + globalThis.__b64encodeBytes(bytes);
-        else if (kind === 'readAsArrayBuffer') this.result = bytes.slice().buffer;
-        else if (kind === 'readAsBinaryString') { let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)); this.result = s; }
-        else this.result = textOf(bytes, label);
+        this.result = decodeReadResult(bytes, blob, kind, label);
         this.readyState = 2;
         this.#fire('load');
         this.#fire('loadend');
@@ -2136,21 +2162,31 @@ globalThis.__ttImportMetaEnv = new Proxy({}, {
 const __ttMetaGlob = { glob() { throw new Error('[module runner] "import.meta.glob" is statically replaced during file transformation. Make sure to reference it by the full name.'); } }.glob;
 // Node's import.meta.resolve(specifier, parent): relative / absolute specifiers and URLs against
 // the parent URL (no file check), builtins as `node:` URLs, packages by the ESM conditions.
-const __ttMetaResolve = (specifier, parent) => {
-  const spec = String(specifier);
+// Node's `Cannot find package 'X' imported from Y` for a package name we couldn't resolve.
+const __ttMetaMissing = (spec, from) => {
+  const pkg = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0];
+  const e = new Error(`Cannot find package '${pkg}' imported from ${from}`);
+  e.code = 'ERR_MODULE_NOT_FOUND';
+  return e;
+};
+// Relative or bare-URL specifiers resolve without going through the Node resolver.
+const __ttMetaTrivial = (spec, parent) => {
   if (/^\.{0,2}\//.test(spec) || spec === '.' || spec === '..') return new globalThis.URL(spec, parent).href;
   if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(spec) && !spec.startsWith('node:')) {
     try { return new globalThis.URL(spec).href; } catch (e) { /* not a URL: a package name */ }
   }
+  return null;
+};
+const __ttMetaResolve = (specifier, parent) => {
+  const spec = String(specifier);
+  const trivial = __ttMetaTrivial(spec, parent);
+  if (trivial !== null) return trivial;
   let from;
   try { from = globalThis.__fileURLToPath(parent); } catch (e) { from = String(parent); }
   const r = globalThis.__ttRequireResolve(globalThis.__dirnameOf(from), spec, true);
   if (typeof r === 'string' && globalThis.__ttIsAbsolutePath(r)) return globalThis.__pathToFileURL(r).href;
   if (typeof r === 'string' && spec !== 'vitest' && spec !== '@jest/globals') return 'node:' + r.replace(/^node:/, '');
-  const pkg = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0];
-  const e = new Error(`Cannot find package '${pkg}' imported from ${from}`);
-  e.code = 'ERR_MODULE_NOT_FOUND';
-  throw e;
+  throw __ttMetaMissing(spec, from);
 };
 globalThis.__ttFillImportMeta = (m, filename) => {
   const url = globalThis.__pathToFileURL(filename).href;
@@ -2550,18 +2586,26 @@ function __highlightRegExp(re) {
       groupModifier();
     }
   };
+  // Follow-up for `\<next>` when `next` opens a composite form (\u{..}, \xNN, \1.., \k<..>,
+  // \p{..}, \P{..}); returns the updated `seq` or null if nothing special, and writes directly
+  // for the forms that emit a writeGroup (returning 'done' then).
+  const escapeTail = (seq, next) => {
+    if (next === 'u' && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return 'done'; }
+    if (next === 'x') { seq += re.slice(i, i + 2); i += 2; return seq; }
+    if (next >= '0' && next <= '9') return seq + readDigits();
+    if (next === 'k' && re[i] === '<') { writeGroup(`${seq}<`, '>'); return 'done'; }
+    if ((next === 'p' || next === 'P') && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return 'done'; }
+    return seq;
+  };
   const escape = () => {
     let seq = '\\';
     i++;
     if (i < re.length) {
       seq += re[i++];
-      const next = seq[1];
       if (i < re.length) {
-        if (next === 'u' && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return; }
-        else if (next === 'x') { seq += re.slice(i, i + 2); i += 2; }
-        else if (next >= '0' && next <= '9') { seq += readDigits(); }
-        else if (next === 'k' && re[i] === '<') { writeGroup(`${seq}<`, '>'); return; }
-        else if ((next === 'p' || next === 'P') && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return; }
+        const r = escapeTail(seq, seq[1]);
+        if (r === 'done') return;
+        seq = r;
       }
     }
     writeDepth(seq, 1, 0);
@@ -2584,6 +2628,8 @@ function __highlightRegExp(re) {
     if (i < re.length && re[i] === '}') { depth--; write('}'); i++; }
     if (i < re.length && re[i] === '?') writeDepth('?', 3, 1);
   };
+  // A one-char token that writes at a lifted depth (operators |+*?,^$ at 3,1; '.' at 2,1).
+  const stepLifted = '|+*?,^$';
   const step = (ch) => {
     if (ch === '[') {
       write('['); depth++; i++; inClass = true;
@@ -2593,7 +2639,7 @@ function __highlightRegExp(re) {
       depth--; write(')'); i++;
     } else if (ch === '\\') {
       escape();
-    } else if (ch === '|' || ch === '+' || ch === '*' || ch === '?' || ch === ',' || ch === '^' || ch === '$') {
+    } else if (stepLifted.indexOf(ch) !== -1) {
       writeDepth(ch, 3, 1);
     } else if (ch === '{') {
       quantifier();
@@ -2707,26 +2753,30 @@ function __formatValue(ctx, value, recurseTimes, typedArray) {
   }
   return __formatRaw(ctx, value, recurseTimes, typedArray);
 }
-function __formatProperty(ctx, value, recurseTimes, key, type, desc) {
-  let name, str;
-  desc = desc || Object.getOwnPropertyDescriptor(value, key) || { value: value[key], enumerable: true };
+// The styled value side of __formatProperty: the data / accessor shape of desc.
+function __formatPropertyValue(ctx, value, recurseTimes, type, desc) {
   if (desc.value !== undefined) {
     const diff = ctx.compact !== true || type !== 0 ? 2 : 3;
     ctx.indentationLvl += diff;
-    str = __formatValue(ctx, desc.value, recurseTimes);
+    const str = __formatValue(ctx, desc.value, recurseTimes);
     ctx.indentationLvl -= diff;
-  } else if (desc.get !== undefined) {
-    str = __sty(ctx, desc.set !== undefined ? '[Getter/Setter]' : '[Getter]', 'special');
-  } else if (desc.set !== undefined) {
-    str = __sty(ctx, '[Setter]', 'special');
-  } else {
-    str = __sty(ctx, 'undefined', 'undefined');
+    return str;
   }
+  if (desc.get !== undefined) return __sty(ctx, desc.set !== undefined ? '[Getter/Setter]' : '[Getter]', 'special');
+  if (desc.set !== undefined) return __sty(ctx, '[Setter]', 'special');
+  return __sty(ctx, 'undefined', 'undefined');
+}
+// The styled key side of __formatProperty (never called for array entries).
+function __formatPropertyKey(ctx, key, desc) {
+  if (typeof key === 'symbol') return desc.enumerable === false ? `[${__sty(ctx, key.toString(), 'symbol')}]` : __sty(ctx, key.toString(), 'symbol');
+  if (desc.enumerable === false) return `[${key}]`;
+  return /^[a-zA-Z_][a-zA-Z_0-9]*$/.test(key) ? key : __sty(ctx, __strEscape(key), 'string');
+}
+function __formatProperty(ctx, value, recurseTimes, key, type, desc) {
+  desc = desc || Object.getOwnPropertyDescriptor(value, key) || { value: value[key], enumerable: true };
+  const str = __formatPropertyValue(ctx, value, recurseTimes, type, desc);
   if (type === 1) return str; // an array element (2: an array's extra key)
-  if (typeof key === 'symbol') name = desc.enumerable === false ? `[${__sty(ctx, key.toString(), 'symbol')}]` : __sty(ctx, key.toString(), 'symbol');
-  else if (desc.enumerable === false) name = `[${key}]`;
-  else name = /^[a-zA-Z_][a-zA-Z_0-9]*$/.test(key) ? key : __sty(ctx, __strEscape(key), 'string');
-  return `${name}: ${str}`;
+  return `${__formatPropertyKey(ctx, key, desc)}: ${str}`;
 }
 // groupArrayElements: each column's width (the widest entry in it, plus the separator)
 function __groupColumnWidths(output, dataLen, columns, separatorSpace) {
@@ -3086,6 +3136,16 @@ function __qsAdd(obj, k, v) {
   else if (Array.isArray(obj[k])) obj[k].push(v);
   else obj[k] = [obj[k], v];
 }
+// querystring.parse: split qs by sep, honoring options.maxKeys (default 1000; non-positive disables)
+function __qsSplit(qs, sep, options) {
+  const maxKeys = options && typeof options.maxKeys === 'number' ? options.maxKeys : 1000;
+  const parts = qs.split(sep);
+  return maxKeys > 0 && parts.length > maxKeys ? parts.slice(0, maxKeys) : parts;
+}
+// querystring.parse: options.decodeURIComponent or the default __querystring.unescape
+function __qsDecoder(options) {
+  return options && typeof options.decodeURIComponent === 'function' ? options.decodeURIComponent : __querystring.unescape;
+}
 const __querystring = {
   unescape: __qsUnescape,
   escape: (s) => encodeURIComponent(typeof s === 'string' ? s : String(s)),
@@ -3106,10 +3166,8 @@ const __querystring = {
     const obj = Object.create(null);
     if (typeof qs !== 'string' || qs.length === 0) return obj;
     sep = sep || '&'; eq = eq || '=';
-    const maxKeys = options && typeof options.maxKeys === 'number' ? options.maxKeys : 1000;
-    const dec = (options && typeof options.decodeURIComponent === 'function') ? options.decodeURIComponent : __querystring.unescape;
-    let parts = qs.split(sep);
-    if (maxKeys > 0 && parts.length > maxKeys) parts = parts.slice(0, maxKeys);
+    const parts = __qsSplit(qs, sep, options);
+    const dec = __qsDecoder(options);
     for (const part of parts) {
       if (part.length === 0) continue;
       const i = part.indexOf(eq);
@@ -3257,6 +3315,12 @@ function __deepEqSeen(seen, a, b) {
   if (memo) memo.add(b); else seen.set(a, new Set([b]));
   return false;
 }
+// A Map or Set of entries must deep-equal before __deepEq walks own-keys; other objects pass.
+function __deepEqCollection(a, b, strict, seen) {
+  if (a instanceof Map) return __deepEqMap(a, b, strict, seen);
+  if (a instanceof Set) return __deepEqSet(a, b, strict, seen);
+  return true;
+}
 function __deepEq(a, b, strict, seen) {
   if (a === b) return a !== 0 || !strict || Object.is(a, b);
   if (__isPrimOrNull(a) || __isPrimOrNull(b)) return __deepEqPrim(a, b, strict);
@@ -3265,8 +3329,7 @@ function __deepEq(a, b, strict, seen) {
   seen = seen || new Map();
   if (__deepEqSeen(seen, a, b)) return true;
   if (!__deepEqValue(a, b, strict, tag)) return false;
-  if (a instanceof Map) { if (!__deepEqMap(a, b, strict, seen)) return false; }
-  else if (a instanceof Set) { if (!__deepEqSet(a, b, strict, seen)) return false; }
+  if (!__deepEqCollection(a, b, strict, seen)) return false;
   return __deepEqKeys(a, b, strict, seen);
 }
 class __AssertionError extends Error {
@@ -3777,6 +3840,17 @@ class __ArrayContaining extends Asymmetric {
   toString() { return `Array${this.inverse ? 'Not' : ''}Containing`; }
   getExpectedType() { return 'array'; }
 }
+// Builtin constructors handled specially by __Any#asymmetricMatch: constructor -> [typeof tag,
+// wrapper constructor or null]. Function/Object have no wrapper form (typeof check only).
+const __anyMatchTable = new Map([
+  [String, ['string', String]],
+  [Number, ['number', Number]],
+  [Function, ['function', null]],
+  [Boolean, ['boolean', Boolean]],
+  [BigInt, ['bigint', BigInt]],
+  [Symbol, ['symbol', Symbol]],
+  [Object, ['object', null]],
+]);
 class __Any extends Asymmetric {
   constructor(sample) {
     if (typeof sample === 'undefined') throw new TypeError('any() expects to be passed a constructor function. Please pass one or use anything() to match any object.');
@@ -3789,13 +3863,9 @@ class __Any extends Asymmetric {
   }
   asymmetricMatch(other) {
     const s = this.sample;
-    if (s === String) return typeof other == 'string' || other instanceof String;
-    if (s === Number) return typeof other == 'number' || other instanceof Number;
-    if (s === Function) return typeof other == 'function';
-    if (s === Boolean) return typeof other == 'boolean' || other instanceof Boolean;
-    if (s === BigInt) return typeof other == 'bigint' || other instanceof BigInt;
-    if (s === Symbol) return typeof other == 'symbol' || other instanceof Symbol;
-    if (s === Object) return typeof other == 'object';
+    // sample -> [typeof tag, boxed constructor or null]; boxed is null for Function/Object (no wrapper form)
+    const row = __anyMatchTable.get(s);
+    if (row) return typeof other == row[0] || (row[1] !== null && other instanceof row[1]);
     return other instanceof s;
   }
   toString() { return 'Any'; }
@@ -3946,16 +4016,22 @@ function __equals(a, b, testers, strictCheck) {
 }
 // __eq's "no answer yet" (an asymmetric matcher or tester may answer anything else)
 const __EQ_NEXT = Symbol('eq-next');
-// __eq before the structural walk: asymmetric matchers, custom testers, URLs, identity, null
-function __eqPre(a, b, testers) {
-  const asymA = __isAsym(a), asymB = __isAsym(b);
-  if (asymA && !asymB) return a.asymmetricMatch(b, testers);
-  if (asymB && !asymA) return b.asymmetricMatch(a, testers);
+// __eq custom-tester chain: the first non-undefined result wins; __EQ_NEXT if none answered.
+function __eqTesters(a, b, testers) {
   const ctx = { equals: __equals };
   for (const t of testers) {
     const r = t.call(ctx, a, b, testers);
     if (r !== undefined) return r;
   }
+  return __EQ_NEXT;
+}
+// __eq before the structural walk: asymmetric matchers, custom testers, URLs, identity, null
+function __eqPre(a, b, testers) {
+  const asymA = __isAsym(a), asymB = __isAsym(b);
+  if (asymA && !asymB) return a.asymmetricMatch(b, testers);
+  if (asymB && !asymA) return b.asymmetricMatch(a, testers);
+  const t = __eqTesters(a, b, testers);
+  if (t !== __EQ_NEXT) return t;
   if (typeof URL === 'function' && a instanceof URL && b instanceof URL) return a.href === b.href;
   if (Object.is(a, b)) return true;
   if (a === null || b === null) return a === b;
@@ -4006,10 +4082,9 @@ function __eqOwnKeys(a, b, aStack, bStack, testers, hasKey) {
   }
   return true;
 }
-function __eq(a, b, aStack, bStack, testers, hasKey) {
-  const pre = __eqPre(a, b, testers);
-  if (pre !== __EQ_NEXT) return pre;
-  const cls = Object.prototype.toString.call(a);
+// __eq fast-path before the stack push: class/byClass/DOM/cycle. Returns __EQ_NEXT when the
+// caller must continue with the structural walk; any other value is the final answer.
+function __eqFast(a, b, aStack, bStack, cls) {
   if (cls !== Object.prototype.toString.call(b)) return false;
   const byClass = __eqByClass(a, b, cls);
   if (byClass !== undefined) return byClass;
@@ -4017,6 +4092,14 @@ function __eq(a, b, aStack, bStack, testers, hasKey) {
   if (__isDomNode(a) && __isDomNode(b)) return a.isEqualNode(b);
   const cycle = __eqCycle(a, b, aStack, bStack);
   if (cycle !== undefined) return cycle;
+  return __EQ_NEXT;
+}
+function __eq(a, b, aStack, bStack, testers, hasKey) {
+  const pre = __eqPre(a, b, testers);
+  if (pre !== __EQ_NEXT) return pre;
+  const cls = Object.prototype.toString.call(a);
+  const fast = __eqFast(a, b, aStack, bStack, cls);
+  if (fast !== __EQ_NEXT) return fast;
   aStack.push(a);
   bStack.push(b);
   if (cls === '[object Array]' && a.length !== b.length) return false;
@@ -4060,6 +4143,16 @@ function __iterOrderedEq(a, b, inner) {
   if (!bi.next().done) return false;
   return !!__equals(Object.entries(a), Object.entries(b), inner);
 }
+// iterableEquality's sized branch (Set/Map). Returns a boolean answer, or __EQ_NEXT when the
+// value is sized but needs the ordered fallthrough (same-constructor Sets without a toString
+// of [object Set], etc.).
+function __iterSizedEq(a, b, inner) {
+  if (a.size !== b.size) return false;
+  const tag = Object.prototype.toString.call(a);
+  if (tag === '[object Set]') return __iterSetEq(a, b, inner);
+  if (tag === '[object Map]') return __iterMapEq(a, b, inner);
+  return __EQ_NEXT;
+}
 // vitest iterableEquality: two non-array iterables of the same constructor — Sets by members and
 // Maps by entries (in any order, deep-equal members match), others in iteration order plus their
 // enumerable own entries.
@@ -4071,16 +4164,8 @@ function __iterableEquality(a, b, testers = [], aStack = [], bStack = []) {
   bStack.push(b);
   const withStack = (x, y) => __iterableEquality(x, y, [...testers], [...aStack], [...bStack]);
   const inner = [...testers.filter((t) => t !== __iterableEquality), withStack];
-  const isA = (t, v) => Object.prototype.toString.call(v) === `[object ${t}]`;
-  if (a.size !== undefined) {
-    if (a.size !== b.size) return false;
-    const unordered = isA('Set', a) ? __iterSetEq : isA('Map', a) ? __iterMapEq : null;
-    if (unordered) {
-      const all = unordered(a, b, inner);
-      aStack.pop(); bStack.pop();
-      return all;
-    }
-  }
+  const sized = a.size !== undefined ? __iterSizedEq(a, b, inner) : __EQ_NEXT;
+  if (sized !== __EQ_NEXT) { aStack.pop(); bStack.pop(); return sized; }
   if (!__iterOrderedEq(a, b, inner)) return false;
   aStack.pop();
   bStack.pop();
@@ -4194,6 +4279,19 @@ function __parseSnapFile(text) {
   try { new Function('exports', text)(out); } catch (e) {}
   return out;
 }
+// natural-compare-lite's char-code mapping: lifts digits/letters into one monotonic range so
+// mixed alphanumeric strings compare in natural order (kept exactly as the upstream expression).
+function __natCharCode(c) {
+  if (c < 45 || c > 127) return c;
+  if (c < 46) return 65;
+  if (c < 48) return c - 1;
+  if (c < 58) return c + 18;
+  if (c < 65) return c - 11;
+  if (c < 91) return c + 11;
+  if (c < 97) return c - 37;
+  if (c < 123) return c + 5;
+  return c - 63;
+}
 // natural-compare-lite, the order vitest writes snapshot keys in.
 function __naturalCompare(a, b) {
   let i, codeA, codeB = 1, posA = 0, posB = 0;
@@ -4202,8 +4300,7 @@ function __naturalCompare(a, b) {
       for (i = pos; (num = code(str, i)), num < 76 && num > 65;) ++i;
       return +str.slice(pos - 1, i);
     }
-    const c = str.charCodeAt(pos) || 0;
-    return c < 45 || c > 127 ? c : c < 46 ? 65 : c < 48 ? c - 1 : c < 58 ? c + 18 : c < 65 ? c - 11 : c < 91 ? c + 11 : c < 97 ? c - 37 : c < 123 ? c + 5 : c - 63;
+    return __natCharCode(str.charCodeAt(pos) || 0);
   };
   if ((a += '') !== (b += '')) {
     for (; codeB;) {
@@ -4226,6 +4323,24 @@ function __serializeSnapFile(map) {
 }
 // a multi-line snapshot is stored with a line break at either end (vitest addExtraLineBreaks)
 function __snapBody(serialized) { return serialized.includes('\n') ? `\n${serialized}\n` : serialized; }
+// toMatchSnapshot's first-arg overload: a string is a hint, an object is the property matcher.
+function __snapPropArgs(propertiesOrHint, hint) {
+  if (typeof propertiesOrHint === 'string') return [undefined, propertiesOrHint];
+  if (propertiesOrHint !== null && typeof propertiesOrHint === 'object') return [propertiesOrHint, hint];
+  return [undefined, hint];
+}
+// toMatchInlineSnapshot's arg shuffle: (inline?) or (props, inline?, hint?)
+function __inlineSnapArgs(a, b, c) {
+  if (typeof a === 'string') return { props: undefined, inline: __stripSnapIndent(a), hint: b };
+  return { props: a, inline: b ? __stripSnapIndent(b) : undefined, hint: c };
+}
+// Validate + merge the property matcher object over `received`; identity-pass when there is none.
+function __snapApplyProps(received, props) {
+  if (!props) return received;
+  if (typeof received !== 'object' || !received) throw new Error('Received value must be an object when the matcher has properties');
+  if (!__subsetMatches(received, props)) throw new Error('Snapshot properties mismatched');
+  return __snapMerge(received, props);
+}
 // vitest deepMergeSnapshot: the property matchers replace the received values they name
 function __snapMerge(target, source) {
   const isObj = (x) => x != null && typeof x === 'object' && !Array.isArray(x) && !__isAsym(x);
@@ -4307,16 +4422,24 @@ function __snapLiteral(snap, code, index) {
   if (lines.length <= 1) return `\`${esc(lines.join('\n'))}\``;
   return `\`\n${esc(lines.map((l) => (l ? next + l : '')).join('\n'))}\n${indent}\``;
 }
+// End of a `{..}` or `(..)` span, counting nested pairs: returns the index just past the
+// matching close, or -1 if it is not in `at`.
+function __matchingClose(at, from, openCh, closeCh) {
+  let depth = 0;
+  for (let j = from; j < at.length; j++) {
+    if (at[j] === openCh) depth++;
+    else if (at[j] === closeCh && --depth === 0) return closeCh === '}' ? j + 1 : j;
+  }
+  return -1;
+}
 // __inlineSplice of a call whose first argument is a property matcher object: the snapshot
 // goes after it
 function __inlineSpliceProps(code, index, snap, name, at, ws) {
   // toMatchInlineSnapshot({ …properties }) [, `…`]
   const obj = new RegExp(`${name}${ws}\\{`).exec(at);
   if (!obj) return null;
-  let depth = 0, i = obj.index + obj[0].length - 1, end = -1;
-  for (; i < at.length; i++) { if (at[i] === '{') depth++; else if (at[i] === '}' && --depth === 0) { end = i + 1; break; } }
-  let callEnd = -1;
-  for (let j = obj.index + name.length, d = 0; j < at.length; j++) { if (at[j] === '(') d++; else if (at[j] === ')' && --d === 0) { callEnd = j; break; } }
+  const end = __matchingClose(at, obj.index + obj[0].length - 1, '{', '}');
+  const callEnd = __matchingClose(at, obj.index + name.length, '(', ')');
   if (end < 0 || callEnd < 0) return null;
   const lit = `, ${__snapLiteral(snap, code, index)}`;
   return end === callEnd ? [index + callEnd, index + callEnd, lit] : [index + end, index + callEnd, lit];
@@ -4541,15 +4664,9 @@ function makeExpect(actual, negated = false, message = undefined, promise = '') 
     toMatchSnapshot(propertiesOrHint, hint) {
       const sf = __snapFile();
       if (!sf) throw new Error('toMatchSnapshot: no test file path available');
-      const props = typeof propertiesOrHint === 'object' && propertiesOrHint !== null ? propertiesOrHint : undefined;
-      const h = typeof propertiesOrHint === 'string' ? propertiesOrHint : hint;
+      const [props, h] = __snapPropArgs(propertiesOrHint, hint);
       const key = __snapNextKey(h ? `${__snap.testName} > ${h}` : __snap.testName);
-      let received = actual;
-      if (props) {
-        if (typeof received !== 'object' || !received) throw new Error('Received value must be an object when the matcher has properties');
-        if (!__subsetMatches(received, props)) throw new Error('Snapshot properties mismatched');
-        received = __snapMerge(received, props);
-      }
+      const received = __snapApplyProps(actual, props);
       const body = __snapBody(__serialize(received));
       const st = __snapLoad();
       st.unchecked.delete(key);
@@ -4592,16 +4709,9 @@ function makeExpect(actual, negated = false, message = undefined, promise = '') 
     // vitest: toMatchInlineSnapshot(propertiesOrInlineSnapshot?, inlineSnapshotOrHint?, hint?);
     // a new or (-u) changed one is written back into the test file when its tests are done.
     toMatchInlineSnapshot(a, b, c, assertionName = 'toMatchInlineSnapshot') {
-      let props, inline, hint;
-      if (typeof a === 'string') { inline = __stripSnapIndent(a); hint = b; }
-      else { props = a; if (b) inline = __stripSnapIndent(b); hint = c; }
+      const { props, inline, hint } = __inlineSnapArgs(a, b, c);
       const key = __snapNextKey(hint ? `${__snap.testName} > ${hint}` : __snap.testName);
-      let received = actual;
-      if (props && typeof props === 'object') {
-        if (typeof received !== 'object' || !received) throw new Error('Received value must be an object when the matcher has properties');
-        if (!__subsetMatches(received, props)) throw new Error('Snapshot properties mismatched');
-        received = __snapMerge(received, props);
-      }
+      const received = __snapApplyProps(actual, typeof props === 'object' ? props : undefined);
       const body = __snapBody(__serialize(received));
       const st = __snapLoad();
       st.inline = true;
@@ -4628,18 +4738,9 @@ function makeExpect(actual, negated = false, message = undefined, promise = '') 
       c(actual.length === n, 'expected #{this} to have a length of #{exp} but got #{act}', 'expected #{this} to not have a length of #{exp}', n, actual.length);
     },
     toHaveProperty(path, value) {
-      let cur = actual, present;
       // A literal key (incl. one containing dots, e.g. a CSS selector) takes precedence over
       // dot-path traversal — matches jest/vitest behavior.
-      if (!Array.isArray(path) && actual != null && (path in Object(actual))) {
-        cur = actual[path]; present = true;
-      } else {
-        const keys = Array.isArray(path) ? path : String(path).split('.');
-        present = true;
-        for (const k of keys) {
-          if (cur != null && (k in Object(cur))) cur = cur[k]; else { present = false; break; }
-        }
-      }
+      const { cur, present } = __lookupProperty(actual, path);
       const pass = arguments.length < 2 ? present : (present && __equals(value, cur, testers));
       const name = Array.isArray(path) ? path.map((k) => String(k).replace(/([.[\]])/g, '\\$1')).join('.') : path;
       const withValue = arguments.length < 2 ? '' : ` with value ${__objDisplay(value)}`;
@@ -5307,16 +5408,21 @@ const __ttMockNames = new WeakMap();
 globalThis.__ttMockNames = (m) => (m && (typeof m === 'object' || typeof m === 'function') ? __ttMockNames.get(m) : undefined);
 // `spy` (vi.mockObject's `{ spy: true }`, vitest's autospy): functions call their originals and
 // arrays are kept.
+// Own static keys that an automocked function must not copy (function built-ins and shape).
+const __AUTOMOCK_FN_SKIP = new Set(['length', 'name', 'prototype', 'caller', 'arguments']);
+// __automockFn's own-static pass: copy each non-skipped key through the recursive automocker.
+function __automockFnStatics(m, mod, depth, spy) {
+  for (const k of Object.getOwnPropertyNames(mod)) {
+    if (__AUTOMOCK_FN_SKIP.has(k)) continue;
+    try { m[k] = __automock(mod[k], depth + 1, spy); } catch (e) {}
+  }
+}
 function __automockFn(mod, depth, spy) {
   const m = __trackSpy(makeSpy(undefined, { original: spy ? mod : undefined }));
   // vitest's automocker keeps the function's own name (`Comp.name`, not the spy's) (turbo-test#136)
   try { Object.defineProperty(m, 'name', { value: mod.name, configurable: true }); } catch (e) {}
   if (depth < 3) {
-    // own statics (class static methods are non-enumerable), not the function's built-ins
-    for (const k of Object.getOwnPropertyNames(mod)) {
-      if (k === 'length' || k === 'name' || k === 'prototype' || k === 'caller' || k === 'arguments') continue;
-      try { m[k] = __automock(mod[k], depth + 1, spy); } catch (e) {}
-    }
+    __automockFnStatics(m, mod, depth, spy);
     // class / constructor function: `new m()` returns an instance of m.prototype, whose
     // methods (inherited ones included) are mocks
     if (mod.prototype && mod.prototype.constructor === mod) __automockProtoMethods(m.prototype, mod.prototype, spy);
@@ -5344,6 +5450,8 @@ function __automock(mod, depth, spy) {
 }
 // vitest's autospy (vi.mockObject(value, { spy: true })): in place, each function (nested
 // objects' too) becomes a spy on it; arrays and other values stay.
+// Only these children are walked recursively by __autospy (functions and plain objects).
+function __autospyWalkable(x) { return typeof x === 'function' || (x && typeof x === 'object'); }
 function __autospy(v, depth, seen) {
   if (typeof v === 'function') return __automock(v, depth, true);
   if (v === null || typeof v !== 'object' || Array.isArray(v) || seen.has(v) || depth > 4) return v;
@@ -5351,7 +5459,7 @@ function __autospy(v, depth, seen) {
   for (const k of Object.keys(v)) {
     let x;
     try { x = v[k]; } catch (e) { continue; }
-    if (typeof x === 'function' || (x && typeof x === 'object')) {
+    if (__autospyWalkable(x)) {
       try { v[k] = __autospy(x, depth + 1, seen); } catch (e) {}
     }
   }
@@ -5547,18 +5655,26 @@ function __ttNodeNs(m) {
   return v;
 }
 const __ttIsNs = (m) => Object.prototype.toString.call(m) === '[object Module]';
-globalThis.__ttToESM = (m) => {
-  if (!m || (typeof m !== 'object' && typeof m !== 'function') || __ttStrictMocks.has(m) || __ttIsNs(m)) return m;
-  if (m[__ttEsmMark]) return __ttEsmNs(m);
-  if (m.__esModule || '__esModule' in m) return ('default' in m || m.default !== undefined) ? m : __ttCjsView(m);
-  if (__ttExternalCjs.has(m)) return __ttNodeNs(m);
-  if ('default' in m) return m;
+// __ttToESM: values returned unchanged (primitives, strict mocks, namespaces).
+const __ttToESMAsIs = (m) => !m || (typeof m !== 'object' && typeof m !== 'function') || __ttStrictMocks.has(m) || __ttIsNs(m);
+// __ttToESM's bundler interop of a CommonJS-marked module (__esModule / '__esModule' in m).
+const __ttToESMBundler = (m) => ('default' in m || m.default !== undefined) ? m : __ttCjsView(m);
+// Last-resort: try to add `default` to m in place; fall back to a view when the module is frozen.
+function __ttToESMAddDefault(m) {
   try {
     Object.defineProperty(m, 'default', { value: m, configurable: true });
     return m;
   } catch (e) {
     return __ttCjsView(m);
   }
+}
+globalThis.__ttToESM = (m) => {
+  if (__ttToESMAsIs(m)) return m;
+  if (m[__ttEsmMark]) return __ttEsmNs(m);
+  if (m.__esModule || '__esModule' in m) return __ttToESMBundler(m);
+  if (__ttExternalCjs.has(m)) return __ttNodeNs(m);
+  if ('default' in m) return m;
+  return __ttToESMAddDefault(m);
 };
 // `__toESM` in a package's bundle: as Node imports in an ES module that Node runs as one
 // (`node`: a `.mjs` file or a `"type": "module"` package's) — CommonJS is Node's namespace of it
@@ -6272,6 +6388,15 @@ const __listCutBefore = (last, second, next, cutLen, outCut, orig) => (last && n
 const __listCutPeek = (last, second, cutLen, withPeek, orig) => !last && second && cutLen > orig && withPeek > orig;
 // inspectList: the entries after this one do not fit
 const __listCutAfter = (last, second, withPeek, orig) => !last && !second && withPeek >= orig;
+// __inspectList's rendered entry and the lookahead for the next one, with the given truncate.
+function __inspectListItem(list, i, o, orig, outLen, item, sep, peek) {
+  const last = i + 1 === list.length;
+  const second = i + 2 === list.length;
+  o.truncate = orig - outLen - (last ? 0 : sep.length);
+  const str = peek || item(list[i], o) + (last ? '' : sep);
+  const nextPeek = last ? '' : item(list[i + 1], o) + (second ? '' : sep);
+  return { last, second, str, nextPeek };
+}
 function __inspectList(list, o, item = __inspect, sep = ', ') {
   if (!list.length) return '';
   const orig = o.truncate;
@@ -6279,15 +6404,12 @@ function __inspectList(list, o, item = __inspect, sep = ', ') {
   let peek = '';
   let cut = '';
   for (let i = 0; i < list.length; i++) {
-    const last = i + 1 === list.length;
-    const second = i + 2 === list.length;
     cut = `…(${list.length - i})`;
-    o.truncate = orig - out.length - (last ? 0 : sep.length);
-    const str = peek || item(list[i], o) + (last ? '' : sep);
+    const { last, second, str, nextPeek } = __inspectListItem(list, i, o, orig, out.length, item, sep, peek);
     const next = out.length + str.length;
     const cutLen = next + cut.length;
     if (__listCutBefore(last, second, next, cutLen, out.length + cut.length, orig)) break;
-    peek = last ? '' : item(list[i + 1], o) + (second ? '' : sep);
+    peek = nextPeek;
     if (__listCutPeek(last, second, cutLen, next + peek.length, orig)) break;
     out += str;
     if (__listCutAfter(last, second, next + peek.length, orig)) { cut = `…(${list.length - i - 1})`; break; }
@@ -6444,6 +6566,18 @@ function __inspect(v, o = { truncate: Infinity, seen: [] }) {
 }
 // @vitest/utils `objDisplay` (truncateThreshold 40): loupe-truncated, and a rendering still that
 // long collapses to a summary.
+// toHaveProperty's path walk. Returns { cur, present }: a literal-key hit wins over the dot
+// path, else the segments are walked; `present=false` if any segment is missing.
+function __lookupProperty(actual, path) {
+  if (!Array.isArray(path) && actual != null && (path in Object(actual))) return { cur: actual[path], present: true };
+  const keys = Array.isArray(path) ? path : String(path).split('.');
+  let cur = actual;
+  for (const k of keys) {
+    if (cur != null && (k in Object(cur))) cur = cur[k];
+    else return { cur: undefined, present: false };
+  }
+  return { cur, present: true };
+}
 function __objDisplay(v) {
   const str = __inspect(v, { truncate: 40, seen: [] });
   if (str.length < 40) return str;
@@ -6630,11 +6764,8 @@ function __pfHooks(v, cfg, ind, depth, refs) {
   if (cfg.errors && v instanceof Error) return __pfError(v, cfg, ind, depth, refs);
   return __PF_NONE;
 }
-// a primitive or function (undefined: an object)
-function __pfPrimitive(v, cfg) {
-  if (v === true || v === false) return `${v}`;
-  if (v === undefined) return 'undefined';
-  if (v === null) return 'null';
+// __pfPrimitive's typeof-dispatch over number/bigint/string/function/symbol.
+function __pfTypeof(v, cfg) {
   switch (typeof v) {
     case 'number': return Object.is(v, -0) ? '-0' : String(v);
     case 'bigint': return `${v}n`;
@@ -6643,6 +6774,13 @@ function __pfPrimitive(v, cfg) {
     case 'symbol': return String(v).replace(/^Symbol\((.*)\)(.*)$/, 'Symbol($1)');
   }
   return undefined;
+}
+// a primitive or function (undefined: an object)
+function __pfPrimitive(v, cfg) {
+  if (v === true || v === false) return `${v}`;
+  if (v === undefined) return 'undefined';
+  if (v === null) return 'null';
+  return __pfTypeof(v, cfg);
 }
 // weak collections, dates, errors and regexps (undefined: other objects)
 function __pfSimpleTag(v, cfg, tag) {
@@ -7100,16 +7238,20 @@ function __scoreSide(c, text, blank) {
   const lb = ws && /[\r\n]/.test(c);
   return { nonAlnum, ws, lb, blank: lb && blank.test(text) };
 }
-function __semanticScore(one, two) {
-  if (!one || !two) return 6;
-  const x = __scoreSide(one.charAt(one.length - 1), one, /\n\r?\n$/);
-  const y = __scoreSide(two.charAt(0), two, /^\r?\n\r?\n/);
+// __semanticScore's rank table over the two edges' character classes.
+function __semanticRank(x, y) {
   if (x.blank || y.blank) return 5;
   if (x.lb || y.lb) return 4;
   if (x.nonAlnum && !x.ws && y.ws) return 3;
   if (x.ws || y.ws) return 2;
   if (x.nonAlnum || y.nonAlnum) return 1;
   return 0;
+}
+function __semanticScore(one, two) {
+  if (!one || !two) return 6;
+  const x = __scoreSide(one.charAt(one.length - 1), one, /\n\r?\n$/);
+  const y = __scoreSide(two.charAt(0), two, /^\r?\n\r?\n/);
+  return __semanticRank(x, y);
 }
 function __cleanupSemanticLossless(diffs) {
   let pointer = 1;
@@ -7524,6 +7666,14 @@ function __formatOneJ(v) {
     throw e;
   }
 }
+// @vitest/utils format %d: BigInt -> "123n", Symbol -> "NaN", else Number(v).
+function __formatOneD(v) {
+  if (typeof v === 'bigint') return `${v}n`;
+  if (typeof v === 'symbol') return 'NaN';
+  return Number(v).toString();
+}
+// @vitest/utils format %i: BigInt -> "123n", else parseInt(String(v)).
+function __formatOneI(v) { return typeof v === 'bigint' ? `${v}n` : Number.parseInt(String(v)).toString(); }
 // @vitest/utils `format(spec, item)` for one placeholder.
 function __formatOne(spec, item) {
   const v = item;
@@ -7531,8 +7681,8 @@ function __formatOne(spec, item) {
     // an unconsumed item is appended, as `format` appends extra arguments
     case '%%': return `% ${__formatExtra(v)}`;
     case '%s': return __formatOneS(v);
-    case '%d': return typeof v === 'bigint' ? `${v}n` : typeof v === 'symbol' ? 'NaN' : Number(v).toString();
-    case '%i': return typeof v === 'bigint' ? `${v}n` : Number.parseInt(String(v)).toString();
+    case '%d': return __formatOneD(v);
+    case '%i': return __formatOneI(v);
     case '%f': return Number.parseFloat(String(v)).toString();
     case '%o': case '%O': return __inspect(v);
     case '%c': return '';
@@ -7712,9 +7862,12 @@ function __withChain(target, mode) {
 // `sequence.concurrent`, host → __TT_SEQUENCE_CONCURRENT), then its own, with vitest's
 // createSuite precedence of concurrent / sequential
 const __parentOpts = (s) => s.opts || (globalThis.__TT_SEQUENCE_CONCURRENT ? { concurrent: true } : {});
+// Suite is concurrent per own/chain/sequential=false; dual for __suiteSelfSeq.
+function __suiteSelfCon(own, chain) { return !!own.concurrent || chain === 'concurrent' || own.sequential === false; }
+function __suiteSelfSeq(own, chain) { return !!own.sequential || chain === 'sequential' || own.concurrent === false; }
 function __suiteOpts(parent, own, chain) {
-  const cs = !!own.concurrent || chain === 'concurrent' || own.sequential === false;
-  const ss = !!own.sequential || chain === 'sequential' || own.concurrent === false;
+  const cs = __suiteSelfCon(own, chain);
+  const ss = __suiteSelfSeq(own, chain);
   const o = { ...__parentOpts(parent), ...own };
   const isC = cs || (o.concurrent && !ss);
   const isS = ss || (o.sequential && !cs);
@@ -7911,20 +8064,34 @@ function __errorNames(ser) {
     no_message: ser.message === undefined,
   };
 }
+// __errorInfo's diff block (diff string + actual / expected / show_diff flags for vitest's TAP).
+function __errorInfoDiff(e, obj, diffable) {
+  return {
+    diff: (diffable ? __errorDiff(e) : '') || '',
+    show_diff: !!(obj && e.showDiff),
+    actual: diffable ? __prettifyValue(e.actual) : null,
+    expected: diffable ? __prettifyValue(e.expected) : null,
+  };
+}
+// __errorInfo's inspected-form, when the error has no message and is not an Error instance.
+function __errorInfoInspected(e, ser) {
+  if (ser.message) return null;
+  if (e instanceof Error) return null;
+  return __nodeInspect(__plainOf({ ...ser, stacks: [] }));
+}
 function __errorInfo(e) {
   const ser = __serializeError(e);
   const obj = e !== null && typeof e === 'object';
   const diffable = obj && __errorDiffable(e);
-  const diff = diffable ? __errorDiff(e) : '';
   const cause = obj && __errorHasCause(e) ? __errorInfo(e.cause) : null;
   // an Error with an empty message keeps the `Name: ` line (vitest prints its serialized form
   // with its parsed frames, not modelled)
-  const inspected = !ser.message && !(e instanceof Error) ? __nodeInspect(__plainOf({ ...ser, stacks: [] })) : null;
+  const inspected = __errorInfoInspected(e, ser);
   const props = __errorProperties(ser);
   const rollup = __errorRollup(obj ? e.__vitest_rollup_error__ : undefined);
   return {
     ...__errorNames(ser),
-    diff: diff || '',
+    ...__errorInfoDiff(e, obj, diffable),
     stack: typeof ser.stack === 'string' ? ser.stack : '',
     cause,
     inspected,
@@ -7932,9 +8099,6 @@ function __errorInfo(e) {
     rollup,
     // processError's prettified actual / expected and the error's showDiff (vitest's TAP
     // block, turbo-test#170)
-    show_diff: !!(obj && e.showDiff),
-    actual: diffable ? __prettifyValue(e.actual) : null,
-    expected: diffable ? __prettifyValue(e.expected) : null,
   };
 }
 // @vitest/utils prettifyValue: a string as it is, anything else pretty-formatted as the diff's
@@ -7964,10 +8128,14 @@ function __serializeErrorJSON(val, seen) {
   if (j && j !== val && typeof j === 'object') __serializeErrorFill(j, val, seen);
   return __serializeValue(j, seen);
 }
+// Keys __serializeErrorFill tries to copy from `val` into the toJSON() result. Each entry
+// reads through a getter that may throw; the picked value is copied only when it is a string
+// (or, for `cause`, any non-nullish), and never overwrites one already in the toJSON output.
+const __ERROR_FILL_STR = ['message', 'stack', 'name'];
 function __serializeErrorFill(j, val, seen) {
-  try { if (typeof val.message === 'string') j.message ??= val.message; } catch {}
-  try { if (typeof val.stack === 'string') j.stack ??= val.stack; } catch {}
-  try { if (typeof val.name === 'string') j.name ??= val.name; } catch {}
+  for (const k of __ERROR_FILL_STR) {
+    try { if (typeof val[k] === 'string') j[k] ??= val[k]; } catch {}
+  }
   try { if (val.cause != null) j.cause ??= __serializeValue(val.cause, seen); } catch {}
 }
 // __serializeValue's "not a leaf"
@@ -8353,9 +8521,13 @@ function __suiteHookError(suite, summary, suiteErrors, hook, e) {
 // a describe.todo block makes its tests todo and a describe.skip block skips them (an
 // it.todo stays todo); otherwise -t, then the test's own todo / skip / `.only`.
 // Returns whether the test is not run.
+// True when `t` is not run at all for one of the vitest reasons (todo / skip / filtered / etc.).
+function __skipTestWhy(t, todo, skipAll, hookFailed, filtered) {
+  return todo || hookFailed || skipAll || filtered || t.skip || t.notOnly;
+}
 function __skipTest(t, chain, summary, label, skipAll, hookFailed, filtered) {
   const todo = !hookFailed && (skipAll === 'todo' || (!filtered && !!t.todo));
-  if (!(todo || hookFailed || skipAll || filtered || t.skip || t.notOnly)) return false;
+  if (!__skipTestWhy(t, todo, skipAll, hookFailed, filtered)) return false;
   summary.skipped++;
   // a forbidden `.only` test that does not run keeps its error (vitest)
   const extra = t.forbiddenOnly ? { failure_messages: [__onlyForbiddenError()] } : undefined;
@@ -8483,21 +8655,30 @@ function __beginAttempt(t, label, run, repeat) {
   __resetTestSnap(t, label);
   return run.attemptErrors.length;
 }
+// __failMessage: when an error's own `.message` is empty or a bare class name, fall back to
+// the first three stack frames joined with ` | `.
+function __failMessageFallback(msg, lastErr) {
+  const bare = !msg || msg === 'AggregateError' || msg === 'Error';
+  if (bare && lastErr.stack) return String(lastErr.stack).split('\n').slice(0, 3).join(' | ');
+  return msg;
+}
+// __failMessage's optional stack appendix under __TT_STACK: the first inner error's first five
+// frames, each prefixed with the summary marker.
+function __failMessageStack(lastErr) {
+  const e0 = lastErr.errors && lastErr.errors[0] ? lastErr.errors[0] : lastErr;
+  if (e0 && e0.stack) return '\n          @ ' + String(e0.stack).split('\n').slice(0, 5).join('\n          @ ');
+  return '';
+}
 // a failed test's summary message: the error's (with an AggregateError's errors), its stack's
 // first lines when it says nothing more, and under __TT_STACK its stack
 function __failMessage(lastErr) {
-  let msg = lastErr ? (lastErr.message || String(lastErr)) : String(lastErr);
-  if (!lastErr) return msg;
+  if (!lastErr) return String(lastErr);
+  let msg = lastErr.message || String(lastErr);
   if (lastErr.errors && lastErr.errors.length) {
     msg += ' [' + lastErr.errors.map((x) => (x && x.message) || String(x)).join('; ') + ']';
   }
-  if ((!msg || msg === 'AggregateError' || msg === 'Error') && lastErr.stack) {
-    msg = String(lastErr.stack).split('\n').slice(0, 3).join(' | ');
-  }
-  if (globalThis.__TT_STACK) {
-    const e0 = lastErr.errors && lastErr.errors[0] ? lastErr.errors[0] : lastErr;
-    if (e0 && e0.stack) msg += '\n          @ ' + String(e0.stack).split('\n').slice(0, 5).join('\n          @ ');
-  }
+  msg = __failMessageFallback(msg, lastErr);
+  if (globalThis.__TT_STACK) msg += __failMessageStack(lastErr);
   return msg;
 }
 // a run test's record; returns whether it failed
