@@ -395,17 +395,26 @@ __fakeHrtime.bigint = () => { const [s, n] = __fakeHrtime(); return BigInt(s) * 
 __fakeHrtime.clock = __loop;
 // sinon's fake performance: `now()` on the fake clock, `timeOrigin` the clock's start, the other
 // methods no-ops (`getEntries*` return [], `mark` / `measure` a bare entry)
-function __fakePerformance(real) {
-  const perf = Object.create(null);
+function __collectPerfMethodNames(real) {
   const names = new Set();
   for (let o = real; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
     for (const k of Object.getOwnPropertyNames(o)) names.add(k);
   }
-  for (const k of names) {
-    if (k === 'constructor' || k === 'now') continue;
-    let v;
-    try { v = real[k]; } catch (e) { continue; }
-    if (typeof v === 'function') perf[k] = k.indexOf('getEntries') === 0 ? () => [] : () => {};
+  names.delete('constructor');
+  names.delete('now');
+  return names;
+}
+function __stubPerfMethod(real, k) {
+  let v;
+  try { v = real[k]; } catch (e) { return null; }
+  if (typeof v !== 'function') return null;
+  return k.indexOf('getEntries') === 0 ? () => [] : () => {};
+}
+function __fakePerformance(real) {
+  const perf = Object.create(null);
+  for (const k of __collectPerfMethodNames(real)) {
+    const stub = __stubPerfMethod(real, k);
+    if (stub) perf[k] = stub;
   }
   const entry = (name, entryType, startTime, duration) => ({ name, entryType, startTime, duration, toJSON() { return { name, entryType, startTime, duration }; } });
   perf.mark = (name) => entry(name, 'mark', 0, 0);
@@ -452,20 +461,28 @@ function __clearModuleMocks() {
 }
 // vi.useFakeTimers(config): a fresh fake clock (sinon's install with vitest's `now: Date.now()`);
 // a config without `loopLimit` (vi.setConfig replaced the default one) gets sinon's 1000
+function __fakeToFake(c) {
+  return Array.isArray(c.toFake) && c.toFake.length ? c.toFake : __TO_FAKE;
+}
+function __fakeStart(c) {
+  return c.now !== undefined ? __epochOf(c.now) : globalThis.Date.now();
+}
+function __applyFakeDate() {
+  if (__loop.faked.has('Date')) __installFakeDate();
+  else __restoreDate();
+}
 function __installFake(cfg) {
   const c = Object.assign({}, cfg || {});
-  const start = c.now !== undefined ? __epochOf(c.now) : globalThis.Date.now();
+  const start = __fakeStart(c);
   if (__loop.fake) __uninstallFake();
   __loop.dateMocked = false;
-  const toFake = Array.isArray(c.toFake) && c.toFake.length ? c.toFake : __TO_FAKE;
   __loop.fake = true;
-  __loop.faked = new Set(toFake);
+  __loop.faked = new Set(__fakeToFake(c));
   __loop.loopLimit = c.loopLimit || 1000;
   __loop.systemTime = start - __loop.fnow;
   __loop.fstart = __loop.fnow;
   __loop.epoch0 = start;
-  if (__loop.faked.has('Date')) __installFakeDate();
-  else __restoreDate();
+  __applyFakeDate();
   __swapFakeTimers();
   __installFakeClocks();
   // shouldAdvanceTime: a real-clock interval ticks the fake clock by advanceTimeDelta (20ms)
