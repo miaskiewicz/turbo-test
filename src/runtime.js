@@ -8070,16 +8070,13 @@ function __diffStringsUnified(a, b) {
   if (diffs.some((d, i) => d[0] === 0 && (i !== last || d[1] !== '\n'))) return __annotation() + __joinDiffs(__alignedDiffs(diffs));
   return __diffLines(a.split('\n'), b.split('\n'), undefined, undefined, true);
 }
+const __DIFF_CTOR_TYPE = new Map([[RegExp, 'regexp'], [Map, 'map'], [Set, 'set'], [Date, 'date']]);
 function __diffType(v) {
   if (v === undefined) return 'undefined';
   if (v === null) return 'null';
   if (Array.isArray(v)) return 'array';
   if (typeof v !== 'object') return typeof v;
-  if (v.constructor === RegExp) return 'regexp';
-  if (v.constructor === Map) return 'map';
-  if (v.constructor === Set) return 'set';
-  if (v.constructor === Date) return 'date';
-  return 'object';
+  return __DIFF_CTOR_TYPE.get(v.constructor) || 'object';
 }
 const __NO_DIFF = 'Compared values have no visual difference.';
 // @vitest/utils `diff(expected, received)`; `annotate` false is its `omitAnnotationLines: true`.
@@ -8098,6 +8095,11 @@ function __vdiffType(a) {
 }
 // __vdiff of objects (maps and sets sorted): by their pretty-format, falling back to the
 // structure without toJSON when they serialize the same
+function __vdiffSort(type, a, b) {
+  if (type === 'map') return [new Map([...a.entries()].sort()), new Map([...b.entries()].sort())];
+  if (type === 'set') return [new Set([...a.values()].sort()), new Set([...b.values()].sort())];
+  return [a, b];
+}
 function __vdiffObjects(a, b, type, fmt, fallback, annotate) {
   const noDiff = __dcol.dim(__NO_DIFF);
   const objects = (opts) => {
@@ -8106,8 +8108,7 @@ function __vdiffObjects(a, b, type, fmt, fallback, annotate) {
     if (ac === bc) return noDiff;
     return __diffLines(__pf(a, opts).split('\n'), __pf(b, opts).split('\n'), ac.split('\n'), bc.split('\n'), annotate);
   };
-  if (type === 'map') { a = new Map([...a.entries()].sort()); b = new Map([...b.entries()].sort()); }
-  else if (type === 'set') { a = new Set([...a.values()].sort()); b = new Set([...b.values()].sort()); }
+  [a, b] = __vdiffSort(type, a, b);
   let d;
   let threw = false;
   try { d = objects(fmt); } catch (e) { threw = true; }
@@ -8117,6 +8118,17 @@ function __vdiffObjects(a, b, type, fmt, fallback, annotate) {
   }
   return d;
 }
+function __vdiffMismatch(a, b, fallback) {
+  return `${__dcol.green(`- ${__diffAnno[0]}:`)}\n${__pf(a, fallback)}\n\n${__dcol.red(`+ ${__diffAnno[1]}:`)}\n${__pf(b, fallback)}`;
+}
+function __vdiffScalar(a, b, type, fmt, annotate) {
+  if (type === 'string') return __diffLines(a.split('\n'), b.split('\n'), undefined, undefined, annotate);
+  if (type === 'boolean' || type === 'number') {
+    const af = __pf(a, fmt), bf = __pf(b, fmt);
+    return af === bf ? '' : __diffLines(af.split('\n'), bf.split('\n'), undefined, undefined, annotate);
+  }
+  return undefined;
+}
 function __vdiff(a, b, annotate = false) {
   if (Object.is(a, b)) return '';
   const typed = __vdiffType(a);
@@ -8124,19 +8136,10 @@ function __vdiff(a, b, annotate = false) {
   const [type, omitDifference] = typed;
   const fmt = { indent: 2, basic: false, maxDepth: 20, errors: true };
   const fallback = { ...fmt, maxDepth: 8, toJSON: false };
-  if (type !== __diffType(b)) {
-    return `${__dcol.green(`- ${__diffAnno[0]}:`)}\n${__pf(a, fallback)}\n\n${__dcol.red(`+ ${__diffAnno[1]}:`)}\n${__pf(b, fallback)}`;
-  }
+  if (type !== __diffType(b)) return __vdiffMismatch(a, b, fallback);
   if (omitDifference) return undefined;
-  switch (type) {
-    case 'string': return __diffLines(a.split('\n'), b.split('\n'), undefined, undefined, annotate);
-    case 'boolean':
-    case 'number': {
-      const af = __pf(a, fmt);
-      const bf = __pf(b, fmt);
-      return af === bf ? '' : __diffLines(af.split('\n'), bf.split('\n'), undefined, undefined, annotate);
-    }
-  }
+  const scalar = __vdiffScalar(a, b, type, fmt, annotate);
+  if (scalar !== undefined) return scalar;
   return __vdiffObjects(a, b, type, fmt, fallback, annotate);
 }
 function __ordinal(n) {
@@ -8186,23 +8189,28 @@ function __objectSubset(object, subset) {
     }
     return object;
   };
+  const setTrimmedCtor = (trimmed, object) => {
+    if (typeof object.constructor === 'function' && typeof object.constructor.name === 'string') {
+      Object.defineProperty(trimmed, 'constructor', { enumerable: false, value: object.constructor });
+    }
+  };
+  const trimKey = (seen, trimmed, object, subset, key) => {
+    if (inObj(subset, key)) {
+      trimmed[key] = seen.has(object[key]) ? seen.get(object[key]) : withContext(seen)(object[key], subset[key]);
+      return;
+    }
+    if (seen.has(object[key])) return;
+    stripped += 1;
+    if (isObj(object[key])) stripped += keys(object[key]).length;
+    withContext(seen)(object[key], subset[key]);
+  };
   // an object cut down to the subset's keys (the subset itself when it matches)
   const trimObject = (seen, object, subset) => {
     if (__subsetMatches(object, subset)) return subset;
     const trimmed = {};
     seen.set(object, trimmed);
-    if (typeof object.constructor === 'function' && typeof object.constructor.name === 'string') {
-      Object.defineProperty(trimmed, 'constructor', { enumerable: false, value: object.constructor });
-    }
-    for (const key of keys(object)) {
-      if (inObj(subset, key)) {
-        trimmed[key] = seen.has(object[key]) ? seen.get(object[key]) : withContext(seen)(object[key], subset[key]);
-      } else if (!seen.has(object[key])) {
-        stripped += 1;
-        if (isObj(object[key])) stripped += keys(object[key]).length;
-        withContext(seen)(object[key], subset[key]);
-      }
-    }
+    setTrimmedCtor(trimmed, object);
+    for (const key of keys(object)) trimKey(seen, trimmed, object, subset, key);
     return keys(trimmed).length > 0 ? trimmed : object;
   };
   return { subset: withContext()(object, subset), stripped };
@@ -8215,10 +8223,13 @@ function __subsetMatches(a, e) {
 // @vitest/utils format's extra argument
 const __formatExtra = (v) => (v === null || typeof v !== 'object' ? (typeof v === 'symbol' ? v.toString() : v) : __inspect(v));
 // @vitest/utils format's %s
+function __formatOneSObject(v) {
+  return (typeof v.toString === 'function' && v.toString !== Object.prototype.toString) ? v.toString() : __inspect(v);
+}
 function __formatOneS(v) {
   if (typeof v === 'bigint') return `${v}n`;
   if (typeof v === 'number' && v === 0 && 1 / v < 0) return '-0';
-  if (typeof v === 'object' && v !== null) return (typeof v.toString === 'function' && v.toString !== Object.prototype.toString) ? v.toString() : __inspect(v);
+  if (typeof v === 'object' && v !== null) return __formatOneSObject(v);
   return String(v);
 }
 // @vitest/utils format's %j: a circular value is `[Circular]`
@@ -8238,20 +8249,20 @@ function __formatOneD(v) {
 // @vitest/utils format %i: BigInt -> "123n", else parseInt(String(v)).
 function __formatOneI(v) { return typeof v === 'bigint' ? `${v}n` : Number.parseInt(String(v)).toString(); }
 // @vitest/utils `format(spec, item)` for one placeholder.
+const __FORMAT_ONE = {
+  '%%': (v) => `% ${__formatExtra(v)}`,
+  '%s': __formatOneS,
+  '%d': __formatOneD,
+  '%i': __formatOneI,
+  '%f': (v) => Number.parseFloat(String(v)).toString(),
+  '%o': (v) => __inspect(v),
+  '%O': (v) => __inspect(v),
+  '%c': () => '',
+  '%j': __formatOneJ,
+};
 function __formatOne(spec, item) {
-  const v = item;
-  switch (spec) {
-    // an unconsumed item is appended, as `format` appends extra arguments
-    case '%%': return `% ${__formatExtra(v)}`;
-    case '%s': return __formatOneS(v);
-    case '%d': return __formatOneD(v);
-    case '%i': return __formatOneI(v);
-    case '%f': return Number.parseFloat(String(v)).toString();
-    case '%o': case '%O': return __inspect(v);
-    case '%c': return '';
-    case '%j': return __formatOneJ(v);
-  }
-  return undefined;
+  const fn = __FORMAT_ONE[spec];
+  return fn ? fn(item) : undefined;
 }
 function __objectAttr(source, path, dflt) {
   let r = source;
@@ -8294,18 +8305,20 @@ function __formatTitleJoin(template, items, attrs, count) {
   if (last < template.length) out += attrs(template.slice(last));
   return out;
 }
-function __formatTitle(template, items, idx) {
-  if (template.includes('%#') || template.includes('%$')) template = __formatTitleIndices(template, idx);
-  const count = template.split('%').length - 1;
-  if (template.includes('%f')) template = __formatTitleHandleF(template, items);
-  const isObjectItem = items[0] != null && typeof items[0] === 'object' && !Array.isArray(items[0]);
-  const attrs = (str) => str.replace(/\$([$\w.]+)/g, (_, key) => {
+function __formatTitleAttrs(items, isObjectItem) {
+  return (str) => str.replace(/\$([$\w.]+)/g, (_, key) => {
     const isArrayKey = /^\d+$/.test(key);
     if (!isObjectItem && !isArrayKey) return `$${key}`;
     const el = isArrayKey ? __objectAttr(items, key) : undefined;
     return __objDisplay(isObjectItem ? __objectAttr(items[0], key, el) : el);
   });
-  return __formatTitleJoin(template, items, attrs, count);
+}
+function __formatTitle(template, items, idx) {
+  if (template.includes('%#') || template.includes('%$')) template = __formatTitleIndices(template, idx);
+  const count = template.split('%').length - 1;
+  if (template.includes('%f')) template = __formatTitleHandleF(template, items);
+  const isObjectItem = items[0] != null && typeof items[0] === 'object' && !Array.isArray(items[0]);
+  return __formatTitleJoin(template, items, __formatTitleAttrs(items, isObjectItem), count);
 }
 function __formatName(name) {
   return typeof name === 'string' ? name : typeof name === 'function' ? name.name || '<anonymous>' : String(name);
@@ -8441,10 +8454,10 @@ function __suiteOpts(parent, own, chain) {
   const cs = __suiteSelfCon(own, chain);
   const ss = __suiteSelfSeq(own, chain);
   const o = { ...__parentOpts(parent), ...own };
-  const isC = cs || (o.concurrent && !ss);
-  const isS = ss || (o.sequential && !cs);
-  if (isC != null) o.concurrent = !!isC && !isS;
-  if (isS != null) o.sequential = !!isS && !isC;
+  const isC = !!(cs || (o.concurrent && !ss));
+  const isS = !!(ss || (o.sequential && !cs));
+  o.concurrent = isC && !isS;
+  o.sequential = isS && !isC;
   return o;
 }
 function describe(name, a, b) {
@@ -8471,12 +8484,15 @@ describe.runIf = (cond) => (cond ? describe : describe.skip);
 describe.each = (cases, ...targs) => __each(describe, cases, targs);
 describe.for = (cases, ...targs) => __for(describe, cases, targs, true);
 // Supports both vitest signatures: it(name, fn, opts) and it(name, opts, fn).
+function __normTestOptsForFn(b) {
+  if (typeof b === 'object' && b) return b;
+  if (typeof b === 'number') return { timeout: b };
+  return {};
+}
 function __normTest(a, b) {
-  let fn, o;
-  if (typeof a === 'function') { fn = a; o = (typeof b === 'object' && b ? b : (typeof b === 'number' ? { timeout: b } : {})); }
-  else if (typeof a === 'object' && a) { o = a; fn = (typeof b === 'function' ? b : () => {}); }
-  else { fn = (typeof b === 'function' ? b : () => {}); o = {}; }
-  return { fn, o };
+  if (typeof a === 'function') return { fn: a, o: __normTestOptsForFn(b) };
+  if (typeof a === 'object' && a) return { fn: typeof b === 'function' ? b : () => {}, o: a };
+  return { fn: typeof b === 'function' ? b : () => {}, o: {} };
 }
 // Default per-test timeout (ms): `--testTimeout` (host → globalThis.__TT_DEFAULT_TIMEOUT) else
 // vitest's 5000ms default. A test's own `{ timeout }` overrides this in runSuite.
@@ -8678,26 +8694,25 @@ function __errorInfoInspected(e, ser) {
   if (e instanceof Error) return null;
   return __nodeInspect(__plainOf({ ...ser, stacks: [] }));
 }
+function __errorInfoCause(e, obj) {
+  return obj && __errorHasCause(e) ? __errorInfo(e.cause) : null;
+}
+function __errorInfoStackField(ser) {
+  return typeof ser.stack === 'string' ? ser.stack : '';
+}
 function __errorInfo(e) {
   const ser = __serializeError(e);
   const obj = e !== null && typeof e === 'object';
   const diffable = obj && __errorDiffable(e);
-  const cause = obj && __errorHasCause(e) ? __errorInfo(e.cause) : null;
-  // an Error with an empty message keeps the `Name: ` line (vitest prints its serialized form
-  // with its parsed frames, not modelled)
-  const inspected = __errorInfoInspected(e, ser);
   const props = __errorProperties(ser);
-  const rollup = __errorRollup(obj ? e.__vitest_rollup_error__ : undefined);
   return {
     ...__errorNames(ser),
     ...__errorInfoDiff(e, obj, diffable),
-    stack: typeof ser.stack === 'string' ? ser.stack : '',
-    cause,
-    inspected,
+    stack: __errorInfoStackField(ser),
+    cause: __errorInfoCause(e, obj),
+    inspected: __errorInfoInspected(e, ser),
     properties: props === null ? null : __inspect(props),
-    rollup,
-    // processError's prettified actual / expected and the error's showDiff (vitest's TAP
-    // block, turbo-test#170)
+    rollup: __errorRollup(obj ? e.__vitest_rollup_error__ : undefined),
   };
 }
 // @vitest/utils prettifyValue: a string as it is, anything else pretty-formatted as the diff's
@@ -8731,11 +8746,15 @@ function __serializeErrorJSON(val, seen) {
 // reads through a getter that may throw; the picked value is copied only when it is a string
 // (or, for `cause`, any non-nullish), and never overwrites one already in the toJSON output.
 const __ERROR_FILL_STR = ['message', 'stack', 'name'];
-function __serializeErrorFill(j, val, seen) {
-  for (const k of __ERROR_FILL_STR) {
-    try { if (typeof val[k] === 'string') j[k] ??= val[k]; } catch {}
-  }
+function __fillStringKey(j, val, k) {
+  try { if (typeof val[k] === 'string') j[k] ??= val[k]; } catch {}
+}
+function __fillCauseKey(j, val, seen) {
   try { if (val.cause != null) j.cause ??= __serializeValue(val.cause, seen); } catch {}
+}
+function __serializeErrorFill(j, val, seen) {
+  for (const k of __ERROR_FILL_STR) __fillStringKey(j, val, k);
+  __fillCauseKey(j, val, seen);
 }
 // __serializeValue's "not a leaf"
 const __SER_NONE = Symbol('ser-none');
@@ -8747,15 +8766,18 @@ function __serializeLeafBuf(val) {
 }
 // the values serialized as themselves or a short text (functions, symbols, primitives, buffers,
 // promises, elements)
-function __serializeLeaf(val) {
-  if (typeof val === 'function') return `Function<${val.name || 'anonymous'}>`;
-  if (typeof val === 'symbol') return val.toString();
-  if (typeof val !== 'object') return val;
+function __serializeLeafObject(val) {
   const buf = __serializeLeafBuf(val);
   if (buf !== __SER_NONE) return buf;
   if (val instanceof Promise) return 'Promise';
   if (typeof Element !== 'undefined' && val instanceof Element) return val.tagName;
   return __SER_NONE;
+}
+function __serializeLeaf(val) {
+  if (typeof val === 'function') return `Function<${val.name || 'anonymous'}>`;
+  if (typeof val === 'symbol') return val.toString();
+  if (typeof val !== 'object') return val;
+  return __serializeLeafObject(val);
 }
 function __serializeArray(val, seen) {
   const clone = new Array(val.length);
@@ -8764,14 +8786,15 @@ function __serializeArray(val, seen) {
   return clone;
 }
 // an object's own and inherited properties (short of Object.prototype)
+function __serializeObjectKey(clone, val, key, seen) {
+  if (key in clone) return;
+  try { clone[key] = __serializeValue(val[key], seen); } catch (err) { delete clone[key]; clone[key] = __unserializable(err); }
+}
 function __serializeObject(val, seen) {
   const clone = Object.create(null);
   seen.set(val, clone);
   for (let obj = val; obj && obj !== Object.prototype; obj = Object.getPrototypeOf(obj)) {
-    for (const key of Object.getOwnPropertyNames(obj)) {
-      if (key in clone) continue;
-      try { clone[key] = __serializeValue(val[key], seen); } catch (err) { delete clone[key]; clone[key] = __unserializable(err); }
-    }
+    for (const key of Object.getOwnPropertyNames(obj)) __serializeObjectKey(clone, val, key, seen);
   }
   if (val instanceof Error) { try { clone.message = val.message; } catch {} }
   return clone;
@@ -8781,14 +8804,19 @@ function __serializeErrorIfJSON(val, seen) {
   if (val instanceof Error && 'toJSON' in val && typeof val.toJSON === 'function') return __serializeErrorJSON(val, seen);
   return __SER_NONE;
 }
+function __serializeShortcut(val, seen) {
+  if (typeof val.toJSON === 'function') return __serializeValue(val.toJSON(), seen);
+  if (seen.has(val)) return seen.get(val);
+  return __SER_NONE;
+}
 function __serializeValue(val, seen = new WeakMap()) {
   if (!val || typeof val === 'string') return val;
   const json = __serializeErrorIfJSON(val, seen);
   if (json !== __SER_NONE) return json;
   const leaf = __serializeLeaf(val);
   if (leaf !== __SER_NONE) return leaf;
-  if (typeof val.toJSON === 'function') return __serializeValue(val.toJSON(), seen);
-  if (seen.has(val)) return seen.get(val);
+  const sc = __serializeShortcut(val, seen);
+  if (sc !== __SER_NONE) return sc;
   if (Array.isArray(val)) return __serializeArray(val, seen);
   return __serializeObject(val, seen);
 }
