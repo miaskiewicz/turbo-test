@@ -235,9 +235,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             "--allowOnly" => o.allow_only = Some(true),
             "--no-allowOnly" => o.allow_only = Some(false),
             "--shard" => {
-                if let Some(shard) = value().as_deref().and_then(parse_shard) {
-                    o.shard = Some(shard);
-                }
+                o.shard = value().as_deref().and_then(parse_shard).or(o.shard);
             }
             // `--reporter <r>`: select an output reporter. Implemented: default, dot, json,
             // junit, tap, verbose. Any other value (html, tap-flat, hanging-process, …) is
@@ -253,9 +251,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             // name matches the regex (vitest semantics: unanchored, case-sensitive). Plumbed to
             // the runtime via env → `globalThis.__TT_NAME_PATTERN` (see runner bootstrap).
             "-t" | "--testNamePattern" => {
-                if let Some(v) = value() {
-                    o.env.push(("TURBO_TEST_NAME_PATTERN", v));
-                }
+                push_optional_env(&mut o.env, "TURBO_TEST_NAME_PATTERN", value());
             }
             // `--includeTaskLocation`: record each test's location (`location` in the JSON report).
             "--includeTaskLocation" => o.env.push(("TURBO_TASK_LOCATION", "1".to_string())),
@@ -317,6 +313,12 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
         }
     }
     o
+}
+
+fn push_optional_env(env: &mut Vec<(&'static str, String)>, key: &'static str, v: Option<String>) {
+    if let Some(v) = v {
+        env.push((key, v));
+    }
 }
 
 /// `env` gains (`key`, `v`) when `v` is a whole number.
@@ -527,47 +529,45 @@ pub fn reuse_result_is_final(r: &FileOutcome) -> bool {
 /// ([`reuse_result_is_final`]) — re-run on a fresh isolate whose (best-of-3) result is
 /// authoritative.
 pub fn execute_file(engine: &Engine, file: &Path) -> FileOutcome {
-    // A panic in V8/loader must not abort the whole run: catch it, leak the dead isolate's
-    // handles, and report this file as an error.
-    let run_once =
-        || match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (engine.run)(file))) {
-            Ok(r) => r,
-            Err(p) => {
-                (engine.forget_registry)();
-                Err(format!("panicked: {}", panic_message(&*p)))
-            }
-        };
     // A file that did not run its tests is re-run (up to 3x), keeping the best attempt. A report
     // never is (turbo-test#144) — under reuse a second run on the reused isolate would also find
     // the file's module already evaluated and collect no tests ("No test suite found").
-    let mut r = run_once();
-    let mut tries = 0;
-    let reuse = (engine.reuse_enabled)();
-    while looks_transient(&r) && tries < 2 {
-        tries += 1;
-        let r2 = run_once();
-        if score(&r2) > score(&r) {
-            r = r2;
-        }
-    }
+    let r = retry_best(|| execute_file_once(engine, file));
     // Fresh-isolate retry (turbo-test#126): reuse is vitest's `isolate: false` (the config or
     // `--no-isolate`), which runs each file once and reports it, so a passing file or one whose
     // failures are assertion failures is final — re-running it fresh doubled its cost and could
     // only hide what vitest shows. Any other result may be a reuse artifact (a module left
     // half-linked by an earlier file, a stale DOM wrapper, the accumulated heap): one run on a
     // fresh isolate, whose result is authoritative.
-    if reuse && !reuse_result_is_final(&r) {
-        let mut fr = (engine.run_fresh)(file);
-        let mut ft = 0;
-        while looks_transient(&fr) && ft < 2 {
-            ft += 1;
-            let f2 = (engine.run_fresh)(file);
-            if score(&f2) > score(&fr) {
-                fr = f2;
-            }
-        }
+    if (engine.reuse_enabled)() && !reuse_result_is_final(&r) {
         // fresh is the source of truth — adopt it (even if it also fails: that's real).
-        r = fr;
+        return retry_best(|| (engine.run_fresh)(file));
+    }
+    r
+}
+
+/// Run one attempt of a file: panic-guarded; a panic in V8/loader is reported as an error (the
+/// dead isolate's handles are leaked by `forget_registry`).
+fn execute_file_once(engine: &Engine, file: &Path) -> FileOutcome {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (engine.run)(file))) {
+        Ok(r) => r,
+        Err(p) => {
+            (engine.forget_registry)();
+            Err(format!("panicked: {}", panic_message(&*p)))
+        }
+    }
+}
+
+/// Run `attempt` up to 3 times while the result looks transient, returning the best-scoring one.
+fn retry_best(mut attempt: impl FnMut() -> FileOutcome) -> FileOutcome {
+    let mut r = attempt();
+    let mut tries = 0;
+    while looks_transient(&r) && tries < 2 {
+        tries += 1;
+        let r2 = attempt();
+        if score(&r2) > score(&r) {
+            r = r2;
+        }
     }
     r
 }
@@ -733,29 +733,9 @@ pub fn render_human(reporter: Reporter, res: &[FileResult]) -> String {
     let mut out = String::new();
     for r in res {
         match reporter {
-            Reporter::Default => {
-                out.push_str(&r.line);
-                out.push('\n');
-            }
-            Reporter::Dot => out.push_str(if r.load_error {
-                "!"
-            } else if !r.failed_file {
-                "."
-            } else {
-                "x"
-            }),
-            Reporter::Verbose => {
-                out.push_str(&r.line);
-                out.push('\n');
-                for t in &r.tests {
-                    let mark = match t.status.as_str() {
-                        "passed" => "✓",
-                        "failed" => "✗",
-                        _ => "-",
-                    };
-                    out.push_str(&format!("   {mark} {} ({:.0}ms)\n", t.name, t.duration_ms));
-                }
-            }
+            Reporter::Default => push_default_file_line(r, &mut out),
+            Reporter::Dot => out.push_str(dot_char(r)),
+            Reporter::Verbose => push_verbose_file(r, &mut out),
             _ => {}
         }
     }
@@ -763,6 +743,34 @@ pub fn render_human(reporter: Reporter, res: &[FileResult]) -> String {
         out.push('\n');
     }
     out
+}
+
+fn push_default_file_line(r: &FileResult, out: &mut String) {
+    out.push_str(&r.line);
+    out.push('\n');
+}
+
+fn dot_char(r: &FileResult) -> &'static str {
+    if r.load_error {
+        "!"
+    } else if !r.failed_file {
+        "."
+    } else {
+        "x"
+    }
+}
+
+fn push_verbose_file(r: &FileResult, out: &mut String) {
+    out.push_str(&r.line);
+    out.push('\n');
+    for t in &r.tests {
+        let mark = match t.status.as_str() {
+            "passed" => "✓",
+            "failed" => "✗",
+            _ => "-",
+        };
+        out.push_str(&format!("   {mark} {} ({:.0}ms)\n", t.name, t.duration_ms));
+    }
 }
 
 /// XML-escape a string for JUnit attribute/text content, as vitest's `escapeXML`: the five
@@ -1002,49 +1010,9 @@ pub fn render_junit(names: &[PathBuf], res: &[FileResult], root: &Path) -> Strin
     let (mut tests, mut failures, mut time) = (0usize, 0usize, 0.0f64);
     for r in res {
         let name = names[r.idx].to_string_lossy().to_string();
-        let mut cases: Vec<String> = Vec::new();
-        let (mut n, mut failed, mut skipped) = (0usize, 0usize, 0usize);
-        for t in &r.tests {
-            n += 1;
-            if t.status == "skipped" || t.status == "todo" {
-                skipped += 1;
-            }
-            if t.status == "failed" {
-                failed += 1;
-            }
-            let body = junit_test_body(t, root);
-            cases.push(testcase(&name, &t.name, t.duration_ms, body));
-        }
-        for se in &r.suite_errors {
-            n += 1;
-            failed += 1;
-            let body = se
-                .errors
-                .iter()
-                .flat_map(|e| failure_element(e, root))
-                .collect();
-            cases.push(testcase(&name, &se.name, se.duration_ms, body));
-        }
-        if n == 0 && r.failed_file {
-            n = 1;
-            failed = 1;
-            let e = r
-                .load_error_info
-                .clone()
-                .unwrap_or_else(|| load_error_info(&r.error_msg));
-            cases.push(testcase(&name, &name, 0.0, failure_element(&e, root)));
-        }
+        let (cases, n, failed, skipped) = junit_cases(r, &name, root);
         let dur = if r.load_error { 0.0 } else { r.dur_ms };
-        let mut suite = vec![format!(
-            "    <testsuite name=\"{}\" timestamp=\"{}\" hostname=\"{}\" tests=\"{n}\" failures=\"{failed}\" errors=\"0\" skipped=\"{skipped}\" time=\"{}\">",
-            xml_esc(&name),
-            iso_now(),
-            xml_esc(&host),
-            seconds(dur)
-        )];
-        suite.extend(cases);
-        suite.push("    </testsuite>".to_string());
-        suites.push(suite);
+        suites.push(junit_suite(&name, &host, n, failed, skipped, dur, cases));
         tests += n;
         failures += failed;
         time += dur;
@@ -1056,6 +1024,72 @@ pub fn render_junit(names: &[PathBuf], res: &[FileResult], root: &Path) -> Strin
     lines.extend(suites.into_iter().flatten());
     lines.push("</testsuites>".to_string());
     lines.join("\n")
+}
+
+/// Cases and counters for one file's `<testsuite>`.
+fn junit_cases(
+    r: &FileResult,
+    name: &str,
+    root: &Path,
+) -> (Vec<String>, usize, usize, usize) {
+    let mut cases: Vec<String> = Vec::new();
+    let (mut n, mut failed, mut skipped) = (0usize, 0usize, 0usize);
+    for t in &r.tests {
+        junit_count_test(t, &mut n, &mut failed, &mut skipped);
+        cases.push(testcase(name, &t.name, t.duration_ms, junit_test_body(t, root)));
+    }
+    for se in &r.suite_errors {
+        n += 1;
+        failed += 1;
+        let body = se
+            .errors
+            .iter()
+            .flat_map(|e| failure_element(e, root))
+            .collect();
+        cases.push(testcase(name, &se.name, se.duration_ms, body));
+    }
+    if n == 0 && r.failed_file {
+        n = 1;
+        failed = 1;
+        let e = r
+            .load_error_info
+            .clone()
+            .unwrap_or_else(|| load_error_info(&r.error_msg));
+        cases.push(testcase(name, name, 0.0, failure_element(&e, root)));
+    }
+    (cases, n, failed, skipped)
+}
+
+fn junit_count_test(t: &TestCase, n: &mut usize, failed: &mut usize, skipped: &mut usize) {
+    *n += 1;
+    if t.status == "skipped" || t.status == "todo" {
+        *skipped += 1;
+    }
+    if t.status == "failed" {
+        *failed += 1;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn junit_suite(
+    name: &str,
+    host: &str,
+    n: usize,
+    failed: usize,
+    skipped: usize,
+    dur: f64,
+    cases: Vec<String>,
+) -> Vec<String> {
+    let mut suite = vec![format!(
+        "    <testsuite name=\"{}\" timestamp=\"{}\" hostname=\"{}\" tests=\"{n}\" failures=\"{failed}\" errors=\"0\" skipped=\"{skipped}\" time=\"{}\">",
+        xml_esc(name),
+        iso_now(),
+        xml_esc(host),
+        seconds(dur)
+    )];
+    suite.extend(cases);
+    suite.push("    </testsuite>".to_string());
+    suite
 }
 
 /// A `<testcase>`'s body: its console output, `<skipped/>`, its annotations and its failures.
@@ -1242,26 +1276,9 @@ pub fn render_tap(files: &[PathBuf], res: &[FileResult], flat: bool) -> String {
             continue;
         }
         let mut children: Vec<TapNode> = Vec::new();
-        let empty: Vec<(usize, Vec<String>, String)> = r
-            .empty_suites
-            .iter()
-            .filter_map(|e| {
-                let mut parts = e.split('\u{1f}');
-                let at = parts.next()?.parse().ok()?;
-                let mode = parts.next()?.to_string();
-                Some((at, parts.map(str::to_string).collect(), mode))
-            })
-            .collect();
+        let empty = parse_empty_suites(&r.empty_suites);
         for i in 0..=r.tests.len() {
-            for (_, path, mode) in empty.iter().filter(|(at, ..)| *at == i) {
-                if let Some((name, above)) = path.split_last() {
-                    tap_insert_node(
-                        &mut children,
-                        above,
-                        TapNode::Empty(name.clone(), mode.clone(), name.clone()),
-                    );
-                }
-            }
+            insert_empty_at(&mut children, &empty, i);
             if let Some(t) = r.tests.get(i) {
                 tap_insert(&mut children, &t.ancestors, t);
             }
@@ -1299,6 +1316,36 @@ enum TapNode<'a> {
 }
 
 /// Put `t` under its describes (`ancestors`): a describe is the last child of that name.
+/// Parse empty-suite records (`at\u{1f}mode\u{1f}path...`) into tuples.
+fn parse_empty_suites(records: &[String]) -> Vec<(usize, Vec<String>, String)> {
+    records
+        .iter()
+        .filter_map(|e| {
+            let mut parts = e.split('\u{1f}');
+            let at = parts.next()?.parse().ok()?;
+            let mode = parts.next()?.to_string();
+            Some((at, parts.map(str::to_string).collect(), mode))
+        })
+        .collect()
+}
+
+/// Insert every empty-suite record whose `at == i` into `children`.
+fn insert_empty_at<'a>(
+    children: &mut Vec<TapNode<'a>>,
+    empty: &[(usize, Vec<String>, String)],
+    i: usize,
+) {
+    for (_, path, mode) in empty.iter().filter(|(at, ..)| *at == i) {
+        if let Some((name, above)) = path.split_last() {
+            tap_insert_node(
+                children,
+                above,
+                TapNode::Empty(name.clone(), mode.clone(), name.clone()),
+            );
+        }
+    }
+}
+
 fn tap_insert<'a>(nodes: &mut Vec<TapNode<'a>>, ancestors: &[String], t: &'a runner::TestCase) {
     tap_insert_node(nodes, ancestors, TapNode::Test(t.title.clone(), t));
 }
@@ -1705,24 +1752,40 @@ pub fn footer_counts(
     res: &[FileResult],
     c: &crate::colors::Colors,
 ) -> (String, String) {
+    let files = count_file_slots(res);
+    let all: Vec<&TestCase> = res.iter().flat_map(|r| &r.tests).collect();
+    let tests = count_test_slots(&all);
+    (
+        state_string_colored(files, file_count, c),
+        state_string_colored(tests, all.len(), c),
+    )
+}
+
+fn count_file_slots(res: &[FileResult]) -> [usize; 5] {
     let mut files = [0usize; 5];
     for r in res {
-        let ran = r
-            .tests
-            .iter()
-            .any(|t| t.status == "passed" || t.status == "failed");
-        let slot = if r.failed_file {
-            0
-        } else if !ran && !(r.tests.is_empty() && r.suites.is_empty()) {
-            3
-        } else {
-            1
-        };
-        files[slot] += 1;
+        files[file_slot(r)] += 1;
     }
+    files
+}
+
+fn file_slot(r: &FileResult) -> usize {
+    let ran = r
+        .tests
+        .iter()
+        .any(|t| t.status == "passed" || t.status == "failed");
+    if r.failed_file {
+        0
+    } else if !ran && !(r.tests.is_empty() && r.suites.is_empty()) {
+        3
+    } else {
+        1
+    }
+}
+
+fn count_test_slots(all: &[&TestCase]) -> [usize; 5] {
     let mut tests = [0usize; 5];
-    let all: Vec<&TestCase> = res.iter().flat_map(|r| &r.tests).collect();
-    for t in &all {
+    for t in all {
         let slot = match t.status.as_str() {
             "failed" => 0,
             "passed" if t.expected_fail => 2,
@@ -1733,10 +1796,7 @@ pub fn footer_counts(
         };
         tests[slot] += 1;
     }
-    (
-        state_string_colored(files, file_count, c),
-        state_string_colored(tests, all.len(), c),
-    )
+    tests
 }
 
 /// turbo-test's diagnostic summary line (files, counts, jobs, wall, env setup, cache hit-rate).

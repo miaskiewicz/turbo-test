@@ -1217,76 +1217,15 @@ fn build_rows(
     st_map: Option<&StHits>,
 ) -> (String, Vec<Row>, Row) {
     let mut lcov = String::new();
-    let (mut tot_lf, mut tot_lh, mut tot_fnf, mut tot_fnh, mut tot_brf, mut tot_brh) =
-        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
-    let (mut tot_sf, mut tot_sh) = (0u64, 0u64);
+    let mut tot = TotCounts::default();
     let mut rows: Vec<Row> = Vec::new();
     for (file, lines) in files {
         lcov.push_str(&format!("SF:{}\n", file.display()));
-
-        // functions (FN/FNDA), sorted by line then name
-        let (mut fnf, mut fnh) = (0u64, 0u64);
-        if let Some(fns) = fn_map.and_then(|m| m.get(*file)) {
-            let mut fv: Vec<(&(u32, String), &u64)> = fns.iter().collect();
-            fv.sort_by(|a, b| a.0 .0.cmp(&b.0 .0).then(a.0 .1.cmp(&b.0 .1)));
-            for ((line, name), _) in &fv {
-                lcov.push_str(&format!("FN:{},{}\n", line, name));
-            }
-            for ((_, name), c) in &fv {
-                lcov.push_str(&format!("FNDA:{},{}\n", c, name));
-            }
-            fnf = fv.len() as u64;
-            fnh = fv.iter().filter(|(_, c)| **c > 0).count() as u64;
-            lcov.push_str(&format!("FNF:{fnf}\nFNH:{fnh}\n"));
-        }
-        tot_fnf += fnf;
-        tot_fnh += fnh;
-
-        // branches (BRDA), sorted by (block, branch)
-        let (mut brf, mut brh) = (0u64, 0u64);
-        if let Some(brs) = br_map.and_then(|m| m.get(*file)) {
-            let mut bv: Vec<(&BranchKey, &BranchHit)> = brs.iter().collect();
-            bv.sort_by(|a, b| a.0.cmp(b.0));
-            for ((block, branch), (line, reached, taken)) in &bv {
-                // lcov: taken is "-" when the containing block never executed.
-                let t = if *reached {
-                    taken.to_string()
-                } else {
-                    "-".to_string()
-                };
-                lcov.push_str(&format!("BRDA:{},{},{},{}\n", line, block, branch, t));
-            }
-            brf = bv.len() as u64;
-            brh = bv
-                .iter()
-                .filter(|(_, (_, reached, taken))| *reached && *taken > 0)
-                .count() as u64;
-            lcov.push_str(&format!("BRF:{brf}\nBRH:{brh}\n"));
-        }
-        tot_brf += brf;
-        tot_brh += brh;
-
-        // lines (DA)
-        let mut nums: Vec<(&u32, &u64)> = lines.iter().collect();
-        nums.sort_by_key(|(l, _)| **l);
-        let lf = nums.len() as u64;
-        let lh = nums.iter().filter(|(_, c)| **c > 0).count() as u64;
-        tot_lf += lf;
-        tot_lh += lh;
-        for (l, c) in &nums {
-            lcov.push_str(&format!("DA:{},{}\n", l, c));
-        }
-        lcov.push_str(&format!("LF:{lf}\nLH:{lh}\nend_of_record\n"));
-
-        // statements (no lcov field — counted for json-summary/text/html + the gate)
-        let (mut sf, mut sh) = (0u64, 0u64);
-        if let Some(sts) = st_map.and_then(|m| m.get(*file)) {
-            sf = sts.len() as u64;
-            sh = sts.values().filter(|(_, c)| *c > 0).count() as u64;
-        }
-        tot_sf += sf;
-        tot_sh += sh;
-
+        let (fnf, fnh) = emit_functions(&mut lcov, fn_map, file);
+        let (brf, brh) = emit_branches(&mut lcov, br_map, file);
+        let (lf, lh) = emit_lines(&mut lcov, lines);
+        let (sf, sh) = count_statements(st_map, file);
+        tot.add(lf, lh, fnf, fnh, brf, brh, sf, sh);
         rows.push(Row {
             path: (*file).clone(),
             lh,
@@ -1299,19 +1238,114 @@ fn build_rows(
             sf,
         });
     }
+    (lcov, rows, tot.row())
+}
 
-    let total = Row {
-        path: PathBuf::new(),
-        lh: tot_lh,
-        lf: tot_lf,
-        fnh: tot_fnh,
-        fnf: tot_fnf,
-        brh: tot_brh,
-        brf: tot_brf,
-        sh: tot_sh,
-        sf: tot_sf,
+#[derive(Default)]
+struct TotCounts {
+    lf: u64,
+    lh: u64,
+    fnf: u64,
+    fnh: u64,
+    brf: u64,
+    brh: u64,
+    sf: u64,
+    sh: u64,
+}
+
+impl TotCounts {
+    #[allow(clippy::too_many_arguments)]
+    fn add(&mut self, lf: u64, lh: u64, fnf: u64, fnh: u64, brf: u64, brh: u64, sf: u64, sh: u64) {
+        self.lf += lf;
+        self.lh += lh;
+        self.fnf += fnf;
+        self.fnh += fnh;
+        self.brf += brf;
+        self.brh += brh;
+        self.sf += sf;
+        self.sh += sh;
+    }
+
+    fn row(&self) -> Row {
+        Row {
+            path: PathBuf::new(),
+            lh: self.lh,
+            lf: self.lf,
+            fnh: self.fnh,
+            fnf: self.fnf,
+            brh: self.brh,
+            brf: self.brf,
+            sh: self.sh,
+            sf: self.sf,
+        }
+    }
+}
+
+/// Functions block (`FN`/`FNDA`), returns (FNF, FNH).
+fn emit_functions(lcov: &mut String, fn_map: Option<&FnHits>, file: &PathBuf) -> (u64, u64) {
+    let Some(fns) = fn_map.and_then(|m| m.get(file)) else {
+        return (0, 0);
     };
-    (lcov, rows, total)
+    let mut fv: Vec<(&(u32, String), &u64)> = fns.iter().collect();
+    fv.sort_by(|a, b| a.0 .0.cmp(&b.0 .0).then(a.0 .1.cmp(&b.0 .1)));
+    for ((line, name), _) in &fv {
+        lcov.push_str(&format!("FN:{},{}\n", line, name));
+    }
+    for ((_, name), c) in &fv {
+        lcov.push_str(&format!("FNDA:{},{}\n", c, name));
+    }
+    let fnf = fv.len() as u64;
+    let fnh = fv.iter().filter(|(_, c)| **c > 0).count() as u64;
+    lcov.push_str(&format!("FNF:{fnf}\nFNH:{fnh}\n"));
+    (fnf, fnh)
+}
+
+/// Branches block (`BRDA`), returns (BRF, BRH).
+fn emit_branches(lcov: &mut String, br_map: Option<&BrHits>, file: &PathBuf) -> (u64, u64) {
+    let Some(brs) = br_map.and_then(|m| m.get(file)) else {
+        return (0, 0);
+    };
+    let mut bv: Vec<(&BranchKey, &BranchHit)> = brs.iter().collect();
+    bv.sort_by(|a, b| a.0.cmp(b.0));
+    for ((block, branch), (line, reached, taken)) in &bv {
+        // lcov: taken is "-" when the containing block never executed.
+        let t = if *reached {
+            taken.to_string()
+        } else {
+            "-".to_string()
+        };
+        lcov.push_str(&format!("BRDA:{},{},{},{}\n", line, block, branch, t));
+    }
+    let brf = bv.len() as u64;
+    let brh = bv
+        .iter()
+        .filter(|(_, (_, reached, taken))| *reached && *taken > 0)
+        .count() as u64;
+    lcov.push_str(&format!("BRF:{brf}\nBRH:{brh}\n"));
+    (brf, brh)
+}
+
+/// Lines block (`DA`/`LF`/`LH`), returns (LF, LH).
+fn emit_lines(lcov: &mut String, lines: &LineHits) -> (u64, u64) {
+    let mut nums: Vec<(&u32, &u64)> = lines.iter().collect();
+    nums.sort_by_key(|(l, _)| **l);
+    let lf = nums.len() as u64;
+    let lh = nums.iter().filter(|(_, c)| **c > 0).count() as u64;
+    for (l, c) in &nums {
+        lcov.push_str(&format!("DA:{},{}\n", l, c));
+    }
+    lcov.push_str(&format!("LF:{lf}\nLH:{lh}\nend_of_record\n"));
+    (lf, lh)
+}
+
+/// Statements (no lcov field — counted for json-summary/text/html + the gate).
+fn count_statements(st_map: Option<&StHits>, file: &PathBuf) -> (u64, u64) {
+    let Some(sts) = st_map.and_then(|m| m.get(file)) else {
+        return (0, 0);
+    };
+    let sf = sts.len() as u64;
+    let sh = sts.values().filter(|(_, c)| *c > 0).count() as u64;
+    (sf, sh)
 }
 
 /// The `text` reporter's terminal summary; `outs` = the report files written (may be empty).
