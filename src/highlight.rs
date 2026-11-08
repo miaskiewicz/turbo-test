@@ -130,6 +130,11 @@ fn regex_literal(s: &str, start: usize) -> usize {
             _ => break,
         }
     }
+    regex_literal_tail(s, i)
+}
+
+/// After the body: consume the closing `/` and its flags, a trailing `\`, or stop.
+fn regex_literal_tail(s: &str, mut i: usize) -> usize {
     match at(s, i) {
         Some('/') => {
             i += 1;
@@ -146,22 +151,14 @@ fn regex_literal(s: &str, start: usize) -> usize {
 /// js-tokens' `Punctuator`, its alternatives in order: the end, if one matches at `i`.
 fn punctuator(s: &str, i: usize) -> Option<usize> {
     let r = &s[i..];
-    for p in ["--", "++", "=>", "..."] {
-        if r.starts_with(p) {
-            return Some(i + p.len());
-        }
+    if let Some(end) = punctuator_fixed(r, i) {
+        return Some(end);
     }
-    // \??\.(?!\d)
-    let not_digit = |j: usize| !at(s, j).is_some_and(|c| c.is_ascii_digit());
-    if r.starts_with("?.") && not_digit(i + 2) {
-        return Some(i + 2);
-    }
-    if r.starts_with('.') && not_digit(i + 1) {
-        return Some(i + 1);
+    if let Some(end) = punctuator_dot(s, r, i) {
+        return Some(end);
     }
     // (?:&&|\|\||\?\?|[+\-%&|^]|\*{1,2}|<{1,2}|>{1,3}|!=?|={1,2}|\/(?![\/*]))=?
-    let op = operator_len(s, i);
-    if let Some(n) = op {
+    if let Some(n) = operator_len(s, i) {
         let end = i + n;
         return Some(if s[end..].starts_with('=') {
             end + 1
@@ -173,6 +170,28 @@ fn punctuator(s: &str, i: usize) -> Option<usize> {
         Some('?' | '~' | ',' | ':' | ';' | '[' | ']' | '(' | ')' | '{' | '}') => Some(i + 1),
         _ => None,
     }
+}
+
+/// Fixed-length punctuators: `--`, `++`, `=>`, `...`.
+fn punctuator_fixed(r: &str, i: usize) -> Option<usize> {
+    for p in ["--", "++", "=>", "..."] {
+        if r.starts_with(p) {
+            return Some(i + p.len());
+        }
+    }
+    None
+}
+
+/// `?.` / `.` when not followed by a digit (`\??\.(?!\d)`).
+fn punctuator_dot(s: &str, r: &str, i: usize) -> Option<usize> {
+    let not_digit = |j: usize| !at(s, j).is_some_and(|c| c.is_ascii_digit());
+    if r.starts_with("?.") && not_digit(i + 2) {
+        return Some(i + 2);
+    }
+    if r.starts_with('.') && not_digit(i + 1) {
+        return Some(i + 1);
+    }
+    None
 }
 
 /// The length of the operator (before its optional `=`) at `i`.
@@ -200,21 +219,25 @@ fn operator_len(s: &str, i: usize) -> Option<usize> {
 /// `\\u[\da-fA-F]{4}|\\u\{[\da-fA-F]+\}` at `i`: its end.
 fn unicode_escape(s: &str, i: usize) -> Option<usize> {
     let r = s.get(i..)?;
+    let body = r.strip_prefix("\\u")?;
+    if let Some(end) = unicode_escape_fixed(body) {
+        return Some(i + 2 + end);
+    }
+    unicode_escape_braced(body).map(|end| i + 2 + end)
+}
+
+/// `[\da-fA-F]{4}`: 4 if the next four characters are all hex.
+fn unicode_escape_fixed(body: &str) -> Option<usize> {
     let hex = |c: char| c.is_ascii_hexdigit();
-    if !r.starts_with("\\u") {
-        return None;
-    }
-    let r = &r[2..];
-    if r.len() >= 4 && r[..4].chars().all(hex) {
-        return Some(i + 6);
-    }
-    if let Some(body) = r.strip_prefix('{') {
-        let n = body.chars().take_while(|c| hex(*c)).count();
-        if n > 0 && body[n..].starts_with('}') {
-            return Some(i + 3 + n + 1);
-        }
-    }
-    None
+    (body.len() >= 4 && body[..4].chars().all(hex)).then_some(4)
+}
+
+/// `\{[\da-fA-F]+\}`: the length including both braces.
+fn unicode_escape_braced(body: &str) -> Option<usize> {
+    let hex = |c: char| c.is_ascii_hexdigit();
+    let inner = body.strip_prefix('{')?;
+    let n = inner.chars().take_while(|c| hex(*c)).count();
+    (n > 0 && inner[n..].starts_with('}')).then_some(1 + n + 1)
 }
 
 /// `(\x23?)(?=[$_\p{ID_Start}\\])(?:[$_‌‍\p{ID_Continue}]|\\u…)+`: the end and
@@ -311,23 +334,33 @@ fn numeric_prefixed_or_bigint(s: &str, i: usize) -> Option<usize> {
     let ch = |j: usize| b.get(j).map(|x| *x as char);
     let dec = |c: char| c.is_ascii_digit();
     if ch(i) == Some('0') {
-        let radix: Option<fn(char) -> bool> = match ch(i + 1) {
-            Some('x' | 'X') => Some(|c: char| c.is_ascii_hexdigit()),
-            Some('o' | 'O') => Some(|c: char| ('0'..='7').contains(&c)),
-            Some('b' | 'B') => Some(|c: char| c == '0' || c == '1'),
-            _ => None,
-        };
-        if let Some(e) = radix.and_then(|r| digits(s, i + 2, r)) {
-            return Some(if ch(e) == Some('n') { e + 1 } else { e });
-        }
-        if ch(i + 1) == Some('n') {
-            return Some(i + 2);
+        if let Some(end) = numeric_zero_prefix(s, i, ch(i + 1)) {
+            return Some(end);
         }
     }
     if ch(i).is_some_and(|c| ('1'..='9').contains(&c)) {
         if let Some(e) = digits(s, i, dec).filter(|e| ch(*e) == Some('n')) {
             return Some(e + 1);
         }
+    }
+    None
+}
+
+/// After `0`: a based-radix run (`0xH`, `0oO`, `0bB`), or a plain `0n` BigInt.
+fn numeric_zero_prefix(s: &str, i: usize, next_ch: Option<char>) -> Option<usize> {
+    let b = s.as_bytes();
+    let ch = |j: usize| b.get(j).map(|x| *x as char);
+    let radix: Option<fn(char) -> bool> = match next_ch {
+        Some('x' | 'X') => Some(|c: char| c.is_ascii_hexdigit()),
+        Some('o' | 'O') => Some(|c: char| ('0'..='7').contains(&c)),
+        Some('b' | 'B') => Some(|c: char| c == '0' || c == '1'),
+        _ => None,
+    };
+    if let Some(e) = radix.and_then(|r| digits(s, i + 2, r)) {
+        return Some(if ch(e) == Some('n') { e + 1 } else { e });
+    }
+    if next_ch == Some('n') {
+        return Some(i + 2);
     }
     None
 }
@@ -519,13 +552,8 @@ impl<'a> Lexer<'a> {
     /// A JavaScript-mode token at `i`; whether there was one.
     fn js(&mut self, mode: Mode) -> bool {
         let (input, i) = (self.input, self.i);
-        if at(input, i) == Some('/') && self.expression_next() {
-            let e = regex_literal(input, i);
-            if e > i {
-                self.postfix_inc_dec = true;
-                self.push_last(Kind::RegularExpressionLiteral, e);
-                return true;
-            }
+        if self.js_try_regex(input, i) {
+            return true;
         }
         if let Some(e) = punctuator(input, i) {
             self.js_punctuator(mode, e);
@@ -535,6 +563,25 @@ impl<'a> Lexer<'a> {
             self.js_identifier(e, private);
             return true;
         }
+        self.js_try_literal_or_template(input, i)
+    }
+
+    /// Try a regex literal at `i` (only when the cursor is at `/` in an expression context).
+    fn js_try_regex(&mut self, input: &'a str, i: usize) -> bool {
+        if at(input, i) != Some('/') || !self.expression_next() {
+            return false;
+        }
+        let e = regex_literal(input, i);
+        if e <= i {
+            return false;
+        }
+        self.postfix_inc_dec = true;
+        self.push_last(Kind::RegularExpressionLiteral, e);
+        true
+    }
+
+    /// Try the remaining JS token forms: string, numeric, or template.
+    fn js_try_literal_or_template(&mut self, input: &'a str, i: usize) -> bool {
         if let Some(e) = string_literal(input, i) {
             self.postfix_inc_dec = true;
             self.push_last(Kind::StringLiteral, e);
@@ -596,33 +643,9 @@ impl<'a> Lexer<'a> {
         let p = &input[self.i..e];
         let mut next_last = p.to_string();
         match p {
-            "(" => {
-                if self.last == "?NonExpressionParenKeyword" {
-                    self.stack.push(Mode {
-                        tag: Tag::JsNonExpressionParen,
-                        nesting: self.paren_nesting as usize,
-                    });
-                }
-                self.paren_nesting += 1;
-                self.postfix_inc_dec = false;
-            }
-            ")" => {
-                self.paren_nesting -= 1;
-                self.postfix_inc_dec = true;
-                if mode.tag == Tag::JsNonExpressionParen
-                    && self.paren_nesting == mode.nesting as i64
-                {
-                    self.stack.pop();
-                    next_last = "?NonExpressionParenEnd".into();
-                    self.postfix_inc_dec = false;
-                }
-            }
-            "{" => {
-                let is_expression =
-                    !not_preceding_object_literal(&self.last) && self.expression_next();
-                self.braces.push(is_expression);
-                self.postfix_inc_dec = false;
-            }
+            "(" => self.js_punct_open_paren(),
+            ")" => self.js_punct_close_paren(mode, &mut next_last),
+            "{" => self.js_punct_open_brace(),
             "}" => match self.js_brace_close(mode) {
                 Some(n) => next_last = n,
                 None => return,
@@ -648,6 +671,33 @@ impl<'a> Lexer<'a> {
         }
         self.last = next_last;
         self.push(Kind::Punctuator, e);
+    }
+
+    fn js_punct_open_paren(&mut self) {
+        if self.last == "?NonExpressionParenKeyword" {
+            self.stack.push(Mode {
+                tag: Tag::JsNonExpressionParen,
+                nesting: self.paren_nesting as usize,
+            });
+        }
+        self.paren_nesting += 1;
+        self.postfix_inc_dec = false;
+    }
+
+    fn js_punct_close_paren(&mut self, mode: Mode, next_last: &mut String) {
+        self.paren_nesting -= 1;
+        self.postfix_inc_dec = true;
+        if mode.tag == Tag::JsNonExpressionParen && self.paren_nesting == mode.nesting as i64 {
+            self.stack.pop();
+            *next_last = "?NonExpressionParenEnd".into();
+            self.postfix_inc_dec = false;
+        }
+    }
+
+    fn js_punct_open_brace(&mut self) {
+        let is_expression = !not_preceding_object_literal(&self.last) && self.expression_next();
+        self.braces.push(is_expression);
+        self.postfix_inc_dec = false;
     }
 
     /// A `}` closing a template interpolation or a JSX one (pushed here: `None`), else a

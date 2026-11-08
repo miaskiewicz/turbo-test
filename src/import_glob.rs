@@ -69,11 +69,28 @@ pub fn expand(file: &Path, src: &str, root: &Path, aliases: &[(String, String)])
     let (calls, invalid) = partition_parsed(parsed);
     let invalid = invalid.or_else(|| first_unanchored(&calls, dir, root, aliases));
     if let Some(message) = invalid {
-        let mut out = src.to_string();
-        let message = serde_json::to_string(&message).ok()?;
-        out.insert_str(after_hashbang(src), &format!("throw new Error({message});"));
-        return Some(out);
+        return expand_throw(src, &message);
     }
+    expand_replace(src, file, dir, root, aliases, &calls)
+}
+
+/// Expand to a module that throws vite's error on first evaluation.
+fn expand_throw(src: &str, message: &str) -> Option<String> {
+    let mut out = src.to_string();
+    let message = serde_json::to_string(message).ok()?;
+    out.insert_str(after_hashbang(src), &format!("throw new Error({message});"));
+    Some(out)
+}
+
+/// Expand each call into its `({...})` entries plus the eager imports (hoisted).
+fn expand_replace(
+    src: &str,
+    file: &Path,
+    dir: &Path,
+    root: &Path,
+    aliases: &[(String, String)],
+    calls: &[Call],
+) -> Option<String> {
     let mut out = src.to_string();
     let mut imports: Vec<String> = Vec::new();
     for (i, call) in calls.iter().enumerate().rev() {
@@ -515,20 +532,27 @@ fn strict_equal(l: &Value, r: &Value) -> Option<bool> {
 /// `l <op> r` for the operators and operand kinds this evaluator models.
 fn binary(op: BinaryOperator, l: Value, r: Value) -> Result<Value, Eval> {
     use BinaryOperator as B;
-    let num = |n: f64| Ok(Value::Num(n));
-    let compare = |o: Option<std::cmp::Ordering>| {
-        Ok(Value::Bool(o.is_some_and(|o| match op {
-            B::LessThan => o.is_lt(),
-            B::LessEqualThan => o.is_le(),
-            B::GreaterThan => o.is_gt(),
-            _ => o.is_ge(),
-        })))
-    };
-    let relational = matches!(
-        op,
-        B::LessThan | B::LessEqualThan | B::GreaterThan | B::GreaterEqualThan
-    );
+    if let Some(v) = binary_arithmetic(op, &l, &r) {
+        return v;
+    }
+    if is_relational(op) {
+        return relational_result(op, l, r);
+    }
     match (op, l, r) {
+        (B::StrictEquality | B::StrictInequality, l, r) => {
+            let eq = strict_equal(&l, &r).ok_or(Eval::Unsupported)?;
+            Ok(Value::Bool(eq == (op == B::StrictEquality)))
+        }
+        (B::Equality | B::Inequality, l, r) => equality_result(op, l, r),
+        _ => Err(Eval::Unsupported),
+    }
+}
+
+/// `l <arith> r` for the arithmetic/concat operators; `None` when `op` is not one of them.
+fn binary_arithmetic(op: BinaryOperator, l: &Value, r: &Value) -> Option<Result<Value, Eval>> {
+    use BinaryOperator as B;
+    let num = |n: f64| Ok(Value::Num(n));
+    Some(match (op, l, r) {
         (B::Addition, Value::Num(a), Value::Num(b)) => num(a + b),
         (B::Addition, l @ (Value::Str(_) | Value::Num(_)), r @ (Value::Str(_) | Value::Num(_))) => {
             Ok(Value::Str(l.to_js_string() + &r.to_js_string()))
@@ -537,28 +561,47 @@ fn binary(op: BinaryOperator, l: Value, r: Value) -> Result<Value, Eval> {
         (B::Multiplication, Value::Num(a), Value::Num(b)) => num(a * b),
         (B::Division, Value::Num(a), Value::Num(b)) => num(a / b),
         (B::Remainder, Value::Num(a), Value::Num(b)) => num(a % b),
-        (_, Value::Num(a), Value::Num(b)) if relational => compare(a.partial_cmp(&b)),
-        (_, Value::Str(a), Value::Str(b)) if relational => {
-            compare(Some(a.encode_utf16().cmp(b.encode_utf16())))
-        }
-        (B::StrictEquality | B::StrictInequality, l, r) => {
-            let eq = strict_equal(&l, &r).ok_or(Eval::Unsupported)?;
-            Ok(Value::Bool(eq == (op == B::StrictEquality)))
-        }
-        (B::Equality | B::Inequality, l, r) => {
-            let nullish = |v: &Value| matches!(v, Value::Undefined | Value::Null);
-            let eq = if nullish(&l) || nullish(&r) {
-                nullish(&l) && nullish(&r)
-            } else if std::mem::discriminant(&l) == std::mem::discriminant(&r) {
-                strict_equal(&l, &r).ok_or(Eval::Unsupported)?
-            } else {
-                // a coercing comparison is not modelled
-                return Err(Eval::Unsupported);
-            };
-            Ok(Value::Bool(eq == (op == B::Equality)))
-        }
+        _ => return None,
+    })
+}
+
+fn is_relational(op: BinaryOperator) -> bool {
+    use BinaryOperator as B;
+    matches!(
+        op,
+        B::LessThan | B::LessEqualThan | B::GreaterThan | B::GreaterEqualThan
+    )
+}
+
+fn relational_result(op: BinaryOperator, l: Value, r: Value) -> Result<Value, Eval> {
+    use BinaryOperator as B;
+    let compare = |o: Option<std::cmp::Ordering>| {
+        Ok(Value::Bool(o.is_some_and(|o| match op {
+            B::LessThan => o.is_lt(),
+            B::LessEqualThan => o.is_le(),
+            B::GreaterThan => o.is_gt(),
+            _ => o.is_ge(),
+        })))
+    };
+    match (l, r) {
+        (Value::Num(a), Value::Num(b)) => compare(a.partial_cmp(&b)),
+        (Value::Str(a), Value::Str(b)) => compare(Some(a.encode_utf16().cmp(b.encode_utf16()))),
         _ => Err(Eval::Unsupported),
     }
+}
+
+fn equality_result(op: BinaryOperator, l: Value, r: Value) -> Result<Value, Eval> {
+    use BinaryOperator as B;
+    let nullish = |v: &Value| matches!(v, Value::Undefined | Value::Null);
+    let eq = if nullish(&l) || nullish(&r) {
+        nullish(&l) && nullish(&r)
+    } else if std::mem::discriminant(&l) == std::mem::discriminant(&r) {
+        strict_equal(&l, &r).ok_or(Eval::Unsupported)?
+    } else {
+        // a coercing comparison is not modelled
+        return Err(Eval::Unsupported);
+    };
+    Ok(Value::Bool(eq == (op == B::Equality)))
 }
 
 /// JS `Number.prototype.toString()` of `n`.
@@ -631,11 +674,26 @@ fn eval_literal(e: &Expression) -> Result<Option<Value>, Eval> {
 
 /// Compound expression forms of `eval` (operators, members, collections).
 fn eval_compound(e: &Expression) -> Result<Value, Eval> {
-    Ok(match e {
+    if let Some(v) = eval_operator(e)? {
+        return Ok(v);
+    }
+    eval_members_collections(e)
+}
+
+/// Unary/binary/logical/conditional operators; `None` when `e` is not one.
+fn eval_operator(e: &Expression) -> Result<Option<Value>, Eval> {
+    Ok(Some(match e {
         Expression::UnaryExpression(u) => eval_unary(u)?,
         Expression::BinaryExpression(b) => eval_binary(b)?,
         Expression::LogicalExpression(l) => eval_logical(l)?,
         Expression::ConditionalExpression(c) => eval_conditional(c)?,
+        _ => return Ok(None),
+    }))
+}
+
+/// Static/computed member accesses, array/object literals.
+fn eval_members_collections(e: &Expression) -> Result<Value, Eval> {
+    Ok(match e {
         Expression::StaticMemberExpression(m) => eval_static_member(m)?,
         Expression::ComputedMemberExpression(m) => eval_computed(m)?,
         Expression::ArrayExpression(a) => eval_array(a)?,
@@ -748,17 +806,21 @@ fn eval_object(o: &ObjectExpression) -> Result<Value, Eval> {
     for p in &o.properties {
         match p {
             ObjectPropertyKind::SpreadProperty(s) => eval_spread(&s.argument, &mut props)?,
-            ObjectPropertyKind::ObjectProperty(p) => {
-                if p.kind != PropertyKind::Init || p.method {
-                    return Err(Eval::Unsupported);
-                }
-                let key = eval_property_key(p)?;
-                let value = eval(&p.value)?;
-                define(&mut props, key, value);
-            }
+            ObjectPropertyKind::ObjectProperty(p) => eval_plain_property(p, &mut props)?,
         }
     }
     Ok(Value::Object(props))
+}
+
+/// Define one `{ key: value }` property into `props`. Rejects accessor/method properties.
+fn eval_plain_property(p: &ObjectProperty, props: &mut Vec<(String, Value)>) -> Result<(), Eval> {
+    if p.kind != PropertyKind::Init || p.method {
+        return Err(Eval::Unsupported);
+    }
+    let key = eval_property_key(p)?;
+    let value = eval(&p.value)?;
+    define(props, key, value);
+    Ok(())
 }
 
 /// `...argument` spread into `props`.
@@ -1036,29 +1098,8 @@ fn parse_call(it: &CallExpression) -> Option<Parsed> {
         base: None,
         case_sensitive: true,
     };
-    let literals = "Could only use literals".to_string();
-    match it.arguments[0]
-        .as_expression()
-        .map(|e| e.get_inner_expression())
-    {
-        Some(Expression::ArrayExpression(a)) => {
-            for el in &a.elements {
-                match el {
-                    // a hole is skipped
-                    ArrayExpressionElement::Elision(_) => {}
-                    ArrayExpressionElement::SpreadElement(_) => return syntax(literals),
-                    el => match glob_literal(el.to_expression()) {
-                        Ok(p) => call.patterns.push(p),
-                        Err(m) => return syntax(m),
-                    },
-                }
-            }
-        }
-        Some(e) => match glob_literal(e) {
-            Ok(p) => call.patterns.push(p),
-            Err(m) => return syntax(m),
-        },
-        None => return syntax(literals),
+    if let Err(m) = collect_glob_patterns(&it.arguments[0], &mut call) {
+        return syntax(m);
     }
     if let Some(arg) = it.arguments.get(1) {
         match apply_glob_options_arg(arg, &mut call) {
@@ -1068,6 +1109,30 @@ fn parse_call(it: &CallExpression) -> Option<Parsed> {
         }
     }
     Some(Parsed::Call(call))
+}
+
+/// Collect the first-argument glob literals (single string or array of strings) into `call`.
+/// Returns the vite-shaped error message on syntax failure.
+fn collect_glob_patterns(arg: &oxc_ast::ast::Argument, call: &mut Call) -> Result<(), String> {
+    let literals = || "Could only use literals".to_string();
+    match arg.as_expression().map(|e| e.get_inner_expression()) {
+        Some(Expression::ArrayExpression(a)) => {
+            for el in &a.elements {
+                match el {
+                    // a hole is skipped
+                    ArrayExpressionElement::Elision(_) => {}
+                    ArrayExpressionElement::SpreadElement(_) => return Err(literals()),
+                    el => call.patterns.push(glob_literal(el.to_expression())?),
+                }
+            }
+            Ok(())
+        }
+        Some(e) => {
+            call.patterns.push(glob_literal(e)?);
+            Ok(())
+        }
+        None => Err(literals()),
+    }
 }
 
 /// Outcome of parsing the second argument of `import.meta.glob(...)`: the options were applied in
@@ -1198,14 +1263,7 @@ fn collect_pattern_matches(
     let mut files = Vec::new();
     walk_dir(start, "", dots, call.exhaustive, &mut files);
     for (rel, abs) in files {
-        let excluded = neg.iter().any(|(nd, nrest, _)| {
-            abs.strip_prefix(nd)
-                .is_ok_and(|r| glob(nrest, &crate::coverage::slash_path(r)))
-        });
-        if !glob(rest, &rel)
-            || excluded
-            || crate::canon::canonicalize(&abs).unwrap_or_else(|_| abs.clone()) == me
-        {
+        if skip_candidate(&rel, &abs, rest, neg, me, glob) {
             continue;
         }
         let key = match_key(base, relative, dir, root, &abs);
@@ -1214,6 +1272,25 @@ fn collect_pattern_matches(
         }
         found.push((key, relative_spec(dir, &abs)));
     }
+}
+
+/// Whether a walked candidate (`rel`, `abs`) fails the positive, negative, or self-exclude tests.
+fn skip_candidate(
+    rel: &str,
+    abs: &Path,
+    rest: &str,
+    neg: &[(PathBuf, String, bool)],
+    me: &Path,
+    glob: &dyn Fn(&str, &str) -> bool,
+) -> bool {
+    if !glob(rest, rel) {
+        return true;
+    }
+    let excluded = neg.iter().any(|(nd, nrest, _)| {
+        abs.strip_prefix(nd)
+            .is_ok_and(|r| glob(nrest, &crate::coverage::slash_path(r)))
+    });
+    excluded || crate::canon::canonicalize(abs).unwrap_or_else(|_| abs.to_path_buf()) == me
 }
 
 /// The key vite writes for match `abs`: relative to `base` when there is one, else to the
@@ -1313,7 +1390,7 @@ fn walk_dir(dir: &Path, rel: &str, dots: bool, exhaustive: bool, out: &mut Vec<(
     };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if (!dots && name.starts_with('.')) || (!exhaustive && name == "node_modules") {
+        if walk_dir_skip(&name, dots, exhaustive) {
             continue;
         }
         let path = e.path();
@@ -1328,6 +1405,10 @@ fn walk_dir(dir: &Path, rel: &str, dots: bool, exhaustive: bool, out: &mut Vec<(
             out.push((r, path));
         }
     }
+}
+
+fn walk_dir_skip(name: &str, dots: bool, exhaustive: bool) -> bool {
+    (!dots && name.starts_with('.')) || (!exhaustive && name == "node_modules")
 }
 
 /// `target` as an import specifier from `dir` (`./x`, `../x`).

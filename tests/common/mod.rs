@@ -173,29 +173,7 @@ pub fn command(
     std::fs::create_dir_all(&tmp).unwrap();
     let mut cmd = Command::new(exe);
     cmd.current_dir(cwd).args(args);
-    for (k, _) in std::env::vars() {
-        if k.starts_with("TURBO_") {
-            cmd.env_remove(k);
-        }
-    }
-    // CI variables switch snapshots to vitest's CI mode (a missing snapshot fails): every
-    // variable std-env's isCI reads is removed; the tests set them themselves where they check
-    // that.
-    for k in turbo_test::ci::env_vars() {
-        cmd.env_remove(k);
-    }
-    // an AI agent running the tests (std-env isAgent) would switch the default reporter to
-    // vitest's agent reporter: every variable it reads is removed too
-    for k in turbo_test::agent::AGENT_VARS
-        .iter()
-        .chain(&["EDITOR", "TERM_PROGRAM"])
-    {
-        cmd.env_remove(k);
-    }
-    // vitest's colours (tinyrainbow) follow these: the tests set them where they check colours
-    for k in ["NO_COLOR", "FORCE_COLOR", "FORCE_TTY", "TERM"] {
-        cmd.env_remove(k);
-    }
+    scrub_test_env(&mut cmd);
     // the tests written against turbo-test's own PASS / FAIL lines keep them; the vitest human
     // reporters (turbo-test#94) are checked with TURBO_LEGACY_REPORTER=0
     // the chai cli.js passes (turbo-test#160): the repo's own, installed by `npm ci`
@@ -214,6 +192,29 @@ pub fn command(
         cmd.env_remove(k);
     }
     cmd
+}
+
+/// Remove every ambient env var the test-run environment should not inherit from the surrounding
+/// shell: TURBO_* overrides, CI-marker variables (std-env's isCI), agent-marker variables
+/// (std-env's isAgent), and tinyrainbow's colour switches (tests re-set these where checked).
+fn scrub_test_env(cmd: &mut Command) {
+    for (k, _) in std::env::vars() {
+        if k.starts_with("TURBO_") {
+            cmd.env_remove(k);
+        }
+    }
+    for k in turbo_test::ci::env_vars() {
+        cmd.env_remove(k);
+    }
+    for k in turbo_test::agent::AGENT_VARS
+        .iter()
+        .chain(&["EDITOR", "TERM_PROGRAM"])
+    {
+        cmd.env_remove(k);
+    }
+    for k in ["NO_COLOR", "FORCE_COLOR", "FORCE_TTY", "TERM"] {
+        cmd.env_remove(k);
+    }
 }
 
 /// Run the `turbo-test` CLI (see `run_exe`).

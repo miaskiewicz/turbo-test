@@ -953,34 +953,41 @@ it('fine', () => { expect(Object.keys(import.meta.glob('./src/ok/*.ts'))).toEqua
         for (f, c) in files {
             p.file(f, c);
         }
-        let envs: &[&[(&str, &str)]] = if esbuild {
-            &[
-                &[],
-                &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
-            ]
-        } else {
-            &[&[]]
-        };
-        for env in envs {
-            let r = turbo_test(&p.dir, &[], env);
-            assert_eq!(r.code, Some(1), "esbuild={esbuild} {env:?}\n{}", r.all());
-            assert!(
-                r.stdout.contains("Test Files  2 failed | 1 passed (3)")
-                    && r.stdout.contains("Tests  1 passed (1)"),
-                "esbuild={esbuild} {env:?}\n{}",
-                r.all()
-            );
-            for (file, pattern) in [("a.test.ts", "sub/*.ts"), ("b.test.ts", "ok/x.ts")] {
-                let want = format!(
-                    "(Error: Invalid glob: \"{pattern}\" (resolved: \"{pattern}\"). It must start with '/' or './')"
-                );
-                assert!(
-                    load_error_line(&r, file).ends_with(&want),
-                    "esbuild={esbuild} {env:?}\n{}",
-                    r.all()
-                );
-            }
+        for env in invalid_glob_envs(esbuild) {
+            assert_invalid_glob_run(&p, esbuild, env);
         }
+    }
+}
+
+fn invalid_glob_envs(esbuild: bool) -> &'static [&'static [(&'static str, &'static str)]] {
+    if esbuild {
+        &[
+            &[],
+            &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
+        ]
+    } else {
+        &[&[]]
+    }
+}
+
+fn assert_invalid_glob_run(p: &Project, esbuild: bool, env: &[(&str, &str)]) {
+    let r = turbo_test(&p.dir, &[], env);
+    assert_eq!(r.code, Some(1), "esbuild={esbuild} {env:?}\n{}", r.all());
+    assert!(
+        r.stdout.contains("Test Files  2 failed | 1 passed (3)")
+            && r.stdout.contains("Tests  1 passed (1)"),
+        "esbuild={esbuild} {env:?}\n{}",
+        r.all()
+    );
+    for (file, pattern) in [("a.test.ts", "sub/*.ts"), ("b.test.ts", "ok/x.ts")] {
+        let want = format!(
+            "(Error: Invalid glob: \"{pattern}\" (resolved: \"{pattern}\"). It must start with '/' or './')"
+        );
+        assert!(
+            load_error_line(&r, file).ends_with(&want),
+            "esbuild={esbuild} {env:?}\n{}",
+            r.all()
+        );
     }
 }
 
@@ -1037,35 +1044,31 @@ it('folds the options as vite evaluates them', async () => {
         for (f, c) in &files {
             p.file(f, c);
         }
-        let envs: &[&[(&str, &str)]] = if esbuild {
-            &[
-                &[],
-                &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
-            ]
-        } else {
-            &[&[]]
-        };
-        for env in envs {
-            let r = turbo_test(&p.dir, &[], env);
-            assert_eq!(r.code, Some(1), "esbuild={esbuild} {env:?}\n{}", r.all());
-            assert!(
-                r.stdout.contains("Test Files  3 failed | 1 passed (4)")
-                    && r.stdout.contains("Tests  1 passed (1)"),
-                "esbuild={esbuild} {env:?}\n{}",
-                r.all()
-            );
-            for (file, message) in [
-                ("base.test.ts", "Option \"base\" must start with '/', './' or '../', but got \"lib\""),
-                ("num.test.ts", "Invalid glob import syntax: Expected the second argument to be an object literal, but got \"Literal\""),
-                ("static.test.ts", "Vite is unable to parse the glob options as the value is not static"),
-            ] {
-                assert!(
-                    load_error_line(&r, file).ends_with(&format!("(Error: {message})")),
-                    "esbuild={esbuild} {env:?}\n{}",
-                    r.all()
-                );
-            }
+        for env in invalid_glob_envs(esbuild) {
+            assert_glob_options_rejected(&p, esbuild, env);
         }
+    }
+}
+
+fn assert_glob_options_rejected(p: &Project, esbuild: bool, env: &[(&str, &str)]) {
+    let r = turbo_test(&p.dir, &[], env);
+    assert_eq!(r.code, Some(1), "esbuild={esbuild} {env:?}\n{}", r.all());
+    assert!(
+        r.stdout.contains("Test Files  3 failed | 1 passed (4)")
+            && r.stdout.contains("Tests  1 passed (1)"),
+        "esbuild={esbuild} {env:?}\n{}",
+        r.all()
+    );
+    for (file, message) in [
+        ("base.test.ts", "Option \"base\" must start with '/', './' or '../', but got \"lib\""),
+        ("num.test.ts", "Invalid glob import syntax: Expected the second argument to be an object literal, but got \"Literal\""),
+        ("static.test.ts", "Vite is unable to parse the glob options as the value is not static"),
+    ] {
+        assert!(
+            load_error_line(&r, file).ends_with(&format!("(Error: {message})")),
+            "esbuild={esbuild} {env:?}\n{}",
+            r.all()
+        );
     }
 }
 
@@ -1117,40 +1120,36 @@ it('evaluates members and matches case-insensitively', () => {
         for (f, c) in &files {
             p.file(f, c);
         }
-        let envs: &[&[(&str, &str)]] = if esbuild {
-            &[
-                &[],
-                &[("TURBO_NATIVE_CJS", "0"), ("TURBO_NATIVE_DEPS", "0")],
-            ]
-        } else {
-            &[&[]]
-        };
-        for env in envs {
-            let r = turbo_test(&p.dir, &[], env);
-            assert_eq!(r.code, Some(1), "esbuild={esbuild} {env:?}\n{}", r.all());
-            assert!(
-                r.stdout.contains("Test Files  2 failed | 1 passed (3)")
-                    && r.stdout.contains("Tests  1 passed (1)"),
-                "esbuild={esbuild} {env:?}\n{}",
-                r.all()
-            );
-            for (file, message) in [
-                (
-                    "member.test.ts",
-                    "Expected glob option \"eager\" to be of type boolean, but got undefined",
-                ),
-                (
-                    "nul.test.ts",
-                    "Vite is unable to parse the glob options as the value is not static",
-                ),
-            ] {
-                assert!(
-                    load_error_line(&r, file).ends_with(&format!("(Error: {message})")),
-                    "esbuild={esbuild} {env:?}\n{}",
-                    r.all()
-                );
-            }
+        for env in invalid_glob_envs(esbuild) {
+            assert_glob_member_evaluation(&p, esbuild, env);
         }
+    }
+}
+
+fn assert_glob_member_evaluation(p: &Project, esbuild: bool, env: &[(&str, &str)]) {
+    let r = turbo_test(&p.dir, &[], env);
+    assert_eq!(r.code, Some(1), "esbuild={esbuild} {env:?}\n{}", r.all());
+    assert!(
+        r.stdout.contains("Test Files  2 failed | 1 passed (3)")
+            && r.stdout.contains("Tests  1 passed (1)"),
+        "esbuild={esbuild} {env:?}\n{}",
+        r.all()
+    );
+    for (file, message) in [
+        (
+            "member.test.ts",
+            "Expected glob option \"eager\" to be of type boolean, but got undefined",
+        ),
+        (
+            "nul.test.ts",
+            "Vite is unable to parse the glob options as the value is not static",
+        ),
+    ] {
+        assert!(
+            load_error_line(&r, file).ends_with(&format!("(Error: {message})")),
+            "esbuild={esbuild} {env:?}\n{}",
+            r.all()
+        );
     }
 }
 

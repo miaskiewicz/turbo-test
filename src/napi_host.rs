@@ -419,44 +419,64 @@ impl Drop for AddonEnvs {
     fn drop(&mut self) {
         let shared = &self.0;
         // no addon's env can run JS any more
-        for item in shared.teardown.borrow().iter() {
-            if let Teardown::Env(env) = item {
-                unsafe { (**env).tearing_down = true };
-            }
-        }
+        mark_envs_tearing_down(shared);
         loop {
             let mut closing = Vec::new();
             let mut waiting = Vec::new();
-            loop {
-                let item = shared.teardown.borrow_mut().pop();
-                let Some(item) = item else { break };
-                unsafe {
-                    match item {
-                        Teardown::Env(env) if async_host::holds_env(shared, env) => {
-                            waiting.push(env)
-                        }
-                        Teardown::Env(env) => drop(Box::from_raw(env)),
-                        Teardown::Hook(env, fun, arg) => in_teardown_scope(env, || {
-                            let _ = call_addon(|| fun(arg));
-                        }),
-                        Teardown::AsyncHook(h) => in_teardown_scope((*h).env, || {
-                            let _ = call_addon(|| ((*h).hook)(h, (*h).arg));
-                        }),
-                        Teardown::Tsfn(t) => closing.push(async_host::close_for_teardown(t)),
-                    }
-                }
-            }
+            drain_teardown_items(shared, &mut closing, &mut waiting);
             if closing.is_empty() {
                 break;
             }
-            for t in closing {
-                unsafe {
-                    let env = async_host::finalize_for_teardown(t);
-                    if waiting.contains(&env) && !async_host::holds_env(shared, env) {
-                        waiting.retain(|&e| e != env);
-                        drop(Box::from_raw(env));
-                    }
-                }
+            finalize_closing_tsfns(closing, &mut waiting, shared);
+        }
+    }
+}
+
+fn mark_envs_tearing_down(shared: &Shared) {
+    for item in shared.teardown.borrow().iter() {
+        if let Teardown::Env(env) = item {
+            unsafe { (**env).tearing_down = true };
+        }
+    }
+}
+
+/// Drain the teardown list, running non-tsfn items and collecting the tsfn closers and waiting envs.
+fn drain_teardown_items(
+    shared: &Shared,
+    closing: &mut Vec<*mut async_host::Tsfn>,
+    waiting: &mut Vec<napi_env>,
+) {
+    loop {
+        let item = shared.teardown.borrow_mut().pop();
+        let Some(item) = item else { break };
+        unsafe {
+            match item {
+                Teardown::Env(env) if async_host::holds_env(shared, env) => waiting.push(env),
+                Teardown::Env(env) => drop(Box::from_raw(env)),
+                Teardown::Hook(env, fun, arg) => in_teardown_scope(env, || {
+                    let _ = call_addon(|| fun(arg));
+                }),
+                Teardown::AsyncHook(h) => in_teardown_scope((*h).env, || {
+                    let _ = call_addon(|| ((*h).hook)(h, (*h).arg));
+                }),
+                Teardown::Tsfn(t) => closing.push(async_host::close_for_teardown(t)),
+            }
+        }
+    }
+}
+
+/// Finalize each closing tsfn and, when that releases a waiting env, free it.
+fn finalize_closing_tsfns(
+    closing: Vec<*mut async_host::Tsfn>,
+    waiting: &mut Vec<napi_env>,
+    shared: &Shared,
+) {
+    for t in closing {
+        unsafe {
+            let env = async_host::finalize_for_teardown(t);
+            if waiting.contains(&env) && !async_host::holds_env(shared, env) {
+                waiting.retain(|&e| e != env);
+                drop(Box::from_raw(env));
             }
         }
     }
@@ -1807,14 +1827,7 @@ pub unsafe extern "C" fn napi_get_cb_info(
         // as Node: the info is required, and so is argc when argv is given
         let cb = info.as_ref().ok_or(napi_invalid_arg)?;
         if !argv.is_null() {
-            let want = *out_arg(argc)?;
-            let n = want.min(cb.args.len());
-            argv.copy_from_nonoverlapping(cb.args.as_ptr(), n);
-            // as in Node, slots past the actual arguments are filled with `undefined`
-            let undefined = to_napi(v8::undefined(scope(env)).into());
-            for i in n..want {
-                *argv.add(i) = undefined;
-            }
+            copy_cb_args(env, cb, argc, argv)?;
         }
         if !argc.is_null() {
             *argc = cb.args.len();
@@ -1827,6 +1840,24 @@ pub unsafe extern "C" fn napi_get_cb_info(
         }
         Ok(())
     })
+}
+
+/// Copy up to `*argc` arguments from `cb` into `argv`, filling the tail with `undefined`.
+unsafe fn copy_cb_args(
+    env: napi_env,
+    cb: &CbInfo,
+    argc: *mut usize,
+    argv: *mut napi_value,
+) -> Result<(), napi_status> {
+    let want = *out_arg(argc)?;
+    let n = want.min(cb.args.len());
+    argv.copy_from_nonoverlapping(cb.args.as_ptr(), n);
+    // as in Node, slots past the actual arguments are filled with `undefined`
+    let undefined = to_napi(v8::undefined(scope(env)).into());
+    for i in n..want {
+        *argv.add(i) = undefined;
+    }
+    Ok(())
 }
 
 #[no_mangle]
@@ -1891,62 +1922,94 @@ pub unsafe extern "C" fn napi_create_typedarray(
     js_call(env, |s| {
         let value = val_arg(arraybuffer)?;
         let out = out_arg(out)?;
-        // as Node: an ArrayBuffer or a SharedArrayBuffer (one JSArrayBuffer in V8, so a
-        // SharedArrayBuffer handle serves where V8's typed array constructors take an
-        // ArrayBuffer)
-        if !(value.is_array_buffer() || value.is_shared_array_buffer()) {
-            return Err(napi_invalid_arg);
-        }
-        let ab: v8::Local<v8::ArrayBuffer> = v8::Local::cast_unchecked(value);
-        // napi_typedarray_type codes (Node 26: 0..=11): element size and constructor name.
-        let (size, name) = match type_ {
-            0 => (1, "Int8Array"),
-            1 => (1, "Uint8Array"),
-            2 => (1, "Uint8ClampedArray"),
-            3 => (2, "Int16Array"),
-            4 => (2, "Uint16Array"),
-            5 => (4, "Int32Array"),
-            6 => (4, "Uint32Array"),
-            7 => (4, "Float32Array"),
-            8 => (8, "Float64Array"),
-            9 => (8, "BigInt64Array"),
-            10 => (8, "BigUint64Array"),
-            11 => (2, "Float16Array"),
-            // as Node: an unknown napi_typedarray_type is napi_invalid_arg
-            _ => return Err(napi_invalid_arg),
-        };
-        // As Node (THROW_RANGE_ERROR_IF_FALSE): a misaligned offset or a view running past the
-        // buffer throws a RangeError; V8's constructors would not check (or abort). `length` is
-        // in ELEMENTS; a product overflowing usize is a length error too.
-        if !byte_offset.is_multiple_of(size) {
-            let msg = format!("start offset of {name} should be a multiple of {size}");
-            return throw_range_error(s, "ERR_NAPI_INVALID_TYPEDARRAY_ALIGNMENT", &msg);
-        }
-        let end = length
-            .checked_mul(size)
-            .and_then(|n| n.checked_add(byte_offset));
-        if end.is_none_or(|end| end > ab.byte_length()) {
-            let code = "ERR_NAPI_INVALID_TYPEDARRAY_LENGTH";
-            return throw_range_error(s, code, "Invalid typed array length");
-        }
-        let (o, n) = (byte_offset, length);
-        let ta: Option<v8::Local<v8::Value>> = match type_ {
-            0 => v8::Int8Array::new(s, ab, o, n).map(Into::into),
-            1 => v8::Uint8Array::new(s, ab, o, n).map(Into::into),
-            2 => v8::Uint8ClampedArray::new(s, ab, o, n).map(Into::into),
-            3 => v8::Int16Array::new(s, ab, o, n).map(Into::into),
-            4 => v8::Uint16Array::new(s, ab, o, n).map(Into::into),
-            5 => v8::Int32Array::new(s, ab, o, n).map(Into::into),
-            6 => v8::Uint32Array::new(s, ab, o, n).map(Into::into),
-            7 => v8::Float32Array::new(s, ab, o, n).map(Into::into),
-            8 => v8::Float64Array::new(s, ab, o, n).map(Into::into),
-            9 => v8::BigInt64Array::new(s, ab, o, n).map(Into::into),
-            // (this V8 binding has no Float16Array -> Value `From`; the upcast is always valid)
-            11 => v8::Float16Array::new(s, ab, o, n).map(|t| v8::Local::cast_unchecked(t)),
-            _ => v8::BigUint64Array::new(s, ab, o, n).map(Into::into), // 10
-        };
+        let ab = typedarray_arraybuffer(value)?;
+        let (size, name) = typedarray_size_and_name(type_)?;
+        check_typedarray_offsets(s, name, size, length, byte_offset, ab.byte_length())?;
+        let ta = build_typedarray(s, type_, ab, byte_offset, length);
         *out = to_napi(ta.ok_or(napi_generic_failure)?);
         Ok(())
+    })
+}
+
+/// Validate the value is an ArrayBuffer / SharedArrayBuffer, returning the ArrayBuffer local.
+unsafe fn typedarray_arraybuffer(
+    value: v8::Local<v8::Value>,
+) -> Result<v8::Local<v8::ArrayBuffer>, napi_status> {
+    // as Node: an ArrayBuffer or a SharedArrayBuffer (one JSArrayBuffer in V8, so a
+    // SharedArrayBuffer handle serves where V8's typed array constructors take an
+    // ArrayBuffer)
+    if !(value.is_array_buffer() || value.is_shared_array_buffer()) {
+        return Err(napi_invalid_arg);
+    }
+    Ok(v8::Local::cast_unchecked(value))
+}
+
+/// As Node (THROW_RANGE_ERROR_IF_FALSE): a misaligned offset or a view running past the buffer
+/// throws a RangeError; V8's constructors would not check (or abort). `length` is in ELEMENTS; a
+/// product overflowing usize is a length error too.
+unsafe fn check_typedarray_offsets(
+    s: &mut v8::PinScope<'static, 'static>,
+    name: &str,
+    size: usize,
+    length: usize,
+    byte_offset: usize,
+    buffer_len: usize,
+) -> NapiResult {
+    if !byte_offset.is_multiple_of(size) {
+        let msg = format!("start offset of {name} should be a multiple of {size}");
+        return throw_range_error(s, "ERR_NAPI_INVALID_TYPEDARRAY_ALIGNMENT", &msg);
+    }
+    let end = length
+        .checked_mul(size)
+        .and_then(|n| n.checked_add(byte_offset));
+    if end.is_none_or(|end| end > buffer_len) {
+        let code = "ERR_NAPI_INVALID_TYPEDARRAY_LENGTH";
+        return throw_range_error(s, code, "Invalid typed array length");
+    }
+    Ok(())
+}
+
+/// Construct the typed-array view for `type_` over `ab[byte_offset..][..length]`.
+unsafe fn build_typedarray<'s>(
+    s: &mut v8::PinScope<'s, '_>,
+    type_: i32,
+    ab: v8::Local<'s, v8::ArrayBuffer>,
+    o: usize,
+    n: usize,
+) -> Option<v8::Local<'s, v8::Value>> {
+    match type_ {
+        0 => v8::Int8Array::new(s, ab, o, n).map(Into::into),
+        1 => v8::Uint8Array::new(s, ab, o, n).map(Into::into),
+        2 => v8::Uint8ClampedArray::new(s, ab, o, n).map(Into::into),
+        3 => v8::Int16Array::new(s, ab, o, n).map(Into::into),
+        4 => v8::Uint16Array::new(s, ab, o, n).map(Into::into),
+        5 => v8::Int32Array::new(s, ab, o, n).map(Into::into),
+        6 => v8::Uint32Array::new(s, ab, o, n).map(Into::into),
+        7 => v8::Float32Array::new(s, ab, o, n).map(Into::into),
+        8 => v8::Float64Array::new(s, ab, o, n).map(Into::into),
+        9 => v8::BigInt64Array::new(s, ab, o, n).map(Into::into),
+        // (this V8 binding has no Float16Array -> Value `From`; the upcast is always valid)
+        11 => v8::Float16Array::new(s, ab, o, n).map(|t| v8::Local::cast_unchecked(t)),
+        _ => v8::BigUint64Array::new(s, ab, o, n).map(Into::into), // 10
+    }
+}
+
+/// napi_typedarray_type code → (element size, constructor name). Rejects unknown codes.
+fn typedarray_size_and_name(type_: i32) -> Result<(usize, &'static str), napi_status> {
+    Ok(match type_ {
+        0 => (1, "Int8Array"),
+        1 => (1, "Uint8Array"),
+        2 => (1, "Uint8ClampedArray"),
+        3 => (2, "Int16Array"),
+        4 => (2, "Uint16Array"),
+        5 => (4, "Int32Array"),
+        6 => (4, "Uint32Array"),
+        7 => (4, "Float32Array"),
+        8 => (8, "Float64Array"),
+        9 => (8, "BigInt64Array"),
+        10 => (8, "BigUint64Array"),
+        11 => (2, "Float16Array"),
+        _ => return Err(napi_invalid_arg),
     })
 }
 
@@ -2751,9 +2814,7 @@ unsafe fn unwrap(
         }
         let obj = wrap_target(js_object)?;
         let key = wrap_key(s);
-        let held = obj.get_private(s, key).ok_or(napi_pending_exception)?;
-        let ext: v8::Local<v8::External> = held.try_into().map_err(|_| napi_invalid_arg)?;
-        let wrap = ext.value() as *mut Finalizer;
+        let wrap = read_wrap_pointer(obj, s, key)?;
         if !result.is_null() {
             *result = (*wrap).native;
         }
@@ -2764,6 +2825,17 @@ unsafe fn unwrap(
         }
         Ok(())
     })
+}
+
+/// Read the `Finalizer*` stored at `obj[wrap_key]` as an External.
+unsafe fn read_wrap_pointer(
+    obj: v8::Local<v8::Object>,
+    s: &mut v8::PinScope<'static, 'static>,
+    key: v8::Local<v8::Private>,
+) -> Result<*mut Finalizer, napi_status> {
+    let held = obj.get_private(s, key).ok_or(napi_pending_exception)?;
+    let ext: v8::Local<v8::External> = held.try_into().map_err(|_| napi_invalid_arg)?;
+    Ok(ext.value() as *mut Finalizer)
 }
 
 #[no_mangle]
@@ -2856,31 +2928,47 @@ pub unsafe extern "C" fn napi_type_tag_object(
     js_call(env, |s| {
         // as Node: an External carries its tag in its wrapper (it holds no properties)
         if let Some(wrapper) = external_wrapper(object) {
-            let tag = type_tag.as_ref().ok_or(napi_invalid_arg)?;
-            if wrapper.tag.is_some() {
-                return Err(napi_invalid_arg);
-            }
-            wrapper.tag = Some((tag.lower, tag.upper));
-            return Ok(());
+            return tag_external_wrapper(wrapper, type_tag);
         }
         let obj = tag_target(s, object)?;
         if type_tag.is_null() {
             return Err(napi_invalid_arg);
         }
-        // as Node: the tag is a BigInt of the two words, under one private key: an object that
-        // already carries a tag is napi_invalid_arg
-        let key = type_tag_key(s);
-        if obj.has_private(s, key) != Some(false) {
-            return Err(napi_invalid_arg);
-        }
-        let tag = &*type_tag;
-        let value = v8::BigInt::new_from_words(s, false, &[tag.lower, tag.upper])
-            .ok_or(napi_generic_failure)?;
-        obj.set_private(s, key, value.into())
-            .filter(|&set| set)
-            .ok_or(napi_generic_failure)?;
-        Ok(())
+        tag_private_key(s, obj, &*type_tag)
     })
+}
+
+/// Set a tag on an External's wrapper; `napi_invalid_arg` when already tagged or arg missing.
+unsafe fn tag_external_wrapper(
+    wrapper: &mut ExternalWrapper,
+    type_tag: *const napi_type_tag,
+) -> NapiResult {
+    let tag = type_tag.as_ref().ok_or(napi_invalid_arg)?;
+    if wrapper.tag.is_some() {
+        return Err(napi_invalid_arg);
+    }
+    wrapper.tag = Some((tag.lower, tag.upper));
+    Ok(())
+}
+
+/// Store a tag as a BigInt under the private key of `obj`; fail if a tag is already there.
+unsafe fn tag_private_key(
+    s: &mut v8::PinScope<'static, 'static>,
+    obj: v8::Local<v8::Object>,
+    tag: &napi_type_tag,
+) -> NapiResult {
+    // as Node: the tag is a BigInt of the two words, under one private key: an object that
+    // already carries a tag is napi_invalid_arg
+    let key = type_tag_key(s);
+    if obj.has_private(s, key) != Some(false) {
+        return Err(napi_invalid_arg);
+    }
+    let value = v8::BigInt::new_from_words(s, false, &[tag.lower, tag.upper])
+        .ok_or(napi_generic_failure)?;
+    obj.set_private(s, key, value.into())
+        .filter(|&set| set)
+        .ok_or(napi_generic_failure)?;
+    Ok(())
 }
 
 #[no_mangle]
@@ -2892,25 +2980,41 @@ pub unsafe extern "C" fn napi_check_object_type_tag(
 ) -> napi_status {
     js_call(env, |s| {
         if let Some(wrapper) = external_wrapper(object) {
-            let tag = type_tag.as_ref().ok_or(napi_invalid_arg)?;
-            *out_arg(result)? = wrapper.tag == Some((tag.lower, tag.upper));
-            return Ok(());
+            return check_external_tag(wrapper, type_tag, result);
         }
         let obj = tag_target(s, object)?;
         if type_tag.is_null() || result.is_null() {
             return Err(napi_invalid_arg);
         }
-        let key = type_tag_key(s);
-        let held = obj.get_private(s, key).ok_or(napi_generic_failure)?;
-        let tag = &*type_tag;
-        *result = v8::Local::<v8::BigInt>::try_from(held).is_ok_and(|held| {
-            // as Node: a non-negative BigInt of up to two words, missing high words being 0
-            let mut words = [0u64; 2];
-            let (negative, _) = held.to_words_array(&mut words);
-            !negative && words == [tag.lower, tag.upper]
-        });
+        *result = compare_private_tag(s, obj, &*type_tag)?;
         Ok(())
     })
+}
+
+unsafe fn check_external_tag(
+    wrapper: &ExternalWrapper,
+    type_tag: *const napi_type_tag,
+    result: *mut bool,
+) -> NapiResult {
+    let tag = type_tag.as_ref().ok_or(napi_invalid_arg)?;
+    *out_arg(result)? = wrapper.tag == Some((tag.lower, tag.upper));
+    Ok(())
+}
+
+/// Read `obj`'s private tag and compare it as Node does.
+unsafe fn compare_private_tag(
+    s: &mut v8::PinScope<'static, 'static>,
+    obj: v8::Local<v8::Object>,
+    tag: &napi_type_tag,
+) -> Result<bool, napi_status> {
+    let key = type_tag_key(s);
+    let held = obj.get_private(s, key).ok_or(napi_generic_failure)?;
+    Ok(v8::Local::<v8::BigInt>::try_from(held).is_ok_and(|held| {
+        // as Node: a non-negative BigInt of up to two words, missing high words being 0
+        let mut words = [0u64; 2];
+        let (negative, _) = held.to_words_array(&mut words);
+        !negative && words == [tag.lower, tag.upper]
+    }))
 }
 
 // ---- externals -------------------------------------------------------------------
@@ -3835,15 +3939,7 @@ pub unsafe extern "C" fn napi_define_class(
         }
         let ctor = ctor.ok_or(napi_invalid_arg)?;
         let props = descriptors(property_count, properties)?;
-        let tpl = callback_template(s, env, ctor, data, None);
-        let class_name =
-            v8::String::new_from_utf8(s, utf8_arg(name, len), v8::NewStringType::Internalized)
-                .ok_or(napi_generic_failure)?;
-        tpl.set_class_name(class_name);
-        let proto = tpl.prototype_template(s);
-        for p in props.iter().filter(|p| p.attributes & napi_static == 0) {
-            define_class_proto_entry(s, env, tpl, proto, p)?;
-        }
+        let tpl = build_class_template(s, env, ctor, data, name, len, props)?;
         let class = tpl.get_function(s).ok_or(napi_generic_failure)?;
         put(out, class.into());
         let statics: Vec<napi_property_descriptor> = props
@@ -3853,6 +3949,29 @@ pub unsafe extern "C" fn napi_define_class(
             .collect();
         define_properties(s, env, class.into(), &statics)
     })
+}
+
+/// Build the class template with its name set and every instance property installed.
+#[allow(clippy::too_many_arguments)]
+unsafe fn build_class_template<'s>(
+    s: &mut v8::PinScope<'static, 'static>,
+    env: napi_env,
+    ctor: napi_callback,
+    data: *mut c_void,
+    name: *const c_char,
+    len: usize,
+    props: &[napi_property_descriptor],
+) -> Result<v8::Local<'s, v8::FunctionTemplate>, napi_status> {
+    let tpl = callback_template(s, env, ctor, data, None);
+    let class_name =
+        v8::String::new_from_utf8(s, utf8_arg(name, len), v8::NewStringType::Internalized)
+            .ok_or(napi_generic_failure)?;
+    tpl.set_class_name(class_name);
+    let proto = tpl.prototype_template(s);
+    for p in props.iter().filter(|p| p.attributes & napi_static == 0) {
+        define_class_proto_entry(s, env, tpl, proto, p)?;
+    }
+    Ok(tpl)
 }
 
 /// Install one instance property on the class template's prototype. Accessor pairs become an
@@ -4006,6 +4125,19 @@ unsafe fn build_property_descriptor(
     if p.value.is_null() {
         return Err(napi_invalid_arg);
     }
+    build_data_descriptor(s, p, key, obj, enumerable, writable, configurable)
+}
+
+/// Build (or fast-path apply) a DATA property's descriptor.
+unsafe fn build_data_descriptor(
+    s: &mut v8::PinScope<'static, 'static>,
+    p: &napi_property_descriptor,
+    key: v8::Local<'static, v8::Name>,
+    obj: v8::Local<'static, v8::Object>,
+    enumerable: bool,
+    writable: bool,
+    configurable: bool,
+) -> Result<DescBuilt, napi_status> {
     let value = to_local(p.value);
     if enumerable && writable && configurable {
         if obj.create_data_property(s, key, value) != Some(true) {

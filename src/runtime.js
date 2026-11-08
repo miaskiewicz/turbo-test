@@ -243,6 +243,12 @@ function __fireMacroTimer(m) {
   else m.ord = m.due = __loop.now + m.interval;
   try { m.cb(); } catch (e) { __reportUncaught(e); }
 }
+function __stepMacroPick(m, it) {
+  if (!m && !it) return null;
+  // earliest-due wins; ties favor the user timer (matches scheduling order intent).
+  const useInternal = it && (!m || it.due < m.due);
+  return { useInternal, due: useInternal ? it.due : m.due };
+}
 __loop.stepMacro = function () {
   __loop.ticks++;
   __dropStaleTimers();
@@ -250,12 +256,10 @@ __loop.stepMacro = function () {
   __loop.internal.sort((a, b) => a.due - b.due || a.id - b.id);
   const m = __loop.macro[0];
   const it = __loop.internal[0];
-  if (!m && !it) return false;
-  // earliest-due wins; ties favor the user timer (matches scheduling order intent).
-  const useInternal = it && (!m || it.due < m.due);
-  const due = useInternal ? it.due : m.due;
-  if (due > __loop.now) __loop.waited += due - __loop.now;
-  if (useInternal) __fireInternalTimer(it);
+  const pick = __stepMacroPick(m, it);
+  if (!pick) return false;
+  if (pick.due > __loop.now) __loop.waited += pick.due - __loop.now;
+  if (pick.useInternal) __fireInternalTimer(it);
   else __fireMacroTimer(m);
   return true;
 };
@@ -395,17 +399,26 @@ __fakeHrtime.bigint = () => { const [s, n] = __fakeHrtime(); return BigInt(s) * 
 __fakeHrtime.clock = __loop;
 // sinon's fake performance: `now()` on the fake clock, `timeOrigin` the clock's start, the other
 // methods no-ops (`getEntries*` return [], `mark` / `measure` a bare entry)
-function __fakePerformance(real) {
-  const perf = Object.create(null);
+function __collectPerfMethodNames(real) {
   const names = new Set();
   for (let o = real; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
     for (const k of Object.getOwnPropertyNames(o)) names.add(k);
   }
-  for (const k of names) {
-    if (k === 'constructor' || k === 'now') continue;
-    let v;
-    try { v = real[k]; } catch (e) { continue; }
-    if (typeof v === 'function') perf[k] = k.indexOf('getEntries') === 0 ? () => [] : () => {};
+  names.delete('constructor');
+  names.delete('now');
+  return names;
+}
+function __stubPerfMethod(real, k) {
+  let v;
+  try { v = real[k]; } catch (e) { return null; }
+  if (typeof v !== 'function') return null;
+  return k.indexOf('getEntries') === 0 ? () => [] : () => {};
+}
+function __fakePerformance(real) {
+  const perf = Object.create(null);
+  for (const k of __collectPerfMethodNames(real)) {
+    const stub = __stubPerfMethod(real, k);
+    if (stub) perf[k] = stub;
   }
   const entry = (name, entryType, startTime, duration) => ({ name, entryType, startTime, duration, toJSON() { return { name, entryType, startTime, duration }; } });
   perf.mark = (name) => entry(name, 'mark', 0, 0);
@@ -452,20 +465,28 @@ function __clearModuleMocks() {
 }
 // vi.useFakeTimers(config): a fresh fake clock (sinon's install with vitest's `now: Date.now()`);
 // a config without `loopLimit` (vi.setConfig replaced the default one) gets sinon's 1000
+function __fakeToFake(c) {
+  return Array.isArray(c.toFake) && c.toFake.length ? c.toFake : __TO_FAKE;
+}
+function __fakeStart(c) {
+  return c.now !== undefined ? __epochOf(c.now) : globalThis.Date.now();
+}
+function __applyFakeDate() {
+  if (__loop.faked.has('Date')) __installFakeDate();
+  else __restoreDate();
+}
 function __installFake(cfg) {
   const c = Object.assign({}, cfg || {});
-  const start = c.now !== undefined ? __epochOf(c.now) : globalThis.Date.now();
+  const start = __fakeStart(c);
   if (__loop.fake) __uninstallFake();
   __loop.dateMocked = false;
-  const toFake = Array.isArray(c.toFake) && c.toFake.length ? c.toFake : __TO_FAKE;
   __loop.fake = true;
-  __loop.faked = new Set(toFake);
+  __loop.faked = new Set(__fakeToFake(c));
   __loop.loopLimit = c.loopLimit || 1000;
   __loop.systemTime = start - __loop.fnow;
   __loop.fstart = __loop.fnow;
   __loop.epoch0 = start;
-  if (__loop.faked.has('Date')) __installFakeDate();
-  else __restoreDate();
+  __applyFakeDate();
   __swapFakeTimers();
   __installFakeClocks();
   // shouldAdvanceTime: a real-clock interval ticks the fake clock by advanceTimeDelta (20ms)
@@ -911,18 +932,19 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
     }
     for (const kv of rec) list.push(kv);
   };
+  const initObjectLike = (init) => (typeof init === 'object' && init !== null) || typeof init === 'function';
+  const fillFromObjectLike = (list, init) => {
+    const m = init[Symbol.iterator];
+    if (m !== undefined && m !== null) fromPairs(list, init, m);
+    else fromRecord(list, init);
+  };
   globalThis.URLSearchParams = class URLSearchParams {
     constructor(init = undefined) {
       // list of [name, value] pairs; not enumerable, as a real URLSearchParams has no own keys
       // (pretty-format prints `URLSearchParams {}`)
       Object.defineProperty(this, '_', { value: [], writable: true, enumerable: false, configurable: true });
       if (init === undefined) return;
-      if ((typeof init === 'object' && init !== null) || typeof init === 'function') {
-        const m = init[Symbol.iterator];
-        if (m !== undefined && m !== null) fromPairs(this._, init, m);
-        else fromRecord(this._, init);
-        return;
-      }
+      if (initObjectLike(init)) { fillFromObjectLike(this._, init); return; }
       const s = usv(init);
       this._ = parse(s.startsWith('?') ? s.slice(1) : s);
     }
@@ -973,8 +995,10 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
     // one pair per line past `breakLength`.
     [Symbol.for('nodejs.util.inspect.custom')](depth, opts) {
       const o = __inspectCustomOpts(opts);
-      if (typeof depth === 'number' && depth < 0) return __sty(o, '[Object]', 'special');
-      if (typeof depth === 'number') o.depth = depth - 1;
+      if (typeof depth === 'number') {
+        if (depth < 0) return __sty(o, '[Object]', 'special');
+        o.depth = depth - 1;
+      }
       const out = this._.map(([k, v]) => `${__nodeInspect(k, o)} => ${__nodeInspect(v, o)}`);
       const len = out.reduce((n, x) => n + __stripAnsi(x).length + 2, -2);
       const name = (this.constructor && this.constructor.name) || 'URLSearchParams';
@@ -987,18 +1011,20 @@ if (typeof globalThis.URLSearchParams === 'undefined') {
   });
 }
 if (typeof globalThis.URL === 'undefined') {
+  const __urlNormalizeInput = (url, base) => {
+    url = String(url).replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, '').replace(/[\t\n\r]/g, '');
+    if (base !== undefined && !/^[a-z][a-z0-9+.-]*:/i.test(url)) {
+      url = globalThis.URL._resolve(url, new globalThis.URL(String(base)));
+    }
+    if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) throw new TypeError('Invalid URL: ' + url);
+    return url;
+  };
   globalThis.URL = class URL {
     constructor(url, base) {
-      // leading/trailing C0 controls and spaces go, tabs and newlines anywhere (WHATWG)
-      url = String(url).replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, '').replace(/[\t\n\r]/g, '');
-      if (base !== undefined && !/^[a-z][a-z0-9+.-]*:/i.test(url)) {
-        url = URL._resolve(url, new globalThis.URL(String(base)));
-      }
-      // Real URL throws on input without a valid scheme (e.g. "not a url"). Matching this is
-      // required for validators built on `new URL()` (e.g. zod's .url()).
-      if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) {
-        throw new TypeError('Invalid URL: ' + url);
-      }
+      // leading/trailing C0 controls and spaces go, tabs and newlines anywhere (WHATWG);
+      // for base-relative inputs, resolve against the parsed base; reject inputs without a
+      // valid scheme (matches real URL for validators like zod's .url()).
+      url = __urlNormalizeInput(url, base);
       // protocol is the scheme up to the first ':' (works for opaque schemes like
       // javascript:/data:/mailto: that have no '//' authority).
       const scheme = /^([a-z][a-z0-9+.-]*:)/i.exec(url);
@@ -1014,6 +1040,11 @@ if (typeof globalThis.URL === 'undefined') {
     }
     // the constructor's parse of a hierarchical URL (scheme://authority/path?query#hash); returns
     // the search string
+    _rejectBadAuthority(url, hp) {
+      if (this._special && !this._isFile && URL._badHostPort(hp)) {
+        throw new TypeError('Invalid URL: ' + url);
+      }
+    }
     _parseAuthority(url, m) {
       this._hierarchical = true;
       // `user:pass@` before the last '@' is the userinfo, percent-encoded (WHATWG; turbo-test#114)
@@ -1022,10 +1053,7 @@ if (typeof globalThis.URL === 'undefined') {
       const hostport = at < 0 ? m[2] : m[2].slice(at + 1);
       this._parseUserInfo(info);
       // a special host takes no forbidden code point, and a port is digits up to 65535 (WHATWG)
-      const hp = /^(\[[^\]]*\]|[^:]*)(?::(.*))?$/.exec(hostport);
-      if (this._special && !this._isFile && URL._badHostPort(hp)) {
-        throw new TypeError('Invalid URL: ' + url);
-      }
+      this._rejectBadAuthority(url, /^(\[[^\]]*\]|[^:]*)(?::(.*))?$/.exec(hostport));
       // a file URL's `localhost` host is the empty host (WHATWG)
       this._hostname = '';
       this._port = '';
@@ -1076,14 +1104,18 @@ if (typeof globalThis.URL === 'undefined') {
     }
     // protocol/username/password are views too: a set is validated and encoded (WHATWG setters)
     get protocol() { return this._protocol; }
+    _rejectProtocolChange(next) {
+      const special = (p) => /^(https?|wss?|ftp|file):$/.test(p);
+      if (special(next) !== special(this._protocol)) return true;
+      if (next === 'file:' && (this._userinfo || this._port)) return true;
+      if (this._isFile && this._hostname === '') return true;
+      return false;
+    }
     set protocol(v) {
       const m = /^([a-z][a-z0-9+.-]*)(?::|$)/i.exec(String(v));
       if (!m) return;
       const next = m[1].toLowerCase() + ':';
-      const special = (p) => /^(https?|wss?|ftp|file):$/.test(p);
-      if (special(next) !== special(this._protocol)) return;
-      if (next === 'file:' && (this._userinfo || this._port)) return;
-      if (this._isFile && this._hostname === '') return;
+      if (this._rejectProtocolChange(next)) return;
       this._protocol = next;
       if (this._port) this._setPort(this._port);
     }
@@ -1110,9 +1142,13 @@ if (typeof globalThis.URL === 'undefined') {
     }
     // Normalises the host part for _setHost. Returns null to reject the whole set (port present
     // when withPort=false or on a file URL; empty name on a special non-file URL).
+    _rejectHostName(name, port, withPort) {
+      if (port !== undefined && (!withPort || this._isFile)) return true;
+      if (name === '' && this._special && !this._isFile) return true;
+      return false;
+    }
     _setHostName(name, port, withPort) {
-      if (port !== undefined && (!withPort || this._isFile)) return null;
-      if (name === '' && this._special && !this._isFile) return null;
+      if (this._rejectHostName(name, port, withPort)) return null;
       if (this._special) name = URL._idnAscii(name);
       if (this._isFile && name === 'localhost') return '';
       return name;
@@ -1205,31 +1241,38 @@ if (typeof globalThis.URL === 'undefined') {
     // scheme-relative `//h/p`, absolute path `/p`, query-only `?q`, fragment-only `#f`, empty,
     // and a relative path merged with the base path's directory. Dot segments are removed by
     // the caller's pathname normalization. An opaque base (`mailto:x`) only takes a fragment.
+    static _resolveOpaque(rel, noHash) {
+      if (rel.startsWith('#')) return noHash + rel;
+      throw new TypeError('Invalid URL: ' + rel);
+    }
     static _resolve(rel, b) {
       const auth = b.protocol + '//' + b._userinfo + b.host;
       const noHash = b.href.replace(/#.*$/, '');
-      if (!b._hierarchical) {
-        if (rel.startsWith('#')) return noHash + rel;
-        throw new TypeError('Invalid URL: ' + rel);
-      }
+      if (!b._hierarchical) return URL._resolveOpaque(rel, noHash);
       if (rel.startsWith('//')) return b.protocol + rel;
       if (rel.startsWith('/')) return auth + rel;
-      if (rel === '') return noHash;
-      if (rel.startsWith('#')) return noHash + rel;
+      if (rel === '' || rel.startsWith('#')) return noHash + rel;
       if (rel.startsWith('?')) return auth + b.pathname + rel;
       return auth + b.pathname.replace(/[^/]*$/, '') + rel;
     }
     // RFC 3986 / WHATWG dot-segment removal on a path (`/a/./b/../c` -> `/a/c`).
+    static _dotKind(seg) {
+      const lower = seg.toLowerCase();
+      if (seg === '..' || lower === '%2e%2e') return 'up';
+      if (seg === '.' || lower === '%2e') return 'cur';
+      return 'keep';
+    }
     static _removeDots(path) {
       const out = [];
       const segs = path.split('/');
       for (let i = 1; i < segs.length; i++) {
         const seg = segs[i];
         const last = i === segs.length - 1;
-        if (seg === '..' || seg.toLowerCase() === '%2e%2e') {
+        const kind = URL._dotKind(seg);
+        if (kind === 'up') {
           if (out.length) out.pop();
           if (last) out.push('');
-        } else if (seg === '.' || seg.toLowerCase() === '%2e') {
+        } else if (kind === 'cur') {
           if (last) out.push('');
         } else {
           out.push(seg);
@@ -1309,17 +1352,21 @@ if (typeof globalThis.Blob === 'undefined') {
     if (typeof bp !== 'object' && typeof bp !== 'function') return false;
     return typeof bp[Symbol.iterator] === 'function';
   };
+  const isDictLike = (v) => v == null || typeof v === 'object' || typeof v === 'function';
+  const blobEndings = (o) => {
+    const endings = o.endings === undefined ? 'transparent' : String(o.endings);
+    if (endings !== 'transparent' && endings !== 'native')
+      throw __codecError(TypeError, 'ERR_INVALID_ARG_VALUE', `The property 'options.endings' is invalid. Received '${endings}'`);
+    return endings;
+  };
   // the Blob constructor's argument checks; returns [options, endings]
   const blobOptions = (blobParts, options) => {
     if (!isIterableParts(blobParts))
       throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'Value cannot be converted to sequence.');
-    if (options != null && typeof options !== 'object' && typeof options !== 'function')
+    if (options != null && !isDictLike(options))
       throw __codecError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "options" argument must be a dictionary. Received ' + received(options));
     const o = options == null ? {} : options;
-    const endings = o.endings === undefined ? 'transparent' : String(o.endings);
-    if (endings !== 'transparent' && endings !== 'native')
-      throw __codecError(TypeError, 'ERR_INVALID_ARG_VALUE', `The property 'options.endings' is invalid. Received '${endings}'`);
-    return [o, endings];
+    return [o, blobEndings(o)];
   };
   globalThis.Blob = class Blob {
     #chunks = [];
@@ -1331,29 +1378,40 @@ if (typeof globalThis.Blob === 'undefined') {
       const add = (c) => { if (c.length) { this.#chunks.push(c); this.#size += c.length; } };
       for (const p of blobParts === undefined ? [] : blobParts) Blob.#addPart(p, endings, add);
     }
+    static #isArrayBufferLike(p) {
+      return p instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && p instanceof SharedArrayBuffer);
+    }
+    static #addStringPart(p, endings, add) {
+      let s = String(p);
+      if (endings === 'native') s = s.replace(/\r\n?/g, '\n');
+      add(new globalThis.TextEncoder().encode(s));
+    }
     // one blob part's bytes, to `add`
     static #addPart(p, endings, add) {
-      if (p instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && p instanceof SharedArrayBuffer)) add(new Uint8Array(p.slice(0)));
+      if (Blob.#isArrayBufferLike(p)) add(new Uint8Array(p.slice(0)));
       else if (ArrayBuffer.isView(p)) add(new Uint8Array(p.buffer, p.byteOffset, p.byteLength).slice());
       else if (p !== null && typeof p === 'object' && #chunks in p) p.#chunks.forEach(add);
-      else {
-        let s = String(p);
-        if (endings === 'native') s = s.replace(/\r\n?/g, '\n');
-        add(new globalThis.TextEncoder().encode(s));
-      }
+      else Blob.#addStringPart(p, endings, add);
     }
     get type() { if (!(#chunks in this)) throw thisErr('Blob'); return this.#type; }
     get size() { if (!(#chunks in this)) throw thisErr('Blob'); return this.#size; }
-    slice(start = undefined, end = undefined, contentType = undefined) {
+    #sliceRel(v, dflt) {
+      if (v === undefined) return dflt;
+      const n = clamp(v);
+      return n < 0 ? Math.max(this.#size + n, 0) : Math.min(n, this.#size);
+    }
+    #appendSliceChunk(out, c, lo, hi) {
+      out.#chunks.push(lo === 0 && hi === c.length ? c : c.subarray(lo, hi));
+      out.#size += hi - lo;
+    }
+    slice(start, end, contentType) {
       if (!(#chunks in this)) throw thisErr('Blob');
-      const size = this.#size;
-      const rel = (v, dflt) => { if (v === undefined) return dflt; const n = clamp(v); return n < 0 ? Math.max(size + n, 0) : Math.min(n, size); };
-      const from = rel(start, 0), to = rel(end, size);
+      const from = this.#sliceRel(start, 0), to = this.#sliceRel(end, this.#size);
       const out = new Blob([], contentType === undefined ? undefined : { type: contentType });
       let at = 0;
       for (const c of this.#chunks) {
         const lo = Math.max(from - at, 0), hi = Math.min(to - at, c.length);
-        if (lo < hi) { out.#chunks.push(lo === 0 && hi === c.length ? c : c.subarray(lo, hi)); out.#size += hi - lo; }
+        if (lo < hi) this.#appendSliceChunk(out, c, lo, hi);
         at += c.length;
       }
       return out;
@@ -1461,13 +1519,23 @@ if (typeof globalThis.FileReader === 'undefined') {
     Object.defineProperty(e, 'code', { value: 11, configurable: true });
     return e;
   };
+  const BOMS = [
+    [[0xef, 0xbb, 0xbf], 'utf-8'],
+    [[0xff, 0xfe], 'utf-16le'],
+    [[0xfe, 0xff], 'utf-16be'],
+  ];
+  const bomMatches = (b, bytes) => bytes.every((v, i) => b[i] === v);
+  const bomEncoding = (b) => {
+    for (const [bytes, enc] of BOMS) if (bomMatches(b, bytes)) return enc;
+    return null;
+  };
+  const labelEncoding = (label) => {
+    if (label === undefined) return 'utf-8';
+    try { return new globalThis.TextDecoder(String(label)).encoding; } catch { return 'utf-8'; }
+  };
   // the encoding readAsText decodes with: a UTF-8 / UTF-16 BOM wins, then the label, then UTF-8
   const textOf = (b, label) => {
-    let enc = 'utf-8';
-    if (b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf) enc = 'utf-8';
-    else if (b[0] === 0xff && b[1] === 0xfe) enc = 'utf-16le';
-    else if (b[0] === 0xfe && b[1] === 0xff) enc = 'utf-16be';
-    else if (label !== undefined) { try { enc = new globalThis.TextDecoder(String(label)).encoding; } catch {} }
+    const enc = bomEncoding(b) || labelEncoding(label);
     return new globalThis.TextDecoder(enc).decode(b);
   };
   // bytes[] -> FileReader#result for the four read kinds
@@ -1517,6 +1585,25 @@ if (typeof globalThis.FileReader === 'undefined') {
         Object.defineProperty(ev, k, { value: v, configurable: true, enumerable: true });
       this.dispatchEvent(ev);
     }
+    async #readBytes(blob) {
+      // the Blob's bytes, not char codes of its decoded text (turbo-test#132)
+      return typeof blob.bytes === 'function' ? await blob.bytes() : new Uint8Array(await blob.arrayBuffer());
+    }
+    #onReadError(gen, e) {
+      if (gen !== this.#gen) return;
+      this.readyState = 2; this.error = e;
+      this.#fire('loadstart'); this.#fire('error'); this.#fire('loadend');
+    }
+    #onReadSuccess(gen, bytes, blob, kind, label) {
+      if (gen !== this.#gen) return;
+      this.#fire('loadstart');
+      if (gen !== this.#gen) return;
+      if (bytes.length) { this.#fire('progress', bytes.length, bytes.length, true); if (gen !== this.#gen) return; }
+      this.result = decodeReadResult(bytes, blob, kind, label);
+      this.readyState = 2;
+      this.#fire('load');
+      this.#fire('loadend');
+    }
     #read(blob, kind, label) {
       if (blob === null || typeof blob !== 'object' || typeof blob.arrayBuffer !== 'function')
         throw new TypeError(`Failed to execute '${kind}' on 'FileReader': parameter 1 is not of type 'Blob'.`);
@@ -1527,23 +1614,9 @@ if (typeof globalThis.FileReader === 'undefined') {
       this.error = null;
       Promise.resolve().then(async () => {
         let bytes;
-        try {
-          // the Blob's bytes, not char codes of its decoded text (turbo-test#132)
-          bytes = typeof blob.bytes === 'function' ? await blob.bytes() : new Uint8Array(await blob.arrayBuffer());
-        } catch (e) {
-          if (gen !== this.#gen) return;
-          this.readyState = 2; this.error = e;
-          this.#fire('loadstart'); this.#fire('error'); this.#fire('loadend');
-          return;
-        }
-        if (gen !== this.#gen) return;
-        this.#fire('loadstart');
-        if (gen !== this.#gen) return;
-        if (bytes.length) { this.#fire('progress', bytes.length, bytes.length, true); if (gen !== this.#gen) return; }
-        this.result = decodeReadResult(bytes, blob, kind, label);
-        this.readyState = 2;
-        this.#fire('load');
-        this.#fire('loadend');
+        try { bytes = await this.#readBytes(blob); }
+        catch (e) { this.#onReadError(gen, e); return; }
+        this.#onReadSuccess(gen, bytes, blob, kind, label);
       });
     }
     readAsArrayBuffer(blob) { this.#read(blob, 'readAsArrayBuffer'); }
@@ -1594,24 +1667,47 @@ if (typeof globalThis.fetch === 'undefined') {
     getSetCookie() { const v = this._.get('set-cookie'); return v ? [v] : []; }
     [Symbol.iterator]() { return this._.entries(); }
   };
+  const __requestUrl = (url) => {
+    if (typeof url !== 'object' || !url) return String(url);
+    return String(url.url || url.href || url);
+  };
+  const __requestHeaders = (h) => {
+    if (h instanceof globalThis.Headers) return h;
+    const out = new globalThis.Headers();
+    if (h) for (const k of Object.keys(h)) out.set(k, h[k]);
+    return out;
+  };
   globalThis.Request = class Request {
     constructor(url, init) {
       init = init || {};
       // define url as an own, writable, configurable prop — a plain `this.url = x` would invoke
       // a getter-only `url` on a subclass prototype (e.g. Next's NextRequest) and throw.
-      const u = typeof url === 'object' && url ? String(url.url || url.href || url) : String(url);
+      const u = __requestUrl(url);
       try { Object.defineProperty(this, 'url', { value: u, writable: true, configurable: true, enumerable: true }); }
       catch (e) {}
       this.method = init.method || 'GET';
-      this.headers = init.headers instanceof globalThis.Headers ? init.headers : (() => { const h = new globalThis.Headers(); if (init.headers) for (const k of Object.keys(init.headers)) h.set(k, init.headers[k]); return h; })();
+      this.headers = __requestHeaders(init.headers);
       this._body = init.body;
     }
     json() { return Promise.resolve(typeof this._body === 'string' ? JSON.parse(this._body) : this._body); }
     text() { return Promise.resolve(this._body == null ? '' : String(this._body)); }
     clone() { return new globalThis.Request(this.url, { method: this.method, headers: this.headers, body: this._body }); }
   };
+  const __responseStatus = (init) => (init && init.status) || 200;
+  const __responseStatusText = (init, status) => (init && init.statusText) || globalThis.__STATUS_TEXT[status] || '';
+  const __responseHeaders = (init) => {
+    if (init && init.headers instanceof globalThis.Headers) return init.headers;
+    return new globalThis.Headers(init && init.headers);
+  };
   globalThis.Response = class Response {
-    constructor(body, init) { this.body = body; this._body = body; this.status = (init && init.status) || 200; this.statusText = (init && init.statusText) || globalThis.__STATUS_TEXT[this.status] || ''; this.ok = this.status >= 200 && this.status < 300; this.headers = (init && init.headers instanceof globalThis.Headers) ? init.headers : new globalThis.Headers(init && init.headers); }
+    constructor(body, init) {
+      this.body = body;
+      this._body = body;
+      this.status = __responseStatus(init);
+      this.statusText = __responseStatusText(init, this.status);
+      this.ok = this.status >= 200 && this.status < 300;
+      this.headers = __responseHeaders(init);
+    }
     json() { return Promise.resolve(typeof this._body === 'string' ? JSON.parse(this._body) : this._body); }
     text() { return Promise.resolve(this._body == null ? '' : String(this._body)); }
     clone() { return new globalThis.Response(this._body, { status: this.status }); }
@@ -1626,14 +1722,17 @@ if (typeof globalThis.FormData === 'undefined') {
 if (typeof globalThis.structuredClone === 'undefined') {
   // V8's structured clone (src/structured_clone.rs), with Node's argument checks: the ArrayBuffers
   // of `transfer` move to the clone
+  const __isIterableValue = (t) => {
+    if (t === null) return false;
+    if (typeof t !== 'object' && typeof t !== 'function') return false;
+    return typeof t[Symbol.iterator] === 'function';
+  };
   globalThis.structuredClone = function structuredClone(value, options) {
     if (arguments.length === 0) throw new TypeError('The "The value argument must be specified" argument must be specified');
-    let transfer = [];
     const t = options == null ? undefined : options.transfer;
+    let transfer = [];
     if (t !== undefined) {
-      if (t === null || (typeof t !== 'object' && typeof t !== 'function') || typeof t[Symbol.iterator] !== 'function') {
-        throw new TypeError("Failed to execute 'structuredClone': transfer in Options cannot be converted to sequence.");
-      }
+      if (!__isIterableValue(t)) throw new TypeError("Failed to execute 'structuredClone': transfer in Options cannot be converted to sequence.");
       transfer = [...t];
     }
     return globalThis.__ttStructuredClone(value, transfer);
@@ -1794,10 +1893,15 @@ if (typeof globalThis.TransformStream === 'undefined') {
     releaseLock() { if (this._s) { this._s._reader = null; this._s = null; } }
   }
 
+  const __rsHwm = (strategy) => (strategy && typeof strategy.highWaterMark === 'number' ? strategy.highWaterMark : 1);
+  const __rsRunStart = (stream) => {
+    if (typeof stream._src.start !== 'function') return;
+    try { stream._startP = stream._src.start(stream._ctrl); } catch (e) { stream._ctrl.error(e); }
+  };
   class ReadableStream {
     constructor(underlyingSource, strategy) {
       this._src = underlyingSource || {};
-      this._hwm = strategy && typeof strategy.highWaterMark === 'number' ? strategy.highWaterMark : 1;
+      this._hwm = __rsHwm(strategy);
       this._queue = [];
       this._pending = [];
       this._closed = false;
@@ -1808,9 +1912,7 @@ if (typeof globalThis.TransformStream === 'undefined') {
       this._closedD = __sDefer(true);
       this._ctrl = new ReadableStreamDefaultController(this);
       this._startP = undefined;
-      if (typeof this._src.start === 'function') {
-        try { this._startP = this._src.start(this._ctrl); } catch (e) { this._ctrl.error(e); }
-      }
+      __rsRunStart(this);
       if (this._startP && typeof this._startP.then === 'function') {
         this._startP.then(() => __rsPull(this), (e) => { try { this._ctrl.error(e); } catch (_) {} });
       } else {
@@ -2007,15 +2109,21 @@ if (typeof globalThis.DOMPoint === 'undefined') {
 }
 if (typeof globalThis.Buffer === 'undefined') {
   class Buffer extends Uint8Array {
+    static #fromHex(d) {
+      const b = new Buffer(d.length / 2);
+      for (let i = 0; i < b.length; i++) b[i] = parseInt(d.substr(i * 2, 2), 16);
+      return b;
+    }
+    static #fromString(d, enc) {
+      if (enc === 'base64') return new Buffer(globalThis.__b64decodeToBytes(d));
+      // base64url: RFC 4648 §5 — `-`/`_` instead of `+`/`/`, optional padding. Node's base64
+      // decoder tolerates either, so normalise to standard base64 and reuse the same path.
+      if (enc === 'base64url') return new Buffer(globalThis.__b64decodeToBytes(d.replace(/-/g, '+').replace(/_/g, '/')));
+      if (enc === 'hex') return Buffer.#fromHex(d);
+      return new Buffer(new globalThis.TextEncoder().encode(d));
+    }
     static from(d, enc) {
-      if (typeof d === 'string') {
-        if (enc === 'base64') { return new Buffer(globalThis.__b64decodeToBytes(d)); }
-        // base64url: RFC 4648 §5 — `-`/`_` instead of `+`/`/`, optional padding. Node's base64
-        // decoder tolerates either, so normalise to standard base64 and reuse the same path.
-        if (enc === 'base64url') { return new Buffer(globalThis.__b64decodeToBytes(d.replace(/-/g, '+').replace(/_/g, '/'))); }
-        if (enc === 'hex') { const b = new Buffer(d.length / 2); for (let i = 0; i < b.length; i++) b[i] = parseInt(d.substr(i * 2, 2), 16); return b; }
-        return new Buffer(new globalThis.TextEncoder().encode(d));
-      }
+      if (typeof d === 'string') return Buffer.#fromString(d, enc);
       if (Array.isArray(d) || d instanceof Uint8Array) return new Buffer(d);
       if (d instanceof ArrayBuffer) return new Buffer(new Uint8Array(d));
       return new Buffer(0);
@@ -2124,19 +2232,22 @@ const __urlError = (code, message) => { const e = new TypeError(message); e.code
 // platform is read at call time.
 const __ttWin = () => globalThis.__ttPlatform === 'win32';
 globalThis.__ttIsAbsolutePath = (p) => (__ttWin() ? /^([a-zA-Z]:)?[\\/]/.test(p) : String(p).startsWith('/'));
-globalThis.__fileURLToPath = (u) => {
-  const url = typeof u === 'string' ? new globalThis.URL(u) : u;
-  if (url.protocol !== 'file:') throw __urlError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
-  if (__ttWin()) {
-    if (/%2f|%5c/i.test(url.pathname)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded \\ or / characters');
-    const path = decodeURIComponent(url.pathname).replace(/\//g, '\\');
-    if (url.hostname !== '') return `\\\\${url.hostname}${path}`;
-    if (!/^\\[a-zA-Z]:/.test(path)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must be absolute');
-    return path.slice(1);
-  }
+const __fileURLToPathWin = (url) => {
+  if (/%2f|%5c/i.test(url.pathname)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded \\ or / characters');
+  const path = decodeURIComponent(url.pathname).replace(/\//g, '\\');
+  if (url.hostname !== '') return `\\\\${url.hostname}${path}`;
+  if (!/^\\[a-zA-Z]:/.test(path)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must be absolute');
+  return path.slice(1);
+};
+const __fileURLToPathPosix = (url) => {
   if (url.hostname !== '') throw __urlError('ERR_INVALID_FILE_URL_HOST', `File URL host must be "localhost" or empty on ${globalThis.__ttPlatform || 'darwin'}`);
   if (/%2f/i.test(url.pathname)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded / characters');
   return decodeURIComponent(url.pathname);
+};
+globalThis.__fileURLToPath = (u) => {
+  const url = typeof u === 'string' ? new globalThis.URL(u) : u;
+  if (url.protocol !== 'file:') throw __urlError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
+  return __ttWin() ? __fileURLToPathWin(url) : __fileURLToPathPosix(url);
 };
 // win32: [host, root ('/C:' or ''), rest] with `/` separators, made absolute against the cwd
 const __ttWinSplit = (p) => {
@@ -2220,15 +2331,23 @@ const __ttMetaTrivial = (spec, parent) => {
   }
   return null;
 };
+const __ttMetaFrom = (parent) => {
+  try { return globalThis.__fileURLToPath(parent); } catch (e) { return String(parent); }
+};
+const __ttMetaFormatResolved = (r, spec) => {
+  if (typeof r !== 'string') return null;
+  if (globalThis.__ttIsAbsolutePath(r)) return globalThis.__pathToFileURL(r).href;
+  if (spec !== 'vitest' && spec !== '@jest/globals') return 'node:' + r.replace(/^node:/, '');
+  return null;
+};
 const __ttMetaResolve = (specifier, parent) => {
   const spec = String(specifier);
   const trivial = __ttMetaTrivial(spec, parent);
   if (trivial !== null) return trivial;
-  let from;
-  try { from = globalThis.__fileURLToPath(parent); } catch (e) { from = String(parent); }
+  const from = __ttMetaFrom(parent);
   const r = globalThis.__ttRequireResolve(globalThis.__dirnameOf(from), spec, true);
-  if (typeof r === 'string' && globalThis.__ttIsAbsolutePath(r)) return globalThis.__pathToFileURL(r).href;
-  if (typeof r === 'string' && spec !== 'vitest' && spec !== '@jest/globals') return 'node:' + r.replace(/^node:/, '');
+  const resolved = __ttMetaFormatResolved(r, spec);
+  if (resolved !== null) return resolved;
   throw __ttMetaMissing(spec, from);
 };
 globalThis.__ttFillImportMeta = (m, filename) => {
@@ -2268,12 +2387,15 @@ const __os = {
 };
 // Node's posix path (lib/path.js): `..`/`.` collapse, resolve against the cwd from the right,
 // relative by common segments, and Node's basename/extname/format edge cases.
+const __normStrStep = (out, seg, absolute) => {
+  if (seg === '' || seg === '.') return;
+  if (seg !== '..') { out.push(seg); return; }
+  if (out.length && out[out.length - 1] !== '..') out.pop();
+  else if (!absolute) out.push('..');
+};
 const __normStr = (p, absolute) => {
   const out = [];
-  for (const seg of p.split('/')) {
-    if (seg === '' || seg === '.') continue;
-    if (seg === '..') { if (out.length && out[out.length - 1] !== '..') out.pop(); else if (!absolute) out.push('..'); } else out.push(seg);
-  }
+  for (const seg of p.split('/')) __normStrStep(out, seg, absolute);
   return out.join('/');
 };
 const __normalize = (p) => {
@@ -2285,10 +2407,11 @@ const __normalize = (p) => {
   if (r !== '' && p.endsWith('/')) r += '/';
   return abs ? '/' + r : r;
 };
+const __resolveCwd = () => String(globalThis.process && globalThis.process.cwd ? globalThis.process.cwd() : '/');
 const __resolve = (...a) => {
   let r = '';
   for (let i = a.length - 1; i >= -1 && !r.startsWith('/'); i--) {
-    const seg = i >= 0 ? String(a[i]) : String(globalThis.process && globalThis.process.cwd ? globalThis.process.cwd() : '/');
+    const seg = i >= 0 ? String(a[i]) : __resolveCwd();
     if (seg === '') continue;
     r = seg + (r ? '/' + r : '');
   }
@@ -2300,6 +2423,15 @@ const __basename = (p, ext) => {
   b = b.slice(b.lastIndexOf('/') + 1);
   if (ext !== undefined && b !== ext && b.endsWith(ext)) b = b.slice(0, -ext.length);
   return b;
+};
+const __pathFormatExt = (ext) => (ext ? (ext.startsWith('.') ? '' : '.') + ext : '');
+const __pathFormatBase = (o) => o.base || ((o.name || '') + __pathFormatExt(o.ext));
+const __pathFormat = (opt) => {
+  const o = opt || {};
+  const dir = o.dir || o.root;
+  const base = __pathFormatBase(o);
+  if (!dir) return base;
+  return dir === o.root ? dir + base : dir + '/' + base;
 };
 const __path = {
   sep: '/',
@@ -2320,13 +2452,7 @@ const __path = {
   },
   normalize: __normalize,
   parse: (p) => { const s = String(p); const dir = globalThis.__dirnameOf(s); const base = __basename(s); const ext = __extname(base); return { root: s.startsWith('/') ? '/' : '', dir, base, ext, name: ext ? base.slice(0, -ext.length) : base }; },
-  format: (o) => {
-    o = o || {};
-    const dir = o.dir || o.root;
-    const base = o.base || ((o.name || '') + (o.ext ? (o.ext.startsWith('.') ? '' : '.') + o.ext : ''));
-    if (!dir) return base;
-    return dir === o.root ? dir + base : dir + '/' + base;
-  },
+  format: (o) => __pathFormat(o),
   delimiter: ':',
 };
 // glob-parent and others reach for path.posix / path.win32; expose both (posix is our default).
@@ -2373,17 +2499,21 @@ const __readdirIsDir = (full, type) => {
   }
   return false;
 };
+const __readdirEntry = (name, type, dir, base, opts) => {
+  const full = (dir.endsWith('/') ? dir + name : dir + '/' + name);
+  const value = opts.withFileTypes ? new Dirent(name, type, dir) : full.slice(base.length + (base.endsWith('/') ? 0 : 1));
+  return { full, value };
+};
 const __readdir = (p, options) => {
   const base = __fsPath(p);
   const opts = typeof options === 'object' && options !== null ? options : {};
   const read = (dir) => globalThis.__fs_readdir(dir);
-  const join = (a, b) => (a.endsWith('/') ? a + b : a + '/' + b);
   if (!opts.recursive) return read(base).map(([name, type]) => (opts.withFileTypes ? new Dirent(name, type, base) : name));
   const out = [], queue = [base];
   for (let i = 0; i < queue.length; i++) {
     for (const [name, type] of read(queue[i])) {
-      const full = join(queue[i], name);
-      out.push(opts.withFileTypes ? new Dirent(name, type, queue[i]) : full.slice(base.length + (base.endsWith('/') ? 0 : 1)));
+      const { full, value } = __readdirEntry(name, type, queue[i], base, opts);
+      out.push(value);
       if (__readdirIsDir(full, type)) queue.push(full);
     }
   }
@@ -2582,6 +2712,13 @@ function __highlightRegExp(re) {
     while (i < re.length && re[i] >= '0' && re[i] <= '9') digits += re[i++];
     return digits;
   };
+  // `\u{..}`/`\p{..}`/`\P{..}` inside a class: a composite form rendered as a group. Returns
+  // true if handled and the caller should return early.
+  const classEscapeComposite = (next, seq) => {
+    if (re[i] !== '{') return false;
+    if (next === 'u' || next === 'p' || next === 'P') { writeGroup(`${seq}{`, '}', 0); return true; }
+    return false;
+  };
   // inside a character class
   const classEscape = () => {
     let seq = '\\';
@@ -2589,22 +2726,17 @@ function __highlightRegExp(re) {
     if (i < re.length) {
       seq += re[i++];
       const next = seq[1];
-      if (next === 'u' && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return; }
-      else if ((next === 'p' || next === 'P') && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return; }
-      else if (seq[1] === 'x') { seq += re.slice(i, i + 2); i += 2; }
+      if (classEscapeComposite(next, seq)) return;
+      if (next === 'x') { seq += re.slice(i, i + 2); i += 2; }
     }
     write(seq);
   };
+  const isRangeDash = (ch) => ch === '-' && re[i - 1] !== '[' && i + 1 < re.length && re[i + 1] !== ']';
   const classChar = (ch) => {
-    if (ch === '\\') {
-      classEscape();
-    } else if (ch === ']') {
-      depth--; write(']'); i++; inClass = false;
-    } else if (ch === '-' && re[i - 1] !== '[' && i + 1 < re.length && re[i + 1] !== ']') {
-      writeDepth('-', 1, 1);
-    } else {
-      write(ch); i++;
-    }
+    if (ch === '\\') { classEscape(); return; }
+    if (ch === ']') { depth--; write(']'); i++; inClass = false; return; }
+    if (isRangeDash(ch)) { writeDepth('-', 1, 1); return; }
+    write(ch); i++;
   };
   const namedGroup = () => {
     i++;
@@ -2618,16 +2750,15 @@ function __highlightRegExp(re) {
     }
   };
   // after `(?`
+  const GROUP_PREFIX = new Set([':', '=', '!']);
+  const GROUP_LOOKBEHIND = new Set(['=', '!']);
   const groupModifier = () => {
     const a = i < re.length ? re[i] : '';
-    if (a === ':' || a === '=' || a === '!') {
-      writeDepth(`?${a}`, -1, 1);
-      return;
-    }
+    if (GROUP_PREFIX.has(a)) { writeDepth(`?${a}`, -1, 1); return; }
+    if (a !== '<') { write('?'); return; }
     const b = i + 1 < re.length ? re[i + 1] : '';
-    if (a === '<' && (b === '=' || b === '!')) writeDepth(`?<${b}`, -1, 2);
-    else if (a === '<') namedGroup();
-    else write('?');
+    if (GROUP_LOOKBEHIND.has(b)) writeDepth(`?<${b}`, -1, 2);
+    else namedGroup();
   };
   const openGroup = () => {
     write('('); depth++; i++;
@@ -2639,11 +2770,16 @@ function __highlightRegExp(re) {
   // Follow-up for `\<next>` when `next` opens a composite form (\u{..}, \xNN, \1.., \k<..>,
   // \p{..}, \P{..}); returns the updated `seq` or null if nothing special, and writes directly
   // for the forms that emit a writeGroup (returning 'done' then).
+  const BRACE_ESCAPE = new Set(['u', 'p', 'P']);
+  const escapeTailBrace = (seq, next) => {
+    if (BRACE_ESCAPE.has(next) && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return true; }
+    if (next === 'k' && re[i] === '<') { writeGroup(`${seq}<`, '>'); return true; }
+    return false;
+  };
   const escapeTail = (seq, next) => {
     if (next === 'x') { seq += re.slice(i, i + 2); i += 2; return seq; }
     if (next >= '0' && next <= '9') return seq + readDigits();
-    if (re[i] === '{' && (next === 'u' || next === 'p' || next === 'P')) { writeGroup(`${seq}{`, '}', 0); return 'done'; }
-    if (next === 'k' && re[i] === '<') { writeGroup(`${seq}<`, '>'); return 'done'; }
+    if (escapeTailBrace(seq, next)) return 'done';
     return seq;
   };
   const escape = () => {
@@ -2683,24 +2819,14 @@ function __highlightRegExp(re) {
   };
   // A one-char token that writes at a lifted depth (operators |+*?,^$ at 3,1; '.' at 2,1).
   const stepLifted = '|+*?,^$';
+  const stepSimple = { '(': openGroup, ')': () => { depth--; write(')'); i++; }, '\\': escape, '{': quantifier };
   const step = (ch) => {
-    if (ch === '[') {
-      write('['); depth++; i++; inClass = true;
-    } else if (ch === '(') {
-      openGroup();
-    } else if (ch === ')') {
-      depth--; write(')'); i++;
-    } else if (ch === '\\') {
-      escape();
-    } else if (stepLifted.indexOf(ch) !== -1) {
-      writeDepth(ch, 3, 1);
-    } else if (ch === '{') {
-      quantifier();
-    } else if (ch === '.') {
-      writeDepth(ch, 2, 1);
-    } else {
-      writeDepth(ch, 1, 1);
-    }
+    if (ch === '[') { write('['); depth++; i++; inClass = true; return; }
+    const fn = stepSimple[ch];
+    if (fn) return fn();
+    if (stepLifted.indexOf(ch) !== -1) return writeDepth(ch, 3, 1);
+    if (ch === '.') return writeDepth(ch, 2, 1);
+    writeDepth(ch, 1, 1);
   };
   write('/');
   depth++;
@@ -2716,20 +2842,22 @@ function __highlightRegExp(re) {
   return out;
 }
 const __inspectMeta = ['\\x00', '\\x01', '\\x02', '\\x03', '\\x04', '\\x05', '\\x06', '\\x07', '\\b', '\\t', '\\n', '\\x0B', '\\f', '\\r', '\\x0E', '\\x0F', '\\x10', '\\x11', '\\x12', '\\x13', '\\x14', '\\x15', '\\x16', '\\x17', '\\x18', '\\x19', '\\x1A', '\\x1B', '\\x1C', '\\x1D', '\\x1E', '\\x1F'];
+function __strEscapeQuote(str) {
+  if (!str.includes("'")) return "'";
+  if (!str.includes('"')) return '"';
+  if (!str.includes('`') && !str.includes('${')) return '`';
+  return "'";
+}
+function __strEscapeChar(ch, c, quote) {
+  if (ch === quote || ch === '\\') return '\\' + ch;
+  if (c < 0x20) return __inspectMeta[c];
+  if (c === 0x7f) return '\\x7F';
+  return ch;
+}
 function __strEscape(str) {
-  let quote = "'";
-  if (str.includes("'")) {
-    if (!str.includes('"')) quote = '"';
-    else if (!str.includes('`') && !str.includes('${')) quote = '`';
-  }
+  const quote = __strEscapeQuote(str);
   let out = '';
-  for (const ch of str) {
-    const c = ch.charCodeAt(0);
-    if (ch === quote || ch === '\\') out += '\\' + ch;
-    else if (c < 0x20) out += __inspectMeta[c];
-    else if (c === 0x7f) out += '\\x7F';
-    else out += ch;
-  }
+  for (const ch of str) out += __strEscapeChar(ch, ch.charCodeAt(0), quote);
   return quote + out + quote;
 }
 function __inspectKey(key) {
@@ -2756,13 +2884,15 @@ function __fnBaseClass(fn) {
   if (sup && sup.name) base += ` extends ${sup.name}`;
   return base + ']';
 }
+const __FN_TYPE_TAGS = new Set(['AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction']);
+function __fnBaseType(fn) {
+  const tag = fn[Symbol.toStringTag];
+  return __FN_TYPE_TAGS.has(tag) ? tag : 'Function';
+}
 function __fnBase(fn, ctor) {
   const src = Function.prototype.toString.call(fn);
   if (src.startsWith('class') && /^class\s*[\s{A-Za-z_$]/.test(src)) return __fnBaseClass(fn);
-  let type = 'Function';
-  const tag = fn[Symbol.toStringTag];
-  if (tag === 'AsyncFunction' || tag === 'GeneratorFunction' || tag === 'AsyncGeneratorFunction') type = tag;
-  let base = `[${type}`;
+  let base = `[${__fnBaseType(fn)}`;
   base += fn.name ? `: ${fn.name}]` : ' (anonymous)]';
   if (ctor === null) base += ' (null prototype)';
   return base;
@@ -2777,28 +2907,36 @@ function __inspectStrLines(v, ctx, sty) {
   return sty(__strEscape(v), 'string');
 }
 // formatPrimitive; `plain` is Node's stylizeNoColor (boxed primitives)
-function __inspectPrimitive(v, ctx, plain) {
-  const sty = (str, type) => (plain ? str : __sty(ctx, str, type));
+function __inspectPrimitiveSimple(v, sty) {
   switch (typeof v) {
-    case 'string': return __inspectStrLines(v, ctx, sty);
     case 'number': return sty(Object.is(v, -0) ? '-0' : String(v), 'number');
     case 'bigint': return sty(`${v}n`, 'bigint');
     case 'boolean': return sty(String(v), 'boolean');
     case 'undefined': return sty('undefined', 'undefined');
     case 'symbol': return sty(v.toString(), 'symbol');
   }
-  return String(v);
+  return null;
+}
+function __inspectPrimitive(v, ctx, plain) {
+  const sty = (str, type) => (plain ? str : __sty(ctx, str, type));
+  if (typeof v === 'string') return __inspectStrLines(v, ctx, sty);
+  const simple = __inspectPrimitiveSimple(v, sty);
+  return simple !== null ? simple : String(v);
+}
+function __formatCustomInspect(ctx, value, recurseTimes) {
+  const custom = value[Symbol.for('nodejs.util.inspect.custom')];
+  if (typeof custom !== 'function' || custom === __util.inspect) return null;
+  const r = custom.call(value, ctx.depth - recurseTimes, { depth: ctx.depth - recurseTimes, breakLength: ctx.breakLength, compact: ctx.compact, colors: ctx.colors }, __util.inspect);
+  if (r === value) return null;
+  // a multi-line result is indented to where it is printed, as Node does
+  return typeof r === 'string' ? r.replace(/\n/g, `\n${' '.repeat(ctx.indentationLvl)}`) : __formatValue(ctx, r, recurseTimes);
 }
 function __formatValue(ctx, value, recurseTimes, typedArray) {
   if (typeof value !== 'object' && typeof value !== 'function') return __inspectPrimitive(value, ctx);
   if (value === null) return __sty(ctx, 'null', 'null');
   // a [util.inspect.custom](depth, options, inspect) method formats its own value
-  const custom = value[Symbol.for('nodejs.util.inspect.custom')];
-  if (typeof custom === 'function' && custom !== __util.inspect) {
-    const r = custom.call(value, ctx.depth - recurseTimes, { depth: ctx.depth - recurseTimes, breakLength: ctx.breakLength, compact: ctx.compact, colors: ctx.colors }, __util.inspect);
-    // a multi-line result is indented to where it is printed, as Node does
-    if (r !== value) return typeof r === 'string' ? r.replace(/\n/g, `\n${' '.repeat(ctx.indentationLvl)}`) : __formatValue(ctx, r, recurseTimes);
-  }
+  const custom = __formatCustomInspect(ctx, value, recurseTimes);
+  if (custom !== null) return custom;
   if (ctx.seen.includes(value)) return __sty(ctx, `[Circular *${__trackCircular(ctx, value)}]`, 'special');
   return __formatRaw(ctx, value, recurseTimes, typedArray);
 }
@@ -2875,12 +3013,9 @@ function __groupRows(output, outputLength, dataLen, columns, separatorSpace, val
   }
   return tmp;
 }
-function __groupArrayElements(ctx, output, value) {
+function __groupMeasure(ctx, output, outputLength, separatorSpace) {
   let totalLength = 0;
   let maxLength = 0;
-  let outputLength = output.length;
-  if (ctx.maxArrayLength < output.length) outputLength--;
-  const separatorSpace = 2;
   const dataLen = new Array(outputLength);
   for (let i = 0; i < outputLength; i++) {
     const len = ctx.colors ? __stripAnsi(output[i]).length : output[i].length;
@@ -2888,22 +3023,31 @@ function __groupArrayElements(ctx, output, value) {
     totalLength += len + separatorSpace;
     if (maxLength < len) maxLength = len;
   }
+  return { totalLength, maxLength, dataLen };
+}
+function __groupColumns(ctx, totalLength, outputLength, actualMax) {
+  const averageBias = Math.sqrt(actualMax - totalLength / outputLength);
+  const biasedMax = Math.max(actualMax - 3 - averageBias, 1);
+  return Math.min(
+    Math.round(Math.sqrt(2.5 * biasedMax * outputLength) / biasedMax),
+    Math.floor((ctx.breakLength - ctx.indentationLvl) / actualMax),
+    ctx.compact * 4,
+    15,
+  );
+}
+function __groupArrayElements(ctx, output, value) {
+  let outputLength = output.length;
+  if (ctx.maxArrayLength < output.length) outputLength--;
+  const separatorSpace = 2;
+  const { totalLength, maxLength, dataLen } = __groupMeasure(ctx, output, outputLength, separatorSpace);
   const actualMax = maxLength + separatorSpace;
-  if (actualMax * 3 + ctx.indentationLvl < ctx.breakLength && (totalLength / actualMax > 5 || maxLength <= 6)) {
-    const averageBias = Math.sqrt(actualMax - totalLength / output.length);
-    const biasedMax = Math.max(actualMax - 3 - averageBias, 1);
-    const columns = Math.min(
-      Math.round(Math.sqrt(2.5 * biasedMax * outputLength) / biasedMax),
-      Math.floor((ctx.breakLength - ctx.indentationLvl) / actualMax),
-      ctx.compact * 4,
-      15,
-    );
-    if (columns <= 1) return output;
-    const tmp = __groupRows(output, outputLength, dataLen, columns, separatorSpace, value);
-    if (ctx.maxArrayLength < output.length) tmp.push(output[outputLength]);
-    output = tmp;
-  }
-  return output;
+  if (actualMax * 3 + ctx.indentationLvl >= ctx.breakLength) return output;
+  if (!(totalLength / actualMax > 5 || maxLength <= 6)) return output;
+  const columns = __groupColumns(ctx, totalLength, output.length, actualMax);
+  if (columns <= 1) return output;
+  const tmp = __groupRows(output, outputLength, dataLen, columns, separatorSpace, value);
+  if (ctx.maxArrayLength < output.length) tmp.push(output[outputLength]);
+  return tmp;
 }
 function __isBelowBreakLength(ctx, output, start, base) {
   let totalLength = output.length + start;
@@ -2916,17 +3060,18 @@ function __isBelowBreakLength(ctx, output, start, base) {
 }
 // reduceToSingleString with a numeric `compact`: [the (grouped) output, its one-line form or
 // undefined when it does not fit on one line]
+function __reduceOneLine(ctx, output, base, braces, entries, recurseTimes) {
+  if (ctx.currentDepth - recurseTimes >= ctx.compact || entries !== output.length) return undefined;
+  const start = output.length + ctx.indentationLvl + braces[0].length + base.length + 10;
+  if (!__isBelowBreakLength(ctx, output, start, base)) return undefined;
+  const joined = output.join(', ');
+  if (joined.includes('\n')) return undefined;
+  return `${base ? `${base} ` : ''}${braces[0]} ${joined} ${braces[1]}`;
+}
 function __reduceCompactNumber(ctx, output, base, braces, extrasType, recurseTimes, value) {
   const entries = output.length;
   if (extrasType === 2 && entries > 6) output = __groupArrayElements(ctx, output, value);
-  if (ctx.currentDepth - recurseTimes < ctx.compact && entries === output.length) {
-    const start = output.length + ctx.indentationLvl + braces[0].length + base.length + 10;
-    if (__isBelowBreakLength(ctx, output, start, base)) {
-      const joined = output.join(', ');
-      if (!joined.includes('\n')) return [output, `${base ? `${base} ` : ''}${braces[0]} ${joined} ${braces[1]}`];
-    }
-  }
-  return [output, undefined];
+  return [output, __reduceOneLine(ctx, output, base, braces, entries, recurseTimes)];
 }
 // The multi-line branch of __reduceToSingleString (ctx.compact !== true): entries one per line,
 // with a numeric `compact` first trying the one-line grouped form from __reduceCompactNumber.
@@ -3064,17 +3209,29 @@ function __rawKind(ctx, value, recurseTimes, keys, ctor, tag, prefix) {
   if (ArrayBuffer.isView(value) && !(value instanceof DataView)) return __rawTyped(ctx, value, keys, ctor, tag, prefix);
   return __rawOther(ctx, value, recurseTimes, keys, ctor, tag, prefix);
 }
-function __formatRaw(ctx, value, recurseTimes, typedArray) {
-  void typedArray;
-  const ctor = __ctorName(value);
-  const tag = value[Symbol.toStringTag];
-  const prefix = (fallback, size) => {
+function __rawPrefix(ctor, tag) {
+  return (fallback, size) => {
     let p = ctor === null ? `[${fallback}: null prototype] ` : `${ctor}${size} `;
     if (typeof tag === 'string' && tag !== '' && tag !== (ctor || fallback)) p = `${p.slice(0, -1)} [${tag}] `;
     return p;
   };
-  const allKeys = ctx.showHidden ? Reflect.ownKeys(value) : Object.keys(value).concat(Object.getOwnPropertySymbols(value).filter((s) => Object.prototype.propertyIsEnumerable.call(value, s)));
-  const sp = __rawKind(ctx, value, recurseTimes, allKeys, ctor, tag, prefix);
+}
+function __rawAllKeys(value, showHidden) {
+  if (showHidden) return Reflect.ownKeys(value);
+  return Object.keys(value).concat(Object.getOwnPropertySymbols(value).filter((s) => Object.prototype.propertyIsEnumerable.call(value, s)));
+}
+function __rawCircularPrefix(ctx, value, res) {
+  if (ctx.circular === undefined) return res;
+  const index = ctx.circular.get(value);
+  if (index === undefined) return res;
+  return `${__sty(ctx, `<ref *${index}>`, 'special')} ${res}`;
+}
+function __formatRaw(ctx, value, recurseTimes, typedArray) {
+  void typedArray;
+  const ctor = __ctorName(value);
+  const tag = value[Symbol.toStringTag];
+  const prefix = __rawPrefix(ctor, tag);
+  const sp = __rawKind(ctx, value, recurseTimes, __rawAllKeys(value, ctx.showHidden), ctor, tag, prefix);
   if (typeof sp === 'string') return sp;
   if (recurseTimes > ctx.depth) {
     const name = (ctor || tag || 'Object');
@@ -3087,33 +3244,38 @@ function __formatRaw(ctx, value, recurseTimes, typedArray) {
   const output = sp.formatter(recurseTimes);
   for (const k of sp.keys) output.push(__formatProperty(ctx, value, recurseTimes, k, sp.extrasType));
   ctx.seen.pop();
-  let res = __reduceToSingleString(ctx, output, sp.base, sp.braces, sp.extrasType, recurseTimes, value);
-  if (ctx.circular !== undefined) {
-    const index = ctx.circular.get(value);
-    if (index !== undefined) res = `${__sty(ctx, `<ref *${index}>`, 'special')} ${res}`;
-  }
-  return res;
+  const res = __reduceToSingleString(ctx, output, sp.base, sp.braces, sp.extrasType, recurseTimes, value);
+  return __rawCircularPrefix(ctx, value, res);
 }
 // The options a [util.inspect.custom] method passes on to its inner inspect calls (Node's
 // `breakLength` 80 when the caller gives none).
 function __inspectCustomOpts(opts) {
   const o = { breakLength: 80, colors: false };
-  if (opts && typeof opts.breakLength === 'number') o.breakLength = opts.breakLength;
-  if (opts && opts.compact !== undefined) o.compact = opts.compact;
-  if (opts && opts.colors) o.colors = true;
-  if (opts && (typeof opts.depth === 'number' || opts.depth === null)) o.depth = opts.depth;
+  if (!opts) return o;
+  if (typeof opts.breakLength === 'number') o.breakLength = opts.breakLength;
+  if (opts.compact !== undefined) o.compact = opts.compact;
+  if (opts.colors) o.colors = true;
+  if (typeof opts.depth === 'number' || opts.depth === null) o.depth = opts.depth;
   return o;
 }
-function __nodeInspect(value, opts) {
+function __nodeInspectDepth(opts) {
+  if (opts.depth === null) return Infinity;
+  if (typeof opts.depth === 'number') return opts.depth;
+  return undefined;
+}
+function __nodeInspectCtx(opts) {
   const ctx = { seen: [], indentationLvl: 0, currentDepth: 0, depth: 2, breakLength: 80, compact: 3, maxArrayLength: 100, circular: undefined, colors: false };
-  if (opts) {
-    if (typeof opts.depth === 'number' || opts.depth === null) ctx.depth = opts.depth === null ? Infinity : opts.depth;
-    if (typeof opts.breakLength === 'number') ctx.breakLength = opts.breakLength;
-    if (opts.compact !== undefined) ctx.compact = opts.compact;
-    if (opts.colors) ctx.colors = true;
-    if (opts.showHidden) ctx.showHidden = true;
-  }
-  return __formatValue(ctx, value, 0);
+  if (!opts) return ctx;
+  const d = __nodeInspectDepth(opts);
+  if (d !== undefined) ctx.depth = d;
+  if (typeof opts.breakLength === 'number') ctx.breakLength = opts.breakLength;
+  if (opts.compact !== undefined) ctx.compact = opts.compact;
+  if (opts.colors) ctx.colors = true;
+  if (opts.showHidden) ctx.showHidden = true;
+  return ctx;
+}
+function __nodeInspect(value, opts) {
+  return __formatValue(__nodeInspectCtx(opts), value, 0);
 }
 // util.format: %s %d %i %f %j %o %O %c %%, the rest inspected (strings as they are)
 function __nodeFormat(...args) {
@@ -3136,16 +3298,24 @@ function __formatSpecNum(c, a) {
   if (c === 'i') return String(parseInt(a));
   return Object.is(Number(a), -0) ? '-0' : String(Number(a));
 }
+function __formatSpecJ(a) { try { return JSON.stringify(a); } catch (e) { return '[Circular]'; } }
+const __NUM_SPECS = new Set(['d', 'i', 'f']);
 // one util.format specifier (sdifjoOc) applied to its argument
 function __formatSpec(c, a, colors) {
-  switch (c) {
-    case 's': return __formatSpecS(a);
-    case 'd': case 'i': case 'f': return __formatSpecNum(c, a);
-    case 'j': try { return JSON.stringify(a); } catch (e) { return '[Circular]'; }
-    case 'o': return __nodeInspect(a, { depth: 4, colors, showHidden: true });
-    case 'O': return __nodeInspect(a, { colors });
-    default: return '';
-  }
+  if (c === 's') return __formatSpecS(a);
+  if (__NUM_SPECS.has(c)) return __formatSpecNum(c, a);
+  if (c === 'j') return __formatSpecJ(a);
+  if (c === 'o') return __nodeInspect(a, { depth: 4, colors, showHidden: true });
+  if (c === 'O') return __nodeInspect(a, { colors });
+  return '';
+}
+// Returns { out, lastAdvance, consumed: true|false } for the %-handling at position p.
+function __nodeFormatStep(first, p, args, i, colors, last) {
+  const c = first[p + 1];
+  if (c === '%') return { chunk: first.slice(last, p) + '%', nextLast: p + 2, iDelta: 0 };
+  if (i >= args.length || !'sdifjoOc'.includes(c)) return null;
+  const s = __formatSpec(c, args[i], colors);
+  return { chunk: first.slice(last, p) + s, nextLast: p + 2, iDelta: 1 };
 }
 function __nodeFormatWith(o, ...args) {
   const colors = !!(o && o.colors);
@@ -3157,13 +3327,9 @@ function __nodeFormatWith(o, ...args) {
   let last = 0;
   for (let p = 0; p < first.length - 1; p++) {
     if (first[p] !== '%') continue;
-    const c = first[p + 1];
-    if (c === '%') { out += first.slice(last, p) + '%'; last = p + 2; p++; continue; }
-    if (i >= args.length || !'sdifjoOc'.includes(c)) continue;
-    const s = __formatSpec(c, args[i++], colors);
-    out += first.slice(last, p) + s;
-    last = p + 2;
-    p++;
+    const step = __nodeFormatStep(first, p, args, i, colors, last);
+    if (!step) continue;
+    out += step.chunk; last = step.nextLast; i += step.iDelta; p++;
   }
   out += first.slice(last);
   for (; i < args.length; i++) out += ' ' + insp(args[i]);
@@ -3221,35 +3387,38 @@ function __qsSplit(qs, sep, options) {
 function __qsDecoder(options) {
   return options && typeof options.decodeURIComponent === 'function' ? options.decodeURIComponent : __querystring.unescape;
 }
+function __qsEncoder(options) {
+  return options && typeof options.encodeURIComponent === 'function' ? options.encodeURIComponent : __querystring.escape;
+}
+function __qsParsePart(obj, part, eq, dec) {
+  if (part.length === 0) return;
+  const i = part.indexOf(eq);
+  const k = dec((i >= 0 ? part.slice(0, i) : part).replace(/\+/g, ' '));
+  const v = i >= 0 ? dec(part.slice(i + eq.length).replace(/\+/g, ' ')) : '';
+  __qsAdd(obj, k, v);
+}
+function __qsStringifyEntry(out, k, v, eq, enc) {
+  const ks = enc(__qsPrim(k)) + eq;
+  if (Array.isArray(v)) { for (const x of v) out.push(ks + enc(__qsPrim(x))); return; }
+  out.push(ks + enc(__qsPrim(v)));
+}
 const __querystring = {
   unescape: __qsUnescape,
   escape: (s) => encodeURIComponent(typeof s === 'string' ? s : String(s)),
   stringify(obj, sep, eq, options) {
-    sep = sep || '&'; eq = eq || '=';
-    const enc = (options && typeof options.encodeURIComponent === 'function') ? options.encodeURIComponent : __querystring.escape;
     if (obj === null || typeof obj !== 'object') return '';
+    const s = sep || '&', e = eq || '=';
+    const enc = __qsEncoder(options);
     const out = [];
-    for (const k of Object.keys(obj)) {
-      const v = obj[k];
-      const ks = enc(__qsPrim(k)) + eq;
-      if (Array.isArray(v)) { for (const x of v) out.push(ks + enc(__qsPrim(x))); }
-      else out.push(ks + enc(__qsPrim(v)));
-    }
-    return out.join(sep);
+    for (const k of Object.keys(obj)) __qsStringifyEntry(out, k, obj[k], e, enc);
+    return out.join(s);
   },
   parse(qs, sep, eq, options) {
     const obj = Object.create(null);
     if (typeof qs !== 'string' || qs.length === 0) return obj;
-    sep = sep || '&'; eq = eq || '=';
-    const parts = __qsSplit(qs, sep, options);
+    const s = sep || '&', e = eq || '=';
     const dec = __qsDecoder(options);
-    for (const part of parts) {
-      if (part.length === 0) continue;
-      const i = part.indexOf(eq);
-      const k = dec((i >= 0 ? part.slice(0, i) : part).replace(/\+/g, ' '));
-      const v = i >= 0 ? dec(part.slice(i + eq.length).replace(/\+/g, ' ')) : '';
-      __qsAdd(obj, k, v);
-    }
+    for (const part of __qsSplit(qs, s, options)) __qsParsePart(obj, part, e, dec);
     return obj;
   },
 };
@@ -3287,23 +3456,22 @@ class __StringDecoder {
     all.set(this._rest); all.set(b, this._rest.length);
     return all;
   }
+  _decodeUtf8(b, final) {
+    const keep = final ? 0 : __utf8Tail(b);
+    this._rest = b.slice(b.length - keep);
+    return __utf8Decode(b, 0, b.length - keep);
+  }
+  _decodeSingleByte(b) {
+    this._rest = new Uint8Array(0);
+    let s = '';
+    for (const c of b) s += this.encoding === 'hex' ? c.toString(16).padStart(2, '0') : String.fromCharCode(this.encoding === 'ascii' ? c & 0x7f : c);
+    return s;
+  }
   _decode(b, final) {
-    switch (this.encoding) {
-      case 'utf8': {
-        const keep = final ? 0 : __utf8Tail(b);
-        this._rest = b.slice(b.length - keep);
-        return __utf8Decode(b, 0, b.length - keep);
-      }
-      case 'utf16le': return this._utf16(b, final);
-      case 'base64':
-      case 'base64url': return this._base64(b, final);
-      default: {
-        this._rest = new Uint8Array(0);
-        let s = '';
-        for (const c of b) s += this.encoding === 'hex' ? c.toString(16).padStart(2, '0') : String.fromCharCode(this.encoding === 'ascii' ? c & 0x7f : c);
-        return s;
-      }
-    }
+    if (this.encoding === 'utf8') return this._decodeUtf8(b, final);
+    if (this.encoding === 'utf16le') return this._utf16(b, final);
+    if (this.encoding === 'base64' || this.encoding === 'base64url') return this._base64(b, final);
+    return this._decodeSingleByte(b);
   }
   _utf16(b, final) {
     let n = b.length - (b.length % 2);
@@ -3347,10 +3515,13 @@ function __deepEqView(a, b, strict) {
   for (let i = 0; i < a.length; i++) if (strict ? !Object.is(a[i], b[i]) : a[i] != b[i]) return false;
   return true;
 }
+function __deepEqRegExp(a, b) {
+  return a.source === b.source && a.flags === b.flags && a.lastIndex === b.lastIndex;
+}
 // deepEqual of the internal value of a date, regexp, error, typed array or boxed primitive
 function __deepEqValue(a, b, strict, tag) {
   if (a instanceof Date) return a.getTime() === b.getTime();
-  if (a instanceof RegExp) return a.source === b.source && a.flags === b.flags && a.lastIndex === b.lastIndex;
+  if (a instanceof RegExp) return __deepEqRegExp(a, b);
   if (a instanceof Error) return a.message === b.message && a.name === b.name;
   if (ArrayBuffer.isView(a)) return __deepEqView(a, b, strict);
   if (__BOXED_TAGS.has(tag)) return Object.is(a.valueOf(), b.valueOf());
@@ -3362,25 +3533,29 @@ function __deepEqMapHit(k, v, b, strict, seen) {
   for (const [k2, v2] of b) if (__deepEq(k, k2, strict, seen) && __deepEq(v, v2, strict, seen)) return true;
   return false;
 }
+function __deepEqMapEntry(k, v, b, strict, seen) {
+  if (b.has(k)) return __deepEq(v, b.get(k), strict, seen);
+  // an object key (or, loosely, a primitive one) can still match a deep-equal key
+  if (strict && (k === null || typeof k !== 'object')) return false;
+  return __deepEqMapHit(k, v, b, strict, seen);
+}
 function __deepEqMap(a, b, strict, seen) {
   if (a.size !== b.size) return false;
-  for (const [k, v] of a) {
-    if (b.has(k)) { if (!__deepEq(v, b.get(k), strict, seen)) return false; continue; }
-    // an object key (or, loosely, a primitive one) can still match a deep-equal key
-    if (strict && (k === null || typeof k !== 'object')) return false;
-    if (!__deepEqMapHit(k, v, b, strict, seen)) return false;
-  }
+  for (const [k, v] of a) if (!__deepEqMapEntry(k, v, b, strict, seen)) return false;
   return true;
+}
+function __deepEqSetHit(v, b, strict, seen) {
+  for (const v2 of b) if (__deepEq(v, v2, strict, seen)) return true;
+  return false;
+}
+function __deepEqSetEntry(v, b, strict, seen) {
+  if (b.has(v)) return true;
+  if (strict && (v === null || typeof v !== 'object')) return false;
+  return __deepEqSetHit(v, b, strict, seen);
 }
 function __deepEqSet(a, b, strict, seen) {
   if (a.size !== b.size) return false;
-  for (const v of a) {
-    if (b.has(v)) continue;
-    if (strict && (v === null || typeof v !== 'object')) return false;
-    let hit = false;
-    for (const v2 of b) if (__deepEq(v, v2, strict, seen)) { hit = true; break; }
-    if (!hit) return false;
-  }
+  for (const v of a) if (!__deepEqSetEntry(v, b, strict, seen)) return false;
   return true;
 }
 // deepEqual of the own enumerable keys (and, strictly, symbols)
@@ -3409,16 +3584,18 @@ function __deepEqCollection(a, b, strict, seen) {
 }
 // `a === b` ends the comparison except for -0 vs 0 under strict, which splits on Object.is.
 function __deepEqSame(a, b, strict) { return a !== 0 || !strict || Object.is(a, b); }
+function __deepEqObjects(a, b, strict, seen, tag) {
+  if (__deepEqSeen(seen, a, b)) return true;
+  if (!__deepEqValue(a, b, strict, tag)) return false;
+  if (!__deepEqCollection(a, b, strict, seen)) return false;
+  return __deepEqKeys(a, b, strict, seen);
+}
 function __deepEq(a, b, strict, seen) {
   if (a === b) return __deepEqSame(a, b, strict);
   if (__isPrimOrNull(a) || __isPrimOrNull(b)) return __deepEqPrim(a, b, strict);
   const tag = __deepEqTag(a, b, strict);
   if (tag === null) return false;
-  seen = seen || new Map();
-  if (__deepEqSeen(seen, a, b)) return true;
-  if (!__deepEqValue(a, b, strict, tag)) return false;
-  if (!__deepEqCollection(a, b, strict, seen)) return false;
-  return __deepEqKeys(a, b, strict, seen);
+  return __deepEqObjects(a, b, strict, seen || new Map(), tag);
 }
 class __AssertionError extends Error {
   constructor(options) {
@@ -3442,10 +3619,11 @@ function __mkAssert(strict) {
     if (!args[0]) fail(args[0], true, args[1], '==', 'The expression evaluated to a falsy value:\n\n  assert.ok(' + __fmtv(args[0]) + ')\n');
   };
   const looseEq = (a, b) => a == b || (a !== a && b !== b);
+  const matchesFnErrorClass = (expected) => Error.isPrototypeOf(expected) || expected === Error;
   // error validation for throws/rejects: a class, a RegExp, a validation function or an object
   const matchesFn = (err, expected, message, operator) => {
     if (expected.prototype !== undefined && err instanceof expected) return;
-    if (Error.isPrototypeOf(expected) || expected === Error) fail(err, expected, message, operator, 'The error is expected to be an instance of "' + expected.name + '". Received "' + (err && err.constructor && err.constructor.name) + '"');
+    if (matchesFnErrorClass(expected)) fail(err, expected, message, operator, 'The error is expected to be an instance of "' + expected.name + '". Received "' + (err && err.constructor && err.constructor.name) + '"');
     const res = expected.call({}, err);
     if (res !== true) fail(err, expected, message, operator, 'The validation function is expected to return "true". Received ' + __fmtv(res));
   };
@@ -3836,9 +4014,11 @@ globalThis.__ttNs = (ns) => {
 };
 // set export `k` of a registered namespace (or its view) to `v`; false when `ns` is not one or
 // has no such export. Setting the module's own value back drops the override.
+const __ttNsRawOf = (ns) => (ns !== null && typeof ns === 'object' && __ttNsRaw.get(ns)) || ns;
+const __ttNsInfoOf = (raw) => (raw !== null && typeof raw === 'object' ? __ttNsInfo.get(__ttNsTarget(raw)) : undefined);
 globalThis.__ttNsSet = (ns, k, v) => {
-  const raw = (ns !== null && typeof ns === 'object' && __ttNsRaw.get(ns)) || ns;
-  const info = raw !== null && typeof raw === 'object' ? __ttNsInfo.get(__ttNsTarget(raw)) : undefined;
+  const raw = __ttNsRawOf(ns);
+  const info = __ttNsInfoOf(raw);
   if (info === undefined || typeof k !== 'string' || !(k in raw)) return false;
   info.over.delete(k);
   if (globalThis.__ttR(raw, k) !== v) info.over.set(k, v);
@@ -3847,11 +4027,11 @@ globalThis.__ttNsSet = (ns, k, v) => {
 // require() of an ES module from CommonJS (`isEsm` false) gives Node's require(esm) object: one
 // with a default export and no `__esModule` of its own reads an enumerable `__esModule: true`
 // (turbo-test#133).
+const __ttRequireEsmTag = (m) => m && typeof m === 'object' && m[Symbol.for('turbo-test.esm')] && 'default' in m;
 const __ttRequireEsm = (m) => {
-  if (m && typeof m === 'object' && m[Symbol.for('turbo-test.esm')] && 'default' in m) {
-    const d = Object.getOwnPropertyDescriptor(m, '__esModule');
-    if (d && d.configurable && !d.enumerable) Object.defineProperty(m, '__esModule', { value: true, enumerable: true, configurable: true });
-  }
+  if (!__ttRequireEsmTag(m)) return m;
+  const d = Object.getOwnPropertyDescriptor(m, '__esModule');
+  if (d && d.configurable && !d.enumerable) Object.defineProperty(m, '__esModule', { value: true, enumerable: true, configurable: true });
   return m;
 };
 globalThis.__mkRequire = (dir, isEsm, importer) => {
@@ -4101,10 +4281,13 @@ function __isError(v) {
   const t = Object.prototype.toString.call(v);
   return t === '[object Error]' || t === '[object Exception]' || t === '[object DOMException]' || v instanceof Error;
 }
+function __hasTypedKey(o, k, type) {
+  return k in o && typeof o[k] === type;
+}
 function __isDomNode(o) {
   // `in` first, as vitest: a mocked module's namespace throws on a read of a missing export
-  return o !== null && typeof o === 'object' && 'nodeType' in o && typeof o.nodeType === 'number' &&
-    'nodeName' in o && typeof o.nodeName === 'string' && 'isEqualNode' in o && typeof o.isEqualNode === 'function';
+  if (o === null || typeof o !== 'object') return false;
+  return __hasTypedKey(o, 'nodeType', 'number') && __hasTypedKey(o, 'nodeName', 'string') && __hasTypedKey(o, 'isEqualNode', 'function');
 }
 function __equals(a, b, testers, strictCheck) {
   return __eq(a, b, [], [], testers || [], strictCheck ? __hasKey : __hasDefinedKey);
@@ -4125,13 +4308,14 @@ function __eqAsym(a, b, asymA, testers) {
   if (asymA) return a.asymmetricMatch(b, testers);
   return b.asymmetricMatch(a, testers);
 }
+const __eqBothUrl = (a, b) => typeof URL === 'function' && a instanceof URL && b instanceof URL;
 // __eq before the structural walk: asymmetric matchers, custom testers, URLs, identity, null
 function __eqPre(a, b, testers) {
   const asymA = __isAsym(a), asymB = __isAsym(b);
   if (asymA !== asymB) return __eqAsym(a, b, asymA, testers);
   const t = __eqTesters(a, b, testers);
   if (t !== __EQ_NEXT) return t;
-  if (typeof URL === 'function' && a instanceof URL && b instanceof URL) return a.href === b.href;
+  if (__eqBothUrl(a, b)) return a.href === b.href;
   if (Object.is(a, b)) return true;
   if (a === null || b === null) return a === b;
   return __EQ_NEXT;
@@ -4141,18 +4325,17 @@ function __eqDate(a, b) {
   const x = +a, y = +b;
   return x === y || (Number.isNaN(x) && Number.isNaN(y));
 }
+const __EQ_PRIMITIVE_TAGS = new Set(['[object Boolean]', '[object String]', '[object Number]']);
+function __eqPrimitiveClass(a, b) {
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object') return Object.is(a, b);
+  return Object.is(a.valueOf(), b.valueOf());
+}
 // __eq of booleans, strings, numbers (boxed or not), dates and regexps (undefined: other classes)
 function __eqByClass(a, b, cls) {
-  switch (cls) {
-    case '[object Boolean]':
-    case '[object String]':
-    case '[object Number]':
-      if (typeof a !== typeof b) return false;
-      if (typeof a !== 'object') return Object.is(a, b);
-      return Object.is(a.valueOf(), b.valueOf());
-    case '[object Date]': return __eqDate(a, b);
-    case '[object RegExp]': return a.source === b.source && a.flags === b.flags;
-  }
+  if (__EQ_PRIMITIVE_TAGS.has(cls)) return __eqPrimitiveClass(a, b);
+  if (cls === '[object Date]') return __eqDate(a, b);
+  if (cls === '[object RegExp]') return a.source === b.source && a.flags === b.flags;
   return undefined;
 }
 // __eq's cycle check: a pair already on the stacks (undefined: not there)
@@ -4163,12 +4346,17 @@ function __eqCycle(a, b, aStack, bStack) {
   }
   return undefined;
 }
+function __eqErrorShape(a, b) {
+  return Object.prototype.toString.call(a) === Object.prototype.toString.call(b) && a.name === b.name && a.message === b.message;
+}
+function __eqErrorExtras(a, b, aStack, bStack, testers, hasKey) {
+  if (typeof b.cause !== 'undefined' && !__eq(a.cause, b.cause, aStack, bStack, testers, hasKey)) return false;
+  if (a instanceof AggregateError && b instanceof AggregateError && !__eq(a.errors, b.errors, aStack, bStack, testers, hasKey)) return false;
+  return __eq({ ...a }, { ...b }, aStack, bStack, testers, hasKey);
+}
 function __eqError(a, b, aStack, bStack, testers, hasKey) {
   try {
-    let r = Object.prototype.toString.call(a) === Object.prototype.toString.call(b) && a.name === b.name && a.message === b.message;
-    if (typeof b.cause !== 'undefined') r = r && __eq(a.cause, b.cause, aStack, bStack, testers, hasKey);
-    if (a instanceof AggregateError && b instanceof AggregateError) r = r && __eq(a.errors, b.errors, aStack, bStack, testers, hasKey);
-    return r && __eq({ ...a }, { ...b }, aStack, bStack, testers, hasKey);
+    return __eqErrorShape(a, b) && __eqErrorExtras(a, b, aStack, bStack, testers, hasKey);
   } finally {
     aStack.pop();
     bStack.pop();
@@ -4185,22 +4373,19 @@ function __eqOwnKeys(a, b, aStack, bStack, testers, hasKey) {
 }
 // __eq fast-path before the stack push: class/byClass/DOM/cycle. Returns __EQ_NEXT when the
 // caller must continue with the structural walk; any other value is the final answer.
+function __eqFastObject(a, b, aStack, bStack) {
+  if (__isDomNode(a) && __isDomNode(b)) return a.isEqualNode(b);
+  const cycle = __eqCycle(a, b, aStack, bStack);
+  return cycle !== undefined ? cycle : __EQ_NEXT;
+}
 function __eqFast(a, b, aStack, bStack, cls) {
   if (cls !== Object.prototype.toString.call(b)) return false;
   const byClass = __eqByClass(a, b, cls);
   if (byClass !== undefined) return byClass;
   if (typeof a !== 'object' || typeof b !== 'object') return false;
-  if (__isDomNode(a) && __isDomNode(b)) return a.isEqualNode(b);
-  const cycle = __eqCycle(a, b, aStack, bStack);
-  if (cycle !== undefined) return cycle;
-  return __EQ_NEXT;
+  return __eqFastObject(a, b, aStack, bStack);
 }
-function __eq(a, b, aStack, bStack, testers, hasKey) {
-  const pre = __eqPre(a, b, testers);
-  if (pre !== __EQ_NEXT) return pre;
-  const cls = Object.prototype.toString.call(a);
-  const fast = __eqFast(a, b, aStack, bStack, cls);
-  if (fast !== __EQ_NEXT) return fast;
+function __eqWalk(a, b, aStack, bStack, testers, hasKey, cls) {
   aStack.push(a);
   bStack.push(b);
   if (cls === '[object Array]' && a.length !== b.length) return false;
@@ -4210,8 +4395,16 @@ function __eq(a, b, aStack, bStack, testers, hasKey) {
   bStack.pop();
   return true;
 }
-const __bothIterable = (a, b) => !(typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) || Array.isArray(b) ||
-  a == null || b == null || !a[Symbol.iterator] || !b[Symbol.iterator]);
+function __eq(a, b, aStack, bStack, testers, hasKey) {
+  const pre = __eqPre(a, b, testers);
+  if (pre !== __EQ_NEXT) return pre;
+  const cls = Object.prototype.toString.call(a);
+  const fast = __eqFast(a, b, aStack, bStack, cls);
+  if (fast !== __EQ_NEXT) return fast;
+  return __eqWalk(a, b, aStack, bStack, testers, hasKey, cls);
+}
+const __isComparableIter = (v) => v != null && typeof v === 'object' && !Array.isArray(v) && !!v[Symbol.iterator];
+const __bothIterable = (a, b) => __isComparableIter(a) && __isComparableIter(b);
 // iterableEquality of two Sets: every member of `a` is in `b` or deep-equals one there
 function __iterSetEq(a, b, inner) {
   for (const av of a) {
@@ -4224,13 +4417,14 @@ function __iterSetEq(a, b, inner) {
   return true;
 }
 // iterableEquality of two Maps: every entry of `a` is in `b` or deep-equals one there
+function __iterMapHit(ak, av, b, inner) {
+  for (const [bk, bv] of b) if (__equals(ak, bk, inner) === true && __equals(av, bv, inner) === true) return true;
+  return false;
+}
 function __iterMapEq(a, b, inner) {
   for (const [ak, av] of a) {
-    if (!b.has(ak) || !__equals(av, b.get(ak), inner)) {
-      let has = false;
-      for (const [bk, bv] of b) if (__equals(ak, bk, inner) === true && __equals(av, bv, inner) === true) has = true;
-      if (!has) return false;
-    }
+    if (b.has(ak) && __equals(av, b.get(ak), inner)) continue;
+    if (!__iterMapHit(ak, av, b, inner)) return false;
   }
   return true;
 }
@@ -4269,10 +4463,15 @@ function __iterableEqualityCompare(a, b, testers, aStack, bStack) {
 // vitest iterableEquality: two non-array iterables of the same constructor — Sets by members and
 // Maps by entries (in any order, deep-equal members match), others in iteration order plus their
 // enumerable own entries.
+function __iterStackHit(a, b, aStack, bStack) {
+  for (let i = aStack.length; i--;) if (aStack[i] === a) return bStack[i] === b;
+  return __EQ_NEXT;
+}
 function __iterableEquality(a, b, testers = [], aStack = [], bStack = []) {
   if (!__bothIterable(a, b)) return undefined;
   if (a.constructor !== b.constructor) return false;
-  for (let i = aStack.length; i--;) if (aStack[i] === a) return bStack[i] === b;
+  const seen = __iterStackHit(a, b, aStack, bStack);
+  if (seen !== __EQ_NEXT) return seen;
   aStack.push(a);
   bStack.push(b);
   return __iterableEqualityCompare(a, b, testers, aStack, bStack);
@@ -4287,13 +4486,16 @@ function __sparseArrayEquality(a, b, testers = []) {
   if (!Array.isArray(a) || !Array.isArray(b)) return undefined;
   return __equals(a, b, testers.filter((t) => t !== __sparseArrayEquality), true) && __equals(Object.keys(a), Object.keys(b));
 }
+function __arrayBufferViews(a, b) {
+  if (a instanceof DataView && b instanceof DataView) return [a, b];
+  if (!(a instanceof ArrayBuffer) || !(b instanceof ArrayBuffer)) return null;
+  try { return [new DataView(a), new DataView(b)]; } catch { return null; }
+}
 // vitest arrayBufferEquality: ArrayBuffers / DataViews by their bytes.
 function __arrayBufferEquality(a, b) {
-  let x = a, y = b;
-  if (!(a instanceof DataView && b instanceof DataView)) {
-    if (!(a instanceof ArrayBuffer) || !(b instanceof ArrayBuffer)) return undefined;
-    try { x = new DataView(a); y = new DataView(b); } catch { return undefined; }
-  }
+  const views = __arrayBufferViews(a, b);
+  if (views === null) return undefined;
+  const [x, y] = views;
   if (x.byteLength !== y.byteLength) return false;
   for (let i = 0; i < x.byteLength; i++) if (x.getUint8(i) !== y.getUint8(i)) return false;
   return true;
@@ -4304,9 +4506,9 @@ function __arrayBufferEquality(a, b) {
 function __subsetEquality(object, subset, testers = []) {
   const inner = testers.filter((t) => t !== __subsetEquality);
   const inObj = (o, k) => !!o && typeof o === 'object' && o !== Object.prototype && (__hasKey(o, k) || inObj(Object.getPrototypeOf(o), k));
+  const isPlainSubsetTarget = (sub) => sub !== null && typeof sub === 'object' && !__isError(sub) && !Array.isArray(sub) && !(sub instanceof Date) && !(sub instanceof Set) && !(sub instanceof Map);
   const withSeen = (seen = new WeakMap()) => (obj, sub) => {
-    if (!(sub !== null && typeof sub === 'object' && !__isError(sub) && !Array.isArray(sub) &&
-      !(sub instanceof Date) && !(sub instanceof Set) && !(sub instanceof Map))) return undefined;
+    if (!isPlainSubsetTarget(sub)) return undefined;
     return Object.keys(sub).every((k) => {
       if (sub[k] != null && typeof sub[k] === 'object') {
         if (seen.has(sub[k])) return __equals(obj[k], sub[k], inner);
@@ -4387,36 +4589,34 @@ function __parseSnapFile(text) {
 }
 // natural-compare-lite's char-code mapping: lifts digits/letters into one monotonic range so
 // mixed alphanumeric strings compare in natural order (kept exactly as the upstream expression).
+// Each entry: [upper bound, delta]. c < hi → c + delta. The final branch handles c ≥ 123 as c - 63.
+const __NAT_RANGES = [[46, 20], [48, -1], [58, 18], [65, -11], [91, 11], [97, -37], [123, 5]];
 function __natCharCode(c) {
   if (c < 45 || c > 127) return c;
-  if (c < 46) return 65;
-  if (c < 48) return c - 1;
-  if (c < 58) return c + 18;
-  if (c < 65) return c - 11;
-  if (c < 91) return c + 11;
-  if (c < 97) return c - 37;
-  if (c < 123) return c + 5;
+  for (const [hi, delta] of __NAT_RANGES) if (c < hi) return c + delta;
   return c - 63;
 }
+const __isDigitCode = (c) => c < 76 && c > 65;
 // natural-compare-lite, the order vitest writes snapshot keys in.
 function __naturalCompare(a, b) {
   let i, codeA, codeB = 1, posA = 0, posB = 0;
   const code = (str, pos, num) => {
     if (num) {
-      for (i = pos; (num = code(str, i)), num < 76 && num > 65;) ++i;
+      for (i = pos; (num = code(str, i)), __isDigitCode(num);) ++i;
       return +str.slice(pos - 1, i);
     }
     return __natCharCode(str.charCodeAt(pos) || 0);
+  };
+  const promoteDigits = () => {
+    codeA = code(a, posA, posA);
+    codeB = code(b, posB, (posA = i));
+    posB = i;
   };
   if ((a += '') !== (b += '')) {
     for (; codeB;) {
       codeA = code(a, posA++);
       codeB = code(b, posB++);
-      if (codeA < 76 && codeB < 76 && codeA > 66 && codeB > 66) {
-        codeA = code(a, posA, posA);
-        codeB = code(b, posB, (posA = i));
-        posB = i;
-      }
+      if (__isDigitCode(codeA) && __isDigitCode(codeB)) promoteDigits();
       if (codeA !== codeB) return codeA < codeB ? -1 : 1;
     }
   }
@@ -4447,19 +4647,23 @@ function __snapApplyProps(received, props) {
   if (!__subsetMatches(received, props)) throw new Error('Snapshot properties mismatched');
   return __snapMerge(received, props);
 }
+const __snapIsObj = (x) => x != null && typeof x === 'object' && !Array.isArray(x) && !__isAsym(x);
+function __snapMergeEntry(target, source) {
+  if (__snapIsObj(source) && __snapIsObj(target)) return __snapMerge(target, source);
+  if (Array.isArray(source)) return __snapMerge(target, source);
+  return source;
+}
+function __snapMergeArrays(target, source) {
+  const out = Array.from(target);
+  source.forEach((s, i) => { out[i] = __snapMergeEntry(out[i], s); });
+  return out;
+}
 // vitest deepMergeSnapshot: the property matchers replace the received values they name
 function __snapMerge(target, source) {
-  const isObj = (x) => x != null && typeof x === 'object' && !Array.isArray(x) && !__isAsym(x);
-  if (Array.isArray(target) && Array.isArray(source)) {
-    const out = Array.from(target);
-    source.forEach((s, i) => { out[i] = isObj(s) && isObj(out[i]) ? __snapMerge(out[i], s) : Array.isArray(s) ? __snapMerge(out[i], s) : s; });
-    return out;
-  }
-  if (!isObj(target) || !isObj(source)) return source === undefined ? target : source;
+  if (Array.isArray(target) && Array.isArray(source)) return __snapMergeArrays(target, source);
+  if (!__snapIsObj(target) || !__snapIsObj(source)) return source === undefined ? target : source;
   const out = { ...target };
-  for (const k of Object.keys(source)) {
-    out[k] = isObj(source[k]) && isObj(target[k]) ? __snapMerge(target[k], source[k]) : Array.isArray(source[k]) ? __snapMerge(target[k], source[k]) : source[k];
-  }
+  for (const k of Object.keys(source)) out[k] = __snapMergeEntry(target[k], source[k]);
   return out;
 }
 
@@ -4489,34 +4693,41 @@ function __snapLoad() {
 }
 // @vitest/snapshot `_reconcile`: whether the snapshot passes, counting it and adding / updating
 // it (`add`) when the mode allows.
+function __snapReconcileWrite(st, pass, hasSnapshot, add, mode) {
+  if (mode !== 'all') { add(); st.added++; return; }
+  if (pass) { st.matched++; return; }
+  if (hasSnapshot) st.updated++; else st.added++;
+  add();
+}
 function __snapReconcile(st, pass, hasSnapshot, add) {
   const mode = __snapMode();
   if ((hasSnapshot && mode === 'all') || (!hasSnapshot && mode !== 'none')) {
-    if (mode === 'all') {
-      if (!pass) { if (hasSnapshot) st.updated++; else st.added++; add(); }
-      else st.matched++;
-    } else { add(); st.added++; }
+    __snapReconcileWrite(st, pass, hasSnapshot, add, mode);
     return true;
   }
   if (!pass) { st.unmatched++; return false; }
   st.matched++;
   return true;
 }
-// @vitest/snapshot stripSnapshotIndentation
+// @vitest/snapshot stripSnapshotIndentation — returns the stripped lines or null when the
+// snapshot shouldn't be stripped (keeps its original indent instead).
+function __stripSnapLines(lines, indent) {
+  for (let i = 1; i < lines.length - 1; i++) {
+    if (lines[i] === '') continue;
+    if (lines[i].indexOf(indent) !== 0) return null;
+    lines[i] = lines[i].substring(indent.length);
+  }
+  return lines;
+}
 function __stripSnapIndent(snap) {
   const m = snap.match(/^([^\S\n]*)\S/m);
   if (!m || !m[1]) return snap;
-  const indent = m[1];
   const lines = snap.split(/\n/g);
   if (lines.length <= 2 || lines[0].trim() !== '' || lines[lines.length - 1].trim() !== '') return snap;
-  for (let i = 1; i < lines.length - 1; i++) {
-    if (lines[i] !== '') {
-      if (lines[i].indexOf(indent) !== 0) return snap;
-      lines[i] = lines[i].substring(indent.length);
-    }
-  }
-  lines[lines.length - 1] = '';
-  return lines.join('\n');
+  const stripped = __stripSnapLines(lines, m[1]);
+  if (stripped === null) return snap;
+  stripped[stripped.length - 1] = '';
+  return stripped.join('\n');
 }
 // @vitest/snapshot prepareSnapString: the snapshot as a template literal indented like its line
 function __snapLiteral(snap, code, index) {
@@ -4598,12 +4809,16 @@ function __snapCheckSkipped(st, skipped) {
 }
 // __snapFinish's save of the snapshot file (or, under -u, delete of an emptied one); returns
 // whether the file counts as deleted
+function __snapWriteExternal(st) {
+  globalThis.__fs_mkdir(st.sf.dir, true);
+  globalThis.__fs_writeFile(st.sf.path, __serializeSnapFile(st.data), false);
+}
+function __snapHasPendingWrite(st, external) {
+  return (st.dirty || st.unchecked.size) && (external || st.inline || st.raw);
+}
 function __snapSave(st, external, mode) {
-  if ((st.dirty || st.unchecked.size) && (external || st.inline || st.raw)) {
-    if (external) {
-      globalThis.__fs_mkdir(st.sf.dir, true);
-      globalThis.__fs_writeFile(st.sf.path, __serializeSnapFile(st.data), false);
-    }
+  if (__snapHasPendingWrite(st, external)) {
+    if (external) __snapWriteExternal(st);
     return false;
   }
   if (!external && st.exists) {
@@ -4614,6 +4829,11 @@ function __snapSave(st, external, mode) {
 }
 // End of the file: mark the snapshots of skipped tests checked, drop the obsolete ones under -u,
 // save (or, under -u, delete an emptied file) and report the counts.
+function __snapDropObsolete(st, uncheckedKeys) {
+  for (const k of uncheckedKeys) delete st.data[k];
+  st.dirty = true;
+  st.unchecked.clear();
+}
 function __snapFinish(skipped) {
   const st = __snapState;
   if (!st.loaded) {
@@ -4624,11 +4844,7 @@ function __snapFinish(skipped) {
   __snapCheckSkipped(st, skipped);
   const mode = __snapMode();
   const uncheckedKeys = [...st.unchecked];
-  if (uncheckedKeys.length && mode === 'all') {
-    for (const k of uncheckedKeys) delete st.data[k];
-    st.dirty = true;
-    st.unchecked.clear();
-  }
+  if (uncheckedKeys.length && mode === 'all') __snapDropObsolete(st, uncheckedKeys);
   __writeInlineSnapshots(st.inlineWrites);
   const external = Object.keys(st.data).length;
   const deleted = __snapSave(st, external, mode);
@@ -4645,28 +4861,43 @@ function __thrownBy(actual) {
   if (actual instanceof Error) return [true, actual];
   return [false, undefined];
 }
+function __isDomContain(actual) { return typeof Node !== 'undefined' && actual instanceof Node; }
+function __toContainDom(c, actual, x) {
+  if (!(x instanceof Node)) throw new TypeError(`toContain() expected a DOM node as the argument, but got ${typeof x}`);
+  return c(actual.contains(x), 'expected #{this} to contain element #{exp}', 'expected #{this} not to contain element #{exp}', x);
+}
 // toThrow() / toThrow(string) / toThrow(RegExp), as chai's `throws` with vitest's messages
+function __throwShown(x) {
+  if (x instanceof Error) return x.toString();
+  if (typeof x === 'string') return x;
+  return x && x.constructor && x.constructor.name;
+}
+function __throwMessage(err) {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'string') return err;
+  return String(err);
+}
 function __toThrowChai(negated, expected, threw, err, fnShown) {
-  const shown = (x) => (x instanceof Error ? x.toString() : typeof x === 'string' ? x : x && x.constructor && x.constructor.name);
   if (expected === undefined) {
-    return __chaiAssert(negated, threw, 'expected #{this} to throw an error', 'expected #{this} to not throw an error but #{act} was thrown', fnShown, undefined, shown(err));
+    return __chaiAssert(negated, threw, 'expected #{this} to throw an error', 'expected #{this} to not throw an error but #{act} was thrown', fnShown, undefined, __throwShown(err));
   }
   if (!threw) {
     if (negated) return;
     throw new __ChaiAssertionError(__chaiMsg('expected #{this} to throw an error', fnShown));
   }
-  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : String(err);
+  const message = __throwMessage(err);
   const re = expected === '' ? /^$/ : expected;
   const matches = re instanceof RegExp ? re.test(message) : message.includes(re);
   const verb = re instanceof RegExp ? 'matching' : 'including';
   return __chaiAssert(negated, matches, `expected #{this} to throw error ${verb} #{exp} but got #{act}`, `expected #{this} to throw error not ${verb} #{exp}`, fnShown, re, message);
 }
 // toThrow(class / Error / asymmetric matcher / value); `c` is the matcher's chai assert
+function __toThrowFn(c, expected, threw, err) {
+  const name = expected.name || expected.prototype.constructor.name;
+  return c(threw && err instanceof expected, `expected error to be instance of ${name}`, `expected error not to be instance of ${name}`, expected, err);
+}
 function __toThrowValue(c, testers, expected, threw, err) {
-  if (typeof expected === 'function') {
-    const name = expected.name || expected.prototype.constructor.name;
-    return c(threw && err instanceof expected, `expected error to be instance of ${name}`, `expected error not to be instance of ${name}`, expected, err);
-  }
+  if (typeof expected === 'function') return __toThrowFn(c, expected, threw, err);
   // an Error or any other value: vitest's `equals(thrown, expected, [iterableEquality])`
   // (Errors by name / message / cause / own props; a plain object never equals an Error)
   if (__isError(expected)) {
@@ -4679,7 +4910,9 @@ function __toThrowValue(c, testers, expected, threw, err) {
 }
 // The jest-style matchers of one call on a chai Assertion (__attachMatcher): `actual`, `negated`,
 // `message` and `promise` are the assertion's object / negate / message / promise flags.
-function makeExpect(actual, negated = false, message = undefined, promise = '') {
+function makeExpect(actual, negated, message, promise) {
+  negated = negated === true;
+  promise = promise || '';
   // `msg` is a thunk: the failure message (and the formatting of the operands in it) is built
   // only when the assertion fails, as vitest does — formatting can throw (a native class
   // prototype whose members check their receiver) and must not fail a passing assertion.
@@ -4736,15 +4969,11 @@ function makeExpect(actual, negated = false, message = undefined, promise = '') 
       cn(pass, `expected #{this} to be close to #{exp}, received difference is ${receivedDiff}, but expected ${expectedDiff}`, `expected #{this} to not be close to #{exp}, received difference is ${receivedDiff}, but expected ${expectedDiff}`, n);
     },
     toContain(x) {
-      if (typeof Node !== 'undefined' && actual instanceof Node) {
-        if (!(x instanceof Node)) throw new TypeError(`toContain() expected a DOM node as the argument, but got ${typeof x}`);
-        return c(actual.contains(x), 'expected #{this} to contain element #{exp}', 'expected #{this} not to contain element #{exp}', x);
-      }
+      if (__isDomContain(actual)) return __toContainDom(c, actual, x);
       if (typeof actual === 'string' && typeof x === 'string') return c(actual.includes(x), 'expected #{this} to contain #{exp}', 'expected #{this} not to contain #{exp}', x);
       // chai's include on the value made indexable (vitest: Array.from)
       const list = actual != null && typeof actual !== 'string' ? Array.from(actual) : actual;
-      const pass = list != null && list.includes(x);
-      __chaiAssert(negated, pass, 'expected #{this} to include #{exp}', 'expected #{this} to not include #{exp}', list, x, list);
+      __chaiAssert(negated, list != null && list.includes(x), 'expected #{this} to include #{exp}', 'expected #{this} to not include #{exp}', list, x, list);
     },
     toContainEqual(x) { c(actual != null && Array.from(actual).some((a) => __equals(a, x, testers)), 'expected #{this} to deep equally contain #{exp}', 'expected #{this} to not deep equally contain #{exp}', x); },
     toBeInstanceOf(ctor) {
@@ -5026,16 +5255,19 @@ function __hintHead(matcherName, received, o, dim) {
   else { hint += dim(`${dimString}.`) + matcherName; dimString = ''; }
   return [hint, dimString];
 }
+function __hintExpectedPart(o, dim, expected, dimString) {
+  if (expected === '') return { hint: '', dimString: dimString + '()' };
+  let hint = dim(`${dimString}(`) + o.expectedColor(expected);
+  if (o.secondArgument) hint += dim(', ') + o.secondArgumentColor(o.secondArgument);
+  return { hint, dimString: ')' };
+}
 function __matcherHint(matcherName, received = 'received', expected = 'expected', options = {}) {
   const o = __hintOptions(options);
   const dim = __dcol.dim;
   let [hint, dimString] = __hintHead(matcherName, received, o, dim);
-  if (expected === '') dimString += '()';
-  else {
-    hint += dim(`${dimString}(`) + o.expectedColor(expected);
-    if (o.secondArgument) hint += dim(', ') + o.secondArgumentColor(o.secondArgument);
-    dimString = ')';
-  }
+  const part = __hintExpectedPart(o, dim, expected, dimString);
+  hint += part.hint;
+  dimString = part.dimString;
   if (o.comment !== '') dimString += ` // ${o.comment}`;
   if (dimString !== '') hint += dim(dimString);
   return hint;
@@ -5237,17 +5469,25 @@ globalThis.expect.poll = function poll(fn, options = {}) {
   if (!test) throw new Error('expect.poll() must be called inside a test');
   const assertion = __chai.expect(null, message);
   fn = fn.bind(assertion);
-  const proxy = new Proxy(assertion, { get(target, key, receiver) {
+  const __pollRejectKey = (key) => {
     if (key === 'resolves' || key === 'rejects') throw new SyntaxError(`expect.poll() is not supported in combination with .${key}`);
+    if (typeof key === 'string' && __pollUnsupported.includes(key)) throw new SyntaxError(`expect.poll() is not supported in combination with .${key}(). Use vi.waitFor() if your assertion condition is unstable.`);
+  };
+  const proxy = new Proxy(assertion, { get(target, key, receiver) {
+    __pollRejectKey(key);
     const matcher = Reflect.get(target, key, receiver);
     if (typeof matcher !== 'function') return matcher instanceof __chai.Assertion ? proxy : matcher;
     if (key === 'assert') return matcher;
-    if (typeof key === 'string' && __pollUnsupported.includes(key)) throw new SyntaxError(`expect.poll() is not supported in combination with .${key}(). Use vi.waitFor() if your assertion condition is unstable.`);
     return function __VITEST_POLL_CHAIN__(...args) {
       const STACK_TRACE_ERROR = new Error('STACK_TRACE_ERROR');
       const withStack = (err) => {
         if (err && typeof err === 'object' && STACK_TRACE_ERROR.stack !== undefined) err.stack = STACK_TRACE_ERROR.stack.replace(STACK_TRACE_ERROR.message, err.message);
         return err;
+      };
+      const onPollFail = (err, last) => {
+        if (!last) return false;
+        if (err && typeof err === 'object' && err.cause == null) err.cause = new Error('Matcher did not succeed in time.');
+        throw withStack(err);
       };
       const run = async () => {
         let timedOut = false;
@@ -5260,10 +5500,7 @@ globalThis.expect.poll = function poll(fn, options = {}) {
               __cu.flag(assertion, 'object', obj);
               return await matcher.call(assertion, ...args);
             } catch (err) {
-              if (last) {
-                if (err && typeof err === 'object' && err.cause == null) err.cause = new Error('Matcher did not succeed in time.');
-                throw withStack(err);
-              }
+              onPollFail(err, last);
               await new Promise((resolve) => __scheduleInternal(resolve, interval));
               if (__loop.fake) __loop.advance(interval);
             }
@@ -5367,12 +5604,13 @@ function __mockConstructorError(shorthand) {
   return new TypeError(`Cannot use \`${shorthand}\` when called with \`new\`. Use \`mockImplementation\` with a \`class\` keyword instead. See https://vitest.dev/api/mock#class-support for more information.`);
 }
 // makeSpy: the original's (or implementation's) own and inherited statics onto the mock
+function __copyMockStaticKey(fn, src, k) {
+  if (__mockStatic.has(k) || __mockDescriptor(fn, k)) return;
+  try { Object.defineProperty(fn, k, Object.getOwnPropertyDescriptor(src, k)); } catch (e) {}
+}
 function __copyMockStatics(fn, from) {
   for (let src = from; src && src !== Object.prototype && src !== Function.prototype; src = Object.getPrototypeOf(src)) {
-    for (const k of [...Object.getOwnPropertyNames(src), ...Object.getOwnPropertySymbols(src)]) {
-      if (__mockStatic.has(k) || __mockDescriptor(fn, k)) continue;
-      try { Object.defineProperty(fn, k, Object.getOwnPropertyDescriptor(src, k)); } catch (e) {}
-    }
+    for (const k of [...Object.getOwnPropertyNames(src), ...Object.getOwnPropertySymbols(src)]) __copyMockStaticKey(fn, src, k);
   }
 }
 const __mockLength = (impl, original) => ((impl || original) ? (impl || original).length : 0);
@@ -5387,56 +5625,71 @@ function __handleMockError(e, result, settled, fn) {
     globalThis.console.warn(`[vitest] The ${fn.getMockName()} mock did not use 'function' or 'class' in its implementation, see https://vitest.dev/api/vi#vi-spyon for examples.`);
   }
 }
-function makeSpy(impl, opts) {
-  opts = opts || {};
-  const original = opts.original;
-  if (opts.restore) __mockRestores.add(opts.restore);
-  const config = { impl: undefined, once: [], name: 'vi.fn()' };
-  // spyOn's original: jest.fn()'s whenCalledWith (__jestWhen) falls through to it
-  Object.defineProperty(config, 'original', { value: original });
+function __mockMakeState() {
   const state = {
     calls: [], contexts: [], instances: [], invocationCallOrder: [], settledResults: [], results: [],
     get lastCall() { return state.calls[state.calls.length - 1]; },
   };
-  const name = (original && original.name) || 'Mock';
-  const fn = { [name]: function (...args) {
-    state.calls.push(args);
-    state.invocationCallOrder.push(++__mockCallOrder);
-    const result = { type: 'incomplete', value: undefined };
-    // vitest's settledResults: 'incomplete' until the returned promise settles
-    const settled = { type: 'incomplete', value: undefined };
-    state.results.push(result);
-    state.settledResults.push(settled);
-    const context = new.target ? undefined : this;
-    const at = state.instances.push(context);
-    state.contexts.push(context);
-    const implementation = config.once.shift() || config.impl || original || function () {};
-    let ret;
-    try {
-      // `new spy()` constructs the implementation (a class cannot be called with .apply)
-      ret = new.target ? Reflect.construct(implementation, args, new.target) : implementation.apply(this, args);
-    } catch (e) {
-      __handleMockError(e, result, settled, fn);
-      throw e;
-    }
-    result.type = 'return';
-    result.value = ret;
-    if (new.target) {
-      state.contexts[at - 1] = ret;
-      state.instances[at - 1] = ret;
-    }
-    if (ret instanceof Promise) {
-      ret.then((v) => { settled.type = 'fulfilled'; settled.value = v; }, (e) => { settled.type = 'rejected'; settled.value = e; });
-    } else {
-      settled.type = 'fulfilled';
-      settled.value = ret;
-    }
-    return ret;
-  } }[name];
+  return state;
+}
+function __mockSettleResult(settled, ret) {
+  if (ret instanceof Promise) {
+    ret.then((v) => { settled.type = 'fulfilled'; settled.value = v; }, (e) => { settled.type = 'rejected'; settled.value = e; });
+    return;
+  }
+  settled.type = 'fulfilled';
+  settled.value = ret;
+}
+function __mockRecordCall(state, args, ctx, newTarget) {
+  state.calls.push(args);
+  state.invocationCallOrder.push(++__mockCallOrder);
+  const result = { type: 'incomplete', value: undefined };
+  const settled = { type: 'incomplete', value: undefined };
+  state.results.push(result);
+  state.settledResults.push(settled);
+  const context = newTarget ? undefined : ctx;
+  const at = state.instances.push(context);
+  state.contexts.push(context);
+  return { result, settled, at };
+}
+function __mockApplyImpl(config, original, args, newTarget, ctx) {
+  const implementation = config.once.shift() || config.impl || original || function () {};
+  if (newTarget) return Reflect.construct(implementation, args, newTarget);
+  return implementation.apply(ctx, args);
+}
+function __mockInvoke(fn, state, config, original, args, newTarget, ctx) {
+  const { result, settled, at } = __mockRecordCall(state, args, ctx, newTarget);
+  let ret;
+  try { ret = __mockApplyImpl(config, original, args, newTarget, ctx); }
+  catch (e) { __handleMockError(e, result, settled, fn); throw e; }
+  result.type = 'return';
+  result.value = ret;
+  if (newTarget) { state.contexts[at - 1] = ret; state.instances[at - 1] = ret; }
+  __mockSettleResult(settled, ret);
+  return ret;
+}
+function __mockMakeConfig(original) {
+  const config = { impl: undefined, once: [], name: 'vi.fn()' };
+  // spyOn's original: jest.fn()'s whenCalledWith (__jestWhen) falls through to it
+  Object.defineProperty(config, 'original', { value: original });
+  return config;
+}
+function __mockSpyName(original) { return (original && original.name) || 'Mock'; }
+function __mockInitOpts(opts, config, original, fn) {
+  if (opts.restore) __mockRestores.add(opts.restore);
+  if (opts.keepName) config.name = fn.name || 'vi.fn()';
+}
+function makeSpy(impl, opts) {
+  opts = opts || {};
+  const original = opts.original;
+  const config = __mockMakeConfig(original);
+  const state = __mockMakeState();
+  const name = __mockSpyName(original);
+  const fn = { [name]: function (...args) { return __mockInvoke(fn, state, config, original, args, new.target, this); } }[name];
   // the original's (or implementation's) own and inherited statics, as vitest copies them
   __copyMockStatics(fn, original || impl);
   Object.defineProperty(fn, 'length', { writable: true, enumerable: false, configurable: true, value: __mockLength(impl, original) });
-  if (opts.keepName) config.name = fn.name || 'vi.fn()';
+  __mockInitOpts(opts, config, original, fn);
   fn._isMockFunction = true;
   // the closure's state, for jest.fn()'s whenCalledWith (__jestWhen); a symbol, so no member
   Object.defineProperty(fn, __mockConfigKey, { value: config });
@@ -5500,13 +5753,14 @@ function __isBuiltinProto(p) {
   if (p === Object.prototype || p === Function.prototype) return true;
   try { return typeof p.constructor === 'function' && /\{\s*\[native code\]\s*\}$/.test(Function.prototype.toString.call(p.constructor)); } catch (e) { return true; }
 }
+function __automockProtoKey(target, p, k, spy) {
+  if (k === 'constructor' || Object.prototype.hasOwnProperty.call(target, k)) return;
+  const d = Object.getOwnPropertyDescriptor(p, k);
+  if (typeof d.value === 'function') target[k] = __trackSpy(makeSpy(undefined, { original: spy ? d.value : undefined }));
+}
 function __automockProtoMethods(target, proto, spy) {
   for (let p = proto; p && !__isBuiltinProto(p); p = Object.getPrototypeOf(p)) {
-    for (const k of Object.getOwnPropertyNames(p)) {
-      if (k === 'constructor' || Object.prototype.hasOwnProperty.call(target, k)) continue;
-      const d = Object.getOwnPropertyDescriptor(p, k);
-      if (typeof d.value === 'function') { target[k] = __trackSpy(makeSpy(undefined, { original: spy ? d.value : undefined })); }
-    }
+    for (const k of Object.getOwnPropertyNames(p)) __automockProtoKey(target, p, k, spy);
   }
 }
 // A mock's names an ES import may name although the mock lacks them (the ESM graph's synthetic
@@ -5804,15 +6058,13 @@ globalThis.__ttToESMDep = (m, node) => {
   return __ttBundlerNs(m);
 };
 // __ttToESMDep's bundler interop of a package's CommonJS module
+function __ttBundlerEsMod(m) { return ('default' in m || m.default !== undefined) ? m : __ttCjsView(m); }
+function __ttBundlerDefault(m) { return m.default === m || !__ttExternalCjs.has(m) ? m : __ttCjsView(m); }
 function __ttBundlerNs(m) {
-  if (m.__esModule || '__esModule' in m) return ('default' in m || m.default !== undefined) ? m : __ttCjsView(m);
-  if ('default' in m) return m.default === m || !__ttExternalCjs.has(m) ? m : __ttCjsView(m);
-  try {
-    Object.defineProperty(m, 'default', { value: m, configurable: true });
-    return m;
-  } catch (e) {
-    return __ttCjsView(m);
-  }
+  if (m.__esModule || '__esModule' in m) return __ttBundlerEsMod(m);
+  if ('default' in m) return __ttBundlerDefault(m);
+  try { Object.defineProperty(m, 'default', { value: m, configurable: true }); return m; }
+  catch (e) { return __ttCjsView(m); }
 }
 // Modules (resolved absolute paths) the entry's mock prepass registered for the current file.
 // vitest calls a hoisted factory ONCE; the module's own hoisted vi.mock call for such a module
@@ -5916,6 +6168,9 @@ function __ttFactoryExports(spec, factory, vitest, isDoMock, dir) {
       : __ttFactoryErrorMock(e, vitest)];
   }
 }
+function __ttMockMake(spec, factory, vitest, isDoMock, dir) {
+  return factory === undefined ? __ttAutomockOf(dir, spec) : __ttFactoryExports(spec, factory, vitest, isDoMock, dir);
+}
 function __ttMock(spec, factory, vitest, isDoMock) {
   const key = (globalThis.__ttDir || '') + '\0' + String(spec);
   // The calling module's dir: the module-runner's __ttDir, else (ESM graph, where modules have
@@ -5926,7 +6181,7 @@ function __ttMock(spec, factory, vitest, isDoMock) {
   // jest 30: `jest.mock(spec, factory)` defers the factory to the module's first require
   // (turbo-test#275). `vi.mock` keeps its eager hoist-time semantics.
   if (__ttJestLazyRegister(spec, factory, vitest, isDoMock, dir, key)) return;
-  const [ok, made] = factory === undefined ? __ttAutomockOf(dir, spec) : __ttFactoryExports(spec, factory, vitest, isDoMock, dir);
+  const [ok, made] = __ttMockMake(spec, factory, vitest, isDoMock, dir);
   if (ok) __ttMockRegister(spec, factory, vitest, isDoMock, dir, key, made);
 }
 // jest 30's lazy `jest.mock(spec, factory)`: the factory runs on the module's first require,
@@ -5939,13 +6194,16 @@ globalThis.__ttJestLazy = __ttJestLazy;
 function __ttJestLazyKey(dir, spec) {
   return (dir && globalThis.__ttResolveSpec(dir, String(spec))) || '\0' + String(spec);
 }
-function __ttJestLazyRegister(spec, factory, vitest, isDoMock, dir, key) {
+function __ttJestLazyEligible(factory, vitest, isDoMock) {
   if (vitest || isDoMock || typeof factory !== 'function') return false;
   // Both prepasses (the esbuild-MR one via __ttMockPrepass, and the untransformed ESM-graph
   // one via __ttNoLazyJestMock) run factories eagerly so the mock is in place before module
   // imports resolve: jest 30 lazy semantics only kick in from the module's own body call,
   // where the module's bindings exist.
-  if (globalThis.__ttMockPrepass || globalThis.__ttNoLazyJestMock) return false;
+  return !(globalThis.__ttMockPrepass || globalThis.__ttNoLazyJestMock);
+}
+function __ttJestLazyRegister(spec, factory, vitest, isDoMock, dir, key) {
+  if (!__ttJestLazyEligible(factory, vitest, isDoMock)) return false;
   __ttLenientMockKeys.add(key);
   __ttJestLazy.set(__ttJestLazyKey(dir, spec), { spec: String(spec), factory, dir, key });
   if (globalThis.__ttRegisterMock && dir) {
@@ -5970,6 +6228,9 @@ function __ttRegisterAsyncMock(spec, vitest, isDoMock, dir, key, exports) {
   __ttQueueMock(spec, exports, vitest, key);
 }
 // __ttMock's registration of the made mock
+function __ttTryRegisterNow(dir, spec, exports, key) {
+  return globalThis.__ttRegisterMock && dir && __ttRegisterMockNow(dir, spec, exports, key);
+}
 function __ttMockRegister(spec, factory, vitest, isDoMock, dir, key, exports) {
   // Sync factory: register IMMEDIATELY in the calling module's dir (vi.mock is hoisted above
   // the module's consumer requires, so the mock is in place before they load — and the factory
@@ -5977,9 +6238,9 @@ function __ttMockRegister(spec, factory, vitest, isDoMock, dir, key, exports) {
   // queue for __resolvePendingMocks (run_entry_mocks prepass / drain).
   if (globalThis.__ttMockPrepass) __ttPrepassMocks.add(__ttPrepassKey(spec));
   if (exports && typeof exports.then === 'function') return __ttRegisterAsyncMock(spec, vitest, isDoMock, dir, key, exports);
-  if (factory !== undefined) exports = __ttStrictMock(exports, key, String(spec), vitest);
-  if (globalThis.__ttRegisterMock && dir && __ttRegisterMockNow(dir, spec, exports, key)) return;
-  __ttQueueMock(spec, exports, vitest, key);
+  const final = factory !== undefined ? __ttStrictMock(exports, key, String(spec), vitest) : exports;
+  if (__ttTryRegisterNow(dir, spec, final, key)) return;
+  __ttQueueMock(spec, final, vitest, key);
 }
 // vi.dynamicImportSettled (vitest's waitForImportsToResolve): wait a macrotask on the real
 // clock (vitest's safe timers, so fake timers do not hold it), then for every import() still
@@ -6130,10 +6391,18 @@ function __viSpyOnCheck(originalImpl, accessType, original) {
 // @vitest/spy's spyOn: `accessor` 'get' / 'set' spies on an accessor; a getter holding a
 // function (a live re-export) is spied through it; the original descriptor comes back on
 // restore (a method found on a prototype is deleted from the object again)
-function __viSpyOn(obj, key, accessor) {
+function __viUnmockClear(spec) {
+  if (globalThis.__pendingMocks) globalThis.__pendingMocks = globalThis.__pendingMocks.filter((m) => m.spec !== String(spec));
+  const pending = __ttDoMockKey(globalThis.__ttDir || globalThis.__ttEntryDir, spec);
+  if (pending) __ttDoMockWaits.delete(pending);
+}
+function __viUnmock(spec) {
+  __viUnmockClear(spec);
+  const dir = globalThis.__ttDir || globalThis.__cwd;
+  if (globalThis.__ttUnmock && dir) { try { globalThis.__ttUnmock(dir, String(spec)); } catch (e) {} }
+}
+function __viSpyLookup(obj, key, accessor) {
   __spyCheckTarget(obj);
-  // a registered ESM-graph namespace: the spy is its override (esm_spy.rs, turbo-test#131,
-  // #146); its current value (a spy already set on it included) is the original
   const nsRaw = typeof obj === 'object' ? __ttNsRaw.get(obj) || obj : obj;
   const isNs = __spyIsNs(nsRaw, key, accessor);
   const found = isNs ? undefined : __mockDescriptor(obj, key);
@@ -6142,16 +6411,24 @@ function __viSpyOn(obj, key, accessor) {
   const [accessType, ssr] = __spyAccess(accessor, desc);
   const original = __spyOriginal(isNs, nsRaw, obj, key, desc, accessType);
   const originalImpl = ssr && original ? original.call(obj) : original;
+  return { nsRaw, isNs, descObj, desc, accessType, ssr, original, originalImpl };
+}
+function __viSpyReassign(obj, key, isNs, desc, accessType, cb) {
+  if (isNs) { globalThis.__ttNsSet(obj, key, cb); return; }
+  const d = Object.assign({}, desc || { configurable: true, writable: true });
+  delete d.value;
+  if (accessType !== 'value') delete d.writable;
+  d[accessType] = cb;
+  Object.defineProperty(obj, key, d);
+}
+// @vitest/spy's spyOn: `accessor` 'get' / 'set' spies on an accessor; a getter holding a
+// function (a live re-export) is spied through it; the original descriptor comes back on
+// restore (a method found on a prototype is deleted from the object again)
+function __viSpyOn(obj, key, accessor) {
+  const { isNs, descObj, desc, accessType, ssr, original, originalImpl } = __viSpyLookup(obj, key, accessor);
   __viSpyOnCheck(originalImpl, accessType, original);
   if (globalThis.vi.isMockFunction(originalImpl)) return originalImpl;
-  const reassign = (cb) => {
-    if (isNs) { globalThis.__ttNsSet(obj, key, cb); return; }
-    const d = Object.assign({}, desc || { configurable: true, writable: true });
-    delete d.value;
-    if (accessType !== 'value') delete d.writable;
-    d[accessType] = cb;
-    Object.defineProperty(obj, key, d);
-  };
+  const reassign = (cb) => __viSpyReassign(obj, key, isNs, desc, accessType, cb);
   const restore = () => {
     if (!isNs && descObj !== obj) Reflect.deleteProperty(obj, key);
     else if (!isNs && desc && !original) Object.defineProperty(obj, key, desc);
@@ -6172,13 +6449,7 @@ globalThis.vi = {
   // module runs, registering the mock keyed by the resolved absolute path. The factory runs
   // here, in the calling module's scope (so closures over setup-file vars work).
   mock: (spec, factory) => __ttMock(spec, factory, true),
-  unmock: (spec) => {
-    if (globalThis.__pendingMocks) globalThis.__pendingMocks = globalThis.__pendingMocks.filter((m) => m.spec !== String(spec));
-    const pending = __ttDoMockKey(globalThis.__ttDir || globalThis.__ttEntryDir, spec);
-    if (pending) __ttDoMockWaits.delete(pending);
-    const dir = globalThis.__ttDir || globalThis.__cwd;
-    if (globalThis.__ttUnmock && dir) { try { globalThis.__ttUnmock(dir, String(spec)); } catch (e) {} }
-  },
+  unmock: (spec) => __viUnmock(spec),
   // vitest's: a string path or a TypeError; the result disposes the mock (`using`)
   doMock: (spec, factory) => {
     __viPath('doMock', spec);
@@ -6368,14 +6639,17 @@ function __jestApplyConfig(ft) {
   __jestTimerDefaults = ft && typeof ft === 'object' ? ft : {};
   if (__jestTimerDefaults.enableGlobally === true) __jestInstallFake();
 }
+function __jestFakeSkip(legacy, c) {
+  if (legacy) return new Set(['Date', 'performance', 'hrtime']);
+  return new Set(Array.isArray(c.doNotFake) ? c.doNotFake : []);
+}
 function __jestInstallFake(cfg) {
   const c = Object.assign({}, __jestTimerDefaults, cfg);
   const legacy = c.legacyFakeTimers === true;
-  const skip = new Set(legacy ? ['Date', 'performance', 'hrtime'] : Array.isArray(c.doNotFake) ? c.doNotFake : []);
-  const at = c.now === undefined ? undefined : c.now;
+  const skip = __jestFakeSkip(legacy, c);
   const delta = typeof c.advanceTimers === 'number' ? c.advanceTimers : undefined;
   __installFake({
-    now: legacy ? undefined : at,
+    now: legacy ? undefined : c.now,
     toFake: __TO_FAKE.filter((k) => !skip.has(k)),
     loopLimit: c.timerLimit || 100000,
     shouldAdvanceTime: !legacy && (c.advanceTimers === true || delta !== undefined),
@@ -6519,15 +6793,17 @@ globalThis.jest = {
 // loupe `inspect` renders them (`'str'`, `[ 1, 2 ]`, `{ a: 1 }`, `[Function f]`, `+0`).
 const __inspectEsc = /['\u0000-\u001f\u007f-\u009f\u00ad\u0600-\u0604\u070f\u17b4\u17b5\u200c-\u200f\u2028-\u202f\u2060-\u206f\ufeff\ufff0-\uffff]/g;
 const __inspectEscMap = { '\b': '\\b', '\t': '\\t', '\n': '\\n', '\f': '\\f', '\r': '\\r', "'": "\\'" };
+function __inspectTruncEnd(str, len) {
+  let end = len - 1;
+  if (end > 0 && str[end - 1] >= '\ud800' && str[end - 1] <= '\udbff') end--;
+  return end;
+}
 function __inspectTrunc(str, len) {
   str = String(str);
-  if (1 > len && str.length > 1) return '…';
-  if (str.length > len && str.length > 1) {
-    let end = len - 1;
-    if (end > 0 && str[end - 1] >= '\ud800' && str[end - 1] <= '\udbff') end--;
-    return `${str.slice(0, end)}…`;
-  }
-  return str;
+  if (str.length <= 1) return str;
+  if (1 > len) return '…';
+  if (str.length <= len) return str;
+  return `${str.slice(0, __inspectTruncEnd(str, len))}…`;
 }
 function __inspectString(str, o) {
   str = String(str).replace(__inspectEsc, (c) => __inspectEscMap[c] || `\\u${`0000${c.charCodeAt(0).toString(16)}`.slice(-4)}`);
@@ -6556,25 +6832,34 @@ function __inspectListItem(list, i, o, orig, outLen, item, sep, peek) {
   const nextPeek = last ? '' : item(list[i + 1], o) + (second ? '' : sep);
   return { last, second, str, nextPeek };
 }
-function __inspectList(list, o, item = __inspect, sep = ', ') {
+function __inspectListStep(list, i, o, orig, out, peek, item, sep) {
+  const cut = `…(${list.length - i})`;
+  const { last, second, str, nextPeek } = __inspectListItem(list, i, o, orig, out.length, item, sep, peek);
+  const next = out.length + str.length;
+  const cutLen = next + cut.length;
+  if (__listCutBefore(last, second, next, cutLen, out.length + cut.length, orig)) return { done: true, cut };
+  if (__listCutPeek(last, second, cutLen, next + nextPeek.length, orig)) return { done: true, cut, peek: nextPeek };
+  if (__listCutAfter(last, second, next + nextPeek.length, orig)) return { done: true, cut: `…(${list.length - i - 1})`, add: str, peek: nextPeek };
+  return { done: false, add: str, peek: nextPeek };
+}
+function __inspectListApply(r, state) {
+  if (r.add) state.out += r.add;
+  if (r.peek !== undefined) state.peek = r.peek;
+  state.cut = r.cut;
+  if (!r.done) state.cut = '';
+  return r.done;
+}
+function __inspectList(list, o, item, sep) {
   if (!list.length) return '';
   const orig = o.truncate;
-  let out = '';
-  let peek = '';
-  let cut = '';
+  const useItem = item === undefined ? __inspect : item;
+  const useSep = sep === undefined ? ', ' : sep;
+  const state = { out: '', peek: '', cut: '' };
   for (let i = 0; i < list.length; i++) {
-    cut = `…(${list.length - i})`;
-    const { last, second, str, nextPeek } = __inspectListItem(list, i, o, orig, out.length, item, sep, peek);
-    const next = out.length + str.length;
-    const cutLen = next + cut.length;
-    if (__listCutBefore(last, second, next, cutLen, out.length + cut.length, orig)) break;
-    peek = nextPeek;
-    if (__listCutPeek(last, second, cutLen, next + peek.length, orig)) break;
-    out += str;
-    if (__listCutAfter(last, second, next + peek.length, orig)) { cut = `…(${list.length - i - 1})`; break; }
-    cut = '';
+    const r = __inspectListStep(list, i, o, orig, state.out, state.peek, useItem, useSep);
+    if (__inspectListApply(r, state)) break;
   }
-  return `${out}${cut}`;
+  return `${state.out}${state.cut}`;
 }
 function __inspectProp([key, value], o) {
   o.truncate -= 2;
@@ -6608,18 +6893,19 @@ function __inspectFunction(v, o) {
   const tag = v[Symbol.toStringTag] || 'Function';
   return v.name ? `[${tag} ${__inspectTrunc(v.name, o.truncate - 11)}]` : `[${tag}]`;
 }
+const __INSPECT_PRIM = {
+  undefined: () => 'undefined',
+  boolean: (v) => String(v),
+  number: __inspectNumber,
+  bigint: __inspectBigInt,
+  string: __inspectString,
+  symbol: (v) => (v.description ? `Symbol(${v.description})` : 'Symbol()'),
+  function: __inspectFunction,
+};
 // loupe's inspect of a primitive or function (undefined: an object)
 function __inspectPrim(v, o) {
-  switch (typeof v) {
-    case 'undefined': return 'undefined';
-    case 'boolean': return String(v);
-    case 'number': return __inspectNumber(v, o);
-    case 'bigint': return __inspectBigInt(v, o);
-    case 'string': return __inspectString(v, o);
-    case 'symbol': return v.description ? `Symbol(${v.description})` : 'Symbol()';
-    case 'function': return __inspectFunction(v, o);
-  }
-  return undefined;
+  const fn = __INSPECT_PRIM[typeof v];
+  return fn ? fn(v, o) : undefined;
 }
 function __inspectArray(v, o) {
   const extra = Object.keys(v).slice(v.length);
@@ -6680,21 +6966,38 @@ const __inspectTypes = new Map([
   ['Generator', __inspectEmpty], ['DataView', __inspectEmpty], ['ArrayBuffer', __inspectEmpty],
   ['Error', __inspectError],
 ]);
+function __inspectTypedName(v) {
+  if (typeof Buffer === 'function' && v instanceof Buffer) return 'Buffer';
+  return v[Symbol.toStringTag] || v.constructor.name;
+}
+function __inspectTypedItem(v, i, o) {
+  const sep = i === v.length - 1 ? '' : ', ';
+  const str = `${__inspectTrunc(v[i], o.truncate)}${sep}`;
+  o.truncate -= str.length;
+  if (v[i] !== v.length && o.truncate <= 3) return { cut: `…(${v.length - v[i] + 1})` };
+  return { str };
+}
 function __inspectTyped(v, o) {
-  const name = (typeof Buffer === 'function' && v instanceof Buffer) ? 'Buffer' : (v[Symbol.toStringTag] || v.constructor.name);
+  const name = __inspectTypedName(v);
   if (!v.length) return `${name}[]`;
   o.truncate -= name.length + 4;
   let out = '';
   for (let i = 0; i < v.length; i++) {
-    const str = `${__inspectTrunc(v[i], o.truncate)}${i === v.length - 1 ? '' : ', '}`;
-    o.truncate -= str.length;
-    if (v[i] !== v.length && o.truncate <= 3) { out += `…(${v.length - v[i] + 1})`; break; }
-    out += str;
+    const r = __inspectTypedItem(v, i, o);
+    if (r.cut) { out += r.cut; break; }
+    out += r.str;
   }
   return `${name}[ ${out} ]`;
 }
 // an object's own inspect: an asymmetric matcher, chai/inspect, util.inspect.custom or an
 // `inspect` method (undefined: none)
+function __inspectHooksCustom(v, o) {
+  const custom = v[Symbol.for('nodejs.util.inspect.custom')];
+  if (typeof custom !== 'function') return undefined;
+  // loupe hands the method its normalised options (depth 2, breakLength Infinity, no colours)
+  const r = custom.call(v, 2, Object.assign({ depth: 2, breakLength: Infinity, colors: false, showHidden: false }, o), __inspect);
+  return typeof r === 'string' ? r : __inspect(r, o);
+}
 function __inspectHooks(v, o) {
   // vitest's asymmetric matchers inspect as their minimal pretty-format (`Any<Number>`, …)
   if (v instanceof Asymmetric) {
@@ -6703,9 +7006,8 @@ function __inspectHooks(v, o) {
   }
   const chai = v[Symbol.for('chai/inspect')];
   if (typeof chai === 'function') return String(chai.call(v, o));
-  const custom = v[Symbol.for('nodejs.util.inspect.custom')];
-  // loupe hands the method its normalised options (depth 2, breakLength Infinity, no colours)
-  if (typeof custom === 'function') { const r = custom.call(v, 2, Object.assign({ depth: 2, breakLength: Infinity, colors: false, showHidden: false }, o), __inspect); return typeof r === 'string' ? r : __inspect(r, o); }
+  const custom = __inspectHooksCustom(v, o);
+  if (custom !== undefined) return custom;
   if (typeof v.inspect === 'function') { const r = v.inspect(2, o); return typeof r === 'string' ? r : __inspect(r, o); }
   return undefined;
 }
@@ -6732,8 +7034,14 @@ function __inspect(v, o = { truncate: Infinity, seen: [] }) {
 // long collapses to a summary.
 // toHaveProperty's path walk. Returns { cur, present }: a literal-key hit wins over the dot
 // path, else the segments are walked; `present=false` if any segment is missing.
+function __lookupPropertyLiteral(actual, path) {
+  if (Array.isArray(path) || actual == null) return null;
+  if (!(path in Object(actual))) return null;
+  return { cur: actual[path], present: true };
+}
 function __lookupProperty(actual, path) {
-  if (!Array.isArray(path) && actual != null && (path in Object(actual))) return { cur: actual[path], present: true };
+  const literal = __lookupPropertyLiteral(actual, path);
+  if (literal) return literal;
   const keys = Array.isArray(path) ? path : String(path).split('.');
   let cur = actual;
   for (const k of keys) {
@@ -6909,16 +7217,19 @@ function __pfMockFn(v, cfg, ind, depth, refs) {
   }
   return `[MockFunction${name === 'vi.fn()' ? '' : ` ${name}`}]${calls}`;
 }
+function __pfErrorEntries(v) {
+  const entries = { message: v.message };
+  if (v.cause !== undefined) entries.cause = v.cause;
+  for (const k of Object.keys(v)) if (k !== 'message' && k !== 'cause') entries[k] = v[k];
+  return entries;
+}
 function __pfError(v, cfg, ind, depth, refs) {
   if (refs.includes(v)) return '[Circular]';
   const r = [...refs, v];
   const d = depth + 1;
-  const entries = { message: v.message };
-  if (v.cause !== undefined) entries.cause = v.cause;
-  for (const k of Object.keys(v)) if (k !== 'message' && k !== 'cause') entries[k] = v[k];
   const name = v.name !== 'Error' ? v.name : __pfCtorName(v);
   if (d > cfg.maxDepth) return `[${name}]`;
-  return `${name} {${__pfEntries(Object.entries(entries), cfg, ind, d, r, ': ')}}`;
+  return `${name} {${__pfEntries(Object.entries(__pfErrorEntries(v)), cfg, ind, d, r, ': ')}}`;
 }
 // Walk cfg.plugins, calling each one's test(v) and letting the first match print the value.
 function __pfPluginFor(v, cfg, ind, depth, refs) {
@@ -6930,24 +7241,27 @@ function __pfPluginFor(v, cfg, ind, depth, refs) {
   return __PF_NONE;
 }
 // plugins, asymmetric matchers, mock functions and (cfg.errors) errors
+function __pfIsAsym(v) { return v && v.$$typeof === Symbol.for('jest.asymmetricMatcher'); }
+function __pfIsMock(v, cfg) { return cfg.mocks && typeof v === 'function' && v._isMockFunction; }
 function __pfHooks(v, cfg, ind, depth, refs) {
   const p = __pfPluginFor(v, cfg, ind, depth, refs);
   if (p !== __PF_NONE) return p;
-  if (v && v.$$typeof === Symbol.for('jest.asymmetricMatcher')) return __pfAsym(v, cfg, ind, depth, refs);
-  if (cfg.mocks && typeof v === 'function' && v._isMockFunction) return __pfMockFn(v, cfg, ind, depth, refs);
+  if (__pfIsAsym(v)) return __pfAsym(v, cfg, ind, depth, refs);
+  if (__pfIsMock(v, cfg)) return __pfMockFn(v, cfg, ind, depth, refs);
   if (cfg.errors && v instanceof Error) return __pfError(v, cfg, ind, depth, refs);
   return __PF_NONE;
 }
 // __pfPrimitive's typeof-dispatch over number/bigint/string/function/symbol.
+const __PF_TYPEOF = {
+  number: (v) => Object.is(v, -0) ? '-0' : String(v),
+  bigint: (v) => `${v}n`,
+  string: (v, cfg) => cfg.escape ? `"${v.replace(/"|\\/g, '\\$&')}"` : `"${v}"`,
+  function: (v, cfg) => cfg.fnName ? `[Function ${v.name || 'anonymous'}]` : '[Function]',
+  symbol: (v) => String(v).replace(/^Symbol\((.*)\)(.*)$/, 'Symbol($1)'),
+};
 function __pfTypeof(v, cfg) {
-  switch (typeof v) {
-    case 'number': return Object.is(v, -0) ? '-0' : String(v);
-    case 'bigint': return `${v}n`;
-    case 'string': return cfg.escape ? `"${v.replace(/"|\\/g, '\\$&')}"` : `"${v}"`;
-    case 'function': return cfg.fnName ? `[Function ${v.name || 'anonymous'}]` : '[Function]';
-    case 'symbol': return String(v).replace(/^Symbol\((.*)\)(.*)$/, 'Symbol($1)');
-  }
-  return undefined;
+  const fn = __PF_TYPEOF[typeof v];
+  return fn ? fn(v, cfg) : undefined;
 }
 // a primitive or function (undefined: an object)
 function __pfPrimitive(v, cfg) {
@@ -6957,15 +7271,16 @@ function __pfPrimitive(v, cfg) {
   return __pfTypeof(v, cfg);
 }
 // weak collections, dates, errors and regexps (undefined: other objects)
+const __PF_SIMPLE_CONST = { '[object WeakMap]': 'WeakMap {}', '[object WeakSet]': 'WeakSet {}' };
+function __pfSimpleRegExp(v, cfg) {
+  const r = RegExp.prototype.toString.call(v);
+  return cfg.escapeRegex ? r.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&') : r;
+}
 function __pfSimpleTag(v, cfg, tag) {
-  if (tag === '[object WeakMap]') return 'WeakMap {}';
-  if (tag === '[object WeakSet]') return 'WeakSet {}';
+  if (__PF_SIMPLE_CONST[tag]) return __PF_SIMPLE_CONST[tag];
   if (tag === '[object Date]') return Number.isNaN(+v) ? 'Date { NaN }' : v.toISOString();
   if (tag === '[object Error]' || v instanceof Error) return `[${Error.prototype.toString.call(v)}]`;
-  if (tag === '[object RegExp]') {
-    const r = RegExp.prototype.toString.call(v);
-    return cfg.escapeRegex ? r.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&') : r;
-  }
+  if (tag === '[object RegExp]') return __pfSimpleRegExp(v, cfg);
   return undefined;
 }
 function __pfArrayLike(v, cfg, ind, d, refs, hit, pp) {
@@ -6981,13 +7296,28 @@ function __pfObject(v, cfg, ind, d, refs, hit) {
   return `${prefix}{${__pfProps(v, cfg, ind, d, refs)}}`;
 }
 // arguments, arrays, typed arrays, maps, sets and other objects, one level down (`hit`: past maxDepth)
+function __pfArgumentsBody(v, cfg, ind, d, refs, pp) {
+  return `${cfg.min ? '' : 'Arguments '}[${__pfItems(Array.from(v), cfg, ind, d, refs, pp)}]`;
+}
+const __PF_TAGGED = {
+  '[object Arguments]': { hit: '[Arguments]', body: __pfArgumentsBody },
+  '[object Map]': { hit: '[Map]', body: (v, cfg, ind, d, refs) => `Map {${__pfEntries([...v.entries()], cfg, ind, d, refs, ' => ')}}` },
+  '[object Set]': { hit: '[Set]', body: (v, cfg, ind, d, refs, pp) => `Set {${__pfItems([...v.values()], cfg, ind, d, refs, pp)}}` },
+};
+function __pfCompositeTagged(v, cfg, ind, d, refs, hit, tag, pp) {
+  const entry = __PF_TAGGED[tag];
+  if (!entry) return undefined;
+  return hit ? entry.hit : entry.body(v, cfg, ind, d, refs, pp);
+}
 function __pfComposite(v, cfg, ind, d, refs, hit, tag) {
   const pp = (x, i) => __pfPrint(x, cfg, i, d, refs, false);
-  if (tag === '[object Arguments]') return hit ? '[Arguments]' : `${cfg.min ? '' : 'Arguments '}[${__pfItems(Array.from(v), cfg, ind, d, refs, pp)}]`;
+  const tagged = __pfCompositeTagged(v, cfg, ind, d, refs, hit, tag, pp);
+  if (tagged !== undefined) return tagged;
   if (Array.isArray(v) || ArrayBuffer.isView(v)) return __pfArrayLike(v, cfg, ind, d, refs, hit, pp);
-  if (tag === '[object Map]') return hit ? '[Map]' : `Map {${__pfEntries([...v.entries()], cfg, ind, d, refs, ' => ')}}`;
-  if (tag === '[object Set]') return hit ? '[Set]' : `Set {${__pfItems([...v.values()], cfg, ind, d, refs, pp)}}`;
   return __pfObject(v, cfg, ind, d, refs, hit);
+}
+function __pfShouldJSON(cfg, v, hit, calledToJSON) {
+  return cfg.toJSON && !hit && typeof v.toJSON === 'function' && !calledToJSON;
 }
 function __pfPrint(v, cfg, ind, depth, refs, calledToJSON) {
   const hooked = __pfHooks(v, cfg, ind, depth, refs);
@@ -6998,13 +7328,11 @@ function __pfPrint(v, cfg, ind, depth, refs, calledToJSON) {
   const simple = __pfSimpleTag(v, cfg, tag);
   if (simple !== undefined) return simple;
   if (refs.includes(v)) return '[Circular]';
-  refs = [...refs, v];
+  const nextRefs = [...refs, v];
   const d = depth + 1;
   const hit = d > cfg.maxDepth;
-  if (cfg.toJSON && !hit && typeof v.toJSON === 'function' && !calledToJSON) {
-    return __pfPrint(v.toJSON(), cfg, ind, d, refs, true);
-  }
-  return __pfComposite(v, cfg, ind, d, refs, hit, tag);
+  if (__pfShouldJSON(cfg, v, hit, calledToJSON)) return __pfPrint(v.toJSON(), cfg, ind, d, nextRefs, true);
+  return __pfComposite(v, cfg, ind, d, nextRefs, hit, tag);
 }
 function __pfEntries(entries, cfg, ind, depth, refs, sep) {
   if (!entries.length) return '';
@@ -7159,6 +7487,14 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     const iR = (d - 1 - (kF + baDeltaLength)) / 2;
     return iR <= iMaxR && aIndexesR[iR] - 1 <= aLast;
   };
+  const overlapFStep = (iF, d, aIndexPrev1, aIndexesF, aEnd, bEnd, bF, kF, common) => {
+    const insert = iF === 0 || (iF !== d && aIndexPrev1 < aIndexesF[iF]);
+    const aLastPrev = insert ? aIndexesF[iF] : aIndexPrev1;
+    const aFirst = insert ? aLastPrev : aLastPrev + 1;
+    const bFirst = bF + aFirst - kF;
+    const nCommonF = countF(aFirst + 1, aEnd, bFirst + 1, bEnd, common);
+    return { insert, aLastPrev, aFirst, bFirst, nCommonF, aLast: aFirst + nCommonF };
+  };
   const overlapF = (d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division) => {
     const bF = bStart - aStart;
     const baDeltaLength = (bEnd - bStart) - (aEnd - aStart);
@@ -7167,16 +7503,11 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     let aIndexPrev1 = 0;
     const nF = d < iMaxF ? d : iMaxF;
     for (let iF = 0, kF = -d; iF <= nF; iF += 1, kF += 2) {
-      const insert = iF === 0 || (iF !== d && aIndexPrev1 < aIndexesF[iF]);
-      const aLastPrev = insert ? aIndexesF[iF] : aIndexPrev1;
-      const aFirst = insert ? aLastPrev : aLastPrev + 1;
-      const bFirst = bF + aFirst - kF;
-      const nCommonF = countF(aFirst + 1, aEnd, bFirst + 1, bEnd, common);
-      const aLast = aFirst + nCommonF;
+      const s = overlapFStep(iF, d, aIndexPrev1, aIndexesF, aEnd, bEnd, bF, kF, common);
       aIndexPrev1 = aIndexesF[iF];
-      aIndexesF[iF] = aLast;
-      if (overlapFReached(kF, kMin, kMax, iMaxR, d, baDeltaLength, aIndexesR, aLast)) {
-        divisionF(d, aStart, aEnd, bStart, bEnd, common, division, bF, aLastPrev, insert, kF, aFirst, bFirst, nCommonF, aLast);
+      aIndexesF[iF] = s.aLast;
+      if (overlapFReached(kF, kMin, kMax, iMaxR, d, baDeltaLength, aIndexesR, s.aLast)) {
+        divisionF(d, aStart, aEnd, bStart, bEnd, common, division, bF, s.aLastPrev, s.insert, kF, s.aFirst, s.bFirst, s.nCommonF, s.aLast);
         return true;
       }
     }
@@ -7188,6 +7519,14 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     const iF = (d + (kR - baDeltaLength)) / 2;
     return iF <= iMaxF && aLast - 1 <= aIndexesF[iF];
   };
+  const overlapRStep = (iR, d, aIndexPrev1, aIndexesR, aStart, bStart, bR, kR, common) => {
+    const insert = iR === 0 || (iR !== d && aIndexesR[iR] < aIndexPrev1);
+    const aLastPrev = insert ? aIndexesR[iR] : aIndexPrev1;
+    const aFirst = insert ? aLastPrev : aLastPrev - 1;
+    const bFirst = bR + aFirst - kR;
+    const nCommonR = countR(aStart, aFirst - 1, bStart, bFirst - 1, common);
+    return { insert, aLastPrev, aFirst, bFirst, nCommonR, aLast: aFirst - nCommonR };
+  };
   const overlapR = (d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division) => {
     const bR = bEnd - aEnd;
     const baDeltaLength = (bEnd - bStart) - (aEnd - aStart);
@@ -7196,18 +7535,39 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     let aIndexPrev1 = 0;
     const nR = d < iMaxR ? d : iMaxR;
     for (let iR = 0, kR = d; iR <= nR; iR += 1, kR -= 2) {
-      const insert = iR === 0 || (iR !== d && aIndexesR[iR] < aIndexPrev1);
-      const aLastPrev = insert ? aIndexesR[iR] : aIndexPrev1;
-      const aFirst = insert ? aLastPrev : aLastPrev - 1;
-      const bFirst = bR + aFirst - kR;
-      const nCommonR = countR(aStart, aFirst - 1, bStart, bFirst - 1, common);
-      const aLast = aFirst - nCommonR;
+      const s = overlapRStep(iR, d, aIndexPrev1, aIndexesR, aStart, bStart, bR, kR, common);
       aIndexPrev1 = aIndexesR[iR];
-      aIndexesR[iR] = aLast;
-      if (overlapRReached(kR, kMin, kMax, iMaxF, d, baDeltaLength, aIndexesF, aLast)) {
-        divisionR(d, aStart, aEnd, bStart, bEnd, common, division, bR, aLastPrev, insert, kR, bFirst, nCommonR, aLast);
+      aIndexesR[iR] = s.aLast;
+      if (overlapRReached(kR, kMin, kMax, iMaxF, d, baDeltaLength, aIndexesF, s.aLast)) {
+        divisionR(d, aStart, aEnd, bStart, bEnd, common, division, bR, s.aLastPrev, s.insert, kR, s.bFirst, s.nCommonR, s.aLast);
         return true;
       }
+    }
+    return false;
+  };
+  const divideEven = (ctx, division) => {
+    const { nChange, aStart, aEnd, bStart, bEnd, aLength, bLength, bR, bF, common, aIndexesF, aIndexesR, baDeltaLength } = ctx;
+    const dMin = (nChange || baDeltaLength) / 2;
+    const dMax = (aLength + bLength) / 2;
+    let iMaxF = aLength, iMaxR = aLength;
+    for (let d = 1; d <= dMax; d += 1) {
+      iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
+      if (d < dMin) iMaxR = extendR(d, aStart, bStart, bR, common, aIndexesR, iMaxR);
+      else if (overlapR(d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division)) return true;
+    }
+    return false;
+  };
+  const divideOdd = (ctx, division) => {
+    const { nChange, aStart, aEnd, bStart, bEnd, aLength, bLength, bR, bF, common, aIndexesF, aIndexesR, baDeltaLength } = ctx;
+    const dMin = ((nChange || baDeltaLength) + 1) / 2;
+    const dMax = (aLength + bLength + 1) / 2;
+    let iMaxF = aLength, iMaxR = aLength;
+    let d = 1;
+    iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
+    for (d += 1; d <= dMax; d += 1) {
+      iMaxR = extendR(d - 1, aStart, bStart, bR, common, aIndexesR, iMaxR);
+      if (d < dMin) iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
+      else if (overlapF(d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division)) return true;
     }
     return false;
   };
@@ -7217,29 +7577,10 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     const aLength = aEnd - aStart;
     const bLength = bEnd - bStart;
     const baDeltaLength = bLength - aLength;
-    let iMaxF = aLength;
-    let iMaxR = aLength;
     aIndexesF[0] = aStart - 1;
     aIndexesR[0] = aEnd;
-    if (baDeltaLength % 2 === 0) {
-      const dMin = (nChange || baDeltaLength) / 2;
-      const dMax = (aLength + bLength) / 2;
-      for (let d = 1; d <= dMax; d += 1) {
-        iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
-        if (d < dMin) iMaxR = extendR(d, aStart, bStart, bR, common, aIndexesR, iMaxR);
-        else if (overlapR(d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division)) return;
-      }
-    } else {
-      const dMin = ((nChange || baDeltaLength) + 1) / 2;
-      const dMax = (aLength + bLength + 1) / 2;
-      let d = 1;
-      iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
-      for (d += 1; d <= dMax; d += 1) {
-        iMaxR = extendR(d - 1, aStart, bStart, bR, common, aIndexesR, iMaxR);
-        if (d < dMin) iMaxF = extendF(d, aEnd, bEnd, bF, common, aIndexesF, iMaxF);
-        else if (overlapF(d, aStart, aEnd, bStart, bEnd, common, aIndexesF, iMaxF, aIndexesR, iMaxR, division)) return;
-      }
-    }
+    const ctx = { nChange, aStart, aEnd, bStart, bEnd, aLength, bLength, bR, bF, common, aIndexesF, aIndexesR, baDeltaLength };
+    if (baDeltaLength % 2 === 0 ? divideEven(ctx, division) : divideOdd(ctx, division)) return;
     throw new Error(`diff-sequences: no overlap aStart=${aStart} aEnd=${aEnd} bStart=${bStart} bEnd=${bEnd}`);
   };
   // Transpose the halves so that `a` is the shorter sequence, lazily installing the mirrored
@@ -7252,16 +7593,20 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     }
     return [bStart, bEnd, aStart, aEnd, t];
   };
+  const findEmit = (division, found) => {
+    const { nCommonPreceding, aCommonPreceding, bCommonPreceding, nCommonFollowing, aCommonFollowing, bCommonFollowing } = division;
+    if (nCommonPreceding !== 0) found(nCommonPreceding, aCommonPreceding, bCommonPreceding);
+    if (nCommonFollowing !== 0) found(nCommonFollowing, aCommonFollowing, bCommonFollowing);
+  };
   const find = (nChange, aStart, aEnd, bStart, bEnd, transposed, callbacks, aIndexesF, aIndexesR, division) => {
     if (bEnd - bStart < aEnd - aStart) {
       [aStart, aEnd, bStart, bEnd, transposed] = transposeHalves(aStart, aEnd, bStart, bEnd, transposed, callbacks);
     }
     const { found, common } = callbacks[transposed ? 1 : 0];
     divide(nChange, aStart, aEnd, bStart, bEnd, common, aIndexesF, aIndexesR, division);
-    const { nChangePreceding, aEndPreceding, bEndPreceding, nCommonPreceding, aCommonPreceding, bCommonPreceding, nCommonFollowing, aCommonFollowing, bCommonFollowing, nChangeFollowing, aStartFollowing, bStartFollowing } = division;
+    const { nChangePreceding, aEndPreceding, bEndPreceding, nChangeFollowing, aStartFollowing, bStartFollowing } = division;
     if (aStart < aEndPreceding && bStart < bEndPreceding) find(nChangePreceding, aStart, aEndPreceding, bStart, bEndPreceding, transposed, callbacks, aIndexesF, aIndexesR, division);
-    if (nCommonPreceding !== 0) found(nCommonPreceding, aCommonPreceding, bCommonPreceding);
-    if (nCommonFollowing !== 0) found(nCommonFollowing, aCommonFollowing, bCommonFollowing);
+    findEmit(division, found);
     if (aStartFollowing < aEnd && bStartFollowing < bEnd) find(nChangeFollowing, aStartFollowing, aEnd, bStartFollowing, bEnd, transposed, callbacks, aIndexesF, aIndexesR, division);
   };
   const nCommonF = countF(0, aLength, 0, bLength, isCommon);
@@ -7301,28 +7646,36 @@ const __annotation = () => `${__dcol.green(`- ${__diffAnno[0]}`)}\n${__dcol.red(
 // jest-diff `joinAlignedDiffsNoExpand` (5 context lines, `@@` patch marks), each line as
 // printDiffLine colours it: deleted green, inserted red, common dim, the marks yellow.
 // joinAlignedDiffsNoExpand: whether common runs longer than the context are cut (`@@` marks)
+function __diffsPatchHit(start, i, len, ctx, ctx2) {
+  if (start === i) return false;
+  const k = i - start;
+  return k > (start === 0 || i === len ? ctx : ctx2);
+}
 function __diffsNeedPatch(diffs, ctx, ctx2) {
   const len = diffs.length;
   let i = 0;
   while (i !== len) {
     const start = i;
     while (i !== len && diffs[i][0] === 0) i++;
-    const k = i - start;
-    if (start !== i && k > (start === 0 || i === len ? ctx : ctx2)) return true;
+    if (__diffsPatchHit(start, i, len, ctx, ctx2)) return true;
     while (i !== len && diffs[i][0] !== 0) i++;
   }
   return false;
 }
 // __joinDiffs's main pass over the (op, line) sequence: a run of common lines first (deferred to
 // commonRun), then every immediately-adjacent `-` and `+` as consecutive del/ins blocks.
+function __joinDiffsOpRun(diffs, i, len, op, emit) {
+  while (i !== len && diffs[i][0] === op) { emit(diffs[i][1]); i++; }
+  return i;
+}
 function __joinDiffsLoop(diffs, len, commonRun, del, ins) {
   let i = 0;
   while (i !== len) {
     const start = i;
     while (i !== len && diffs[i][0] === 0) i++;
     if (start !== i) commonRun(start, i);
-    while (i !== len && diffs[i][0] === -1) { del(diffs[i][1]); i++; }
-    while (i !== len && diffs[i][0] === 1) { ins(diffs[i][1]); i++; }
+    i = __joinDiffsOpRun(diffs, i, len, -1, del);
+    i = __joinDiffsOpRun(diffs, i, len, 1, ins);
   }
 }
 function __joinDiffs(diffs) {
@@ -7414,14 +7767,12 @@ function __commonSuffix(t1, t2) {
   }
   return mid;
 }
-function __commonOverlap(t1, t2) {
-  const l1 = t1.length;
-  const l2 = t2.length;
-  if (l1 === 0 || l2 === 0) return 0;
-  if (l1 > l2) t1 = t1.substring(l1 - l2);
-  else if (l1 < l2) t2 = t2.substring(0, l1);
-  const len = Math.min(l1, l2);
-  if (t1 === t2) return len;
+function __commonOverlapTrim(t1, t2, l1, l2) {
+  if (l1 > l2) return [t1.substring(l1 - l2), t2];
+  if (l1 < l2) return [t1, t2.substring(0, l1)];
+  return [t1, t2];
+}
+function __commonOverlapLoop(t1, t2, len) {
   let best = 0;
   let length = 1;
   for (;;) {
@@ -7430,6 +7781,15 @@ function __commonOverlap(t1, t2) {
     length += found;
     if (found === 0 || t1.substring(len - length) === t2.substring(0, length)) { best = length; length++; }
   }
+}
+function __commonOverlap(t1, t2) {
+  const l1 = t1.length;
+  const l2 = t2.length;
+  if (l1 === 0 || l2 === 0) return 0;
+  [t1, t2] = __commonOverlapTrim(t1, t2, l1, l2);
+  const len = Math.min(l1, l2);
+  if (t1 === t2) return len;
+  return __commonOverlapLoop(t1, t2, len);
 }
 // semanticScore's classes of the character at a boundary: non-alphanumeric, whitespace, line
 // break, blank line (`blank`: the text's blank-line test at that end)
@@ -7442,13 +7802,13 @@ function __scoreSide(c, text, blank) {
 // True when either edge has the flag — the symmetric half of __semanticRank's table.
 function __semanticEither(x, y, key) { return x[key] || y[key]; }
 // __semanticScore's rank table over the two edges' character classes.
+const __semanticSplit = (x, y) => x.nonAlnum && !x.ws && y.ws;
 function __semanticRank(x, y) {
   if (__semanticEither(x, y, 'blank')) return 5;
   if (__semanticEither(x, y, 'lb')) return 4;
-  if (x.nonAlnum && !x.ws && y.ws) return 3;
+  if (__semanticSplit(x, y)) return 3;
   if (__semanticEither(x, y, 'ws')) return 2;
-  if (__semanticEither(x, y, 'nonAlnum')) return 1;
-  return 0;
+  return __semanticEither(x, y, 'nonAlnum') ? 1 : 0;
 }
 function __semanticScore(one, two) {
   if (!one || !two) return 6;
@@ -7456,38 +7816,40 @@ function __semanticScore(one, two) {
   const y = __scoreSide(two.charAt(0), two, /^\r?\n\r?\n/);
   return __semanticRank(x, y);
 }
+function __losslessShiftSuffix(eq1, edit, eq2) {
+  const off = __commonSuffix(eq1, edit);
+  if (!off) return { eq1, edit, eq2 };
+  const common = edit.substring(edit.length - off);
+  return { eq1: eq1.substring(0, eq1.length - off), edit: common + edit.substring(0, edit.length - off), eq2: common + eq2 };
+}
+function __losslessBestShift(eq1, edit, eq2) {
+  let bestEq1 = eq1, bestEdit = edit, bestEq2 = eq2;
+  let bestScore = __semanticScore(eq1, edit) + __semanticScore(edit, eq2);
+  while (edit.charAt(0) === eq2.charAt(0)) {
+    eq1 += edit.charAt(0);
+    edit = edit.substring(1) + eq2.charAt(0);
+    eq2 = eq2.substring(1);
+    const score = __semanticScore(eq1, edit) + __semanticScore(edit, eq2);
+    if (score >= bestScore) { bestScore = score; bestEq1 = eq1; bestEdit = edit; bestEq2 = eq2; }
+  }
+  return { bestEq1, bestEdit, bestEq2 };
+}
+function __losslessApply(diffs, pointer, best) {
+  if (diffs[pointer - 1][1] === best.bestEq1) return pointer;
+  if (best.bestEq1) diffs[pointer - 1][1] = best.bestEq1;
+  else { diffs.splice(pointer - 1, 1); pointer--; }
+  diffs[pointer][1] = best.bestEdit;
+  if (best.bestEq2) diffs[pointer + 1][1] = best.bestEq2;
+  else { diffs.splice(pointer + 1, 1); pointer--; }
+  return pointer;
+}
 function __cleanupSemanticLossless(diffs) {
   let pointer = 1;
   while (pointer < diffs.length - 1) {
     if (diffs[pointer - 1][0] === 0 && diffs[pointer + 1][0] === 0) {
-      let eq1 = diffs[pointer - 1][1];
-      let edit = diffs[pointer][1];
-      let eq2 = diffs[pointer + 1][1];
-      const off = __commonSuffix(eq1, edit);
-      if (off) {
-        const common = edit.substring(edit.length - off);
-        eq1 = eq1.substring(0, eq1.length - off);
-        edit = common + edit.substring(0, edit.length - off);
-        eq2 = common + eq2;
-      }
-      let bestEq1 = eq1;
-      let bestEdit = edit;
-      let bestEq2 = eq2;
-      let bestScore = __semanticScore(eq1, edit) + __semanticScore(edit, eq2);
-      while (edit.charAt(0) === eq2.charAt(0)) {
-        eq1 += edit.charAt(0);
-        edit = edit.substring(1) + eq2.charAt(0);
-        eq2 = eq2.substring(1);
-        const score = __semanticScore(eq1, edit) + __semanticScore(edit, eq2);
-        if (score >= bestScore) { bestScore = score; bestEq1 = eq1; bestEdit = edit; bestEq2 = eq2; }
-      }
-      if (diffs[pointer - 1][1] !== bestEq1) {
-        if (bestEq1) diffs[pointer - 1][1] = bestEq1;
-        else { diffs.splice(pointer - 1, 1); pointer--; }
-        diffs[pointer][1] = bestEdit;
-        if (bestEq2) diffs[pointer + 1][1] = bestEq2;
-        else { diffs.splice(pointer + 1, 1); pointer--; }
-      }
+      const shifted = __losslessShiftSuffix(diffs[pointer - 1][1], diffs[pointer][1], diffs[pointer + 1][1]);
+      const best = __losslessBestShift(shifted.eq1, shifted.edit, shifted.eq2);
+      pointer = __losslessApply(diffs, pointer, best);
     }
     pointer++;
   }
@@ -7512,15 +7874,16 @@ function __mergeFactor(diffs, pointer, nDel, nIns, tIns, tDel) {
 }
 // cleanupMerge at an equality ending a run of edits: the run as one deletion and one insertion
 // (or the equality merged into the previous one); returns the new pointer
+function __mergeRunMulti(diffs, pointer, nDel, nIns, tDel, tIns) {
+  if (nDel !== 0 && nIns !== 0) [pointer, tIns, tDel] = __mergeFactor(diffs, pointer, nDel, nIns, tIns, tDel);
+  pointer -= nDel + nIns;
+  diffs.splice(pointer, nDel + nIns);
+  if (tDel.length) { diffs.splice(pointer, 0, [-1, tDel]); pointer++; }
+  if (tIns.length) { diffs.splice(pointer, 0, [1, tIns]); pointer++; }
+  return pointer + 1;
+}
 function __mergeRun(diffs, pointer, nDel, nIns, tDel, tIns) {
-  if (nDel + nIns > 1) {
-    if (nDel !== 0 && nIns !== 0) [pointer, tIns, tDel] = __mergeFactor(diffs, pointer, nDel, nIns, tIns, tDel);
-    pointer -= nDel + nIns;
-    diffs.splice(pointer, nDel + nIns);
-    if (tDel.length) { diffs.splice(pointer, 0, [-1, tDel]); pointer++; }
-    if (tIns.length) { diffs.splice(pointer, 0, [1, tIns]); pointer++; }
-    return pointer + 1;
-  }
+  if (nDel + nIns > 1) return __mergeRunMulti(diffs, pointer, nDel, nIns, tDel, tIns);
   if (pointer !== 0 && diffs[pointer - 1][0] === 0) {
     diffs[pointer - 1][1] += diffs[pointer][1];
     diffs.splice(pointer, 1);
@@ -7554,85 +7917,82 @@ function __mergeShifts(diffs) {
   }
   return changes;
 }
+function __cleanupMergeStep(state, diffs) {
+  const op = diffs[state.pointer][0];
+  if (op === 1) { state.nIns++; state.tIns += diffs[state.pointer][1]; state.pointer++; return; }
+  if (op === -1) { state.nDel++; state.tDel += diffs[state.pointer][1]; state.pointer++; return; }
+  state.pointer = __mergeRun(diffs, state.pointer, state.nDel, state.nIns, state.tDel, state.tIns);
+  state.nIns = 0; state.nDel = 0; state.tDel = ''; state.tIns = '';
+}
 function __cleanupMerge(diffs) {
   diffs.push([0, '']);
-  let pointer = 0;
-  let nDel = 0;
-  let nIns = 0;
-  let tDel = '';
-  let tIns = '';
-  while (pointer < diffs.length) {
-    switch (diffs[pointer][0]) {
-      case 1: nIns++; tIns += diffs[pointer][1]; pointer++; break;
-      case -1: nDel++; tDel += diffs[pointer][1]; pointer++; break;
-      case 0:
-        pointer = __mergeRun(diffs, pointer, nDel, nIns, tDel, tIns);
-        nIns = 0; nDel = 0; tDel = ''; tIns = '';
-        break;
-    }
-  }
+  const state = { pointer: 0, nDel: 0, nIns: 0, tDel: '', tIns: '' };
+  while (state.pointer < diffs.length) __cleanupMergeStep(state, diffs);
   if (diffs.at(-1)?.[1] === '') diffs.pop();
   if (__mergeShifts(diffs)) __cleanupMerge(diffs);
 }
 // cleanupSemantic's last step: a deletion and insertion overlapping by at least half of either
 // become deletion, equality, insertion
+function __overlapsForward(diffs, pointer, deletion, insertion, o1) {
+  diffs.splice(pointer, 0, [0, insertion.substring(0, o1)]);
+  diffs[pointer - 1][1] = deletion.substring(0, deletion.length - o1);
+  diffs[pointer + 1][1] = insertion.substring(o1);
+}
+function __overlapsReverse(diffs, pointer, deletion, insertion, o2) {
+  diffs.splice(pointer, 0, [0, deletion.substring(0, o2)]);
+  diffs[pointer - 1][0] = 1;
+  diffs[pointer - 1][1] = insertion.substring(0, insertion.length - o2);
+  diffs[pointer + 1][0] = -1;
+  diffs[pointer + 1][1] = deletion.substring(o2);
+}
+function __overlapsAt(diffs, pointer) {
+  const deletion = diffs[pointer - 1][1];
+  const insertion = diffs[pointer][1];
+  const o1 = __commonOverlap(deletion, insertion);
+  const o2 = __commonOverlap(insertion, deletion);
+  if (o1 >= o2) {
+    if (o1 >= deletion.length / 2 || o1 >= insertion.length / 2) { __overlapsForward(diffs, pointer, deletion, insertion, o1); return true; }
+    return false;
+  }
+  if (o2 >= deletion.length / 2 || o2 >= insertion.length / 2) { __overlapsReverse(diffs, pointer, deletion, insertion, o2); return true; }
+  return false;
+}
 function __cleanupOverlaps(diffs) {
   let pointer = 1;
   while (pointer < diffs.length) {
     if (diffs[pointer - 1][0] === -1 && diffs[pointer][0] === 1) {
-      const deletion = diffs[pointer - 1][1];
-      const insertion = diffs[pointer][1];
-      const o1 = __commonOverlap(deletion, insertion);
-      const o2 = __commonOverlap(insertion, deletion);
-      if (o1 >= o2) {
-        if (o1 >= deletion.length / 2 || o1 >= insertion.length / 2) {
-          diffs.splice(pointer, 0, [0, insertion.substring(0, o1)]);
-          diffs[pointer - 1][1] = deletion.substring(0, deletion.length - o1);
-          diffs[pointer + 1][1] = insertion.substring(o1);
-          pointer++;
-        }
-      } else if (o2 >= deletion.length / 2 || o2 >= insertion.length / 2) {
-        diffs.splice(pointer, 0, [0, deletion.substring(0, o2)]);
-        diffs[pointer - 1][0] = 1;
-        diffs[pointer - 1][1] = insertion.substring(0, insertion.length - o2);
-        diffs[pointer + 1][0] = -1;
-        diffs[pointer + 1][1] = deletion.substring(o2);
-        pointer++;
-      }
+      if (__overlapsAt(diffs, pointer)) pointer++;
       pointer++;
     }
     pointer++;
   }
 }
-function __cleanupSemantic(diffs) {
-  let changes = false;
-  const equalities = [];
-  let nEq = 0;
-  let lastEquality = null;
-  let pointer = 0;
-  let ins1 = 0, del1 = 0, ins2 = 0, del2 = 0;
-  while (pointer < diffs.length) {
-    if (diffs[pointer][0] === 0) {
-      equalities[nEq++] = pointer;
-      ins1 = ins2; del1 = del2; ins2 = 0; del2 = 0;
-      lastEquality = diffs[pointer][1];
-    } else {
-      if (diffs[pointer][0] === 1) ins2 += diffs[pointer][1].length;
-      else del2 += diffs[pointer][1].length;
-      if (lastEquality && lastEquality.length <= Math.max(ins1, del1) && lastEquality.length <= Math.max(ins2, del2)) {
-        diffs.splice(equalities[nEq - 1], 0, [-1, lastEquality]);
-        diffs[equalities[nEq - 1] + 1][0] = 1;
-        nEq--;
-        nEq--;
-        pointer = nEq > 0 ? equalities[nEq - 1] : -1;
-        ins1 = 0; del1 = 0; ins2 = 0; del2 = 0;
-        lastEquality = null;
-        changes = true;
-      }
-    }
-    pointer++;
+function __cleanupSemEqualityHit(lastEquality, ins1, del1, ins2, del2) {
+  return lastEquality && lastEquality.length <= Math.max(ins1, del1) && lastEquality.length <= Math.max(ins2, del2);
+}
+function __cleanupSemStep(state, diffs) {
+  const d = diffs[state.pointer];
+  if (d[0] === 0) {
+    state.equalities[state.nEq++] = state.pointer;
+    state.ins1 = state.ins2; state.del1 = state.del2; state.ins2 = 0; state.del2 = 0;
+    state.lastEquality = d[1];
+    return;
   }
-  if (changes) __cleanupMerge(diffs);
+  if (d[0] === 1) state.ins2 += d[1].length;
+  else state.del2 += d[1].length;
+  if (!__cleanupSemEqualityHit(state.lastEquality, state.ins1, state.del1, state.ins2, state.del2)) return;
+  diffs.splice(state.equalities[state.nEq - 1], 0, [-1, state.lastEquality]);
+  diffs[state.equalities[state.nEq - 1] + 1][0] = 1;
+  state.nEq -= 2;
+  state.pointer = state.nEq > 0 ? state.equalities[state.nEq - 1] : -1;
+  state.ins1 = 0; state.del1 = 0; state.ins2 = 0; state.del2 = 0;
+  state.lastEquality = null;
+  state.changes = true;
+}
+function __cleanupSemantic(diffs) {
+  const state = { changes: false, equalities: [], nEq: 0, lastEquality: null, pointer: 0, ins1: 0, del1: 0, ins2: 0, del2: 0 };
+  while (state.pointer < diffs.length) { __cleanupSemStep(state, diffs); state.pointer++; }
+  if (state.changes) __cleanupMerge(diffs);
   __cleanupSemanticLossless(diffs);
   __cleanupOverlaps(diffs);
 }
@@ -7710,16 +8070,13 @@ function __diffStringsUnified(a, b) {
   if (diffs.some((d, i) => d[0] === 0 && (i !== last || d[1] !== '\n'))) return __annotation() + __joinDiffs(__alignedDiffs(diffs));
   return __diffLines(a.split('\n'), b.split('\n'), undefined, undefined, true);
 }
+const __DIFF_CTOR_TYPE = new Map([[RegExp, 'regexp'], [Map, 'map'], [Set, 'set'], [Date, 'date']]);
 function __diffType(v) {
   if (v === undefined) return 'undefined';
   if (v === null) return 'null';
   if (Array.isArray(v)) return 'array';
   if (typeof v !== 'object') return typeof v;
-  if (v.constructor === RegExp) return 'regexp';
-  if (v.constructor === Map) return 'map';
-  if (v.constructor === Set) return 'set';
-  if (v.constructor === Date) return 'date';
-  return 'object';
+  return __DIFF_CTOR_TYPE.get(v.constructor) || 'object';
 }
 const __NO_DIFF = 'Compared values have no visual difference.';
 // @vitest/utils `diff(expected, received)`; `annotate` false is its `omitAnnotationLines: true`.
@@ -7738,6 +8095,11 @@ function __vdiffType(a) {
 }
 // __vdiff of objects (maps and sets sorted): by their pretty-format, falling back to the
 // structure without toJSON when they serialize the same
+function __vdiffSort(type, a, b) {
+  if (type === 'map') return [new Map([...a.entries()].sort()), new Map([...b.entries()].sort())];
+  if (type === 'set') return [new Set([...a.values()].sort()), new Set([...b.values()].sort())];
+  return [a, b];
+}
 function __vdiffObjects(a, b, type, fmt, fallback, annotate) {
   const noDiff = __dcol.dim(__NO_DIFF);
   const objects = (opts) => {
@@ -7746,8 +8108,7 @@ function __vdiffObjects(a, b, type, fmt, fallback, annotate) {
     if (ac === bc) return noDiff;
     return __diffLines(__pf(a, opts).split('\n'), __pf(b, opts).split('\n'), ac.split('\n'), bc.split('\n'), annotate);
   };
-  if (type === 'map') { a = new Map([...a.entries()].sort()); b = new Map([...b.entries()].sort()); }
-  else if (type === 'set') { a = new Set([...a.values()].sort()); b = new Set([...b.values()].sort()); }
+  [a, b] = __vdiffSort(type, a, b);
   let d;
   let threw = false;
   try { d = objects(fmt); } catch (e) { threw = true; }
@@ -7757,6 +8118,17 @@ function __vdiffObjects(a, b, type, fmt, fallback, annotate) {
   }
   return d;
 }
+function __vdiffMismatch(a, b, fallback) {
+  return `${__dcol.green(`- ${__diffAnno[0]}:`)}\n${__pf(a, fallback)}\n\n${__dcol.red(`+ ${__diffAnno[1]}:`)}\n${__pf(b, fallback)}`;
+}
+function __vdiffScalar(a, b, type, fmt, annotate) {
+  if (type === 'string') return __diffLines(a.split('\n'), b.split('\n'), undefined, undefined, annotate);
+  if (type === 'boolean' || type === 'number') {
+    const af = __pf(a, fmt), bf = __pf(b, fmt);
+    return af === bf ? '' : __diffLines(af.split('\n'), bf.split('\n'), undefined, undefined, annotate);
+  }
+  return undefined;
+}
 function __vdiff(a, b, annotate = false) {
   if (Object.is(a, b)) return '';
   const typed = __vdiffType(a);
@@ -7764,19 +8136,10 @@ function __vdiff(a, b, annotate = false) {
   const [type, omitDifference] = typed;
   const fmt = { indent: 2, basic: false, maxDepth: 20, errors: true };
   const fallback = { ...fmt, maxDepth: 8, toJSON: false };
-  if (type !== __diffType(b)) {
-    return `${__dcol.green(`- ${__diffAnno[0]}:`)}\n${__pf(a, fallback)}\n\n${__dcol.red(`+ ${__diffAnno[1]}:`)}\n${__pf(b, fallback)}`;
-  }
+  if (type !== __diffType(b)) return __vdiffMismatch(a, b, fallback);
   if (omitDifference) return undefined;
-  switch (type) {
-    case 'string': return __diffLines(a.split('\n'), b.split('\n'), undefined, undefined, annotate);
-    case 'boolean':
-    case 'number': {
-      const af = __pf(a, fmt);
-      const bf = __pf(b, fmt);
-      return af === bf ? '' : __diffLines(af.split('\n'), bf.split('\n'), undefined, undefined, annotate);
-    }
-  }
+  const scalar = __vdiffScalar(a, b, type, fmt, annotate);
+  if (scalar !== undefined) return scalar;
   return __vdiffObjects(a, b, type, fmt, fallback, annotate);
 }
 function __ordinal(n) {
@@ -7826,23 +8189,28 @@ function __objectSubset(object, subset) {
     }
     return object;
   };
+  const setTrimmedCtor = (trimmed, object) => {
+    if (typeof object.constructor === 'function' && typeof object.constructor.name === 'string') {
+      Object.defineProperty(trimmed, 'constructor', { enumerable: false, value: object.constructor });
+    }
+  };
+  const trimKey = (seen, trimmed, object, subset, key) => {
+    if (inObj(subset, key)) {
+      trimmed[key] = seen.has(object[key]) ? seen.get(object[key]) : withContext(seen)(object[key], subset[key]);
+      return;
+    }
+    if (seen.has(object[key])) return;
+    stripped += 1;
+    if (isObj(object[key])) stripped += keys(object[key]).length;
+    withContext(seen)(object[key], subset[key]);
+  };
   // an object cut down to the subset's keys (the subset itself when it matches)
   const trimObject = (seen, object, subset) => {
     if (__subsetMatches(object, subset)) return subset;
     const trimmed = {};
     seen.set(object, trimmed);
-    if (typeof object.constructor === 'function' && typeof object.constructor.name === 'string') {
-      Object.defineProperty(trimmed, 'constructor', { enumerable: false, value: object.constructor });
-    }
-    for (const key of keys(object)) {
-      if (inObj(subset, key)) {
-        trimmed[key] = seen.has(object[key]) ? seen.get(object[key]) : withContext(seen)(object[key], subset[key]);
-      } else if (!seen.has(object[key])) {
-        stripped += 1;
-        if (isObj(object[key])) stripped += keys(object[key]).length;
-        withContext(seen)(object[key], subset[key]);
-      }
-    }
+    setTrimmedCtor(trimmed, object);
+    for (const key of keys(object)) trimKey(seen, trimmed, object, subset, key);
     return keys(trimmed).length > 0 ? trimmed : object;
   };
   return { subset: withContext()(object, subset), stripped };
@@ -7855,10 +8223,13 @@ function __subsetMatches(a, e) {
 // @vitest/utils format's extra argument
 const __formatExtra = (v) => (v === null || typeof v !== 'object' ? (typeof v === 'symbol' ? v.toString() : v) : __inspect(v));
 // @vitest/utils format's %s
+function __formatOneSObject(v) {
+  return (typeof v.toString === 'function' && v.toString !== Object.prototype.toString) ? v.toString() : __inspect(v);
+}
 function __formatOneS(v) {
   if (typeof v === 'bigint') return `${v}n`;
   if (typeof v === 'number' && v === 0 && 1 / v < 0) return '-0';
-  if (typeof v === 'object' && v !== null) return (typeof v.toString === 'function' && v.toString !== Object.prototype.toString) ? v.toString() : __inspect(v);
+  if (typeof v === 'object' && v !== null) return __formatOneSObject(v);
   return String(v);
 }
 // @vitest/utils format's %j: a circular value is `[Circular]`
@@ -7878,20 +8249,20 @@ function __formatOneD(v) {
 // @vitest/utils format %i: BigInt -> "123n", else parseInt(String(v)).
 function __formatOneI(v) { return typeof v === 'bigint' ? `${v}n` : Number.parseInt(String(v)).toString(); }
 // @vitest/utils `format(spec, item)` for one placeholder.
+const __FORMAT_ONE = {
+  '%%': (v) => `% ${__formatExtra(v)}`,
+  '%s': __formatOneS,
+  '%d': __formatOneD,
+  '%i': __formatOneI,
+  '%f': (v) => Number.parseFloat(String(v)).toString(),
+  '%o': (v) => __inspect(v),
+  '%O': (v) => __inspect(v),
+  '%c': () => '',
+  '%j': __formatOneJ,
+};
 function __formatOne(spec, item) {
-  const v = item;
-  switch (spec) {
-    // an unconsumed item is appended, as `format` appends extra arguments
-    case '%%': return `% ${__formatExtra(v)}`;
-    case '%s': return __formatOneS(v);
-    case '%d': return __formatOneD(v);
-    case '%i': return __formatOneI(v);
-    case '%f': return Number.parseFloat(String(v)).toString();
-    case '%o': case '%O': return __inspect(v);
-    case '%c': return '';
-    case '%j': return __formatOneJ(v);
-  }
-  return undefined;
+  const fn = __FORMAT_ONE[spec];
+  return fn ? fn(item) : undefined;
 }
 function __objectAttr(source, path, dflt) {
   let r = source;
@@ -7934,18 +8305,20 @@ function __formatTitleJoin(template, items, attrs, count) {
   if (last < template.length) out += attrs(template.slice(last));
   return out;
 }
-function __formatTitle(template, items, idx) {
-  if (template.includes('%#') || template.includes('%$')) template = __formatTitleIndices(template, idx);
-  const count = template.split('%').length - 1;
-  if (template.includes('%f')) template = __formatTitleHandleF(template, items);
-  const isObjectItem = items[0] != null && typeof items[0] === 'object' && !Array.isArray(items[0]);
-  const attrs = (str) => str.replace(/\$([$\w.]+)/g, (_, key) => {
+function __formatTitleAttrs(items, isObjectItem) {
+  return (str) => str.replace(/\$([$\w.]+)/g, (_, key) => {
     const isArrayKey = /^\d+$/.test(key);
     if (!isObjectItem && !isArrayKey) return `$${key}`;
     const el = isArrayKey ? __objectAttr(items, key) : undefined;
     return __objDisplay(isObjectItem ? __objectAttr(items[0], key, el) : el);
   });
-  return __formatTitleJoin(template, items, attrs, count);
+}
+function __formatTitle(template, items, idx) {
+  if (template.includes('%#') || template.includes('%$')) template = __formatTitleIndices(template, idx);
+  const count = template.split('%').length - 1;
+  if (template.includes('%f')) template = __formatTitleHandleF(template, items);
+  const isObjectItem = items[0] != null && typeof items[0] === 'object' && !Array.isArray(items[0]);
+  return __formatTitleJoin(template, items, __formatTitleAttrs(items, isObjectItem), count);
 }
 function __formatName(name) {
   return typeof name === 'string' ? name : typeof name === 'function' ? name.name || '<anonymous>' : String(name);
@@ -8081,10 +8454,10 @@ function __suiteOpts(parent, own, chain) {
   const cs = __suiteSelfCon(own, chain);
   const ss = __suiteSelfSeq(own, chain);
   const o = { ...__parentOpts(parent), ...own };
-  const isC = cs || (o.concurrent && !ss);
-  const isS = ss || (o.sequential && !cs);
-  if (isC != null) o.concurrent = !!isC && !isS;
-  if (isS != null) o.sequential = !!isS && !isC;
+  const isC = !!(cs || (o.concurrent && !ss));
+  const isS = !!(ss || (o.sequential && !cs));
+  o.concurrent = isC && !isS;
+  o.sequential = isS && !isC;
   return o;
 }
 function describe(name, a, b) {
@@ -8111,12 +8484,15 @@ describe.runIf = (cond) => (cond ? describe : describe.skip);
 describe.each = (cases, ...targs) => __each(describe, cases, targs);
 describe.for = (cases, ...targs) => __for(describe, cases, targs, true);
 // Supports both vitest signatures: it(name, fn, opts) and it(name, opts, fn).
+function __normTestOptsForFn(b) {
+  if (typeof b === 'object' && b) return b;
+  if (typeof b === 'number') return { timeout: b };
+  return {};
+}
 function __normTest(a, b) {
-  let fn, o;
-  if (typeof a === 'function') { fn = a; o = (typeof b === 'object' && b ? b : (typeof b === 'number' ? { timeout: b } : {})); }
-  else if (typeof a === 'object' && a) { o = a; fn = (typeof b === 'function' ? b : () => {}); }
-  else { fn = (typeof b === 'function' ? b : () => {}); o = {}; }
-  return { fn, o };
+  if (typeof a === 'function') return { fn: a, o: __normTestOptsForFn(b) };
+  if (typeof a === 'object' && a) return { fn: typeof b === 'function' ? b : () => {}, o: a };
+  return { fn: typeof b === 'function' ? b : () => {}, o: {} };
 }
 // Default per-test timeout (ms): `--testTimeout` (host → globalThis.__TT_DEFAULT_TIMEOUT) else
 // vitest's 5000ms default. A test's own `{ timeout }` overrides this in runSuite.
@@ -8318,26 +8694,25 @@ function __errorInfoInspected(e, ser) {
   if (e instanceof Error) return null;
   return __nodeInspect(__plainOf({ ...ser, stacks: [] }));
 }
+function __errorInfoCause(e, obj) {
+  return obj && __errorHasCause(e) ? __errorInfo(e.cause) : null;
+}
+function __errorInfoStackField(ser) {
+  return typeof ser.stack === 'string' ? ser.stack : '';
+}
 function __errorInfo(e) {
   const ser = __serializeError(e);
   const obj = e !== null && typeof e === 'object';
   const diffable = obj && __errorDiffable(e);
-  const cause = obj && __errorHasCause(e) ? __errorInfo(e.cause) : null;
-  // an Error with an empty message keeps the `Name: ` line (vitest prints its serialized form
-  // with its parsed frames, not modelled)
-  const inspected = __errorInfoInspected(e, ser);
   const props = __errorProperties(ser);
-  const rollup = __errorRollup(obj ? e.__vitest_rollup_error__ : undefined);
   return {
     ...__errorNames(ser),
     ...__errorInfoDiff(e, obj, diffable),
-    stack: typeof ser.stack === 'string' ? ser.stack : '',
-    cause,
-    inspected,
+    stack: __errorInfoStackField(ser),
+    cause: __errorInfoCause(e, obj),
+    inspected: __errorInfoInspected(e, ser),
     properties: props === null ? null : __inspect(props),
-    rollup,
-    // processError's prettified actual / expected and the error's showDiff (vitest's TAP
-    // block, turbo-test#170)
+    rollup: __errorRollup(obj ? e.__vitest_rollup_error__ : undefined),
   };
 }
 // @vitest/utils prettifyValue: a string as it is, anything else pretty-formatted as the diff's
@@ -8371,11 +8746,15 @@ function __serializeErrorJSON(val, seen) {
 // reads through a getter that may throw; the picked value is copied only when it is a string
 // (or, for `cause`, any non-nullish), and never overwrites one already in the toJSON output.
 const __ERROR_FILL_STR = ['message', 'stack', 'name'];
-function __serializeErrorFill(j, val, seen) {
-  for (const k of __ERROR_FILL_STR) {
-    try { if (typeof val[k] === 'string') j[k] ??= val[k]; } catch {}
-  }
+function __fillStringKey(j, val, k) {
+  try { if (typeof val[k] === 'string') j[k] ??= val[k]; } catch {}
+}
+function __fillCauseKey(j, val, seen) {
   try { if (val.cause != null) j.cause ??= __serializeValue(val.cause, seen); } catch {}
+}
+function __serializeErrorFill(j, val, seen) {
+  for (const k of __ERROR_FILL_STR) __fillStringKey(j, val, k);
+  __fillCauseKey(j, val, seen);
 }
 // __serializeValue's "not a leaf"
 const __SER_NONE = Symbol('ser-none');
@@ -8387,15 +8766,18 @@ function __serializeLeafBuf(val) {
 }
 // the values serialized as themselves or a short text (functions, symbols, primitives, buffers,
 // promises, elements)
-function __serializeLeaf(val) {
-  if (typeof val === 'function') return `Function<${val.name || 'anonymous'}>`;
-  if (typeof val === 'symbol') return val.toString();
-  if (typeof val !== 'object') return val;
+function __serializeLeafObject(val) {
   const buf = __serializeLeafBuf(val);
   if (buf !== __SER_NONE) return buf;
   if (val instanceof Promise) return 'Promise';
   if (typeof Element !== 'undefined' && val instanceof Element) return val.tagName;
   return __SER_NONE;
+}
+function __serializeLeaf(val) {
+  if (typeof val === 'function') return `Function<${val.name || 'anonymous'}>`;
+  if (typeof val === 'symbol') return val.toString();
+  if (typeof val !== 'object') return val;
+  return __serializeLeafObject(val);
 }
 function __serializeArray(val, seen) {
   const clone = new Array(val.length);
@@ -8404,14 +8786,15 @@ function __serializeArray(val, seen) {
   return clone;
 }
 // an object's own and inherited properties (short of Object.prototype)
+function __serializeObjectKey(clone, val, key, seen) {
+  if (key in clone) return;
+  try { clone[key] = __serializeValue(val[key], seen); } catch (err) { delete clone[key]; clone[key] = __unserializable(err); }
+}
 function __serializeObject(val, seen) {
   const clone = Object.create(null);
   seen.set(val, clone);
   for (let obj = val; obj && obj !== Object.prototype; obj = Object.getPrototypeOf(obj)) {
-    for (const key of Object.getOwnPropertyNames(obj)) {
-      if (key in clone) continue;
-      try { clone[key] = __serializeValue(val[key], seen); } catch (err) { delete clone[key]; clone[key] = __unserializable(err); }
-    }
+    for (const key of Object.getOwnPropertyNames(obj)) __serializeObjectKey(clone, val, key, seen);
   }
   if (val instanceof Error) { try { clone.message = val.message; } catch {} }
   return clone;
@@ -8421,14 +8804,22 @@ function __serializeErrorIfJSON(val, seen) {
   if (val instanceof Error && 'toJSON' in val && typeof val.toJSON === 'function') return __serializeErrorJSON(val, seen);
   return __SER_NONE;
 }
-function __serializeValue(val, seen = new WeakMap()) {
-  if (!val || typeof val === 'string') return val;
+function __serializeShortcut(val, seen) {
+  if (typeof val.toJSON === 'function') return __serializeValue(val.toJSON(), seen);
+  if (seen.has(val)) return seen.get(val);
+  return __SER_NONE;
+}
+function __serializeFast(val, seen) {
   const json = __serializeErrorIfJSON(val, seen);
   if (json !== __SER_NONE) return json;
   const leaf = __serializeLeaf(val);
   if (leaf !== __SER_NONE) return leaf;
-  if (typeof val.toJSON === 'function') return __serializeValue(val.toJSON(), seen);
-  if (seen.has(val)) return seen.get(val);
+  return __serializeShortcut(val, seen);
+}
+function __serializeValue(val, seen = new WeakMap()) {
+  if (!val || typeof val === 'string') return val;
+  const fast = __serializeFast(val, seen);
+  if (fast !== __SER_NONE) return fast;
   if (Array.isArray(val)) return __serializeArray(val, seen);
   return __serializeObject(val, seen);
 }
@@ -8532,6 +8923,9 @@ function __suiteTaskOf(s, chain) {
   return task;
 }
 // A test's task (`ctx.task`), created once (it outlives retries).
+function __taskTimeout(t) {
+  return typeof t.timeout === 'number' ? t.timeout : __defaultTimeout();
+}
 function __testTaskOf(t, chain) {
   if (t.task) return t.task;
   const file = __fileTaskOf();
@@ -8542,7 +8936,7 @@ function __testTaskOf(t, chain) {
     type: 'test', name: t.name, id: `${(up || file).id}_${parent.tasks.indexOf(t)}`, mode: 'run', file, suite: up,
     fullName: [file.name, ...names].join(' > '), fullTestName: names.join(' > '), meta: Object.create(null),
     each: t.each || undefined, fails: t.fails || undefined, retry: t.retry || undefined, repeats: t.repeats,
-    timeout: typeof t.timeout === 'number' ? t.timeout : __defaultTimeout(), shuffle: undefined,
+    timeout: __taskTimeout(t), shuffle: undefined,
     tags: [], annotations: [], artifacts: [], result: undefined,
   };
   return t.task;
@@ -8561,15 +8955,19 @@ function __contextOf(t, chain) {
     task.result.pending = true;
     throw new __PendingError(typeof condition === 'string' ? condition : note);
   };
-  context.annotate = (message, type, attachment) => {
-    if (task.result && task.result.state !== 'run') {
-      throw new Error(`Cannot annotate tests outside of the test run. The test "${task.name}" finished running with the "${task.result.state}" state already.`);
-    }
+  const __makeAnnotation = (message, type, attachment) => {
     const annotation = { message, type: typeof type === 'object' || type === undefined ? 'notice' : type };
     const att = typeof type === 'object' ? type : attachment;
     if (att) annotation.attachment = att;
     const site = globalThis.__ttCallSite();
     if (site) annotation.location = { file: globalThis.__ttFile, line: site[0], column: site[1] };
+    return annotation;
+  };
+  context.annotate = (message, type, attachment) => {
+    if (task.result && task.result.state !== 'run') {
+      throw new Error(`Cannot annotate tests outside of the test run. The test "${task.name}" finished running with the "${task.result.state}" state already.`);
+    }
+    const annotation = __makeAnnotation(message, type, attachment);
     task.annotations.push(annotation);
     return Promise.resolve(annotation);
   };
@@ -8729,11 +9127,13 @@ async function __vtRunHook(h, args, name) {
 }
 // callSuiteHook: a suite's hooks (afterEach / afterAll last registered first); beforeEach runs
 // the enclosing suites' first, afterEach after. `chain[i]` is the suite. A throw stops them.
+function __vtOrderedHooks(hooks, name) {
+  return name === 'ae' || name === 'aa' ? hooks.slice().reverse() : hooks;
+}
 async function __vtSuiteHook(chain, i, name, args) {
   const callbacks = [];
   if (name === 'be' && i > 0) callbacks.push(...(await __vtSuiteHook(chain, i - 1, name, args)));
-  const hooks = chain[i].hooks[name];
-  for (const h of name === 'ae' || name === 'aa' ? hooks.slice().reverse() : hooks) callbacks.push(await __vtRunHook(h, args, name));
+  for (const h of __vtOrderedHooks(chain[i].hooks[name], name)) callbacks.push(await __vtRunHook(h, args, name));
   if (name === 'ae' && i > 0) callbacks.push(...(await __vtSuiteHook(chain, i - 1, name, args)));
   return callbacks;
 }
@@ -8781,8 +9181,11 @@ function __suiteHookError(suite, summary, suiteErrors, hook, e) {
 function __skipTestWhy(t, todo, skipAll, hookFailed, filtered) {
   return todo || hookFailed || skipAll || filtered || t.skip || t.notOnly;
 }
+function __computeTodo(t, hookFailed, skipAll, filtered) {
+  return !hookFailed && (skipAll === 'todo' || (!filtered && !!t.todo));
+}
 function __skipTest(t, chain, summary, label, skipAll, hookFailed, filtered) {
-  const todo = !hookFailed && (skipAll === 'todo' || (!filtered && !!t.todo));
+  const todo = __computeTodo(t, hookFailed, skipAll, filtered);
   if (!__skipTestWhy(t, todo, skipAll, hookFailed, filtered)) return false;
   summary.skipped++;
   // a forbidden `.only` test that does not run keeps its error (vitest)
@@ -9020,10 +9423,7 @@ function __runTestSetup(t, chain) {
   return { timeoutMs, run, t0, start, logs, ctx, task, repeats };
 }
 // a test that runs: its repeats and attempts (retries), then its record; returns whether it failed
-async function __runTest(t, chain, summary, label, suiteTask) {
-  const attempts = __testRetry(t) + 1;
-  const { timeoutMs, run, t0, start, logs, ctx, task, repeats } = __runTestSetup(t, chain);
-  await null;
+async function __runTestAttempts(t, chain, ctx, timeoutMs, run, label, attempts, repeats, task) {
   let failed = false;
   for (let r = 0; r <= repeats && !task.result.pending; r++) {
     for (let a = 0; a < attempts; a++) {
@@ -9036,6 +9436,13 @@ async function __runTest(t, chain, summary, label, suiteTask) {
       if (a + 1 < attempts) failed = __retryAttempt(task, run);
     }
   }
+  return failed;
+}
+async function __runTest(t, chain, summary, label, suiteTask) {
+  const attempts = __testRetry(t) + 1;
+  const { timeoutMs, run, t0, start, logs, ctx, task, repeats } = __runTestSetup(t, chain);
+  await null;
+  const failed = await __runTestAttempts(t, chain, ctx, timeoutMs, run, label, attempts, repeats, task);
   run.ok = !failed;
   if (failed && !run.lastErr) run.lastErr = run.attemptErrors[run.attemptErrors.length - 1];
   if (!task.result.pending) await __vtAfterRunTask();
@@ -9046,28 +9453,26 @@ async function __runTest(t, chain, summary, label, suiteTask) {
   return __recordTest(t, chain, summary, label, run, timing, dur);
 }
 // one test of a suite (not a nested suite): whether it failed, or the promise of that when it runs
+function __runSuiteOnlyUnderSkip(t, chain, summary, skipAll, label) {
+  if (!(t.only && (skipAll === 'skip' || skipAll === 'todo'))) return false;
+  summary.tests.push(__testRecord(t, chain, 'pending'));
+  summary.skippedNames.push(label);
+  return true;
+}
+function __runSuiteForbiddenOnly(t, chain, summary, label) {
+  if (!t.forbiddenOnly) return false;
+  summary.failed++;
+  summary.failures.push(`${label}: ${__ONLY_FORBIDDEN}`);
+  summary.tests.push(__testRecord(t, chain, 'failed', { message: __ONLY_FORBIDDEN, failure_messages: [__onlyForbiddenError()], not_run: true }));
+  return true;
+}
 function __runSuiteTest(t, chain, summary, skipAll, hookFailed, suiteTask) {
   const label = chain.map((s) => s.name).filter(Boolean).concat(t.name).join(' > ');
-  // -t/--testNamePattern: skip tests whose full name does not match the regex (vitest: unanchored,
-  // case-sensitive, tested against `getTaskFullName` — the enclosing describe names and the
-  // test's joined with a space, turbo-test#66).
   const fullName = chain.slice(1).map((s) => s.name).concat(t.name).join(' ');
   const filtered = !skipAll && __tt.namePattern && !__tt.namePattern.test(fullName);
-  // a `.only` test inside describe.skip / describe.todo: vitest's interpretTaskModes does not
-  // descend there, so it keeps mode `only`, never runs and is reported `pending` (#77)
-  if (t.only && (skipAll === 'skip' || skipAll === 'todo')) {
-    summary.tests.push(__testRecord(t, chain, 'pending'));
-    summary.skippedNames.push(label);
-    return false;
-  }
+  if (__runSuiteOnlyUnderSkip(t, chain, summary, skipAll, label)) return false;
   if (__skipTest(t, chain, summary, label, skipAll, hookFailed, filtered)) return false;
-  // a forbidden `.only` test fails without running: no hooks, no body, no duration (#76)
-  if (t.forbiddenOnly) {
-    summary.failed++;
-    summary.failures.push(`${label}: ${__ONLY_FORBIDDEN}`);
-    summary.tests.push(__testRecord(t, chain, 'failed', { message: __ONLY_FORBIDDEN, failure_messages: [__onlyForbiddenError()], not_run: true }));
-    return true;
-  }
+  if (__runSuiteForbiddenOnly(t, chain, summary, label)) return true;
   return __runTest(t, chain, summary, label, suiteTask);
 }
 // runSuiteChild: a test through limitTestConcurrency, a suite as it is
@@ -9150,6 +9555,27 @@ function __suiteAfterAllSteps(baCleanups, st) {
 // afterAll hooks, then the functions its beforeAll hooks returned (last first: vitest's
 // `sequence.hooks: 'stack'`; a throwing beforeAll drops them all, turbo-test#101). A throwing
 // hook stops the hooks after it.
+async function __runSuiteGroups(st, suite) {
+  for (const group of __partition(suite.tasks)) {
+    if (group[0].concurrent === true) {
+      if (await __runConcurrent(group, st)) st.failed = true;
+      continue;
+    }
+    for (const t of group) {
+      if (await __vtChild(t, () => __suiteChild(t, st))) st.failed = true;
+    }
+  }
+}
+async function __runSuiteAfter(st, suite, summary, suiteErrors, baCleanups) {
+  const afterSteps = __suiteAfterAllSteps(baCleanups, st);
+  try {
+    await __vtSuiteHook([suite], 0, 'aa', []);
+    for (const step of afterSteps) await step();
+  } catch (e) {
+    __suiteHookError(suite, summary, suiteErrors, 'afterAll', e);
+    st.failed = true;
+  }
+}
 async function __runSuiteBody(st) {
   const { suite, summary, suiteErrors } = st;
   let baCleanups = [];
@@ -9160,25 +9586,8 @@ async function __runSuiteBody(st) {
     st.hookFailed = st.failed = true;
   }
   if (st.hookFailed) __idleTasks(st);
-  else {
-    for (const group of __partition(suite.tasks)) {
-      if (group[0].concurrent === true) {
-        if (await __runConcurrent(group, st)) st.failed = true;
-        continue;
-      }
-      for (const t of group) {
-        if (await __vtChild(t, () => __suiteChild(t, st))) st.failed = true;
-      }
-    }
-  }
-  const afterSteps = __suiteAfterAllSteps(baCleanups, st);
-  try {
-    await __vtSuiteHook([suite], 0, 'aa', []);
-    for (const step of afterSteps) await step();
-  } catch (e) {
-    __suiteHookError(suite, summary, suiteErrors, 'afterAll', e);
-    st.failed = true;
-  }
+  else await __runSuiteGroups(st, suite);
+  await __runSuiteAfter(st, suite, summary, suiteErrors, baCleanups);
 }
 // a suite's child as vitest's runSuiteChild runs it
 const __suiteChild = (t, st) => (t.suite ? runSuite(t, st.chain, st.summary) : __vtTest(__runSuiteTest(t, st.chain, st.summary, '', false, st.suiteTask)));
@@ -9235,15 +9644,16 @@ function __interpretInclude(t, hasSomeOnly, suiteIsOnly) {
   if (hasSomeOnly) return !!t.only || (!!t.suite && __someOnly(t));
   return suiteIsOnly || !!t.only;
 }
+function __interpretOnlyTask(t, hasSomeOnly, suiteIsOnly, forbid) {
+  const include = __interpretInclude(t, hasSomeOnly, suiteIsOnly);
+  if (forbid && t.only) t.forbiddenOnly = true;
+  if (t.suite) __interpretOnly(t, include, forbid && !t.mode);
+  else if (!include) t.notOnly = true;
+}
 function __interpretOnly(suite, parentIsOnly, forbid) {
   const suiteIsOnly = parentIsOnly || !!suite.only;
   const hasSomeOnly = __someOnly(suite);
-  for (const t of suite.tasks) {
-    const include = __interpretInclude(t, hasSomeOnly, suiteIsOnly);
-    if (forbid && t.only) t.forbiddenOnly = true;
-    if (t.suite) __interpretOnly(t, include, forbid && !t.mode);
-    else if (!include) t.notOnly = true;
-  }
+  for (const t of suite.tasks) __interpretOnlyTask(t, hasSomeOnly, suiteIsOnly, forbid);
 }
 
 globalThis.__tt = {
@@ -9420,10 +9830,11 @@ globalThis.__ttInstallWindowMembers = () => {
 // style) and the shorthands built from those, where turbo-dom resolves it as Chrome does
 // (`1.25rem` vs `20px`, `bold` vs `700`). A property nothing declares reads turbo-dom's computed
 // value. `turbo-dom` keeps Chrome's.
+const __jsdomCsEligible = (w) => w && typeof w.getComputedStyle === 'function' && !w.getComputedStyle.__ttJsdom;
 globalThis.__ttInstallJsdomComputedStyle = () => {
   if (globalThis.__ttJsdomQuirks !== true) return;
   const w = globalThis.window;
-  if (!w || typeof w.getComputedStyle !== 'function' || w.getComputedStyle.__ttJsdom) return;
+  if (!__jsdomCsEligible(w)) return;
   const real = w.getComputedStyle;
   // opt-in only (TURBO_JSDOM_QUIRKS=1): by default getComputedStyle stays Chrome's
   const jsdomEnv = () => globalThis.__ttJsdomQuirks === true && (globalThis.__ttEnvName === 'jsdom' || globalThis.__ttEnvName === 'happy-dom');
@@ -9441,16 +9852,14 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
     const c = String(rule.conditionText || head(rule).replace(/^@supports/i, '')).trim();
     return typeof CSS !== 'undefined' && CSS.supports && CSS.supports(c);
   };
+  const flattenGroup = (rule, out) => {
+    if (rule.type === 4) { if (mediaApplies(rule)) flatten(rule.cssRules, out); return; }
+    if (rule.type === 12) { if (supportsApplies(rule)) flatten(rule.cssRules, out); return; }
+    flatten(rule.cssRules, out);
+  };
   const flattenRule = (rule, out) => {
-    if (rule.type === 1 && rule.style) {
-      out.push(rule);
-    } else if (rule.type === 4 && rule.cssRules) {
-      if (mediaApplies(rule)) flatten(rule.cssRules, out);
-    } else if (rule.type === 12 && rule.cssRules) {
-      if (supportsApplies(rule)) flatten(rule.cssRules, out);
-    } else if (rule.cssRules) {
-      flatten(rule.cssRules, out);
-    }
+    if (rule.type === 1 && rule.style) { out.push(rule); return; }
+    if (rule.cssRules) flattenGroup(rule, out);
   };
   const flatten = (rules, out) => {
     for (const rule of rules) {
@@ -9478,12 +9887,14 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
       version++;
     }
   };
+  const childListNode = (n) => {
+    if (isSheetOwner(n)) { touch(n); return; }
+    if (n.nodeType !== 1 || !n.querySelectorAll) return;
+    for (const m of n.querySelectorAll('style, link')) if (isSheetOwner(m)) touch(m);
+  };
   const childList = (rec) => {
     if (isSheetOwner(rec.target)) touch(rec.target);
-    for (const n of rec.addedNodes) {
-      if (isSheetOwner(n)) touch(n);
-      else if (n.nodeType === 1 && n.querySelectorAll) for (const m of n.querySelectorAll('style, link')) if (isSheetOwner(m)) touch(m);
-    }
+    for (const n of rec.addedNodes) childListNode(n);
     if (rec.removedNodes.length) version++;
   };
   const track = (doc) => {
@@ -9516,19 +9927,31 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
     }
     return [...tree.filter((sh) => !seen.has(sh)), ...out];
   };
+  const flattenSheets = (sheets, adopted) => {
+    const rules = [];
+    for (const sh of [...sheets, ...adopted]) {
+      try { if (!sh.disabled) flatten(sh.cssRules, rules); } catch (e) {}
+    }
+    return rules;
+  };
   const rulesOf = (doc) => {
     track(doc);
     const tree = Array.from(doc.styleSheets || []);
     const adopted = Array.from(doc.adoptedStyleSheets || []);
     const key = version + ':' + tree.length + ':' + adopted.length + ':' + countRules(tree, adopted);
     if (cache.key === key && cache.doc === doc) return cache.rules;
-    const sheets = observer ? ranked(tree) : tree;
-    const rules = [];
-    for (const sh of [...sheets, ...adopted]) {
-      try { if (!sh.disabled) flatten(sh.cssRules, rules); } catch (e) {}
-    }
+    const rules = flattenSheets(observer ? ranked(tree) : tree, adopted);
     cache = { key, rules, doc };
     return rules;
+  };
+  const declaredBlock = (decl, block) => {
+    for (let i = 0; i < block.length; i++) {
+      const name = block[i];
+      // jsdom sets each declaration in turn, whatever its priority: the last one wins
+      const value = block.getPropertyValue(name);
+      if (value === 'unset') decl.delete(name);
+      else decl.set(name, { value });
+    }
   };
   const declared = (el) => {
     const blocks = [];
@@ -9538,41 +9961,35 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
     }
     if (el.style) blocks.push(el.style);
     const decl = new Map();
-    for (const block of blocks) {
-      for (let i = 0; i < block.length; i++) {
-        const name = block[i];
-        // jsdom sets each declaration in turn, whatever its priority: the last one wins
-        const value = block.getPropertyValue(name);
-        if (value === 'unset') decl.delete(name);
-        else decl.set(name, { value });
-      }
-    }
+    for (const block of blocks) declaredBlock(decl, block);
     return decl;
   };
   let colorDoc;
+  const valueColorProbe = (name, dValue) => {
+    try {
+      if (!colorDoc) colorDoc = w.document.implementation.createHTMLDocument('');
+      const probe = colorDoc.createElement('span');
+      probe.style.setProperty(name, dValue);
+      colorDoc.body.appendChild(probe);
+      const c = Reflect.apply(real, w, [probe]).getPropertyValue(name);
+      probe.remove();
+      return c || undefined;
+    } catch (e) { return undefined; }
+  };
+  const valueWantsColor = (d, name) => d && /color$/.test(name) && !/var\(|currentcolor|inherit|initial|unset|revert/i.test(d.value);
   const value = (decl, name, scratch, cs) => {
     const d = decl.get(name);
-    // a color reads as rgb(), as jsdom's cssstyle spells it: turbo-dom's computed one
-    if (d && /color$/.test(name) && !/var\(|currentcolor|inherit|initial|unset|revert/i.test(d.value)) {
-      try {
-        // in a document of its own: no mutation an observer of the page could see
-        if (!colorDoc) colorDoc = w.document.implementation.createHTMLDocument('');
-        const probe = colorDoc.createElement('span');
-        probe.style.setProperty(name, d.value);
-        colorDoc.body.appendChild(probe);
-        const c = Reflect.apply(real, w, [probe]).getPropertyValue(name);
-        probe.remove();
-        if (c) return c;
-      } catch (e) {}
+    if (valueWantsColor(d, name)) {
+      const c = valueColorProbe(name, d.value);
+      if (c) return c;
     }
     if (d) return d.value;
-    // a shorthand of declared longhands: the declaration block spells it
-    const v = scratch().getPropertyValue(name);
-    return v || undefined;
+    return scratch().getPropertyValue(name) || undefined;
   };
+  const getComputedStyleSkip = (el, pseudo) => !jsdomEnv() || (pseudo !== undefined && pseudo !== null && pseudo !== '') || !el || el.nodeType !== 1;
   const getComputedStyle = function getComputedStyle(el, pseudo) {
     const cs = Reflect.apply(real, w, arguments);
-    if (!jsdomEnv() || (pseudo !== undefined && pseudo !== null && pseudo !== '') || !el || el.nodeType !== 1) return cs;
+    if (getComputedStyleSkip(el, pseudo)) return cs;
     const decl = declared(el);
     if (!decl.size) return cs;
     let block;

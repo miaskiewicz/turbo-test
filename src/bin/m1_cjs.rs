@@ -90,7 +90,34 @@ fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path) -> Option<()> {
     }
 
     let wrapper = cjs_wrapper(scope, abs)?;
+    let final_exports = run_cjs_wrapper(scope, abs, wrapper)?;
 
+    // detect named exports via Object.keys (helper installed in main)
+    let global = scope.get_current_context().global(scope);
+    let names = object_keys(scope, global, final_exports);
+
+    let exports_global = v8::Global::new(scope, final_exports);
+    let synth = make_cjs_synthetic(scope, abs, &names)?;
+    let synth_hash = synth.get_identity_hash().get();
+    let synth_global = v8::Global::new(scope, synth);
+
+    REGISTRY.with(|r| {
+        let mut reg = r.borrow_mut();
+        reg.cjs_exports.insert(abs.to_path_buf(), exports_global);
+        reg.cjs_export_names.insert(abs.to_path_buf(), names);
+        reg.cjs_synth_by_path
+            .insert(abs.to_path_buf(), synth_global);
+        reg.path_by_hash.insert(synth_hash, abs.to_path_buf());
+    });
+    Some(())
+}
+
+/// Call the CJS wrapper with the classic locals and return `module.exports` after the call.
+fn run_cjs_wrapper<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+    wrapper: v8::Local<'s, v8::Function>,
+) -> Option<v8::Local<'s, v8::Value>> {
     // module = { exports: {} }
     let exports_obj = v8::Object::new(scope);
     let module_obj = v8::Object::new(scope);
@@ -119,25 +146,7 @@ fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path) -> Option<()> {
     )?;
 
     // module.exports may have been reassigned — read it back.
-    let final_exports = module_obj.get(scope, exports_key.into())?;
-
-    // detect named exports via Object.keys (helper installed in main)
-    let names = object_keys(scope, global, final_exports);
-
-    let exports_global = v8::Global::new(scope, final_exports);
-    let synth = make_cjs_synthetic(scope, abs, &names)?;
-    let synth_hash = synth.get_identity_hash().get();
-    let synth_global = v8::Global::new(scope, synth);
-
-    REGISTRY.with(|r| {
-        let mut reg = r.borrow_mut();
-        reg.cjs_exports.insert(abs.to_path_buf(), exports_global);
-        reg.cjs_export_names.insert(abs.to_path_buf(), names);
-        reg.cjs_synth_by_path
-            .insert(abs.to_path_buf(), synth_global);
-        reg.path_by_hash.insert(synth_hash, abs.to_path_buf());
-    });
-    Some(())
+    module_obj.get(scope, exports_key.into())
 }
 
 /// `abs`'s source compiled in the classic wrapper: a function, to be called with the CJS locals.
@@ -242,17 +251,28 @@ fn cjs_synth_eval<'s>(
 
     // named = module.exports[name]
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(exports) {
-        for n in names {
-            if n == "default" {
-                continue;
-            }
-            let k = v8::String::new(scope, &n)?;
-            if let Some(v) = obj.get(scope, k.into()) {
-                module.set_synthetic_module_export(scope, k, v)?;
-            }
-        }
+        export_named_cjs(scope, module, obj, &names)?;
     }
     Some(v8::undefined(scope).into())
+}
+
+/// Set each non-`default` named export to `obj[name]`.
+fn export_named_cjs(
+    scope: &mut v8::PinScope,
+    module: v8::Local<v8::Module>,
+    obj: v8::Local<v8::Object>,
+    names: &[String],
+) -> Option<()> {
+    for n in names {
+        if n == "default" {
+            continue;
+        }
+        let k = v8::String::new(scope, n)?;
+        if let Some(v) = obj.get(scope, k.into()) {
+            module.set_synthetic_module_export(scope, k, v)?;
+        }
+    }
+    Some(())
 }
 
 /// Native require(dir, spec) — used by the CJS wrapper for CJS->CJS requires.

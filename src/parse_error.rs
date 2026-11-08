@@ -356,24 +356,7 @@ fn vite_code_frame(src: &str, at: usize) -> String {
     let mut out = Vec::new();
     let first = i.saturating_sub(2);
     for (j, text) in lines.iter().enumerate().take(i + 3).skip(first) {
-        let chars: Vec<char> = text.chars().collect();
-        let mut shown = text.to_string();
-        let mut under = column;
-        if chars.len() > MAX {
-            let from = if j == i {
-                column.saturating_sub(MAX / 2)
-            } else {
-                0
-            };
-            if j == i {
-                under = column - from + if from > 0 { 3 } else { 0 };
-            }
-            let prefix = if from > 0 { "..." } else { "" };
-            let suffix = if chars.len() - from > MAX { "..." } else { "" };
-            let take = MAX - prefix.len() - suffix.len();
-            let body: String = chars[from..].iter().take(take).collect();
-            shown = format!("{prefix}{body}{suffix}");
-        }
+        let (shown, under) = truncate_line(text, column, j == i, MAX);
         let number = (j + 1).to_string();
         out.push(format!(
             "{number}{}|  {shown}",
@@ -384,6 +367,29 @@ fn vite_code_frame(src: &str, at: usize) -> String {
         }
     }
     out.join("\n")
+}
+
+/// `text` shown up to `max` chars, with `...` elision; returns the `^` offset for a focus line.
+fn truncate_line(text: &str, column: usize, is_focus: bool, max: usize) -> (String, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        return (text.to_string(), column);
+    }
+    let from = if is_focus {
+        column.saturating_sub(max / 2)
+    } else {
+        0
+    };
+    let under = if is_focus {
+        column - from + if from > 0 { 3 } else { 0 }
+    } else {
+        column
+    };
+    let prefix = if from > 0 { "..." } else { "" };
+    let suffix = if chars.len() - from > max { "..." } else { "" };
+    let take = max - prefix.len() - suffix.len();
+    let body: String = chars[from..].iter().take(take).collect();
+    (format!("{prefix}{body}{suffix}"), under)
 }
 
 /// What es-module-lexer makes of a source: the byte offset it fails at (`e.idx`: a `)` or `}`

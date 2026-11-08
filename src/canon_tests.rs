@@ -77,18 +77,26 @@ fn the_runner_canonicalizes_only_through_this_module() {
     for entry in std::fs::read_dir(&src).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        if !name.ends_with(".rs") || name.contains("_tests") || name.starts_with("canon") {
+        if skip_canon_scan(&name) {
             continue;
         }
-        let text = std::fs::read_to_string(&path).unwrap();
-        // a file's own `mod tests { … }` block is test code too
-        let text = text.split("#[cfg(test)]\nmod tests {").next().unwrap();
-        for (i, line) in text.lines().enumerate() {
-            let code = line.split("//").next().unwrap();
-            if code.contains("fs::canonicalize(") || code.contains(".canonicalize()") {
-                offenders.push(format!("{name}:{}: {}", i + 1, line.trim()));
-            }
-        }
+        collect_canon_offenders(&path, &name, &mut offenders);
     }
     assert!(offenders.is_empty(), "{offenders:#?}");
+}
+
+fn skip_canon_scan(name: &str) -> bool {
+    !name.ends_with(".rs") || name.contains("_tests") || name.starts_with("canon")
+}
+
+fn collect_canon_offenders(path: &Path, name: &str, offenders: &mut Vec<String>) {
+    let text = std::fs::read_to_string(path).unwrap();
+    // a file's own `mod tests { … }` block is test code too
+    let text = text.split("#[cfg(test)]\nmod tests {").next().unwrap();
+    for (i, line) in text.lines().enumerate() {
+        let code = line.split("//").next().unwrap();
+        if code.contains("fs::canonicalize(") || code.contains(".canonicalize()") {
+            offenders.push(format!("{name}:{}: {}", i + 1, line.trim()));
+        }
+    }
 }

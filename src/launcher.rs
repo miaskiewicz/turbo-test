@@ -188,23 +188,39 @@ fn find_config(start_dir: &Path, forced: Option<&Path>) -> Option<Config> {
     }
     let mut dir = start_dir.to_path_buf();
     loop {
-        for n in VITEST_CONFIG_FILES {
-            let p = dir.join(n);
-            if p.is_file() {
-                if let Ok(text) = std::fs::read_to_string(&p) {
-                    return Some(Config {
-                        dir: dir.clone(),
-                        text,
-                    });
-                }
-                return None;
-            }
+        match config_in_dir(&dir) {
+            ConfigScan::Found(c) => return Some(c),
+            ConfigScan::Unreadable => return None,
+            ConfigScan::Missing => {}
         }
         match dir.parent() {
             Some(parent) if parent != dir => dir = parent.to_path_buf(),
             _ => return None,
         }
     }
+}
+
+enum ConfigScan {
+    Found(Config),
+    Unreadable,
+    Missing,
+}
+
+/// Look for a vitest/vite config in `dir` only (no ancestor walk).
+fn config_in_dir(dir: &Path) -> ConfigScan {
+    for n in VITEST_CONFIG_FILES {
+        let p = dir.join(n);
+        if p.is_file() {
+            return match std::fs::read_to_string(&p) {
+                Ok(text) => ConfigScan::Found(Config {
+                    dir: dir.to_path_buf(),
+                    text,
+                }),
+                Err(_) => ConfigScan::Unreadable,
+            };
+        }
+    }
+    ConfigScan::Missing
 }
 
 /// Test-level include/exclude globs + their root, from a discovered config (`None` without a
@@ -277,23 +293,29 @@ fn config_environment(text: &str) -> Option<String> {
     let mut from = 0usize;
     while let Some(rel) = text[from..].find("environment") {
         let after = from + rel + "environment".len();
-        let i = skip_ws(b, after);
-        if i < b.len() && b[i] == b':' {
-            let i = skip_ws(b, i + 1);
-            if i < b.len() && (b[i] == b'\'' || b[i] == b'"' || b[i] == b'`') {
-                let rest = &text[i + 1..];
-                let val: String = rest
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphabetic() || *c == '-')
-                    .collect();
-                if !val.is_empty() {
-                    return Some(val.to_ascii_lowercase());
-                }
-            }
+        if let Some(val) = environment_value_at(b, text, after) {
+            return Some(val);
         }
         from = after;
     }
     None
+}
+
+/// After a match of `environment`, try to parse the `: '<name>'` value.
+fn environment_value_at(b: &[u8], text: &str, after: usize) -> Option<String> {
+    let i = skip_ws(b, after);
+    if i >= b.len() || b[i] != b':' {
+        return None;
+    }
+    let i = skip_ws(b, i + 1);
+    if i >= b.len() || !matches!(b[i], b'\'' | b'"' | b'`') {
+        return None;
+    }
+    let val: String = text[i + 1..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic() || *c == '-')
+        .collect();
+    (!val.is_empty()).then(|| val.to_ascii_lowercase())
 }
 
 /// The vitest `coverage` block's include/exclude globs + thresholds string. Mirrors cli.js
@@ -417,19 +439,22 @@ fn number_value_after_colon(text: &str, b: &[u8], after: usize) -> Option<String
     if i >= b.len() || b[i] != b':' {
         return None;
     }
-    let mut j = skip_ws(b, i + 1);
-    let start = j;
+    let start = skip_ws(b, i + 1);
+    read_number_or_infinity(text, b, start)
+}
+
+/// A digits+dot run at `start`, or `Infinity` (turbo-test#273: accept it as a no-timeout value).
+fn read_number_or_infinity(text: &str, b: &[u8], start: usize) -> Option<String> {
+    let mut j = start;
     while j < b.len() && (b[j].is_ascii_digit() || b[j] == b'.') {
         j += 1;
     }
     if j > start {
         return Some(text[start..j].to_string());
     }
-    // turbo-test#273: accept `Infinity` as a numeric value (no timeout).
-    if text[start..].starts_with("Infinity") {
-        return Some("Infinity".to_string());
-    }
-    None
+    text[start..]
+        .starts_with("Infinity")
+        .then(|| "Infinity".to_string())
 }
 
 /// The balanced `{...}`/`[...]` (or `(...)`) that OPENS at byte `open_at` — respecting nested
@@ -448,18 +473,11 @@ pub(crate) fn balanced_block_end(text: &str, open_at: usize) -> Option<(String, 
     let mut i = open_at;
     let mut quote: Option<u8> = None;
     while i < b.len() {
-        let c = b[i];
         if let Some(q) = quote {
-            if c == b'\\' {
-                i += 2;
-                continue;
-            }
-            if c == q {
-                quote = None;
-            }
-            i += 1;
+            i += advance_in_quote(b[i], q, &mut quote);
             continue;
         }
+        let c = b[i];
         match c {
             b'\'' | b'"' | b'`' => quote = Some(c),
             b'{' | b'[' | b'(' => depth += 1,
@@ -476,26 +494,45 @@ pub(crate) fn balanced_block_end(text: &str, open_at: usize) -> Option<(String, 
     None
 }
 
+/// Inside a quoted run: consume the next byte(s), close the quote on `q`, return advance.
+fn advance_in_quote(c: u8, q: u8, quote: &mut Option<u8>) -> usize {
+    if c == b'\\' {
+        return 2;
+    }
+    if c == q {
+        *quote = None;
+    }
+    1
+}
+
 /// Lexically resolve `target` against `dir`: absolute stays, `.`/`..`-relative joins+normalizes,
 /// a bare specifier (`react`, `@scope/x`) is returned unchanged (module-name alias).
 fn resolve_alias_target(dir: &Path, target: &str) -> String {
     if target.starts_with('/') {
         return target.to_string();
     }
-    if target.starts_with("./") || target.starts_with("../") || target == "." || target == ".." {
-        let mut out = dir.to_path_buf();
-        for seg in target.split('/') {
-            match seg {
-                "" | "." => {}
-                ".." => {
-                    out.pop();
-                }
-                s => out.push(s),
-            }
-        }
-        return out.to_string_lossy().into_owned();
+    if is_dot_relative(target) {
+        return join_segments(dir, target);
     }
     target.to_string()
+}
+
+fn is_dot_relative(target: &str) -> bool {
+    target.starts_with("./") || target.starts_with("../") || target == "." || target == ".."
+}
+
+fn join_segments(dir: &Path, target: &str) -> String {
+    let mut out = dir.to_path_buf();
+    for seg in target.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    out.to_string_lossy().into_owned()
 }
 
 /// Split a top-level object/array's inner text into entries on TOP-LEVEL commas (respecting nested
@@ -670,29 +707,35 @@ impl Words {
     /// Any other char `c` copied through.
     fn push(&mut self, c: char) {
         if c.is_alphanumeric() || c == '_' || c == '$' {
-            // Identifier/number char: it IS significant (a `/` after it is division), and it
-            // extends the current word.
-            if self.cur_word.is_empty() {
-                self.cur_member = self.prev_sig == '.';
-            }
-            self.cur_word.push(c);
-            self.prev_sig = c;
+            self.push_word_char(c);
         } else if c.is_whitespace() {
             // Finalize the current word but keep it as `last_word` across the space, so
             // `return /re/` still sees the keyword. prev_sig (last non-ws char) is unchanged.
-            if !self.cur_word.is_empty() {
-                self.last_word = std::mem::take(&mut self.cur_word);
-                self.last_member = self.cur_member;
-            }
+            self.flush_word_keeping_last();
         } else {
             // Punctuation: significant, and it ends any pending word.
-            if !self.cur_word.is_empty() {
-                self.last_word = std::mem::take(&mut self.cur_word);
-                self.last_member = self.cur_member;
-            } else {
+            if self.cur_word.is_empty() {
                 self.last_word.clear();
+            } else {
+                self.flush_word_keeping_last();
             }
             self.prev_sig = c;
+        }
+    }
+
+    /// Identifier/number char: significant (a `/` after it is division), extends the current word.
+    fn push_word_char(&mut self, c: char) {
+        if self.cur_word.is_empty() {
+            self.cur_member = self.prev_sig == '.';
+        }
+        self.cur_word.push(c);
+        self.prev_sig = c;
+    }
+
+    fn flush_word_keeping_last(&mut self) {
+        if !self.cur_word.is_empty() {
+            self.last_word = std::mem::take(&mut self.cur_word);
+            self.last_member = self.cur_member;
         }
     }
 }
@@ -891,41 +934,45 @@ fn config_aliases(start_dir: &Path, forced: Option<&Path>) -> Vec<(String, Strin
 }
 
 fn parse_alias_inner(inner: &str, dir: &Path) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let trimmed = inner.trim();
     // Array form (`alias: [ { find, replacement }, … ]`): the inner text begins with an object `{`.
     // The object form's inner begins with a quoted/identifier key instead — so the first char
     // distinguishes them without a fragile substring test.
-    if trimmed.starts_with('{') {
-        for entry in split_top_level(inner) {
-            let e = entry.trim();
-            let e = e.strip_prefix('{').unwrap_or(e);
-            let e = e.strip_suffix('}').unwrap_or(e);
-            // Only a quoted string `find` is a (prefix) alias, whatever its first char (`'/@z'`);
-            // a regex literal `find` (unquoted — already blanked by strip_comments) is skipped.
-            let find = value_after_key(e, "find")
-                .filter(|v| v.starts_with(['\'', '"', '`']))
-                .and_then(|v| first_quoted(&v));
-            let repl = value_after_key(e, "replacement").and_then(|v| alias_target(dir, &v));
-            if let (Some(f), Some(r)) = (find, repl) {
-                out.push((f, r));
-            }
-        }
-        return out;
+    if inner.trim().starts_with('{') {
+        return parse_alias_array(inner, dir);
     }
-    // Object form: `key: value` entries.
+    parse_alias_object(inner, dir)
+}
+
+/// Array form: `alias: [ { find, replacement }, … ]`.
+fn parse_alias_array(inner: &str, dir: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for entry in split_top_level(inner) {
+        let e = entry.trim();
+        let e = e.strip_prefix('{').unwrap_or(e);
+        let e = e.strip_suffix('}').unwrap_or(e);
+        // Only a quoted string `find` is a (prefix) alias, whatever its first char (`'/@z'`);
+        // a regex literal `find` (unquoted — already blanked by strip_comments) is skipped.
+        let find = value_after_key(e, "find")
+            .filter(|v| v.starts_with(['\'', '"', '`']))
+            .and_then(|v| first_quoted(&v));
+        let repl = value_after_key(e, "replacement").and_then(|v| alias_target(dir, &v));
+        if let (Some(f), Some(r)) = (find, repl) {
+            out.push((f, r));
+        }
+    }
+    out
+}
+
+/// Object form: `alias: { key: value, … }`.
+fn parse_alias_object(inner: &str, dir: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
     for entry in split_top_level(inner) {
         let Some(colon) = top_level_colon(&entry) else {
             continue;
         };
         let key_raw = entry[..colon].trim();
         let val = &entry[colon + 1..];
-        // key is either quoted or a bare identifier; a `[computed]` or regex key is skipped.
-        let key = if let Some(q) = first_quoted(key_raw) {
-            q
-        } else if !key_raw.is_empty() && !key_raw.starts_with('[') && !key_raw.starts_with('/') {
-            key_raw.to_string()
-        } else {
+        let Some(key) = alias_object_key(key_raw) else {
             continue;
         };
         if let Some(target) = alias_target(dir, val) {
@@ -933,6 +980,15 @@ fn parse_alias_inner(inner: &str, dir: &Path) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// A plain identifier or quoted alias key; `None` for a `[computed]` or regex-literal key.
+fn alias_object_key(key_raw: &str) -> Option<String> {
+    if let Some(q) = first_quoted(key_raw) {
+        return Some(q);
+    }
+    (!key_raw.is_empty() && !key_raw.starts_with('[') && !key_raw.starts_with('/'))
+        .then(|| key_raw.to_string())
 }
 
 /// Derive the alias target path/specifier from a JS value expression. When the value looks like a
@@ -959,28 +1015,29 @@ fn alias_target(dir: &Path, val: &str) -> Option<String> {
     // is what path.resolve semantics on a `'/'` argument would wrongly do).
     let mut parts = split_top_level_plus(val).into_iter();
     let first = parts.next()?;
-    // Test markers against CODE (strings blanked) so a literal merely CONTAINING `__dirname` etc.
-    // isn't mistaken for a path expression.
-    let mut base = if PATH_MARKERS
-        .iter()
-        .any(|m| blank_quoted(&first).contains(m))
-    {
-        let quoted = extract_quoted(&first);
-        // a bare config-dir base (`__dirname + '/z'`) is the dir itself: joining no segments
-        let bare_dir = matches!(first.as_str(), "__dirname" | "import.meta.dirname");
-        if quoted.is_empty() && !bare_dir {
-            return None;
-        }
-        resolve_alias_join(dir, &quoted)
-    } else {
-        resolve_alias_target(dir, extract_quoted(&first).last()?)
-    };
+    let mut base = alias_base(dir, &first, &PATH_MARKERS)?;
     for p in parts {
         for s in extract_quoted(&p) {
             base.push_str(&s);
         }
     }
     Some(base)
+}
+
+/// The base path for the first `+`-operand of an alias value (path expression or plain literal).
+fn alias_base(dir: &Path, first: &str, markers: &[&str]) -> Option<String> {
+    // Test markers against CODE (strings blanked) so a literal merely CONTAINING `__dirname` etc.
+    // isn't mistaken for a path expression.
+    if markers.iter().any(|m| blank_quoted(first).contains(m)) {
+        let quoted = extract_quoted(first);
+        // a bare config-dir base (`__dirname + '/z'`) is the dir itself: joining no segments
+        let bare_dir = matches!(first, "__dirname" | "import.meta.dirname");
+        if quoted.is_empty() && !bare_dir {
+            return None;
+        }
+        return Some(resolve_alias_join(dir, &quoted));
+    }
+    Some(resolve_alias_target(dir, extract_quoted(first).last()?))
 }
 
 /// Split `s` on TOP-LEVEL `+` (string concatenation), not inside quotes/brackets. Operands trimmed.
@@ -1028,27 +1085,37 @@ fn blank_quoted(s: &str) -> String {
     let mut quote: Option<char> = None;
     while let Some(c) = chars.next() {
         match quote {
-            Some(q) => {
-                out.push(' ');
-                if c == '\\' {
-                    if chars.next().is_some() {
-                        out.push(' ');
-                    }
-                } else if c == q {
-                    quote = None;
-                }
-            }
-            None => {
-                if c == '\'' || c == '"' || c == '`' {
-                    quote = Some(c);
-                    out.push(' ');
-                } else {
-                    out.push(c);
-                }
-            }
+            Some(q) => blank_quoted_in_string(c, q, &mut chars, &mut quote, &mut out),
+            None => blank_quoted_in_code(c, &mut quote, &mut out),
         }
     }
     out
+}
+
+fn blank_quoted_in_string(
+    c: char,
+    q: char,
+    chars: &mut std::str::Chars,
+    quote: &mut Option<char>,
+    out: &mut String,
+) {
+    out.push(' ');
+    if c == '\\' {
+        if chars.next().is_some() {
+            out.push(' ');
+        }
+    } else if c == q {
+        *quote = None;
+    }
+}
+
+fn blank_quoted_in_code(c: char, quote: &mut Option<char>, out: &mut String) {
+    if c == '\'' || c == '"' || c == '`' {
+        *quote = Some(c);
+        out.push(' ');
+    } else {
+        out.push(c);
+    }
 }
 
 /// Join path segments against `dir` with Node `path.resolve` semantics: an absolute segment resets
@@ -1122,21 +1189,34 @@ fn value_after_key(e: &str, key: &str) -> Option<String> {
     while let Some(rel) = e[from..].find(key) {
         let at = from + rel;
         let after = at + key.len();
-        let prev_ok = at == 0 || {
-            let p = b[at - 1];
-            p != b'.' && p != b'_' && p != b'$' && !p.is_ascii_alphanumeric()
-        };
-        if prev_ok {
-            let ws = skip_ws(b, after);
-            if ws < b.len() && b[ws] == b':' {
-                let val_start = ws + 1;
-                let rel_end = top_level_comma(&e[val_start..]).unwrap_or(e.len() - val_start);
-                return Some(e[val_start..val_start + rel_end].trim().to_string());
+        if value_key_prev_ok(b, at) {
+            if let Some(v) = value_after_key_at(e, b, after) {
+                return Some(v);
             }
         }
         from = after;
     }
     None
+}
+
+/// Word-boundary check: the byte before an object-key match is not an identifier character.
+fn value_key_prev_ok(b: &[u8], at: usize) -> bool {
+    if at == 0 {
+        return true;
+    }
+    let p = b[at - 1];
+    p != b'.' && p != b'_' && p != b'$' && !p.is_ascii_alphanumeric()
+}
+
+/// After a potential key match at `after`: the trimmed value if the next non-ws byte is `:`.
+fn value_after_key_at(e: &str, b: &[u8], after: usize) -> Option<String> {
+    let ws = skip_ws(b, after);
+    if ws >= b.len() || b[ws] != b':' {
+        return None;
+    }
+    let val_start = ws + 1;
+    let rel_end = top_level_comma(&e[val_start..]).unwrap_or(e.len() - val_start);
+    Some(e[val_start..val_start + rel_end].trim().to_string())
 }
 
 /// Byte offset of the first TOP-LEVEL `,` in `s` (not inside quotes/brackets). `None` if none.
@@ -1246,31 +1326,10 @@ fn discover(cwd: &Path, forced_config: Option<&Path>) -> Vec<PathBuf> {
 /// HEAD/index) — staged + unstaged + untracked. `None` when git is unavailable / not a repo
 /// (caller then runs everything). Mirrors cli.js `gitChanged`.
 fn git_changed(since: &str, cwd: &Path) -> Option<HashSet<PathBuf>> {
-    let run = |args: &[&str]| -> Option<Vec<String>> {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        Some(
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(|s| s.to_string())
-                .collect(),
-        )
-    };
+    let run = |args: &[&str]| -> Option<Vec<String>> { run_git_lines(args, cwd) };
     let root_lines = run(&["rev-parse", "--show-toplevel"])?;
     let repo_root = PathBuf::from(root_lines.first()?);
-    let mut set = HashSet::new();
-    let diff_ref: Vec<&str> = if !since.is_empty() && since != "true" {
-        vec![since]
-    } else {
-        vec![]
-    };
+    let diff_ref: Vec<&str> = git_diff_ref_args(since);
     let mut cmds: Vec<Vec<&str>> = vec![
         {
             let mut v = vec!["diff", "--name-only"];
@@ -1284,14 +1343,45 @@ fn git_changed(since: &str, cwd: &Path) -> Option<HashSet<PathBuf>> {
         },
         vec!["ls-files", "--others", "--exclude-standard"],
     ];
+    let mut set = HashSet::new();
     for args in cmds.drain(..) {
-        if let Some(lines) = run(&args) {
-            for f in lines {
-                set.insert(repo_root.join(f));
-            }
-        }
+        collect_git_lines(run(&args), &repo_root, &mut set);
     }
     Some(set)
+}
+
+fn git_diff_ref_args(since: &str) -> Vec<&str> {
+    if !since.is_empty() && since != "true" {
+        vec![since]
+    } else {
+        vec![]
+    }
+}
+
+fn collect_git_lines(lines: Option<Vec<String>>, repo_root: &Path, set: &mut HashSet<PathBuf>) {
+    let Some(lines) = lines else { return };
+    for f in lines {
+        set.insert(repo_root.join(f));
+    }
+}
+
+/// `git <args>` in `cwd`: each stdout line (dropping blanks). `None` on non-zero exit or spawn error.
+fn run_git_lines(args: &[&str], cwd: &Path) -> Option<Vec<String>> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|s| s.to_string())
+            .collect(),
+    )
 }
 
 /// Launcher-consumed options.
@@ -1466,24 +1556,38 @@ fn plan_arg(
     if launcher_flag(key, opts, &mut || take_val(raw, &mut i, &inline_val)) {
         return i;
     }
-    // Dotted vitest flags with a value (`--sequence.seed 123`, `--browser.name chromium`): drop
-    // the flag and, when the next token is its value (a non-flag), that too — otherwise the
-    // orphaned value token would be mistaken for a test-file path and hard-fail the run. Covers
-    // both the `=`-inline and space forms.
-    if a == SEQUENCE_CONCURRENT {
-        forward.push(a);
-        return i;
-    }
-    if key.starts_with("--sequence") || key.starts_with("--browser") || key.starts_with("--inspect")
-    {
-        let _ = take_val(raw, &mut i, &inline_val);
-        return i;
+    if let Some(end) = handle_dotted_vitest_flag(raw, i, &a, key, &inline_val, forward) {
+        return end;
     }
     if !flag_takes_value(&a) {
         push_plain_arg(a, forward, files);
         return i;
     }
     forward_value_flag(raw, i, a, forward, messages)
+}
+
+/// `plan_arg`'s dotted-vitest-flag arm (`--sequence.seed 123`, `--browser.name chromium`, …).
+/// Drops the flag and, when the next token is its value (a non-flag), that too — otherwise the
+/// orphaned value token would be mistaken for a test-file path and hard-fail the run. Returns the
+/// new `i` when this arm matched, `None` to fall through.
+fn handle_dotted_vitest_flag(
+    raw: &[String],
+    mut i: usize,
+    a: &str,
+    key: &str,
+    inline_val: &Option<String>,
+    forward: &mut Vec<String>,
+) -> Option<usize> {
+    if a == SEQUENCE_CONCURRENT {
+        forward.push(a.to_string());
+        return Some(i);
+    }
+    if key.starts_with("--sequence") || key.starts_with("--browser") || key.starts_with("--inspect")
+    {
+        let _ = take_val(raw, &mut i, inline_val);
+        return Some(i);
+    }
+    None
 }
 
 /// Dispatch a non-value-taking argument: a flag goes to `forward`, a non-empty bare token to
@@ -1591,6 +1695,12 @@ fn config_env(
     forced: Option<&Path>,
     env: &mut Vec<(&'static str, String)>,
 ) {
+    push_opts_env(opts, proc_cwd, env);
+    push_config_env(opts, cwd, forced, env);
+}
+
+/// Opts-only switches: `--root`, `--passWithNoTests`, `--isolate`.
+fn push_opts_env(opts: &Opts, proc_cwd: &Path, env: &mut Vec<(&'static str, String)>) {
     // `--root`: the reports name the files relative to it (cli.rs `display_names`).
     if let Some(r) = &opts.name_root {
         env.push((
@@ -1611,7 +1721,15 @@ fn config_env(
         Some(true) => env.push(("TURBO_NO_REUSE", "1".to_string())),
         None => {}
     }
+}
 
+/// Config-fed env: `environment`, `server.deps.inline`, aliases, `includeTaskLocation`.
+fn push_config_env(
+    opts: &Opts,
+    cwd: &Path,
+    forced: Option<&Path>,
+    env: &mut Vec<(&'static str, String)>,
+) {
     // `--environment` → TURBO_ENV (falls back to config `test.environment`). A per-file pragma
     // overrides this at runtime (runner.rs).
     let environment = opts
@@ -1660,11 +1778,19 @@ fn config_forward(cwd: &Path, forced: Option<&Path>, forward: &mut Vec<String>) 
             coverage_forward(&cov, forward);
         }
     }
-    // Per-test timeout: honor the vitest config `test.testTimeout` unless the user passed
-    // `--testTimeout` explicitly. Without this the binary falls back to vitest's 5000ms default,
-    // so a project that raises testTimeout (e.g. 10000 for slow editor/auto-hide flows) spuriously
-    // times out under turbo-test.
-    // the same for hooks (`test.hookTimeout`, turbo-test#255) and `test.maxConcurrency` (#256)
+    forward_config_numbers(cwd, forced, forward);
+    // `test.sequence.concurrent: true` (turbo-test#256)
+    let seq = find_config(cwd, forced)
+        .and_then(|c| scan_braced(&c.text, "sequence"))
+        .is_some_and(|b| config_true(&b, "concurrent"));
+    if seq && !has_flag(forward, SEQUENCE_CONCURRENT) {
+        forward.push(SEQUENCE_CONCURRENT.to_string());
+    }
+}
+
+/// Per-test timeout: honor the vitest config `test.testTimeout` unless the user passed
+/// `--testTimeout` explicitly. Same for `hookTimeout` (turbo-test#255) and `maxConcurrency` (#256).
+fn forward_config_numbers(cwd: &Path, forced: Option<&Path>, forward: &mut Vec<String>) {
     for key in ["testTimeout", "hookTimeout", "maxConcurrency"] {
         let flag = format!("--{key}");
         if has_flag(forward, &flag) {
@@ -1675,13 +1801,6 @@ fn config_forward(cwd: &Path, forced: Option<&Path>, forward: &mut Vec<String>) 
             forward.push(v);
         }
     }
-    // `test.sequence.concurrent: true` (turbo-test#256)
-    let seq = find_config(cwd, forced)
-        .and_then(|c| scan_braced(&c.text, "sequence"))
-        .is_some_and(|b| config_true(&b, "concurrent"));
-    if seq && !has_flag(forward, SEQUENCE_CONCURRENT) {
-        forward.push(SEQUENCE_CONCURRENT.to_string());
-    }
 }
 
 /// vitest's `--sequence.concurrent` (every test concurrent): forwarded to the runner.
@@ -1689,21 +1808,26 @@ const SEQUENCE_CONCURRENT: &str = "--sequence.concurrent";
 
 /// Coverage thresholds/include/exclude from the config `cov`, unless `forward` passes them.
 fn coverage_forward(cov: &CoverageCfg, forward: &mut Vec<String>) {
-    if let Some(thr) = &cov.thresholds {
-        if !has_flag(forward, "--coverage-thresholds") && !has_flag(forward, "--coverage-threshold")
-        {
-            forward.push("--coverage-thresholds".to_string());
-            forward.push(thr.clone());
-        }
+    forward_coverage_thresholds(cov.thresholds.as_ref(), forward);
+    forward_coverage_globs(&cov.include, "--coverage-include", forward);
+    forward_coverage_globs(&cov.exclude, "--coverage-exclude", forward);
+}
+
+fn forward_coverage_thresholds(thr: Option<&String>, forward: &mut Vec<String>) {
+    let Some(thr) = thr else { return };
+    if has_flag(forward, "--coverage-thresholds") || has_flag(forward, "--coverage-threshold") {
+        return;
     }
-    if !cov.include.is_empty() && !has_flag(forward, "--coverage-include") {
-        forward.push("--coverage-include".to_string());
-        forward.push(cov.include.join(","));
+    forward.push("--coverage-thresholds".to_string());
+    forward.push(thr.clone());
+}
+
+fn forward_coverage_globs(globs: &[String], flag: &str, forward: &mut Vec<String>) {
+    if globs.is_empty() || has_flag(forward, flag) {
+        return;
     }
-    if !cov.exclude.is_empty() && !has_flag(forward, "--coverage-exclude") {
-        forward.push("--coverage-exclude".to_string());
-        forward.push(cov.exclude.join(","));
-    }
+    forward.push(flag.to_string());
+    forward.push(globs.join(","));
 }
 
 /// The "No test files found" report: the exit `code`, the filters, include and exclude.
