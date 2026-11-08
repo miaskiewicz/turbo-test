@@ -6793,15 +6793,17 @@ globalThis.jest = {
 // loupe `inspect` renders them (`'str'`, `[ 1, 2 ]`, `{ a: 1 }`, `[Function f]`, `+0`).
 const __inspectEsc = /['\u0000-\u001f\u007f-\u009f\u00ad\u0600-\u0604\u070f\u17b4\u17b5\u200c-\u200f\u2028-\u202f\u2060-\u206f\ufeff\ufff0-\uffff]/g;
 const __inspectEscMap = { '\b': '\\b', '\t': '\\t', '\n': '\\n', '\f': '\\f', '\r': '\\r', "'": "\\'" };
+function __inspectTruncEnd(str, len) {
+  let end = len - 1;
+  if (end > 0 && str[end - 1] >= '\ud800' && str[end - 1] <= '\udbff') end--;
+  return end;
+}
 function __inspectTrunc(str, len) {
   str = String(str);
-  if (1 > len && str.length > 1) return '…';
-  if (str.length > len && str.length > 1) {
-    let end = len - 1;
-    if (end > 0 && str[end - 1] >= '\ud800' && str[end - 1] <= '\udbff') end--;
-    return `${str.slice(0, end)}…`;
-  }
-  return str;
+  if (str.length <= 1) return str;
+  if (1 > len) return '…';
+  if (str.length <= len) return str;
+  return `${str.slice(0, __inspectTruncEnd(str, len))}…`;
 }
 function __inspectString(str, o) {
   str = String(str).replace(__inspectEsc, (c) => __inspectEscMap[c] || `\\u${`0000${c.charCodeAt(0).toString(16)}`.slice(-4)}`);
@@ -6830,25 +6832,34 @@ function __inspectListItem(list, i, o, orig, outLen, item, sep, peek) {
   const nextPeek = last ? '' : item(list[i + 1], o) + (second ? '' : sep);
   return { last, second, str, nextPeek };
 }
-function __inspectList(list, o, item = __inspect, sep = ', ') {
+function __inspectListStep(list, i, o, orig, out, peek, item, sep) {
+  const cut = `…(${list.length - i})`;
+  const { last, second, str, nextPeek } = __inspectListItem(list, i, o, orig, out.length, item, sep, peek);
+  const next = out.length + str.length;
+  const cutLen = next + cut.length;
+  if (__listCutBefore(last, second, next, cutLen, out.length + cut.length, orig)) return { done: true, cut };
+  if (__listCutPeek(last, second, cutLen, next + nextPeek.length, orig)) return { done: true, cut, peek: nextPeek };
+  if (__listCutAfter(last, second, next + nextPeek.length, orig)) return { done: true, cut: `…(${list.length - i - 1})`, add: str, peek: nextPeek };
+  return { done: false, add: str, peek: nextPeek };
+}
+function __inspectListApply(r, state) {
+  if (r.add) state.out += r.add;
+  if (r.peek !== undefined) state.peek = r.peek;
+  state.cut = r.cut;
+  if (!r.done) state.cut = '';
+  return r.done;
+}
+function __inspectList(list, o, item, sep) {
   if (!list.length) return '';
   const orig = o.truncate;
-  let out = '';
-  let peek = '';
-  let cut = '';
+  const useItem = item === undefined ? __inspect : item;
+  const useSep = sep === undefined ? ', ' : sep;
+  const state = { out: '', peek: '', cut: '' };
   for (let i = 0; i < list.length; i++) {
-    cut = `…(${list.length - i})`;
-    const { last, second, str, nextPeek } = __inspectListItem(list, i, o, orig, out.length, item, sep, peek);
-    const next = out.length + str.length;
-    const cutLen = next + cut.length;
-    if (__listCutBefore(last, second, next, cutLen, out.length + cut.length, orig)) break;
-    peek = nextPeek;
-    if (__listCutPeek(last, second, cutLen, next + peek.length, orig)) break;
-    out += str;
-    if (__listCutAfter(last, second, next + peek.length, orig)) { cut = `…(${list.length - i - 1})`; break; }
-    cut = '';
+    const r = __inspectListStep(list, i, o, orig, state.out, state.peek, useItem, useSep);
+    if (__inspectListApply(r, state)) break;
   }
-  return `${out}${cut}`;
+  return `${state.out}${state.cut}`;
 }
 function __inspectProp([key, value], o) {
   o.truncate -= 2;
@@ -6882,18 +6893,19 @@ function __inspectFunction(v, o) {
   const tag = v[Symbol.toStringTag] || 'Function';
   return v.name ? `[${tag} ${__inspectTrunc(v.name, o.truncate - 11)}]` : `[${tag}]`;
 }
+const __INSPECT_PRIM = {
+  undefined: () => 'undefined',
+  boolean: (v) => String(v),
+  number: __inspectNumber,
+  bigint: __inspectBigInt,
+  string: __inspectString,
+  symbol: (v) => (v.description ? `Symbol(${v.description})` : 'Symbol()'),
+  function: __inspectFunction,
+};
 // loupe's inspect of a primitive or function (undefined: an object)
 function __inspectPrim(v, o) {
-  switch (typeof v) {
-    case 'undefined': return 'undefined';
-    case 'boolean': return String(v);
-    case 'number': return __inspectNumber(v, o);
-    case 'bigint': return __inspectBigInt(v, o);
-    case 'string': return __inspectString(v, o);
-    case 'symbol': return v.description ? `Symbol(${v.description})` : 'Symbol()';
-    case 'function': return __inspectFunction(v, o);
-  }
-  return undefined;
+  const fn = __INSPECT_PRIM[typeof v];
+  return fn ? fn(v, o) : undefined;
 }
 function __inspectArray(v, o) {
   const extra = Object.keys(v).slice(v.length);
@@ -6954,21 +6966,38 @@ const __inspectTypes = new Map([
   ['Generator', __inspectEmpty], ['DataView', __inspectEmpty], ['ArrayBuffer', __inspectEmpty],
   ['Error', __inspectError],
 ]);
+function __inspectTypedName(v) {
+  if (typeof Buffer === 'function' && v instanceof Buffer) return 'Buffer';
+  return v[Symbol.toStringTag] || v.constructor.name;
+}
+function __inspectTypedItem(v, i, o) {
+  const sep = i === v.length - 1 ? '' : ', ';
+  const str = `${__inspectTrunc(v[i], o.truncate)}${sep}`;
+  o.truncate -= str.length;
+  if (v[i] !== v.length && o.truncate <= 3) return { cut: `…(${v.length - v[i] + 1})` };
+  return { str };
+}
 function __inspectTyped(v, o) {
-  const name = (typeof Buffer === 'function' && v instanceof Buffer) ? 'Buffer' : (v[Symbol.toStringTag] || v.constructor.name);
+  const name = __inspectTypedName(v);
   if (!v.length) return `${name}[]`;
   o.truncate -= name.length + 4;
   let out = '';
   for (let i = 0; i < v.length; i++) {
-    const str = `${__inspectTrunc(v[i], o.truncate)}${i === v.length - 1 ? '' : ', '}`;
-    o.truncate -= str.length;
-    if (v[i] !== v.length && o.truncate <= 3) { out += `…(${v.length - v[i] + 1})`; break; }
-    out += str;
+    const r = __inspectTypedItem(v, i, o);
+    if (r.cut) { out += r.cut; break; }
+    out += r.str;
   }
   return `${name}[ ${out} ]`;
 }
 // an object's own inspect: an asymmetric matcher, chai/inspect, util.inspect.custom or an
 // `inspect` method (undefined: none)
+function __inspectHooksCustom(v, o) {
+  const custom = v[Symbol.for('nodejs.util.inspect.custom')];
+  if (typeof custom !== 'function') return undefined;
+  // loupe hands the method its normalised options (depth 2, breakLength Infinity, no colours)
+  const r = custom.call(v, 2, Object.assign({ depth: 2, breakLength: Infinity, colors: false, showHidden: false }, o), __inspect);
+  return typeof r === 'string' ? r : __inspect(r, o);
+}
 function __inspectHooks(v, o) {
   // vitest's asymmetric matchers inspect as their minimal pretty-format (`Any<Number>`, …)
   if (v instanceof Asymmetric) {
@@ -6977,9 +7006,8 @@ function __inspectHooks(v, o) {
   }
   const chai = v[Symbol.for('chai/inspect')];
   if (typeof chai === 'function') return String(chai.call(v, o));
-  const custom = v[Symbol.for('nodejs.util.inspect.custom')];
-  // loupe hands the method its normalised options (depth 2, breakLength Infinity, no colours)
-  if (typeof custom === 'function') { const r = custom.call(v, 2, Object.assign({ depth: 2, breakLength: Infinity, colors: false, showHidden: false }, o), __inspect); return typeof r === 'string' ? r : __inspect(r, o); }
+  const custom = __inspectHooksCustom(v, o);
+  if (custom !== undefined) return custom;
   if (typeof v.inspect === 'function') { const r = v.inspect(2, o); return typeof r === 'string' ? r : __inspect(r, o); }
   return undefined;
 }
@@ -7006,8 +7034,14 @@ function __inspect(v, o = { truncate: Infinity, seen: [] }) {
 // long collapses to a summary.
 // toHaveProperty's path walk. Returns { cur, present }: a literal-key hit wins over the dot
 // path, else the segments are walked; `present=false` if any segment is missing.
+function __lookupPropertyLiteral(actual, path) {
+  if (Array.isArray(path) || actual == null) return null;
+  if (!(path in Object(actual))) return null;
+  return { cur: actual[path], present: true };
+}
 function __lookupProperty(actual, path) {
-  if (!Array.isArray(path) && actual != null && (path in Object(actual))) return { cur: actual[path], present: true };
+  const literal = __lookupPropertyLiteral(actual, path);
+  if (literal) return literal;
   const keys = Array.isArray(path) ? path : String(path).split('.');
   let cur = actual;
   for (const k of keys) {
@@ -7183,16 +7217,19 @@ function __pfMockFn(v, cfg, ind, depth, refs) {
   }
   return `[MockFunction${name === 'vi.fn()' ? '' : ` ${name}`}]${calls}`;
 }
+function __pfErrorEntries(v) {
+  const entries = { message: v.message };
+  if (v.cause !== undefined) entries.cause = v.cause;
+  for (const k of Object.keys(v)) if (k !== 'message' && k !== 'cause') entries[k] = v[k];
+  return entries;
+}
 function __pfError(v, cfg, ind, depth, refs) {
   if (refs.includes(v)) return '[Circular]';
   const r = [...refs, v];
   const d = depth + 1;
-  const entries = { message: v.message };
-  if (v.cause !== undefined) entries.cause = v.cause;
-  for (const k of Object.keys(v)) if (k !== 'message' && k !== 'cause') entries[k] = v[k];
   const name = v.name !== 'Error' ? v.name : __pfCtorName(v);
   if (d > cfg.maxDepth) return `[${name}]`;
-  return `${name} {${__pfEntries(Object.entries(entries), cfg, ind, d, r, ': ')}}`;
+  return `${name} {${__pfEntries(Object.entries(__pfErrorEntries(v)), cfg, ind, d, r, ': ')}}`;
 }
 // Walk cfg.plugins, calling each one's test(v) and letting the first match print the value.
 function __pfPluginFor(v, cfg, ind, depth, refs) {
@@ -7204,24 +7241,27 @@ function __pfPluginFor(v, cfg, ind, depth, refs) {
   return __PF_NONE;
 }
 // plugins, asymmetric matchers, mock functions and (cfg.errors) errors
+function __pfIsAsym(v) { return v && v.$$typeof === Symbol.for('jest.asymmetricMatcher'); }
+function __pfIsMock(v, cfg) { return cfg.mocks && typeof v === 'function' && v._isMockFunction; }
 function __pfHooks(v, cfg, ind, depth, refs) {
   const p = __pfPluginFor(v, cfg, ind, depth, refs);
   if (p !== __PF_NONE) return p;
-  if (v && v.$$typeof === Symbol.for('jest.asymmetricMatcher')) return __pfAsym(v, cfg, ind, depth, refs);
-  if (cfg.mocks && typeof v === 'function' && v._isMockFunction) return __pfMockFn(v, cfg, ind, depth, refs);
+  if (__pfIsAsym(v)) return __pfAsym(v, cfg, ind, depth, refs);
+  if (__pfIsMock(v, cfg)) return __pfMockFn(v, cfg, ind, depth, refs);
   if (cfg.errors && v instanceof Error) return __pfError(v, cfg, ind, depth, refs);
   return __PF_NONE;
 }
 // __pfPrimitive's typeof-dispatch over number/bigint/string/function/symbol.
+const __PF_TYPEOF = {
+  number: (v) => Object.is(v, -0) ? '-0' : String(v),
+  bigint: (v) => `${v}n`,
+  string: (v, cfg) => cfg.escape ? `"${v.replace(/"|\\/g, '\\$&')}"` : `"${v}"`,
+  function: (v, cfg) => cfg.fnName ? `[Function ${v.name || 'anonymous'}]` : '[Function]',
+  symbol: (v) => String(v).replace(/^Symbol\((.*)\)(.*)$/, 'Symbol($1)'),
+};
 function __pfTypeof(v, cfg) {
-  switch (typeof v) {
-    case 'number': return Object.is(v, -0) ? '-0' : String(v);
-    case 'bigint': return `${v}n`;
-    case 'string': return cfg.escape ? `"${v.replace(/"|\\/g, '\\$&')}"` : `"${v}"`;
-    case 'function': return cfg.fnName ? `[Function ${v.name || 'anonymous'}]` : '[Function]';
-    case 'symbol': return String(v).replace(/^Symbol\((.*)\)(.*)$/, 'Symbol($1)');
-  }
-  return undefined;
+  const fn = __PF_TYPEOF[typeof v];
+  return fn ? fn(v, cfg) : undefined;
 }
 // a primitive or function (undefined: an object)
 function __pfPrimitive(v, cfg) {
@@ -7231,15 +7271,16 @@ function __pfPrimitive(v, cfg) {
   return __pfTypeof(v, cfg);
 }
 // weak collections, dates, errors and regexps (undefined: other objects)
+const __PF_SIMPLE_CONST = { '[object WeakMap]': 'WeakMap {}', '[object WeakSet]': 'WeakSet {}' };
+function __pfSimpleRegExp(v, cfg) {
+  const r = RegExp.prototype.toString.call(v);
+  return cfg.escapeRegex ? r.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&') : r;
+}
 function __pfSimpleTag(v, cfg, tag) {
-  if (tag === '[object WeakMap]') return 'WeakMap {}';
-  if (tag === '[object WeakSet]') return 'WeakSet {}';
+  if (__PF_SIMPLE_CONST[tag]) return __PF_SIMPLE_CONST[tag];
   if (tag === '[object Date]') return Number.isNaN(+v) ? 'Date { NaN }' : v.toISOString();
   if (tag === '[object Error]' || v instanceof Error) return `[${Error.prototype.toString.call(v)}]`;
-  if (tag === '[object RegExp]') {
-    const r = RegExp.prototype.toString.call(v);
-    return cfg.escapeRegex ? r.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&') : r;
-  }
+  if (tag === '[object RegExp]') return __pfSimpleRegExp(v, cfg);
   return undefined;
 }
 function __pfArrayLike(v, cfg, ind, d, refs, hit, pp) {
@@ -7255,13 +7296,28 @@ function __pfObject(v, cfg, ind, d, refs, hit) {
   return `${prefix}{${__pfProps(v, cfg, ind, d, refs)}}`;
 }
 // arguments, arrays, typed arrays, maps, sets and other objects, one level down (`hit`: past maxDepth)
+function __pfArgumentsBody(v, cfg, ind, d, refs, pp) {
+  return `${cfg.min ? '' : 'Arguments '}[${__pfItems(Array.from(v), cfg, ind, d, refs, pp)}]`;
+}
+const __PF_TAGGED = {
+  '[object Arguments]': { hit: '[Arguments]', body: __pfArgumentsBody },
+  '[object Map]': { hit: '[Map]', body: (v, cfg, ind, d, refs) => `Map {${__pfEntries([...v.entries()], cfg, ind, d, refs, ' => ')}}` },
+  '[object Set]': { hit: '[Set]', body: (v, cfg, ind, d, refs, pp) => `Set {${__pfItems([...v.values()], cfg, ind, d, refs, pp)}}` },
+};
+function __pfCompositeTagged(v, cfg, ind, d, refs, hit, tag, pp) {
+  const entry = __PF_TAGGED[tag];
+  if (!entry) return undefined;
+  return hit ? entry.hit : entry.body(v, cfg, ind, d, refs, pp);
+}
 function __pfComposite(v, cfg, ind, d, refs, hit, tag) {
   const pp = (x, i) => __pfPrint(x, cfg, i, d, refs, false);
-  if (tag === '[object Arguments]') return hit ? '[Arguments]' : `${cfg.min ? '' : 'Arguments '}[${__pfItems(Array.from(v), cfg, ind, d, refs, pp)}]`;
+  const tagged = __pfCompositeTagged(v, cfg, ind, d, refs, hit, tag, pp);
+  if (tagged !== undefined) return tagged;
   if (Array.isArray(v) || ArrayBuffer.isView(v)) return __pfArrayLike(v, cfg, ind, d, refs, hit, pp);
-  if (tag === '[object Map]') return hit ? '[Map]' : `Map {${__pfEntries([...v.entries()], cfg, ind, d, refs, ' => ')}}`;
-  if (tag === '[object Set]') return hit ? '[Set]' : `Set {${__pfItems([...v.values()], cfg, ind, d, refs, pp)}}`;
   return __pfObject(v, cfg, ind, d, refs, hit);
+}
+function __pfShouldJSON(cfg, v, hit, calledToJSON) {
+  return cfg.toJSON && !hit && typeof v.toJSON === 'function' && !calledToJSON;
 }
 function __pfPrint(v, cfg, ind, depth, refs, calledToJSON) {
   const hooked = __pfHooks(v, cfg, ind, depth, refs);
@@ -7272,13 +7328,11 @@ function __pfPrint(v, cfg, ind, depth, refs, calledToJSON) {
   const simple = __pfSimpleTag(v, cfg, tag);
   if (simple !== undefined) return simple;
   if (refs.includes(v)) return '[Circular]';
-  refs = [...refs, v];
+  const nextRefs = [...refs, v];
   const d = depth + 1;
   const hit = d > cfg.maxDepth;
-  if (cfg.toJSON && !hit && typeof v.toJSON === 'function' && !calledToJSON) {
-    return __pfPrint(v.toJSON(), cfg, ind, d, refs, true);
-  }
-  return __pfComposite(v, cfg, ind, d, refs, hit, tag);
+  if (__pfShouldJSON(cfg, v, hit, calledToJSON)) return __pfPrint(v.toJSON(), cfg, ind, d, nextRefs, true);
+  return __pfComposite(v, cfg, ind, d, nextRefs, hit, tag);
 }
 function __pfEntries(entries, cfg, ind, depth, refs, sep) {
   if (!entries.length) return '';
