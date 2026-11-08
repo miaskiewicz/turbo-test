@@ -2109,15 +2109,21 @@ if (typeof globalThis.DOMPoint === 'undefined') {
 }
 if (typeof globalThis.Buffer === 'undefined') {
   class Buffer extends Uint8Array {
+    static #fromHex(d) {
+      const b = new Buffer(d.length / 2);
+      for (let i = 0; i < b.length; i++) b[i] = parseInt(d.substr(i * 2, 2), 16);
+      return b;
+    }
+    static #fromString(d, enc) {
+      if (enc === 'base64') return new Buffer(globalThis.__b64decodeToBytes(d));
+      // base64url: RFC 4648 §5 — `-`/`_` instead of `+`/`/`, optional padding. Node's base64
+      // decoder tolerates either, so normalise to standard base64 and reuse the same path.
+      if (enc === 'base64url') return new Buffer(globalThis.__b64decodeToBytes(d.replace(/-/g, '+').replace(/_/g, '/')));
+      if (enc === 'hex') return Buffer.#fromHex(d);
+      return new Buffer(new globalThis.TextEncoder().encode(d));
+    }
     static from(d, enc) {
-      if (typeof d === 'string') {
-        if (enc === 'base64') { return new Buffer(globalThis.__b64decodeToBytes(d)); }
-        // base64url: RFC 4648 §5 — `-`/`_` instead of `+`/`/`, optional padding. Node's base64
-        // decoder tolerates either, so normalise to standard base64 and reuse the same path.
-        if (enc === 'base64url') { return new Buffer(globalThis.__b64decodeToBytes(d.replace(/-/g, '+').replace(/_/g, '/'))); }
-        if (enc === 'hex') { const b = new Buffer(d.length / 2); for (let i = 0; i < b.length; i++) b[i] = parseInt(d.substr(i * 2, 2), 16); return b; }
-        return new Buffer(new globalThis.TextEncoder().encode(d));
-      }
+      if (typeof d === 'string') return Buffer.#fromString(d, enc);
       if (Array.isArray(d) || d instanceof Uint8Array) return new Buffer(d);
       if (d instanceof ArrayBuffer) return new Buffer(new Uint8Array(d));
       return new Buffer(0);
@@ -2226,19 +2232,22 @@ const __urlError = (code, message) => { const e = new TypeError(message); e.code
 // platform is read at call time.
 const __ttWin = () => globalThis.__ttPlatform === 'win32';
 globalThis.__ttIsAbsolutePath = (p) => (__ttWin() ? /^([a-zA-Z]:)?[\\/]/.test(p) : String(p).startsWith('/'));
-globalThis.__fileURLToPath = (u) => {
-  const url = typeof u === 'string' ? new globalThis.URL(u) : u;
-  if (url.protocol !== 'file:') throw __urlError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
-  if (__ttWin()) {
-    if (/%2f|%5c/i.test(url.pathname)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded \\ or / characters');
-    const path = decodeURIComponent(url.pathname).replace(/\//g, '\\');
-    if (url.hostname !== '') return `\\\\${url.hostname}${path}`;
-    if (!/^\\[a-zA-Z]:/.test(path)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must be absolute');
-    return path.slice(1);
-  }
+const __fileURLToPathWin = (url) => {
+  if (/%2f|%5c/i.test(url.pathname)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded \\ or / characters');
+  const path = decodeURIComponent(url.pathname).replace(/\//g, '\\');
+  if (url.hostname !== '') return `\\\\${url.hostname}${path}`;
+  if (!/^\\[a-zA-Z]:/.test(path)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must be absolute');
+  return path.slice(1);
+};
+const __fileURLToPathPosix = (url) => {
   if (url.hostname !== '') throw __urlError('ERR_INVALID_FILE_URL_HOST', `File URL host must be "localhost" or empty on ${globalThis.__ttPlatform || 'darwin'}`);
   if (/%2f/i.test(url.pathname)) throw __urlError('ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded / characters');
   return decodeURIComponent(url.pathname);
+};
+globalThis.__fileURLToPath = (u) => {
+  const url = typeof u === 'string' ? new globalThis.URL(u) : u;
+  if (url.protocol !== 'file:') throw __urlError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
+  return __ttWin() ? __fileURLToPathWin(url) : __fileURLToPathPosix(url);
 };
 // win32: [host, root ('/C:' or ''), rest] with `/` separators, made absolute against the cwd
 const __ttWinSplit = (p) => {
@@ -2322,15 +2331,23 @@ const __ttMetaTrivial = (spec, parent) => {
   }
   return null;
 };
+const __ttMetaFrom = (parent) => {
+  try { return globalThis.__fileURLToPath(parent); } catch (e) { return String(parent); }
+};
+const __ttMetaFormatResolved = (r, spec) => {
+  if (typeof r !== 'string') return null;
+  if (globalThis.__ttIsAbsolutePath(r)) return globalThis.__pathToFileURL(r).href;
+  if (spec !== 'vitest' && spec !== '@jest/globals') return 'node:' + r.replace(/^node:/, '');
+  return null;
+};
 const __ttMetaResolve = (specifier, parent) => {
   const spec = String(specifier);
   const trivial = __ttMetaTrivial(spec, parent);
   if (trivial !== null) return trivial;
-  let from;
-  try { from = globalThis.__fileURLToPath(parent); } catch (e) { from = String(parent); }
+  const from = __ttMetaFrom(parent);
   const r = globalThis.__ttRequireResolve(globalThis.__dirnameOf(from), spec, true);
-  if (typeof r === 'string' && globalThis.__ttIsAbsolutePath(r)) return globalThis.__pathToFileURL(r).href;
-  if (typeof r === 'string' && spec !== 'vitest' && spec !== '@jest/globals') return 'node:' + r.replace(/^node:/, '');
+  const resolved = __ttMetaFormatResolved(r, spec);
+  if (resolved !== null) return resolved;
   throw __ttMetaMissing(spec, from);
 };
 globalThis.__ttFillImportMeta = (m, filename) => {
@@ -2370,12 +2387,15 @@ const __os = {
 };
 // Node's posix path (lib/path.js): `..`/`.` collapse, resolve against the cwd from the right,
 // relative by common segments, and Node's basename/extname/format edge cases.
+const __normStrStep = (out, seg, absolute) => {
+  if (seg === '' || seg === '.') return;
+  if (seg !== '..') { out.push(seg); return; }
+  if (out.length && out[out.length - 1] !== '..') out.pop();
+  else if (!absolute) out.push('..');
+};
 const __normStr = (p, absolute) => {
   const out = [];
-  for (const seg of p.split('/')) {
-    if (seg === '' || seg === '.') continue;
-    if (seg === '..') { if (out.length && out[out.length - 1] !== '..') out.pop(); else if (!absolute) out.push('..'); } else out.push(seg);
-  }
+  for (const seg of p.split('/')) __normStrStep(out, seg, absolute);
   return out.join('/');
 };
 const __normalize = (p) => {
@@ -2387,10 +2407,11 @@ const __normalize = (p) => {
   if (r !== '' && p.endsWith('/')) r += '/';
   return abs ? '/' + r : r;
 };
+const __resolveCwd = () => String(globalThis.process && globalThis.process.cwd ? globalThis.process.cwd() : '/');
 const __resolve = (...a) => {
   let r = '';
   for (let i = a.length - 1; i >= -1 && !r.startsWith('/'); i--) {
-    const seg = i >= 0 ? String(a[i]) : String(globalThis.process && globalThis.process.cwd ? globalThis.process.cwd() : '/');
+    const seg = i >= 0 ? String(a[i]) : __resolveCwd();
     if (seg === '') continue;
     r = seg + (r ? '/' + r : '');
   }
@@ -2402,6 +2423,15 @@ const __basename = (p, ext) => {
   b = b.slice(b.lastIndexOf('/') + 1);
   if (ext !== undefined && b !== ext && b.endsWith(ext)) b = b.slice(0, -ext.length);
   return b;
+};
+const __pathFormatExt = (ext) => (ext ? (ext.startsWith('.') ? '' : '.') + ext : '');
+const __pathFormatBase = (o) => o.base || ((o.name || '') + __pathFormatExt(o.ext));
+const __pathFormat = (opt) => {
+  const o = opt || {};
+  const dir = o.dir || o.root;
+  const base = __pathFormatBase(o);
+  if (!dir) return base;
+  return dir === o.root ? dir + base : dir + '/' + base;
 };
 const __path = {
   sep: '/',
@@ -2422,13 +2452,7 @@ const __path = {
   },
   normalize: __normalize,
   parse: (p) => { const s = String(p); const dir = globalThis.__dirnameOf(s); const base = __basename(s); const ext = __extname(base); return { root: s.startsWith('/') ? '/' : '', dir, base, ext, name: ext ? base.slice(0, -ext.length) : base }; },
-  format: (o) => {
-    o = o || {};
-    const dir = o.dir || o.root;
-    const base = o.base || ((o.name || '') + (o.ext ? (o.ext.startsWith('.') ? '' : '.') + o.ext : ''));
-    if (!dir) return base;
-    return dir === o.root ? dir + base : dir + '/' + base;
-  },
+  format: (o) => __pathFormat(o),
   delimiter: ':',
 };
 // glob-parent and others reach for path.posix / path.win32; expose both (posix is our default).
@@ -2475,17 +2499,21 @@ const __readdirIsDir = (full, type) => {
   }
   return false;
 };
+const __readdirEntry = (name, type, dir, base, opts) => {
+  const full = (dir.endsWith('/') ? dir + name : dir + '/' + name);
+  const value = opts.withFileTypes ? new Dirent(name, type, dir) : full.slice(base.length + (base.endsWith('/') ? 0 : 1));
+  return { full, value };
+};
 const __readdir = (p, options) => {
   const base = __fsPath(p);
   const opts = typeof options === 'object' && options !== null ? options : {};
   const read = (dir) => globalThis.__fs_readdir(dir);
-  const join = (a, b) => (a.endsWith('/') ? a + b : a + '/' + b);
   if (!opts.recursive) return read(base).map(([name, type]) => (opts.withFileTypes ? new Dirent(name, type, base) : name));
   const out = [], queue = [base];
   for (let i = 0; i < queue.length; i++) {
     for (const [name, type] of read(queue[i])) {
-      const full = join(queue[i], name);
-      out.push(opts.withFileTypes ? new Dirent(name, type, queue[i]) : full.slice(base.length + (base.endsWith('/') ? 0 : 1)));
+      const { full, value } = __readdirEntry(name, type, queue[i], base, opts);
+      out.push(value);
       if (__readdirIsDir(full, type)) queue.push(full);
     }
   }
@@ -2684,6 +2712,13 @@ function __highlightRegExp(re) {
     while (i < re.length && re[i] >= '0' && re[i] <= '9') digits += re[i++];
     return digits;
   };
+  // `\u{..}`/`\p{..}`/`\P{..}` inside a class: a composite form rendered as a group. Returns
+  // true if handled and the caller should return early.
+  const classEscapeComposite = (next, seq) => {
+    if (re[i] !== '{') return false;
+    if (next === 'u' || next === 'p' || next === 'P') { writeGroup(`${seq}{`, '}', 0); return true; }
+    return false;
+  };
   // inside a character class
   const classEscape = () => {
     let seq = '\\';
@@ -2691,22 +2726,17 @@ function __highlightRegExp(re) {
     if (i < re.length) {
       seq += re[i++];
       const next = seq[1];
-      if (next === 'u' && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return; }
-      else if ((next === 'p' || next === 'P') && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return; }
-      else if (seq[1] === 'x') { seq += re.slice(i, i + 2); i += 2; }
+      if (classEscapeComposite(next, seq)) return;
+      if (next === 'x') { seq += re.slice(i, i + 2); i += 2; }
     }
     write(seq);
   };
+  const isRangeDash = (ch) => ch === '-' && re[i - 1] !== '[' && i + 1 < re.length && re[i + 1] !== ']';
   const classChar = (ch) => {
-    if (ch === '\\') {
-      classEscape();
-    } else if (ch === ']') {
-      depth--; write(']'); i++; inClass = false;
-    } else if (ch === '-' && re[i - 1] !== '[' && i + 1 < re.length && re[i + 1] !== ']') {
-      writeDepth('-', 1, 1);
-    } else {
-      write(ch); i++;
-    }
+    if (ch === '\\') { classEscape(); return; }
+    if (ch === ']') { depth--; write(']'); i++; inClass = false; return; }
+    if (isRangeDash(ch)) { writeDepth('-', 1, 1); return; }
+    write(ch); i++;
   };
   const namedGroup = () => {
     i++;
@@ -2720,16 +2750,15 @@ function __highlightRegExp(re) {
     }
   };
   // after `(?`
+  const GROUP_PREFIX = new Set([':', '=', '!']);
+  const GROUP_LOOKBEHIND = new Set(['=', '!']);
   const groupModifier = () => {
     const a = i < re.length ? re[i] : '';
-    if (a === ':' || a === '=' || a === '!') {
-      writeDepth(`?${a}`, -1, 1);
-      return;
-    }
+    if (GROUP_PREFIX.has(a)) { writeDepth(`?${a}`, -1, 1); return; }
+    if (a !== '<') { write('?'); return; }
     const b = i + 1 < re.length ? re[i + 1] : '';
-    if (a === '<' && (b === '=' || b === '!')) writeDepth(`?<${b}`, -1, 2);
-    else if (a === '<') namedGroup();
-    else write('?');
+    if (GROUP_LOOKBEHIND.has(b)) writeDepth(`?<${b}`, -1, 2);
+    else namedGroup();
   };
   const openGroup = () => {
     write('('); depth++; i++;
@@ -2741,11 +2770,16 @@ function __highlightRegExp(re) {
   // Follow-up for `\<next>` when `next` opens a composite form (\u{..}, \xNN, \1.., \k<..>,
   // \p{..}, \P{..}); returns the updated `seq` or null if nothing special, and writes directly
   // for the forms that emit a writeGroup (returning 'done' then).
+  const BRACE_ESCAPE = new Set(['u', 'p', 'P']);
+  const escapeTailBrace = (seq, next) => {
+    if (BRACE_ESCAPE.has(next) && re[i] === '{') { writeGroup(`${seq}{`, '}', 0); return true; }
+    if (next === 'k' && re[i] === '<') { writeGroup(`${seq}<`, '>'); return true; }
+    return false;
+  };
   const escapeTail = (seq, next) => {
     if (next === 'x') { seq += re.slice(i, i + 2); i += 2; return seq; }
     if (next >= '0' && next <= '9') return seq + readDigits();
-    if (re[i] === '{' && (next === 'u' || next === 'p' || next === 'P')) { writeGroup(`${seq}{`, '}', 0); return 'done'; }
-    if (next === 'k' && re[i] === '<') { writeGroup(`${seq}<`, '>'); return 'done'; }
+    if (escapeTailBrace(seq, next)) return 'done';
     return seq;
   };
   const escape = () => {
@@ -2785,24 +2819,14 @@ function __highlightRegExp(re) {
   };
   // A one-char token that writes at a lifted depth (operators |+*?,^$ at 3,1; '.' at 2,1).
   const stepLifted = '|+*?,^$';
+  const stepSimple = { '(': openGroup, ')': () => { depth--; write(')'); i++; }, '\\': escape, '{': quantifier };
   const step = (ch) => {
-    if (ch === '[') {
-      write('['); depth++; i++; inClass = true;
-    } else if (ch === '(') {
-      openGroup();
-    } else if (ch === ')') {
-      depth--; write(')'); i++;
-    } else if (ch === '\\') {
-      escape();
-    } else if (stepLifted.indexOf(ch) !== -1) {
-      writeDepth(ch, 3, 1);
-    } else if (ch === '{') {
-      quantifier();
-    } else if (ch === '.') {
-      writeDepth(ch, 2, 1);
-    } else {
-      writeDepth(ch, 1, 1);
-    }
+    if (ch === '[') { write('['); depth++; i++; inClass = true; return; }
+    const fn = stepSimple[ch];
+    if (fn) return fn();
+    if (stepLifted.indexOf(ch) !== -1) return writeDepth(ch, 3, 1);
+    if (ch === '.') return writeDepth(ch, 2, 1);
+    writeDepth(ch, 1, 1);
   };
   write('/');
   depth++;
@@ -2818,20 +2842,22 @@ function __highlightRegExp(re) {
   return out;
 }
 const __inspectMeta = ['\\x00', '\\x01', '\\x02', '\\x03', '\\x04', '\\x05', '\\x06', '\\x07', '\\b', '\\t', '\\n', '\\x0B', '\\f', '\\r', '\\x0E', '\\x0F', '\\x10', '\\x11', '\\x12', '\\x13', '\\x14', '\\x15', '\\x16', '\\x17', '\\x18', '\\x19', '\\x1A', '\\x1B', '\\x1C', '\\x1D', '\\x1E', '\\x1F'];
+function __strEscapeQuote(str) {
+  if (!str.includes("'")) return "'";
+  if (!str.includes('"')) return '"';
+  if (!str.includes('`') && !str.includes('${')) return '`';
+  return "'";
+}
+function __strEscapeChar(ch, c, quote) {
+  if (ch === quote || ch === '\\') return '\\' + ch;
+  if (c < 0x20) return __inspectMeta[c];
+  if (c === 0x7f) return '\\x7F';
+  return ch;
+}
 function __strEscape(str) {
-  let quote = "'";
-  if (str.includes("'")) {
-    if (!str.includes('"')) quote = '"';
-    else if (!str.includes('`') && !str.includes('${')) quote = '`';
-  }
+  const quote = __strEscapeQuote(str);
   let out = '';
-  for (const ch of str) {
-    const c = ch.charCodeAt(0);
-    if (ch === quote || ch === '\\') out += '\\' + ch;
-    else if (c < 0x20) out += __inspectMeta[c];
-    else if (c === 0x7f) out += '\\x7F';
-    else out += ch;
-  }
+  for (const ch of str) out += __strEscapeChar(ch, ch.charCodeAt(0), quote);
   return quote + out + quote;
 }
 function __inspectKey(key) {
@@ -2858,13 +2884,15 @@ function __fnBaseClass(fn) {
   if (sup && sup.name) base += ` extends ${sup.name}`;
   return base + ']';
 }
+const __FN_TYPE_TAGS = new Set(['AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction']);
+function __fnBaseType(fn) {
+  const tag = fn[Symbol.toStringTag];
+  return __FN_TYPE_TAGS.has(tag) ? tag : 'Function';
+}
 function __fnBase(fn, ctor) {
   const src = Function.prototype.toString.call(fn);
   if (src.startsWith('class') && /^class\s*[\s{A-Za-z_$]/.test(src)) return __fnBaseClass(fn);
-  let type = 'Function';
-  const tag = fn[Symbol.toStringTag];
-  if (tag === 'AsyncFunction' || tag === 'GeneratorFunction' || tag === 'AsyncGeneratorFunction') type = tag;
-  let base = `[${type}`;
+  let base = `[${__fnBaseType(fn)}`;
   base += fn.name ? `: ${fn.name}]` : ' (anonymous)]';
   if (ctor === null) base += ' (null prototype)';
   return base;
@@ -2879,28 +2907,36 @@ function __inspectStrLines(v, ctx, sty) {
   return sty(__strEscape(v), 'string');
 }
 // formatPrimitive; `plain` is Node's stylizeNoColor (boxed primitives)
-function __inspectPrimitive(v, ctx, plain) {
-  const sty = (str, type) => (plain ? str : __sty(ctx, str, type));
+function __inspectPrimitiveSimple(v, sty) {
   switch (typeof v) {
-    case 'string': return __inspectStrLines(v, ctx, sty);
     case 'number': return sty(Object.is(v, -0) ? '-0' : String(v), 'number');
     case 'bigint': return sty(`${v}n`, 'bigint');
     case 'boolean': return sty(String(v), 'boolean');
     case 'undefined': return sty('undefined', 'undefined');
     case 'symbol': return sty(v.toString(), 'symbol');
   }
-  return String(v);
+  return null;
+}
+function __inspectPrimitive(v, ctx, plain) {
+  const sty = (str, type) => (plain ? str : __sty(ctx, str, type));
+  if (typeof v === 'string') return __inspectStrLines(v, ctx, sty);
+  const simple = __inspectPrimitiveSimple(v, sty);
+  return simple !== null ? simple : String(v);
+}
+function __formatCustomInspect(ctx, value, recurseTimes) {
+  const custom = value[Symbol.for('nodejs.util.inspect.custom')];
+  if (typeof custom !== 'function' || custom === __util.inspect) return null;
+  const r = custom.call(value, ctx.depth - recurseTimes, { depth: ctx.depth - recurseTimes, breakLength: ctx.breakLength, compact: ctx.compact, colors: ctx.colors }, __util.inspect);
+  if (r === value) return null;
+  // a multi-line result is indented to where it is printed, as Node does
+  return typeof r === 'string' ? r.replace(/\n/g, `\n${' '.repeat(ctx.indentationLvl)}`) : __formatValue(ctx, r, recurseTimes);
 }
 function __formatValue(ctx, value, recurseTimes, typedArray) {
   if (typeof value !== 'object' && typeof value !== 'function') return __inspectPrimitive(value, ctx);
   if (value === null) return __sty(ctx, 'null', 'null');
   // a [util.inspect.custom](depth, options, inspect) method formats its own value
-  const custom = value[Symbol.for('nodejs.util.inspect.custom')];
-  if (typeof custom === 'function' && custom !== __util.inspect) {
-    const r = custom.call(value, ctx.depth - recurseTimes, { depth: ctx.depth - recurseTimes, breakLength: ctx.breakLength, compact: ctx.compact, colors: ctx.colors }, __util.inspect);
-    // a multi-line result is indented to where it is printed, as Node does
-    if (r !== value) return typeof r === 'string' ? r.replace(/\n/g, `\n${' '.repeat(ctx.indentationLvl)}`) : __formatValue(ctx, r, recurseTimes);
-  }
+  const custom = __formatCustomInspect(ctx, value, recurseTimes);
+  if (custom !== null) return custom;
   if (ctx.seen.includes(value)) return __sty(ctx, `[Circular *${__trackCircular(ctx, value)}]`, 'special');
   return __formatRaw(ctx, value, recurseTimes, typedArray);
 }
@@ -2977,12 +3013,9 @@ function __groupRows(output, outputLength, dataLen, columns, separatorSpace, val
   }
   return tmp;
 }
-function __groupArrayElements(ctx, output, value) {
+function __groupMeasure(ctx, output, outputLength, separatorSpace) {
   let totalLength = 0;
   let maxLength = 0;
-  let outputLength = output.length;
-  if (ctx.maxArrayLength < output.length) outputLength--;
-  const separatorSpace = 2;
   const dataLen = new Array(outputLength);
   for (let i = 0; i < outputLength; i++) {
     const len = ctx.colors ? __stripAnsi(output[i]).length : output[i].length;
@@ -2990,22 +3023,31 @@ function __groupArrayElements(ctx, output, value) {
     totalLength += len + separatorSpace;
     if (maxLength < len) maxLength = len;
   }
+  return { totalLength, maxLength, dataLen };
+}
+function __groupColumns(ctx, totalLength, outputLength, actualMax) {
+  const averageBias = Math.sqrt(actualMax - totalLength / outputLength);
+  const biasedMax = Math.max(actualMax - 3 - averageBias, 1);
+  return Math.min(
+    Math.round(Math.sqrt(2.5 * biasedMax * outputLength) / biasedMax),
+    Math.floor((ctx.breakLength - ctx.indentationLvl) / actualMax),
+    ctx.compact * 4,
+    15,
+  );
+}
+function __groupArrayElements(ctx, output, value) {
+  let outputLength = output.length;
+  if (ctx.maxArrayLength < output.length) outputLength--;
+  const separatorSpace = 2;
+  const { totalLength, maxLength, dataLen } = __groupMeasure(ctx, output, outputLength, separatorSpace);
   const actualMax = maxLength + separatorSpace;
-  if (actualMax * 3 + ctx.indentationLvl < ctx.breakLength && (totalLength / actualMax > 5 || maxLength <= 6)) {
-    const averageBias = Math.sqrt(actualMax - totalLength / output.length);
-    const biasedMax = Math.max(actualMax - 3 - averageBias, 1);
-    const columns = Math.min(
-      Math.round(Math.sqrt(2.5 * biasedMax * outputLength) / biasedMax),
-      Math.floor((ctx.breakLength - ctx.indentationLvl) / actualMax),
-      ctx.compact * 4,
-      15,
-    );
-    if (columns <= 1) return output;
-    const tmp = __groupRows(output, outputLength, dataLen, columns, separatorSpace, value);
-    if (ctx.maxArrayLength < output.length) tmp.push(output[outputLength]);
-    output = tmp;
-  }
-  return output;
+  if (actualMax * 3 + ctx.indentationLvl >= ctx.breakLength) return output;
+  if (!(totalLength / actualMax > 5 || maxLength <= 6)) return output;
+  const columns = __groupColumns(ctx, totalLength, output.length, actualMax);
+  if (columns <= 1) return output;
+  const tmp = __groupRows(output, outputLength, dataLen, columns, separatorSpace, value);
+  if (ctx.maxArrayLength < output.length) tmp.push(output[outputLength]);
+  return tmp;
 }
 function __isBelowBreakLength(ctx, output, start, base) {
   let totalLength = output.length + start;
@@ -3018,17 +3060,18 @@ function __isBelowBreakLength(ctx, output, start, base) {
 }
 // reduceToSingleString with a numeric `compact`: [the (grouped) output, its one-line form or
 // undefined when it does not fit on one line]
+function __reduceOneLine(ctx, output, base, braces, entries, recurseTimes) {
+  if (ctx.currentDepth - recurseTimes >= ctx.compact || entries !== output.length) return undefined;
+  const start = output.length + ctx.indentationLvl + braces[0].length + base.length + 10;
+  if (!__isBelowBreakLength(ctx, output, start, base)) return undefined;
+  const joined = output.join(', ');
+  if (joined.includes('\n')) return undefined;
+  return `${base ? `${base} ` : ''}${braces[0]} ${joined} ${braces[1]}`;
+}
 function __reduceCompactNumber(ctx, output, base, braces, extrasType, recurseTimes, value) {
   const entries = output.length;
   if (extrasType === 2 && entries > 6) output = __groupArrayElements(ctx, output, value);
-  if (ctx.currentDepth - recurseTimes < ctx.compact && entries === output.length) {
-    const start = output.length + ctx.indentationLvl + braces[0].length + base.length + 10;
-    if (__isBelowBreakLength(ctx, output, start, base)) {
-      const joined = output.join(', ');
-      if (!joined.includes('\n')) return [output, `${base ? `${base} ` : ''}${braces[0]} ${joined} ${braces[1]}`];
-    }
-  }
-  return [output, undefined];
+  return [output, __reduceOneLine(ctx, output, base, braces, entries, recurseTimes)];
 }
 // The multi-line branch of __reduceToSingleString (ctx.compact !== true): entries one per line,
 // with a numeric `compact` first trying the one-line grouped form from __reduceCompactNumber.
