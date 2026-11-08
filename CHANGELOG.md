@@ -5,6 +5,17 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Added
+- `test.scoped({...})` and `test.override({...})` on a `base.extend({...})` test — vitest 4's
+  per-describe fixture overrides (#276). Called inside a `describe` block, they merge the
+  overrides over the closest enclosing override (or the base extend) and attach them to that
+  suite; the fixture resolver walks from the test's suite outward and picks the nearest match.
+  Keys not present in the base extend pass straight through to the context, override values may
+  themselves be fixture functions (`async ({}, use) => use(value)`), and a `scoped` call outside
+  any `describe` scopes to the file's root suite (mirrors real vitest 4.1.12). `scoped` is
+  vitest's deprecated alias for `override`; both set the same overrides. Before, calling
+  `test.scoped` threw `TypeError: test.scoped is not a function`.
+
 ### Fixed
 - A special URL's host is now UTS#46 ToASCII, as Node/vitest's WHATWG URL serializes it (#259).
   Before, the runtime's `URL` polyfill only ASCII-lowercased the hostname, so
