@@ -1156,15 +1156,16 @@ if (typeof globalThis.URL === 'undefined') {
     // WHATWG `domain to ASCII` for a special URL's host (turbo-test#259): Node runs an IDN
     // hostname through UTS#46 ToASCII (`new URL('http://ü.com').host === 'xn--tda.com'`); the
     // lowercase that was here before did the ASCII half of that. IPv6 brackets skip the IDN
-    // pass (the brackets' contents are not a domain); a pure-ASCII name without an `xn--`
-    // label is lower-cased directly (ToASCII is a no-op on it, and the native call isn't
-    // free); otherwise ToASCII runs through `__ttIdnaToAscii`, with a fallback to the
-    // lower-cased name if the native is missing or rejects the input — the host parse
-    // already stripped forbidden code points.
+    // pass (the brackets' contents are not a domain); a pure-printable-ASCII name without an
+    // `xn--`-anchored label is lower-cased directly (ToASCII is a no-op on it, and the native
+    // call isn't free); otherwise ToASCII runs through `__ttIdnaToAscii`, with a fallback to
+    // the lower-cased name if the native is missing or rejects the input — the host parse
+    // rejects forbidden code points, but the fast-path only trusts printable ASCII so a
+    // control byte that slips through still crosses the native UTS#46 boundary.
     static _idnAscii(name) {
       const lower = name.toLowerCase();
       if (lower.startsWith('[')) return lower;
-      if (/^[\x00-\x7f]*$/.test(lower) && !lower.includes('xn--')) return lower;
+      if (/^[\x21-\x7e]*$/.test(lower) && !/(^|\.)xn--/.test(lower)) return lower;
       const ascii = globalThis.__ttIdnaToAscii ? globalThis.__ttIdnaToAscii(lower) : undefined;
       return ascii === undefined ? lower : ascii;
     }
@@ -8589,9 +8590,13 @@ it.extend = (fixtures) => {
   // current suite; nested describes without their own scoped call inherit it via resolveCtx's walk.
   // `scoped` is vitest's deprecated name for `override` — both set the same overrides.
   const applyScoped = (overrides) => {
-    const parentFx = __closestFixtureOverride(current.parent, ext) || base;
-    const merged = { ...parentFx, ...(overrides || {}) };
+    // Multiple scoped calls in the same describe layer onto each other, not onto the parent:
+    // the baseline is the current suite's own override if one is already set here, else the
+    // closest ancestor's override, else the base extend.
     let m = __fixtureOverrides.get(current);
+    const own = m && m.get(ext);
+    const parentFx = own || __closestFixtureOverride(current.parent, ext) || base;
+    const merged = { ...parentFx, ...(overrides || {}) };
     if (!m) { m = new Map(); __fixtureOverrides.set(current, m); }
     m.set(ext, merged);
     return ext;
@@ -9439,25 +9444,31 @@ function __exitTestLogs(logs, suiteTask) {
 async function __runTest(t, chain, summary, label, suiteTask) {
   const attempts = __testRetry(t) + 1;
   const { timeoutMs, run, t0, start, logs, ctx, task, repeats } = __runTestSetup(t, chain);
-  await null;
-  let failed = false;
-  for (let r = 0; r <= repeats && !task.result.pending; r++) {
-    for (let a = 0; a < attempts; a++) {
-      const mark = __beginAttempt(t, label, run, r);
-      await __vtAround(() => __runAttemptInner(t, chain, ctx, timeoutMs, run)).catch(__vtNoop);
-      await null;
-      __snap.currentTest = null;
-      failed = __endAttempt(t, run, mark, failed);
-      if (!failed) break;
-      if (a + 1 < attempts) failed = __retryAttempt(task, run);
+  try {
+    await null;
+    let failed = false;
+    for (let r = 0; r <= repeats && !task.result.pending; r++) {
+      for (let a = 0; a < attempts; a++) {
+        const mark = __beginAttempt(t, label, run, r);
+        await __vtAround(() => __runAttemptInner(t, chain, ctx, timeoutMs, run)).catch(__vtNoop);
+        await null;
+        __snap.currentTest = null;
+        failed = __endAttempt(t, run, mark, failed);
+        if (!failed) break;
+        if (a + 1 < attempts) failed = __retryAttempt(task, run);
+      }
     }
+    __finalizeAttempts(run, failed);
+    if (!task.result.pending) await __vtAfterRunTask();
+    const dur = __loop.elapsed() - t0;
+    const timing = { duration_ms: dur, start_ms: start, retry_count: run.retries, repeat_count: task.result.repeatCount, logs: logs.map((l) => [l[0], l[1]]) };
+    return __recordTest(t, chain, summary, label, run, timing, dur);
+  } finally {
+    // __vtAfterRunTask can reject (a failing onBeforeRunTask returned by the suite hook stack);
+    // exit the log capture no matter what, so a subsequent concurrent test's console output
+    // doesn't land in this test's timing.logs.
+    __exitTestLogs(logs, suiteTask);
   }
-  __finalizeAttempts(run, failed);
-  if (!task.result.pending) await __vtAfterRunTask();
-  const dur = __loop.elapsed() - t0;
-  const timing = { duration_ms: dur, start_ms: start, retry_count: run.retries, repeat_count: task.result.repeatCount, logs: logs.map((l) => [l[0], l[1]]) };
-  __exitTestLogs(logs, suiteTask);
-  return __recordTest(t, chain, summary, label, run, timing, dur);
 }
 // one test of a suite (not a nested suite): whether it failed, or the promise of that when it runs
 function __runSuiteOnlyUnderSkip(t, chain, summary, skipAll, label) {
