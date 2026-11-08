@@ -3209,17 +3209,29 @@ function __rawKind(ctx, value, recurseTimes, keys, ctor, tag, prefix) {
   if (ArrayBuffer.isView(value) && !(value instanceof DataView)) return __rawTyped(ctx, value, keys, ctor, tag, prefix);
   return __rawOther(ctx, value, recurseTimes, keys, ctor, tag, prefix);
 }
-function __formatRaw(ctx, value, recurseTimes, typedArray) {
-  void typedArray;
-  const ctor = __ctorName(value);
-  const tag = value[Symbol.toStringTag];
-  const prefix = (fallback, size) => {
+function __rawPrefix(ctor, tag) {
+  return (fallback, size) => {
     let p = ctor === null ? `[${fallback}: null prototype] ` : `${ctor}${size} `;
     if (typeof tag === 'string' && tag !== '' && tag !== (ctor || fallback)) p = `${p.slice(0, -1)} [${tag}] `;
     return p;
   };
-  const allKeys = ctx.showHidden ? Reflect.ownKeys(value) : Object.keys(value).concat(Object.getOwnPropertySymbols(value).filter((s) => Object.prototype.propertyIsEnumerable.call(value, s)));
-  const sp = __rawKind(ctx, value, recurseTimes, allKeys, ctor, tag, prefix);
+}
+function __rawAllKeys(value, showHidden) {
+  if (showHidden) return Reflect.ownKeys(value);
+  return Object.keys(value).concat(Object.getOwnPropertySymbols(value).filter((s) => Object.prototype.propertyIsEnumerable.call(value, s)));
+}
+function __rawCircularPrefix(ctx, value, res) {
+  if (ctx.circular === undefined) return res;
+  const index = ctx.circular.get(value);
+  if (index === undefined) return res;
+  return `${__sty(ctx, `<ref *${index}>`, 'special')} ${res}`;
+}
+function __formatRaw(ctx, value, recurseTimes, typedArray) {
+  void typedArray;
+  const ctor = __ctorName(value);
+  const tag = value[Symbol.toStringTag];
+  const prefix = __rawPrefix(ctor, tag);
+  const sp = __rawKind(ctx, value, recurseTimes, __rawAllKeys(value, ctx.showHidden), ctor, tag, prefix);
   if (typeof sp === 'string') return sp;
   if (recurseTimes > ctx.depth) {
     const name = (ctor || tag || 'Object');
@@ -3232,33 +3244,38 @@ function __formatRaw(ctx, value, recurseTimes, typedArray) {
   const output = sp.formatter(recurseTimes);
   for (const k of sp.keys) output.push(__formatProperty(ctx, value, recurseTimes, k, sp.extrasType));
   ctx.seen.pop();
-  let res = __reduceToSingleString(ctx, output, sp.base, sp.braces, sp.extrasType, recurseTimes, value);
-  if (ctx.circular !== undefined) {
-    const index = ctx.circular.get(value);
-    if (index !== undefined) res = `${__sty(ctx, `<ref *${index}>`, 'special')} ${res}`;
-  }
-  return res;
+  const res = __reduceToSingleString(ctx, output, sp.base, sp.braces, sp.extrasType, recurseTimes, value);
+  return __rawCircularPrefix(ctx, value, res);
 }
 // The options a [util.inspect.custom] method passes on to its inner inspect calls (Node's
 // `breakLength` 80 when the caller gives none).
 function __inspectCustomOpts(opts) {
   const o = { breakLength: 80, colors: false };
-  if (opts && typeof opts.breakLength === 'number') o.breakLength = opts.breakLength;
-  if (opts && opts.compact !== undefined) o.compact = opts.compact;
-  if (opts && opts.colors) o.colors = true;
-  if (opts && (typeof opts.depth === 'number' || opts.depth === null)) o.depth = opts.depth;
+  if (!opts) return o;
+  if (typeof opts.breakLength === 'number') o.breakLength = opts.breakLength;
+  if (opts.compact !== undefined) o.compact = opts.compact;
+  if (opts.colors) o.colors = true;
+  if (typeof opts.depth === 'number' || opts.depth === null) o.depth = opts.depth;
   return o;
 }
-function __nodeInspect(value, opts) {
+function __nodeInspectDepth(opts) {
+  if (opts.depth === null) return Infinity;
+  if (typeof opts.depth === 'number') return opts.depth;
+  return undefined;
+}
+function __nodeInspectCtx(opts) {
   const ctx = { seen: [], indentationLvl: 0, currentDepth: 0, depth: 2, breakLength: 80, compact: 3, maxArrayLength: 100, circular: undefined, colors: false };
-  if (opts) {
-    if (typeof opts.depth === 'number' || opts.depth === null) ctx.depth = opts.depth === null ? Infinity : opts.depth;
-    if (typeof opts.breakLength === 'number') ctx.breakLength = opts.breakLength;
-    if (opts.compact !== undefined) ctx.compact = opts.compact;
-    if (opts.colors) ctx.colors = true;
-    if (opts.showHidden) ctx.showHidden = true;
-  }
-  return __formatValue(ctx, value, 0);
+  if (!opts) return ctx;
+  const d = __nodeInspectDepth(opts);
+  if (d !== undefined) ctx.depth = d;
+  if (typeof opts.breakLength === 'number') ctx.breakLength = opts.breakLength;
+  if (opts.compact !== undefined) ctx.compact = opts.compact;
+  if (opts.colors) ctx.colors = true;
+  if (opts.showHidden) ctx.showHidden = true;
+  return ctx;
+}
+function __nodeInspect(value, opts) {
+  return __formatValue(__nodeInspectCtx(opts), value, 0);
 }
 // util.format: %s %d %i %f %j %o %O %c %%, the rest inspected (strings as they are)
 function __nodeFormat(...args) {
@@ -3281,16 +3298,24 @@ function __formatSpecNum(c, a) {
   if (c === 'i') return String(parseInt(a));
   return Object.is(Number(a), -0) ? '-0' : String(Number(a));
 }
+function __formatSpecJ(a) { try { return JSON.stringify(a); } catch (e) { return '[Circular]'; } }
+const __NUM_SPECS = new Set(['d', 'i', 'f']);
 // one util.format specifier (sdifjoOc) applied to its argument
 function __formatSpec(c, a, colors) {
-  switch (c) {
-    case 's': return __formatSpecS(a);
-    case 'd': case 'i': case 'f': return __formatSpecNum(c, a);
-    case 'j': try { return JSON.stringify(a); } catch (e) { return '[Circular]'; }
-    case 'o': return __nodeInspect(a, { depth: 4, colors, showHidden: true });
-    case 'O': return __nodeInspect(a, { colors });
-    default: return '';
-  }
+  if (c === 's') return __formatSpecS(a);
+  if (__NUM_SPECS.has(c)) return __formatSpecNum(c, a);
+  if (c === 'j') return __formatSpecJ(a);
+  if (c === 'o') return __nodeInspect(a, { depth: 4, colors, showHidden: true });
+  if (c === 'O') return __nodeInspect(a, { colors });
+  return '';
+}
+// Returns { out, lastAdvance, consumed: true|false } for the %-handling at position p.
+function __nodeFormatStep(first, p, args, i, colors, last) {
+  const c = first[p + 1];
+  if (c === '%') return { chunk: first.slice(last, p) + '%', nextLast: p + 2, iDelta: 0 };
+  if (i >= args.length || !'sdifjoOc'.includes(c)) return null;
+  const s = __formatSpec(c, args[i], colors);
+  return { chunk: first.slice(last, p) + s, nextLast: p + 2, iDelta: 1 };
 }
 function __nodeFormatWith(o, ...args) {
   const colors = !!(o && o.colors);
@@ -3302,13 +3327,9 @@ function __nodeFormatWith(o, ...args) {
   let last = 0;
   for (let p = 0; p < first.length - 1; p++) {
     if (first[p] !== '%') continue;
-    const c = first[p + 1];
-    if (c === '%') { out += first.slice(last, p) + '%'; last = p + 2; p++; continue; }
-    if (i >= args.length || !'sdifjoOc'.includes(c)) continue;
-    const s = __formatSpec(c, args[i++], colors);
-    out += first.slice(last, p) + s;
-    last = p + 2;
-    p++;
+    const step = __nodeFormatStep(first, p, args, i, colors, last);
+    if (!step) continue;
+    out += step.chunk; last = step.nextLast; i += step.iDelta; p++;
   }
   out += first.slice(last);
   for (; i < args.length; i++) out += ' ' + insp(args[i]);
@@ -3366,35 +3387,38 @@ function __qsSplit(qs, sep, options) {
 function __qsDecoder(options) {
   return options && typeof options.decodeURIComponent === 'function' ? options.decodeURIComponent : __querystring.unescape;
 }
+function __qsEncoder(options) {
+  return options && typeof options.encodeURIComponent === 'function' ? options.encodeURIComponent : __querystring.escape;
+}
+function __qsParsePart(obj, part, eq, dec) {
+  if (part.length === 0) return;
+  const i = part.indexOf(eq);
+  const k = dec((i >= 0 ? part.slice(0, i) : part).replace(/\+/g, ' '));
+  const v = i >= 0 ? dec(part.slice(i + eq.length).replace(/\+/g, ' ')) : '';
+  __qsAdd(obj, k, v);
+}
+function __qsStringifyEntry(out, k, v, eq, enc) {
+  const ks = enc(__qsPrim(k)) + eq;
+  if (Array.isArray(v)) { for (const x of v) out.push(ks + enc(__qsPrim(x))); return; }
+  out.push(ks + enc(__qsPrim(v)));
+}
 const __querystring = {
   unescape: __qsUnescape,
   escape: (s) => encodeURIComponent(typeof s === 'string' ? s : String(s)),
   stringify(obj, sep, eq, options) {
-    sep = sep || '&'; eq = eq || '=';
-    const enc = (options && typeof options.encodeURIComponent === 'function') ? options.encodeURIComponent : __querystring.escape;
     if (obj === null || typeof obj !== 'object') return '';
+    const s = sep || '&', e = eq || '=';
+    const enc = __qsEncoder(options);
     const out = [];
-    for (const k of Object.keys(obj)) {
-      const v = obj[k];
-      const ks = enc(__qsPrim(k)) + eq;
-      if (Array.isArray(v)) { for (const x of v) out.push(ks + enc(__qsPrim(x))); }
-      else out.push(ks + enc(__qsPrim(v)));
-    }
-    return out.join(sep);
+    for (const k of Object.keys(obj)) __qsStringifyEntry(out, k, obj[k], e, enc);
+    return out.join(s);
   },
   parse(qs, sep, eq, options) {
     const obj = Object.create(null);
     if (typeof qs !== 'string' || qs.length === 0) return obj;
-    sep = sep || '&'; eq = eq || '=';
-    const parts = __qsSplit(qs, sep, options);
+    const s = sep || '&', e = eq || '=';
     const dec = __qsDecoder(options);
-    for (const part of parts) {
-      if (part.length === 0) continue;
-      const i = part.indexOf(eq);
-      const k = dec((i >= 0 ? part.slice(0, i) : part).replace(/\+/g, ' '));
-      const v = i >= 0 ? dec(part.slice(i + eq.length).replace(/\+/g, ' ')) : '';
-      __qsAdd(obj, k, v);
-    }
+    for (const part of __qsSplit(qs, s, options)) __qsParsePart(obj, part, e, dec);
     return obj;
   },
 };
@@ -3432,23 +3456,22 @@ class __StringDecoder {
     all.set(this._rest); all.set(b, this._rest.length);
     return all;
   }
+  _decodeUtf8(b, final) {
+    const keep = final ? 0 : __utf8Tail(b);
+    this._rest = b.slice(b.length - keep);
+    return __utf8Decode(b, 0, b.length - keep);
+  }
+  _decodeSingleByte(b) {
+    this._rest = new Uint8Array(0);
+    let s = '';
+    for (const c of b) s += this.encoding === 'hex' ? c.toString(16).padStart(2, '0') : String.fromCharCode(this.encoding === 'ascii' ? c & 0x7f : c);
+    return s;
+  }
   _decode(b, final) {
-    switch (this.encoding) {
-      case 'utf8': {
-        const keep = final ? 0 : __utf8Tail(b);
-        this._rest = b.slice(b.length - keep);
-        return __utf8Decode(b, 0, b.length - keep);
-      }
-      case 'utf16le': return this._utf16(b, final);
-      case 'base64':
-      case 'base64url': return this._base64(b, final);
-      default: {
-        this._rest = new Uint8Array(0);
-        let s = '';
-        for (const c of b) s += this.encoding === 'hex' ? c.toString(16).padStart(2, '0') : String.fromCharCode(this.encoding === 'ascii' ? c & 0x7f : c);
-        return s;
-      }
-    }
+    if (this.encoding === 'utf8') return this._decodeUtf8(b, final);
+    if (this.encoding === 'utf16le') return this._utf16(b, final);
+    if (this.encoding === 'base64' || this.encoding === 'base64url') return this._base64(b, final);
+    return this._decodeSingleByte(b);
   }
   _utf16(b, final) {
     let n = b.length - (b.length % 2);
@@ -3492,10 +3515,13 @@ function __deepEqView(a, b, strict) {
   for (let i = 0; i < a.length; i++) if (strict ? !Object.is(a[i], b[i]) : a[i] != b[i]) return false;
   return true;
 }
+function __deepEqRegExp(a, b) {
+  return a.source === b.source && a.flags === b.flags && a.lastIndex === b.lastIndex;
+}
 // deepEqual of the internal value of a date, regexp, error, typed array or boxed primitive
 function __deepEqValue(a, b, strict, tag) {
   if (a instanceof Date) return a.getTime() === b.getTime();
-  if (a instanceof RegExp) return a.source === b.source && a.flags === b.flags && a.lastIndex === b.lastIndex;
+  if (a instanceof RegExp) return __deepEqRegExp(a, b);
   if (a instanceof Error) return a.message === b.message && a.name === b.name;
   if (ArrayBuffer.isView(a)) return __deepEqView(a, b, strict);
   if (__BOXED_TAGS.has(tag)) return Object.is(a.valueOf(), b.valueOf());
@@ -3507,25 +3533,29 @@ function __deepEqMapHit(k, v, b, strict, seen) {
   for (const [k2, v2] of b) if (__deepEq(k, k2, strict, seen) && __deepEq(v, v2, strict, seen)) return true;
   return false;
 }
+function __deepEqMapEntry(k, v, b, strict, seen) {
+  if (b.has(k)) return __deepEq(v, b.get(k), strict, seen);
+  // an object key (or, loosely, a primitive one) can still match a deep-equal key
+  if (strict && (k === null || typeof k !== 'object')) return false;
+  return __deepEqMapHit(k, v, b, strict, seen);
+}
 function __deepEqMap(a, b, strict, seen) {
   if (a.size !== b.size) return false;
-  for (const [k, v] of a) {
-    if (b.has(k)) { if (!__deepEq(v, b.get(k), strict, seen)) return false; continue; }
-    // an object key (or, loosely, a primitive one) can still match a deep-equal key
-    if (strict && (k === null || typeof k !== 'object')) return false;
-    if (!__deepEqMapHit(k, v, b, strict, seen)) return false;
-  }
+  for (const [k, v] of a) if (!__deepEqMapEntry(k, v, b, strict, seen)) return false;
   return true;
+}
+function __deepEqSetHit(v, b, strict, seen) {
+  for (const v2 of b) if (__deepEq(v, v2, strict, seen)) return true;
+  return false;
+}
+function __deepEqSetEntry(v, b, strict, seen) {
+  if (b.has(v)) return true;
+  if (strict && (v === null || typeof v !== 'object')) return false;
+  return __deepEqSetHit(v, b, strict, seen);
 }
 function __deepEqSet(a, b, strict, seen) {
   if (a.size !== b.size) return false;
-  for (const v of a) {
-    if (b.has(v)) continue;
-    if (strict && (v === null || typeof v !== 'object')) return false;
-    let hit = false;
-    for (const v2 of b) if (__deepEq(v, v2, strict, seen)) { hit = true; break; }
-    if (!hit) return false;
-  }
+  for (const v of a) if (!__deepEqSetEntry(v, b, strict, seen)) return false;
   return true;
 }
 // deepEqual of the own enumerable keys (and, strictly, symbols)
