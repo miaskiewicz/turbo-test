@@ -167,22 +167,34 @@ fn default_tests(c: &Colors, kind: Kind, r: &FileResult, name: &str, out: &mut S
     }
     out.push_str(&module_line(c, r, name));
     for t in &r.tests {
-        let pad = "  ".repeat(t.ancestors.len() + 1);
-        let (title, suffix) = (&t.title, suffix(c, t));
-        let line = if t.status == "failed" {
-            c.red(&format!(" {pad}{} {title}", c.red("×"))) + &suffix
-        } else if kind == Kind::Agent {
-            continue;
-        } else if t.duration_ms > SLOW_MS {
-            format!(" {pad}{} {title} {suffix}", c.yellow(&c.dim("✓")))
-        } else if r.failed_file {
-            format!(" {pad}{} {title}{suffix}", symbol(c, t))
-        } else {
-            continue;
-        };
-        out.push_str(&line);
-        out.push('\n');
+        if let Some(line) = default_test_line(c, kind, r, t) {
+            out.push_str(&line);
+            out.push('\n');
+        }
     }
+}
+
+/// One test's reporter line, or `None` when it should be skipped in this mode.
+fn default_test_line(c: &Colors, kind: Kind, r: &FileResult, t: &TestCase) -> Option<String> {
+    let pad = "  ".repeat(t.ancestors.len() + 1);
+    let title = &t.title;
+    let suffix = suffix(c, t);
+    if t.status == "failed" {
+        return Some(c.red(&format!(" {pad}{} {title}", c.red("×"))) + &suffix);
+    }
+    if kind == Kind::Agent {
+        return None;
+    }
+    if t.duration_ms > SLOW_MS {
+        return Some(format!(
+            " {pad}{} {title} {suffix}",
+            c.yellow(&c.dim("✓"))
+        ));
+    }
+    if r.failed_file {
+        return Some(format!(" {pad}{} {title}{suffix}", symbol(c, t)));
+    }
+    None
 }
 
 /// reportTestSummary: the Snapshots, Test Files, Tests, Start at and Duration lines.
@@ -304,10 +316,7 @@ fn duration(c: &Colors, ms: f64) -> String {
 /// ` [note]` for one skipped with a note.
 fn suffix(c: &Colors, t: &TestCase) -> String {
     let mut s = String::new();
-    let ran = t.status == "passed" || t.status == "failed" || t.start_ms > 0.0;
-    if ran && !t.not_run {
-        s.push_str(&duration(c, t.duration_ms));
-    }
+    append_duration_suffix(c, t, &mut s);
     if t.retry_count > 0 {
         s.push_str(&c.yellow(&format!(" (retry x{})", t.retry_count)));
     }
@@ -318,6 +327,13 @@ fn suffix(c: &Colors, t: &TestCase) -> String {
         s.push_str(&c.dim(&c.gray(&format!(" [{}]", t.note))));
     }
     s
+}
+
+fn append_duration_suffix(c: &Colors, t: &TestCase, s: &mut String) {
+    let ran = t.status == "passed" || t.status == "failed" || t.start_ms > 0.0;
+    if ran && !t.not_run {
+        s.push_str(&duration(c, t.duration_ms));
+    }
 }
 
 /// vitest's printAnnotations (turbo-test#96): the annotations grouped by where they were made
@@ -407,25 +423,7 @@ fn module_line(c: &Colors, r: &FileResult, name: &str) -> String {
 /// than one (the summary prints a blank line there).
 fn snapshot_lines(res: &[FileResult], run: &Run) -> Vec<String> {
     let c = &run.colors;
-    let (mut added, mut unmatched, mut updated, mut unchecked, mut files_removed) = (0, 0, 0, 0, 0);
-    let mut keys = Vec::new();
-    for r in res {
-        let Some(s) = &r.snapshot else { continue };
-        added += s.added;
-        unmatched += s.unmatched;
-        updated += s.updated;
-        unchecked += s.unchecked;
-        files_removed += u32::from(s.file_deleted);
-        if !s.unchecked_keys.is_empty() {
-            let name = run.names[r.idx].to_string_lossy().replace('\\', "/");
-            keys.push(format!("{} {}", c.gray("↳"), test_file_path(c, &name)));
-            keys.extend(
-                s.unchecked_keys
-                    .iter()
-                    .map(|k| format!("  {} {k}", c.gray("·"))),
-            );
-        }
-    }
+    let (totals, keys) = snapshot_totals(res, run);
     // `N files removed ` / `N obsolete` …: removed (green) under -u, obsolete (yellow) otherwise
     let gone = |text: String| {
         if run.did_update {
@@ -434,6 +432,7 @@ fn snapshot_lines(res: &[FileResult], run: &Run) -> Vec<String> {
             c.bold(&c.yellow(&text.replace("{}", "obsolete")))
         }
     };
+    let (added, unmatched, updated, unchecked, files_removed) = totals;
     let mut items = Vec::new();
     if added > 0 {
         items.push(c.bold(&c.green(&format!("{added} written"))));
@@ -455,6 +454,36 @@ fn snapshot_lines(res: &[FileResult], run: &Run) -> Vec<String> {
         items.push(String::new());
     }
     items
+}
+
+type SnapshotTotals = (u32, u32, u32, u32, u32);
+
+/// Snapshot counters summed over `res`, plus the obsolete-keys lines keyed by file.
+fn snapshot_totals(res: &[FileResult], run: &Run) -> (SnapshotTotals, Vec<String>) {
+    let c = &run.colors;
+    let (mut added, mut unmatched, mut updated, mut unchecked, mut files_removed) = (0, 0, 0, 0, 0);
+    let mut keys = Vec::new();
+    for r in res {
+        let Some(s) = &r.snapshot else { continue };
+        added += s.added;
+        unmatched += s.unmatched;
+        updated += s.updated;
+        unchecked += s.unchecked;
+        files_removed += u32::from(s.file_deleted);
+        if !s.unchecked_keys.is_empty() {
+            let name = run.names[r.idx].to_string_lossy().replace('\\', "/");
+            keys.push(format!("{} {}", c.gray("↳"), test_file_path(c, &name)));
+            keys.extend(
+                s.unchecked_keys
+                    .iter()
+                    .map(|k| format!("  {} {k}", c.gray("·"))),
+            );
+        }
+    }
+    (
+        (added, unmatched, updated, unchecked, files_removed),
+        keys,
+    )
 }
 
 /// vitest's formatTestPath for a root-relative file: `dir/` dim, the base name bold, a
