@@ -27,12 +27,6 @@ function binaryPath() {
   return null;
 }
 
-/**
- * Run turbo-test over the given files.
- * @param {string[]} files  test file paths
- * @param {{ jobs?: number, reporter?: string, shard?: string, coverage?: boolean, coverageDir?: string, env?: object }} [opts]
- * @returns {{ status: number }}
- */
 function pushFlag(args, flag, value) {
   if (value) args.push(flag, String(value));
 }
@@ -52,6 +46,12 @@ function buildRunArgs(opts, files) {
   return args;
 }
 
+/**
+ * Run turbo-test over the given files.
+ * @param {string[]} files  test file paths
+ * @param {{ jobs?: number, reporter?: string, shard?: string, coverage?: boolean, coverageDir?: string, env?: object }} [opts]
+ * @returns {{ status: number }}
+ */
 function run(files, opts = {}) {
   const bin = binaryPath();
   if (!bin) throw new Error(`turbo-test: no binary for ${process.platform}-${process.arch}`);
