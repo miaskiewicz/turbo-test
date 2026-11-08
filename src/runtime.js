@@ -8801,7 +8801,12 @@ function __testRetry(t) {
 }
 // Reset per-test snapshot + assertion-count state (snapshot counter is keyed by test name,
 // so distinct multi-snapshot tests don't collide; assertion enforcement resets each attempt).
+// The label is also stashed on `t` so the body wrapper can re-install it when the microtask
+// that runs `fn(ctx)` actually runs — otherwise a concurrent sibling's `__beginAttempt` (the
+// `await null` inside __runAttemptInner yields between them) would leave the global holding
+// its name when this test's body throws (turbo-test#277).
 function __resetTestSnap(t, label) {
+  t.snapLabel = label;
   __snap.testName = label;
   __snap.currentTest = t;
   for (const k of Object.keys(__snap.counters)) if (k === label || k.startsWith(`${label} > `)) __snap.counters[k] = 0;
@@ -8835,6 +8840,13 @@ function __runTestBody(t, ctx, timeoutMs) {
   const fn = t.fn;
   const body = async () => {
     __loop.ticks++;
+    // Concurrent siblings share the global `__snap` and __beginAttempt's write races with
+    // __runAttemptInner's awaits; re-install this test's own snap state synchronously so
+    // `expect(...).toMatchInlineSnapshot(...)` inside fn(ctx) reads its own name
+    // (turbo-test#277). An async body that awaits inside still races and should use the
+    // context's `expect` for snapshots.
+    __snap.testName = t.snapLabel;
+    __snap.currentTest = t;
     return fn(ctx);
   };
   return __vtLimit(() => __vtSettle(() => __vtSettle(async () => await body()), arm));
