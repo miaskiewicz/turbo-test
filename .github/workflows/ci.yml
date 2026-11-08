@@ -225,20 +225,20 @@ jobs:
           { echo '### Rust functions above cc 12'; echo '```'; grep 'cyclomatic complexity' complexity.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   complexity-js:
-    name: complexity / js (cc <= 15)
+    name: complexity / js (cc <= 12)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: oxlint complexity max 15 (cli.js, index.js, src/runtime.js)
+      - name: oxlint complexity max 12 (cli.js, index.js, src/runtime.js)
         shell: bash  # -eo pipefail: tee must not mask the gate's exit code
         run: npm run -s complexity:js 2>&1 | tee complexity.txt
       - name: List the functions over the limit
         if: failure()
         run: |
-          { echo '### JS functions above cc 15'; echo '```'; grep 'complexity of' complexity.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '### JS functions above cc 12'; echo '```'; grep 'complexity of' complexity.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   # ---- The lockfile must install cleanly with npm 10 AND npm 11 (turbo-test#30) ----
   # npm 11 rejects a lock that lacks the optional @esbuild/* platform entries

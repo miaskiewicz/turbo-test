@@ -50,8 +50,8 @@ A release where these disagree is a bug. Bump both in the same commit.
 ## Complexity gates
 - CI jobs `complexity / rust (cc <= 12)` (`npm run complexity:rust`: turbo-html2pdf's `cc-check`,
   installed from its home at the pinned rev in ci.yml, over every tracked `.rs` file) and
-  `complexity / js (cc <= 15)` (`npm run complexity:js`: oxlint `complexity` over cli.js,
-  index.js, src/runtime.js). Separate per-language limits, no allow-list, no baseline.
+  `complexity / js (cc <= 12)` (`npm run complexity:js`: oxlint `complexity` over cli.js,
+  index.js, src/runtime.js). One limit, no allow-list, no baseline.
 - Both are blocking since 0.8.0 (turbo-test#240 cleared the backlog; on failure the step summary
   lists the functions over the limit). Every new or changed Rust function stays <= 12, every JS
   function <= 15: split it, never raise the limit, never add an allow-list or a lint-disable
