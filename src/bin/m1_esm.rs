@@ -96,7 +96,16 @@ fn load_graph<'s>(
         reg.path_by_hash.insert(hash, abs_path.to_path_buf());
     });
 
-    // discover + load dependencies
+    load_module_dependencies(scope, module, abs_path)?;
+    Some(module)
+}
+
+/// Recursively compile + register each of `module`'s imports.
+fn load_module_dependencies(
+    scope: &mut v8::PinScope,
+    module: v8::Local<v8::Module>,
+    abs_path: &Path,
+) -> Option<()> {
     let requests = module.get_module_requests();
     let dir = abs_path.parent().unwrap().to_path_buf();
     for i in 0..requests.length() {
@@ -106,8 +115,7 @@ fn load_graph<'s>(
         let dep = resolve_spec(&spec, &dir)?;
         load_graph(scope, &dep)?;
     }
-
-    Some(module)
+    Some(())
 }
 
 /// Host resolve callback: V8 calls this during instantiate for each import. Maps
