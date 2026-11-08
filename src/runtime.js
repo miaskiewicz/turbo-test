@@ -8809,14 +8809,17 @@ function __serializeShortcut(val, seen) {
   if (seen.has(val)) return seen.get(val);
   return __SER_NONE;
 }
-function __serializeValue(val, seen = new WeakMap()) {
-  if (!val || typeof val === 'string') return val;
+function __serializeFast(val, seen) {
   const json = __serializeErrorIfJSON(val, seen);
   if (json !== __SER_NONE) return json;
   const leaf = __serializeLeaf(val);
   if (leaf !== __SER_NONE) return leaf;
-  const sc = __serializeShortcut(val, seen);
-  if (sc !== __SER_NONE) return sc;
+  return __serializeShortcut(val, seen);
+}
+function __serializeValue(val, seen = new WeakMap()) {
+  if (!val || typeof val === 'string') return val;
+  const fast = __serializeFast(val, seen);
+  if (fast !== __SER_NONE) return fast;
   if (Array.isArray(val)) return __serializeArray(val, seen);
   return __serializeObject(val, seen);
 }
@@ -8920,6 +8923,9 @@ function __suiteTaskOf(s, chain) {
   return task;
 }
 // A test's task (`ctx.task`), created once (it outlives retries).
+function __taskTimeout(t) {
+  return typeof t.timeout === 'number' ? t.timeout : __defaultTimeout();
+}
 function __testTaskOf(t, chain) {
   if (t.task) return t.task;
   const file = __fileTaskOf();
@@ -8930,7 +8936,7 @@ function __testTaskOf(t, chain) {
     type: 'test', name: t.name, id: `${(up || file).id}_${parent.tasks.indexOf(t)}`, mode: 'run', file, suite: up,
     fullName: [file.name, ...names].join(' > '), fullTestName: names.join(' > '), meta: Object.create(null),
     each: t.each || undefined, fails: t.fails || undefined, retry: t.retry || undefined, repeats: t.repeats,
-    timeout: typeof t.timeout === 'number' ? t.timeout : __defaultTimeout(), shuffle: undefined,
+    timeout: __taskTimeout(t), shuffle: undefined,
     tags: [], annotations: [], artifacts: [], result: undefined,
   };
   return t.task;
@@ -8949,15 +8955,19 @@ function __contextOf(t, chain) {
     task.result.pending = true;
     throw new __PendingError(typeof condition === 'string' ? condition : note);
   };
-  context.annotate = (message, type, attachment) => {
-    if (task.result && task.result.state !== 'run') {
-      throw new Error(`Cannot annotate tests outside of the test run. The test "${task.name}" finished running with the "${task.result.state}" state already.`);
-    }
+  const __makeAnnotation = (message, type, attachment) => {
     const annotation = { message, type: typeof type === 'object' || type === undefined ? 'notice' : type };
     const att = typeof type === 'object' ? type : attachment;
     if (att) annotation.attachment = att;
     const site = globalThis.__ttCallSite();
     if (site) annotation.location = { file: globalThis.__ttFile, line: site[0], column: site[1] };
+    return annotation;
+  };
+  context.annotate = (message, type, attachment) => {
+    if (task.result && task.result.state !== 'run') {
+      throw new Error(`Cannot annotate tests outside of the test run. The test "${task.name}" finished running with the "${task.result.state}" state already.`);
+    }
+    const annotation = __makeAnnotation(message, type, attachment);
     task.annotations.push(annotation);
     return Promise.resolve(annotation);
   };
@@ -9117,11 +9127,13 @@ async function __vtRunHook(h, args, name) {
 }
 // callSuiteHook: a suite's hooks (afterEach / afterAll last registered first); beforeEach runs
 // the enclosing suites' first, afterEach after. `chain[i]` is the suite. A throw stops them.
+function __vtOrderedHooks(hooks, name) {
+  return name === 'ae' || name === 'aa' ? hooks.slice().reverse() : hooks;
+}
 async function __vtSuiteHook(chain, i, name, args) {
   const callbacks = [];
   if (name === 'be' && i > 0) callbacks.push(...(await __vtSuiteHook(chain, i - 1, name, args)));
-  const hooks = chain[i].hooks[name];
-  for (const h of name === 'ae' || name === 'aa' ? hooks.slice().reverse() : hooks) callbacks.push(await __vtRunHook(h, args, name));
+  for (const h of __vtOrderedHooks(chain[i].hooks[name], name)) callbacks.push(await __vtRunHook(h, args, name));
   if (name === 'ae' && i > 0) callbacks.push(...(await __vtSuiteHook(chain, i - 1, name, args)));
   return callbacks;
 }
@@ -9169,8 +9181,11 @@ function __suiteHookError(suite, summary, suiteErrors, hook, e) {
 function __skipTestWhy(t, todo, skipAll, hookFailed, filtered) {
   return todo || hookFailed || skipAll || filtered || t.skip || t.notOnly;
 }
+function __computeTodo(t, hookFailed, skipAll, filtered) {
+  return !hookFailed && (skipAll === 'todo' || (!filtered && !!t.todo));
+}
 function __skipTest(t, chain, summary, label, skipAll, hookFailed, filtered) {
-  const todo = !hookFailed && (skipAll === 'todo' || (!filtered && !!t.todo));
+  const todo = __computeTodo(t, hookFailed, skipAll, filtered);
   if (!__skipTestWhy(t, todo, skipAll, hookFailed, filtered)) return false;
   summary.skipped++;
   // a forbidden `.only` test that does not run keeps its error (vitest)
@@ -9408,10 +9423,7 @@ function __runTestSetup(t, chain) {
   return { timeoutMs, run, t0, start, logs, ctx, task, repeats };
 }
 // a test that runs: its repeats and attempts (retries), then its record; returns whether it failed
-async function __runTest(t, chain, summary, label, suiteTask) {
-  const attempts = __testRetry(t) + 1;
-  const { timeoutMs, run, t0, start, logs, ctx, task, repeats } = __runTestSetup(t, chain);
-  await null;
+async function __runTestAttempts(t, chain, ctx, timeoutMs, run, label, attempts, repeats, task) {
   let failed = false;
   for (let r = 0; r <= repeats && !task.result.pending; r++) {
     for (let a = 0; a < attempts; a++) {
@@ -9424,6 +9436,13 @@ async function __runTest(t, chain, summary, label, suiteTask) {
       if (a + 1 < attempts) failed = __retryAttempt(task, run);
     }
   }
+  return failed;
+}
+async function __runTest(t, chain, summary, label, suiteTask) {
+  const attempts = __testRetry(t) + 1;
+  const { timeoutMs, run, t0, start, logs, ctx, task, repeats } = __runTestSetup(t, chain);
+  await null;
+  const failed = await __runTestAttempts(t, chain, ctx, timeoutMs, run, label, attempts, repeats, task);
   run.ok = !failed;
   if (failed && !run.lastErr) run.lastErr = run.attemptErrors[run.attemptErrors.length - 1];
   if (!task.result.pending) await __vtAfterRunTask();
@@ -9434,28 +9453,26 @@ async function __runTest(t, chain, summary, label, suiteTask) {
   return __recordTest(t, chain, summary, label, run, timing, dur);
 }
 // one test of a suite (not a nested suite): whether it failed, or the promise of that when it runs
+function __runSuiteOnlyUnderSkip(t, chain, summary, skipAll, label) {
+  if (!(t.only && (skipAll === 'skip' || skipAll === 'todo'))) return false;
+  summary.tests.push(__testRecord(t, chain, 'pending'));
+  summary.skippedNames.push(label);
+  return true;
+}
+function __runSuiteForbiddenOnly(t, chain, summary, label) {
+  if (!t.forbiddenOnly) return false;
+  summary.failed++;
+  summary.failures.push(`${label}: ${__ONLY_FORBIDDEN}`);
+  summary.tests.push(__testRecord(t, chain, 'failed', { message: __ONLY_FORBIDDEN, failure_messages: [__onlyForbiddenError()], not_run: true }));
+  return true;
+}
 function __runSuiteTest(t, chain, summary, skipAll, hookFailed, suiteTask) {
   const label = chain.map((s) => s.name).filter(Boolean).concat(t.name).join(' > ');
-  // -t/--testNamePattern: skip tests whose full name does not match the regex (vitest: unanchored,
-  // case-sensitive, tested against `getTaskFullName` — the enclosing describe names and the
-  // test's joined with a space, turbo-test#66).
   const fullName = chain.slice(1).map((s) => s.name).concat(t.name).join(' ');
   const filtered = !skipAll && __tt.namePattern && !__tt.namePattern.test(fullName);
-  // a `.only` test inside describe.skip / describe.todo: vitest's interpretTaskModes does not
-  // descend there, so it keeps mode `only`, never runs and is reported `pending` (#77)
-  if (t.only && (skipAll === 'skip' || skipAll === 'todo')) {
-    summary.tests.push(__testRecord(t, chain, 'pending'));
-    summary.skippedNames.push(label);
-    return false;
-  }
+  if (__runSuiteOnlyUnderSkip(t, chain, summary, skipAll, label)) return false;
   if (__skipTest(t, chain, summary, label, skipAll, hookFailed, filtered)) return false;
-  // a forbidden `.only` test fails without running: no hooks, no body, no duration (#76)
-  if (t.forbiddenOnly) {
-    summary.failed++;
-    summary.failures.push(`${label}: ${__ONLY_FORBIDDEN}`);
-    summary.tests.push(__testRecord(t, chain, 'failed', { message: __ONLY_FORBIDDEN, failure_messages: [__onlyForbiddenError()], not_run: true }));
-    return true;
-  }
+  if (__runSuiteForbiddenOnly(t, chain, summary, label)) return true;
   return __runTest(t, chain, summary, label, suiteTask);
 }
 // runSuiteChild: a test through limitTestConcurrency, a suite as it is
@@ -9538,6 +9555,27 @@ function __suiteAfterAllSteps(baCleanups, st) {
 // afterAll hooks, then the functions its beforeAll hooks returned (last first: vitest's
 // `sequence.hooks: 'stack'`; a throwing beforeAll drops them all, turbo-test#101). A throwing
 // hook stops the hooks after it.
+async function __runSuiteGroups(st, suite) {
+  for (const group of __partition(suite.tasks)) {
+    if (group[0].concurrent === true) {
+      if (await __runConcurrent(group, st)) st.failed = true;
+      continue;
+    }
+    for (const t of group) {
+      if (await __vtChild(t, () => __suiteChild(t, st))) st.failed = true;
+    }
+  }
+}
+async function __runSuiteAfter(st, suite, summary, suiteErrors, baCleanups) {
+  const afterSteps = __suiteAfterAllSteps(baCleanups, st);
+  try {
+    await __vtSuiteHook([suite], 0, 'aa', []);
+    for (const step of afterSteps) await step();
+  } catch (e) {
+    __suiteHookError(suite, summary, suiteErrors, 'afterAll', e);
+    st.failed = true;
+  }
+}
 async function __runSuiteBody(st) {
   const { suite, summary, suiteErrors } = st;
   let baCleanups = [];
@@ -9548,25 +9586,8 @@ async function __runSuiteBody(st) {
     st.hookFailed = st.failed = true;
   }
   if (st.hookFailed) __idleTasks(st);
-  else {
-    for (const group of __partition(suite.tasks)) {
-      if (group[0].concurrent === true) {
-        if (await __runConcurrent(group, st)) st.failed = true;
-        continue;
-      }
-      for (const t of group) {
-        if (await __vtChild(t, () => __suiteChild(t, st))) st.failed = true;
-      }
-    }
-  }
-  const afterSteps = __suiteAfterAllSteps(baCleanups, st);
-  try {
-    await __vtSuiteHook([suite], 0, 'aa', []);
-    for (const step of afterSteps) await step();
-  } catch (e) {
-    __suiteHookError(suite, summary, suiteErrors, 'afterAll', e);
-    st.failed = true;
-  }
+  else await __runSuiteGroups(st, suite);
+  await __runSuiteAfter(st, suite, summary, suiteErrors, baCleanups);
 }
 // a suite's child as vitest's runSuiteChild runs it
 const __suiteChild = (t, st) => (t.suite ? runSuite(t, st.chain, st.summary) : __vtTest(__runSuiteTest(t, st.chain, st.summary, '', false, st.suiteTask)));
@@ -9623,15 +9644,16 @@ function __interpretInclude(t, hasSomeOnly, suiteIsOnly) {
   if (hasSomeOnly) return !!t.only || (!!t.suite && __someOnly(t));
   return suiteIsOnly || !!t.only;
 }
+function __interpretOnlyTask(t, hasSomeOnly, suiteIsOnly, forbid) {
+  const include = __interpretInclude(t, hasSomeOnly, suiteIsOnly);
+  if (forbid && t.only) t.forbiddenOnly = true;
+  if (t.suite) __interpretOnly(t, include, forbid && !t.mode);
+  else if (!include) t.notOnly = true;
+}
 function __interpretOnly(suite, parentIsOnly, forbid) {
   const suiteIsOnly = parentIsOnly || !!suite.only;
   const hasSomeOnly = __someOnly(suite);
-  for (const t of suite.tasks) {
-    const include = __interpretInclude(t, hasSomeOnly, suiteIsOnly);
-    if (forbid && t.only) t.forbiddenOnly = true;
-    if (t.suite) __interpretOnly(t, include, forbid && !t.mode);
-    else if (!include) t.notOnly = true;
-  }
+  for (const t of suite.tasks) __interpretOnlyTask(t, hasSomeOnly, suiteIsOnly, forbid);
 }
 
 globalThis.__tt = {
@@ -9808,10 +9830,11 @@ globalThis.__ttInstallWindowMembers = () => {
 // style) and the shorthands built from those, where turbo-dom resolves it as Chrome does
 // (`1.25rem` vs `20px`, `bold` vs `700`). A property nothing declares reads turbo-dom's computed
 // value. `turbo-dom` keeps Chrome's.
+const __jsdomCsEligible = (w) => w && typeof w.getComputedStyle === 'function' && !w.getComputedStyle.__ttJsdom;
 globalThis.__ttInstallJsdomComputedStyle = () => {
   if (globalThis.__ttJsdomQuirks !== true) return;
   const w = globalThis.window;
-  if (!w || typeof w.getComputedStyle !== 'function' || w.getComputedStyle.__ttJsdom) return;
+  if (!__jsdomCsEligible(w)) return;
   const real = w.getComputedStyle;
   // opt-in only (TURBO_JSDOM_QUIRKS=1): by default getComputedStyle stays Chrome's
   const jsdomEnv = () => globalThis.__ttJsdomQuirks === true && (globalThis.__ttEnvName === 'jsdom' || globalThis.__ttEnvName === 'happy-dom');
@@ -9829,16 +9852,14 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
     const c = String(rule.conditionText || head(rule).replace(/^@supports/i, '')).trim();
     return typeof CSS !== 'undefined' && CSS.supports && CSS.supports(c);
   };
+  const flattenGroup = (rule, out) => {
+    if (rule.type === 4) { if (mediaApplies(rule)) flatten(rule.cssRules, out); return; }
+    if (rule.type === 12) { if (supportsApplies(rule)) flatten(rule.cssRules, out); return; }
+    flatten(rule.cssRules, out);
+  };
   const flattenRule = (rule, out) => {
-    if (rule.type === 1 && rule.style) {
-      out.push(rule);
-    } else if (rule.type === 4 && rule.cssRules) {
-      if (mediaApplies(rule)) flatten(rule.cssRules, out);
-    } else if (rule.type === 12 && rule.cssRules) {
-      if (supportsApplies(rule)) flatten(rule.cssRules, out);
-    } else if (rule.cssRules) {
-      flatten(rule.cssRules, out);
-    }
+    if (rule.type === 1 && rule.style) { out.push(rule); return; }
+    if (rule.cssRules) flattenGroup(rule, out);
   };
   const flatten = (rules, out) => {
     for (const rule of rules) {
@@ -9866,12 +9887,14 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
       version++;
     }
   };
+  const childListNode = (n) => {
+    if (isSheetOwner(n)) { touch(n); return; }
+    if (n.nodeType !== 1 || !n.querySelectorAll) return;
+    for (const m of n.querySelectorAll('style, link')) if (isSheetOwner(m)) touch(m);
+  };
   const childList = (rec) => {
     if (isSheetOwner(rec.target)) touch(rec.target);
-    for (const n of rec.addedNodes) {
-      if (isSheetOwner(n)) touch(n);
-      else if (n.nodeType === 1 && n.querySelectorAll) for (const m of n.querySelectorAll('style, link')) if (isSheetOwner(m)) touch(m);
-    }
+    for (const n of rec.addedNodes) childListNode(n);
     if (rec.removedNodes.length) version++;
   };
   const track = (doc) => {
@@ -9904,19 +9927,31 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
     }
     return [...tree.filter((sh) => !seen.has(sh)), ...out];
   };
+  const flattenSheets = (sheets, adopted) => {
+    const rules = [];
+    for (const sh of [...sheets, ...adopted]) {
+      try { if (!sh.disabled) flatten(sh.cssRules, rules); } catch (e) {}
+    }
+    return rules;
+  };
   const rulesOf = (doc) => {
     track(doc);
     const tree = Array.from(doc.styleSheets || []);
     const adopted = Array.from(doc.adoptedStyleSheets || []);
     const key = version + ':' + tree.length + ':' + adopted.length + ':' + countRules(tree, adopted);
     if (cache.key === key && cache.doc === doc) return cache.rules;
-    const sheets = observer ? ranked(tree) : tree;
-    const rules = [];
-    for (const sh of [...sheets, ...adopted]) {
-      try { if (!sh.disabled) flatten(sh.cssRules, rules); } catch (e) {}
-    }
+    const rules = flattenSheets(observer ? ranked(tree) : tree, adopted);
     cache = { key, rules, doc };
     return rules;
+  };
+  const declaredBlock = (decl, block) => {
+    for (let i = 0; i < block.length; i++) {
+      const name = block[i];
+      // jsdom sets each declaration in turn, whatever its priority: the last one wins
+      const value = block.getPropertyValue(name);
+      if (value === 'unset') decl.delete(name);
+      else decl.set(name, { value });
+    }
   };
   const declared = (el) => {
     const blocks = [];
@@ -9926,41 +9961,35 @@ globalThis.__ttInstallJsdomComputedStyle = () => {
     }
     if (el.style) blocks.push(el.style);
     const decl = new Map();
-    for (const block of blocks) {
-      for (let i = 0; i < block.length; i++) {
-        const name = block[i];
-        // jsdom sets each declaration in turn, whatever its priority: the last one wins
-        const value = block.getPropertyValue(name);
-        if (value === 'unset') decl.delete(name);
-        else decl.set(name, { value });
-      }
-    }
+    for (const block of blocks) declaredBlock(decl, block);
     return decl;
   };
   let colorDoc;
+  const valueColorProbe = (name, dValue) => {
+    try {
+      if (!colorDoc) colorDoc = w.document.implementation.createHTMLDocument('');
+      const probe = colorDoc.createElement('span');
+      probe.style.setProperty(name, dValue);
+      colorDoc.body.appendChild(probe);
+      const c = Reflect.apply(real, w, [probe]).getPropertyValue(name);
+      probe.remove();
+      return c || undefined;
+    } catch (e) { return undefined; }
+  };
+  const valueWantsColor = (d, name) => d && /color$/.test(name) && !/var\(|currentcolor|inherit|initial|unset|revert/i.test(d.value);
   const value = (decl, name, scratch, cs) => {
     const d = decl.get(name);
-    // a color reads as rgb(), as jsdom's cssstyle spells it: turbo-dom's computed one
-    if (d && /color$/.test(name) && !/var\(|currentcolor|inherit|initial|unset|revert/i.test(d.value)) {
-      try {
-        // in a document of its own: no mutation an observer of the page could see
-        if (!colorDoc) colorDoc = w.document.implementation.createHTMLDocument('');
-        const probe = colorDoc.createElement('span');
-        probe.style.setProperty(name, d.value);
-        colorDoc.body.appendChild(probe);
-        const c = Reflect.apply(real, w, [probe]).getPropertyValue(name);
-        probe.remove();
-        if (c) return c;
-      } catch (e) {}
+    if (valueWantsColor(d, name)) {
+      const c = valueColorProbe(name, d.value);
+      if (c) return c;
     }
     if (d) return d.value;
-    // a shorthand of declared longhands: the declaration block spells it
-    const v = scratch().getPropertyValue(name);
-    return v || undefined;
+    return scratch().getPropertyValue(name) || undefined;
   };
+  const getComputedStyleSkip = (el, pseudo) => !jsdomEnv() || (pseudo !== undefined && pseudo !== null && pseudo !== '') || !el || el.nodeType !== 1;
   const getComputedStyle = function getComputedStyle(el, pseudo) {
     const cs = Reflect.apply(real, w, arguments);
-    if (!jsdomEnv() || (pseudo !== undefined && pseudo !== null && pseudo !== '') || !el || el.nodeType !== 1) return cs;
+    if (getComputedStyleSkip(el, pseudo)) return cs;
     const decl = declared(el);
     if (!decl.size) return cs;
     let block;
