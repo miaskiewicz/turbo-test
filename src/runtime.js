@@ -3584,16 +3584,18 @@ function __deepEqCollection(a, b, strict, seen) {
 }
 // `a === b` ends the comparison except for -0 vs 0 under strict, which splits on Object.is.
 function __deepEqSame(a, b, strict) { return a !== 0 || !strict || Object.is(a, b); }
+function __deepEqObjects(a, b, strict, seen, tag) {
+  if (__deepEqSeen(seen, a, b)) return true;
+  if (!__deepEqValue(a, b, strict, tag)) return false;
+  if (!__deepEqCollection(a, b, strict, seen)) return false;
+  return __deepEqKeys(a, b, strict, seen);
+}
 function __deepEq(a, b, strict, seen) {
   if (a === b) return __deepEqSame(a, b, strict);
   if (__isPrimOrNull(a) || __isPrimOrNull(b)) return __deepEqPrim(a, b, strict);
   const tag = __deepEqTag(a, b, strict);
   if (tag === null) return false;
-  seen = seen || new Map();
-  if (__deepEqSeen(seen, a, b)) return true;
-  if (!__deepEqValue(a, b, strict, tag)) return false;
-  if (!__deepEqCollection(a, b, strict, seen)) return false;
-  return __deepEqKeys(a, b, strict, seen);
+  return __deepEqObjects(a, b, strict, seen || new Map(), tag);
 }
 class __AssertionError extends Error {
   constructor(options) {
@@ -3617,10 +3619,11 @@ function __mkAssert(strict) {
     if (!args[0]) fail(args[0], true, args[1], '==', 'The expression evaluated to a falsy value:\n\n  assert.ok(' + __fmtv(args[0]) + ')\n');
   };
   const looseEq = (a, b) => a == b || (a !== a && b !== b);
+  const matchesFnErrorClass = (expected) => Error.isPrototypeOf(expected) || expected === Error;
   // error validation for throws/rejects: a class, a RegExp, a validation function or an object
   const matchesFn = (err, expected, message, operator) => {
     if (expected.prototype !== undefined && err instanceof expected) return;
-    if (Error.isPrototypeOf(expected) || expected === Error) fail(err, expected, message, operator, 'The error is expected to be an instance of "' + expected.name + '". Received "' + (err && err.constructor && err.constructor.name) + '"');
+    if (matchesFnErrorClass(expected)) fail(err, expected, message, operator, 'The error is expected to be an instance of "' + expected.name + '". Received "' + (err && err.constructor && err.constructor.name) + '"');
     const res = expected.call({}, err);
     if (res !== true) fail(err, expected, message, operator, 'The validation function is expected to return "true". Received ' + __fmtv(res));
   };
@@ -4011,9 +4014,11 @@ globalThis.__ttNs = (ns) => {
 };
 // set export `k` of a registered namespace (or its view) to `v`; false when `ns` is not one or
 // has no such export. Setting the module's own value back drops the override.
+const __ttNsRawOf = (ns) => (ns !== null && typeof ns === 'object' && __ttNsRaw.get(ns)) || ns;
+const __ttNsInfoOf = (raw) => (raw !== null && typeof raw === 'object' ? __ttNsInfo.get(__ttNsTarget(raw)) : undefined);
 globalThis.__ttNsSet = (ns, k, v) => {
-  const raw = (ns !== null && typeof ns === 'object' && __ttNsRaw.get(ns)) || ns;
-  const info = raw !== null && typeof raw === 'object' ? __ttNsInfo.get(__ttNsTarget(raw)) : undefined;
+  const raw = __ttNsRawOf(ns);
+  const info = __ttNsInfoOf(raw);
   if (info === undefined || typeof k !== 'string' || !(k in raw)) return false;
   info.over.delete(k);
   if (globalThis.__ttR(raw, k) !== v) info.over.set(k, v);
@@ -4022,11 +4027,11 @@ globalThis.__ttNsSet = (ns, k, v) => {
 // require() of an ES module from CommonJS (`isEsm` false) gives Node's require(esm) object: one
 // with a default export and no `__esModule` of its own reads an enumerable `__esModule: true`
 // (turbo-test#133).
+const __ttRequireEsmTag = (m) => m && typeof m === 'object' && m[Symbol.for('turbo-test.esm')] && 'default' in m;
 const __ttRequireEsm = (m) => {
-  if (m && typeof m === 'object' && m[Symbol.for('turbo-test.esm')] && 'default' in m) {
-    const d = Object.getOwnPropertyDescriptor(m, '__esModule');
-    if (d && d.configurable && !d.enumerable) Object.defineProperty(m, '__esModule', { value: true, enumerable: true, configurable: true });
-  }
+  if (!__ttRequireEsmTag(m)) return m;
+  const d = Object.getOwnPropertyDescriptor(m, '__esModule');
+  if (d && d.configurable && !d.enumerable) Object.defineProperty(m, '__esModule', { value: true, enumerable: true, configurable: true });
   return m;
 };
 globalThis.__mkRequire = (dir, isEsm, importer) => {
@@ -4276,10 +4281,13 @@ function __isError(v) {
   const t = Object.prototype.toString.call(v);
   return t === '[object Error]' || t === '[object Exception]' || t === '[object DOMException]' || v instanceof Error;
 }
+function __hasTypedKey(o, k, type) {
+  return k in o && typeof o[k] === type;
+}
 function __isDomNode(o) {
   // `in` first, as vitest: a mocked module's namespace throws on a read of a missing export
-  return o !== null && typeof o === 'object' && 'nodeType' in o && typeof o.nodeType === 'number' &&
-    'nodeName' in o && typeof o.nodeName === 'string' && 'isEqualNode' in o && typeof o.isEqualNode === 'function';
+  if (o === null || typeof o !== 'object') return false;
+  return __hasTypedKey(o, 'nodeType', 'number') && __hasTypedKey(o, 'nodeName', 'string') && __hasTypedKey(o, 'isEqualNode', 'function');
 }
 function __equals(a, b, testers, strictCheck) {
   return __eq(a, b, [], [], testers || [], strictCheck ? __hasKey : __hasDefinedKey);
@@ -4300,13 +4308,14 @@ function __eqAsym(a, b, asymA, testers) {
   if (asymA) return a.asymmetricMatch(b, testers);
   return b.asymmetricMatch(a, testers);
 }
+const __eqBothUrl = (a, b) => typeof URL === 'function' && a instanceof URL && b instanceof URL;
 // __eq before the structural walk: asymmetric matchers, custom testers, URLs, identity, null
 function __eqPre(a, b, testers) {
   const asymA = __isAsym(a), asymB = __isAsym(b);
   if (asymA !== asymB) return __eqAsym(a, b, asymA, testers);
   const t = __eqTesters(a, b, testers);
   if (t !== __EQ_NEXT) return t;
-  if (typeof URL === 'function' && a instanceof URL && b instanceof URL) return a.href === b.href;
+  if (__eqBothUrl(a, b)) return a.href === b.href;
   if (Object.is(a, b)) return true;
   if (a === null || b === null) return a === b;
   return __EQ_NEXT;
@@ -4316,18 +4325,17 @@ function __eqDate(a, b) {
   const x = +a, y = +b;
   return x === y || (Number.isNaN(x) && Number.isNaN(y));
 }
+const __EQ_PRIMITIVE_TAGS = new Set(['[object Boolean]', '[object String]', '[object Number]']);
+function __eqPrimitiveClass(a, b) {
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object') return Object.is(a, b);
+  return Object.is(a.valueOf(), b.valueOf());
+}
 // __eq of booleans, strings, numbers (boxed or not), dates and regexps (undefined: other classes)
 function __eqByClass(a, b, cls) {
-  switch (cls) {
-    case '[object Boolean]':
-    case '[object String]':
-    case '[object Number]':
-      if (typeof a !== typeof b) return false;
-      if (typeof a !== 'object') return Object.is(a, b);
-      return Object.is(a.valueOf(), b.valueOf());
-    case '[object Date]': return __eqDate(a, b);
-    case '[object RegExp]': return a.source === b.source && a.flags === b.flags;
-  }
+  if (__EQ_PRIMITIVE_TAGS.has(cls)) return __eqPrimitiveClass(a, b);
+  if (cls === '[object Date]') return __eqDate(a, b);
+  if (cls === '[object RegExp]') return a.source === b.source && a.flags === b.flags;
   return undefined;
 }
 // __eq's cycle check: a pair already on the stacks (undefined: not there)
@@ -4338,12 +4346,17 @@ function __eqCycle(a, b, aStack, bStack) {
   }
   return undefined;
 }
+function __eqErrorShape(a, b) {
+  return Object.prototype.toString.call(a) === Object.prototype.toString.call(b) && a.name === b.name && a.message === b.message;
+}
+function __eqErrorExtras(a, b, aStack, bStack, testers, hasKey) {
+  if (typeof b.cause !== 'undefined' && !__eq(a.cause, b.cause, aStack, bStack, testers, hasKey)) return false;
+  if (a instanceof AggregateError && b instanceof AggregateError && !__eq(a.errors, b.errors, aStack, bStack, testers, hasKey)) return false;
+  return __eq({ ...a }, { ...b }, aStack, bStack, testers, hasKey);
+}
 function __eqError(a, b, aStack, bStack, testers, hasKey) {
   try {
-    let r = Object.prototype.toString.call(a) === Object.prototype.toString.call(b) && a.name === b.name && a.message === b.message;
-    if (typeof b.cause !== 'undefined') r = r && __eq(a.cause, b.cause, aStack, bStack, testers, hasKey);
-    if (a instanceof AggregateError && b instanceof AggregateError) r = r && __eq(a.errors, b.errors, aStack, bStack, testers, hasKey);
-    return r && __eq({ ...a }, { ...b }, aStack, bStack, testers, hasKey);
+    return __eqErrorShape(a, b) && __eqErrorExtras(a, b, aStack, bStack, testers, hasKey);
   } finally {
     aStack.pop();
     bStack.pop();
@@ -4360,22 +4373,19 @@ function __eqOwnKeys(a, b, aStack, bStack, testers, hasKey) {
 }
 // __eq fast-path before the stack push: class/byClass/DOM/cycle. Returns __EQ_NEXT when the
 // caller must continue with the structural walk; any other value is the final answer.
+function __eqFastObject(a, b, aStack, bStack) {
+  if (__isDomNode(a) && __isDomNode(b)) return a.isEqualNode(b);
+  const cycle = __eqCycle(a, b, aStack, bStack);
+  return cycle !== undefined ? cycle : __EQ_NEXT;
+}
 function __eqFast(a, b, aStack, bStack, cls) {
   if (cls !== Object.prototype.toString.call(b)) return false;
   const byClass = __eqByClass(a, b, cls);
   if (byClass !== undefined) return byClass;
   if (typeof a !== 'object' || typeof b !== 'object') return false;
-  if (__isDomNode(a) && __isDomNode(b)) return a.isEqualNode(b);
-  const cycle = __eqCycle(a, b, aStack, bStack);
-  if (cycle !== undefined) return cycle;
-  return __EQ_NEXT;
+  return __eqFastObject(a, b, aStack, bStack);
 }
-function __eq(a, b, aStack, bStack, testers, hasKey) {
-  const pre = __eqPre(a, b, testers);
-  if (pre !== __EQ_NEXT) return pre;
-  const cls = Object.prototype.toString.call(a);
-  const fast = __eqFast(a, b, aStack, bStack, cls);
-  if (fast !== __EQ_NEXT) return fast;
+function __eqWalk(a, b, aStack, bStack, testers, hasKey, cls) {
   aStack.push(a);
   bStack.push(b);
   if (cls === '[object Array]' && a.length !== b.length) return false;
@@ -4384,6 +4394,14 @@ function __eq(a, b, aStack, bStack, testers, hasKey) {
   aStack.pop();
   bStack.pop();
   return true;
+}
+function __eq(a, b, aStack, bStack, testers, hasKey) {
+  const pre = __eqPre(a, b, testers);
+  if (pre !== __EQ_NEXT) return pre;
+  const cls = Object.prototype.toString.call(a);
+  const fast = __eqFast(a, b, aStack, bStack, cls);
+  if (fast !== __EQ_NEXT) return fast;
+  return __eqWalk(a, b, aStack, bStack, testers, hasKey, cls);
 }
 const __bothIterable = (a, b) => !(typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) || Array.isArray(b) ||
   a == null || b == null || !a[Symbol.iterator] || !b[Symbol.iterator]);
