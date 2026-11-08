@@ -20,29 +20,36 @@ use crate::runner::resolve_spec;
 pub fn extract_specifiers(src: &str) -> Vec<String> {
     let mut out = Vec::new();
     for kw in ["from", "import", "require"] {
-        let bytes = src.as_bytes();
-        let mut i = 0;
-        while let Some(p) = src[i..].find(kw) {
-            let at = i + p;
-            let after = at + kw.len();
-            i = after;
-            // word boundary before keyword
-            if at > 0 && bytes[at - 1].is_ascii_alphanumeric() {
-                continue;
-            }
-            let rest = &src[after..];
-            let trimmed = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '(');
-            let mut chars = trimmed.chars();
-            if let Some(q) = chars.next() {
-                if q == '\'' || q == '"' || q == '`' {
-                    if let Some(end) = trimmed[1..].find(q) {
-                        out.push(trimmed[1..1 + end].to_string());
-                    }
-                }
-            }
-        }
+        collect_kw_specifiers(src, kw, &mut out);
     }
     out
+}
+
+fn collect_kw_specifiers(src: &str, kw: &str, out: &mut Vec<String>) {
+    let bytes = src.as_bytes();
+    let mut i = 0;
+    while let Some(p) = src[i..].find(kw) {
+        let at = i + p;
+        let after = at + kw.len();
+        i = after;
+        // word boundary before keyword
+        if at > 0 && bytes[at - 1].is_ascii_alphanumeric() {
+            continue;
+        }
+        if let Some(spec) = quoted_after_kw(&src[after..]) {
+            out.push(spec);
+        }
+    }
+}
+
+fn quoted_after_kw(rest: &str) -> Option<String> {
+    let trimmed = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '(');
+    let q = trimmed.chars().next()?;
+    if q != '\'' && q != '"' && q != '`' {
+        return None;
+    }
+    let end = trimmed[1..].find(q)?;
+    Some(trimmed[1..1 + end].to_string())
 }
 
 fn is_node_modules(p: &Path) -> bool {
@@ -62,18 +69,28 @@ pub fn transitive_imports(
     let mut set = HashSet::new();
     if let Ok(src) = std::fs::read_to_string(file) {
         let dir = file.parent().unwrap_or(Path::new("."));
-        for spec in extract_specifiers(&src) {
-            if let Some(dep) = resolve_spec(&spec, dir) {
-                if set.insert(dep.clone()) && !is_node_modules(&dep) {
-                    for t in transitive_imports(&dep, memo) {
-                        set.insert(t);
-                    }
-                }
-            }
-        }
+        collect_deps_into(&src, dir, &mut set, memo);
     }
     memo.insert(file.to_path_buf(), set.clone());
     set
+}
+
+fn collect_deps_into(
+    src: &str,
+    dir: &Path,
+    set: &mut HashSet<PathBuf>,
+    memo: &mut HashMap<PathBuf, HashSet<PathBuf>>,
+) {
+    for spec in extract_specifiers(src) {
+        let Some(dep) = resolve_spec(&spec, dir) else {
+            continue;
+        };
+        if set.insert(dep.clone()) && !is_node_modules(&dep) {
+            for t in transitive_imports(&dep, memo) {
+                set.insert(t);
+            }
+        }
+    }
 }
 
 /// Given changed files, return the subset of `tests` transitively affected.

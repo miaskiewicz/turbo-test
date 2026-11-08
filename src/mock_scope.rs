@@ -50,17 +50,7 @@ pub fn bindings(path: &Path, src: &str, factories: &str) -> Vec<Binding> {
     for stmt in &parsed.program.body {
         let decl = match stmt {
             Statement::ImportDeclaration(i) => {
-                let api = matches!(i.source.value.as_str(), "vitest" | "@jest/globals");
-                for s in i.specifiers.iter().flatten() {
-                    let local = match s {
-                        ImportDeclarationSpecifier::ImportSpecifier(s) => &s.local,
-                        ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => &s.local,
-                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => &s.local,
-                    };
-                    if !api && used(local) {
-                        add(local.name.as_str(), false);
-                    }
-                }
+                import_bindings(i, &used, &mut add);
                 continue;
             }
             Statement::ExportNamedDeclaration(e) => match &e.declaration {
@@ -79,6 +69,28 @@ pub fn bindings(path: &Path, src: &str, factories: &str) -> Vec<Binding> {
         declaration_bindings(decl, &mut add);
     }
     out
+}
+
+/// Add each non-API import's local to `add` when `used` says it is value-referenced.
+fn import_bindings(
+    i: &oxc_ast::ast::ImportDeclaration,
+    used: &dyn Fn(&oxc_ast::ast::BindingIdentifier) -> bool,
+    add: &mut dyn FnMut(&str, bool),
+) {
+    let api = matches!(i.source.value.as_str(), "vitest" | "@jest/globals");
+    if api {
+        return;
+    }
+    for s in i.specifiers.iter().flatten() {
+        let local = match s {
+            ImportDeclarationSpecifier::ImportSpecifier(s) => &s.local,
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => &s.local,
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => &s.local,
+        };
+        if used(local) {
+            add(local.name.as_str(), false);
+        }
+    }
 }
 
 /// The binding an `export default` function / class declares.
