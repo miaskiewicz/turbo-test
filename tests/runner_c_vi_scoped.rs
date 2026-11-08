@@ -198,3 +198,28 @@ describe('layered scoped calls', () => {
     );
     assert_passes(&turbo_test(&p.dir, &["a.test.js"], &[]), 1);
 }
+
+#[test]
+fn scoped_on_two_chained_extends_in_one_describe_keeps_them_separate() {
+    // Pins the WeakMap-of-Map keying for `test.scoped` / `test.override`: two distinct
+    // `.extend`-returned helpers in the same describe each have their own overrides on the
+    // same suite, keyed by the `ext` function identity. A refactor that keys the inner map
+    // by something coarser (the suite alone) would conflate them.
+    let p = project_with(
+        r#"
+import { describe, expect, test as base } from 'vitest';
+const a = base.extend({ x: 'a0' });
+const b = a.extend({ y: 'b0' });
+describe('two chained extends', () => {
+  a.scoped({ x: 'a-scoped' });
+  b.scoped({ y: 'b-scoped' });
+  a('a sees its scoped', ({ x }) => expect(x).toBe('a-scoped'));
+  b('b sees both', ({ x, y }) => {
+    expect(x).toBe('a0');
+    expect(y).toBe('b-scoped');
+  });
+});
+"#,
+    );
+    assert_passes(&turbo_test(&p.dir, &["a.test.js"], &[]), 2);
+}
