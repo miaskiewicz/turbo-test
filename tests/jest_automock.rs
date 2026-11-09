@@ -138,6 +138,33 @@ fn automock_off_alias_disables() {
 }
 
 #[test]
+fn automock_state_does_not_leak_across_files() {
+    // File A enables automock and installs a custom generator; file B must start on real
+    // timers of automock: it should see the REAL module (state is per-file in jest).
+    let p = Project::new("jest-automock-cross-file-184");
+    base_jest(&p);
+    p.file("m.js", "module.exports = { f: () => 'real' };\n");
+    p.file(
+        "a.test.js",
+        "jest.enableAutomock();\n\
+         jest.onGenerateMock(() => ({ custom: 'from-a' }));\n\
+         const m = require('./m');\n\
+         test('a: custom gen', () => expect(m).toEqual({ custom: 'from-a' }));\n",
+    );
+    p.file(
+        "b.test.js",
+        "const m = require('./m');\n\
+         test('b: real, not leaked from a', () => {\n\
+             expect(m.f()).toBe('real');\n\
+             expect(jest.isMockFunction(m.f)).toBe(false);\n\
+         });\n",
+    );
+    // Force a single worker so both files share one runtime state (the leak path).
+    let r = turbo_test(&p.dir, &["--reporter", "json", "--jobs", "1"], &[]);
+    assert_eq!(counts(&r), (2, 0), "{}", r.all());
+}
+
+#[test]
 fn node_modules_modules_are_not_automocked() {
     let p = Project::new("jest-automock-nm-184");
     base_jest(&p);
