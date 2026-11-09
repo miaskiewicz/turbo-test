@@ -6,14 +6,17 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 ## [Unreleased]
 
 ### Performance
-- Default worker count capped at `min(host_logical_cpus, 12)` (was host logical cpus). The 0.8.1
-  runtime scales worse past ~12 concurrent workers on large suites: on a payroll-app full-suite
-  benchmark (2002 files, 25481 tests) an 18-core host ran **1.67×** slower at `jobs=18` than at
-  `jobs=12`, with the same total CPU time but half the effective parallelism. Single-file timings
-  are identical across jobs counts, so the loss is OS/runtime scaling at high worker counts, not
-  more work per worker. The cap is a no-op on <= 12-core hosts (common CI runners untouched);
-  workstation hosts recover ~17% vs 0.8.0's own default. Explicit `TURBO_JOBS=N` / `--jobs N`
-  overrides the cap in both directions.
+- `__runTest`'s body is no longer wrapped in `try/finally`. An earlier review-round patch added
+  one to guard a hypothetical rejection from `__vtAfterRunTask()`, but that helper is a plain
+  `async () => { await null; }` that never rejects, so the handler was dead code — and a
+  try/finally anywhere in an async function body makes V8 compile the whole function with a
+  bigger state machine (extra resume state tracked on every `await`), which multiplied across
+  tens of thousands of tests measured **1.67× wall-time** on a payroll-app full-suite
+  benchmark (2002 files, 25481 tests) at the 18-core host's default parallelism. With the
+  wrapper removed, 0.8.1 runs the same suite **~24% faster than 0.8.0** (28.03s vs 37.01s,
+  best of 3). The microtask-order probe still matches vitest. `__exitTestLogs` still runs on
+  the success path as it always did; the dead-code rejection branch simply has nothing to
+  catch.
 
 ### Changed
 - Cyclomatic-complexity gate lowered from `<= 10` to `<= 7` for both the Rust and JS sides

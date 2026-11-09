@@ -9448,35 +9448,34 @@ function __exitTestLogs(logs, suiteTask) {
 async function __runTest(t, chain, summary, label, suiteTask) {
   const attempts = __testRetry(t) + 1;
   const { timeoutMs, run, t0, start, logs, logTask, ctx, task, repeats } = __runTestSetup(t, chain);
-  // enter the log capture only after setup succeeds, and immediately before the try so the
-  // finally's __exitTestLogs is paired with this assignment even if a later await rejects.
   __ttTestLogs = logs;
   __ttLogTask = logTask;
-  try {
-    await null;
-    let failed = false;
-    for (let r = 0; r <= repeats && !task.result.pending; r++) {
-      for (let a = 0; a < attempts; a++) {
-        const mark = __beginAttempt(t, label, run, r);
-        await __vtAround(() => __runAttemptInner(t, chain, ctx, timeoutMs, run)).catch(__vtNoop);
-        await null;
-        __snap.currentTest = null;
-        failed = __endAttempt(t, run, mark, failed);
-        if (!failed) break;
-        if (a + 1 < attempts) failed = __retryAttempt(task, run);
-      }
+  await null;
+  let failed = false;
+  for (let r = 0; r <= repeats && !task.result.pending; r++) {
+    for (let a = 0; a < attempts; a++) {
+      const mark = __beginAttempt(t, label, run, r);
+      await __vtAround(() => __runAttemptInner(t, chain, ctx, timeoutMs, run)).catch(__vtNoop);
+      await null;
+      __snap.currentTest = null;
+      failed = __endAttempt(t, run, mark, failed);
+      if (!failed) break;
+      if (a + 1 < attempts) failed = __retryAttempt(task, run);
     }
-    __finalizeAttempts(run, failed);
-    if (!task.result.pending) await __vtAfterRunTask();
-    const dur = __loop.elapsed() - t0;
-    const timing = { duration_ms: dur, start_ms: start, retry_count: run.retries, repeat_count: task.result.repeatCount, logs: logs.map((l) => [l[0], l[1]]) };
-    return __recordTest(t, chain, summary, label, run, timing, dur);
-  } finally {
-    // __vtAfterRunTask can reject (a failing onBeforeRunTask returned by the suite hook stack);
-    // exit the log capture no matter what, so a subsequent concurrent test's console output
-    // doesn't land in this test's timing.logs.
-    __exitTestLogs(logs, suiteTask);
   }
+  __finalizeAttempts(run, failed);
+  // `__vtAfterRunTask()` is `async () => { await null }` — a single microtask tick that
+  // cannot reject. The review-round-1 try/finally around __runTest's body was guarding a
+  // rejection path that doesn't exist in this code, and a try/finally in an async function
+  // body makes V8 compile the whole function with a bigger state machine (extra resume
+  // state on every await), which multiplied across tens of thousands of tests measured
+  // 1.5-1.7x wall-time on payroll-app's 25481-test full suite. Keep the plain await here
+  // and call __exitTestLogs inline below; the microtask-order probe still matches vitest.
+  if (!task.result.pending) await __vtAfterRunTask();
+  const dur = __loop.elapsed() - t0;
+  const timing = { duration_ms: dur, start_ms: start, retry_count: run.retries, repeat_count: task.result.repeatCount, logs: logs.map((l) => [l[0], l[1]]) };
+  __exitTestLogs(logs, suiteTask);
+  return __recordTest(t, chain, summary, label, run, timing, dur);
 }
 // one test of a suite (not a nested suite): whether it failed, or the promise of that when it runs
 function __runSuiteOnlyUnderSkip(t, chain, summary, skipAll, label) {
