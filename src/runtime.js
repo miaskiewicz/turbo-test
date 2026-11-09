@@ -4044,15 +4044,27 @@ const __ttRequireEsm = (m) => {
 let __ttAutomockOn = false;
 // The generator (`jest.onGenerateMock(factory)`): `(exports) => mockedExports`. Default:
 // `vi.mockObject(exports)` (same deep automocker vitest's factory-less vi.mock uses).
-let __ttAutomockGenerator = (exports) => __automock(exports, 0);
+const __ttAutomockDefaultGen = (exports) => __automock(exports, 0);
+let __ttAutomockGenerator = __ttAutomockDefaultGen;
 // Specs the file has explicitly mocked or unmocked (jest.mock/doMock/unmock/setMock/vi.mock
 // /vi.unmock), by their resolved key: these skip automock interception.
 const __ttAutomockExplicit = new Set();
-function __ttAutomockKey(dir, spec) {
-  return (dir && globalThis.__ttResolveSpec(dir, String(spec))) || '\0' + String(spec);
+// Per-file (dir, spec) → resolved absolute path cache so __ttAutomockShould doesn't cross the
+// JS→Rust boundary for every require. Cleared in __ttResetForNextFile.
+const __ttAutomockResolveCache = new Map();
+function __ttAutomockResolve(dir, spec) {
+  const k = dir + '\0' + spec;
+  let v = __ttAutomockResolveCache.get(k);
+  if (v === undefined) {
+    v = globalThis.__ttRequireResolve(dir, spec, true) || '';
+    __ttAutomockResolveCache.set(k, v);
+  }
+  return v;
 }
 function __ttAutomockMark(dir, spec) {
-  __ttAutomockExplicit.add(__ttAutomockKey(dir, spec));
+  const s = String(spec);
+  const key = (dir && __ttAutomockResolve(dir, s)) || '\0' + s;
+  __ttAutomockExplicit.add(key);
 }
 globalThis.__ttAutomockMark = __ttAutomockMark;
 // A specifier that automock may touch: relative ('./x', '../x') or absolute ('/x') only —
@@ -4068,25 +4080,26 @@ function __ttAutomockShould(dir, spec) {
   if (!__ttAutomockOn) return false;
   const s = String(spec);
   if (!__ttAutomockLocalSpec(s)) return false;
-  const resolved = (dir && globalThis.__ttRequireResolve(dir, s, true)) || '';
+  const resolved = dir ? __ttAutomockResolve(dir, s) : '';
   if (!resolved || resolved.includes('/node_modules/')) return false;
   return !__ttAutomockExplicit.has(resolved);
 }
-function __ttAutomockApply(exports) {
-  try { return __ttAutomockGenerator(exports); } catch (e) { return exports; }
+// Do NOT swallow onGenerateMock errors: jest surfaces them to the test (a broken generator
+// must fail loudly, not silently return the real module and hide the bug).
+function __ttAutomockApply(exports) { return __ttAutomockGenerator(exports); }
+function __ttAutomockResetForNextFile() {
+  __ttAutomockOn = false;
+  __ttAutomockGenerator = __ttAutomockDefaultGen;
+  __ttAutomockExplicit.clear();
+  __ttAutomockResolveCache.clear();
 }
 globalThis.__mkRequire = (dir, isEsm, importer) => {
-  const req = isEsm === false
-    ? (spec) => {
-        __ttJestLazyRun && __ttJestLazyRun(dir, spec);
-        const real = __ttRequireEsm(globalThis.__nativeRequire(dir, spec, false, importer));
-        return __ttAutomockShould(dir, spec) ? __ttAutomockApply(real) : real;
-      }
-    : (spec) => {
-        __ttJestLazyRun && __ttJestLazyRun(dir, spec);
-        const real = globalThis.__nativeRequire(dir, spec, isEsm, importer);
-        return __ttAutomockShould(dir, spec) ? __ttAutomockApply(real) : real;
-      };
+  const req = (spec) => {
+    __ttJestLazyRun && __ttJestLazyRun(dir, spec);
+    const raw = globalThis.__nativeRequire(dir, spec, isEsm, importer);
+    const real = isEsm === false ? __ttRequireEsm(raw) : raw;
+    return __ttAutomockShould(dir, spec) ? __ttAutomockApply(real) : real;
+  };
   // as Node: the resolved path (a builtin stays its name); MODULE_NOT_FOUND when nothing resolves
   req.resolve = (spec) => {
     const r = globalThis.__ttRequireResolve(dir, String(spec), isEsm === undefined ? true : !!isEsm);
@@ -9912,6 +9925,8 @@ globalThis.__ttResetForNextFile = () => {
   // jest.setTimeout / jest.retryTimes are per-file overrides (turbo-test#273)
   globalThis.__TT_JEST_TIMEOUT = undefined;
   globalThis.__TT_JEST_RETRY = undefined;
+  // jest automock state is per-file (turbo-test#184): clear it so the next file starts fresh.
+  __ttAutomockResetForNextFile();
   // each file starts on real timers (vitest's fresh environment per file): fake timers a file
   // left on would otherwise hold every timer of the next one (turbo-test#168)
   if (__loop.fake) __uninstallFake();
