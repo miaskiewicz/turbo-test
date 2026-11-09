@@ -6298,7 +6298,7 @@ fn native_require(
     let dir = args.get(0).to_rust_string_lossy(scope);
     let spec = args.get(1).to_rust_string_lossy(scope);
     let esm = native_require_esm_flag(scope, &args);
-    if require_builtin(scope, &mut rv, &spec) {
+    if require_pre_resolve(scope, &mut rv, &dir, &spec) {
         return;
     }
     let Some(abs) = resolve_spec_as(&spec, Path::new(&dir), esm) else {
@@ -6391,6 +6391,34 @@ fn set_cjs_exports(scope: &mut v8::PinScope, rv: &mut v8::ReturnValue, key: &Pat
         .with(|r| r.borrow().cjs_exports.get(key).cloned())
         .map(|g| rv.set(v8::Local::new(scope, &g)))
         .is_some()
+}
+
+/// `native_require` pre-resolution fast paths: node builtins / the test API / lazy stubs, and
+/// `jest.mock(spec, factory, { virtual: true })` mocks (keyed by the raw spec + importer dir,
+/// never resolved). Returns true when one of them served the require.
+fn require_pre_resolve(
+    scope: &mut v8::PinScope,
+    rv: &mut v8::ReturnValue,
+    dir: &str,
+    spec: &str,
+) -> bool {
+    require_builtin(scope, rv, spec) || require_virtual(scope, rv, dir, spec)
+}
+
+/// `native_require` of a `jest.mock(spec, factory, { virtual: true })` mock: served keyed by the
+/// raw spec + importer dir, skipping module resolution (true if served).
+fn require_virtual(
+    scope: &mut v8::PinScope,
+    rv: &mut v8::ReturnValue,
+    dir: &str,
+    spec: &str,
+) -> bool {
+    let key = virtual_mock_key(dir, spec);
+    if !REGISTRY.with(|r| r.borrow().cjs_exports.contains_key(&key)) {
+        return false;
+    }
+    set_cjs_exports(scope, rv, &key);
+    true
 }
 
 /// `native_require` of a node builtin, the test API or a lazy-stubbed barrel (true if served).
@@ -6687,6 +6715,28 @@ fn native_register_mock(
     if let Some(key) = mock_key(&spec, Path::new(&dir)) {
         register_mock_value(scope, &key, exports);
     }
+}
+
+/// `jest.mock(spec, factory, { virtual: true })`: register the factory's exports keyed by the
+/// raw spec (plus the caller's dir), skipping module resolution. `require(spec)` in the test
+/// looks the mock up here before resolving, so the spec never needs to point at a real file.
+fn virtual_mock_key(dir: &str, spec: &str) -> PathBuf {
+    PathBuf::from(format!("<virtual:{dir}\0{spec}>"))
+}
+
+fn native_register_virtual_mock(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let dir = args.get(0).to_rust_string_lossy(scope);
+    let spec = args.get(1).to_rust_string_lossy(scope);
+    let exports = args.get(2);
+    if exports.is_undefined() {
+        return;
+    }
+    let key = virtual_mock_key(&dir, &spec);
+    register_mock_value(scope, &key, exports);
 }
 
 /// Whether `dir` lies in a package the config's `server.deps.inline` names (TURBO_DEPS_INLINE,
@@ -8739,6 +8789,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__ttCallSite", native_call_site);
     bind_fn(scope, global, "__nativeRequire", native_require);
     bind_fn(scope, global, "__ttRegisterMock", native_register_mock);
+    bind_fn(scope, global, "__ttRegisterVirtualMock", native_register_virtual_mock);
     bind_fn(scope, global, "__ttImportActual", native_import_actual);
     bind_fn(scope, global, "__ttResetModules", native_reset_modules);
     bind_fn(scope, global, "__ttUnmock", native_unmock);
