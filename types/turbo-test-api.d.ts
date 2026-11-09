@@ -493,6 +493,11 @@ export interface JestAPI extends Omit<ViAPI, JestTimerKeys> {
   unstable_unmockModule(path: string): JestAPI;
   getSeed(): number;
   isEnvironmentTornDown(): boolean;
+  // jest 30's runtime-mock + its alias for unmock. Runtime has both; this shim previously
+  // inherited `mock`/`unmock` via `extends Omit<ViAPI, …>` but left the jest-only pair out.
+  doMock(path: string, factory: (importOriginal: ImportOriginal) => any): void;
+  doMock(path: string, factory?: (...args: any[]) => any): void;
+  dontMock(path: string): void;
   isolateModules(fn: () => void): void;
   isolateModulesAsync(fn: () => Promise<void>): Promise<void>;
   setTimeout(ms: number): JestAPI;
