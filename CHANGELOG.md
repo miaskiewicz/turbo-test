@@ -19,6 +19,32 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   Why: ts-jest / NestJS codebases rely on `automock` to stub collaborators across a test
   file without touching each one. Deferred for a follow-up: `automockModuleIgnorePatterns`
   / `automockWithModulePathIgnorePatterns`, `__mocks__` folder auto-detection.
+- `jest.mock(spec, factory, { virtual: true })` and `jest.doMock(spec, factory, { virtual:
+  true })` (#308). A virtual mock is keyed by the raw spec + caller's dir, so `require('x')`
+  returns the factory's exports without ever resolving `'x'` through the module resolver —
+  useful for stubbing a side-effect-only specifier or a runtime-only addon that doesn't
+  correspond to a real file. Jest-only; `vi.mock` keeps its existing semantics. Shim
+  `JestAPI.mock` / `JestAPI.doMock` gain the third-argument options overload.
+- `jest.doMock` / `jest.dontMock` declared on the `JestAPI` type shim. The runtime
+  already had both (`dontMock` is jest 30's alias for `unmock`); the type shim inherited
+  `mock` / `unmock` via `extends Omit<ViAPI, …>` but left the jest-only pair out, so a
+  consumer path-mapping `@jest/globals` to turbo-test's shim saw `TS2339` on them.
+
+### Fixed
+- Coverage floor restored from 99.8 back to 99.9 (#306). The v0.8.1 cc-7 refactor
+  (#294) extracted 78 Rust helpers and turned each inlined `v8::String::new(...)` /
+  JSON-shape / REGISTRY-lookup OOM guard into its own `let Some(x) = … else { return; };`
+  block, pushing 27 provably-unreachable lines into their own uncovered `return;` branches
+  and forcing the 0.8.1 floor down to 99.8. v0.8.2 collapses these: a `v8_str!` macro (one
+  call site = one line against the outer happy path, panics on the never-reached OOM) covers
+  four V8 string-alloc sites in `runner.rs`; `copy_variant_named_exports` drops the
+  dead `is_none` early return on `set_synthetic_module_export`; `coverage_script_ranges` /
+  `collect_function_ranges`'s JSON-shape and `parse_range` guards, `register_mock_cjs_override`'s
+  redundant `is_object` check, and `collect_brace_named_imports`' nested `rfind` guards flatten
+  into `if let` forms; `real_esm_eligible` becomes a single Option method chain; the chai-load
+  failure branch collapses to `.unwrap_or_else(|| chai_missing(...))`. Net: 14804/14817
+  (99.91%) vs 0.8.1's 14803/14830 (99.82%). cc ≤ 7 still green on both sides, runtime
+  behaviour unchanged.
 
 ## [0.8.1] — 2026-11-09 — v0.8.0 bugfixes, cc ≤ 7, turbo-dom 0.8.1 repin
 
