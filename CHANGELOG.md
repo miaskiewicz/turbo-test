@@ -5,6 +5,16 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Performance
+- Default worker count capped at `min(host_logical_cpus, 12)` (was host logical cpus). The 0.8.1
+  runtime scales worse past ~12 concurrent workers on large suites: on a payroll-app full-suite
+  benchmark (2002 files, 25481 tests) an 18-core host ran **1.67×** slower at `jobs=18` than at
+  `jobs=12`, with the same total CPU time but half the effective parallelism. Single-file timings
+  are identical across jobs counts, so the loss is OS/runtime scaling at high worker counts, not
+  more work per worker. The cap is a no-op on <= 12-core hosts (common CI runners untouched);
+  workstation hosts recover ~17% vs 0.8.0's own default. Explicit `TURBO_JOBS=N` / `--jobs N`
+  overrides the cap in both directions.
+
 ### Changed
 - Cyclomatic-complexity gate lowered from `<= 10` to `<= 7` for both the Rust and JS sides
   (#263). The 0.8.0 round of refactors cleared the backlog at `<= 10`; the 0.8.1 round

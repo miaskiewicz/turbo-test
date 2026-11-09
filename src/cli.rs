@@ -152,16 +152,19 @@ pub struct Options {
     pub warnings: Vec<String>,
 }
 
-/// Default worker count = `TURBO_JOBS` when it parses, else host logical cores. (Reducing this
-/// to leave headroom for V8's GC helper threads looked like a big win on a warm 40-file
-/// microbench but REGRESSED the full suite badly: +75% on a 431-file run — with the whole cold
-/// suite in flight, all cores stay productively busy and the GC helpers are mostly idle, so fewer
-/// workers just leaves cores empty. Lesson: measure parallelism changes on the FULL suite, never a
-/// subset.) An explicit `--jobs` flag still wins (see [`parse_args`]).
+/// Default worker count = `TURBO_JOBS` when it parses, else host logical cores capped at 12.
+/// (A past attempt to cap for GC-helper headroom regressed the full suite +75% on a 431-file
+/// warm run — with the whole cold suite in flight, all cores stay productively busy. The 12-cap
+/// here is a DIFFERENT motivation: on a real payroll-app full-suite benchmark [2002 files, 25481
+/// tests] the 18-core host runs 1.67× slower at jobs=18 than at jobs=12, and ui-design-components
+/// [460 files] is 26% faster at jobs=12 too. Single-file timings are identical across jobs, so
+/// the loss at high parallelism is OS/runtime scaling, not more work per worker. Cap small enough
+/// to cover common workstation core counts without hurting <= 12-core boxes.) An explicit
+/// `--jobs` flag still wins (see [`parse_args`]).
 pub fn default_jobs(turbo_jobs: Option<&str>) -> usize {
     turbo_jobs.and_then(|v| v.parse().ok()).unwrap_or_else(|| {
         std::thread::available_parallelism()
-            .map(|n| n.get())
+            .map(|n| n.get().min(12))
             .unwrap_or(4)
     })
 }

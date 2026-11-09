@@ -427,9 +427,13 @@ fn default_jobs_prefers_turbo_jobs() {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
+    // Default is `min(cores, 12)` — a workstation-class host (18+ cores) caps at 12;
+    // CI-size hosts (<= 12 cores) are unchanged. Explicit TURBO_JOBS always wins.
+    let capped = cores.min(12);
     assert_eq!(default_jobs(Some("3")), 3);
-    assert_eq!(default_jobs(Some("lots")), cores);
-    assert_eq!(default_jobs(None), cores);
+    assert_eq!(default_jobs(Some("24")), 24, "explicit TURBO_JOBS wins over the cap");
+    assert_eq!(default_jobs(Some("lots")), capped);
+    assert_eq!(default_jobs(None), capped);
 }
 
 #[test]
