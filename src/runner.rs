@@ -1781,12 +1781,23 @@ fn runtime_config_for(start: &Path, env: Option<&str>) -> Option<String> {
 /// switch as for a vitest config.
 fn jest_runtime_config_literal(s: &str, env: Option<&str>) -> Option<String> {
     let base = runtime_config_literal_with("", env);
-    let Some(ft) = config_object_literal(s, "fakeTimers") else {
+    let ft = config_object_literal(s, "fakeTimers");
+    // turbo-test#184: jest config `automock: true` enables automock from file-load, mirroring
+    // jest's bootstrap behavior. The runtime's __ttApplyConfig reads `jestAutomock`.
+    let am = config_is_true(s, "automock");
+    if ft.is_none() && !am {
         return base;
-    };
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(ft) = ft {
+        parts.push(format!("jestFakeTimers: {ft}"));
+    }
+    if am {
+        parts.push("jestAutomock: true".to_string());
+    }
     Some(match base {
-        Some(b) => format!("{{ jestFakeTimers: {ft}, {}", &b[2..]),
-        None => format!("{{ jestFakeTimers: {ft} }}"),
+        Some(b) => format!("{{ {}, {}", parts.join(", "), &b[2..]),
+        None => format!("{{ {} }}", parts.join(", ")),
     })
 }
 

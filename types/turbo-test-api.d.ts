@@ -508,4 +508,11 @@ export interface JestAPI extends Omit<ViAPI, JestTimerKeys> {
   retryTimes(n: number): JestAPI;
   replaceProperty(obj: any, key: string, value: any): { restore: () => void };
   now(): number;
+  // jest automock (turbo-test#184): a local `require('./x')` whose spec is not explicitly
+  // mocked / unmocked returns a generated mock. node_modules modules are not automocked.
+  enableAutomock(): JestAPI;
+  disableAutomock(): JestAPI;
+  autoMockOn(): JestAPI;
+  autoMockOff(): JestAPI;
+  onGenerateMock(factory: (exports: any) => any): JestAPI;
 }
