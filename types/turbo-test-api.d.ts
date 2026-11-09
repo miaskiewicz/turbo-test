@@ -107,6 +107,11 @@ export interface TestAPI {
   fails: TestAPI;
   each: TestEachFunction;
   for: TestForFunction;
+  // Conditional variants (vitest 4.1.12): `test.runIf(cond)(name, fn)` runs when `cond` is
+  // truthy else skips; `test.skipIf(cond)(name, fn)` is its inverse. The runtime implements
+  // both (src/runtime.js `it.skipIf` / `it.runIf`).
+  runIf(condition: unknown): TestAPI;
+  skipIf(condition: unknown): TestAPI;
 }
 
 export interface SuiteAPI {
@@ -118,6 +123,11 @@ export interface SuiteAPI {
   sequential: SuiteAPI;
   each: TestEachFunction;
   for: SuiteForFunction;
+  // Conditional variants (vitest 4.1.12): `describe.runIf(cond)(name, fn)` runs the describe
+  // when `cond` is truthy else skips it; `describe.skipIf(cond)` is its inverse. The runtime
+  // implements both (src/runtime.js `describe.skipIf` / `describe.runIf`).
+  runIf(condition: unknown): SuiteAPI;
+  skipIf(condition: unknown): SuiteAPI;
 }
 
 // vitest's hooks pass a context (`beforeEach((ctx, suite) => …)`) and accept any return — a
