@@ -1159,9 +1159,11 @@ if (typeof globalThis.URL === 'undefined') {
     // pass (the brackets' contents are not a domain); a pure-printable-ASCII name without an
     // `xn--`-anchored label is lower-cased directly (ToASCII is a no-op on it, and the native
     // call isn't free); otherwise ToASCII runs through `__ttIdnaToAscii`, with a fallback to
-    // the lower-cased name if the native is missing or rejects the input — the host parse
-    // rejects forbidden code points, but the fast-path only trusts printable ASCII so a
-    // control byte that slips through still crosses the native UTS#46 boundary.
+    // the lower-cased name if the native is missing or rejects the input — the upstream
+    // `_parseHost` step (NOT the thin `_rejectHostName` helper, which only checks port /
+    // empty-special-host) rejects forbidden code points, and the fast-path only trusts
+    // printable ASCII so a control byte that ever slipped through still crosses the native
+    // UTS#46 boundary.
     static _idnAscii(name) {
       const lower = name.toLowerCase();
       if (lower.startsWith('[')) return lower;
@@ -9407,9 +9409,11 @@ function __runTestSetup(t, chain) {
   // vi.setSystemTime replace it).
   const t0 = __loop.elapsed();
   const start = __loop.realNow();
-  // its console output (concurrent tests: what is logged while it is the last started)
-  const logs = (__ttTestLogs = []);
-  __ttLogTask = chain.slice(1).map((s) => s.name).concat(t.name).join(' > ');
+  // the array that will capture this test's console output (concurrent tests: what is logged
+  // while it is the last started). NOT installed as __ttTestLogs here — __runTest does that
+  // immediately before its try block so the finally's __exitTestLogs is paired with it.
+  const logs = [];
+  const logTask = chain.slice(1).map((s) => s.name).concat(t.name).join(' > ');
   // its context (turbo-test#96): `task.result` while it runs, as vitest's
   const ctx = __contextOf(t, chain);
   const task = t.task;
@@ -9425,7 +9429,7 @@ function __runTestSetup(t, chain) {
   };
   // `{ repeats: n }` (turbo-test#257): 1 + n repeats, each retried up to `retry` times
   const repeats = t.repeats > 0 ? t.repeats : 0;
-  return { timeoutMs, run, t0, start, logs, ctx, task, repeats };
+  return { timeoutMs, run, t0, start, logs, logTask, ctx, task, repeats };
 }
 // post-loop bookkeeping on run (sync; keeps __runTest's microtask shape identical to vitest's)
 function __finalizeAttempts(run, failed) {
@@ -9443,7 +9447,11 @@ function __exitTestLogs(logs, suiteTask) {
 // (turbo-test#251 probes).
 async function __runTest(t, chain, summary, label, suiteTask) {
   const attempts = __testRetry(t) + 1;
-  const { timeoutMs, run, t0, start, logs, ctx, task, repeats } = __runTestSetup(t, chain);
+  const { timeoutMs, run, t0, start, logs, logTask, ctx, task, repeats } = __runTestSetup(t, chain);
+  // enter the log capture only after setup succeeds, and immediately before the try so the
+  // finally's __exitTestLogs is paired with this assignment even if a later await rejects.
+  __ttTestLogs = logs;
+  __ttLogTask = logTask;
   try {
     await null;
     let failed = false;
