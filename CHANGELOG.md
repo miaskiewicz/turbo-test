@@ -5,6 +5,8 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-11-09 — v0.8.0 bugfixes, cc ≤ 7, turbo-dom 0.8.1 repin
+
 ### Performance
 - `__runTest`'s body is no longer wrapped in `try/finally`. An earlier review-round patch added
   one to guard a hypothetical rejection from `__vtAfterRunTask()`, but that helper is a plain
