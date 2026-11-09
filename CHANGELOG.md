@@ -5,6 +5,8 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-11-09 — jest compat: automock + virtual mocks, shim gaps
+
 ### Added
 - Jest automock compatibility (#184): `jest.enableAutomock()`, `jest.disableAutomock()`,
   jest 30's shorter aliases `jest.autoMockOn()` / `jest.autoMockOff()`, and
