@@ -1,7 +1,7 @@
 # turbo-test
 
 **A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
-(and, experimentally, jest).** Release **0.8.0**.
+(and, experimentally, jest).** Release **0.8.2**.
 
 turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
 work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
@@ -24,13 +24,13 @@ Since 0.6.0 the browser engine lives in one place,
 | `turbo-dom-layout` | HTML/CSS layout | turbo-html2pdf, turbo-surf |
 | `turbo-dom-raster` | synthetic screenshots | turbo-surf |
 
-turbo-test links `turbo-dom-browser-env` 0.6.0 and `turbo-dom-v8 ~150.4` (under the local alias
+turbo-test links `turbo-dom-browser-env` 0.8.2 and `turbo-dom-v8 ~150.4` (under the local alias
 `v8`; `scripts/check-single-v8.sh` keeps exactly one V8 in the graph). This repository carries no
 copy of the binding or of V8: the binding, its probes and the Chrome-control collectors that
 record their oracles live in turbo-dom's
 [`crates/turbo-dom-browser-env`](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
 — fix DOM behaviour and recollect controls there. turbo-dom-v8 150.4.0 and
-turbo-dom / -layout / -browser-env 0.8.0 come from crates.io.
+turbo-dom / -layout / -browser-env 0.8.2 come from crates.io.
 
 ## Install and run
 
@@ -475,12 +475,12 @@ npm run complexity:js        # CI job `complexity / js (cc <= 7)`
 - **Release** (`v*` tag): `release-guard` (no `[patch]`, no git sources, versions equal the tag),
   then the npm and crates.io publish jobs ([RELEASING.md](RELEASING.md)).
 
-## Status (0.8.0)
+## Status (0.8.2)
 
 - vitest suites: drop-in; the `vi` / mock / `expect` surface is vitest 4.1.12's
   ([vitest.compat.md](vitest.compat.md) lists what is covered and what is approximated).
 - jest suites: experimental (see above).
-- DOM: turbo-dom-browser-env 0.8.0, Chrome 156-controlled in turbo-dom.
+- DOM: turbo-dom-browser-env 0.8.2, Chrome 156-controlled in turbo-dom.
 - Open work is tracked as GitHub issues in this repository and in turbo-dom.
 
 ## License
