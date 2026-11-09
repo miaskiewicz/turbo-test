@@ -2607,7 +2607,10 @@ fn run_prepass_wrapper(scope: &mut v8::PinScope, entry: &Path, dir: &Path, raw: 
 /// fresh vi.hoisted cache for this file; the prepass fills it (the entry
 /// reuses it by index so `const x = vi.hoisted(...)` is one shared object).
 fn prepass_reset_hoisted(tc: &mut v8::PinScope) {
-    let code = v8_str!(tc, "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;");
+    let code = v8_str!(
+        tc,
+        "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;"
+    );
     if let Some(s) = v8::Script::compile(tc, code, None) {
         s.run(tc);
     }
