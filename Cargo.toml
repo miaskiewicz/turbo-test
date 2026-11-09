@@ -37,7 +37,7 @@ path = "src/bin/m5_affected.rs"
 v8 = { package = "turbo-dom-v8", version = "~150.4" }
 # The browser environment (window, document, CSSOM, forms, events) the runner
 # installs into each test context.
-turbo-dom-browser-env = "0.8.1"
+turbo-dom-browser-env = "0.8.2"
 oxc_allocator = "0.134"
 oxc_parser = "0.134"
 oxc_span = "0.134"
@@ -69,6 +69,12 @@ idna = "1"
 # `cargo tarpaulin` builds with `--cfg tarpaulin` (napi_host's coverage flush before an abort).
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tarpaulin)"] }
+
+[patch.crates-io]
+# Validate v0.8.2 against the unreleased turbo-dom-browser-env 0.8.2
+# (release/0.8.2 tip). release-guard will refuse to tag while this git
+# override is here — remove it once turbo-dom 0.8.2 publishes to crates.io.
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom.git", rev = "88d6f4330d9f4e11fc3961bca0019a20f2ec218a" }
 
 [profile.release]
 opt-level = 3
