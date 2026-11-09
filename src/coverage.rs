@@ -306,25 +306,29 @@ fn simple_match(pat: &[u8], path: &[u8]) -> bool {
 }
 
 /// A path as a vite/vitest module id: `/` separators. Only Windows rewrites `\\` (on POSIX a
-/// backslash is a legal file-name character).
+/// backslash is a legal file-name character). `#[cfg(...)]` (compile-time) rather than
+/// `cfg!(...)` (runtime) so the opposite-platform branch isn't compiled — tarpaulin only
+/// sees lines for the host platform's branch, matching how the function actually behaves.
+#[cfg(windows)]
 pub fn slash_path(p: &Path) -> String {
+    // vite's normalizePath: `C:/x/y` (a verbatim `\\?\` prefix is dropped)
     let s = p.to_string_lossy();
-    if cfg!(windows) {
-        // vite's normalizePath: `C:/x/y` (a verbatim `\\?\` prefix is dropped)
-        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-        s.replace('\\', "/")
-    } else {
-        s.into_owned()
-    }
+    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    s.replace('\\', "/")
+}
+#[cfg(not(windows))]
+pub fn slash_path(p: &Path) -> String {
+    p.to_string_lossy().into_owned()
 }
 
 /// The file-system form of a `/`-separated id path (Windows verbatim `\\?\` paths reject `/`).
+#[cfg(windows)]
 pub fn native_path(s: &str) -> PathBuf {
-    if cfg!(windows) {
-        PathBuf::from(s.replace('/', "\\"))
-    } else {
-        PathBuf::from(s)
-    }
+    PathBuf::from(s.replace('/', "\\"))
+}
+#[cfg(not(windows))]
+pub fn native_path(s: &str) -> PathBuf {
+    PathBuf::from(s)
 }
 
 /// Whether a file passes the configured include/exclude globs. Matched against the file's
