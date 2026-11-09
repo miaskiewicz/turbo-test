@@ -4,8 +4,16 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+  # Only PRs that target main run CI; stacked PRs into a release/integration
+  # branch do not (their PR into main runs the full gate).
   pull_request:
-    branches: [main, codex/browser-parity-followup]
+    branches: [main]
+
+# A newer push to the same PR cancels its superseded run; push and tag runs
+# each get their own group (github.ref), so they are never cancelled.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
