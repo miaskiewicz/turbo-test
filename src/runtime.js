@@ -448,8 +448,9 @@ globalThis.__ttCaptureConfigBaseline = () => {
 };
 globalThis.__ttApplyConfig = (cfg) => {
   if (!cfg || typeof cfg !== 'object') return;
-  const { fakeTimers, zeroDelayTimers, jestFakeTimers, ...rest } = cfg;
+  const { fakeTimers, zeroDelayTimers, jestFakeTimers, jestAutomock, ...rest } = cfg;
   __jestApplyConfig(jestFakeTimers);
+  if (jestAutomock === true) __ttAutomockOn = true;
   if (typeof zeroDelayTimers === 'boolean') __ttZeroDelay = zeroDelayTimers;
   if (fakeTimers && typeof fakeTimers === 'object') __ttConfig.fakeTimers = Object.assign(__ttConfigDefaults().fakeTimers, fakeTimers);
   Object.assign(__ttConfig, rest);
@@ -4037,10 +4038,55 @@ const __ttRequireEsm = (m) => {
   if (d && d.configurable && !d.enumerable) Object.defineProperty(m, '__esModule', { value: true, enumerable: true, configurable: true });
   return m;
 };
+// jest automock (turbo-test#184): when enabled, a `require('./x')` of a local module whose
+// spec was not explicitly mocked or unmocked returns a generated mock of the real exports.
+// State is file-scoped (reset in __ttResetForNextFile, like __TT_JEST_TIMEOUT), per jest.
+let __ttAutomockOn = false;
+// The generator (`jest.onGenerateMock(factory)`): `(exports) => mockedExports`. Default:
+// `vi.mockObject(exports)` (same deep automocker vitest's factory-less vi.mock uses).
+let __ttAutomockGenerator = (exports) => __automock(exports, 0);
+// Specs the file has explicitly mocked or unmocked (jest.mock/doMock/unmock/setMock/vi.mock
+// /vi.unmock), by their resolved key: these skip automock interception.
+const __ttAutomockExplicit = new Set();
+function __ttAutomockKey(dir, spec) {
+  return (dir && globalThis.__ttResolveSpec(dir, String(spec))) || '\0' + String(spec);
+}
+function __ttAutomockMark(dir, spec) {
+  __ttAutomockExplicit.add(__ttAutomockKey(dir, spec));
+}
+globalThis.__ttAutomockMark = __ttAutomockMark;
+// A specifier that automock may touch: relative ('./x', '../x') or absolute ('/x') only —
+// never a bare package ('react') or node: builtin. Bare specifiers always fall through.
+function __ttAutomockLocalSpec(s) {
+  const first = s.charCodeAt(0);
+  return (first === 46 /* . */ || first === 47 /* / */) && !s.startsWith('node:');
+}
+// Whether a `require(spec)` from `dir` should be auto-mocked: automock is on, the spec is
+// local, the resolved module is not under node_modules, and it has not been explicitly
+// mocked / unmocked.
+function __ttAutomockShould(dir, spec) {
+  if (!__ttAutomockOn) return false;
+  const s = String(spec);
+  if (!__ttAutomockLocalSpec(s)) return false;
+  const resolved = (dir && globalThis.__ttRequireResolve(dir, s, true)) || '';
+  if (!resolved || resolved.includes('/node_modules/')) return false;
+  return !__ttAutomockExplicit.has(resolved);
+}
+function __ttAutomockApply(exports) {
+  try { return __ttAutomockGenerator(exports); } catch (e) { return exports; }
+}
 globalThis.__mkRequire = (dir, isEsm, importer) => {
   const req = isEsm === false
-    ? (spec) => { __ttJestLazyRun && __ttJestLazyRun(dir, spec); return __ttRequireEsm(globalThis.__nativeRequire(dir, spec, false, importer)); }
-    : (spec) => { __ttJestLazyRun && __ttJestLazyRun(dir, spec); return globalThis.__nativeRequire(dir, spec, isEsm, importer); };
+    ? (spec) => {
+        __ttJestLazyRun && __ttJestLazyRun(dir, spec);
+        const real = __ttRequireEsm(globalThis.__nativeRequire(dir, spec, false, importer));
+        return __ttAutomockShould(dir, spec) ? __ttAutomockApply(real) : real;
+      }
+    : (spec) => {
+        __ttJestLazyRun && __ttJestLazyRun(dir, spec);
+        const real = globalThis.__nativeRequire(dir, spec, isEsm, importer);
+        return __ttAutomockShould(dir, spec) ? __ttAutomockApply(real) : real;
+      };
   // as Node: the resolved path (a builtin stays its name); MODULE_NOT_FOUND when nothing resolves
   req.resolve = (spec) => {
     const r = globalThis.__ttRequireResolve(dir, String(spec), isEsm === undefined ? true : !!isEsm);
@@ -6180,6 +6226,10 @@ function __ttMock(spec, factory, vitest, isDoMock) {
   // none) the entry file's dir, so a runtime vi.doMock registers immediately and a later import()
   // of the module sees it.
   const dir = globalThis.__ttDir || globalThis.__ttEntryDir;
+  // jest automock (turbo-test#184): record this spec as explicitly handled so the automock
+  // bypass does NOT re-mock it on require. Resolution may fail (non-existent spec from a
+  // prepass): we still fall through to normal mock logic.
+  __ttAutomockMark(dir, spec);
   if (!globalThis.__ttMockPrepass && __ttMockPrepassed(spec, vitest, key, dir)) return;
   // jest 30: `jest.mock(spec, factory)` defers the factory to the module's first require
   // (turbo-test#275). `vi.mock` keeps its eager hoist-time semantics.
@@ -6403,6 +6453,8 @@ function __viUnmock(spec) {
   __viUnmockClear(spec);
   const dir = globalThis.__ttDir || globalThis.__cwd;
   if (globalThis.__ttUnmock && dir) { try { globalThis.__ttUnmock(dir, String(spec)); } catch (e) {} }
+  // jest automock (turbo-test#184): a `jest.unmock(spec)` opts the module out of automock.
+  if (globalThis.__ttAutomockMark) globalThis.__ttAutomockMark(dir, spec);
 }
 function __viSpyLookup(obj, key, accessor) {
   __spyCheckTarget(obj);
@@ -6733,6 +6785,18 @@ globalThis.jest = {
   unstable_mockModule: (spec, factory) => { __ttMock(spec, factory, false, true); return globalThis.jest; },
   unstable_unmockModule: (spec) => { globalThis.vi.unmock(spec); return globalThis.jest; },
   createMockFromModule: (spec) => __automock(globalThis.jest.requireActual(spec)),
+  // jest automock (turbo-test#184): when enabled, `require('./x')` of a local module that
+  // has not been explicitly mocked / unmocked returns a generated mock of its real exports.
+  // Jest 30 adds the shorter aliases `autoMockOn` / `autoMockOff`. `onGenerateMock(factory)`
+  // replaces the default generator (`vi.mockObject(exports)`).
+  enableAutomock: () => { __ttAutomockOn = true; return globalThis.jest; },
+  disableAutomock: () => { __ttAutomockOn = false; return globalThis.jest; },
+  autoMockOn: () => { __ttAutomockOn = true; return globalThis.jest; },
+  autoMockOff: () => { __ttAutomockOn = false; return globalThis.jest; },
+  onGenerateMock: (factory) => {
+    if (typeof factory === 'function') __ttAutomockGenerator = (exports) => factory(exports);
+    return globalThis.jest;
+  },
   // the run's seed (jest: a 32-bit integer, one per run) and whether the file's environment is gone
   getSeed: () => __jestSeed,
   isEnvironmentTornDown: () => false,

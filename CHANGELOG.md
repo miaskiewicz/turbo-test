@@ -5,6 +5,19 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Added
+- Jest automock compatibility (#184): `jest.enableAutomock()`, `jest.disableAutomock()`,
+  jest 30's shorter aliases `jest.autoMockOn()` / `jest.autoMockOff()`, and
+  `jest.onGenerateMock(factory)` to customize the generated mock. Jest config
+  `automock: true` enables it at file-load. When on, a `require('./x')` of a local module
+  whose spec has not been explicitly mocked or unmocked returns a generated mock of the
+  real exports (functions become `jest.fn()`, nested objects are deep-mocked, primitives
+  kept); `jest.unmock(path)` opts a specific path out. Modules under `node_modules` are
+  never automocked — automock applies to local (`./` / `../` / absolute) specifiers only.
+  Why: ts-jest / NestJS codebases rely on `automock` to stub collaborators across a test
+  file without touching each one. Deferred for a follow-up: `automockModuleIgnorePatterns`
+  / `automockWithModulePathIgnorePatterns`, `__mocks__` folder auto-detection.
+
 ## [0.8.1] — 2026-11-09 — v0.8.0 bugfixes, cc ≤ 7, turbo-dom 0.8.1 repin
 
 ### Performance

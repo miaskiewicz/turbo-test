@@ -12,15 +12,10 @@ use common::{turbo_test, Project};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-/// `jest` members jest 30.5.2 has and turbo-test does not, each tracked by its issue: the
-/// automock switches (turbo-test#184).
-const JEST_KNOWN_MISSING: [&str; 5] = [
-    "autoMockOff:function",
-    "autoMockOn:function",
-    "disableAutomock:function",
-    "enableAutomock:function",
-    "onGenerateMock:function",
-];
+/// `jest` members jest 30.5.2 has and turbo-test does not, each tracked by its issue. The
+/// automock switches (`enableAutomock`, `disableAutomock`, `autoMockOn`, `autoMockOff`,
+/// `onGenerateMock`) landed in turbo-test#184.
+const JEST_KNOWN_MISSING: [&str; 0] = [];
 
 fn set(v: &Value) -> BTreeSet<String> {
     v.as_array()
