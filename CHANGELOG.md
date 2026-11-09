@@ -3,6 +3,72 @@
 All notable changes to `@miaskiewicz/turbo-test`. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [Unreleased]
+
+## [0.8.1] — 2026-11-09 — v0.8.0 bugfixes, cc ≤ 7, turbo-dom 0.8.1 repin
+
+### Performance
+- `__runTest`'s body is no longer wrapped in `try/finally`. An earlier review-round patch added
+  one to guard a hypothetical rejection from `__vtAfterRunTask()`, but that helper is a plain
+  `async () => { await null; }` that never rejects, so the handler was dead code — and a
+  try/finally anywhere in an async function body makes V8 compile the whole function with a
+  bigger state machine (extra resume state tracked on every `await`), which multiplied across
+  tens of thousands of tests measured **1.67× wall-time** on a payroll-app full-suite
+  benchmark (2002 files, 25481 tests) at the 18-core host's default parallelism. With the
+  wrapper removed, 0.8.1 runs the same suite **~24% faster than 0.8.0** (28.03s vs 37.01s,
+  best of 3). The microtask-order probe still matches vitest. `__exitTestLogs` still runs on
+  the success path as it always did; the dead-code rejection branch simply has nothing to
+  catch.
+
+### Changed
+- Cyclomatic-complexity gate lowered from `<= 10` to `<= 7` for both the Rust and JS sides
+  (#263). The 0.8.0 round of refactors cleared the backlog at `<= 10`; the 0.8.1 round
+  (#294, #295) brings every function in `src/`, `tests/`, `cli.js`, `index.js` and
+  `src/runtime.js` to `<= 7` with no allow-list and no behaviour change (full `cargo test
+  --locked` and the 99.9 coverage floor stay green, no re-baselining). CI job names, the
+  `complexity:rust` / `complexity:js` scripts, `.oxlintrc.complexity.json`, CLAUDE.md,
+  README.md and RELEASING.md are updated; both jobs stay blocking.
+
+### Added
+- `test.scoped({...})` and `test.override({...})` on a `base.extend({...})` test — vitest 4's
+  per-describe fixture overrides (#276). Called inside a `describe` block, they merge the
+  overrides over the closest enclosing override (or the base extend) and attach them to that
+  suite; the fixture resolver walks from the test's suite outward and picks the nearest match.
+  Keys not present in the base extend pass straight through to the context, override values may
+  themselves be fixture functions (`async ({}, use) => use(value)`), and a `scoped` call outside
+  any `describe` scopes to the file's root suite (mirrors real vitest 4.1.12). `scoped` is
+  vitest's deprecated alias for `override`; both set the same overrides. Before, calling
+  `test.scoped` threw `TypeError: test.scoped is not a function`.
+
+### Fixed
+- Concurrent tests with mismatching inline snapshots each carry their own test label in the
+  error message (#277). `__beginAttempt` wrote the current test name to a shared global, and
+  the `await null` inside `__runAttemptInner` let a concurrent sibling overwrite it before this
+  test's body threw — so both errors printed the second-scheduled test's name. The label is
+  now stashed on the test task and re-installed synchronously before each body runs.
+- A special URL's host is now UTS#46 ToASCII, as Node/vitest's WHATWG URL serializes it (#259).
+  Before, the runtime's `URL` polyfill only ASCII-lowercased the hostname, so
+  `new URL('http://ü.com').host` was `ü.com` (vitest: `xn--tda.com`) and a validator built on
+  `new URL()` saw a different host for the same URL under the two runners. The host parser now
+  runs a special, non-file, non-IPv6 name through a native `__ttIdnaToAscii` binding (Rust
+  `idna::domain_to_ascii`, the UTS#46 non-transitional ToASCII the WHATWG URL spec's
+  domain-to-ASCII step calls for). Pure-ASCII names without an `xn--` label keep the lowercase
+  fast path (no native round-trip). IPv6 bracketed hosts, trailing dots, empty labels and
+  already-`xn--`-encoded labels are unchanged. Not a 0.8.0 regression — the same bug ships in
+  0.7.1.
+- `jest.mock(spec, factory)` now defers the factory to the module's first `require`, matching
+  jest 30.5.2 (#275). Before, the factory ran at hoist time — the factory in
+  ```js
+  const order = []
+  jest.mock('./m', () => { order.push('factory'); return 'x' })
+  order.push('top')
+  require('./m')
+  ```
+  pushed `'factory'` before `'top'`; now `order` is `['top', 'factory']` as jest produces.
+  The hoist of the `jest.mock` call itself is unchanged; only the factory's invocation moves
+  to the first `require` of the module. `vi.mock` keeps vitest's eager hoist-time semantics;
+  `jest.doMock` (runtime) and factory-less `jest.mock(spec)` automocks also keep eager.
+
 ## [0.8.0] — 2026-11-05 — complexity gates blocking, jest whenCalledWith / fakeTimers config, turbo-dom 0.8
 
 ### Changed

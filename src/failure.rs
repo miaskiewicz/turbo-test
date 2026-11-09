@@ -84,31 +84,40 @@ pub fn parse_stack(stack: &str) -> Vec<Frame> {
     frames[after_helper..]
         .iter()
         .map(|f| without_eval(f))
-        .filter_map(|rest| {
-            let rest = rest.as_str();
-            let (method, loc) = match rest.strip_suffix(')').and_then(|r| r.rsplit_once(" (")) {
-                Some((m, loc)) => (m, loc),
-                // an anonymous frame: `at <location>`, or `at async <location>` when it is
-                // suspended at an await (turbo-test#169)
-                None => ("", rest.strip_prefix("async ").unwrap_or(rest)),
-            };
-            let loc = loc.strip_prefix("file://").unwrap_or(loc);
-            let (file_line, col) = loc.rsplit_once(':')?;
-            let (file, line) = file_line.rsplit_once(':')?;
-            if !file.starts_with('/') || ignored(file) {
-                return None;
-            }
-            Some(Frame {
-                method: {
-                    let m = method.strip_prefix("async ").unwrap_or(method);
-                    m.strip_prefix("Object.").unwrap_or(m).to_string()
-                },
-                file: PathBuf::from(file),
-                line: line.parse().ok()?,
-                col: col.parse().ok()?,
-            })
-        })
+        .filter_map(|rest| parse_frame(rest.as_str()))
         .collect()
+}
+
+/// Parse one stack line into a `Frame`, or return `None` for an anonymous / runtime frame.
+fn parse_frame(rest: &str) -> Option<Frame> {
+    let (method, loc) = method_and_location(rest);
+    let loc = loc.strip_prefix("file://").unwrap_or(loc);
+    let (file_line, col) = loc.rsplit_once(':')?;
+    let (file, line) = file_line.rsplit_once(':')?;
+    if !file.starts_with('/') || ignored(file) {
+        return None;
+    }
+    Some(Frame {
+        method: clean_method(method),
+        file: PathBuf::from(file),
+        line: line.parse().ok()?,
+        col: col.parse().ok()?,
+    })
+}
+
+/// Split `rest` into the frame's method name and its location token.
+fn method_and_location(rest: &str) -> (&str, &str) {
+    match rest.strip_suffix(')').and_then(|r| r.rsplit_once(" (")) {
+        Some((m, loc)) => (m, loc),
+        // an anonymous frame: `at <location>`, or `at async <location>` when it is
+        // suspended at an await (turbo-test#169)
+        None => ("", rest.strip_prefix("async ").unwrap_or(rest)),
+    }
+}
+
+fn clean_method(method: &str) -> String {
+    let m = method.strip_prefix("async ").unwrap_or(method);
+    m.strip_prefix("Object.").unwrap_or(m).to_string()
 }
 
 /// A frame in `eval` / `new Function` code, `fn (eval at <caller> (<origin>), <anonymous>:L:C)`,

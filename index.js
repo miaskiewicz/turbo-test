@@ -27,6 +27,25 @@ function binaryPath() {
   return null;
 }
 
+function pushFlag(args, flag, value) {
+  if (value) args.push(flag, String(value));
+}
+
+function pushCoverage(args, opts) {
+  if (opts.coverageDir) args.push('--coverage-dir', String(opts.coverageDir));
+  else if (opts.coverage) args.push('--coverage');
+}
+
+function buildRunArgs(opts, files) {
+  const args = [];
+  pushFlag(args, '--jobs', opts.jobs);
+  pushFlag(args, '--reporter', opts.reporter);
+  pushFlag(args, '--shard', opts.shard);
+  pushCoverage(args, opts);
+  args.push(...files);
+  return args;
+}
+
 /**
  * Run turbo-test over the given files.
  * @param {string[]} files  test file paths
@@ -36,13 +55,7 @@ function binaryPath() {
 function run(files, opts = {}) {
   const bin = binaryPath();
   if (!bin) throw new Error(`turbo-test: no binary for ${process.platform}-${process.arch}`);
-  const args = [];
-  if (opts.jobs) args.push('--jobs', String(opts.jobs));
-  if (opts.reporter) args.push('--reporter', String(opts.reporter));
-  if (opts.shard) args.push('--shard', String(opts.shard));
-  if (opts.coverageDir) args.push('--coverage-dir', String(opts.coverageDir));
-  else if (opts.coverage) args.push('--coverage');
-  args.push(...files);
+  const args = buildRunArgs(opts, files);
   const res = spawnSync(bin, args, { stdio: 'inherit', env: { ...process.env, ...(opts.env || {}) } });
   return { status: res.status == null ? 1 : res.status };
 }

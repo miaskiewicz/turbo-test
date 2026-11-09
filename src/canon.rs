@@ -26,13 +26,21 @@ pub fn strip_verbatim(p: PathBuf) -> PathBuf {
         return PathBuf::from(format!(r"\\{rest}"));
     }
     if let Some(rest) = s.strip_prefix(r"\\?\") {
-        let b = rest.as_bytes();
-        let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
-        if drive && (b.len() == 2 || b[2] == b'\\') {
-            return PathBuf::from(rest);
+        if let Some(out) = strip_verbatim_drive(rest) {
+            return out;
         }
     }
     p
+}
+
+/// `rest` (after `\\?\`) as a plain drive path if it opens with `X:` followed by end or `\`.
+fn strip_verbatim_drive(rest: &str) -> Option<PathBuf> {
+    let b = rest.as_bytes();
+    let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
+    if drive && (b.len() == 2 || b[2] == b'\\') {
+        return Some(PathBuf::from(rest));
+    }
+    None
 }
 
 #[cfg(test)]

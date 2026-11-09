@@ -389,39 +389,65 @@ impl<'a> EmitState<'a, '_> {
             _ => None,
         }
     }
+
+    /// Rewrite an imported-local identifier to its `import_x.name` access, returning whether a
+    /// rewrite happened (so `visit_expression` can skip the normal walk).
+    fn rewrite_ident_ref(&mut self, expr: &mut Expression<'a>) -> bool {
+        let Expression::Identifier(id) = expr else {
+            return false;
+        };
+        let Some(access) = self.access_for_ref(id).cloned() else {
+            return false;
+        };
+        *expr = self.build_member(&access, id.span);
+        true
+    }
+
+    /// Rewrite a bundler-resolved `require("./rel")` into the bundled init/require chain.
+    fn rewrite_bundled_require(&mut self, expr: &mut Expression<'a>) -> bool {
+        let (Some(resolve), Expression::CallExpression(call)) = (self.resolve, &*expr) else {
+            return false;
+        };
+        let Some(spec) = Self::require_spec(call) else {
+            return false;
+        };
+        match resolve(&spec) {
+            SourceRef::BundledEsm { id } => {
+                *expr = self.build_init_exports(&id);
+                true
+            }
+            SourceRef::BundledCjs { id } => {
+                *expr = self.build_require_id(&id);
+                true
+            }
+            SourceRef::External => false,
+        }
+    }
+
+    /// `import.meta` → runtime.js `__ttImportMeta(<module path>)` (a CJS script cannot hold
+    /// `import.meta`: V8's "Cannot use 'import.meta' outside a module", turbo-test#123).
+    fn rewrite_import_meta(&mut self, expr: &mut Expression<'a>) -> bool {
+        let Expression::MetaProperty(m) = &*expr else {
+            return false;
+        };
+        if m.meta.name != "import" || m.property.name != "meta" {
+            return false;
+        }
+        *expr = self.build_import_meta(m.span);
+        true
+    }
 }
 
 impl<'a> VisitMut<'a> for EmitState<'a, '_> {
     fn visit_expression(&mut self, expr: &mut Expression<'a>) {
-        if let Expression::Identifier(id) = expr {
-            if let Some(access) = self.access_for_ref(id).cloned() {
-                *expr = self.build_member(&access, id.span);
-                return;
-            }
+        if self.rewrite_ident_ref(expr) {
+            return;
         }
-        // bundler mode: rewrite `require("./rel")` for a bundled module to its init/require chain.
-        if let (Some(resolve), Expression::CallExpression(call)) = (self.resolve, &*expr) {
-            if let Some(spec) = Self::require_spec(call) {
-                match resolve(&spec) {
-                    SourceRef::BundledEsm { id } => {
-                        *expr = self.build_init_exports(&id);
-                        return;
-                    }
-                    SourceRef::BundledCjs { id } => {
-                        *expr = self.build_require_id(&id);
-                        return;
-                    }
-                    SourceRef::External => {}
-                }
-            }
+        if self.rewrite_bundled_require(expr) {
+            return;
         }
-        // `import.meta` → runtime.js `__ttImportMeta(<module path>)` (a CJS script cannot hold
-        // `import.meta`: V8's "Cannot use 'import.meta' outside a module", turbo-test#123)
-        if let Expression::MetaProperty(m) = &*expr {
-            if m.meta.name == "import" && m.property.name == "meta" {
-                *expr = self.build_import_meta(m.span);
-                return;
-            }
+        if self.rewrite_import_meta(expr) {
+            return;
         }
         if matches!(expr, Expression::ImportExpression(_)) {
             // take the node out, rewrite its (recursively-visited) source into a require chain.
@@ -480,40 +506,18 @@ pub fn emit_mapped(path: &Path, src: &str, legacy_decorators: bool) -> Option<St
 /// `emit_with` with the coverage decision injected: `with_map = true` appends the inline source map.
 fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -> Option<String> {
     let alloc = Allocator::default();
-    let stype = SourceType::from_path(path).ok()?;
-    let parsed = Parser::new(&alloc, src, stype).parse();
-    if !parsed.errors.is_empty() {
-        return None;
-    }
-    let mut program = parsed.program;
+    let mut program = parse_source_file(&alloc, path, src)?;
 
     // TS/JSX strip IN PLACE (original spans preserved → the codegen map points at the .ts source).
-    if crate::transform::needs_transform(path) {
-        let scoping0 = crate::transform::semantic_scoping(&program);
-        let mut opts = TransformOptions::default();
-        if legacy_decorators {
-            // Mirror `transform::transform_decorators_with_metadata` so output is identical to the
-            // tsc/esbuild metadata path: legacy decorators, metadata, no strict-null elision (so
-            // `x?: T` / `T | null` emit `T`, not `Object` — matches tsc/ts-jest, which Mongoose
-            // `@Prop`/Sequelize `@Column` rely on), helpers as global `babelHelpers.*`.
-            opts.decorator.legacy = true;
-            opts.decorator.emit_decorator_metadata = true;
-            opts.decorator.strict_null_checks = false;
-            opts.helper_loader.mode = HelperLoaderMode::External;
-        }
-        let ret = Transformer::new(&alloc, path, &opts).build_with_scoping(scoping0, &mut program);
-        if !ret.errors.is_empty() {
-            return None;
-        }
+    if crate::transform::needs_transform(path)
+        && !strip_ts_jsx_in_place(&alloc, path, &mut program, legacy_decorators)
+    {
+        return None;
     }
 
     // Rebuild semantic on the now-plain-JS AST for the ESM→CJS reference rewriting (no TS enums
     // remain, so no `with_enum_eval` here or in `transform_to_parts`).
-    let sem = SemanticBuilder::new().build(&program);
-    if !sem.errors.is_empty() {
-        return None;
-    }
-    let scoping = sem.semantic.into_scoping();
+    let scoping = build_plain_js_scoping(&program)?;
     let ast = AstBuilder::new(&alloc);
 
     let ctx = LowerCtx {
@@ -524,6 +528,52 @@ fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -
     let map_src = if with_map { Some((path, src)) } else { None };
     let (parts, mappings) = lower(ast, scoping, &ctx, &mut program, map_src)?;
     Some(assemble_output(path, parts, mappings.as_ref()))
+}
+
+/// Parse `src` as a module whose source type comes from `path`; `None` on parse error.
+fn parse_source_file<'a>(
+    alloc: &'a Allocator,
+    path: &Path,
+    src: &'a str,
+) -> Option<oxc_ast::ast::Program<'a>> {
+    let stype = SourceType::from_path(path).ok()?;
+    let parsed = Parser::new(alloc, src, stype).parse();
+    if !parsed.errors.is_empty() {
+        return None;
+    }
+    Some(parsed.program)
+}
+
+/// Build semantic/scoping for a plain-JS program (no TS enums remain), returning `None` on errors.
+fn build_plain_js_scoping(program: &Program) -> Option<Scoping> {
+    let sem = SemanticBuilder::new().build(program);
+    if !sem.errors.is_empty() {
+        return None;
+    }
+    Some(sem.semantic.into_scoping())
+}
+
+/// TS/JSX strip (and optional legacy-decorator lowering) IN PLACE. Returns `false` on error.
+fn strip_ts_jsx_in_place<'a>(
+    alloc: &'a Allocator,
+    path: &Path,
+    program: &mut oxc_ast::ast::Program<'a>,
+    legacy_decorators: bool,
+) -> bool {
+    let scoping0 = crate::transform::semantic_scoping(program);
+    let mut opts = TransformOptions::default();
+    if legacy_decorators {
+        // Mirror `transform::transform_decorators_with_metadata` so output is identical to the
+        // tsc/esbuild metadata path: legacy decorators, metadata, no strict-null elision (so
+        // `x?: T` / `T | null` emit `T`, not `Object` — matches tsc/ts-jest, which Mongoose
+        // `@Prop`/Sequelize `@Column` rely on), helpers as global `babelHelpers.*`.
+        opts.decorator.legacy = true;
+        opts.decorator.emit_decorator_metadata = true;
+        opts.decorator.strict_null_checks = false;
+        opts.helper_loader.mode = HelperLoaderMode::External;
+    }
+    let ret = Transformer::new(alloc, path, &opts).build_with_scoping(scoping0, program);
+    ret.errors.is_empty()
 }
 
 /// Assemble the final output source for `emit_inner`, appending the inline source map when one was
@@ -565,11 +615,7 @@ pub(crate) fn transform_to_parts(js: &str, ctx: &LowerCtx) -> Option<ModuleParts
         return None;
     }
     let mut program = parsed.program;
-    let sem = SemanticBuilder::new().build(&program);
-    if !sem.errors.is_empty() {
-        return None;
-    }
-    let scoping = sem.semantic.into_scoping();
+    let scoping = build_plain_js_scoping(&program)?;
     let ast = AstBuilder::new(&alloc);
     let (parts, _) = lower(ast, scoping, ctx, &mut program, None)?;
     Some(parts)
@@ -585,7 +631,6 @@ fn lower<'a>(
     program: &mut Program<'a>,
     map_src: Option<(&Path, &'a str)>,
 ) -> Option<(ModuleParts, Option<String>)> {
-    let stype = SourceType::mjs();
     let lexical_helpers = lexical_helpers(&scoping);
     let p = plan(&ast, &scoping, ctx, program)?;
     let (requires, re_exports, exports) = (p.requires, p.re_exports, p.exports);
@@ -603,23 +648,7 @@ fn lower<'a>(
         state.visit_statement(stmt);
     }
 
-    // codegen resolves sourcemap spans against `program.source_text` (NOT with_source_text), so the
-    // synthetic program must carry the ORIGINAL source text for the map to point at the .ts lines.
-    let prog_src = map_src.map(|(_, s)| s).unwrap_or("");
-    let body = ast.vec_from_iter(body);
-    let prog2 = ast.program(SPAN, stype, prog_src, ast.vec(), None, ast.vec(), body);
-    let (mut body_code, mappings) = match map_src {
-        Some((path, _)) => {
-            let ret = Codegen::new()
-                .with_options(CodegenOptions {
-                    source_map_path: Some(path.to_path_buf()),
-                    ..Default::default()
-                })
-                .build(&prog2);
-            (ret.code, ret.map.map(|m| m.to_json().mappings))
-        }
-        None => (Codegen::new().build(&prog2).code, None),
-    };
+    let (mut body_code, mappings) = codegen_body(ast, body, map_src);
     if p.default_needs_rewrite {
         // same-line replacement → does not shift line numbers, map stays valid.
         body_code = body_code.replacen("export default ", "var __tt_default = ", 1);
@@ -642,6 +671,32 @@ fn lower<'a>(
         },
         mappings,
     ))
+}
+
+/// Codegen the lowered body, with an inline source map when `map_src` is provided.
+fn codegen_body<'a>(
+    ast: AstBuilder<'a>,
+    body: Vec<Statement<'a>>,
+    map_src: Option<(&Path, &'a str)>,
+) -> (String, Option<String>) {
+    // codegen resolves sourcemap spans against `program.source_text` (NOT with_source_text), so the
+    // synthetic program must carry the ORIGINAL source text for the map to point at the .ts lines.
+    let prog_src = map_src.map(|(_, s)| s).unwrap_or("");
+    let stype = SourceType::mjs();
+    let body = ast.vec_from_iter(body);
+    let prog2 = ast.program(SPAN, stype, prog_src, ast.vec(), None, ast.vec(), body);
+    match map_src {
+        Some((path, _)) => {
+            let ret = Codegen::new()
+                .with_options(CodegenOptions {
+                    source_map_path: Some(path.to_path_buf()),
+                    ..Default::default()
+                })
+                .build(&prog2);
+            (ret.code, ret.map.map(|m| m.to_json().mappings))
+        }
+        None => (Codegen::new().build(&prog2).code, None),
+    }
 }
 
 /// Append an inline source map (`//# sourceMappingURL=data:…base64`) whose generated lines align
@@ -739,31 +794,7 @@ fn plan<'a>(
             }
             Statement::ExportAllDeclaration(decl) => {
                 seq += 1;
-                let src = decl.source.value.as_str();
-                match &decl.exported {
-                    // `export * as ns from "s"` → named export of the namespace object.
-                    Some(name) => {
-                        let (prelude, expr) = module_namespace_expr(ctx, src, seq, true);
-                        let var = import_var(src, seq);
-                        requires.extend(prelude);
-                        requires.push(format!("var {var} = {expr};"));
-                        exports.push(ExportEntry {
-                            name: module_export_name(name),
-                            value_js: var,
-                        });
-                    }
-                    // `export * from "s"` → live merge into this module's exports object AND its
-                    // module.exports. The 3rd arg is REQUIRED: `module.exports = __toCommonJS(obj)`
-                    // (emitted earlier) snapshots `obj`'s getters into a NEW object, so re-exported
-                    // names added to `obj` afterward must ALSO be copied onto module.exports. Inside
-                    // a bundled module's `__commonJS` closure, `module.exports` is the closure param.
-                    None => {
-                        let (prelude, expr) = module_namespace_expr(ctx, src, seq, false);
-                        re_exports.extend(prelude);
-                        let obj = &ctx.exports_obj;
-                        re_exports.push(format!("__reExport({obj}, {expr}, module.exports);"));
-                    }
-                }
+                collect_export_all(ctx, seq, decl, &mut requires, &mut re_exports, &mut exports);
             }
             other => body_stmts.push(other),
         }
@@ -788,6 +819,43 @@ fn plan<'a>(
         body_stmts,
         default_needs_rewrite,
     })
+}
+
+/// Handle one `export * [as ns] from "src"` declaration: appends the right lines to `requires` /
+/// `re_exports` / `exports`.
+fn collect_export_all(
+    ctx: &LowerCtx,
+    seq: usize,
+    decl: ABox<'_, oxc_ast::ast::ExportAllDeclaration>,
+    requires: &mut Vec<String>,
+    re_exports: &mut Vec<String>,
+    exports: &mut Vec<ExportEntry>,
+) {
+    let src = decl.source.value.as_str();
+    match &decl.exported {
+        // `export * as ns from "s"` → named export of the namespace object.
+        Some(name) => {
+            let (prelude, expr) = module_namespace_expr(ctx, src, seq, true);
+            let var = import_var(src, seq);
+            requires.extend(prelude);
+            requires.push(format!("var {var} = {expr};"));
+            exports.push(ExportEntry {
+                name: module_export_name(name),
+                value_js: var,
+            });
+        }
+        // `export * from "s"` → live merge into this module's exports object AND its
+        // module.exports. The 3rd arg is REQUIRED: `module.exports = __toCommonJS(obj)`
+        // (emitted earlier) snapshots `obj`'s getters into a NEW object, so re-exported
+        // names added to `obj` afterward must ALSO be copied onto module.exports. Inside
+        // a bundled module's `__commonJS` closure, `module.exports` is the closure param.
+        None => {
+            let (prelude, expr) = module_namespace_expr(ctx, src, seq, false);
+            re_exports.extend(prelude);
+            let obj = &ctx.exports_obj;
+            re_exports.push(format!("__reExport({obj}, {expr}, module.exports);"));
+        }
+    }
 }
 
 /// An expression evaluating to a module's namespace object, plus any prelude lines needed first.
@@ -889,39 +957,7 @@ fn collect_import(
     match &sref {
         // bundled ESM: refs go to `<id>_exports.<name>`; ensure init; bind a namespace local to it.
         SourceRef::BundledEsm { id } => {
-            let exports_obj = format!("{id}_exports");
-            if let Some(local) = &ns_local {
-                requires.push(format!("var {local} = (init_{id}(), {exports_obj});"));
-            } else {
-                requires.push(format!("init_{id}();"));
-            }
-            for spec in specifiers {
-                match spec {
-                    ImportDeclarationSpecifier::ImportDefaultSpecifier(d) => {
-                        if let Some(sym) = d.local.symbol_id.get() {
-                            imports.insert(
-                                sym,
-                                Access {
-                                    var: exports_obj.clone(),
-                                    prop: "default".into(),
-                                },
-                            );
-                        }
-                    }
-                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
-                    ImportDeclarationSpecifier::ImportSpecifier(s) => {
-                        if let Some(sym) = s.local.symbol_id.get() {
-                            imports.insert(
-                                sym,
-                                Access {
-                                    var: exports_obj.clone(),
-                                    prop: module_export_name(&s.imported),
-                                },
-                            );
-                        }
-                    }
-                }
-            }
+            collect_import_bundled_esm(id, &ns_local, specifiers, imports, requires);
         }
         // bundled CJS: `var v = require_<id>()` (or __toESM for default/ns), refs `v.name`.
         SourceRef::BundledCjs { id } => {
@@ -948,6 +984,49 @@ fn collect_import(
     }
 }
 
+/// Emit the require/init line and imports map for a BundledEsm source (`<id>_exports.<name>`).
+fn collect_import_bundled_esm(
+    id: &str,
+    ns_local: &Option<String>,
+    specifiers: &[ImportDeclarationSpecifier],
+    imports: &mut HashMap<SymbolId, Access>,
+    requires: &mut Vec<String>,
+) {
+    let exports_obj = format!("{id}_exports");
+    if let Some(local) = ns_local {
+        requires.push(format!("var {local} = (init_{id}(), {exports_obj});"));
+    } else {
+        requires.push(format!("init_{id}();"));
+    }
+    for spec in specifiers {
+        match spec {
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(d) => {
+                if let Some(sym) = d.local.symbol_id.get() {
+                    imports.insert(
+                        sym,
+                        Access {
+                            var: exports_obj.clone(),
+                            prop: "default".into(),
+                        },
+                    );
+                }
+            }
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+            ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                if let Some(sym) = s.local.symbol_id.get() {
+                    imports.insert(
+                        sym,
+                        Access {
+                            var: exports_obj.clone(),
+                            prop: module_export_name(&s.imported),
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// An `export { a as b }` name: (exported, local name, local symbol).
 type DeferredNamed = (String, String, Option<SymbolId>);
 
@@ -963,24 +1042,7 @@ fn collect_export_named<'a>(
     body_stmts: &mut Vec<Statement<'a>>,
 ) -> bool {
     if let Some(d) = decl.declaration {
-        for name in declaration_binding_names(&d) {
-            exports.push(ExportEntry {
-                name: name.clone(),
-                value_js: name,
-            });
-        }
-        // re-emit the bare declaration as a statement (Declaration → Statement variant by variant).
-        match d {
-            Declaration::VariableDeclaration(v) => {
-                body_stmts.push(Statement::VariableDeclaration(v))
-            }
-            Declaration::FunctionDeclaration(f) => {
-                body_stmts.push(Statement::FunctionDeclaration(f))
-            }
-            Declaration::ClassDeclaration(c) => body_stmts.push(Statement::ClassDeclaration(c)),
-            _ => return false, // TS-only decl (enum/interface/type) shouldn't survive the strip
-        }
-        return true;
+        return emit_export_decl(d, exports, body_stmts);
     }
     if let Some(source) = &decl.source {
         // `export { a, b as c } from "s"` — reference the module, getters read from it.
@@ -1018,6 +1080,28 @@ fn collect_export_named<'a>(
             _ => None,
         };
         deferred_named.push((exported, local_name, sym));
+    }
+    true
+}
+
+/// Append each binding name in `d` to `exports` and re-emit the declaration as a statement.
+/// Returns `false` for a TS-only declaration that shouldn't survive the strip.
+fn emit_export_decl<'a>(
+    d: Declaration<'a>,
+    exports: &mut Vec<ExportEntry>,
+    body_stmts: &mut Vec<Statement<'a>>,
+) -> bool {
+    for name in declaration_binding_names(&d) {
+        exports.push(ExportEntry {
+            name: name.clone(),
+            value_js: name,
+        });
+    }
+    match d {
+        Declaration::VariableDeclaration(v) => body_stmts.push(Statement::VariableDeclaration(v)),
+        Declaration::FunctionDeclaration(f) => body_stmts.push(Statement::FunctionDeclaration(f)),
+        Declaration::ClassDeclaration(c) => body_stmts.push(Statement::ClassDeclaration(c)),
+        _ => return false, // TS-only decl (enum/interface/type) shouldn't survive the strip
     }
     true
 }
@@ -1312,10 +1396,7 @@ pub(crate) fn graph_interop_rewrite(
     target: &dyn Fn(&str) -> Target,
     node: bool,
 ) -> Option<String> {
-    if !src.contains("import") && !src.contains("export") {
-        return None;
-    }
-    if !node && !src.contains('*') {
+    if !interop_candidate(src, node) {
         return None;
     }
     let alloc = Allocator::default();
@@ -1340,6 +1421,16 @@ pub(crate) fn graph_interop_rewrite(
     if edits.is_empty() {
         return None;
     }
+    Some(apply_interop_edits(src, edits))
+}
+
+/// Fast guard: a source worth scanning for `graph_interop_rewrite` edits.
+fn interop_candidate(src: &str, node: bool) -> bool {
+    (src.contains("import") || src.contains("export")) && (node || src.contains('*'))
+}
+
+/// Splice `edits` into `src`, keeping the replaced text's line breaks so later line numbers stay.
+fn apply_interop_edits(src: &str, edits: Vec<(u32, u32, String)>) -> String {
     let mut out = String::with_capacity(src.len() + edits.len() * 16);
     let mut at = 0usize;
     for (start, end, text) in edits {
@@ -1351,7 +1442,7 @@ pub(crate) fn graph_interop_rewrite(
         at = end;
     }
     out.push_str(&src[at..]);
-    Some(out)
+    out
 }
 
 /// `spec` with the query `q`, as a JS string literal.
@@ -1490,17 +1581,8 @@ pub(crate) fn cjs_literal_export_names(src: &str) -> Option<Vec<String>> {
         if sc.at_end_or(b'}') {
             break;
         }
-        let key = match sc.entry()? {
-            Entry::Stop => break,
-            Entry::Spread => None,
-            Entry::Key(k) => Some(k),
-        };
-        sc.ws();
-        if let Some(k) = key {
-            if !sc.value() {
-                break;
-            }
-            names.extend(k);
+        if !scan_one_entry(&mut sc, &mut names)? {
+            break;
         }
         if !sc.eat(b',') {
             break;
@@ -1509,14 +1591,27 @@ pub(crate) fn cjs_literal_export_names(src: &str) -> Option<Vec<String>> {
     Some(names)
 }
 
+/// Scan one `{ ... }` entry, extend `names` with its exported key(s). Returns `false` to stop the
+/// whole scan (an unsupported value form), `true` to continue.
+fn scan_one_entry(sc: &mut KeyScan, names: &mut Vec<String>) -> Option<bool> {
+    let key = match sc.entry()? {
+        Entry::Stop => return Some(false),
+        Entry::Spread => None,
+        Entry::Key(k) => Some(k),
+    };
+    sc.ws();
+    if let Some(k) = key {
+        if !sc.value() {
+            return Some(false);
+        }
+        names.extend(k);
+    }
+    Some(true)
+}
+
 /// The text after the `{` of a module's one export form `module.exports = {`.
 fn exports_object_literal(src: &str) -> Option<&[u8]> {
-    if src.matches("module.exports").count() != 1
-        || src.contains("exports.")
-        || src.contains("exports[")
-        || src.contains("defineProperty(exports")
-        || src.contains("__export")
-    {
+    if !sole_module_exports_write(src) {
         return None;
     }
     let at = src.find("module.exports")? + "module.exports".len();
@@ -1525,6 +1620,15 @@ fn exports_object_literal(src: &str) -> Option<&[u8]> {
         return None;
     }
     Some(rest.trim_start().strip_prefix('{')?.as_bytes())
+}
+
+/// Whether `src`'s only CommonJS export form is a single `module.exports = ...`.
+fn sole_module_exports_write(src: &str) -> bool {
+    src.matches("module.exports").count() == 1
+        && !src.contains("exports.")
+        && !src.contains("exports[")
+        && !src.contains("defineProperty(exports")
+        && !src.contains("__export")
 }
 
 /// A cursor over an object literal's text for [`cjs_literal_export_names`].
@@ -1743,26 +1847,49 @@ fn string_key(b: &[u8], at: usize) -> Option<(Option<String>, usize)> {
         if c == q {
             return Some((String::from_utf16(&units).ok(), i + 1));
         }
-        if c != b'\\' {
-            // a run of source text up to the next quote or escape, as UTF-16
-            let len = b[i..].iter().position(|&c| c == q || c == b'\\')?;
-            units.extend(String::from_utf8_lossy(&b[i..i + len]).encode_utf16());
-            i += len;
-            continue;
-        }
-        let e = *b.get(i + 1)?;
-        i += 2;
-        let cp = escape_code_point(b, &mut i, e)?;
-        match char::from_u32(cp) {
-            Some(ch) => units.extend(ch.encode_utf16(&mut [0; 2]).iter()),
-            None => units.push(cp as u16),
-        }
+        advance_string_unit(b, q, &mut i, c, &mut units)?;
+    }
+}
+
+/// Consume one character (plain run or escape) at `i`, appending to `units`; `None` if truncated.
+fn advance_string_unit(b: &[u8], q: u8, i: &mut usize, c: u8, units: &mut Vec<u16>) -> Option<()> {
+    if c != b'\\' {
+        *i += extend_plain_run(b, q, *i, units)?;
+        return Some(());
+    }
+    let e = *b.get(*i + 1)?;
+    *i += 2;
+    let cp = escape_code_point(b, i, e)?;
+    push_code_point(units, cp);
+    Some(())
+}
+
+/// Append a run of source text (from `i`, as UTF-16) until the next quote or escape, returning the
+/// run's byte length.
+fn extend_plain_run(b: &[u8], q: u8, i: usize, units: &mut Vec<u16>) -> Option<usize> {
+    let len = b[i..].iter().position(|&c| c == q || c == b'\\')?;
+    units.extend(String::from_utf8_lossy(&b[i..i + len]).encode_utf16());
+    Some(len)
+}
+
+/// Push `cp` as UTF-16 code unit(s), falling back to the raw unit when it is a lone surrogate.
+fn push_code_point(units: &mut Vec<u16>, cp: u32) {
+    match char::from_u32(cp) {
+        Some(ch) => units.extend(ch.encode_utf16(&mut [0; 2]).iter()),
+        None => units.push(cp as u16),
     }
 }
 
 /// The code point of the escape `\e` whose text follows at `*i` (moved past it).
 fn escape_code_point(b: &[u8], i: &mut usize, e: u8) -> Option<u32> {
-    let hex = |s: &[u8]| u32::from_str_radix(std::str::from_utf8(s).ok()?, 16).ok();
+    if let Some(cp) = simple_escape_code_point(e) {
+        return Some(cp);
+    }
+    escape_code_point_extended(b, i, e)
+}
+
+/// Single-char escapes (`\n`, `\t`, `\0`, …), or `None` to defer to the extended form.
+fn simple_escape_code_point(e: u8) -> Option<u32> {
     Some(match e {
         b'n' => 0x0a,
         b't' => 0x09,
@@ -1771,27 +1898,43 @@ fn escape_code_point(b: &[u8], i: &mut usize, e: u8) -> Option<u32> {
         b'f' => 0x0c,
         b'v' => 0x0b,
         b'0' => 0,
-        b'x' => {
-            *i += 2;
-            hex(b.get(*i - 2..*i)?)?
-        }
-        b'u' if b.get(*i) == Some(&b'{') => {
-            let len = b[*i..].iter().position(|&c| c == b'}')?;
-            let cp = hex(&b[*i + 1..*i + len])?;
-            *i += len + 1;
-            cp
-        }
-        b'u' => {
-            *i += 4;
-            hex(b.get(*i - 4..*i)?)?
-        }
-        _ => {
-            // any other character stands for itself (a line break included)
-            let ch = String::from_utf8_lossy(&b[*i - 1..]).chars().next()?;
-            *i += ch.len_utf8() - 1;
-            ch as u32
-        }
+        _ => return None,
     })
+}
+
+/// Variable-length escapes (`\xHH`, `\uHHHH`, `\u{H+}`) and the identity fallback.
+fn escape_code_point_extended(b: &[u8], i: &mut usize, e: u8) -> Option<u32> {
+    match e {
+        b'x' => fixed_hex_escape(b, i, 2),
+        b'u' => unicode_escape_code_point(b, i),
+        _ => identity_escape(b, i),
+    }
+}
+
+fn fixed_hex_escape(b: &[u8], i: &mut usize, n: usize) -> Option<u32> {
+    *i += n;
+    hex_u32(b.get(*i - n..*i)?)
+}
+
+fn unicode_escape_code_point(b: &[u8], i: &mut usize) -> Option<u32> {
+    if b.get(*i) == Some(&b'{') {
+        let len = b[*i..].iter().position(|&c| c == b'}')?;
+        let cp = hex_u32(&b[*i + 1..*i + len])?;
+        *i += len + 1;
+        return Some(cp);
+    }
+    fixed_hex_escape(b, i, 4)
+}
+
+/// Any other character stands for itself (a line break included).
+fn identity_escape(b: &[u8], i: &mut usize) -> Option<u32> {
+    let ch = String::from_utf8_lossy(&b[*i - 1..]).chars().next()?;
+    *i += ch.len_utf8() - 1;
+    Some(ch as u32)
+}
+
+fn hex_u32(s: &[u8]) -> Option<u32> {
+    u32::from_str_radix(std::str::from_utf8(s).ok()?, 16).ok()
 }
 
 #[cfg(test)]

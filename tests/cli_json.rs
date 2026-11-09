@@ -13,22 +13,26 @@ fn keys(json: &str) -> Vec<String> {
     let (mut out, mut i) = (Vec::new(), 0);
     while i < b.len() {
         if b[i] == b'"' {
-            let start = i + 1;
-            i += 1;
-            while b[i] != b'"' {
-                i += if b[i] == b'\\' { 2 } else { 1 };
-            }
-            let mut j = i + 1;
-            while j < b.len() && b[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j < b.len() && b[j] == b':' {
-                out.push(json[start..i].to_string());
-            }
+            scan_key_at(json, b, &mut i, &mut out);
         }
         i += 1;
     }
     out
+}
+
+fn scan_key_at(json: &str, b: &[u8], i: &mut usize, out: &mut Vec<String>) {
+    let start = *i + 1;
+    *i += 1;
+    while b[*i] != b'"' {
+        *i += if b[*i] == b'\\' { 2 } else { 1 };
+    }
+    let mut j = *i + 1;
+    while j < b.len() && b[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    if j < b.len() && b[j] == b':' {
+        out.push(json[start..*i].to_string());
+    }
 }
 
 /// The run's JSON report with timings zeroed, failure messages cut to their first line and file
@@ -215,62 +219,74 @@ fn json_report_has_vitest_task_locations() {
     // V8 position mapped to the original source) after `failureMessages`.
     for esbuild in [false, true] {
         for via_config in [false, true] {
-            let p = Project::new("json-location");
-            if esbuild {
-                p.with_esbuild();
-            }
-            for (name, src) in LOCATED {
-                // without esbuild a mock factory cannot read the file's `let` (turbo-test#72);
-                // same line layout either way
-                let src = if esbuild {
-                    src.to_string()
-                } else {
-                    src.replace("v: () => shared", "v: () => 2")
-                };
-                p.file(name, &src);
-            }
-            let mut args = vec!["--reporter", "json"];
-            if via_config {
-                p.file(
-                    "vitest.config.js",
-                    "export default { test: { includeTaskLocation: true } }\n",
-                );
-            } else {
-                args.push("--includeTaskLocation");
-            }
-            let r = turbo_test(&p.dir, &args, &[]);
-            assert_eq!(r.code, Some(0), "{}", r.all());
-            let j = normalized(&p, &r);
-            let mut got = Vec::new();
-            for f in j["testResults"].as_array().unwrap() {
-                for a in f["assertionResults"].as_array().unwrap() {
-                    let loc = &a["location"];
-                    got.push((
-                        f["name"].as_str().unwrap().to_string(),
-                        a["fullName"].as_str().unwrap().to_string(),
-                        loc["line"].as_u64().unwrap_or(0),
-                        loc["column"].as_u64().unwrap_or(0),
-                    ));
-                }
-            }
-            let want: Vec<_> = LOCATIONS
-                .iter()
-                .map(|(f, n, l, c)| (f.to_string(), n.to_string(), *l, *c))
-                .collect();
-            assert_eq!(
-                got,
-                want,
-                "esbuild={esbuild} config={via_config}\n{}",
-                r.all()
-            );
-            let k = keys(r.stdout.trim());
-            let at = k.iter().position(|k| k == "location").unwrap();
-            assert_eq!(
-                &k[at - 1..at + 4],
-                ["failureMessages", "location", "line", "column", "meta"]
-            );
+            assert_task_locations_case(esbuild, via_config);
         }
     }
+    assert_no_location_without_option();
+}
+
+fn assert_task_locations_case(esbuild: bool, via_config: bool) {
+    let p = Project::new("json-location");
+    if esbuild {
+        p.with_esbuild();
+    }
+    for (name, src) in LOCATED {
+        // without esbuild a mock factory cannot read the file's `let` (turbo-test#72);
+        // same line layout either way
+        let src = if esbuild {
+            src.to_string()
+        } else {
+            src.replace("v: () => shared", "v: () => 2")
+        };
+        p.file(name, &src);
+    }
+    let mut args = vec!["--reporter", "json"];
+    if via_config {
+        p.file(
+            "vitest.config.js",
+            "export default { test: { includeTaskLocation: true } }\n",
+        );
+    } else {
+        args.push("--includeTaskLocation");
+    }
+    let r = turbo_test(&p.dir, &args, &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let j = normalized(&p, &r);
+    let got: Vec<_> = j["testResults"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|f| {
+            f["assertionResults"].as_array().unwrap().iter().map(|a| {
+                let loc = &a["location"];
+                (
+                    f["name"].as_str().unwrap().to_string(),
+                    a["fullName"].as_str().unwrap().to_string(),
+                    loc["line"].as_u64().unwrap_or(0),
+                    loc["column"].as_u64().unwrap_or(0),
+                )
+            })
+        })
+        .collect();
+    let want: Vec<_> = LOCATIONS
+        .iter()
+        .map(|(f, n, l, c)| (f.to_string(), n.to_string(), *l, *c))
+        .collect();
+    assert_eq!(
+        got,
+        want,
+        "esbuild={esbuild} config={via_config}\n{}",
+        r.all()
+    );
+    let k = keys(r.stdout.trim());
+    let at = k.iter().position(|k| k == "location").unwrap();
+    assert_eq!(
+        &k[at - 1..at + 4],
+        ["failureMessages", "location", "line", "column", "meta"]
+    );
+}
+
+fn assert_no_location_without_option() {
     // without the option there is no `location`
     let p = Project::new("json-no-location");
     p.file("a.test.js", LOCATED[0].1);

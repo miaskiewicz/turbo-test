@@ -48,70 +48,89 @@ pub fn spyable(file: &Path, code: &str) -> Option<(String, Vec<crate::location::
         m.statement(st);
     }
 
-    struct Reads<'s> {
-        scoping: &'s Scoping,
-        reads: &'s HashMap<SymbolId, String>,
-        edits: Vec<(u32, u32, String)>,
-    }
-    impl Reads<'_> {
-        fn read_of(&self, it: &IdentifierReference) -> Option<&String> {
-            let r = self.scoping.get_reference(it.reference_id.get()?);
-            if r.is_write() {
-                return None;
-            }
-            self.reads.get(&r.symbol_id()?)
-        }
-    }
-    impl<'a> Visit<'a> for Reads<'_> {
-        fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
-            if let Some(read) = self.read_of(it) {
-                self.edits.push((it.span.start, it.span.end, read.clone()));
-            }
-        }
-        fn visit_object_property(&mut self, it: &ObjectProperty<'a>) {
-            if let (true, Expression::Identifier(id)) = (it.shorthand, &it.value) {
-                if let Some(read) = self.read_of(id) {
-                    let edit = format!("{}: {read}", id.name);
-                    self.edits.push((it.span.start, it.span.end, edit));
-                    return;
-                }
-            }
-            walk::walk_object_property(self, it);
-        }
-        // `export { binding }` names the binding, it does not read it
-        fn visit_export_named_declaration(&mut self, it: &ExportNamedDeclaration<'a>) {
-            if let Some(d) = &it.declaration {
-                self.visit_declaration(d);
-            }
-        }
-        fn visit_import_expression(&mut self, it: &ImportExpression<'a>) {
-            self.edits
-                .push((it.span.start, it.span.start, "(".to_string()));
-            let end = it.span.end;
-            self.edits
-                .push((end, end, ").then(globalThis.__ttNs)".to_string()));
-            walk::walk_import_expression(self, it);
-        }
-    }
-    let mut v = Reads {
-        scoping,
-        reads: &m.reads,
-        edits: Vec::new(),
-    };
-    v.visit_program(&program);
-    let mut edits = v.edits;
-    let exporter = !m.own.is_empty() || !m.reexports.is_empty() || !m.stars.is_empty();
+    let mut edits = collect_read_edits(scoping, &m.reads, &program);
+    let exporter = module_is_exporter(&m);
     if edits.is_empty() && !exporter {
         return None;
     }
     let mut out = code.to_string();
     edits.sort_by_key(|e| (e.0, e.1));
     let shifts = shifts(code, &edits);
+    apply_edits(&mut out, edits);
+    append_registration(&mut out, &mut m, file, exporter)?;
+    Some((out, shifts))
+}
+
+fn module_is_exporter(m: &Module) -> bool {
+    !m.own.is_empty() || !m.reexports.is_empty() || !m.stars.is_empty()
+}
+
+fn apply_edits(out: &mut String, edits: Vec<(u32, u32, String)>) {
     for (s, e, text) in edits.into_iter().rev() {
         out.replace_range(s as usize..e as usize, &text);
     }
-    append_registration(&mut out, &mut m, file, exporter)?;
-    Some((out, shifts))
+}
+
+struct Reads<'s> {
+    scoping: &'s Scoping,
+    reads: &'s HashMap<SymbolId, String>,
+    edits: Vec<(u32, u32, String)>,
+}
+
+impl Reads<'_> {
+    fn read_of(&self, it: &IdentifierReference) -> Option<&String> {
+        let r = self.scoping.get_reference(it.reference_id.get()?);
+        if r.is_write() {
+            return None;
+        }
+        self.reads.get(&r.symbol_id()?)
+    }
+}
+
+impl<'a> Visit<'a> for Reads<'_> {
+    fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
+        if let Some(read) = self.read_of(it) {
+            self.edits.push((it.span.start, it.span.end, read.clone()));
+        }
+    }
+    fn visit_object_property(&mut self, it: &ObjectProperty<'a>) {
+        if let (true, Expression::Identifier(id)) = (it.shorthand, &it.value) {
+            if let Some(read) = self.read_of(id) {
+                let edit = format!("{}: {read}", id.name);
+                self.edits.push((it.span.start, it.span.end, edit));
+                return;
+            }
+        }
+        walk::walk_object_property(self, it);
+    }
+    // `export { binding }` names the binding, it does not read it
+    fn visit_export_named_declaration(&mut self, it: &ExportNamedDeclaration<'a>) {
+        if let Some(d) = &it.declaration {
+            self.visit_declaration(d);
+        }
+    }
+    fn visit_import_expression(&mut self, it: &ImportExpression<'a>) {
+        self.edits
+            .push((it.span.start, it.span.start, "(".to_string()));
+        let end = it.span.end;
+        self.edits
+            .push((end, end, ").then(globalThis.__ttNs)".to_string()));
+        walk::walk_import_expression(self, it);
+    }
+}
+
+fn collect_read_edits(
+    scoping: &Scoping,
+    reads: &HashMap<SymbolId, String>,
+    program: &oxc_ast::ast::Program,
+) -> Vec<(u32, u32, String)> {
+    let mut v = Reads {
+        scoping,
+        reads,
+        edits: Vec::new(),
+    };
+    v.visit_program(program);
+    v.edits
 }
 
 /// Cheap pre-parse filter: `spyable` only has work to do on files that use ESM module syntax.

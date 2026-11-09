@@ -228,10 +228,18 @@ fn bundle_capped(entry: &Path, max_modules: usize) -> Option<String> {
         )?;
     }
 
-    // Pass 2: transform + wrap each module.
+    assemble_bundle(&modules, &order, &id_of)
+}
+
+/// Pass 2: transform + wrap each module, then emit the entry-module call.
+fn assemble_bundle(
+    modules: &[Module],
+    order: &[PathBuf],
+    id_of: &HashMap<PathBuf, usize>,
+) -> Option<String> {
     let mut out = String::from(esm_cjs::PREAMBLE);
     for (idx, module) in modules.iter().enumerate() {
-        let (module_text, lexical) = module_text(module, &order[idx], &id_of)?;
+        let (module_text, lexical) = module_text(module, &order[idx], id_of)?;
         let params = helper_params(&lexical);
         out.push_str(&format!(
             "var require_m{idx} = __commonJS((exports, module, {params}) => {{\n{module_text}\n}});\n"

@@ -39,16 +39,7 @@ pub fn guard_default_reads(src: &str, guarded: &dyn Fn(&str) -> bool) -> Option<
         .build(&parsed.program)
         .semantic
         .into_scoping();
-    let mut symbols = HashSet::new();
-    for stmt in &parsed.program.body {
-        let Statement::ImportDeclaration(i) = stmt else {
-            continue;
-        };
-        if !guarded(i.source.value.as_str()) {
-            continue;
-        }
-        collect_default_symbols(i, &mut symbols);
-    }
+    let symbols = collect_guarded_default_symbols(&parsed.program, guarded);
     if symbols.is_empty() {
         return None;
     }
@@ -67,6 +58,24 @@ pub fn guard_default_reads(src: &str, guarded: &dyn Fn(&str) -> bool) -> Option<
         out.replace_range(start as usize..end as usize, &text);
     }
     Some(out)
+}
+
+/// Default-import symbol ids from every `import` whose specifier `guarded` accepts.
+fn collect_guarded_default_symbols(
+    program: &oxc_ast::ast::Program,
+    guarded: &dyn Fn(&str) -> bool,
+) -> HashSet<SymbolId> {
+    let mut symbols = HashSet::new();
+    for stmt in &program.body {
+        let Statement::ImportDeclaration(i) = stmt else {
+            continue;
+        };
+        if !guarded(i.source.value.as_str()) {
+            continue;
+        }
+        collect_default_symbols(i, &mut symbols);
+    }
+    symbols
 }
 
 /// Record the symbol ids of every `import X from …` / `import { default as X } from …` local

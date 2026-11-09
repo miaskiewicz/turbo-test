@@ -68,6 +68,19 @@ function chaiPath() {
   }
 }
 
+function setIfAbsent(env, key, resolve) {
+  if (env[key]) return;
+  const value = resolve();
+  if (value) env[key] = value;
+}
+
+function buildChildEnv() {
+  const env = { ...process.env };
+  setIfAbsent(env, 'TURBO_ESBUILD', bundledEsbuild);
+  setIfAbsent(env, 'TURBO_CHAI', chaiPath);
+  return env;
+}
+
 function main() {
   const bin = binaryPath();
   if (!bin) {
@@ -79,16 +92,7 @@ function main() {
   }
   // Forward argv verbatim; the binary's launcher (src/launcher.rs) does the rest. cwd is inherited
   // so the binary's discovery / config walk / git --changed all run relative to where the user is.
-  const env = { ...process.env };
-  if (!env.TURBO_ESBUILD) {
-    const esbuild = bundledEsbuild();
-    if (esbuild) env.TURBO_ESBUILD = esbuild;
-  }
-  if (!env.TURBO_CHAI) {
-    const chai = chaiPath();
-    if (chai) env.TURBO_CHAI = chai;
-  }
-  const res = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit', env });
+  const res = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit', env: buildChildEnv() });
   if (res.error) { console.error('turbo-test:', res.error.message); process.exit(1); }
   process.exit(res.status == null ? 1 : res.status);
 }

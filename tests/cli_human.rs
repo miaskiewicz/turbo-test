@@ -390,51 +390,56 @@ const SLOW_MS: u64 = 300;
 fn normalize_colored(text: &str, root: &str) -> String {
     text.replace(root, "<root>")
         .split('\n')
-        .map(|l| {
-            if l.contains("   Start at ") {
-                return "<start>".to_string();
-            }
-            if l.contains("   Duration ") {
-                return "<duration>".to_string();
-            }
-            let mut out = String::new();
-            let mut rest = l;
-            while let Some(i) = rest.find(|c: char| c.is_ascii_digit()) {
-                let digits = rest[i..].len()
-                    - rest[i..]
-                        .trim_start_matches(|c: char| c.is_ascii_digit())
-                        .len();
-                let after = &rest[i + digits..];
-                let duration = (after.starts_with("ms") || after.starts_with("\x1b[2mms"))
-                    && rest[..i].ends_with(' ');
-                // (a colour code's own digits went out already: look at what is written)
-                out.push_str(&rest[..i]);
-                let coloured =
-                    duration && (out.ends_with("\x1b[32m ") || out.ends_with("\x1b[33m "));
-                if coloured {
-                    let value: u64 = rest[i..i + digits].parse().unwrap();
-                    let yellow = out.ends_with("\x1b[33m ");
-                    assert_eq!(
-                        yellow,
-                        value > SLOW_MS,
-                        "{value}ms coloured {}: {l:?}",
-                        if yellow { "yellow" } else { "green" }
-                    );
-                    out.truncate(out.len() - "\x1b[32m ".len());
-                    out.push_str("\x1b[3?m ");
-                }
-                out.push_str(if duration {
-                    "<n>"
-                } else {
-                    &rest[i..i + digits]
-                });
-                rest = after;
-            }
-            out.push_str(rest);
-            out
-        })
+        .map(normalize_colored_line)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn normalize_colored_line(l: &str) -> String {
+    if l.contains("   Start at ") {
+        return "<start>".to_string();
+    }
+    if l.contains("   Duration ") {
+        return "<duration>".to_string();
+    }
+    let mut out = String::new();
+    let mut rest = l;
+    while let Some(i) = rest.find(|c: char| c.is_ascii_digit()) {
+        let digits = rest[i..].len()
+            - rest[i..]
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .len();
+        let after = &rest[i + digits..];
+        let duration = is_duration_digits(after, &rest[..i]);
+        out.push_str(&rest[..i]);
+        rewrite_duration(&mut out, duration, &rest[i..i + digits], l);
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+fn is_duration_digits(after: &str, before: &str) -> bool {
+    (after.starts_with("ms") || after.starts_with("\x1b[2mms")) && before.ends_with(' ')
+}
+
+/// Append the digits span, swapping a duration's ansi green/yellow for a canonical `\x1b[3?m`.
+fn rewrite_duration(out: &mut String, duration: bool, digits_text: &str, line: &str) {
+    // (a colour code's own digits went out already: look at what is written)
+    let coloured = duration && (out.ends_with("\x1b[32m ") || out.ends_with("\x1b[33m "));
+    if coloured {
+        let value: u64 = digits_text.parse().unwrap();
+        let yellow = out.ends_with("\x1b[33m ");
+        assert_eq!(
+            yellow,
+            value > SLOW_MS,
+            "{value}ms coloured {}: {line:?}",
+            if yellow { "yellow" } else { "green" }
+        );
+        out.truncate(out.len() - "\x1b[32m ".len());
+        out.push_str("\x1b[3?m ");
+    }
+    out.push_str(if duration { "<n>" } else { digits_text });
 }
 
 /// A coloured reference as [`normalize_colored`] spells its output: each duration's colour code is
