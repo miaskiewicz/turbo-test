@@ -6220,12 +6220,18 @@ function __ttFactoryExports(spec, factory, vitest, isDoMock, dir) {
 function __ttMockMake(spec, factory, vitest, isDoMock, dir) {
   return factory === undefined ? __ttAutomockOf(dir, spec) : __ttFactoryExports(spec, factory, vitest, isDoMock, dir);
 }
-function __ttMock(spec, factory, vitest, isDoMock) {
-  const key = (globalThis.__ttDir || '') + '\0' + String(spec);
-  // The calling module's dir: the module-runner's __ttDir, else (ESM graph, where modules have
-  // none) the entry file's dir, so a runtime vi.doMock registers immediately and a later import()
-  // of the module sees it.
-  const dir = globalThis.__ttDir || globalThis.__ttEntryDir;
+// The calling module's dir: the module-runner's __ttDir, else (ESM graph, where modules have
+// none) the entry file's dir, so a runtime vi.doMock registers immediately and a later import()
+// of the module sees it.
+function __ttMockDir() { return globalThis.__ttDir || globalThis.__ttEntryDir; }
+function __ttMockKey(spec) { return (globalThis.__ttDir || '') + '\0' + String(spec); }
+function __ttMock(spec, factory, vitest, isDoMock, options) {
+  const key = __ttMockKey(spec);
+  const dir = __ttMockDir();
+  // jest.mock(spec, factory, { virtual: true }): skip resolution; keyed by the raw spec + dir
+  // (turbo-test#308). Jest-only; vi.mock has no such option. Virtual registrations take their
+  // own path and don't need the automock mark below.
+  if (__ttIsVirtualMock(vitest, options)) return __ttVirtualMockEntry(spec, factory, isDoMock, dir);
   // jest automock (turbo-test#184): record this spec as explicitly handled so the automock
   // bypass does NOT re-mock it on require. Resolution may fail (non-existent spec from a
   // prepass): we still fall through to normal mock logic.
@@ -6236,6 +6242,40 @@ function __ttMock(spec, factory, vitest, isDoMock) {
   if (__ttJestLazyRegister(spec, factory, vitest, isDoMock, dir, key)) return;
   const [ok, made] = __ttMockMake(spec, factory, vitest, isDoMock, dir);
   if (ok) __ttMockRegister(spec, factory, vitest, isDoMock, dir, key, made);
+}
+// jest.mock(spec, factory, { virtual: true }): a mock keyed by the raw spec + caller's dir, so
+// `require('non-existent')` returns the factory's exports without ever resolving the spec
+// (turbo-test#308). Lazy for jest.mock (same as #275); eager for jest.doMock / jest.setMock.
+function __ttVirtualRegister(dir, spec, exports) {
+  if (globalThis.__ttRegisterVirtualMock && dir) {
+    try { globalThis.__ttRegisterVirtualMock(String(dir), String(spec), exports); } catch (e) {}
+  }
+}
+function __ttVirtualLazyEligible(factory, isDoMock) {
+  if (isDoMock || typeof factory !== 'function') return false;
+  return !(globalThis.__ttMockPrepass || globalThis.__ttNoLazyJestMock);
+}
+function __ttVirtualKey(dir, spec) {
+  return (dir || '') + '\0virtual:' + String(spec);
+}
+function __ttIsVirtualMock(vitest, options) {
+  return !vitest && !!options && options.virtual === true;
+}
+// Prepass can't resolve the raw spec to a path, so it's a no-op — the module's own call does
+// the work.
+function __ttVirtualMockEntry(spec, factory, isDoMock, dir) {
+  if (globalThis.__ttMockPrepass) return;
+  __ttVirtualMock(spec, factory, isDoMock, dir, __ttVirtualKey(dir, spec));
+}
+function __ttVirtualMock(spec, factory, isDoMock, dir, key) {
+  __ttLenientMockKeys.add(key);
+  if (__ttVirtualLazyEligible(factory, isDoMock)) {
+    __ttJestLazy.set(key, { spec: String(spec), factory, dir, key, virtual: true });
+    return;
+  }
+  const [ok, made] = __ttFactoryExports(spec, factory, false, isDoMock, dir);
+  if (!ok) return;
+  __ttVirtualRegister(dir, spec, __ttStrictMock(made, key, String(spec), false));
 }
 // jest 30's lazy `jest.mock(spec, factory)`: the factory runs on the module's first require,
 // closing over bindings the test file has by then initialised (turbo-test#275). The prepass
@@ -6264,14 +6304,28 @@ function __ttJestLazyRegister(spec, factory, vitest, isDoMock, dir, key) {
   }
   return true;
 }
+function __ttJestLazyFind(dir, spec) {
+  const regular = __ttJestLazyKey(dir, spec);
+  const entry = __ttJestLazy.get(regular);
+  if (entry) return [regular, entry];
+  const virtual = __ttVirtualKey(dir, spec);
+  return [virtual, __ttJestLazy.get(virtual)];
+}
+function __ttJestLazyFinalize(entry) {
+  const [ok, made] = __ttFactoryExports(entry.spec, entry.factory, false, false, entry.dir);
+  if (!ok) return;
+  if (entry.virtual) {
+    __ttVirtualRegister(entry.dir, entry.spec, __ttStrictMock(made, entry.key, entry.spec, false));
+  } else {
+    __ttMockRegister(entry.spec, entry.factory, false, false, entry.dir, entry.key, made);
+  }
+}
 function __ttJestLazyRun(dir, spec) {
   if (!__ttJestLazy.size) return;
-  const k = __ttJestLazyKey(dir, spec);
-  const entry = __ttJestLazy.get(k);
+  const [k, entry] = __ttJestLazyFind(dir, spec);
   if (!entry) return;
   __ttJestLazy.delete(k);
-  const [ok, made] = __ttFactoryExports(entry.spec, entry.factory, false, false, entry.dir);
-  if (ok) __ttMockRegister(entry.spec, entry.factory, false, false, entry.dir, entry.key, made);
+  __ttJestLazyFinalize(entry);
 }
 globalThis.__ttJestLazyRun = __ttJestLazyRun;
 // Async (Promise) factory branch of __ttMockRegister: a doMock (not hoisted: it applies to
@@ -6773,9 +6827,9 @@ function __jestWhen(fn) {
 globalThis.jest = {
   fn: (impl) => __jestWhen(globalThis.vi.fn(impl)),
   spyOn: (obj, key, accessType) => __jestWhen(globalThis.vi.spyOn(obj, key, accessType)),
-  mock: (spec, factory) => __ttMock(spec, factory, false),
+  mock: (spec, factory, options) => __ttMock(spec, factory, false, false, options),
   unmock: (spec) => globalThis.vi.unmock(spec),
-  doMock: (spec, factory) => __ttMock(spec, factory, false, true),
+  doMock: (spec, factory, options) => __ttMock(spec, factory, false, true, options),
   dontMock: (spec) => globalThis.vi.unmock(spec),
   // jest's other module-registry members, on the same machinery (turbo-test#179): setMock is a
   // doMock of the given exports, unstable_mockModule / unstable_unmockModule the ESM forms,
