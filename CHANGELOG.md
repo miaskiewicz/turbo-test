@@ -5,8 +5,33 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-11-09 — jest compat: automock + virtual mocks, shim gaps
+
+### Added
+- Jest automock compatibility (#184): `jest.enableAutomock()`, `jest.disableAutomock()`,
+  jest 30's shorter aliases `jest.autoMockOn()` / `jest.autoMockOff()`, and
+  `jest.onGenerateMock(factory)` to customize the generated mock. Jest config
+  `automock: true` enables it at file-load. When on, a `require('./x')` of a local module
+  whose spec has not been explicitly mocked or unmocked returns a generated mock of the
+  real exports (functions become `jest.fn()`, nested objects are deep-mocked, primitives
+  kept); `jest.unmock(path)` opts a specific path out. Modules under `node_modules` are
+  never automocked — automock applies to local (`./` / `../` / absolute) specifiers only.
+  Why: ts-jest / NestJS codebases rely on `automock` to stub collaborators across a test
+  file without touching each one. Deferred for a follow-up: `automockModuleIgnorePatterns`
+  / `automockWithModulePathIgnorePatterns`, `__mocks__` folder auto-detection.
+- `jest.mock(spec, factory, { virtual: true })` and `jest.doMock(spec, factory, { virtual:
+  true })` (#308). A virtual mock is keyed by the raw spec + caller's dir, so `require('x')`
+  returns the factory's exports without ever resolving `'x'` through the module resolver —
+  useful for stubbing a side-effect-only specifier or a runtime-only addon that doesn't
+  correspond to a real file. Jest-only; `vi.mock` keeps its existing semantics. Shim
+  `JestAPI.mock` / `JestAPI.doMock` gain the third-argument options overload.
+- `jest.doMock` / `jest.dontMock` declared on the `JestAPI` type shim. The runtime
+  already had both (`dontMock` is jest 30's alias for `unmock`); the type shim inherited
+  `mock` / `unmock` via `extends Omit<ViAPI, …>` but left the jest-only pair out, so a
+  consumer path-mapping `@jest/globals` to turbo-test's shim saw `TS2339` on them.
+
 ### Fixed
-- Coverage floor restored from 99.8 back to 99.9 (turbo-test#306). The v0.8.1 cc-7 refactor
+- Coverage floor restored from 99.8 back to 99.9 (#306). The v0.8.1 cc-7 refactor
   (#294) extracted 78 Rust helpers and turned each inlined `v8::String::new(...)` /
   JSON-shape / REGISTRY-lookup OOM guard into its own `let Some(x) = … else { return; };`
   block, pushing 27 provably-unreachable lines into their own uncovered `return;` branches
