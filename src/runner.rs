@@ -8800,7 +8800,12 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__ttCallSite", native_call_site);
     bind_fn(scope, global, "__nativeRequire", native_require);
     bind_fn(scope, global, "__ttRegisterMock", native_register_mock);
-    bind_fn(scope, global, "__ttRegisterVirtualMock", native_register_virtual_mock);
+    bind_fn(
+        scope,
+        global,
+        "__ttRegisterVirtualMock",
+        native_register_virtual_mock,
+    );
     bind_fn(scope, global, "__ttImportActual", native_import_actual);
     bind_fn(scope, global, "__ttResetModules", native_reset_modules);
     bind_fn(scope, global, "__ttUnmock", native_unmock);
