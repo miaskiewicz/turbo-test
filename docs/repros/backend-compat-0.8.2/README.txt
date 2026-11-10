@@ -53,3 +53,29 @@ Jest passes all five assertions and writes "closed" during globalTeardown.
 Turbo fails all five assertions and leaves no marker. The probes cover
 globalSetup, globalTeardown, moduleNameMapper, isolateModulesAsync,
 restoreAllMocks with replaceProperty, and vm.runInNewContext.
+
+Additional Jest API controls
+
+From fixtures/jest-project, compare the public mock and timer APIs:
+
+  ../../node_modules/.bin/turbo-test --jobs 1 jest-surface.spec.js
+  ../../node_modules/.bin/jest --runInBand jest-surface.spec.js
+  rm -f .teardown-ran
+
+Jest passes all ten tests. Turbo passes seven, including factory and virtual
+mocks, local automock, resetAllMocks, restoring a spy, fake timer advancement
+and resetModules. Turbo fails requireActual error propagation, automatic
+mock generation in requireMock, and flushing process.nextTick in runAllTicks.
+
+Jest discovery and explicit globals
+
+From the kit root, enter fixtures/jest-discovery. Run both commands without
+test path arguments to exercise discovery:
+
+  cd fixtures/jest-discovery
+  ../../node_modules/.bin/turbo-test --jobs 1
+  ../../node_modules/.bin/jest --runInBand
+
+Both runners execute setupFilesAfterEnv and load @jest/globals. Jest passes
+both assertions in the included file. Turbo injects globals despite
+injectGlobals: false and runs the file that testMatch excludes.
