@@ -1,0 +1,11 @@
+{
+  "name": "turbo-test-compat-repros",
+  "private": true,
+  "devDependencies": {
+    "@miaskiewicz/turbo-test": "0.8.2",
+    "es-errors": "1.3.0",
+    "jest": "30.5.2",
+    "side-channel": "1.1.1",
+    "esbuild": "0.28.1"
+  }
+}
