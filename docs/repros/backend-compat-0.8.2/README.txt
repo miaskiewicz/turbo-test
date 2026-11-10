@@ -95,3 +95,21 @@ timer delay preservation after setSystemTime, and the nested timer control.
 It fails manual __mocks__ lookup, onGenerateMock callback composition and
 arguments, JEST_WORKER_ID injection, and the replaceProperty handle's
 replaceValue method.
+
+Jest config edge cases
+
+From the kit root after running prepare-fixtures.cjs:
+
+  cd fixtures/jest-config-edge
+  ../../node_modules/.bin/turbo-test --jobs 1 config-edge.spec.js
+  ../../node_modules/.bin/jest --runInBand config-edge.spec.js
+  ../../node_modules/.bin/turbo-test --jobs 1 timeout.spec.js
+  ../../node_modules/.bin/jest --runInBand timeout.spec.js
+  ../../node_modules/.bin/turbo-test --jobs 1 --testTimeout 35 timeout.spec.js
+  cd clear-mocks
+  ../../../node_modules/.bin/turbo-test --jobs 1 clear.spec.js
+  ../../../node_modules/.bin/jest --runInBand clear.spec.js
+
+The main config probe is 6/6 in Jest and 1/6 in Turbo. The clearMocks probe
+is 2/2 in Jest and 1/2 in Turbo. The 100 ms test exceeds the 35 ms limit
+in Jest. Turbo passes it with config alone and times out with the CLI flag.
