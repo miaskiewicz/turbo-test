@@ -416,13 +416,32 @@ import.meta.url))`, string concatenation (`__dirname + '/z'`, `path.resolve(__di
   `node_modules/.pnpm/<name>@<version>/node_modules/<name>`. On Windows, canonical paths are
   spelled as Node spells them (`C:\...`, `\\server\share\...`), never with the `\\?\` prefix.
 
-## Benchmarks — pending re-run
+## Benchmarks (0.8.2, 2026-11-10, macOS arm64)
 
-0.6.0 has **not** been re-benchmarked yet. A re-run of all four repos (turbo-dom, turbo-test,
-turbo-html2pdf, turbo-surf) together, on a quiet machine, is planned after the release; this
-section will carry those numbers. The last measured numbers (turbo-test 0.2.x, June 2026,
-vs vitest + jsdom and vitest + turbo-dom) are kept, labelled with version, date and machine, in
-[docs/BENCHMARKS-history.md](docs/BENCHMARKS-history.md).
+Wall-clock on four real codebases, interleaved (three runs of each runner; best of three
+reported). Machine: Apple Silicon, quiet. Each app's own `vitest.config.ts` was used — the
+turbo-test column is this repo's local 0.8.2 build, the vitest column is each project's pinned
+vitest (or `vitest@latest` with `jsdom` when the project no longer has vitest as a dep).
+
+| App                   | Files | Tests  | vitest + jsdom | turbo-test 0.8.2 | Speedup |
+|-----------------------|------:|-------:|---------------:|-----------------:|--------:|
+| standalone-chat-app   |    68 |    770 | — *(a)*        |            1.61s | —       |
+| website-global        |   109 |  1 551 | — *(b)*        |            1.75s | —       |
+| ui-design-components  |   459 |  7 334 |         36.6 s |           15.5 s |    2.4× |
+| payroll-app           | 1 942 | 24 494 | — *(a)*        |           25.7 s | —       |
+
+*(a)* vitest has been removed from this project's `package.json`; its `vitest.config.ts` is
+consumed only by turbo-test, and re-installing a fresh vitest fails to resolve ~every app import
+(Next.js layout aliases, generated types, path rewrites), yielding `MODULE_NOT_FOUND` on 60+
+files. A fair head-to-head needs a maintained vite config, which these apps intentionally no
+longer ship.
+
+*(b)* The project's `vitest@2.1.8` loads but the same aliases fail (108 tests out of 1 551
+collect; the rest hit `ERR_MODULE_NOT_FOUND`). Not a representative run.
+
+ui-design-components is the one project here with a working vitest config and a sizeable suite
+(7 334 tests). Historical numbers from the 0.2.x generation (June 2026) are kept, labelled with
+version, date and machine, in [docs/BENCHMARKS-history.md](docs/BENCHMARKS-history.md).
 
 ## Requirements
 
