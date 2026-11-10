@@ -424,19 +424,25 @@ running this repo's 0.8.2 build (`node cli.js --reporter=dot`), the vitest colum
 `@vitejs/plugin-react-swc`) freshly installed into each app. Interleaved, best of three on
 ui-design-components; single clean run on the others. Machine: Apple Silicon, quiet.
 
-| App                   | Files |  Tests   | vitest (collected / wall)      | turbo-test 0.8.2 (collected / wall) | Speedup |
-|-----------------------|------:|---------:|-------------------------------:|------------------------------------:|--------:|
-| standalone-chat-app   |    68 |      770 |   0 / 2.75 s *(a)*             |                      770 / 1.61 s   |      —  |
-| website-global        |   109 |   1 551  | 515 / 7.73 s *(a)*             |                    1 551 / 1.75 s   |   4.4×  |
-| ui-design-components  |   459 |   7 334  | 7 334 / 36.6 s                 |                    7 334 / 15.5 s   |   2.4×  |
-| payroll-app           | 1 942 |  24 494  | 7 657 / 68.5 s *(a)*           |                   24 494 / 25.7 s   |   2.7×  |
+| App                   | Files |  Tests   | vitest (collected / wall / t/s)  | turbo-test 0.8.2 (collected / wall / t/s) | Throughput Δ |
+|-----------------------|------:|---------:|---------------------------------:|------------------------------------------:|-------------:|
+| standalone-chat-app   |    68 |      770 |      0 / 2.75 s / —          *(a)* |                   770 / 1.61 s / 478 t/s |      —       |
+| website-global        |   109 |   1 551  |    515 / 7.73 s /  67 t/s    *(a)* |                 1 551 / 1.75 s / 886 t/s |      13×     |
+| ui-design-components  |   459 |   7 334  |  7 334 / 36.6 s / 200 t/s          |                 7 334 / 15.5 s / 473 t/s |     2.4×     |
+| payroll-app           | 1 942 |  24 494  |  7 657 / 68.5 s / 112 t/s    *(a)* |                24 494 / 25.7 s / 953 t/s |      8.5×    |
+
+The last column is a per-test-throughput ratio (`turbo-test t/s ÷ vitest t/s`), *not* a
+wall-time ratio — a wall-time ratio on rows where vitest ran a subset of the suite and
+turbo-test ran all of it would be comparing different workloads. Throughput divides out the
+test-count difference. On ui-design-components, where both runners collected the full 7 334
+tests, the wall-time ratio and the throughput ratio are the same thing.
 
 *(a)* Under vitest a share of each app's files fail to import (Next.js layout aliases,
 generated types, framework path rewrites that vitest's default vite setup doesn't reproduce),
-so vitest's wall covers only the files it *could* collect. turbo-test resolves and runs every
-file in the same suite. Only ui-design-components is a clean, apples-to-apples row — its full
-suite of 7 334 tests runs under both. The three others are shown with their asymmetric
-collection counts so the ratio is not misread as "twice as fast on the same work."
+so vitest's wall and tests-collected cover only the files it *could* import. turbo-test
+resolves and runs every file in the same suite. ui-design-components is the clean,
+apples-to-apples row; the other three carry the throughput ratio so the absolute wall times
+aren't misread as same-work speedups.
 
 Historical numbers from the 0.2.x generation (June 2026) are kept, labelled with version, date
 and machine, in [docs/BENCHMARKS-history.md](docs/BENCHMARKS-history.md).
