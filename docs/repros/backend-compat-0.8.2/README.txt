@@ -79,3 +79,19 @@ test path arguments to exercise discovery:
 Both runners execute setupFilesAfterEnv and load @jest/globals. Jest passes
 both assertions in the included file. Turbo injects globals despite
 injectGlobals: false and runs the file that testMatch excludes.
+
+Jest edge cases
+
+From the kit root, enter fixtures/jest-project. Clear any inherited worker ID
+so the worker probe measures the environment each runner creates.
+
+  cd fixtures/jest-project
+  env -u JEST_WORKER_ID ../../node_modules/.bin/turbo-test --jobs 1 jest-edge.spec.js
+  env -u JEST_WORKER_ID ../../node_modules/.bin/jest --runInBand jest-edge.spec.js
+  rm -f .teardown-ran
+
+Jest passes all seven tests. Turbo passes async withImplementation restoration,
+timer delay preservation after setSystemTime, and the nested timer control.
+It fails manual __mocks__ lookup, onGenerateMock callback composition and
+arguments, JEST_WORKER_ID injection, and the replaceProperty handle's
+replaceValue method.
