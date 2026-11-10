@@ -418,30 +418,28 @@ import.meta.url))`, string concatenation (`__dirname + '/z'`, `path.resolve(__di
 
 ## Benchmarks (0.8.2, 2026-11-10, macOS arm64)
 
-Wall-clock on four real codebases, interleaved (three runs of each runner; best of three
-reported). Machine: Apple Silicon, quiet. Each app's own `vitest.config.ts` was used — the
-turbo-test column is this repo's local 0.8.2 build, the vitest column is each project's pinned
-vitest (or `vitest@latest` with `jsdom` when the project no longer has vitest as a dep).
+Wall-clock on four real codebases: each app's own `vitest.config.ts`, the turbo-test column
+running this repo's 0.8.2 build (`node cli.js --reporter=dot`), the vitest column running
+`vitest@latest run --environment jsdom` with the plumbing (`vitest`, `vite`, `jsdom`,
+`@vitejs/plugin-react-swc`) freshly installed into each app. Interleaved, best of three on
+ui-design-components; single clean run on the others. Machine: Apple Silicon, quiet.
 
-| App                   | Files | Tests  | vitest + jsdom | turbo-test 0.8.2 | Speedup |
-|-----------------------|------:|-------:|---------------:|-----------------:|--------:|
-| standalone-chat-app   |    68 |    770 | — *(a)*        |            1.61s | —       |
-| website-global        |   109 |  1 551 | — *(b)*        |            1.75s | —       |
-| ui-design-components  |   459 |  7 334 |         36.6 s |           15.5 s |    2.4× |
-| payroll-app           | 1 942 | 24 494 | — *(a)*        |           25.7 s | —       |
+| App                   | Files |  Tests   | vitest (collected / wall)      | turbo-test 0.8.2 (collected / wall) | Speedup |
+|-----------------------|------:|---------:|-------------------------------:|------------------------------------:|--------:|
+| standalone-chat-app   |    68 |      770 |   0 / 2.75 s *(a)*             |                      770 / 1.61 s   |      —  |
+| website-global        |   109 |   1 551  | 515 / 7.73 s *(a)*             |                    1 551 / 1.75 s   |   4.4×  |
+| ui-design-components  |   459 |   7 334  | 7 334 / 36.6 s                 |                    7 334 / 15.5 s   |   2.4×  |
+| payroll-app           | 1 942 |  24 494  | 7 657 / 68.5 s *(a)*           |                   24 494 / 25.7 s   |   2.7×  |
 
-*(a)* vitest has been removed from this project's `package.json`; its `vitest.config.ts` is
-consumed only by turbo-test, and re-installing a fresh vitest fails to resolve ~every app import
-(Next.js layout aliases, generated types, path rewrites), yielding `MODULE_NOT_FOUND` on 60+
-files. A fair head-to-head needs a maintained vite config, which these apps intentionally no
-longer ship.
+*(a)* Under vitest a share of each app's files fail to import (Next.js layout aliases,
+generated types, framework path rewrites that vitest's default vite setup doesn't reproduce),
+so vitest's wall covers only the files it *could* collect. turbo-test resolves and runs every
+file in the same suite. Only ui-design-components is a clean, apples-to-apples row — its full
+suite of 7 334 tests runs under both. The three others are shown with their asymmetric
+collection counts so the ratio is not misread as "twice as fast on the same work."
 
-*(b)* The project's `vitest@2.1.8` loads but the same aliases fail (108 tests out of 1 551
-collect; the rest hit `ERR_MODULE_NOT_FOUND`). Not a representative run.
-
-ui-design-components is the one project here with a working vitest config and a sizeable suite
-(7 334 tests). Historical numbers from the 0.2.x generation (June 2026) are kept, labelled with
-version, date and machine, in [docs/BENCHMARKS-history.md](docs/BENCHMARKS-history.md).
+Historical numbers from the 0.2.x generation (June 2026) are kept, labelled with version, date
+and machine, in [docs/BENCHMARKS-history.md](docs/BENCHMARKS-history.md).
 
 ## Requirements
 
