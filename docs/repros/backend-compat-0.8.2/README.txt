@@ -19,9 +19,37 @@ Jest passes the six assertions in the remaining five suites:
 
   npx jest --runInBand resolver.spec.js crypto.spec.js streams.spec.js http-socket.spec.js child-process.spec.js
 
+Additional runtime probes cover async context, hashing, gzip, abort timeouts,
+data URL fetch, structured cloning, Web Crypto, IP parsing, EventEmitter,
+diagnostics channels, V8 serialization, FormData and callback stream pipelines.
+
+  npx turbo-test --jobs 1 additional-runtime.spec.js more-runtime.spec.js
+  npx jest --runInBand additional-runtime.spec.js more-runtime.spec.js
+
+Jest passes all 15 assertions. Turbo passes the Map and ArrayBuffer clone
+control and reproduces the 14 remaining failures.
+
 The coverage test passes under both runners. Turbo includes only src/used.js
 and exits 0 at 100% coverage. Jest also includes src/unused.js, reports 50%
 line coverage, and exits 1 at the same threshold:
 
   npx turbo-test --jobs 1 --coverage --coverage-include 'src/*.js' --coverage-thresholds lines=100 coverage.spec.js
   npx jest --runInBand --coverage --collectCoverageFrom 'src/*.js' --coverageThreshold '{"global":{"lines":100}}' coverage.spec.js
+
+Backend Jest configuration and API probes
+
+Run from the fixture directory so the launchers discover its own Jest config.
+Start without a teardown marker.
+
+  cd fixtures/jest-project
+  rm -f .teardown-ran
+  ../../node_modules/.bin/turbo-test --jobs 1 backend-config.spec.js jest-api.spec.js
+  test ! -e .teardown-ran
+  ../../node_modules/.bin/jest --runInBand backend-config.spec.js jest-api.spec.js
+  cat .teardown-ran
+  rm -f .teardown-ran
+
+Jest passes all five assertions and writes "closed" during globalTeardown.
+Turbo fails all five assertions and leaves no marker. The probes cover
+globalSetup, globalTeardown, moduleNameMapper, isolateModulesAsync,
+restoreAllMocks with replaceProperty, and vm.runInNewContext.
