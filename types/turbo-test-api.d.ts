@@ -493,10 +493,26 @@ export interface JestAPI extends Omit<ViAPI, JestTimerKeys> {
   unstable_unmockModule(path: string): JestAPI;
   getSeed(): number;
   isEnvironmentTornDown(): boolean;
+  // jest 30's runtime-mock + its alias for unmock. Runtime has both; this shim previously
+  // inherited `mock`/`unmock` via `extends Omit<ViAPI, …>` but left the jest-only pair out.
+  // The optional third `{ virtual: true }` registers the mock against the raw spec without
+  // resolving it against the filesystem (turbo-test#308).
+  mock(path: string, factory: (importOriginal: ImportOriginal) => any, options?: { virtual?: boolean }): void;
+  mock(path: string, factory?: (...args: any[]) => any, options?: { virtual?: boolean }): void;
+  doMock(path: string, factory: (importOriginal: ImportOriginal) => any, options?: { virtual?: boolean }): void;
+  doMock(path: string, factory?: (...args: any[]) => any, options?: { virtual?: boolean }): void;
+  dontMock(path: string): void;
   isolateModules(fn: () => void): void;
   isolateModulesAsync(fn: () => Promise<void>): Promise<void>;
   setTimeout(ms: number): JestAPI;
   retryTimes(n: number): JestAPI;
   replaceProperty(obj: any, key: string, value: any): { restore: () => void };
   now(): number;
+  // jest automock (turbo-test#184): a local `require('./x')` whose spec is not explicitly
+  // mocked / unmocked returns a generated mock. node_modules modules are not automocked.
+  enableAutomock(): JestAPI;
+  disableAutomock(): JestAPI;
+  autoMockOn(): JestAPI;
+  autoMockOff(): JestAPI;
+  onGenerateMock(factory: (exports: any) => any): JestAPI;
 }

@@ -11,6 +11,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Allocate a `v8::String` from a Rust `&str` or panic. Collapses the OOM-guard pattern
+/// `let Some(x) = v8::String::new(scope, s) else { return; };` (which ran 3 lines, two of
+/// them unreachable in test scope) to a single call. V8 string allocation only returns None
+/// on out-of-memory / overflow: effectively unreachable in the runner's test workload, so a
+/// panic matches how `.expect()` is used elsewhere for provably-unreachable V8 failures.
+macro_rules! v8_str {
+    ($scope:expr, $s:expr) => {
+        v8::String::new($scope, $s).expect("v8::String::new failed (OOM)")
+    };
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Kind {
     Esm,
@@ -1781,12 +1792,23 @@ fn runtime_config_for(start: &Path, env: Option<&str>) -> Option<String> {
 /// switch as for a vitest config.
 fn jest_runtime_config_literal(s: &str, env: Option<&str>) -> Option<String> {
     let base = runtime_config_literal_with("", env);
-    let Some(ft) = config_object_literal(s, "fakeTimers") else {
+    let ft = config_object_literal(s, "fakeTimers");
+    // turbo-test#184: jest config `automock: true` enables automock from file-load, mirroring
+    // jest's bootstrap behavior. The runtime's __ttApplyConfig reads `jestAutomock`.
+    let am = config_is_true(s, "automock");
+    if ft.is_none() && !am {
         return base;
-    };
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(ft) = ft {
+        parts.push(format!("jestFakeTimers: {ft}"));
+    }
+    if am {
+        parts.push("jestAutomock: true".to_string());
+    }
     Some(match base {
-        Some(b) => format!("{{ jestFakeTimers: {ft}, {}", &b[2..]),
-        None => format!("{{ jestFakeTimers: {ft} }}"),
+        Some(b) => format!("{{ {}, {}", parts.join(", "), &b[2..]),
+        None => format!("{{ {} }}", parts.join(", ")),
     })
 }
 
@@ -2542,9 +2564,7 @@ fn run_entry_mocks_mr(scope: &mut v8::PinScope, entry: &Path, src: &str, p: &Pat
 fn run_prepass_wrapper(scope: &mut v8::PinScope, entry: &Path, dir: &Path, raw: &str) {
     let wrapped =
         format!("(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})");
-    let Some(code) = v8::String::new(scope, &wrapped) else {
-        return;
-    };
+    let code = v8_str!(scope, &wrapped);
     let tc = std::pin::pin!(v8::TryCatch::new(scope));
     let tc = &mut tc.init();
     let Some(wf) = v8::Script::compile(tc, code, None)
@@ -2558,7 +2578,7 @@ fn run_prepass_wrapper(scope: &mut v8::PinScope, entry: &Path, dir: &Path, raw: 
     if let Some(ek) = v8::String::new(tc, "exports") {
         module_obj.set(tc, ek.into(), exports_obj.into());
     }
-    let dir_str = v8::String::new(tc, &dir.to_string_lossy()).unwrap();
+    let dir_str = v8_str!(tc, &dir.to_string_lossy());
     let g = tc.get_current_context().global(tc);
     // expose the entry dir for vi.importActual('...') used inside factories
     if let Some(k) = v8::String::new(tc, "__ttDir") {
@@ -2569,7 +2589,7 @@ fn run_prepass_wrapper(scope: &mut v8::PinScope, entry: &Path, dir: &Path, raw: 
         return;
     };
     let undef = v8::undefined(tc).into();
-    let fname = v8::String::new(tc, &entry.to_string_lossy()).unwrap();
+    let fname = v8_str!(tc, &entry.to_string_lossy());
     wf.call(
         tc,
         undef,
@@ -2587,12 +2607,10 @@ fn run_prepass_wrapper(scope: &mut v8::PinScope, entry: &Path, dir: &Path, raw: 
 /// fresh vi.hoisted cache for this file; the prepass fills it (the entry
 /// reuses it by index so `const x = vi.hoisted(...)` is one shared object).
 fn prepass_reset_hoisted(tc: &mut v8::PinScope) {
-    let Some(code) = v8::String::new(
+    let code = v8_str!(
         tc,
-        "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;",
-    ) else {
-        return;
-    };
+        "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;"
+    );
     if let Some(s) = v8::Script::compile(tc, code, None) {
         s.run(tc);
     }
@@ -4706,18 +4724,18 @@ fn collect_named_imports(text: &str, abs: &str) -> Vec<String> {
 
 /// Push every identifier named inside the braces of `head`'s nearest `{ ... }` clause into `out`.
 fn collect_brace_named_imports(head: &str, out: &mut Vec<String>) {
-    let Some(close) = head.rfind('}') else { return };
-    let Some(open) = head.get(..close).unwrap_or("").rfind('{') else {
-        return;
-    };
-    for part in head.get(open + 1..close).unwrap_or("").split(',') {
-        let name = part.split_whitespace().last().unwrap_or("").trim();
-        if !name.is_empty()
-            && name
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-        {
-            out.push(name.to_string());
+    if let Some(close) = head.rfind('}') {
+        if let Some(open) = head.get(..close).unwrap_or("").rfind('{') {
+            for part in head.get(open + 1..close).unwrap_or("").split(',') {
+                let name = part.split_whitespace().last().unwrap_or("").trim();
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+                {
+                    out.push(name.to_string());
+                }
+            }
         }
     }
 }
@@ -4826,9 +4844,6 @@ fn remock_in_place<'s>(
         return false;
     };
     let existing = v8::Local::new(scope, &existing_g);
-    if !existing.is_object() || !exports_val.is_object() {
-        return false;
-    }
     let Some((dst, src)) = existing.to_object(scope).zip(exports_val.to_object(scope)) else {
         return false;
     };
@@ -4851,9 +4866,7 @@ fn copy_mock_props(
     names: &[String],
 ) {
     for n in names {
-        let Some(k) = v8::String::new(scope, n) else {
-            continue;
-        };
+        let k = v8_str!(scope, n);
         if !src.has(scope, k.into()).unwrap_or(false) {
             continue;
         }
@@ -6298,7 +6311,7 @@ fn native_require(
     let dir = args.get(0).to_rust_string_lossy(scope);
     let spec = args.get(1).to_rust_string_lossy(scope);
     let esm = native_require_esm_flag(scope, &args);
-    if require_builtin(scope, &mut rv, &spec) {
+    if require_pre_resolve(scope, &mut rv, &dir, &spec) {
         return;
     }
     let Some(abs) = resolve_spec_as(&spec, Path::new(&dir), esm) else {
@@ -6391,6 +6404,34 @@ fn set_cjs_exports(scope: &mut v8::PinScope, rv: &mut v8::ReturnValue, key: &Pat
         .with(|r| r.borrow().cjs_exports.get(key).cloned())
         .map(|g| rv.set(v8::Local::new(scope, &g)))
         .is_some()
+}
+
+/// `native_require` pre-resolution fast paths: node builtins / the test API / lazy stubs, and
+/// `jest.mock(spec, factory, { virtual: true })` mocks (keyed by the raw spec + importer dir,
+/// never resolved). Returns true when one of them served the require.
+fn require_pre_resolve(
+    scope: &mut v8::PinScope,
+    rv: &mut v8::ReturnValue,
+    dir: &str,
+    spec: &str,
+) -> bool {
+    require_builtin(scope, rv, spec) || require_virtual(scope, rv, dir, spec)
+}
+
+/// `native_require` of a `jest.mock(spec, factory, { virtual: true })` mock: served keyed by the
+/// raw spec + importer dir, skipping module resolution (true if served).
+fn require_virtual(
+    scope: &mut v8::PinScope,
+    rv: &mut v8::ReturnValue,
+    dir: &str,
+    spec: &str,
+) -> bool {
+    let key = virtual_mock_key(dir, spec);
+    if !REGISTRY.with(|r| r.borrow().cjs_exports.contains_key(&key)) {
+        return false;
+    }
+    set_cjs_exports(scope, rv, &key);
+    true
 }
 
 /// `native_require` of a node builtin, the test API or a lazy-stubbed barrel (true if served).
@@ -6687,6 +6728,28 @@ fn native_register_mock(
     if let Some(key) = mock_key(&spec, Path::new(&dir)) {
         register_mock_value(scope, &key, exports);
     }
+}
+
+/// `jest.mock(spec, factory, { virtual: true })`: register the factory's exports keyed by the
+/// raw spec (plus the caller's dir), skipping module resolution. `require(spec)` in the test
+/// looks the mock up here before resolving, so the spec never needs to point at a real file.
+fn virtual_mock_key(dir: &str, spec: &str) -> PathBuf {
+    PathBuf::from(format!("<virtual:{dir}\0{spec}>"))
+}
+
+fn native_register_virtual_mock(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let dir = args.get(0).to_rust_string_lossy(scope);
+    let spec = args.get(1).to_rust_string_lossy(scope);
+    let exports = args.get(2);
+    if exports.is_undefined() {
+        return;
+    }
+    let key = virtual_mock_key(&dir, &spec);
+    register_mock_value(scope, &key, exports);
 }
 
 /// Whether `dir` lies in a package the config's `server.deps.inline` names (TURBO_DEPS_INLINE,
@@ -7489,14 +7552,10 @@ fn copy_variant_named_exports<'s>(
 ) {
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(view) {
         for n in names {
-            let Some(k) = v8::String::new(scope, n) else {
-                return;
-            };
+            let k = v8_str!(scope, n);
             if obj.has(scope, k.into()).unwrap_or(false) {
                 if let Some(v) = obj.get(scope, k.into()) {
-                    if module.set_synthetic_module_export(scope, k, v).is_none() {
-                        return;
-                    }
+                    let _ = module.set_synthetic_module_export(scope, k, v);
                 }
             }
         }
@@ -7813,19 +7872,16 @@ fn real_esm_for<'s>(
 /// mocked ES module (not an asset or JSON).
 fn real_esm_eligible(referrer: v8::Local<v8::Module>, abs: &Path) -> bool {
     let hash = referrer.get_identity_hash().get();
-    let Some(from) = REGISTRY.with(|r| r.borrow().path_by_hash.get(&hash).cloned()) else {
-        return false;
-    };
-    let Some(dir) = from.parent() else {
-        return false;
-    };
-    if !dir.to_string_lossy().contains("/node_modules/") || inlined_dep(dir) {
-        return false;
-    }
-    REGISTRY.with(|r| r.borrow().mocks.contains_key(abs))
-        && !is_asset(abs)
-        && abs.extension().and_then(|e| e.to_str()) != Some("json")
-        && matches!(detect_kind(abs), Kind::Esm)
+    REGISTRY
+        .with(|r| r.borrow().path_by_hash.get(&hash).cloned())
+        .and_then(|from| from.parent().map(Path::to_path_buf))
+        .filter(|dir| dir.to_string_lossy().contains("/node_modules/") && !inlined_dep(dir))
+        .is_some_and(|_| {
+            REGISTRY.with(|r| r.borrow().mocks.contains_key(abs))
+                && !is_asset(abs)
+                && abs.extension().and_then(|e| e.to_str()) != Some("json")
+                && matches!(detect_kind(abs), Kind::Esm)
+        })
 }
 
 type MockEntries = (
@@ -8573,11 +8629,9 @@ fn framework_prelude(scope: &mut v8::PinScope) {
         let tc = std::pin::pin!(v8::TryCatch::new(scope));
         let tc = &mut tc.init();
         let ccode = v8::String::new(tc, &chai).unwrap();
-        let ran = v8::Script::compile(tc, ccode, None).and_then(|s| s.run(tc));
-        if ran.is_none() {
-            let msg = caught_message(tc, "Error").unwrap_or_default();
-            chai_missing(&format!("chai failed to load: {msg}"));
-        }
+        v8::Script::compile(tc, ccode, None)
+            .and_then(|s| s.run(tc))
+            .unwrap_or_else(|| chai_missing("chai failed to load"));
     }
     let code = v8::String::new(scope, RUNTIME_JS).unwrap();
     let s = v8::Script::compile(scope, code, None).unwrap();
@@ -8739,6 +8793,12 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__ttCallSite", native_call_site);
     bind_fn(scope, global, "__nativeRequire", native_require);
     bind_fn(scope, global, "__ttRegisterMock", native_register_mock);
+    bind_fn(
+        scope,
+        global,
+        "__ttRegisterVirtualMock",
+        native_register_virtual_mock,
+    );
     bind_fn(scope, global, "__ttImportActual", native_import_actual);
     bind_fn(scope, global, "__ttResetModules", native_reset_modules);
     bind_fn(scope, global, "__ttUnmock", native_unmock);
@@ -9514,11 +9574,10 @@ fn coverage_script_ranges(s: &serde_json::Value) -> (CoverageRanges, CoverageFun
     // (name, outer-range start offset, call count) — the FIRST range of each function is its
     // body span; its count is the invocation count → function coverage.
     let mut funcs: Vec<(String, usize, i64)> = Vec::new();
-    let Some(fns) = s.get("functions").and_then(|f| f.as_array()) else {
-        return (ranges, funcs);
-    };
-    for f in fns {
-        collect_function_ranges(f, &mut ranges, &mut funcs);
+    if let Some(fns) = s.get("functions").and_then(|f| f.as_array()) {
+        for f in fns {
+            collect_function_ranges(f, &mut ranges, &mut funcs);
+        }
     }
     (ranges, funcs)
 }
@@ -9533,19 +9592,17 @@ fn collect_function_ranges(
         .and_then(|n| n.as_str())
         .unwrap_or("")
         .to_string();
-    let Some(rs) = f.get("ranges").and_then(|r| r.as_array()) else {
-        return;
-    };
-    for (i, r) in rs.iter().enumerate() {
-        let Some((s0, e0, c0)) = parse_range(r) else {
-            continue;
-        };
-        if i == 0 && !name.is_empty() {
-            // a top-level wrapper-ish function with no name + huge span is the module body
-            // itself — skip from function metrics, keep its ranges.
-            funcs.push((name.clone(), s0, c0));
+    if let Some(rs) = f.get("ranges").and_then(|r| r.as_array()) {
+        for (i, r) in rs.iter().enumerate() {
+            if let Some((s0, e0, c0)) = parse_range(r) {
+                if i == 0 && !name.is_empty() {
+                    // a top-level wrapper-ish function with no name + huge span is the module body
+                    // itself — skip from function metrics, keep its ranges.
+                    funcs.push((name.clone(), s0, c0));
+                }
+                ranges.push((s0, e0, c0));
+            }
         }
-        ranges.push((s0, e0, c0));
     }
 }
 
