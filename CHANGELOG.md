@@ -5,6 +5,58 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-11-11 — jest compat: full config surface + module resolution fixes
+
+### Added
+- Jest `globalSetup` / `globalTeardown` (#335): reads the config path, boots a fresh V8
+  isolate, loads the script as CJS, and calls the default export (sync or async) once
+  before all suites (setup) / after all suites (teardown). Why: many Jest projects use
+  `globalSetup` for database seeding, server startup, or one-time fixtures.
+- Jest `moduleNameMapper` (#335): regex-prefix patterns with `$1` substitution and
+  `<rootDir>` expansion. Applied before the oxc resolver, so `'^@src/(.*)$'` style
+  aliases work out of the box with a Jest config.
+- Jest `testMatch` discovery (#340): when the vitest `include` array is absent, falls back
+  to the Jest config's `testMatch` globs for file discovery. Why: projects migrating from
+  Jest keep their `testMatch` and expect it honoured.
+- Jest `injectGlobals: false` (#340): reads the jest config flag, caches
+  expect/test/describe/it into the `@jest/globals` synthetic module via
+  `ensure_vitest_builtin`, then removes them from globalThis. Why: some Jest projects
+  opt into explicit imports to avoid global namespace pollution.
+- Jest `moduleDirectories` (#345): configures additional directories for bare-specifier
+  module lookup (beyond `node_modules`), e.g. `["node_modules", "src"]`.
+- Jest `customExportConditions` (#345): forwards custom export conditions to the oxc
+  resolver so packages with conditional exports resolve correctly under Jest config.
+- Jest `isolateModulesAsync` preserves outer module registry (#336): the async variant
+  now snapshots and restores the CJS registry around the callback, matching Jest's
+  semantics where modules loaded inside the callback are isolated.
+- Jest `jest.setTimeout` / `jest.retryTimes` / `jest.getSeed` / `jest.isGeneratingDiff`
+  shims (#337, #338, #339): `setTimeout` sets the default test timeout,
+  `retryTimes` stores retry config (foundation for retry execution), `getSeed` returns
+  the PRNG seed, `isGeneratingDiff` returns false (no snapshot diff in turbo-test).
+- Jest `each` table-driven tests (#341): `test.each` / `describe.each` / `it.each` with
+  array-of-arrays, array-of-primitives, and tagged-template-literal formats.
+- Jest `jest.advanceTimersByTimeAsync` / `jest.advanceTimersToNextTimerAsync` (#342):
+  async timer advancement that flushes microtasks between steps, matching Jest 29+.
+- Jest `jest.replaceProperty` / `jest.spyOn` getter/setter (#343): `replaceProperty`
+  replaces an object property with a value and returns a replacer with `.restore()`;
+  `spyOn` with `'get'`/`'set'` accessor type creates spies on property accessors.
+- Jest `expect.addSnapshotSerializer` (#344): registers custom serializers that are
+  consulted during snapshot matching, matching Jest's `addSnapshotSerializer` API.
+- Jest `expect.closeTo` asymmetric matcher (#346): `expect.closeTo(number, numDigits?)`
+  for use inside `toEqual` / `toMatchObject` patterns, matching Jest's asymmetric API.
+
+### Fixed
+- ESM singleton identity for subpath exports (#316): modules resolved through different
+  subpath export entries (e.g. `pkg` vs `pkg/sub`) but pointing to the same file now
+  return the same module instance, preserving `===` identity.
+- Module resolution cache respects custom conditions (#317): the oxc resolver thread-local
+  cache is keyed by the full set of resolve options including custom export conditions,
+  preventing stale cache hits when conditions change between test files.
+
+### Performance
+- `runtime.js` `__ttApplyConfig` refactored: extracted `__ttApplyJestFields` helper to
+  bring cyclomatic complexity from 9 back within the cc ≤ 7 gate.
+
 ## [0.8.2] — 2026-11-09 — jest compat: automock + virtual mocks, shim gaps
 
 ### Added
