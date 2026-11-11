@@ -197,6 +197,9 @@ struct EmitState<'a, 'r> {
     uses_to_esm: bool,
     /// `LowerCtx::module_path`
     module_path: Option<String>,
+    /// Root-level `const/let/var require = …` clashes with the CJS wrapper's `require` param;
+    /// rename to `_require` (like esbuild's `require2`).
+    require_sym: Option<SymbolId>,
 }
 
 impl<'a> EmitState<'a, '_> {
@@ -396,6 +399,14 @@ impl<'a> EmitState<'a, '_> {
         let Expression::Identifier(id) = expr else {
             return false;
         };
+        if let Some(req_sym) = self.require_sym {
+            if let Some(rid) = id.reference_id.get() {
+                if self.scoping.get_reference(rid).symbol_id() == Some(req_sym) {
+                    *expr = self.ast.expression_identifier(id.span, self.ast.ident("_require"));
+                    return true;
+                }
+            }
+        }
         let Some(access) = self.access_for_ref(id).cloned() else {
             return false;
         };
@@ -461,6 +472,14 @@ impl<'a> VisitMut<'a> for EmitState<'a, '_> {
             return;
         }
         walk_mut::walk_expression(self, expr);
+    }
+
+    fn visit_binding_identifier(&mut self, id: &mut BindingIdentifier<'a>) {
+        if let Some(req_sym) = self.require_sym {
+            if id.symbol_id.get() == Some(req_sym) {
+                id.name = self.ast.ident("_require");
+            }
+        }
     }
 
     fn visit_object_property(&mut self, prop: &mut ObjectProperty<'a>) {
@@ -635,6 +654,7 @@ fn lower<'a>(
     let p = plan(&ast, &scoping, ctx, program)?;
     let (requires, re_exports, exports) = (p.requires, p.re_exports, p.exports);
 
+    let require_sym = scoping.get_root_binding("require".into());
     let mut state = EmitState {
         ast,
         imports: p.imports,
@@ -642,6 +662,7 @@ fn lower<'a>(
         resolve: ctx.resolve,
         uses_to_esm: false,
         module_path: ctx.module_path.clone(),
+        require_sym,
     };
     let mut body = p.body_stmts;
     for stmt in body.iter_mut() {
