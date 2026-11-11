@@ -56,6 +56,10 @@ pub struct Thresholds {
 }
 static THRESHOLDS: Mutex<Option<Thresholds>> = Mutex::new(None);
 static PER_FILE: AtomicBool = AtomicBool::new(false);
+static ALL: AtomicBool = AtomicBool::new(false);
+pub fn set_all(on: bool) {
+    ALL.store(on, Ordering::Relaxed);
+}
 
 /// Parse `lines=90,functions=80,branches=80,statements=90` (any subset, any order). Unknown
 /// keys ignored.
@@ -1034,10 +1038,86 @@ impl Row {
     }
 }
 
+/// Walk the cwd for source files matching the include globs that were never executed, and inject
+/// them into COV with every non-blank line counted at zero hits. Called when `--coverage-all` /
+/// `coverage.all: true` is set, so the report denominator reflects the full source surface.
+fn inject_unexecuted_files() {
+    let inc = INCLUDE.lock().unwrap().clone();
+    if inc.is_empty() {
+        return;
+    }
+    let exc = EXCLUDE.lock().unwrap().clone();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let existing: HashSet<PathBuf> = COV
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    let discovered = discover_source_files(&cwd, &inc, &exc);
+    let mut g = COV.lock().unwrap();
+    let map = g.get_or_insert_with(HashMap::new);
+    for file in discovered {
+        if existing.contains(&file) || is_ignored(&file) {
+            continue;
+        }
+        if let Some(lines) = zero_line_map(&file) {
+            map.insert(file, lines);
+        }
+    }
+}
+
+fn zero_line_map(file: &Path) -> Option<HashMap<u32, u64>> {
+    let src = std::fs::read_to_string(file).ok()?;
+    let mut lines: HashMap<u32, u64> = HashMap::new();
+    for (i, line) in src.lines().enumerate() {
+        if !line.trim().is_empty() {
+            lines.insert((i + 1) as u32, 0);
+        }
+    }
+    if lines.is_empty() { None } else { Some(lines) }
+}
+
+/// Walk `root` recursively, returning absolute paths that pass the include/exclude globs.
+fn discover_source_files(root: &Path, inc: &[String], exc: &[String]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    walk_dir(root, root, inc, exc, &mut out);
+    out
+}
+
+fn skip_dir(name: &std::ffi::OsStr) -> bool {
+    let s = name.to_string_lossy();
+    s == "node_modules" || s == ".git" || s == "target" || s.starts_with('.')
+}
+
+fn walk_dir(dir: &Path, root: &Path, inc: &[String], exc: &[String], out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if skip_dir(&entry.file_name()) {
+                continue;
+            }
+            walk_dir(&path, root, inc, exc, out);
+        } else if path.is_file() {
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            if glob_filter(&rel_str, inc, exc) {
+                out.push(path);
+            }
+        }
+    }
+}
+
 /// Emit the configured coverage reporters and apply threshold gating. Returns `true` if the gate
 /// passed (or no thresholds were configured), `false` if any threshold was unmet — the caller
 /// turns a `false` into a non-zero process exit.
 pub fn report() -> bool {
+    if ALL.load(Ordering::Relaxed) {
+        inject_unexecuted_files();
+    }
     let g = COV.lock().unwrap();
     let map = g.as_ref();
     // Zero instrumented source files is a hard FAILURE, not a vacuous 100% (0/0) green. Almost

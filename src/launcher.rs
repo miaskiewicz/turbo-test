@@ -324,6 +324,7 @@ struct CoverageCfg {
     include: Vec<String>,
     exclude: Vec<String>,
     thresholds: Option<String>,
+    all: bool,
 }
 
 fn vitest_coverage(start_dir: &Path, forced: Option<&Path>) -> Option<CoverageCfg> {
@@ -336,6 +337,7 @@ fn vitest_coverage(start_dir: &Path, forced: Option<&Path>) -> Option<CoverageCf
             include: vec![],
             exclude: vec![],
             thresholds: None,
+            all: false,
         });
     };
     let slice = &text[ci..];
@@ -355,10 +357,12 @@ fn vitest_coverage(start_dir: &Path, forced: Option<&Path>) -> Option<CoverageCf
     } else {
         Some(parts.join(","))
     };
+    let all = scan_bool_true(slice, "all");
     Some(CoverageCfg {
         include,
         exclude,
         thresholds,
+        all,
     })
 }
 
@@ -406,6 +410,26 @@ fn scan_braced(text: &str, key: &str) -> Option<String> {
 /// tail of another identifier so `branches` doesn't match `subBranches`). vitest's withTimeout
 /// treats `<= 0 || Infinity` as "no timeout" (turbo-test#273), so `test.hookTimeout: Infinity`
 /// in a config must forward too.
+fn scan_bool_true(text: &str, key: &str) -> bool {
+    let b = text.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = text[from..].find(key) {
+        let at = from + rel;
+        let after = at + key.len();
+        if is_key_boundary_prev(b, at) {
+            let i = skip_ws(b, after);
+            if i < b.len() && b[i] == b':' {
+                let j = skip_ws(b, i + 1);
+                if text[j..].starts_with("true") {
+                    return true;
+                }
+            }
+        }
+        from = after;
+    }
+    false
+}
+
 fn scan_number(text: &str, key: &str) -> Option<String> {
     let b = text.as_bytes();
     let mut from = 0usize;
@@ -1848,6 +1872,9 @@ fn coverage_forward(cov: &CoverageCfg, forward: &mut Vec<String>) {
     forward_coverage_thresholds(cov.thresholds.as_ref(), forward);
     forward_coverage_globs(&cov.include, "--coverage-include", forward);
     forward_coverage_globs(&cov.exclude, "--coverage-exclude", forward);
+    if cov.all && !has_flag(forward, "--coverage-all") {
+        forward.push("--coverage-all".to_string());
+    }
 }
 
 fn forward_coverage_thresholds(thr: Option<&String>, forward: &mut Vec<String>) {

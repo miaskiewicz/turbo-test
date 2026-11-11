@@ -44,6 +44,12 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   consulted during snapshot matching, matching Jest's `addSnapshotSerializer` API.
 - Jest `expect.closeTo` asymmetric matcher (#346): `expect.closeTo(number, numDigits?)`
   for use inside `toEqual` / `toMatchObject` patterns, matching Jest's asymmetric API.
+- `--coverage-all` flag (#320): includes unexecuted source files (matched by
+  `--coverage-include` globs) in coverage reports at zero hits, so the denominator
+  reflects the full source surface. Auto-read from vitest config `coverage.all: true`.
+  Why: without this, coverage percentages are misleadingly high when most source files
+  have no test touching them — matching vitest's `coverage.all` and Jest's
+  `collectCoverageFrom` behaviour.
 
 ### Fixed
 - ESM singleton identity for subpath exports (#316): modules resolved through different

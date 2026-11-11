@@ -1003,3 +1003,84 @@ fn coverage_is_identical_cold_and_warm() {
     );
     assert_eq!(cold_lcov, warm_lcov);
 }
+
+/// #320: `--coverage-all` includes unexecuted files (matched by include globs) at zero hits,
+/// so the report denominator reflects the full source surface — like Jest's collectCoverageFrom.
+#[test]
+fn coverage_all_reports_unexecuted_files_at_zero() {
+    let p = Project::new("cov-all-320");
+    p.with_esbuild();
+    p.file("package.json", r#"{ "name": "cov-all" }"#);
+    p.file("src/used.js", "exports.used = () => 1;\n");
+    p.file("src/unused.js", "exports.unused = () => 2;\n");
+    p.file(
+        "a.test.js",
+        "const { used } = require('./src/used');\ntest('uses one', () => { expect(used()).toBe(1); });\n",
+    );
+    let r = turbo_test(
+        &p.dir,
+        &[
+            "--coverage",
+            "--coverage-all",
+            "--coverage-include",
+            "src/*.js",
+            "--coverage-reporter",
+            "json-summary",
+            "a.test.js",
+        ],
+        &[],
+    );
+    assert_eq!(r.code, Some(0), "run should pass: {}", r.all());
+    let j = json(&p, "coverage/coverage-summary.json");
+    let keys: Vec<&str> = j
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|k| *k != "total")
+        .map(|k| k.as_str())
+        .collect();
+    assert_eq!(keys.len(), 2, "both src/used.js and src/unused.js: {j}");
+    let total_lines = j["total"]["lines"]["total"].as_u64().unwrap();
+    let covered_lines = j["total"]["lines"]["covered"].as_u64().unwrap();
+    assert!(total_lines >= 2, "at least 2 lines total: {total_lines}");
+    assert!(
+        covered_lines < total_lines,
+        "covered ({covered_lines}) < total ({total_lines}) because unused.js has 0 hits"
+    );
+}
+
+/// #320: without `--coverage-all`, unexecuted files do NOT appear (existing behavior preserved).
+#[test]
+fn coverage_without_all_excludes_unexecuted_files() {
+    let p = Project::new("cov-no-all-320");
+    p.with_esbuild();
+    p.file("package.json", r#"{ "name": "cov-no-all" }"#);
+    p.file("src/used.js", "exports.used = () => 1;\n");
+    p.file("src/unused.js", "exports.unused = () => 2;\n");
+    p.file(
+        "a.test.js",
+        "const { used } = require('./src/used');\ntest('uses one', () => { expect(used()).toBe(1); });\n",
+    );
+    let r = turbo_test(
+        &p.dir,
+        &[
+            "--coverage",
+            "--coverage-include",
+            "src/*.js",
+            "--coverage-reporter",
+            "json-summary",
+            "a.test.js",
+        ],
+        &[],
+    );
+    assert_eq!(r.code, Some(0), "run should pass: {}", r.all());
+    let j = json(&p, "coverage/coverage-summary.json");
+    let keys: Vec<&str> = j
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|k| *k != "total")
+        .map(|k| k.as_str())
+        .collect();
+    assert_eq!(keys.len(), 1, "only src/used.js without --coverage-all: {j}");
+}

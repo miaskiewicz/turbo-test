@@ -109,6 +109,7 @@ pub enum CoverageOp {
     OutDir(String),
     Thresholds(String),
     PerFile,
+    All,
     Reporters(String),
     Include(String),
     Exclude(String),
@@ -122,6 +123,7 @@ impl CoverageOp {
             CoverageOp::OutDir(d) => coverage::set_out_dir(d),
             CoverageOp::Thresholds(v) => coverage::set_thresholds(v),
             CoverageOp::PerFile => coverage::set_per_file(true),
+            CoverageOp::All => coverage::set_all(true),
             CoverageOp::Reporters(v) => coverage::set_reporters(v),
             CoverageOp::Include(v) => coverage::add_include(v),
             CoverageOp::Exclude(v) => coverage::add_exclude(v),
@@ -281,6 +283,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             // launcher.
             "--coverage-include" => push_coverage(&mut o.coverage, CoverageOp::Include, value()),
             "--coverage-exclude" => push_coverage(&mut o.coverage, CoverageOp::Exclude, value()),
+            "--coverage-all" => {
+                o.coverage.push(CoverageOp::Enable);
+                o.coverage.push(CoverageOp::All);
+            }
             // `--no-file-parallelism` (vitest: run test files serially) → jobs = 1.
             "--no-file-parallelism" => o.jobs = 1,
             // Value-taking vitest flags with no effect on a native single-run runner. Consume the
