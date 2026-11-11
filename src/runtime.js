@@ -446,14 +446,18 @@ const __ttCloneConfig = (c) => Object.assign({}, c, { fakeTimers: Object.assign(
 globalThis.__ttCaptureConfigBaseline = () => {
   __ttConfigBaseline = { config: __ttCloneConfig(__ttConfig), saved: __ttConfigSaved && __ttCloneConfig(__ttConfigSaved), zero: __ttZeroDelay };
 };
+function __ttApplyJestFields(cfg) {
+  const { jestFakeTimers, jestAutomock, jestTestTimeout } = cfg;
+  __jestApplyConfig(jestFakeTimers);
+  if (jestAutomock === true) __ttAutomockOn = true;
+  if (typeof jestTestTimeout === 'number' && globalThis.__TT_DEFAULT_TIMEOUT === undefined) globalThis.__TT_DEFAULT_TIMEOUT = jestTestTimeout;
+}
 globalThis.__ttApplyConfig = (cfg) => {
   if (!cfg || typeof cfg !== 'object') return;
   const { fakeTimers, zeroDelayTimers, jestFakeTimers, jestAutomock, jestTestTimeout, ...rest } = cfg;
-  __jestApplyConfig(jestFakeTimers);
-  if (jestAutomock === true) __ttAutomockOn = true;
+  __ttApplyJestFields(cfg);
   if (typeof zeroDelayTimers === 'boolean') __ttZeroDelay = zeroDelayTimers;
   if (fakeTimers && typeof fakeTimers === 'object') __ttConfig.fakeTimers = Object.assign(__ttConfigDefaults().fakeTimers, fakeTimers);
-  if (typeof jestTestTimeout === 'number' && globalThis.__TT_DEFAULT_TIMEOUT === undefined) globalThis.__TT_DEFAULT_TIMEOUT = jestTestTimeout;
   Object.assign(__ttConfig, rest);
 };
 // jest setupFiles pre-framework phase (turbo-test#344): temporarily hide test globals so

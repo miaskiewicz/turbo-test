@@ -1887,7 +1887,11 @@ pub fn run(opts: Options) -> i32 {
         &files,
         std::env::var_os("TURBO_ROOT").map(PathBuf::from).as_deref(),
     );
+    if let Some(code) = run_jest_global_script("globalSetup") {
+        return code;
+    }
     let res = run_files(&Engine::v8(), &files, &names, &order, jobs, opts.bail);
+    run_jest_global_script("globalTeardown");
     let wall_ms = wall.elapsed().as_secs_f64() * 1000.0;
 
     let t = tally(&res);
@@ -1899,6 +1903,20 @@ pub fn run(opts: Options) -> i32 {
     report_machine(
         &opts, &files, &names, &res, &t, start_ms, wall_ms, jobs, &hist_path, hist,
     )
+}
+
+/// Run a jest `globalSetup` or `globalTeardown` script if configured.
+/// Returns `Some(1)` when the script fails (for globalSetup: abort the run).
+fn run_jest_global_script(key: &str) -> Option<i32> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let (setup, teardown) = runner::jest_global_scripts(&cwd);
+    let path = if key == "globalSetup" { setup } else { teardown };
+    let path = path?;
+    if let Err(e) = runner::run_global_script(&path) {
+        eprintln!("{key} failed: {e}");
+        return Some(1);
+    }
+    None
 }
 
 /// Apply `opts`'s side effects (warnings, env, coverage, allowOnly). Returns `Some(code)` when

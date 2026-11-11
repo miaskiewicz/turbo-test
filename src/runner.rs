@@ -2023,6 +2023,54 @@ fn config_is_false(s: &str, key: &str) -> bool {
     })
 }
 
+/// Apply jest `moduleNameMapper` to a specifier. Returns `Some(mapped)` when a pattern matches.
+fn apply_module_name_mapper(spec: &str) -> Option<String> {
+    MODULE_NAME_MAPPER.with(|m| {
+        for (prefix, replacement) in m.borrow().iter() {
+            if let Some(rest) = spec.strip_prefix(prefix.as_str()) {
+                return Some(replacement.replace("$1", rest));
+            }
+        }
+        None
+    })
+}
+
+/// Parse jest `moduleNameMapper` from config text. Extracts `^prefix(.*)$` → replacement
+/// pairs, replacing `<rootDir>` with the actual root directory.
+fn parse_module_name_mapper(s: &str, root_dir: &Path) -> Vec<(String, String)> {
+    let Some(start) = find_config_key(s, "moduleNameMapper") else {
+        return Vec::new();
+    };
+    let tail = &s[start..];
+    let Some(lb) = tail.find('{') else {
+        return Vec::new();
+    };
+    let Some(rb) = tail[lb..].find('}') else {
+        return Vec::new();
+    };
+    let body = &tail[lb + 1..lb + rb];
+    let mut out = Vec::new();
+    for part in body.split(',') {
+        let part = part.trim();
+        if let Some((pattern, target)) = part.split_once(':') {
+            let pattern = pattern.trim().trim_matches(|c| c == '\'' || c == '"');
+            let target = target.trim().trim_matches(|c| c == '\'' || c == '"');
+            let target = target.replace("<rootDir>", &root_dir.to_string_lossy());
+            if let Some(prefix) = extract_simple_prefix(pattern) {
+                out.push((prefix, target));
+            }
+        }
+    }
+    out
+}
+
+/// Extract a literal prefix from a simple regex like `^prefix(.*)$` or `^prefix(.*)`.
+fn extract_simple_prefix(pattern: &str) -> Option<String> {
+    let s = pattern.strip_prefix('^')?;
+    let end = s.find("(.*)")?;
+    Some(s[..end].to_string())
+}
+
 /// A config key's unsigned integer value (`None` when absent or not a whole number).
 fn config_u64_value(s: &str, key: &str) -> Option<u64> {
     let start = find_config_key(s, key)?;
@@ -2180,6 +2228,23 @@ fn config_string_value(s: &str, key: &str) -> Option<String> {
     // skip the key name + colon
     let after_colon = tail.find(':').map(|c| &tail[c + 1..])?.trim_start();
     read_quoted(after_colon)
+}
+
+/// Jest `globalSetup` / `globalTeardown` paths from the project's jest config (#335).
+pub fn jest_global_scripts(cwd: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
+    let Some(text) = jest_config_text(cwd) else {
+        return (None, None);
+    };
+    let resolve = |key: &str| -> Option<PathBuf> {
+        let val = config_string_value(&text, key)?;
+        let p = if val.starts_with('.') {
+            cwd.join(&val)
+        } else {
+            PathBuf::from(&val)
+        };
+        Some(crate::canon::canonicalize(&p).unwrap_or(p))
+    };
+    (resolve("globalSetup"), resolve("globalTeardown"))
 }
 
 /// All string values from an array-valued config key (`key: ['a', 'b']`). Returns an empty vec
@@ -10066,13 +10131,18 @@ fn set_custom_resolve_options(entry: &Path) {
             CUSTOM_MODULE_DIRS.with(|m| *m.borrow_mut() = dirs);
             let conds = config_string_array(&text, "customExportConditions");
             CUSTOM_EXPORT_CONDITIONS.with(|c| *c.borrow_mut() = conds);
+            let root_dir = config_string_value(&text, "rootDir")
+                .map(|r| normalize_path(&d.join(&r)))
+                .unwrap_or_else(|| d.to_path_buf());
+            let mapper = parse_module_name_mapper(&text, &root_dir);
+            MODULE_NAME_MAPPER.with(|m| *m.borrow_mut() = mapper);
             return;
         }
         dir = d.parent();
     }
-    // No jest config: clear any stale values from a prior entry.
     CUSTOM_MODULE_DIRS.with(|m| m.borrow_mut().clear());
     CUSTOM_EXPORT_CONDITIONS.with(|c| c.borrow_mut().clear());
+    MODULE_NAME_MAPPER.with(|m| m.borrow_mut().clear());
 }
 
 /// Setup-file mock specifiers to externalize from the bundle, and each one's mock target by
@@ -10735,6 +10805,74 @@ fn run_fresh_with(
         Ok(r) => r,
         Err(_) => Err("panicked (fresh retry)".to_string()),
     }
+}
+
+/// Run a jest globalSetup or globalTeardown script in a fresh V8 isolate.
+/// The script is loaded as CJS; if it exports a function, that function is called.
+pub fn run_global_script(path: &Path) -> Result<(), String> {
+    let abs = crate::canon::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let isolate = &mut v8::Isolate::new(isolate_params());
+    v8::scope!(let scope, isolate);
+    let context = framework_snapshot().new_context(scope, false);
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let global = context.global(scope);
+    install_natives(scope, global);
+    set_project_cwd(scope, &abs);
+    CJS_FIRST_RESOLUTION.with(|c| c.set(true));
+    set_custom_resolve_options(&abs);
+    {
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let tc = &mut tc.init();
+        if load_cjs(tc, &abs, false).is_none() {
+            let msg = caught_message(tc, "globalSetup/globalTeardown load failed");
+            clear_registry();
+            return Err(msg.unwrap_or_else(|| "load failed".into()));
+        }
+        tc.perform_microtask_checkpoint();
+    }
+    let result = call_global_script_export(scope, &abs);
+    clear_registry();
+    result
+}
+
+fn global_script_callable<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: &Path,
+) -> Option<v8::Local<'s, v8::Function>> {
+    let key = abs.to_path_buf();
+    let exports_g = REGISTRY.with(|r| r.borrow().cjs_exports.get(&key).cloned())?;
+    let exports = v8::Local::new(scope, &exports_g);
+    if exports.is_function() {
+        return v8::Local::<v8::Function>::try_from(exports).ok();
+    }
+    let obj = exports.to_object(scope)?;
+    let default_key = v8::String::new(scope, "default")?;
+    let val = obj.get(scope, default_key.into()).filter(|v| v.is_function())?;
+    v8::Local::<v8::Function>::try_from(val).ok()
+}
+
+fn call_global_script_export(
+    scope: &mut v8::PinScope,
+    abs: &Path,
+) -> Result<(), String> {
+    let Some(func) = global_script_callable(scope, abs) else {
+        return Ok(());
+    };
+    let tc = std::pin::pin!(v8::TryCatch::new(scope));
+    let tc = &mut tc.init();
+    let undef = v8::undefined(tc).into();
+    let ret = func.call(tc, undef, &[]);
+    tc.perform_microtask_checkpoint();
+    if let Some(promise) = ret.filter(|v| v.is_promise()) {
+        let promise = v8::Local::<v8::Promise>::try_from(promise).unwrap();
+        let g = tc.get_current_context().global(tc);
+        run_event_loop(tc, g, promise, 100_000)?;
+    }
+    if tc.has_caught() {
+        let msg = caught_message(tc, "globalSetup/globalTeardown failed");
+        return Err(msg.unwrap_or_else(|| "failed".into()));
+    }
+    Ok(())
 }
 
 fn drive_tests(
