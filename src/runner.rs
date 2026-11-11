@@ -103,6 +103,10 @@ thread_local! {
     /// Jest `customExportConditions`: additional package.json export conditions appended to
     /// the resolver's condition set (turbo-test#345). Empty when unconfigured.
     static CUSTOM_EXPORT_CONDITIONS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    /// Jest `moduleNameMapper`: pairs of (prefix, replacement) derived from the jest config's
+    /// moduleNameMapper object (turbo-test#335). Each entry maps a simple `^prefix(.*)$`
+    /// pattern to a replacement path (`$1` is the capture). Empty when unconfigured.
+    static MODULE_NAME_MAPPER: RefCell<Vec<(String, String)>> = RefCell::new(Vec::new());
     /// Set while resolve+drain of pending vi.mock factories is in progress. An async factory's
     /// `await import('<self>')` re-enters load_cjs(drain_mocks=true) for the real module; without
     /// this guard that nested call would drain (and clear) the very queue we're mid-resolving,
@@ -733,6 +737,8 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
     if let Some(qpos) = spec.find('?') {
         return resolve_queried_spec(spec, qpos, from_dir, esm);
     }
+    let mapped = apply_module_name_mapper(spec);
+    let spec = mapped.as_deref().unwrap_or(spec);
     // A `node_modules/<pkg>/...` import (some tests `await import('node_modules/x/dist/y')`)
     // is really a bare specifier — strip the prefix so oxc resolves it from node_modules.
     let spec = spec.strip_prefix("node_modules/").unwrap_or(spec);
@@ -10415,13 +10421,20 @@ fn prepare_fresh_env(
     }
     // 0a½. jest `setupFiles` (pre-framework, turbo-test#344): run with framework globals hidden.
     run_jest_early_setup(scope, plan)?;
-    // 0b. project setupFiles (vitest) / setupFilesAfterEnv (jest): register jest-dom matchers
-    //     (expect.extend) AND any global vi.mock()s, draining each into the path-keyed mock
-    //     registry.
+    // 0b–0c: project setup files, then snapshot serializers.
+    run_setup_and_serializers(scope, entry_abs, plan)
+}
+
+/// Steps 0b–0c: run each project setup file (vitest `setupFiles` / jest `setupFilesAfterEnv`)
+/// to register jest-dom matchers and global mocks, then load snapshot serializers.
+fn run_setup_and_serializers(
+    scope: &mut v8::PinScope,
+    entry_abs: &Path,
+    plan: &EntryPlan,
+) -> Result<(), String> {
     for sf in plan.setup_files {
         run_setup_file(scope, sf, plan.externals, plan.mock_targets)?;
     }
-    // 0c. the config's snapshotSerializers (turbo-test#167), after the setup files
     let serializers = vitest_snapshot_serializers(entry_abs);
     if !serializers.is_empty() {
         load_snapshot_serializers(scope, &serializers)?;
