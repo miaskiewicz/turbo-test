@@ -247,6 +247,17 @@ fn assemble_bundle(
     }
     // the entry is the first module walked, so its id is always 0.
     out.push_str("module.exports = require_m0();\n");
+    // turbo-test#316: register non-entry sub-modules in the require cache so a later
+    // `require('pkg/subpath')` that resolves to a file already bundled here returns the SAME
+    // module instance (identity). `__ttRegBundled` is a native function that calls the lazy
+    // `__commonJS` init (idempotent — returns the cached `mod.exports`) and registers the result
+    // under the file's absolute path.
+    for idx in 1..order.len() {
+        let escaped = order[idx].to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+        out.push_str(&format!(
+            "__ttRegBundled(\"{escaped}\", require_m{idx});\n"
+        ));
+    }
     Some(out)
 }
 

@@ -1982,6 +1982,14 @@ fn config_is_true(s: &str, key: &str) -> bool {
     })
 }
 
+fn config_is_false(s: &str, key: &str) -> bool {
+    find_config_key(s, key).is_some_and(|start| {
+        s[start..]
+            .split_once(':')
+            .is_some_and(|(_, v)| v.trim_start().starts_with("false"))
+    })
+}
+
 /// A config key's unsigned integer value (`None` when absent or not a whole number).
 fn config_u64_value(s: &str, key: &str) -> Option<u64> {
     let start = find_config_key(s, key)?;
@@ -3119,7 +3127,8 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
     // (turbo-test#133)
     // v7: package ES modules marked "pkg" (turbo-test#159)
     // v8: each module's closure takes the bundle's helpers as parameters (turbo-test#230)
-    "native-dep-v8-bundle".hash(&mut h);
+    // v9: sub-module registration for singleton identity (turbo-test#316)
+    "native-dep-v9-bundle".hash(&mut h);
     // the bundle inlines the package's whole relative graph, not just this file: two installs
     // with the same entry file (user-event 14.6.1 / 14.6.8) differ inside, so the key names this
     // install (its path) and its package.json (turbo-test#213)
@@ -4502,6 +4511,19 @@ fn read_transformed_mr_app(abs: &Path, prefer_metadata: bool) -> Option<Option<S
         }
     }
     esbuild_transform_cjs(abs, prefer_metadata).map(Some)
+}
+
+/// Whether the entry file can be CJS-transformed for the module-runner path: the native oxc
+/// emitter (no esbuild needed) or the esbuild single-file transform. Used as the guard for
+/// `load_and_drive_cjs_entry` so projects without esbuild still take the CJS path when the
+/// native emitter handles the file (turbo-test#316: needed for singleton dep bundling).
+fn mr_entry_transformable(abs: &Path) -> bool {
+    if crate::esm_cjs::enabled() && !crate::coverage::enabled() {
+        if let Some(Some(_)) = read_transformed_native(abs) {
+            return true;
+        }
+    }
+    esbuild_transform_cjs(abs, false).is_some()
 }
 
 fn mr_app_meta_wanted(abs: &Path) -> bool {
@@ -8933,11 +8955,38 @@ fn node_tmpdir(var: impl Fn(&str) -> Option<String>) -> String {
     }
 }
 
+/// turbo-test#316: register a bundled sub-module's exports in the require cache so a later
+/// `require('pkg/subpath')` resolving to the same file returns the identical module instance.
+/// Called by the native bundler's output for every non-entry file in the bundle.
+/// Args: (absolute_path: string, factory: () => module.exports).
+fn native_reg_bundled(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let path_str = args.get(0).to_rust_string_lossy(scope);
+    let abs = PathBuf::from(&*path_str);
+    // Already registered (a previous bundle or a direct require): skip.
+    if REGISTRY.with(|r| r.borrow().cjs_synth_by_path.contains_key(&abs)) {
+        return;
+    }
+    let Ok(factory) = v8::Local::<v8::Function>::try_from(args.get(1)) else {
+        return;
+    };
+    let undefined = v8::undefined(scope).into();
+    let Some(exports) = factory.call(scope, undefined, &[]) else {
+        return;
+    };
+    let global = scope.get_current_context().global(scope);
+    register_cjs_exports(scope, global, &abs, exports);
+}
+
 fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "log", native_log);
     bind_fn(scope, global, "__ttWrite", native_write);
     bind_fn(scope, global, "__ttCallSite", native_call_site);
     bind_fn(scope, global, "__nativeRequire", native_require);
+    bind_fn(scope, global, "__ttRegBundled", native_reg_bundled);
     bind_fn(scope, global, "__ttRegisterMock", native_register_mock);
     bind_fn(
         scope,
@@ -10060,6 +10109,28 @@ fn apply_runtime_config(scope: &mut v8::PinScope, entry_abs: &Path) {
     }
 }
 
+fn jest_inject_globals_false(entry: &Path) -> bool {
+    let dir = entry.parent().unwrap_or(entry);
+    let text = jest_config_text(dir);
+    let result = text.as_ref().is_some_and(|s| config_is_false(s, "injectGlobals"));
+    eprintln!("[DEBUG] jest_inject_globals_false({}) dir={} text={:?} => {result}", entry.display(), dir.display(), text.as_deref().map(|s| &s[..s.len().min(80)]));
+    result
+}
+
+fn remove_framework_globals(scope: &mut v8::PinScope) {
+    ensure_vitest_builtin(scope);
+    let global = scope.get_current_context().global(scope);
+    let undef = v8::undefined(scope);
+    for name in [
+        "expect", "test", "it", "describe", "beforeAll",
+        "afterAll", "beforeEach", "afterEach",
+    ] {
+        if let Some(k) = v8::String::new(scope, name) {
+            global.set(scope, k.into(), undef.into());
+        }
+    }
+}
+
 /// Reset the vi.hoisted index (keep the cache the prepass filled) so the entry's
 /// `const x = vi.hoisted(...)` calls reuse the SAME objects the mock factories closed over, by
 /// re-hitting the cache in source order.
@@ -10078,12 +10149,13 @@ fn load_and_drive_entry(
     entry_abs: &Path,
     load_target: &Path,
 ) -> Result<TestReport, String> {
-    // Module-runner: load the entry as CJS (esbuild --format=cjs transform); its body
-    // (describe/it + inline vi.mock) runs in-realm via the CJS wrapper, with the
+    // Module-runner: load the entry as CJS (native oxc or esbuild --format=cjs transform);
+    // its body (describe/it + inline vi.mock) runs in-realm via the CJS wrapper, with the
     // require-graph loaded per-module (live bindings, shared react). No ESM bundle.
-    // Only when the entry can actually be CJS-transformed (esbuild project present);
-    // standalone ESM fixtures (no esbuild) fall through to the legacy ESM graph loader.
-    if mr_enabled() && esbuild_transform_cjs(entry_abs, false).is_some() {
+    // Succeeds when the entry can be CJS-transformed: the native oxc path (no esbuild needed)
+    // or the esbuild path. Standalone ESM fixtures that neither handles fall through to the
+    // legacy ESM graph loader.
+    if mr_enabled() && mr_entry_transformable(entry_abs) {
         return load_and_drive_cjs_entry(scope, global, entry_abs);
     }
     let module = load_entry_graph(scope, load_target)?;
@@ -10239,10 +10311,37 @@ fn run_fresh_file(
     if dom {
         setup_dom(scope, entry_abs);
     }
+    // 0a–0c. runtime config, setup files, serializers.
+    prepare_fresh_env(scope, entry_abs, plan)?;
+    // 1. entry-file vi.mock(): hoisted + registered before instantiation, via a
+    //    transformed pre-pass (handles JSX/factory transforms), drained to the
+    //    path-keyed mock registry. Its specifiers were externalized from the bundle.
+    run_entry_mocks(scope, entry_abs)?;
+    reset_hoisted_idx(scope);
+    // 2. load + run the test module.
+    load_and_drive_entry(scope, global, entry_abs, plan.load_target)
+}
+
+/// Steps 0a–0c of `run_fresh_file`: runtime config, globals, jest early setup, vitest/jest setup
+/// files and snapshot serializers — everything that runs before the entry's own mocks.
+fn prepare_fresh_env(
+    scope: &mut v8::PinScope,
+    entry_abs: &Path,
+    plan: &EntryPlan,
+) -> Result<(), String> {
     // 0a. the config's test.fakeTimers (what vi.useFakeTimers() uses, turbo-test#180) and
     //     mock / stub switches (turbo-test#183), for the setup files too (a literal that
     //     does not evaluate is left out, as vitest would fail earlier)
     apply_runtime_config(scope, entry_abs);
+    if jest_inject_globals_false(entry_abs) {
+        remove_framework_globals(scope);
+        let global = scope.get_current_context().global(scope);
+        if let Some(k) = v8::String::new(scope, "expect") {
+            if let Some(v) = global.get(scope, k.into()) {
+                eprintln!("[DEBUG] after remove: expect is_undefined={} is_function={}", v.is_undefined(), v.is_function());
+            }
+        }
+    }
     // 0a½. jest `setupFiles` (pre-framework, turbo-test#344): run with framework globals hidden.
     run_jest_early_setup(scope, plan)?;
     // 0b. project setupFiles (vitest) / setupFilesAfterEnv (jest): register jest-dom matchers
@@ -10256,13 +10355,7 @@ fn run_fresh_file(
     if !serializers.is_empty() {
         load_snapshot_serializers(scope, &serializers)?;
     }
-    // 1. entry-file vi.mock(): hoisted + registered before instantiation, via a
-    //    transformed pre-pass (handles JSX/factory transforms), drained to the
-    //    path-keyed mock registry. Its specifiers were externalized from the bundle.
-    run_entry_mocks(scope, entry_abs)?;
-    reset_hoisted_idx(scope);
-    // 2. load + run the test module.
-    load_and_drive_entry(scope, global, entry_abs, plan.load_target)
+    Ok(())
 }
 
 /// What a test file runs with besides its entry: setup files, the bundle's externalized mock
@@ -10451,6 +10544,9 @@ fn run_test_file_reused(entry_abs: &Path, plan: &EntryPlan) -> Result<TestReport
         // the config's runtime settings for this file (zeroDelayTimers, fakeTimers, mock / stub
         // switches), as the fresh path applies them; the reset above restored the defaults
         apply_runtime_config(scope, entry_abs);
+        if jest_inject_globals_false(entry_abs) {
+            remove_framework_globals(scope);
+        }
         // __cwd: the test's project root (nearest package.json outside node_modules).
         set_project_cwd(scope, entry_abs);
         let setup_us = setup_start.elapsed().as_secs_f64() * 1_000_000.0;
