@@ -97,6 +97,12 @@ thread_local! {
     /// Node's conditions, `import` for an import and `require` for a require(), turbo-test#134)
     /// for vitest/React projects.
     static CJS_FIRST_RESOLUTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Jest `moduleDirectories`: additional directories to search for bare modules besides
+    /// `node_modules` (turbo-test#345). Empty when unconfigured (only `node_modules`).
+    static CUSTOM_MODULE_DIRS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    /// Jest `customExportConditions`: additional package.json export conditions appended to
+    /// the resolver's condition set (turbo-test#345). Empty when unconfigured.
+    static CUSTOM_EXPORT_CONDITIONS: RefCell<Vec<String>> = RefCell::new(Vec::new());
     /// Set while resolve+drain of pending vi.mock factories is in progress. An async factory's
     /// `await import('<self>')` re-enters load_cjs(drain_mocks=true) for the real module; without
     /// this guard that nested call would drain (and clear) the very queue we're mid-resolving,
@@ -399,12 +405,27 @@ fn base_resolve_options(
             &["browser", "main", "module"],
         )
     };
+    // turbo-test#345: jest `customExportConditions` — additional conditions appended to the set.
+    let mut cond_names = strs(conditions);
+    CUSTOM_EXPORT_CONDITIONS.with(|c| cond_names.extend(c.borrow().iter().cloned()));
+    // turbo-test#345: jest `moduleDirectories` — custom resolve directories besides
+    // `node_modules`. The default is `["node_modules"]`; when configured, the value replaces
+    // the default (jest semantics).
+    let modules = CUSTOM_MODULE_DIRS.with(|m| {
+        let v = m.borrow();
+        if v.is_empty() {
+            strs(&["node_modules"])
+        } else {
+            v.clone()
+        }
+    });
     oxc_resolver::ResolveOptions {
         extensions: strs(&[
             ".ts", ".tsx", ".mjs", ".js", ".jsx", ".cjs", ".json", ".node",
         ]),
-        condition_names: strs(conditions),
+        condition_names: cond_names,
         main_fields: strs(mains),
+        modules,
         // vitest/vite `resolve.alias` + `test.alias` (launcher → TURBO_ALIAS). oxc matches an alias
         // key exactly or as a `key/`-prefixed path, so `@` -> /abs/src turns `@/foo` into
         // /abs/src/foo (and leaves `@scope/pkg` alone). tsconfig `paths` stay separate (below).
@@ -510,9 +531,12 @@ fn is_esm_module_uncached(abs: &Path) -> bool {
     }
 }
 
-/// The resolvers by (nearest tsconfig, ESM importer, CJS-first resolution).
-type ResolverCache =
-    HashMap<(Option<PathBuf>, bool, bool, bool), std::rc::Rc<oxc_resolver::Resolver>>;
+/// The resolvers by (nearest tsconfig, ESM importer, CJS-first resolution, require_fallback,
+/// custom module dirs, custom export conditions).
+type ResolverCache = HashMap<
+    (Option<PathBuf>, bool, bool, bool, Vec<String>, Vec<String>),
+    std::rc::Rc<oxc_resolver::Resolver>,
+>;
 
 /// A resolver configured for the nearest tsconfig of `from_dir` + the importer's module kind
 /// (ESM vs CJS conditions), cached per (tsconfig, esm).
@@ -529,12 +553,15 @@ fn resolver_with(
     thread_local! {
         static RESOLVERS: RefCell<ResolverCache> = RefCell::new(HashMap::new());
     }
-    // CJS-first mode is part of the key so a flip rebuilds the resolver (it changes conditions).
+    // CJS-first mode, custom module dirs and export conditions are part of the key so a flip
+    // rebuilds the resolver (they change the resolve options).
     let key = (
         nearest_tsconfig(from_dir),
         esm,
         CJS_FIRST_RESOLUTION.with(|c| c.get()),
         require_fallback,
+        CUSTOM_MODULE_DIRS.with(|m| m.borrow().clone()),
+        CUSTOM_EXPORT_CONDITIONS.with(|c| c.borrow().clone()),
     );
     RESOLVERS.with(|m| {
         if let Some(r) = m.borrow().get(&key) {
@@ -2147,6 +2174,34 @@ fn config_string_value(s: &str, key: &str) -> Option<String> {
     // skip the key name + colon
     let after_colon = tail.find(':').map(|c| &tail[c + 1..])?.trim_start();
     read_quoted(after_colon)
+}
+
+/// All string values from an array-valued config key (`key: ['a', 'b']`). Returns an empty vec
+/// when the key is absent or not an array. Used for jest `moduleDirectories` / `customExportConditions`.
+fn config_string_array(s: &str, key: &str) -> Vec<String> {
+    let Some(start) = find_config_key(s, key) else {
+        return Vec::new();
+    };
+    let tail = &s[start..];
+    let Some(lb) = tail.find('[') else {
+        return Vec::new();
+    };
+    let Some(rb) = tail[lb..].find(']') else {
+        return Vec::new();
+    };
+    tail[lb + 1..lb + rb]
+        .split(',')
+        .filter_map(|part| {
+            let q = part
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"' || c == '`');
+            if q.is_empty() {
+                None
+            } else {
+                Some(q.to_string())
+            }
+        })
+        .collect()
 }
 
 /// The quoted string value starting at `s` (first byte a quote), or `None`.
@@ -9990,6 +10045,28 @@ fn prepare_entry_thread_locals(entry_abs: &Path) {
     // CommonJS-first resolution for jest/node backends (sequelize/tslib/lexical get their working
     // require-condition build). Decided once per file from the project; vitest/React → ESM-first.
     CJS_FIRST_RESOLUTION.with(|c| c.set(cjs_first_project(entry_abs)));
+    // turbo-test#345: jest `moduleDirectories` and `customExportConditions` — read from the
+    // nearest jest config and stash in thread-locals for the resolver.
+    set_custom_resolve_options(entry_abs);
+}
+
+/// Read jest `moduleDirectories` and `customExportConditions` from the nearest jest config and
+/// store them in thread-locals so `base_resolve_options()` picks them up (turbo-test#345).
+fn set_custom_resolve_options(entry: &Path) {
+    let mut dir = entry.parent();
+    while let Some(d) = dir {
+        if let Some(text) = jest_config_text(d) {
+            let dirs = config_string_array(&text, "moduleDirectories");
+            CUSTOM_MODULE_DIRS.with(|m| *m.borrow_mut() = dirs);
+            let conds = config_string_array(&text, "customExportConditions");
+            CUSTOM_EXPORT_CONDITIONS.with(|c| *c.borrow_mut() = conds);
+            return;
+        }
+        dir = d.parent();
+    }
+    // No jest config: clear any stale values from a prior entry.
+    CUSTOM_MODULE_DIRS.with(|m| m.borrow_mut().clear());
+    CUSTOM_EXPORT_CONDITIONS.with(|c| c.borrow_mut().clear());
 }
 
 /// Setup-file mock specifiers to externalize from the bundle, and each one's mock target by
@@ -10112,9 +10189,7 @@ fn apply_runtime_config(scope: &mut v8::PinScope, entry_abs: &Path) {
 fn jest_inject_globals_false(entry: &Path) -> bool {
     let dir = entry.parent().unwrap_or(entry);
     let text = jest_config_text(dir);
-    let result = text.as_ref().is_some_and(|s| config_is_false(s, "injectGlobals"));
-    eprintln!("[DEBUG] jest_inject_globals_false({}) dir={} text={:?} => {result}", entry.display(), dir.display(), text.as_deref().map(|s| &s[..s.len().min(80)]));
-    result
+    text.as_ref().is_some_and(|s| config_is_false(s, "injectGlobals"))
 }
 
 fn remove_framework_globals(scope: &mut v8::PinScope) {
@@ -10218,15 +10293,17 @@ fn load_and_drive_cjs_entry(
     // Persist __ttDir = the entry file's dir for the test-run phase (loads cleared it).
     // So vi.doMock/vi.unmock/vi.importActual fired from inside a test callback resolve
     // relative + `@/`-aliased specs against the test file, like at hoist time.
+    persist_entry_dir(scope, entry_abs);
+    drive_tests(scope, global, entry_abs)
+}
+
+/// Set `globalThis.__ttDir` to the entry file's directory so vi.doMock/vi.unmock/vi.importActual
+/// inside test callbacks resolve relative specs against the test file.
+fn persist_entry_dir(scope: &mut v8::PinScope, entry_abs: &Path) {
     if let Some(d) = entry_abs.parent() {
         let js = format!("globalThis.__ttDir = {:?};", d.to_string_lossy());
-        if let Some(code) = v8::String::new(scope, &js) {
-            if let Some(s) = v8::Script::compile(scope, code, None) {
-                s.run(scope);
-            }
-        }
+        run_js(scope, &js);
     }
-    drive_tests(scope, global, entry_abs)
 }
 
 /// Fresh path: run one file in its own isolate booted from the framework snapshot.
@@ -10335,12 +10412,6 @@ fn prepare_fresh_env(
     apply_runtime_config(scope, entry_abs);
     if jest_inject_globals_false(entry_abs) {
         remove_framework_globals(scope);
-        let global = scope.get_current_context().global(scope);
-        if let Some(k) = v8::String::new(scope, "expect") {
-            if let Some(v) = global.get(scope, k.into()) {
-                eprintln!("[DEBUG] after remove: expect is_undefined={} is_function={}", v.is_undefined(), v.is_function());
-            }
-        }
     }
     // 0a½. jest `setupFiles` (pre-framework, turbo-test#344): run with framework globals hidden.
     run_jest_early_setup(scope, plan)?;
