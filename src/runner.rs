@@ -442,6 +442,13 @@ fn nearest_tsconfig(dir: &Path) -> Option<PathBuf> {
 }
 
 fn nearest_tsconfig_uncached(dir: &Path) -> Option<PathBuf> {
+    // turbo-test#317: a dependency's published tsconfig (e.g. `side-channel/tsconfig.json`
+    // extending a dev-only `@ljharb/tsconfig` not installed by the consumer) must not poison
+    // the resolver. tsconfig `paths` are only useful for the project's own code, so skip any
+    // tsconfig found inside `node_modules`.
+    if in_node_modules(dir) {
+        return None;
+    }
     let mut d = Some(dir);
     while let Some(cur) = d {
         let tc = cur.join("tsconfig.json");
@@ -459,6 +466,12 @@ fn nearest_tsconfig_uncached(dir: &Path) -> Option<PathBuf> {
         d = cur.parent();
     }
     None
+}
+
+/// Whether `dir` is inside a `node_modules` tree (any ancestor is named `node_modules`).
+fn in_node_modules(dir: &Path) -> bool {
+    dir.components()
+        .any(|c| c.as_os_str() == "node_modules")
 }
 
 /// Is `abs` an ES module (so its imports resolve with the "import" condition)? .mjs/.ts/.tsx are
@@ -1792,24 +1805,38 @@ fn runtime_config_for(start: &Path, env: Option<&str>) -> Option<String> {
 /// switch as for a vitest config.
 fn jest_runtime_config_literal(s: &str, env: Option<&str>) -> Option<String> {
     let base = runtime_config_literal_with("", env);
-    let ft = config_object_literal(s, "fakeTimers");
-    // turbo-test#184: jest config `automock: true` enables automock from file-load, mirroring
-    // jest's bootstrap behavior. The runtime's __ttApplyConfig reads `jestAutomock`.
-    let am = config_is_true(s, "automock");
-    if ft.is_none() && !am {
+    let parts = jest_config_parts(s);
+    if parts.is_empty() {
         return base;
-    }
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(ft) = ft {
-        parts.push(format!("jestFakeTimers: {ft}"));
-    }
-    if am {
-        parts.push("jestAutomock: true".to_string());
     }
     Some(match base {
         Some(b) => format!("{{ {}, {}", parts.join(", "), &b[2..]),
         None => format!("{{ {} }}", parts.join(", ")),
     })
+}
+
+/// Collect the Jest config fields that map into the runtime config literal.
+fn jest_config_parts(s: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(ft) = config_object_literal(s, "fakeTimers") {
+        parts.push(format!("jestFakeTimers: {ft}"));
+    }
+    if config_is_true(s, "automock") {
+        parts.push("jestAutomock: true".to_string());
+    }
+    if let Some(ms) = config_u64_value(s, "testTimeout") {
+        parts.push(format!("jestTestTimeout: {ms}"));
+    }
+    for (key, field) in [
+        ("clearMocks", "clearMocks"),
+        ("resetMocks", "mockReset"),
+        ("restoreMocks", "restoreMocks"),
+    ] {
+        if config_is_true(s, key) {
+            parts.push(format!("{field}: true"));
+        }
+    }
+    parts
 }
 
 /// The warning for a `TURBO_ZERO_DELAY_TIMERS` value that is not `0|1|true|false` (ignored).
@@ -1945,6 +1972,14 @@ fn config_is_true(s: &str, key: &str) -> bool {
             .split_once(':')
             .is_some_and(|(_, v)| v.trim_start().starts_with("true"))
     })
+}
+
+/// A config key's unsigned integer value (`None` when absent or not a whole number).
+fn config_u64_value(s: &str, key: &str) -> Option<u64> {
+    let start = find_config_key(s, key)?;
+    let after = s[start..].split_once(':')?.1.trim_start();
+    let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+    after[..end].parse().ok()
 }
 
 /// The `{ ... }` value of a config key, braces included (`None` when the key is absent or its

@@ -448,11 +448,12 @@ globalThis.__ttCaptureConfigBaseline = () => {
 };
 globalThis.__ttApplyConfig = (cfg) => {
   if (!cfg || typeof cfg !== 'object') return;
-  const { fakeTimers, zeroDelayTimers, jestFakeTimers, jestAutomock, ...rest } = cfg;
+  const { fakeTimers, zeroDelayTimers, jestFakeTimers, jestAutomock, jestTestTimeout, ...rest } = cfg;
   __jestApplyConfig(jestFakeTimers);
   if (jestAutomock === true) __ttAutomockOn = true;
   if (typeof zeroDelayTimers === 'boolean') __ttZeroDelay = zeroDelayTimers;
   if (fakeTimers && typeof fakeTimers === 'object') __ttConfig.fakeTimers = Object.assign(__ttConfigDefaults().fakeTimers, fakeTimers);
+  if (typeof jestTestTimeout === 'number' && globalThis.__TT_DEFAULT_TIMEOUT === undefined) globalThis.__TT_DEFAULT_TIMEOUT = jestTestTimeout;
   Object.assign(__ttConfig, rest);
 };
 // vitest's clearModuleMocks (onBeforeTryTask): before each attempt of a test, its beforeEach too
@@ -4044,7 +4045,7 @@ const __ttRequireEsm = (m) => {
 let __ttAutomockOn = false;
 // The generator (`jest.onGenerateMock(factory)`): `(exports) => mockedExports`. Default:
 // `vi.mockObject(exports)` (same deep automocker vitest's factory-less vi.mock uses).
-const __ttAutomockDefaultGen = (exports) => __automock(exports, 0);
+const __ttAutomockDefaultGen = (_path, exports) => __automock(exports, 0);
 let __ttAutomockGenerator = __ttAutomockDefaultGen;
 // Specs the file has explicitly mocked or unmocked (jest.mock/doMock/unmock/setMock/vi.mock
 // /vi.unmock), by their resolved key: these skip automock interception.
@@ -4084,9 +4085,21 @@ function __ttAutomockShould(dir, spec) {
   if (!resolved || resolved.includes('/node_modules/')) return false;
   return !__ttAutomockExplicit.has(resolved);
 }
+// Check for a colocated `__mocks__/<basename>` manual mock next to the resolved module path.
+// Jest loads the manual mock when present, even for a factory-less `jest.mock('./x')`.
+function __ttManualMockPath(dir, spec) {
+  const resolved = dir ? __ttAutomockResolve(dir, String(spec)) : '';
+  if (!resolved) return '';
+  const d = globalThis.__dirnameOf(resolved);
+  const b = __basename(resolved);
+  const candidate = d + '/__mocks__/' + b;
+  return globalThis.__fs_existsSync(candidate) ? candidate : '';
+}
 // Do NOT swallow onGenerateMock errors: jest surfaces them to the test (a broken generator
 // must fail loudly, not silently return the real module and hide the bug).
-function __ttAutomockApply(exports) { return __ttAutomockGenerator(exports); }
+function __ttAutomockApply(exports, resolvedPath) {
+  return __ttAutomockGenerator(resolvedPath, exports);
+}
 function __ttAutomockResetForNextFile() {
   __ttAutomockOn = false;
   __ttAutomockGenerator = __ttAutomockDefaultGen;
@@ -4098,7 +4111,10 @@ globalThis.__mkRequire = (dir, isEsm, importer) => {
     __ttJestLazyRun && __ttJestLazyRun(dir, spec);
     const raw = globalThis.__nativeRequire(dir, spec, isEsm, importer);
     const real = isEsm === false ? __ttRequireEsm(raw) : raw;
-    return __ttAutomockShould(dir, spec) ? __ttAutomockApply(real) : real;
+    if (!__ttAutomockShould(dir, spec)) return real;
+    const mp = __ttManualMockPath(dir, spec);
+    if (mp) return globalThis.__nativeRequire(globalThis.__dirnameOf(mp), './' + __basename(mp), isEsm, importer);
+    return __ttAutomockApply(real, __ttAutomockResolve(dir, String(spec)));
   };
   // as Node: the resolved path (a builtin stays its name); MODULE_NOT_FOUND when nothing resolves
   req.resolve = (spec) => {
@@ -6205,6 +6221,12 @@ function __ttMockPrepassed(spec, vitest, key, dir) {
 // [false] when the module is left unmocked
 function __ttAutomockOf(dir, spec) {
   try {
+    // Jest: when a colocated __mocks__/<basename> exists, load it as the mock (turbo-test#341).
+    const mp = __ttManualMockPath(dir, spec);
+    if (mp) {
+      const manual = globalThis.__ttImportActual(globalThis.__dirnameOf(mp), './' + __basename(mp));
+      return [true, manual];
+    }
     const actual = globalThis.__ttImportActual(dir, String(spec));
     const exports = __automock(globalThis.__ttToESM(actual));
     // its own names stay importable on the ESM graph (reading undefined, as vitest's)
@@ -6861,7 +6883,10 @@ globalThis.jest = {
   autoMockOn: () => { __ttAutomockOn = true; return globalThis.jest; },
   autoMockOff: () => { __ttAutomockOn = false; return globalThis.jest; },
   onGenerateMock: (factory) => {
-    if (typeof factory === 'function') __ttAutomockGenerator = (exports) => factory(exports);
+    if (typeof factory === 'function') {
+      const prev = __ttAutomockGenerator;
+      __ttAutomockGenerator = (path, exports) => factory(path, prev(path, exports));
+    }
     return globalThis.jest;
   },
   // the run's seed (jest: a 32-bit integer, one per run) and whether the file's environment is gone
@@ -6874,8 +6899,8 @@ globalThis.jest = {
   isMockFunction: (f) => globalThis.vi.isMockFunction(f),
   // jest.requireActual / requireMock are SYNCHRONOUS (return the module, not a Promise) —
   // unlike vi.importActual. Bridge to the native sync loader directly.
-  requireActual: (p) => { try { return globalThis.__ttImportActual(globalThis.__ttDir || globalThis.__ttEntryDir, String(p)); } catch (e) { return {}; } },
-  requireMock: (p) => { try { return globalThis.__nativeRequire(globalThis.__ttDir || globalThis.__ttEntryDir, String(p)); } catch (e) { return {}; } },
+  requireActual: (p) => globalThis.__ttImportActual(globalThis.__ttDir || globalThis.__ttEntryDir, String(p)),
+  requireMock: (p) => __automock(globalThis.jest.requireActual(p)),
   // jest.isolateModules(fn): run `fn` with a fresh module registry. Approximate with a
   // resetModules around the (sync) callback — enough for the common "re-require with new env".
   isolateModules: (fn) => { globalThis.vi.resetModules(); try { fn(); } finally { globalThis.vi.resetModules(); } },
@@ -6899,7 +6924,7 @@ globalThis.jest = {
   runAllTimersAsync: async () => { if (__jestCheckFake()) await __loop.runAllAsync(); },
   runOnlyPendingTimers: () => { if (__jestCheckFake()) __loop.runOnlyPending(); },
   runOnlyPendingTimersAsync: async () => { if (__jestCheckFake()) await __loop.runOnlyPendingAsync(); },
-  runAllTicks: () => { __jestCheckFake(); },
+  runAllTicks: () => { __jestCheckFake(); __loop.drainNextTicks(); },
   // legacy fake timers only (jest's TypeError under the modern ones)
   runAllImmediates: () => {
     if (!__jestLegacy) throw new TypeError('`jest.runAllImmediates()` is only available when using legacy fake timers.');
@@ -6917,7 +6942,16 @@ globalThis.jest = {
   setTimeout: (ms) => { if (typeof ms === 'number' && ms >= 0) globalThis.__TT_JEST_TIMEOUT = ms; return globalThis.jest; },
   retryTimes: (n) => { if (typeof n === 'number' && n >= 0) globalThis.__TT_JEST_RETRY = n; return globalThis.jest; },
   // env stubbing parity (rarely used via jest, but harmless)
-  replaceProperty: (obj, key, val) => { const orig = obj[key]; obj[key] = val; return { restore: () => { obj[key] = orig; } }; },
+  replaceProperty: (obj, key, val) => {
+    const orig = obj[key];
+    obj[key] = val;
+    const handle = {
+      replaceValue: (v) => { obj[key] = v; return handle; },
+      restore: () => { obj[key] = orig; },
+    };
+    __mockRestores.add(() => { obj[key] = orig; });
+    return handle;
+  },
 };
 
 // ---- test.each / describe.each titles (turbo-test#67) ----
