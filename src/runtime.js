@@ -6915,8 +6915,8 @@ globalThis.jest = {
   requireMock: (p) => __automock(globalThis.jest.requireActual(p)),
   // jest.isolateModules(fn): run `fn` with a fresh module registry. Approximate with a
   // resetModules around the (sync) callback — enough for the common "re-require with new env".
-  isolateModules: (fn) => { globalThis.vi.resetModules(); try { fn(); } finally { globalThis.vi.resetModules(); } },
-  isolateModulesAsync: async (fn) => { globalThis.vi.resetModules(); try { await fn(); } finally { globalThis.vi.resetModules(); } },
+  isolateModules: (fn) => { globalThis.__ttSaveModules(); try { fn(); } finally { globalThis.__ttRestoreModules(); } },
+  isolateModulesAsync: async (fn) => { globalThis.__ttSaveModules(); try { await fn(); } finally { globalThis.__ttRestoreModules(); } },
   resetModules: () => { globalThis.vi.resetModules(); return globalThis.jest; },
   // timers (turbo-test#181): jest's modern fake timers. useFakeTimers reads jest's options
   // (`now`, `doNotFake`, `timerLimit` (100000), `advanceTimers: true | ms`, `legacyFakeTimers`);
