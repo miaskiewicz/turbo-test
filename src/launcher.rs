@@ -1289,6 +1289,7 @@ fn excludes_dir(exclude: &[String], rel: &str) -> bool {
 fn discover(cwd: &Path, forced_config: Option<&Path>) -> Vec<PathBuf> {
     let mut all = Vec::new();
     let pats = vitest_patterns(cwd, forced_config);
+    let jest_match = if pats.is_none() { jest_test_match(cwd) } else { None };
     let base = pats.as_ref().map_or(cwd, |p| p.root.as_path());
     let include = pats.as_ref().and_then(|p| p.include.as_deref());
     let exclude: Vec<String> = match pats.as_ref().and_then(|p| p.exclude.clone()) {
@@ -1307,19 +1308,55 @@ fn discover(cwd: &Path, forced_config: Option<&Path>) -> Vec<PathBuf> {
             .join("/")
     };
     let prune = |d: &Path| excludes_dir(&exclude, &rel(d));
-    match include {
-        // a config include is matched against every file
-        Some(_) => walk(cwd, &mut all, &|_| true, &prune),
-        // vitest's default include
-        None => walk(cwd, &mut all, &is_test_file, &prune),
+    let has_include = include.is_some() || jest_match.is_some();
+    if has_include {
+        walk(cwd, &mut all, &|_| true, &prune);
+    } else {
+        walk(cwd, &mut all, &is_test_file, &prune);
     }
     all.retain(|f| {
         let r = rel(f);
-        include.is_none_or(|inc| inc.iter().any(|g| glob_matches(g, &r)))
-            && !exclude.iter().any(|g| glob_matches(g, &r))
+        let inc_ok = if let Some(inc) = include {
+            inc.iter().any(|g| glob_matches(g, &r))
+        } else if let Some(ref jm) = jest_match {
+            jm.iter().any(|g| glob_matches(g, &r))
+        } else {
+            true
+        };
+        inc_ok && !exclude.iter().any(|g| glob_matches(g, &r))
     });
     all.sort();
     all
+}
+
+const JEST_CONFIG_NAMES: [&str; 5] = [
+    "jest.config.js",
+    "jest.config.cjs",
+    "jest.config.mjs",
+    "jest.config.ts",
+    "jest.config.json",
+];
+
+fn jest_test_match(cwd: &Path) -> Option<Vec<String>> {
+    let text = jest_config_text_in(cwd)?;
+    scan_string_array(&text, "testMatch")
+}
+
+fn jest_config_text_in(dir: &Path) -> Option<String> {
+    for n in &JEST_CONFIG_NAMES {
+        if let Ok(s) = std::fs::read_to_string(dir.join(n)) {
+            return Some(s);
+        }
+    }
+    std::fs::read_to_string(dir.join("package.json"))
+        .ok()
+        .and_then(|pkg| package_json_jest_block(&pkg))
+}
+
+fn package_json_jest_block(pkg: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(pkg).ok()?;
+    let jest = v.get("jest")?;
+    jest.is_object().then(|| jest.to_string())
 }
 
 /// `--changed [since]`: absolute paths git reports changed vs `since` (default working-tree vs
