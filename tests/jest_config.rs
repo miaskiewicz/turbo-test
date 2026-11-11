@@ -67,6 +67,35 @@ test('cleared between tests', () => { expect(fn).toHaveBeenCalledTimes(0); });\n
     assert_eq!((pass, fail), (2, 0), "clearMocks should clear call history: {}", r.all());
 }
 
+// #344: setupFiles runs before the test framework (typeof expect === 'undefined').
+#[test]
+fn jest_setup_files_run_before_framework() {
+    let p = Project::new("jest-setup-order-344");
+    base_jest(&p);
+    p.file(
+        "jest.config.js",
+        "module.exports = { testEnvironment: 'node', setupFiles: ['./early.js'], setupFilesAfterEnv: ['./late.js'] };\n",
+    );
+    p.file(
+        "early.js",
+        "globalThis.__earlyExpect = typeof expect;\n",
+    );
+    p.file(
+        "late.js",
+        "globalThis.__lateExpect = typeof expect;\n",
+    );
+    p.file(
+        "a.test.js",
+        "test('setupFiles runs before framework', () => {\n\
+             expect(globalThis.__earlyExpect).toBe('undefined');\n\
+             expect(globalThis.__lateExpect).toBe('function');\n\
+         });\n",
+    );
+    let r = turbo_test(&p.dir, &["--reporter", "json", "--jobs", "1"], &[]);
+    let (pass, fail) = counts(&r);
+    assert_eq!((pass, fail), (1, 0), "setup ordering wrong: {}", r.all());
+}
+
 // #342: JEST_WORKER_ID is set for jest suites.
 #[test]
 fn jest_worker_id_is_set() {

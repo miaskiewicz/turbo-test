@@ -77,6 +77,32 @@ fn a_jest_configs_test_timeout_reaches_the_runtime() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+// Jest setupFiles vs setupFilesAfterEnv split (turbo-test#344).
+#[test]
+fn jest_setup_files_split_early_and_after_env() {
+    let d = dir("setup-split");
+    std::fs::write(d.join("early.js"), "// early\n").unwrap();
+    std::fs::write(d.join("late.js"), "// late\n").unwrap();
+    std::fs::write(
+        d.join("jest.config.js"),
+        "module.exports = { setupFiles: ['./early.js'], setupFilesAfterEnv: ['./late.js'] };\n",
+    )
+    .unwrap();
+    let found = jest_setup_files(&d).unwrap();
+    assert_eq!(found.len(), 1, "after-env should have 1 file: {found:?}");
+    assert!(
+        found[0].ends_with("late.js"),
+        "after-env should be late.js: {found:?}"
+    );
+    let early: Vec<PathBuf> = JEST_EARLY_SETUP.with(|f| f.borrow().clone());
+    assert_eq!(early.len(), 1, "early should have 1 file: {early:?}");
+    assert!(
+        early[0].ends_with("early.js"),
+        "early should be early.js: {early:?}"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 // Jest clearMocks / resetMocks / restoreMocks config (turbo-test#343).
 #[test]
 fn jest_config_clear_reset_restore_mocks() {

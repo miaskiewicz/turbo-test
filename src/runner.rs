@@ -2079,14 +2079,14 @@ fn jest_config_text(dir: &Path) -> Option<String> {
 }
 
 fn jest_setup_files_from(dir: &Path, s: &str) -> Option<Vec<PathBuf>> {
-    // rootDir (default = config dir). Jest paths in setupFiles use `<rootDir>`.
     let root_dir = config_string_value(s, "rootDir")
         .map(|r| normalize_path(&dir.join(&r)))
         .unwrap_or_else(|| dir.to_path_buf());
+    let mut early = Vec::new();
+    collect_jest_setup_entries(s, "setupFiles", dir, &root_dir, &mut early);
+    JEST_EARLY_SETUP.with(|f| *f.borrow_mut() = early);
     let mut out = Vec::new();
-    for key in ["setupFiles", "setupFilesAfterEnv"] {
-        collect_jest_setup_entries(s, key, dir, &root_dir, &mut out);
-    }
+    collect_jest_setup_entries(s, "setupFilesAfterEnv", dir, &root_dir, &mut out);
     Some(out)
 }
 
@@ -2182,6 +2182,22 @@ fn normalize_path(p: &Path) -> PathBuf {
 /// below its vi.mock calls. Otherwise (no esbuild CJS transform, e.g. top-level await): bundled,
 /// with mock specifiers externalized, then any vi.mock() calls it made are drained (resolved
 /// relative to the setup file's dir) — they reach the test files, not the setup's own imports.
+/// Jest `setupFiles` (pre-framework, turbo-test#344): run each early setup file with test
+/// framework globals (`expect`, `test`, `it`, `describe`) temporarily hidden, matching Jest's
+/// two-phase lifecycle where `setupFiles` execute before the test environment.
+fn run_jest_early_setup(scope: &mut v8::PinScope, plan: &EntryPlan) -> Result<(), String> {
+    let early: Vec<PathBuf> = JEST_EARLY_SETUP.with(|f| f.borrow().clone());
+    if early.is_empty() {
+        return Ok(());
+    }
+    run_js(scope, "globalThis.__ttHideFramework && globalThis.__ttHideFramework();");
+    for sf in &early {
+        run_setup_file(scope, sf, plan.externals, plan.mock_targets)?;
+    }
+    run_js(scope, "globalThis.__ttRestoreFramework && globalThis.__ttRestoreFramework();");
+    Ok(())
+}
+
 fn run_setup_file(
     scope: &mut v8::PinScope,
     file: &Path,
@@ -6277,6 +6293,8 @@ thread_local! {
     static TEST_FILE: std::cell::RefCell<PathBuf> = const { std::cell::RefCell::new(PathBuf::new()) };
     /// The current test file's setup files, which get the factory-scope binder too (turbo-test#205).
     static SCOPED_SETUP_FILES: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Jest `setupFiles` (pre-framework, turbo-test#344): run before test globals are visible.
+    static JEST_EARLY_SETUP: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The test file's top-level bindings its `vi.mock` factories name (mock_scope.rs); the shared
@@ -10225,8 +10243,11 @@ fn run_fresh_file(
     //     mock / stub switches (turbo-test#183), for the setup files too (a literal that
     //     does not evaluate is left out, as vitest would fail earlier)
     apply_runtime_config(scope, entry_abs);
-    // 0b. project setupFiles: register jest-dom matchers (expect.extend) AND any
-    //     global vi.mock()s, draining each into the path-keyed mock registry.
+    // 0a½. jest `setupFiles` (pre-framework, turbo-test#344): run with framework globals hidden.
+    run_jest_early_setup(scope, plan)?;
+    // 0b. project setupFiles (vitest) / setupFilesAfterEnv (jest): register jest-dom matchers
+    //     (expect.extend) AND any global vi.mock()s, draining each into the path-keyed mock
+    //     registry.
     for sf in plan.setup_files {
         run_setup_file(scope, sf, plan.externals, plan.mock_targets)?;
     }
@@ -10283,10 +10304,13 @@ fn prepare_reused_context(
 /// Reuse path: run the worker's setup files once (first file) and snapshot the hook / config
 /// baseline and the setup-registered mocks.
 fn run_setup_files_once(scope: &mut v8::PinScope, plan: &EntryPlan) {
-    let setup_err = plan
-        .setup_files
-        .iter()
-        .find_map(|sf| run_setup_file(scope, sf, plan.externals, plan.mock_targets).err());
+    let setup_err = run_jest_early_setup(scope, plan)
+        .err()
+        .or_else(|| {
+            plan.setup_files
+                .iter()
+                .find_map(|sf| run_setup_file(scope, sf, plan.externals, plan.mock_targets).err())
+        });
     REUSE_SETUP_ERROR.with(|e| *e.borrow_mut() = setup_err);
     SETUP_MOCKS.with(|s| {
         *s.borrow_mut() = REGISTRY.with(|r| r.borrow().mocks.keys().cloned().collect());

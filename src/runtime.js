@@ -456,6 +456,18 @@ globalThis.__ttApplyConfig = (cfg) => {
   if (typeof jestTestTimeout === 'number' && globalThis.__TT_DEFAULT_TIMEOUT === undefined) globalThis.__TT_DEFAULT_TIMEOUT = jestTestTimeout;
   Object.assign(__ttConfig, rest);
 };
+// jest setupFiles pre-framework phase (turbo-test#344): temporarily hide test globals so
+// typeof expect === 'undefined' during setupFiles, matching Jest's two-phase lifecycle.
+let __hiddenFramework;
+globalThis.__ttHideFramework = () => {
+  __hiddenFramework = {};
+  for (const k of ['expect', 'test', 'it', 'describe', 'beforeAll', 'afterAll', 'beforeEach', 'afterEach']) {
+    if (k in globalThis) { __hiddenFramework[k] = globalThis[k]; delete globalThis[k]; }
+  }
+};
+globalThis.__ttRestoreFramework = () => {
+  if (__hiddenFramework) { Object.assign(globalThis, __hiddenFramework); __hiddenFramework = undefined; }
+};
 // vitest's clearModuleMocks (onBeforeTryTask): before each attempt of a test, its beforeEach too
 function __clearModuleMocks() {
   const vi = globalThis.vi;
@@ -6707,7 +6719,7 @@ globalThis.vi = {
     cache[i] = v;
     return v;
   },
-  importActual: (p) => { try { return Promise.resolve(globalThis.__ttToESM(globalThis.__ttImportActual(globalThis.__ttDir || globalThis.__ttEntryDir, String(p)))); } catch (e) { return Promise.resolve({}); } },
+  importActual: (p) => { try { return Promise.resolve(globalThis.__ttToESM(globalThis.__ttImportActual(globalThis.__ttDir || globalThis.__ttEntryDir, String(p)))); } catch (e) { return Promise.resolve(undefined); } },
   importMock: (p) => { try { return Promise.resolve(globalThis.__nativeRequire(globalThis.__ttDir || globalThis.__ttEntryDir, String(p))); } catch (e) { return Promise.resolve({}); } },
   unstubAllEnvs: () => {
     const m = globalThis.__stubbedEnvs;
