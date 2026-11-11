@@ -1467,11 +1467,19 @@ fn set_file_env(scope: &mut v8::PinScope, file: &Path) {
     let web = env.as_deref().is_some_and(is_dom_env);
     let (pool, seq) = WORKER_SLOT.with(|w| w.get());
     let worker = if on_reuse_path() { pool } else { seq };
+    let jest_worker = if CJS_FIRST_RESOLUTION.with(|c| c.get()) {
+        format!(
+            " globalThis.process.env.JEST_WORKER_ID = '{}';",
+            pool + 1
+        )
+    } else {
+        String::new()
+    };
     run_js(
         scope,
         &format!(
             "globalThis.process.env.SSR = '{}'; globalThis.process.env.VITEST_POOL_ID = '{}'; \
-             globalThis.process.env.VITEST_WORKER_ID = '{}'; globalThis.__ttEnvName = {};",
+             globalThis.process.env.VITEST_WORKER_ID = '{}';{jest_worker} globalThis.__ttEnvName = {};",
             if web { "" } else { "1" },
             pool + 1,
             worker,
@@ -6878,6 +6886,7 @@ fn native_import_actual(
         return;
     }
     let Some(abs) = resolve_spec(&spec, Path::new(&dir)) else {
+        throw_module_not_found(scope, &spec, args.get(0));
         return;
     };
     if let Some(g) = actual_exports(scope, &abs) {
@@ -6955,11 +6964,95 @@ fn native_reset_modules(
     });
 }
 
+/// Snapshot of the app-level registry entries for isolateModules save/restore (#336).
+struct RegistrySnapshot {
+    cjs_exports: HashMap<PathBuf, v8::Global<v8::Value>>,
+    real_exports: HashMap<PathBuf, v8::Global<v8::Value>>,
+    cjs_synth_by_path: HashMap<PathBuf, v8::Global<v8::Module>>,
+    cjs_export_names: HashMap<PathBuf, Vec<String>>,
+    esm_by_path: HashMap<PathBuf, v8::Global<v8::Module>>,
+}
+
 thread_local! {
     /// The CJS modules executing on this thread, outermost first: Node's require stack.
     static REQUIRE_STACK: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
     /// The paths whose require.cache entry the test put there: require() serves them as is.
     static CACHE_PUT: RefCell<std::collections::HashSet<PathBuf>> = RefCell::default();
+    /// Stack of saved registry snapshots for isolateModules(Async) (#336).
+    static REGISTRY_STACK: RefCell<Vec<RegistrySnapshot>> = const { RefCell::new(Vec::new()) };
+}
+
+fn is_app_path(p: &std::path::Path) -> bool {
+    !p.to_string_lossy().contains("node_modules") && !p.starts_with("<")
+}
+
+/// __ttSaveModules(): snapshot and remove app-level registry entries (save before isolation).
+fn native_save_modules(
+    _scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    REGISTRY.with(|r| {
+        let mut reg = r.borrow_mut();
+        let app: Vec<PathBuf> = reg
+            .cjs_synth_by_path
+            .keys()
+            .chain(reg.cjs_exports.keys())
+            .filter(|p| is_app_path(p))
+            .filter(|p| !reg.mocks.contains_key(*p))
+            .cloned()
+            .collect();
+        let mut snap = RegistrySnapshot {
+            cjs_exports: HashMap::new(),
+            real_exports: HashMap::new(),
+            cjs_synth_by_path: HashMap::new(),
+            cjs_export_names: HashMap::new(),
+            esm_by_path: HashMap::new(),
+        };
+        for p in &app {
+            if let Some(v) = reg.cjs_exports.remove(p) { snap.cjs_exports.insert(p.clone(), v); }
+            if let Some(v) = reg.real_exports.remove(p) { snap.real_exports.insert(p.clone(), v); }
+            if let Some(v) = reg.cjs_synth_by_path.remove(p) { snap.cjs_synth_by_path.insert(p.clone(), v); }
+            if let Some(v) = reg.cjs_export_names.remove(p) { snap.cjs_export_names.insert(p.clone(), v); }
+            if let Some(v) = reg.esm_by_path.remove(p) { snap.esm_by_path.insert(p.clone(), v); }
+        }
+        REGISTRY_STACK.with(|s| s.borrow_mut().push(snap));
+    });
+}
+
+/// __ttRestoreModules(): drop callback-loaded app modules, then restore the saved snapshot.
+fn native_restore_modules(
+    _scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let snap = REGISTRY_STACK.with(|s| s.borrow_mut().pop());
+    let Some(snap) = snap else { return };
+    REGISTRY.with(|r| {
+        let mut reg = r.borrow_mut();
+        // Drop app modules loaded during the isolated callback.
+        let app: Vec<PathBuf> = reg
+            .cjs_synth_by_path
+            .keys()
+            .chain(reg.cjs_exports.keys())
+            .filter(|p| is_app_path(p))
+            .filter(|p| !reg.mocks.contains_key(*p))
+            .cloned()
+            .collect();
+        for p in app {
+            reg.cjs_exports.remove(&p);
+            reg.real_exports.remove(&p);
+            reg.cjs_synth_by_path.remove(&p);
+            reg.cjs_export_names.remove(&p);
+            reg.esm_by_path.remove(&p);
+        }
+        // Restore the saved entries.
+        reg.cjs_exports.extend(snap.cjs_exports);
+        reg.real_exports.extend(snap.real_exports);
+        reg.cjs_synth_by_path.extend(snap.cjs_synth_by_path);
+        reg.cjs_export_names.extend(snap.cjs_export_names);
+        reg.esm_by_path.extend(snap.esm_by_path);
+    });
 }
 
 /// Throw Node's MODULE_NOT_FOUND error for `spec` required by `importer` (runtime.js
@@ -8836,6 +8929,8 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     );
     bind_fn(scope, global, "__ttImportActual", native_import_actual);
     bind_fn(scope, global, "__ttResetModules", native_reset_modules);
+    bind_fn(scope, global, "__ttSaveModules", native_save_modules);
+    bind_fn(scope, global, "__ttRestoreModules", native_restore_modules);
     bind_fn(scope, global, "__ttUnmock", native_unmock);
     bind_fn(scope, global, "__ttResolveSpec", native_resolve_spec);
     bind_fn(scope, global, "__ttRequireResolve", native_require_resolve);
