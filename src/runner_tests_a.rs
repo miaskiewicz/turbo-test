@@ -1002,7 +1002,9 @@ fn jest_setup_files_root_dir_absolute_and_resolution() {
             abs.display()
         ),
     );
-    assert_eq!(jest_setup_files(&d), Some(vec![a, b, abs, c]));
+    assert_eq!(jest_setup_files(&d), Some(vec![abs.clone(), c]));
+    // setupFiles (pre-framework) are stored in the JEST_EARLY_SETUP thread-local (#344)
+    JEST_EARLY_SETUP.with(|f| assert_eq!(*f.borrow(), vec![a, b]));
 
     // JSON-form jest configs (turbo-test#31 item 1): a package.json "jest" block and
     // jest.config.json, with <rootDir>, a JSON rootDir and both setup keys
@@ -1014,7 +1016,8 @@ fn jest_setup_files_root_dir_absolute_and_resolution() {
         "package.json",
         r#"{"name":"p","jest":{"setupFiles":["<rootDir>/setup.js"],"setupFilesAfterEnv":["./after.js"]}}"#,
     );
-    assert_eq!(jest_setup_files(&pj), Some(vec![ps, pa]));
+    assert_eq!(jest_setup_files(&pj), Some(vec![pa]));
+    JEST_EARLY_SETUP.with(|f| assert_eq!(*f.borrow(), vec![ps]));
     let jj = tmp("jest-config-json");
     let js = put(&jj, "src/s.js", "");
     put(
@@ -1022,7 +1025,8 @@ fn jest_setup_files_root_dir_absolute_and_resolution() {
         "jest.config.json",
         "{\n  \"rootDir\": \"src\",\n  \"setupFiles\": [\"<rootDir>/s.js\"]\n}\n",
     );
-    assert_eq!(jest_setup_files(&jj), Some(vec![js]));
+    assert_eq!(jest_setup_files(&jj), Some(vec![]));
+    JEST_EARLY_SETUP.with(|f| assert_eq!(*f.borrow(), vec![js]));
     // a package.json "jest" block with no setup keys is still a jest config (stop walking)
     let pe = tmp("jest-pkg-empty");
     put(
