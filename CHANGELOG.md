@@ -8,13 +8,19 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 ## [0.8.3] — 2026-11-11 — jest compat: full config surface + module resolution fixes
 
 ### Added
-- Jest `globalSetup` / `globalTeardown` (#335): reads the config path, boots a fresh V8
-  isolate, loads the script as CJS, and calls the default export (sync or async) once
-  before all suites (setup) / after all suites (teardown). Why: many Jest projects use
-  `globalSetup` for database seeding, server startup, or one-time fixtures.
-- Jest `moduleNameMapper` (#335): regex-prefix patterns with `$1` substitution and
-  `<rootDir>` expansion. Applied before the oxc resolver, so `'^@src/(.*)$'` style
-  aliases work out of the box with a Jest config.
+- Jest `globalSetup` / `globalTeardown` (#335): resolved as jest does (`<rootDir>`,
+  rootDir-relative, or a module name; the nearest jest config up from the cwd), loaded as
+  CJS in a fresh V8 isolate and called once — with jest's `(globalConfig, projectConfig)`
+  (their `rootDir`) — before all suites (setup) / after all suites (teardown); the
+  `process.env` globalSetup leaves reaches every test file, as with jest (which runs it in
+  the parent before forking workers). Why: many Jest projects use `globalSetup` for
+  database seeding or server startup and pass its address on through `process.env`
+  (`@shelf/jest-mongodb`'s `MONGO_URL`).
+- Jest `moduleNameMapper` (#335): keys are regexes tried in config order (first match
+  wins), `$n` is the n-th capture, a value may be a target, a list of targets (the first
+  that resolves) or `require.resolve('…')`; `<rootDir>` expanded. Applied before the oxc
+  resolver; the resolve memo is keyed by the jest config, so two projects of one run that
+  map the same specifier differently each get their own.
 - Jest `testMatch` discovery (#340): when the vitest `include` array is absent, falls back
   to the Jest config's `testMatch` globs for file discovery. Why: projects migrating from
   Jest keep their `testMatch` and expect it honoured.
@@ -47,14 +53,24 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - `--coverage-all` flag (#320): includes unexecuted source files (matched by
   `--coverage-include` globs) in coverage reports at zero hits, so the denominator
   reflects the full source surface. Auto-read from vitest config `coverage.all: true`.
-  Why: without this, coverage percentages are misleadingly high when most source files
-  have no test touching them — matching vitest's `coverage.all` and Jest's
-  `collectCoverageFrom` behaviour.
+  Each unexecuted file counts its statements (and their lines), functions and branch arms
+  at zero, so every metric and threshold sees it. Left out as vitest leaves them out: test
+  / spec / bench files, `.d.ts`, `*.config.*`, root `test/` / `tests/`, `__tests__` /
+  `__mocks__`, non-JS/TS files and files with the coverage-ignore directive; symlinked
+  directories are not followed. Why: without this, coverage percentages are misleadingly
+  high when most source files have no test touching them — matching vitest's
+  `coverage.all` and Jest's `collectCoverageFrom` behaviour.
 
 ### Fixed
 - ESM singleton identity for subpath exports (#316): modules resolved through different
   subpath export entries (e.g. `pkg` vs `pkg/sub`) but pointing to the same file now
-  return the same module instance, preserving `===` identity.
+  return the same module instance, preserving `===` identity. A bundle registers its
+  sub-modules lazily: each still runs on its first require only (esbuild's `__commonJS`,
+  Node), so a lazily required file that needs an uninstalled optional peer, or has side
+  effects, costs nothing until it is used.
+- `process.env.JEST_WORKER_ID` (#342) is set for every jest project's test files — any
+  `testEnvironment`, jsdom included — and not for vitest ones, as jest and vitest do. Why:
+  per-worker resources (database names, ports) are commonly keyed on it.
 - Module resolution cache respects custom conditions (#317): the oxc resolver thread-local
   cache is keyed by the full set of resolve options including custom export conditions,
   preventing stale cache hits when conditions change between test files.
@@ -75,6 +91,15 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `function module` / `var require` replaced the wrapper's own `module` / `require`
   (empty exports, broken imports). Imports keep their name, and a CommonJS file is left as
   Node runs it (`var exports = exports || {}` keeps the wrapper's object).
+
+- ES modules run in strict mode on the CommonJS load path too. A test file or app module
+  with `import` / `export` (or a `.mjs` / `.mts` file, or any file of a `"type": "module"`
+  package) loaded through esbuild's or the native emitter's ESM→CJS output ran sloppy —
+  neither emits `"use strict"` — so `undeclared = 1` silently made a global and top-level
+  `this` was `module.exports`. Node, vitest and babel-jest / ts-jest run them strict; the
+  wrapper now opens with `"use strict"` on its own line (no source line moves). CommonJS
+  files and node_modules bundles are unchanged. A suite that relied on sloppy mode in an ES
+  module will now see the `ReferenceError` / `TypeError` Node and vitest give it.
 
 ### CI
 - `cargo test --no-fail-fast`: one red run lists every failing suite. Without it cargo

@@ -123,6 +123,29 @@ pub fn extract_all(file: &Path, source: &str) -> (Vec<RawBranch>, Vec<u32>) {
     (c.out, c.stmts)
 }
 
+/// The start offset and name of each function of `source` (declarations, expressions, methods,
+/// arrows; `(anonymous)` when unnamed): a never-loaded file's functions, for `--coverage-all`.
+pub fn function_starts(file: &Path, source: &str) -> Vec<(u32, String)> {
+    struct Fns(Vec<(u32, String)>);
+    impl<'a> Visit<'a> for Fns {
+        fn visit_function(&mut self, f: &Function<'a>, flags: oxc_semantic::ScopeFlags) {
+            let name = f.id.as_ref().map_or("(anonymous)", |id| id.name.as_str());
+            self.0.push((f.span.start, name.to_string()));
+            walk::walk_function(self, f, flags);
+        }
+        fn visit_arrow_function_expression(&mut self, a: &ArrowFunctionExpression<'a>) {
+            self.0.push((a.span.start, "(anonymous)".to_string()));
+            walk::walk_arrow_function_expression(self, a);
+        }
+    }
+    let st = SourceType::from_path(file).unwrap_or_default();
+    let allocator = Allocator::default();
+    let ret = Parser::new(&allocator, source, st).parse();
+    let mut fns = Fns(Vec::new());
+    fns.visit_program(&ret.program);
+    fns.0
+}
+
 #[cfg(test)]
 #[path = "coverage_branch_tests.rs"]
 mod unit_tests;

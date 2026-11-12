@@ -1088,3 +1088,76 @@ fn coverage_without_all_excludes_unexecuted_files() {
         "only src/used.js without --coverage-all: {j}"
     );
 }
+
+/// #320: `--coverage-all` adds what vitest's `coverage.all` adds — unexecuted source files, not
+/// test files, data, type declarations, config files or files carrying the ignore directive —
+/// counts their functions / statements / branches at zero too, and never follows a symlinked
+/// directory (a loop must not produce phantom paths).
+#[test]
+fn coverage_all_adds_only_unexecuted_sources_with_every_metric() {
+    let p = Project::new("cov-all-320-filter");
+    p.with_esbuild();
+    p.file("package.json", r#"{ "name": "cov-all" }"#);
+    p.file("src/used.js", "exports.used = () => 1;\n");
+    p.file(
+        "src/unused.js",
+        "// a comment line\nexports.unused = (x) => {\n  if (x) return 1;\n  return 2;\n};\n",
+    );
+    p.file("src/used.test.js", "test('n', () => {});\n");
+    p.file("src/data.json", "{ \"a\": 1 }\n");
+    p.file("src/types.d.ts", "export type T = number;\n");
+    p.file("src/vite.config.js", "export default {};\n");
+    p.file(
+        "src/skipped.js",
+        "// coverage-ignore-file\nexports.s = () => 3;\n",
+    );
+    std::os::unix::fs::symlink("..", p.path("src/up")).unwrap();
+    p.file(
+        "a.test.js",
+        "const { used } = require('./src/used');\ntest('uses one', () => { expect(used()).toBe(1); });\n",
+    );
+    let r = turbo_test(
+        &p.dir,
+        &[
+            "--coverage",
+            "--coverage-all",
+            "--coverage-include",
+            "src/**",
+            "--coverage-reporter",
+            "json-summary",
+            "a.test.js",
+        ],
+        &[],
+    );
+    assert_eq!(r.code, Some(0), "run should pass: {}", r.all());
+    let j = json(&p, "coverage/coverage-summary.json");
+    let mut keys: Vec<String> = j
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|k| *k != "total")
+        .map(|k| k.rsplit('/').next().unwrap().to_string())
+        .collect();
+    keys.sort();
+    assert_eq!(keys, ["unused.js", "used.js"], "{j}");
+    let unused = j
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(k, _)| k.ends_with("src/unused.js"))
+        .unwrap()
+        .1;
+    let metric = |m: &str| (unused[m]["covered"].as_u64(), unused[m]["total"].as_u64());
+    assert_eq!(
+        metric("lines"),
+        (Some(0), Some(3)),
+        "statement lines, no comment: {unused}"
+    );
+    assert_eq!(
+        metric("statements"),
+        (Some(0), Some(4)),
+        "assignment, if, 2 returns: {unused}"
+    );
+    assert_eq!(metric("functions"), (Some(0), Some(1)), "{unused}");
+    assert_eq!(metric("branches"), (Some(0), Some(2)), "{unused}");
+}

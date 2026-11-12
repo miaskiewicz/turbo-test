@@ -2476,6 +2476,7 @@ dependencies = [
  "oxc_sourcemap",
  "oxc_span",
  "oxc_transformer",
+ "regex",
  "rolldown-ariadne",
  "serde_json",
  "turbo-dom-browser-env",

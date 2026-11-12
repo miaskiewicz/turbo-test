@@ -142,3 +142,46 @@ test('both custom resolve options work together', () => {
         r.all()
     );
 }
+
+/// Two jest projects in one run (one worker, so one resolve memo) map the same specifier from a
+/// shared directory differently: each file resolves through its own project's moduleNameMapper.
+#[test]
+fn resolve_memo_is_per_jest_config() {
+    let p = Project::new("jest-resolve-memo-per-config");
+    p.with_esbuild();
+    p.file("package.json", r#"{ "name": "mono" }"#);
+    p.file("shared/use.js", "module.exports = require('which-cfg');\n");
+    for name in ["a", "b"] {
+        p.file(
+            &format!("{name}/jest.config.js"),
+            "module.exports = { testEnvironment: 'node', moduleNameMapper: { '^which-cfg$': '<rootDir>/cfg.js' } };\n",
+        );
+        p.file(
+            &format!("{name}/cfg.js"),
+            &format!("module.exports = '{name}';\n"),
+        );
+        p.file(
+            &format!("{name}/t.test.js"),
+            &format!("test('{name}', () => expect(require('../shared/use.js')).toBe('{name}'));\n"),
+        );
+    }
+    let r = turbo_test(
+        &p.dir,
+        &[
+            "--reporter",
+            "json",
+            "--jobs",
+            "1",
+            "a/t.test.js",
+            "b/t.test.js",
+        ],
+        &[],
+    );
+    let j = json_report(&r);
+    assert_eq!(
+        (j["numPassedTests"].as_u64(), j["numFailedTests"].as_u64()),
+        (Some(2), Some(0)),
+        "{}",
+        r.all()
+    );
+}

@@ -1048,38 +1048,74 @@ fn inject_unexecuted_files() {
     }
     let exc = EXCLUDE.lock().unwrap().clone();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // executed files under any spelling of their path (symlink, `..`) are not "unexecuted"
     let existing: HashSet<PathBuf> = COV
         .lock()
         .unwrap()
         .as_ref()
-        .map(|m| m.keys().cloned().collect())
+        .map(|m| m.keys().map(|k| canonical(k)).collect())
         .unwrap_or_default();
-    let discovered = discover_source_files(&cwd, &inc, &exc);
-    let mut g = COV.lock().unwrap();
-    let map = g.get_or_insert_with(HashMap::new);
-    for file in discovered {
-        if existing.contains(&file) || is_ignored(&file) {
-            continue;
-        }
-        if let Some(lines) = zero_line_map(&file) {
-            map.insert(file, lines);
+    for file in discover_source_files(&cwd, &inc, &exc) {
+        if !existing.contains(&canonical(&file)) {
+            inject_zero_file(&file);
         }
     }
 }
 
-fn zero_line_map(file: &Path) -> Option<HashMap<u32, u64>> {
-    let src = std::fs::read_to_string(file).ok()?;
-    let mut lines: HashMap<u32, u64> = HashMap::new();
-    for (i, line) in src.lines().enumerate() {
-        if !line.trim().is_empty() {
-            lines.insert((i + 1) as u32, 0);
+fn canonical(p: &Path) -> PathBuf {
+    crate::canon::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Record a never-loaded file at zero: its executable statements (and their lines), functions
+/// and branch arms — every metric — unless it carries the coverage-ignore directive.
+fn inject_zero_file(file: &Path) {
+    let Ok(src) = std::fs::read_to_string(file) else {
+        return;
+    };
+    scan_ignore_directive(file, &src);
+    if is_ignored(file) {
+        return;
+    }
+    let line_of = |off: u32| src[..(off as usize).min(src.len())].matches('\n').count() as u32 + 1;
+    let (branches, stmts) = crate::coverage_branch::extract_all(file, &src);
+    for (idx, &off) in stmts.iter().enumerate() {
+        record(file, line_of(off), 0);
+        record_stmt(file, idx as u32, line_of(off), 0);
+    }
+    for (off, name) in crate::coverage_branch::function_starts(file, &src) {
+        record_fn(file, line_of(off), &name, 0);
+    }
+    for (block, br) in branches.iter().enumerate() {
+        for arm in 0..br.arms.len() {
+            record_branch(
+                file,
+                block as u32,
+                arm as u32,
+                line_of(br.decision),
+                false,
+                0,
+            );
         }
     }
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines)
-    }
+}
+
+/// What vitest's coverage leaves out of `all` by default: test and benchmark files
+/// (`*.test.*`, `*-spec.*`, …), type declarations, tool config files (`*.config.*`), `test/` /
+/// `tests/` at the root, `__tests__` / `__mocks__`, and anything that is not a JS/TS source.
+fn default_coverage_excluded(rel: &str) -> bool {
+    const SOURCE: [&str; 8] = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"];
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    let parts: Vec<&str> = name.split(['.', '-']).collect();
+    // a marker counts after the first part and before the extension (`a.test.ts`, not `test.ts`)
+    let markers = &parts[1.min(parts.len())..parts.len().saturating_sub(1)];
+    let first_dir = rel.split('/').next().filter(|_| rel.contains('/'));
+    !SOURCE.contains(parts.last().unwrap_or(&""))
+        || markers.contains(&"d")
+        || markers
+            .iter()
+            .any(|p| matches!(*p, "test" | "spec" | "bench" | "benchmark" | "config"))
+        || matches!(first_dir, Some("test" | "tests"))
+        || rel.split('/').any(|c| c == "__tests__" || c == "__mocks__")
 }
 
 /// Walk `root` recursively, returning absolute paths that pass the include/exclude globs.
@@ -1100,19 +1136,21 @@ fn walk_dir(dir: &Path, root: &Path, inc: &[String], exc: &[String], out: &mut V
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            if skip_dir(&entry.file_name()) {
-                continue;
-            }
+        // a symlinked directory is not followed (a link to an ancestor would loop)
+        let real_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        if real_dir && !skip_dir(&entry.file_name()) {
             walk_dir(&path, root, inc, exc, out);
-        } else if path.is_file() {
-            let rel = path.strip_prefix(root).unwrap_or(&path);
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
-            if glob_filter(&rel_str, inc, exc) {
-                out.push(path);
-            }
+        } else if !path.is_dir() && path.is_file() && is_coverable(&path, root, inc, exc) {
+            out.push(path);
         }
     }
+}
+
+/// A discovered file `--coverage-all` reports: within the globs and not left out by default.
+fn is_coverable(path: &Path, root: &Path, inc: &[String], exc: &[String]) -> bool {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    glob_filter(&rel_str, inc, exc) && !default_coverage_excluded(&rel_str)
 }
 
 /// Emit the configured coverage reporters and apply threshold gating. Returns `true` if the gate

@@ -204,6 +204,44 @@ struct EmitState<'a, 'r> {
 }
 
 impl<'a> EmitState<'a, '_> {
+    /// The new name of a reference to a renamed wrapper-parameter binding (`wrapper_renames`).
+    fn renamed_ref(&self, id: &IdentifierReference) -> Option<&String> {
+        let sym = self
+            .scoping
+            .get_reference(id.reference_id.get()?)
+            .symbol_id()?;
+        self.wrapper_renames.get(&sym)
+    }
+
+    /// `{ name }` / `{ name = init }` as `{ name: renamed }` / `{ name: renamed = init }`.
+    fn expanded_shorthand_target(
+        &self,
+        p: &mut AssignmentTargetPropertyIdentifier<'a>,
+        renamed: &str,
+    ) -> AssignmentTargetProperty<'a> {
+        let span = p.span;
+        let key = self
+            .ast
+            .property_key_static_identifier(span, p.binding.name);
+        let target = AssignmentTarget::from(
+            self.ast
+                .simple_assignment_target_assignment_target_identifier(
+                    span,
+                    self.ast.ident(renamed),
+                ),
+        );
+        let binding = match p.init.take() {
+            Some(init) => self
+                .ast
+                .assignment_target_maybe_default_assignment_target_with_default(span, target, init),
+            None => AssignmentTargetMaybeDefault::from(target),
+        };
+        self.ast
+            .assignment_target_property_assignment_target_property_property(
+                span, key, binding, false,
+            )
+    }
+
     fn access_for_ref(&self, id: &IdentifierReference) -> Option<&Access> {
         let rid = id.reference_id.get()?;
         let sym = self.scoping.get_reference(rid).symbol_id()?;
@@ -400,15 +438,11 @@ impl<'a> EmitState<'a, '_> {
         let Expression::Identifier(id) = expr else {
             return false;
         };
-        if let Some(rid) = id.reference_id.get() {
-            if let Some(sym) = self.scoping.get_reference(rid).symbol_id() {
-                if let Some(renamed) = self.wrapper_renames.get(&sym) {
-                    *expr = self
-                        .ast
-                        .expression_identifier(id.span, self.ast.ident(renamed));
-                    return true;
-                }
-            }
+        if let Some(renamed) = self.renamed_ref(id) {
+            *expr = self
+                .ast
+                .expression_identifier(id.span, self.ast.ident(renamed));
+            return true;
         }
         let Some(access) = self.access_for_ref(id).cloned() else {
             return false;
@@ -475,6 +509,25 @@ impl<'a> VisitMut<'a> for EmitState<'a, '_> {
             return;
         }
         walk_mut::walk_expression(self, expr);
+    }
+
+    /// Assignment / update targets (`module = 2`, `exports++`, `[exports] = …`) of a renamed
+    /// binding; expression reads are rewritten by `rewrite_ident_ref`.
+    fn visit_identifier_reference(&mut self, id: &mut IdentifierReference<'a>) {
+        if let Some(renamed) = self.renamed_ref(id) {
+            id.name = self.ast.ident(renamed);
+        }
+    }
+
+    /// `({ module } = obj)`: the shorthand's name is also the property read, so a renamed target
+    /// becomes `({ module: _module } = obj)`.
+    fn visit_assignment_target_property(&mut self, prop: &mut AssignmentTargetProperty<'a>) {
+        if let AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(p) = prop {
+            if let Some(renamed) = self.renamed_ref(&p.binding).cloned() {
+                *prop = self.expanded_shorthand_target(p, &renamed);
+            }
+        }
+        walk_mut::walk_assignment_target_property(self, prop);
     }
 
     fn visit_binding_identifier(&mut self, id: &mut BindingIdentifier<'a>) {
@@ -643,18 +696,22 @@ pub(crate) fn transform_to_parts(js: &str, ctx: &LowerCtx) -> Option<ModuleParts
     Some(parts)
 }
 
-/// An ES module's top-level bindings named like a CJS wrapper parameter, with fresh names: in the
-/// wrapper a `let` / `const` / `class` one redeclares the parameter (a SyntaxError) and a `var` /
-/// function one replaces the `module` / `require` the emitted `module.exports = …` and import
-/// `require(…)` calls use. Imports are lowered away and keep their name. A CommonJS file
-/// (`module_syntax == false`) is left as Node runs it: `var exports = exports || {}` re-declares
-/// the parameter on purpose.
+/// Top-level bindings named like a CJS wrapper parameter, with fresh names. A `let` / `const` /
+/// `class` one always: in the wrapper it redeclares the parameter (a SyntaxError), also in an ES
+/// module whose only module syntax (`export {}`, `import.meta`) lowers to nothing. In an ES module
+/// (`module_syntax`) a `var` / function one too: it would replace the `module` / `require` the
+/// emitted `module.exports = …` and import `require(…)` calls use. Imports are lowered away and
+/// keep their name; a CommonJS file's `var exports = exports || {}` re-declares the parameter on
+/// purpose, as Node runs it.
 fn wrapper_renames(scoping: &Scoping, module_syntax: bool) -> HashMap<SymbolId, String> {
+    let lexical = SymbolFlags::BlockScopedVariable | SymbolFlags::Class;
     ["exports", "module", "require", "__filename", "__dirname"]
         .into_iter()
-        .filter(|_| module_syntax)
         .filter_map(|name| Some((scoping.get_root_binding(name.into())?, name)))
-        .filter(|(sym, _)| !scoping.symbol_flags(*sym).contains(SymbolFlags::Import))
+        .filter(|(sym, _)| {
+            let flags = scoping.symbol_flags(*sym);
+            !flags.contains(SymbolFlags::Import) && (module_syntax || flags.intersects(lexical))
+        })
         .map(|(sym, name)| (sym, unused_name(scoping, name)))
         .collect()
 }

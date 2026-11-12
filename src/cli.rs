@@ -1915,14 +1915,14 @@ pub fn run(opts: Options) -> i32 {
 /// Returns `Some(1)` when the script fails (for globalSetup: abort the run).
 fn run_jest_global_script(key: &str) -> Option<i32> {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let (setup, teardown) = runner::jest_global_scripts(&cwd);
+    let scripts = runner::jest_global_scripts(&cwd)?;
     let path = if key == "globalSetup" {
-        setup
+        scripts.setup
     } else {
-        teardown
+        scripts.teardown
     };
     let path = path?;
-    if let Err(e) = runner::run_global_script(&path) {
+    if let Err(e) = runner::run_global_script(&path, &scripts.root_dir) {
         eprintln!("{key} failed: {e}");
         return Some(1);
     }

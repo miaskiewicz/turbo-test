@@ -105,14 +105,31 @@ fn jest_setup_files_run_before_framework() {
     assert_eq!((pass, fail), (1, 0), "setup ordering wrong: {}", r.all());
 }
 
-// #342: JEST_WORKER_ID is set for jest suites.
+// #342: JEST_WORKER_ID is set for jest suites, whatever their test environment, and not for
+// vitest ones.
 #[test]
 fn jest_worker_id_is_set() {
-    let p = Project::new("jest-worker-id-342");
+    for env in ["node", "jsdom"] {
+        jest_worker_id_case(env);
+    }
+    let v = Project::new("jest-worker-id-342-vitest");
+    v.with_esbuild();
+    v.file("package.json", r#"{ "name": "v" }"#);
+    v.file("vitest.config.js", "export default { test: {} };\n");
+    v.file(
+        "a.test.js",
+        "test('no JEST_WORKER_ID under vitest', () => expect(process.env.JEST_WORKER_ID).toBe(undefined));\n",
+    );
+    let r = turbo_test(&v.dir, &["--reporter", "json", "--jobs", "1"], &[]);
+    assert_eq!(counts(&r), (1, 0), "{}", r.all());
+}
+
+fn jest_worker_id_case(env: &str) {
+    let p = Project::new(&format!("jest-worker-id-342-{env}"));
     base_jest(&p);
     p.file(
         "jest.config.js",
-        "module.exports = { testEnvironment: 'node' };\n",
+        &format!("module.exports = {{ testEnvironment: '{env}' }};\n"),
     );
     p.file(
         "a.test.js",
@@ -127,7 +144,7 @@ fn jest_worker_id_is_set() {
     assert_eq!(
         (pass, fail),
         (1, 0),
-        "JEST_WORKER_ID should be set: {}",
+        "JEST_WORKER_ID should be set ({env}): {}",
         r.all()
     );
 }

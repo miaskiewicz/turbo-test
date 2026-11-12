@@ -120,6 +120,43 @@ fn exports_of_a_renamed_binding_read_the_renamed_name() {
 }
 
 #[test]
+fn assignments_and_updates_of_a_renamed_binding_follow_the_rename() {
+    let o = e(
+        "let module = 1;\nmodule = 2;\nlet exports = 1;\nexports++;\n[exports] = [exports + 10];\n\
+               ({ x: module } = { x: 3 });\nexport const get = () => [module, exports];\n",
+    );
+    let flat: String = after_exports(&o).split_whitespace().collect();
+    for want in [
+        "_module=2",
+        "_exports++",
+        "[_exports]=[_exports+10]",
+        "x:_module}=",
+    ] {
+        assert!(flat.contains(want), "{want}:\n{o}");
+    }
+    // shorthand destructuring keeps reading the `module` property into the renamed binding
+    let o = e("let module = 1;\n({ module } = { module: 4 });\nexport const m = () => module;\n");
+    let flat: String = after_exports(&o).split_whitespace().collect();
+    assert!(flat.contains("({module:_module}={module:4})"), "{o}");
+}
+
+#[test]
+fn lexical_wrapper_param_bindings_are_renamed_without_lowered_module_syntax() {
+    // an ES module whose only module syntax is `export {}` or `import.meta` lowers to nothing,
+    // yet a `const require` still redeclares the wrapper's parameter
+    let o = e("const require = 1;\nexport {};\nglobalThis.r = require;\n");
+    assert!(
+        o.contains("const _require = 1") && o.contains("= _require"),
+        "{o}"
+    );
+    let o = e("const module = { url: import.meta.url };\nglobalThis.m = module;\n");
+    assert!(
+        o.contains("const _module = ") && o.contains("= _module"),
+        "{o}"
+    );
+}
+
+#[test]
 fn a_rename_never_collides_with_a_name_in_use() {
     let o = e(
         "const require = 1;\nconst _require = 2;\nconst f = () => _require2;\n\

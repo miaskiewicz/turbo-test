@@ -44,6 +44,9 @@ struct Registry {
     esm_by_path: HashMap<PathBuf, v8::Global<v8::Module>>,
     cjs_synth_by_path: HashMap<PathBuf, v8::Global<v8::Module>>,
     cjs_exports: HashMap<PathBuf, v8::Global<v8::Value>>,
+    /// A package bundle's sub-modules (turbo-test#316): path -> the bundle's lazy `require_mN`
+    /// init, run by the module's first require so it shares the bundle's instance.
+    cjs_lazy: HashMap<PathBuf, v8::Global<v8::Function>>,
     /// Genuine (unmocked) exports of every real module loaded via load_cjs, kept even after a
     /// mock overwrites cjs_exports — so vi.importActual/importOriginal returns the real module
     /// without re-running it (avoids dual instances of singletons like react-query).
@@ -97,6 +100,9 @@ thread_local! {
     /// Node's conditions, `import` for an import and `require` for a require(), turbo-test#134)
     /// for vitest/React projects.
     static CJS_FIRST_RESOLUTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The file belongs to a jest project (a jest config, no vitest config nearer or above it):
+    /// jest's per-file environment (JEST_WORKER_ID) applies whatever its testEnvironment.
+    static JEST_PROJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Jest `moduleDirectories`: additional directories to search for bare modules besides
     /// `node_modules` (turbo-test#345). Empty when unconfigured (only `node_modules`).
     static CUSTOM_MODULE_DIRS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -106,7 +112,9 @@ thread_local! {
     /// Jest `moduleNameMapper`: pairs of (prefix, replacement) derived from the jest config's
     /// moduleNameMapper object (turbo-test#335). Each entry maps a simple `^prefix(.*)$`
     /// pattern to a replacement path (`$1` is the capture). Empty when unconfigured.
-    static MODULE_NAME_MAPPER: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+    static MODULE_NAME_MAPPER: RefCell<Vec<NameMapping>> = const { RefCell::new(Vec::new()) };
+    /// `resolve_config_id` of the jest config the resolver options above come from (0: none).
+    static RESOLVE_CONFIG_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Set while resolve+drain of pending vi.mock factories is in progress. An async factory's
     /// `await import('<self>')` re-enters load_cjs(drain_mocks=true) for the real module; without
     /// this guard that nested call would drain (and clear) the very queue we're mid-resolving,
@@ -291,6 +299,7 @@ fn reset_app_registry(stale: &[PathBuf]) {
         let evict = |p: &PathBuf| test_mocked.contains(p) || stale.contains(p);
         reg.cjs_exports.retain(|p, _| !evict(p));
         reg.cjs_synth_by_path.retain(|p, _| !evict(p));
+        reg.cjs_lazy.retain(|p, _| !evict(p));
         reg.cjs_export_names.retain(|p, _| !evict(p));
         reg.real_exports.retain(|p, _| !evict(p));
         reg.real_esm.retain(|p, _| !evict(p));
@@ -603,6 +612,20 @@ fn cjs_first_project(entry: &Path) -> bool {
     cjs_first_project_uncached(entry)
 }
 
+/// Whether `entry` is governed by a jest config: walking up, a jest config (file or package.json
+/// block) found before any vitest config (the rule `runtime_config_for` reads configs by).
+fn jest_project(entry: &Path) -> bool {
+    for d in entry.ancestors().skip(1) {
+        if VITEST_CONFIG_FILES.iter().any(|v| d.join(v).is_file()) {
+            return false;
+        }
+        if jest_config_text(d).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
 fn cjs_first_project_uncached(entry: &Path) -> bool {
     let mut dir = entry.parent();
     while let Some(d) = dir {
@@ -708,7 +731,7 @@ pub fn resolve_spec(spec: &str, from_dir: &Path) -> Option<PathBuf> {
 }
 
 /// The resolutions by (specifier, importer dir, ESM importer, CJS-first resolution).
-type ResolveMemo = HashMap<(String, PathBuf, bool, bool), Option<PathBuf>>;
+type ResolveMemo = HashMap<(String, PathBuf, bool, bool, u64), Option<PathBuf>>;
 
 /// Resolve with the importer's module kind (`esm`) selecting ESM vs CJS export conditions.
 pub fn resolve_spec_as(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
@@ -721,7 +744,8 @@ pub fn resolve_spec_as(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf
             static RES_MEMO: RefCell<ResolveMemo> = RefCell::new(HashMap::new());
         }
         let cjs = CJS_FIRST_RESOLUTION.with(|c| c.get());
-        let key = (spec.to_string(), from_dir.to_path_buf(), esm, cjs);
+        let cfg = RESOLVE_CONFIG_ID.with(|c| c.get());
+        let key = (spec.to_string(), from_dir.to_path_buf(), esm, cjs, cfg);
         if let Some(v) = RES_MEMO.with(|m| m.borrow().get(&key).cloned()) {
             return v;
         }
@@ -736,8 +760,16 @@ fn resolve_spec_as_uncached(spec: &str, from_dir: &Path, esm: bool) -> Option<Pa
     if let Some(qpos) = spec.find('?') {
         return resolve_queried_spec(spec, qpos, from_dir, esm);
     }
-    let mapped = apply_module_name_mapper(spec);
-    let spec = mapped.as_deref().unwrap_or(spec);
+    if let Some(targets) = apply_module_name_mapper(spec) {
+        return targets
+            .iter()
+            .find_map(|t| resolve_unmapped_spec(t, from_dir, esm));
+    }
+    resolve_unmapped_spec(spec, from_dir, esm)
+}
+
+/// `resolve_spec_as` after moduleNameMapper (jest does not map a mapped spec again).
+fn resolve_unmapped_spec(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
     // A `node_modules/<pkg>/...` import (some tests `await import('node_modules/x/dist/y')`)
     // is really a bare specifier — strip the prefix so oxc resolves it from node_modules.
     let spec = spec.strip_prefix("node_modules/").unwrap_or(spec);
@@ -1499,7 +1531,7 @@ fn set_file_env(scope: &mut v8::PinScope, file: &Path) {
     let web = env.as_deref().is_some_and(is_dom_env);
     let (pool, seq) = WORKER_SLOT.with(|w| w.get());
     let worker = if on_reuse_path() { pool } else { seq };
-    let jest_worker = if CJS_FIRST_RESOLUTION.with(|c| c.get()) {
+    let jest_worker = if JEST_PROJECT.with(|c| c.get()) {
         format!(" globalThis.process.env.JEST_WORKER_ID = '{}';", pool + 1)
     } else {
         String::new()
@@ -2019,52 +2051,102 @@ fn config_is_false(s: &str, key: &str) -> bool {
     })
 }
 
-/// Apply jest `moduleNameMapper` to a specifier. Returns `Some(mapped)` when a pattern matches.
-fn apply_module_name_mapper(spec: &str) -> Option<String> {
+/// One jest `moduleNameMapper` entry: its key as a regex and its target(s), `<rootDir>` resolved.
+pub(crate) struct NameMapping {
+    pattern: regex::Regex,
+    targets: Vec<String>,
+}
+
+/// Apply jest `moduleNameMapper` to a specifier: the first entry whose regex matches (config
+/// order) gives its targets with `$n` replaced by the n-th capture (empty when absent), as jest's
+/// resolver does. `None` when no entry matches.
+fn apply_module_name_mapper(spec: &str) -> Option<Vec<String>> {
     MODULE_NAME_MAPPER.with(|m| {
-        for (prefix, replacement) in m.borrow().iter() {
-            if let Some(rest) = spec.strip_prefix(prefix.as_str()) {
-                return Some(replacement.replace("$1", rest));
-            }
-        }
-        None
+        m.borrow().iter().find_map(|nm| {
+            let caps = nm.pattern.captures(spec)?;
+            Some(
+                nm.targets
+                    .iter()
+                    .map(|t| substitute_captures(t, &caps))
+                    .collect(),
+            )
+        })
     })
 }
 
-/// Parse jest `moduleNameMapper` from config text. Extracts `^prefix(.*)$` → replacement
-/// pairs, replacing `<rootDir>` with the actual root directory.
-fn parse_module_name_mapper(s: &str, root_dir: &Path) -> Vec<(String, String)> {
-    let Some(start) = find_config_key(s, "moduleNameMapper") else {
-        return Vec::new();
-    };
-    let tail = &s[start..];
-    let Some(lb) = tail.find('{') else {
-        return Vec::new();
-    };
-    let Some(rb) = tail[lb..].find('}') else {
-        return Vec::new();
-    };
-    let body = &tail[lb + 1..lb + rb];
-    let mut out = Vec::new();
-    for part in body.split(',') {
-        let part = part.trim();
-        if let Some((pattern, target)) = part.split_once(':') {
-            let pattern = pattern.trim().trim_matches(|c| c == '\'' || c == '"');
-            let target = target.trim().trim_matches(|c| c == '\'' || c == '"');
-            let target = target.replace("<rootDir>", &root_dir.to_string_lossy());
-            if let Some(prefix) = extract_simple_prefix(pattern) {
-                out.push((prefix, target));
-            }
-        }
-    }
-    out
+fn substitute_captures(target: &str, caps: &regex::Captures) -> String {
+    static GROUP: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let group = GROUP.get_or_init(|| regex::Regex::new(r"\$([0-9]+)").unwrap());
+    group
+        .replace_all(target, |g: &regex::Captures| {
+            let n: usize = g[1].parse().unwrap_or(usize::MAX);
+            caps.get(n).map_or("", |m| m.as_str()).to_string()
+        })
+        .into_owned()
 }
 
-/// Extract a literal prefix from a simple regex like `^prefix(.*)$` or `^prefix(.*)`.
-fn extract_simple_prefix(pattern: &str) -> Option<String> {
-    let s = pattern.strip_prefix('^')?;
-    let end = s.find("(.*)")?;
-    Some(s[..end].to_string())
+/// Parse jest `moduleNameMapper` from config text: the object literal's entries in order, each
+/// key compiled as a regex (an invalid one is skipped) and each value a target string, a list of
+/// them, or `require.resolve('<spec>')` (evaluated by jest from the config file, so a relative
+/// spec is taken from `config_dir`).
+fn parse_module_name_mapper(s: &str, root_dir: &Path, config_dir: &Path) -> Vec<NameMapping> {
+    let Some(obj) = config_object_literal(s, "moduleNameMapper") else {
+        return Vec::new();
+    };
+    let src = format!("({obj})");
+    let alloc = oxc_allocator::Allocator::default();
+    let Ok(expr) =
+        oxc_parser::Parser::new(&alloc, &src, oxc_span::SourceType::mjs()).parse_expression()
+    else {
+        return Vec::new();
+    };
+    let root = root_dir.to_string_lossy();
+    let oxc_ast::ast::Expression::ObjectExpression(obj) = expr.without_parentheses() else {
+        return Vec::new();
+    };
+    obj.properties
+        .iter()
+        .filter_map(|p| p.as_property())
+        .filter_map(|p| {
+            let pattern = regex::Regex::new(&p.key.static_name()?).ok()?;
+            let targets = mapper_targets(&p.value)
+                .into_iter()
+                .map(|(t, resolved)| match resolved && t.starts_with('.') {
+                    true => config_dir.join(t).to_string_lossy().into_owned(),
+                    false => t.replace("<rootDir>", &root),
+                })
+                .collect();
+            Some(NameMapping { pattern, targets })
+        })
+        .collect()
+}
+
+/// A `moduleNameMapper` value's target specs: `'t'`, `['t1', 't2']` or `require.resolve('t')`
+/// (flagged `true`).
+fn mapper_targets(value: &oxc_ast::ast::Expression) -> Vec<(String, bool)> {
+    use oxc_ast::ast::{ArrayExpressionElement, Expression};
+    match value.without_parentheses() {
+        Expression::StringLiteral(s) => vec![(s.value.to_string(), false)],
+        Expression::ArrayExpression(a) => a
+            .elements
+            .iter()
+            .filter_map(|e| match e {
+                ArrayExpressionElement::StringLiteral(s) => Some((s.value.to_string(), false)),
+                _ => None,
+            })
+            .collect(),
+        Expression::CallExpression(c) if c.callee_name() == Some("resolve") => c
+            .arguments
+            .first()
+            .and_then(|a| a.as_expression())
+            .and_then(|e| match e {
+                Expression::StringLiteral(s) => Some((s.value.to_string(), true)),
+                _ => None,
+            })
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// A config key's unsigned integer value (`None` when absent or not a whole number).
@@ -2228,21 +2310,43 @@ fn config_string_value(s: &str, key: &str) -> Option<String> {
     read_quoted(after_colon)
 }
 
-/// Jest `globalSetup` / `globalTeardown` paths from the project's jest config (#335).
-pub fn jest_global_scripts(cwd: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
-    let Some(text) = jest_config_text(cwd) else {
-        return (None, None);
-    };
-    let resolve = |key: &str| -> Option<PathBuf> {
+/// A jest project's `globalSetup` / `globalTeardown` scripts and its `rootDir` (#335).
+pub struct JestGlobalScripts {
+    pub setup: Option<PathBuf>,
+    pub teardown: Option<PathBuf>,
+    pub root_dir: PathBuf,
+}
+
+/// The nearest jest config at or above `cwd`'s global scripts, resolved as jest does: `<rootDir>`
+/// substituted, a relative path against rootDir, else a module name (a package's script).
+pub fn jest_global_scripts(cwd: &Path) -> Option<JestGlobalScripts> {
+    let (dir, text) = cwd
+        .ancestors()
+        .find_map(|d| Some((d, jest_config_text(d)?)))?;
+    let root_dir = config_string_value(&text, "rootDir")
+        .map(|r| normalize_path(&dir.join(r)))
+        .unwrap_or_else(|| dir.to_path_buf());
+    let resolve = |key: &str| {
         let val = config_string_value(&text, key)?;
-        let p = if val.starts_with('.') {
-            cwd.join(&val)
-        } else {
-            PathBuf::from(&val)
-        };
-        Some(crate::canon::canonicalize(&p).unwrap_or(p))
+        jest_config_path(&val, &root_dir)
     };
-    (resolve("globalSetup"), resolve("globalTeardown"))
+    Some(JestGlobalScripts {
+        setup: resolve("globalSetup"),
+        teardown: resolve("globalTeardown"),
+        root_dir,
+    })
+}
+
+/// A jest config path value: `<rootDir>/…`, absolute, rootDir-relative, or a module name.
+fn jest_config_path(val: &str, root_dir: &Path) -> Option<PathBuf> {
+    let val = val.replace("<rootDir>", &root_dir.to_string_lossy());
+    let p = normalize_path(&root_dir.join(&val));
+    let p = if p.is_file() {
+        p
+    } else {
+        resolve_spec(&val, root_dir)?
+    };
+    Some(crate::canon::canonicalize(&p).unwrap_or(p))
 }
 
 /// All string values from an array-valued config key (`key: ['a', 'b']`). Returns an empty vec
@@ -2456,6 +2560,13 @@ fn run_js_ok(scope: &mut v8::PinScope, js: &str) -> bool {
         .and_then(|code| v8::Script::compile(tc, code, None))
         .and_then(|s| s.run(tc))
         .is_some()
+}
+
+/// Run a short framework snippet and read its result as a string.
+fn eval_string(scope: &mut v8::PinScope, js: &str) -> Option<String> {
+    let code = v8::String::new(scope, js)?;
+    let value = v8::Script::compile(scope, code, None)?.run(scope)?;
+    Some(value.to_rust_string_lossy(scope))
 }
 
 /// Run a short framework snippet in the current context.
@@ -4649,7 +4760,7 @@ fn read_transformed_mr_app(abs: &Path, prefer_metadata: bool) -> Option<Option<S
 /// esbuild keeps the ESM graph loader, whose top-level await, import() errors, link-time reloads
 /// and jest.setMock a CJS wrapper does not reproduce.
 fn mr_entry_transformable(abs: &Path) -> bool {
-    if cjs_first_project(abs) && entry_is_commonjs(abs) && native_entry_transformable(abs) {
+    if cjs_first_project(abs) && is_commonjs_file(abs) && native_entry_transformable(abs) {
         return true;
     }
     esbuild_transform_cjs(abs, false).is_some()
@@ -4658,7 +4769,7 @@ fn mr_entry_transformable(abs: &Path) -> bool {
 /// Whether `abs` is CommonJS by Node's rule: `.cjs` / `.cts` are, `.mjs` / `.mts` and files of a
 /// `"type": "module"` package are not (ES modules are strict and have no wrapper scope); otherwise
 /// a file without static `import` / `export`.
-fn entry_is_commonjs(abs: &Path) -> bool {
+fn is_commonjs_file(abs: &Path) -> bool {
     match abs.extension().and_then(|e| e.to_str()) {
         Some("cjs" | "cts") => true,
         Some("mjs" | "mts") => false,
@@ -5385,6 +5496,21 @@ fn stamp_from(
 }
 
 const CJS_WRAPPER_OPEN: &str = "(function (exports, module, require, __filename, __dirname) {\n";
+const CJS_WRAPPER_OPEN_STRICT: &str =
+    "(function (exports, module, require, __filename, __dirname) {\"use strict\";\n";
+
+/// The CJS wrapper's opening line for `abs`: an app ES module (Node's rule, `is_commonjs_file`)
+/// runs strict, as Node / vitest / babel-jest run it — esbuild's and the native emitter's CJS
+/// output carry no "use strict" of their own. The directive sits on the wrapper line, so no
+/// source line moves. node_modules bundles mix ES and CommonJS sources and stay as they are.
+fn cjs_wrapper_open(abs: &Path) -> &'static str {
+    let app = !abs.components().any(|c| c.as_os_str() == "node_modules");
+    if app && !is_commonjs_file(abs) {
+        CJS_WRAPPER_OPEN_STRICT
+    } else {
+        CJS_WRAPPER_OPEN
+    }
+}
 
 /// Whether a module's transform depends only on its file, so its wrapped source can be shared:
 /// not the test file or a setup file (their factories get a binder, turbo-test#205; the test
@@ -5407,7 +5533,10 @@ fn module_source_for(abs: &Path, prefer_metadata: bool) -> Option<Arc<ModuleSour
         return module_source(abs, prefer_metadata);
     }
     let raw = read_transformed(abs, true, prefer_metadata)?;
-    Some(new_module_source(format!("{CJS_WRAPPER_OPEN}{raw}\n}})")))
+    Some(new_module_source(format!(
+        "{}{raw}\n}})",
+        cjs_wrapper_open(abs)
+    )))
 }
 
 /// An owned source (its text is copied into V8).
@@ -5503,7 +5632,7 @@ fn module_source(abs: &Path, prefer_metadata: bool) -> Option<Arc<ModuleSource>>
     }
     // transformed outside the lock (it can run esbuild); a racing thread's copy is dropped
     let raw = read_transformed(abs, true, prefer_metadata)?;
-    let wrapped = format!("{CJS_WRAPPER_OPEN}{raw}\n}})");
+    let wrapped = format!("{}{raw}\n}})", cjs_wrapper_open(abs));
     let mut map = map.lock().unwrap();
     if let Some(src) = hit(&mut map) {
         return Some(src);
@@ -5699,8 +5828,8 @@ fn load_cjs_inner<'s>(
     drain_mocks: bool,
     prefer_metadata: bool,
 ) -> Option<()> {
-    if REGISTRY.with(|r| r.borrow().cjs_synth_by_path.contains_key(abs)) {
-        return Some(());
+    if let Some(done) = loaded_or_lazy(scope, abs) {
+        return done;
     }
     let wrapper = compile_cjs_wrapper(scope, abs, prefer_metadata)?;
     let (exports_obj, module_obj, exports_key) = build_cjs_module_object(scope)?;
@@ -5938,8 +6067,7 @@ fn esbuild_fallback_script(
     prefer_metadata: bool,
 ) -> Option<v8::Global<v8::Script>> {
     let src = esbuild_cjs_fallback(abs, prefer_metadata)?;
-    let wrapped_fb =
-        format!("(function (exports, module, require, __filename, __dirname) {{\n{src}\n}})");
+    let wrapped_fb = format!("{}{src}\n}})", cjs_wrapper_open(abs));
     if wrapped_fb == module.wrapped {
         return None; // native wasn't the source (output identical) — no point retrying
     }
@@ -9132,19 +9260,35 @@ fn native_reg_bundled(
 ) {
     let path_str = args.get(0).to_rust_string_lossy(scope);
     let abs = PathBuf::from(&*path_str);
-    // Already registered (a previous bundle or a direct require): skip.
+    // Already loaded (a previous bundle or a direct require): skip.
     if REGISTRY.with(|r| r.borrow().cjs_synth_by_path.contains_key(&abs)) {
         return;
     }
-    let Ok(factory) = v8::Local::<v8::Function>::try_from(args.get(1)) else {
-        return;
-    };
+    // Registered, not run: a sub-module runs on its first require, as esbuild's lazy
+    // `__commonJS` and Node do (an unused optional-peer require must not throw at load).
+    if let Ok(factory) = v8::Local::<v8::Function>::try_from(args.get(1)) {
+        let factory = v8::Global::new(scope, factory);
+        REGISTRY.with(|r| r.borrow_mut().cjs_lazy.insert(abs, factory));
+    }
+}
+
+/// `load_cjs`'s short cuts: an already loaded module, or a bundled one's lazy init.
+fn loaded_or_lazy(scope: &mut v8::PinScope, abs: &Path) -> Option<Option<()>> {
+    if REGISTRY.with(|r| r.borrow().cjs_synth_by_path.contains_key(abs)) {
+        return Some(Some(()));
+    }
+    load_lazy_bundled(scope, abs)
+}
+
+/// A bundled sub-module's first require: run the bundle's init (`native_reg_bundled`) and
+/// register its exports. `None` when `abs` has no pending init.
+fn load_lazy_bundled(scope: &mut v8::PinScope, abs: &Path) -> Option<Option<()>> {
+    let factory = REGISTRY.with(|r| r.borrow_mut().cjs_lazy.remove(abs))?;
+    let factory = v8::Local::new(scope, &factory);
     let undefined = v8::undefined(scope).into();
-    let Some(exports) = factory.call(scope, undefined, &[]) else {
-        return;
-    };
+    let exports = factory.call(scope, undefined, &[]);
     let global = scope.get_current_context().global(scope);
-    register_cjs_exports(scope, global, &abs, exports);
+    Some(exports.and_then(|e| register_cjs_exports(scope, global, abs, e)))
 }
 
 fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
@@ -9880,9 +10024,7 @@ fn coverage_accumulate(json: &str) {
         // test file that covers it — rebuild the exact wrapper V8 compiled only on first encounter.
         if !crate::coverage::has_meta(abs) {
             if let Some(raw) = read_transformed(abs, true, false) {
-                let wrapped = format!(
-                    "(function (exports, module, require, __filename, __dirname) {{\n{raw}\n}})"
-                );
+                let wrapped = format!("{}{raw}\n}})", cjs_wrapper_open(abs));
                 let orig = std::fs::read_to_string(abs).unwrap_or_default();
                 crate::coverage::register_meta(abs, &wrapped, &orig);
             } else {
@@ -10156,6 +10298,7 @@ fn prepare_entry_thread_locals(entry_abs: &Path) {
     // CommonJS-first resolution for jest/node backends (sequelize/tslib/lexical get their working
     // require-condition build). Decided once per file from the project; vitest/React → ESM-first.
     CJS_FIRST_RESOLUTION.with(|c| c.set(cjs_first_project(entry_abs)));
+    JEST_PROJECT.with(|c| c.set(jest_project(entry_abs)));
     // turbo-test#345: jest `moduleDirectories` and `customExportConditions` — read from the
     // nearest jest config and stash in thread-locals for the resolver.
     set_custom_resolve_options(entry_abs);
@@ -10174,7 +10317,8 @@ fn set_custom_resolve_options(entry: &Path) {
             let root_dir = config_string_value(&text, "rootDir")
                 .map(|r| normalize_path(&d.join(&r)))
                 .unwrap_or_else(|| d.to_path_buf());
-            let mapper = parse_module_name_mapper(&text, &root_dir);
+            let mapper = parse_module_name_mapper(&text, &root_dir, d);
+            RESOLVE_CONFIG_ID.with(|c| c.set(resolve_config_id(d, &text)));
             MODULE_NAME_MAPPER.with(|m| *m.borrow_mut() = mapper);
             return;
         }
@@ -10183,6 +10327,18 @@ fn set_custom_resolve_options(entry: &Path) {
     CUSTOM_MODULE_DIRS.with(|m| m.borrow_mut().clear());
     CUSTOM_EXPORT_CONDITIONS.with(|c| c.borrow_mut().clear());
     MODULE_NAME_MAPPER.with(|m| m.borrow_mut().clear());
+    RESOLVE_CONFIG_ID.with(|c| c.set(0));
+}
+
+/// A fingerprint of the jest config the resolver options (`moduleNameMapper`,
+/// `moduleDirectories`, `customExportConditions`) come from, for the resolve memo's key: its
+/// directory too, which `<rootDir>` and relative values are taken from.
+fn resolve_config_id(dir: &Path, text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    dir.hash(&mut h);
+    text.hash(&mut h);
+    h.finish() | 1
 }
 
 /// Setup-file mock specifiers to externalize from the bundle, and each one's mock target by
@@ -10853,8 +11009,11 @@ fn run_fresh_with(
 }
 
 /// Run a jest globalSetup or globalTeardown script in a fresh V8 isolate.
-/// The script is loaded as CJS; if it exports a function, that function is called.
-pub fn run_global_script(path: &Path) -> Result<(), String> {
+/// The script is loaded as CJS; if it exports a function, that function is called with jest's
+/// `(globalConfig, projectConfig)` (their `rootDir`). The `process.env` it leaves is copied into
+/// this process's environment, which the test workers inherit (jest runs globalSetup in the
+/// parent before forking them).
+pub fn run_global_script(path: &Path, root_dir: &Path) -> Result<(), String> {
     let abs = crate::canon::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let isolate = &mut v8::Isolate::new(isolate_params());
     v8::scope!(let scope, isolate);
@@ -10875,9 +11034,25 @@ pub fn run_global_script(path: &Path) -> Result<(), String> {
         }
         tc.perform_microtask_checkpoint();
     }
-    let result = call_global_script_export(scope, &abs);
+    let result = call_global_script_export(scope, &abs, root_dir);
+    export_process_env(scope);
     clear_registry();
     result
+}
+
+/// Copy the isolate's `process.env` string entries that differ from this process's environment
+/// into it.
+fn export_process_env(scope: &mut v8::PinScope) {
+    let js = "JSON.stringify(Object.entries(globalThis.process.env).filter(([, v]) => typeof v === 'string'))";
+    let Some(json) = eval_string(scope, js) else {
+        return;
+    };
+    let entries: Vec<(String, String)> = serde_json::from_str(&json).unwrap_or_default();
+    for (k, v) in entries {
+        if std::env::var(&k).ok().as_deref() != Some(v.as_str()) {
+            std::env::set_var(k, v);
+        }
+    }
 }
 
 fn global_script_callable<'s>(
@@ -10898,14 +11073,41 @@ fn global_script_callable<'s>(
     v8::Local::<v8::Function>::try_from(val).ok()
 }
 
-fn call_global_script_export(scope: &mut v8::PinScope, abs: &Path) -> Result<(), String> {
+/// jest's `(globalConfig, projectConfig)` for a global script: each carries the project's
+/// `rootDir`.
+fn jest_global_config_args<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    root_dir: &Path,
+) -> Vec<v8::Local<'s, v8::Value>> {
+    let js = format!(
+        "[{{ rootDir: {0:?} }}, {{ rootDir: {0:?} }}]",
+        root_dir.to_string_lossy()
+    );
+    v8::String::new(scope, &js)
+        .and_then(|code| v8::Script::compile(scope, code, None))
+        .and_then(|s| s.run(scope))
+        .and_then(|v| v8::Local::<v8::Array>::try_from(v).ok())
+        .map(|a| {
+            (0..a.length())
+                .filter_map(|i| a.get_index(scope, i))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn call_global_script_export(
+    scope: &mut v8::PinScope,
+    abs: &Path,
+    root_dir: &Path,
+) -> Result<(), String> {
     let Some(func) = global_script_callable(scope, abs) else {
         return Ok(());
     };
     let tc = std::pin::pin!(v8::TryCatch::new(scope));
     let tc = &mut tc.init();
     let undef = v8::undefined(tc).into();
-    let ret = func.call(tc, undef, &[]);
+    let args = jest_global_config_args(tc, root_dir);
+    let ret = func.call(tc, undef, &args);
     tc.perform_microtask_checkpoint();
     if let Some(promise) = ret.filter(|v| v.is_promise()) {
         let promise = v8::Local::<v8::Promise>::try_from(promise).unwrap();
@@ -11551,6 +11753,7 @@ fn clear_registry() {
         reg.esm_by_path.clear();
         reg.cjs_synth_by_path.clear();
         reg.cjs_exports.clear();
+        reg.cjs_lazy.clear();
         reg.real_exports.clear();
         reg.real_esm.clear();
         reg.cjs_export_names.clear();
