@@ -9310,19 +9310,31 @@ fn native_reg_bundled(
                 .build(scope)
                 .map(Into::into)
         }
-        None => {
-            // also when the path is mocked: a mocked require never reaches it, the original
-            // (importOriginal / requireActual) does — the package's own instance
-            if let Ok(f) = v8::Local::<v8::Function>::try_from(init) {
-                let f = v8::Global::new(scope, f);
-                REGISTRY.with(|r| r.borrow_mut().cjs_lazy.insert(abs, f));
-            }
-            Some(init)
-        }
+        None => Some(shared_lazy_init(scope, abs, init).unwrap_or(init)),
     };
     if let Some(v) = returned {
         rv.set(v);
     }
+}
+
+/// The init a bundle uses for a sub-module not loaded yet: the one another bundle of the package
+/// already registered for the file (one instance per file, as in Node — else a provider and its
+/// consumers from different entries hold different copies of a context module); `None` when
+/// there is none, after registering this bundle's own `init` — also when the path is mocked: a
+/// mocked require never reaches it, the original (importOriginal / requireActual) does.
+fn shared_lazy_init<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    abs: PathBuf,
+    init: v8::Local<v8::Value>,
+) -> Option<v8::Local<'s, v8::Value>> {
+    if let Some(registered) = REGISTRY.with(|r| r.borrow().cjs_lazy.get(&abs).cloned()) {
+        return Some(v8::Local::new(scope, &registered).into());
+    }
+    if let Ok(f) = v8::Local::<v8::Function>::try_from(init) {
+        let f = v8::Global::new(scope, f);
+        REGISTRY.with(|r| r.borrow_mut().cjs_lazy.insert(abs, f));
+    }
+    None
 }
 
 /// The REAL instance of `abs` already loaded, for a bundle to share: never a mock (the test's,

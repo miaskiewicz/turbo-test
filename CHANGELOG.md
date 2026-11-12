@@ -84,7 +84,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   only: a `vi.mock` of the sub-path reaches the test's import, never the package's own
   internal require (vitest leaves node_modules to Node), nor the next file of a reused
   isolate; and a partial mock's original (`importOriginal` / `vi.importActual` /
-  `jest.requireActual`) is the package's own instance, not a second copy.
+  `jest.requireActual`) is the package's own instance, not a second copy. A module one entry's bundle has
+  registered but not yet run is the instance every other entry bundle of the package uses
+  too (one instance per file, as in Node), so a context provider and its consumers from
+  different entries (MUI's `FormControl` / `FormLabel`) share their context module.
 - `process.env.JEST_WORKER_ID` (#342) is set for every jest project's test files — any
   `testEnvironment`, jsdom included — and not for vitest ones, as jest and vitest do. Why:
   per-worker resources (database names, ports) are commonly keyed on it.

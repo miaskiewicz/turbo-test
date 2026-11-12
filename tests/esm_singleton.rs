@@ -329,3 +329,50 @@ test('one instance', () => { bump(); expect({ same: rootState === sub.state, n: 
         );
     }
 }
+
+/// One instance per file across a package's entry bundles, as in Node: a module one entry's
+/// bundle has registered but not yet run (a lazy require) is the instance a second entry's bundle
+/// uses — a provider and a consumer from different entries share their context module (MUI's
+/// FormControl / FormLabel via FormControlContext).
+#[test]
+fn entry_bundles_share_a_module_registered_but_not_yet_run() {
+    for esbuild in [true, false] {
+        let p = Project::new(&format!("esm-share-lazy-{esbuild}"));
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", r#"{ "name": "esm-share-lazy" }"#);
+        p.file("vitest.config.js", "export default { test: {} };\n");
+        p.file(
+            "node_modules/ctxpkg/package.json",
+            r#"{"name":"ctxpkg","exports":{"./provider":"./provider.js","./consumer":"./consumer.js"}}"#,
+        );
+        p.file("node_modules/ctxpkg/ctx.js", "exports.value = 'unset';\n");
+        p.file(
+            "node_modules/ctxpkg/provider.js",
+            "exports.provide = (v) => { require('./ctx.js').value = v; };\n",
+        );
+        p.file(
+            "node_modules/ctxpkg/consumer.js",
+            "require('./provider.js');\nexports.read = () => require('./ctx.js').value;\n",
+        );
+        p.file(
+            "a.test.js",
+            r#"import { provide } from 'ctxpkg/provider';
+import { read } from 'ctxpkg/consumer';
+test('provider and consumer share ctx.js', () => {
+  provide('set');
+  expect(read()).toBe('set');
+});
+"#,
+        );
+        let r = turbo_test(&p.dir, &["--reporter", "json", "a.test.js"], &[]);
+        let j = json_report(&r);
+        assert_eq!(
+            (j["numPassedTests"].as_u64(), j["numFailedTests"].as_u64()),
+            (Some(1), Some(0)),
+            "esbuild={esbuild}:\n{}",
+            r.all()
+        );
+    }
+}
