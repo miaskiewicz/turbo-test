@@ -62,14 +62,19 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   every entry the native emitter could transform down the CommonJS module-runner path,
   which cannot reproduce top-level await, vite's `import()` rejection messages, link-time
   reloads after `vi.resetModules()` or `jest.setMock`. Only a CommonJS entry of a jest
-  node project (what #316 needs) takes the native CJS path without esbuild now.
+  node project (what #316 needs) takes the native CJS path without esbuild now — by Node's
+  rule: `.cjs`/`.cts` are CommonJS, `.mjs`/`.mts` and files of a `"type": "module"`
+  package are not (they stay strict), else a file without static `import`/`export`.
 - `jest.requireMock` returns the registered mock (`jest.mock` factory, `jest.setMock`)
-  again, and automocks the real module only when none is registered or after
-  `jest.unmock` — #338 had made it always automock.
-- The native ESM→CJS emitter renames a top-level binding that shadows a CommonJS wrapper
-  parameter (`require`, `module`, `exports`, `__filename`, `__dirname`), e.g.
-  `const require = createRequire(import.meta.url)`, which failed with "Identifier has
-  already been declared".
+  again, else the colocated `__mocks__/<name>` manual mock, and automocks the real module
+  only when there is neither or after `jest.unmock` — #338 had made it always automock.
+- The native ESM→CJS emitter gives an ES module's top-level binding named like a CommonJS
+  wrapper parameter (`require`, `module`, `exports`, `__filename`, `__dirname`) a fresh
+  name no other binding uses, and points its export at it: `const require =
+  createRequire(import.meta.url)` failed with "Identifier has already been declared", and a
+  `function module` / `var require` replaced the wrapper's own `module` / `require`
+  (empty exports, broken imports). Imports keep their name, and a CommonJS file is left as
+  Node runs it (`var exports = exports || {}` keeps the wrapper's object).
 
 ### CI
 - `cargo test --no-fail-fast`: one red run lists every failing suite. Without it cargo

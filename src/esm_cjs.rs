@@ -31,7 +31,7 @@ use oxc_ast::{AstBuilder, NONE};
 use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
-use oxc_semantic::{Scoping, SemanticBuilder, SymbolId};
+use oxc_semantic::{Scoping, SemanticBuilder, SymbolFlags, SymbolId};
 use oxc_span::{SourceType, Span, SPAN};
 use oxc_transformer::{HelperLoaderMode, TransformOptions, Transformer};
 
@@ -200,7 +200,7 @@ struct EmitState<'a, 'r> {
     /// Root-level bindings that shadow the CJS wrapper's parameters (`exports`, `module`,
     /// `require`, `__filename`, `__dirname`) must be renamed to avoid strict-mode redeclaration
     /// errors. Maps the SymbolId to the replacement name.
-    wrapper_renames: HashMap<SymbolId, &'static str>,
+    wrapper_renames: HashMap<SymbolId, String>,
 }
 
 impl<'a> EmitState<'a, '_> {
@@ -643,23 +643,65 @@ pub(crate) fn transform_to_parts(js: &str, ctx: &LowerCtx) -> Option<ModuleParts
     Some(parts)
 }
 
+/// An ES module's top-level bindings named like a CJS wrapper parameter, with fresh names: in the
+/// wrapper a `let` / `const` / `class` one redeclares the parameter (a SyntaxError) and a `var` /
+/// function one replaces the `module` / `require` the emitted `module.exports = …` and import
+/// `require(…)` calls use. Imports are lowered away and keep their name. A CommonJS file
+/// (`module_syntax == false`) is left as Node runs it: `var exports = exports || {}` re-declares
+/// the parameter on purpose.
+fn wrapper_renames(scoping: &Scoping, module_syntax: bool) -> HashMap<SymbolId, String> {
+    ["exports", "module", "require", "__filename", "__dirname"]
+        .into_iter()
+        .filter(|_| module_syntax)
+        .filter_map(|name| Some((scoping.get_root_binding(name.into())?, name)))
+        .filter(|(sym, _)| !scoping.symbol_flags(*sym).contains(SymbolFlags::Import))
+        .map(|(sym, name)| (sym, unused_name(scoping, name)))
+        .collect()
+}
+
+/// `_name`, else `_name2`, `_name3`, … : the first one the module neither binds nor reads as a
+/// global.
+fn unused_name(scoping: &Scoping, name: &str) -> String {
+    let taken = |n: &str| {
+        scoping.symbol_names().any(|s| s == n)
+            || scoping
+                .root_unresolved_references()
+                .keys()
+                .any(|k| k.as_str() == n)
+    };
+    (1..)
+        .map(|i| match i {
+            1 => format!("_{name}"),
+            _ => format!("_{name}{i}"),
+        })
+        .find(|n| !taken(n))
+        .unwrap_or_default()
+}
+
+/// Point a local export's getter at its renamed binding (`export const require` → `_require`).
+fn renamed_exports(
+    exports: Vec<ExportEntry>,
+    renames: &HashMap<SymbolId, String>,
+    scoping: &Scoping,
+) -> Vec<ExportEntry> {
+    let by_name: HashMap<&str, &str> = renames
+        .iter()
+        .map(|(sym, renamed)| (scoping.symbol_name(*sym), renamed.as_str()))
+        .collect();
+    exports
+        .into_iter()
+        .map(|mut e| {
+            if let Some(renamed) = by_name.get(e.value_js.as_str()) {
+                e.value_js = (*renamed).to_string();
+            }
+            e
+        })
+        .collect()
+}
+
 /// Core: classify imports/exports under `ctx`, rewrite imported-local refs + dynamic `import()` +
 /// (bundler) `require()` calls, codegen the body. `map_src = Some((path, original_src))` enables a
 /// codegen source map (returned as the raw VLQ `mappings` string for the body).
-/// The module's top-level bindings that shadow a CJS wrapper parameter, with their new names.
-fn wrapper_renames(scoping: &Scoping) -> HashMap<SymbolId, &'static str> {
-    [
-        ("exports", "_exports"),
-        ("module", "_module"),
-        ("require", "_require"),
-        ("__filename", "___filename"),
-        ("__dirname", "___dirname"),
-    ]
-    .into_iter()
-    .filter_map(|(name, renamed)| Some((scoping.get_root_binding(name.into())?, renamed)))
-    .collect()
-}
-
 fn lower<'a>(
     ast: AstBuilder<'a>,
     scoping: Scoping,
@@ -671,7 +713,12 @@ fn lower<'a>(
     let p = plan(&ast, &scoping, ctx, program)?;
     let (requires, re_exports, exports) = (p.requires, p.re_exports, p.exports);
 
-    let wrapper_renames = wrapper_renames(&scoping);
+    let has_module_syntax = !(requires.is_empty()
+        && re_exports.is_empty()
+        && exports.is_empty()
+        && !p.default_needs_rewrite);
+    let wrapper_renames = wrapper_renames(&scoping, has_module_syntax);
+    let exports = renamed_exports(exports, &wrapper_renames, &scoping);
     let mut state = EmitState {
         ast,
         imports: p.imports,
@@ -692,10 +739,6 @@ fn lower<'a>(
         body_code = body_code.replacen("export default ", "var __tt_default = ", 1);
     }
 
-    let has_module_syntax = !(requires.is_empty()
-        && re_exports.is_empty()
-        && exports.is_empty()
-        && !p.default_needs_rewrite);
     let uses_to_esm = state.uses_to_esm;
     Some((
         ModuleParts {

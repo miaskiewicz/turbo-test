@@ -4087,11 +4087,14 @@ function __ttAutomockMark(dir, spec) {
 }
 globalThis.__ttAutomockMark = __ttAutomockMark;
 // Specs with a registered mock (jest.mock/doMock/setMock, vi.mock) not unmocked since, by their
-// resolved key: jest.requireMock returns that mock, else an automock of the real module.
+// resolved key: jest.requireMock returns that mock, else the colocated __mocks__/<name> manual
+// mock, else an automock of the real module (jest's moduleRegistry.requireMock).
 const __ttMockedKeys = new Set();
 function __ttRequireMock(p) {
   const dir = globalThis.__ttDir || globalThis.__ttEntryDir;
   if (__ttMockedKeys.has(__ttSpecKey(dir, p))) return globalThis.__nativeRequire(dir, String(p));
+  const manual = __ttManualMockPath(dir, p);
+  if (manual) return globalThis.__ttImportActual(globalThis.__dirnameOf(manual), './' + __basename(manual));
   return __automock(globalThis.jest.requireActual(p));
 }
 // A specifier that automock may touch: relative ('./x', '../x') or absolute ('/x') only —

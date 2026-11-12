@@ -37,20 +37,17 @@ fn inline_map(o: &str) -> serde_json::Value {
 fn top_level_bindings_named_like_wrapper_params_are_renamed() {
     let o = e("import { createRequire } from 'node:module';\n\
                const require = createRequire(import.meta.url);\n\
-               const __dirname = 'own';\nlet __filename = 'f';\nvar exports = 1;\nvar module = 2;\n\
+               const __dirname = 'own';\nlet __filename = 'f';\nclass exports {}\nconst module = 2;\n\
                export const all = [require, __dirname, __filename, exports, module];\n");
     let body = after_exports(&o);
-    for (orig, renamed) in [
-        ("require", "_require"),
-        ("__dirname", "___dirname"),
-        ("__filename", "___filename"),
-        ("exports", "_exports"),
-        ("module", "_module"),
+    for (orig, decl) in [
+        ("require", "const _require = "),
+        ("__dirname", "const ___dirname = "),
+        ("__filename", "let ___filename = "),
+        ("exports", "class _exports "),
+        ("module", "const _module = "),
     ] {
-        assert!(
-            body.contains(&format!(" {renamed} = ")),
-            "{orig} binding renamed:\n{o}"
-        );
+        assert!(body.contains(decl), "{orig} binding renamed:\n{o}");
     }
     let flat: String = body.split_whitespace().collect();
     assert!(
@@ -72,6 +69,68 @@ fn wrapper_params_used_without_a_local_binding_are_left_alone() {
         body.contains("= __dirname") && body.contains("require("),
         "{o}"
     );
+}
+
+#[test]
+fn a_commonjs_file_redeclares_wrapper_params_as_node_does() {
+    // the UMD idiom: `var exports` re-declares the parameter and keeps its value
+    let o = e("var exports = exports || {};\nvar __dirname;\nexports.a = 1;\n");
+    assert!(!o.contains("_exports") && !o.contains("___dirname"), "{o}");
+    assert!(o.contains("var exports = exports || {}"), "{o}");
+}
+
+#[test]
+fn an_import_named_like_a_wrapper_param_keeps_its_name() {
+    let o = e("import require from './m6.js';\nexport const r = require();\n");
+    assert!(
+        !o.contains("_require"),
+        "an import binding is lowered away, never renamed:\n{o}"
+    );
+}
+
+#[test]
+fn es_module_var_and_function_bindings_leave_the_wrappers_module_alone() {
+    // a hoisted `function module` / `var require` would replace the wrapper's module / require
+    // that `module.exports = …` and the import's require(…) use
+    let o = e(
+        "import x from './x';\nfunction module() {}\nvar require = 1;\n\
+               export const a = [x, module, require];\n",
+    );
+    assert!(
+        o.contains("module.exports = __toCommonJS(__tt_exports);"),
+        "{o}"
+    );
+    assert!(o.contains("require(\"./x\")"), "{o}");
+    let flat: String = after_exports(&o).split_whitespace().collect();
+    assert!(flat.contains("function_module()"), "{o}");
+    assert!(flat.contains("var_require=1"), "{o}");
+    assert!(flat.contains(",_module,_require]"), "{o}");
+}
+
+#[test]
+fn exports_of_a_renamed_binding_read_the_renamed_name() {
+    let o = e(
+        "export const require = (s) => s;\nclass exports {}\nfunction module() {}\n\
+               export { module, exports as ex };\n",
+    );
+    let flat: String = o.split_whitespace().collect();
+    assert!(flat.contains("require:()=>_require"), "{o}");
+    assert!(flat.contains("ex:()=>_exports"), "{o}");
+    assert!(flat.contains("module:()=>_module"), "{o}");
+}
+
+#[test]
+fn a_rename_never_collides_with_a_name_in_use() {
+    let o = e(
+        "const require = 1;\nconst _require = 2;\nconst f = () => _require2;\n\
+               export const all = [require, _require, f];\n",
+    );
+    let flat: String = after_exports(&o).split_whitespace().collect();
+    assert!(
+        flat.contains("const_require3=1"),
+        "skips the bound _require and global _require2:\n{o}"
+    );
+    assert!(flat.contains("[_require3,_require,f]"), "{o}");
 }
 
 // ---- env switches ---------------------------------------------------------------------------

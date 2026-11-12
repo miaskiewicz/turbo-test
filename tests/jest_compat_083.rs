@@ -135,6 +135,28 @@ test('after jest.unmock requireMock automocks the real module again', () => {
     assert_eq!(counts(&r), (3, 0), "{}", r.all());
 }
 
+#[test]
+fn require_mock_returns_a_colocated_manual_mock() {
+    let p = Project::new("jest-338-require-mock-manual");
+    base_jest(&p);
+    p.file("helper.js", "module.exports = { add: (a, b) => a + b };\n");
+    p.file(
+        "__mocks__/helper.js",
+        "module.exports = { add: () => 'manual' };\n",
+    );
+    p.file(
+        "a.test.js",
+        r#"
+test('requireMock loads __mocks__/<name> without a jest.mock call', () => {
+    expect(jest.requireMock('./helper').add(1, 2)).toBe('manual');
+    expect(require('./helper').add(1, 2)).toBe(3);
+});
+"#,
+    );
+    let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+    assert_eq!(counts(&r), (1, 0), "{}", r.all());
+}
+
 // ---- #339: runAllTicks flushes nextTick under fake timers ----
 
 #[test]

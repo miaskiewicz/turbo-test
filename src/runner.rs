@@ -4655,14 +4655,24 @@ fn mr_entry_transformable(abs: &Path) -> bool {
     esbuild_transform_cjs(abs, false).is_some()
 }
 
-/// Whether `abs` parses without static `import` / `export` (a CommonJS file).
+/// Whether `abs` is CommonJS by Node's rule: `.cjs` / `.cts` are, `.mjs` / `.mts` and files of a
+/// `"type": "module"` package are not (ES modules are strict and have no wrapper scope); otherwise
+/// a file without static `import` / `export`.
 fn entry_is_commonjs(abs: &Path) -> bool {
+    match abs.extension().and_then(|e| e.to_str()) {
+        Some("cjs" | "cts") => true,
+        Some("mjs" | "mts") => false,
+        _ => nearest_pkg_type(abs) != Some("module") && !has_static_module_syntax(abs),
+    }
+}
+
+fn has_static_module_syntax(abs: &Path) -> bool {
     let src = std::fs::read_to_string(abs).ok();
     let stype = oxc_span::SourceType::from_path(abs).ok();
     src.zip(stype).is_some_and(|(src, stype)| {
         let alloc = oxc_allocator::Allocator::default();
         let parsed = oxc_parser::Parser::new(&alloc, &src, stype).parse();
-        !parsed.module_record.has_module_syntax
+        parsed.module_record.has_module_syntax
     })
 }
 
