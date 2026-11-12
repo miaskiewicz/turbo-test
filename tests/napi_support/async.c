@@ -188,6 +188,9 @@ typedef struct {
     long n;
     double statuses[16];
     int null_env_calls;
+    /* set by the caller thread once statuses[15] holds the release's status: the release can
+     * run the finalizer (on the JS thread) before that assignment lands */
+    atomic_int released;
 } Tsfn;
 
 static void tsfn_call_js(napi_env env, napi_value js_cb, void *context, void *data) {
@@ -204,6 +207,9 @@ static void tsfn_call_js(napi_env env, napi_value js_cb, void *context, void *da
 }
 static void tsfn_finalize(napi_env env, void *finalize_data, void *context) {
     Tsfn *t = context;
+    /* tsfnThreads' caller thread is still storing the release status (others never release
+     * from a thread: their flag is set up front) */
+    for (int spins = 0; !atomic_load(&t->released) && spins < 200000; spins++) usleep(10);
     double r[18];
     for (int i = 0; i < 16; i++) r[i] = t->statuses[i];
     r[16] = t->null_env_calls;
@@ -217,6 +223,7 @@ static void *caller_thread(void *arg) {
     for (long i = 0; i < t->n; i++)
         t->statuses[i] = napi_call_threadsafe_function(t->tsfn, (void *)i, napi_tsfn_blocking);
     t->statuses[15] = napi_release_threadsafe_function(t->tsfn, napi_tsfn_release);
+    atomic_store(&t->released, 1);
     return NULL;
 }
 
@@ -227,6 +234,7 @@ static napi_value f_tsfn_threads(napi_env env, napi_callback_info info) {
     napi_value argv[2], promise;
     args(env, info, argv, 2);
     Tsfn *t = calloc(1, sizeof *t);
+    atomic_init(&t->released, 0);
     t->n = (long)argd(env, argv[1]);
     for (int i = 0; i < 16; i++) t->statuses[i] = -1;
     napi_create_promise(env, &t->done, &promise);
@@ -244,6 +252,7 @@ static napi_value f_tsfn_default(napi_env env, napi_callback_info info) {
     napi_value argv[1], promise;
     args(env, info, argv, 1);
     Tsfn *t = calloc(1, sizeof *t);
+    atomic_init(&t->released, 1);
     for (int i = 0; i < 16; i++) t->statuses[i] = -1;
     napi_create_promise(env, &t->done, &promise);
     t->statuses[0] = napi_create_threadsafe_function(env, argv[0], NULL, str(env, "default"), 0,
@@ -261,6 +270,7 @@ static napi_value f_tsfn_lifecycle(napi_env env, napi_callback_info info) {
     (void)info;
     napi_value promise;
     Tsfn *t = calloc(1, sizeof *t);
+    atomic_init(&t->released, 1);
     for (int i = 0; i < 16; i++) t->statuses[i] = -1;
     napi_create_promise(env, &t->done, &promise);
     double *st = t->statuses;
@@ -290,6 +300,7 @@ static napi_value f_tsfn_release(napi_env env, napi_callback_info info) {
     napi_threadsafe_function tsfn;
     napi_value promise;
     Tsfn *t = calloc(1, sizeof *t);
+    atomic_init(&t->released, 1);
     napi_create_promise(env, &t->done, &promise);
     double st[4];
     st[0] = napi_create_threadsafe_function(env, NULL, NULL, str(env, "release"), 0, 2, NULL,
@@ -313,6 +324,7 @@ static napi_value f_tsfn_held(napi_env env, napi_callback_info info) {
     (void)info;
     napi_value promise;
     Tsfn *t = calloc(1, sizeof *t);
+    atomic_init(&t->released, 1);
     for (int i = 0; i < 16; i++) t->statuses[i] = -1;
     napi_create_promise(env, &t->done, &promise);
     t->statuses[0] = napi_create_threadsafe_function(env, NULL, NULL, str(env, "held"), 0, 3, NULL,
@@ -334,6 +346,7 @@ static napi_value f_tsfn_default_aborted(napi_env env, napi_callback_info info) 
     napi_value argv[1], promise;
     args(env, info, argv, 1);
     Tsfn *t = calloc(1, sizeof *t);
+    atomic_init(&t->released, 1);
     for (int i = 0; i < 16; i++) t->statuses[i] = -1;
     napi_create_promise(env, &t->done, &promise);
     t->statuses[0] = napi_create_threadsafe_function(env, argv[0], NULL, str(env, "aborted"), 0,
@@ -352,6 +365,7 @@ static napi_value f_tsfn_held_late(napi_env env, napi_callback_info info) {
     (void)info;
     napi_value promise;
     Tsfn *t = calloc(1, sizeof *t);
+    atomic_init(&t->released, 1);
     for (int i = 0; i < 16; i++) t->statuses[i] = -1;
     napi_create_promise(env, &t->done, &promise);
     t->statuses[0] = napi_create_threadsafe_function(env, NULL, NULL, str(env, "late"), 0, 3, NULL,
@@ -385,6 +399,7 @@ static napi_value f_tsfn_throws(napi_env env, napi_callback_info info) {
     (void)info;
     napi_value promise;
     Tsfn *t = calloc(1, sizeof *t);
+    atomic_init(&t->released, 1);
     napi_create_promise(env, &t->done, &promise);
     napi_create_threadsafe_function(env, NULL, NULL, str(env, "throws"), 0, 1, NULL, NULL, t,
                                     throwing_call_js, &t->tsfn);
