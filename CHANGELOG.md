@@ -126,16 +126,20 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   under babel-jest / ts-jest — the namespace and its importers read the new value — instead
   of failing on the getter-only export; vitest's namespaces stay read-only, as in vitest.
 
-- TouchEvent lists follow the test file's environment (turbo-dom 0.8.3's TouchEventMode):
-  under jsdom and happy-dom — and turbo-test's auto DOM, its jsdom-parity default — a
-  `TouchEvent`'s `touches` / `targetTouches` / `changedTouches` keep plain-object entries, so
-  `fireEvent.touchStart(el, { touches: [{ clientX, clientY }] })` works as it does there
-  (jsdom has no `Touch` class); the native `turbo-dom` environment stays Chrome's (branded
-  `Touch` objects only). Set per file, so a reused isolate follows each file's environment.
+- jsdom-compatibility modes follow the test file's environment (turbo-dom 0.8.3's
+  TouchEventMode / ComputedStyleMode): under jsdom and happy-dom — and turbo-test's auto DOM,
+  its jsdom-parity default — a `TouchEvent`'s `touches` / `targetTouches` / `changedTouches`
+  keep plain-object entries, so `fireEvent.touchStart(el, { touches: [{ clientX, clientY }] })`
+  works as it does there (jsdom has no `Touch` class), and computed `text-decoration` is the
+  declared shorthand (`line-through`, as jest-dom's `toHaveStyle` reads it there) instead of
+  Chrome's `line-through rgb(0, 0, 0)`; the native `turbo-dom` environment stays Chrome's.
+  Set per file, so a reused isolate follows each file's environment. A test that asserted
+  Chrome's computed text-decoration under `environment: 'jsdom'` (which real vitest fails)
+  now fails here too.
 
 ### Dependencies
 - turbo-dom-browser-env / turbo-dom / turbo-dom-layout 0.8.3, pinned to the turbo-dom
-  release commit `6827656c` until 0.8.3 is on crates.io (release-guard refuses the tag while
+  release commit `ce3d0d0b` until 0.8.3 is on crates.io (release-guard refuses the tag while
   that git pin is in Cargo.toml).
 
 ### Tests

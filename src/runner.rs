@@ -3017,7 +3017,7 @@ fn setup_dom(scope: &mut v8::PinScope, entry: &Path) {
     let css_motion = dom_switch(entry, "TURBO_CSS_TRANSITIONS", "cssTransitions");
     turbo_dom_browser_env::browser_env::set_css_transitions(scope, css_motion);
     turbo_dom_browser_env::browser_env::set_css_animations(scope, css_motion);
-    set_touch_event_mode(scope, entry);
+    set_environment_modes(scope, entry);
     // the embedder's window members: open / alert / print / postMessage … (turbo-test#208)
     run_js(
         scope,
@@ -3029,18 +3029,24 @@ fn setup_dom(scope: &mut v8::PinScope, entry: &Path) {
     run_js(scope, &format!("globalThis.__ttJsdomQuirks = {quirks};"));
 }
 
-/// TouchEvent lists as the file's environment builds them (independent of the media and CSS
-/// motion switches): jsdom and happy-dom — and the auto DOM, turbo-test's jsdom-parity default —
-/// keep plain-object entries (`fireEvent.touchStart(el, { touches: [{ clientX }] })`); the native
-/// `turbo-dom` environment is Chrome's, branded `Touch` objects only.
-fn set_touch_event_mode(scope: &mut v8::PinScope, entry: &Path) {
-    use turbo_dom_browser_env::browser_env::TouchEventMode;
-    let src = std::fs::read_to_string(entry).unwrap_or_default();
-    let mode = match forced_env(&src).as_deref() {
-        Some("turbo-dom") => TouchEventMode::Chrome,
-        _ => TouchEventMode::Jsdom,
+/// The DOM's jsdom-compatibility modes for the file's environment (independent of the media and
+/// CSS motion switches): under jsdom and happy-dom — and the auto DOM, turbo-test's jsdom-parity
+/// default — TouchEvent lists keep plain-object entries (`fireEvent.touchStart(el, { touches:
+/// [{ clientX }] })`) and computed `text-decoration` is the declared shorthand (jest-dom's
+/// `toHaveStyle({ textDecoration: 'line-through' })`), as both libraries do; the native
+/// `turbo-dom` environment is Chrome's (branded `Touch` only, `line-through rgb(0, 0, 0)`).
+fn set_environment_modes(scope: &mut v8::PinScope, entry: &Path) {
+    use turbo_dom_browser_env::browser_env::{
+        set_computed_style_mode, set_touch_event_mode, ComputedStyleMode, TouchEventMode,
     };
-    turbo_dom_browser_env::browser_env::set_touch_event_mode(scope, mode);
+    let src = std::fs::read_to_string(entry).unwrap_or_default();
+    let chrome = forced_env(&src).as_deref() == Some("turbo-dom");
+    let (touch, style) = match chrome {
+        true => (TouchEventMode::Chrome, ComputedStyleMode::Chrome),
+        false => (TouchEventMode::Jsdom, ComputedStyleMode::Jsdom),
+    };
+    set_touch_event_mode(scope, touch);
+    set_computed_style_mode(scope, style);
 }
 
 /// Transform a TS file to **ESM** JS using the PROJECT'S OWN TypeScript (`ts.transpileModule`),
@@ -10889,7 +10895,7 @@ fn run_reused_file(
     }
     // the kept DOM's per-file settings follow this file's environment
     if DOM_INSTALLED.with(|d| d.get()) {
-        set_touch_event_mode(scope, entry_abs);
+        set_environment_modes(scope, entry_abs);
     }
     // Setup files run ONCE per worker (vitest isolate:false semantics): their hooks,
     // matchers and mocks persist across files. After the first run we snapshot the hook

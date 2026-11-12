@@ -73,12 +73,13 @@ fancy-regex = "0.20"
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tarpaulin)"] }
 
-# turbo-dom 0.8.3 is not on crates.io yet: pinned to its release commit (TouchEvent jsdom mode).
+# turbo-dom 0.8.3 is not on crates.io yet: pinned to its release commit (jsdom TouchEvent and
+# computed-style modes).
 # release-guard fails a tag while a git pin is here — replace with the published 0.8.3 first.
 [patch.crates-io]
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "6827656c8da5533bc2512a90220c9df4c647bc26" }
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "6827656c8da5533bc2512a90220c9df4c647bc26" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "6827656c8da5533bc2512a90220c9df4c647bc26" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "ce3d0d0b0f9a2c7a08e8a9fcf899085682186fd6" }
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "ce3d0d0b0f9a2c7a08e8a9fcf899085682186fd6" }
+turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "ce3d0d0b0f9a2c7a08e8a9fcf899085682186fd6" }
 
 [profile.release]
 opt-level = 3

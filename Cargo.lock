@@ -2414,7 +2414,7 @@ dependencies = [
 [[package]]
 name = "turbo-dom"
 version = "0.8.3"
-source = "git+https://github.com/miaskiewicz/turbo-dom?rev=6827656c8da5533bc2512a90220c9df4c647bc26#6827656c8da5533bc2512a90220c9df4c647bc26"
+source = "git+https://github.com/miaskiewicz/turbo-dom?rev=ce3d0d0b0f9a2c7a08e8a9fcf899085682186fd6#ce3d0d0b0f9a2c7a08e8a9fcf899085682186fd6"
 dependencies = [
  "cssparser",
  "html5ever",
@@ -2429,7 +2429,7 @@ dependencies = [
 [[package]]
 name = "turbo-dom-browser-env"
 version = "0.8.3"
-source = "git+https://github.com/miaskiewicz/turbo-dom?rev=6827656c8da5533bc2512a90220c9df4c647bc26#6827656c8da5533bc2512a90220c9df4c647bc26"
+source = "git+https://github.com/miaskiewicz/turbo-dom?rev=ce3d0d0b0f9a2c7a08e8a9fcf899085682186fd6#ce3d0d0b0f9a2c7a08e8a9fcf899085682186fd6"
 dependencies = [
  "cssparser",
  "lightningcss",
@@ -2447,7 +2447,7 @@ dependencies = [
 [[package]]
 name = "turbo-dom-layout"
 version = "0.8.3"
-source = "git+https://github.com/miaskiewicz/turbo-dom?rev=6827656c8da5533bc2512a90220c9df4c647bc26#6827656c8da5533bc2512a90220c9df4c647bc26"
+source = "git+https://github.com/miaskiewicz/turbo-dom?rev=ce3d0d0b0f9a2c7a08e8a9fcf899085682186fd6#ce3d0d0b0f9a2c7a08e8a9fcf899085682186fd6"
 dependencies = [
  "core-foundation",
  "core-text",
