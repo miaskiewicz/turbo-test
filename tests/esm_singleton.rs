@@ -132,3 +132,88 @@ test('an unused sub-module never runs', () => {
         );
     }
 }
+
+/// A bundled sub-module that throws is not cached (Node drops a failed module): every require of
+/// it — from outside the package or by the package itself — runs it again and throws again,
+/// never handing out its half-built exports.
+#[test]
+fn a_failed_bundled_sub_module_runs_again_on_the_next_require() {
+    for esbuild in [false, true] {
+        let p = Project::new(&format!("esm-lazy-throw-{esbuild}"));
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", r#"{ "name": "esm-lazy-throw" }"#);
+        p.file(
+            "jest.config.js",
+            "module.exports = { testEnvironment: 'node' };\n",
+        );
+        p.file(
+            "node_modules/throw-pkg/package.json",
+            r#"{ "name": "throw-pkg", "main": "index.js" }"#,
+        );
+        p.file(
+            "node_modules/throw-pkg/index.js",
+            "exports.loadB = () => require('./b.js');\n",
+        );
+        p.file(
+            "node_modules/throw-pkg/b.js",
+            "globalThis.__bRuns = (globalThis.__bRuns || 0) + 1;\nexports.partial = 1;\nthrow new Error('b boom');\n",
+        );
+        p.file(
+            "a.test.js",
+            r#"const pkg = require('throw-pkg');
+test('a throwing sub-module is never cached half-built', () => {
+  expect(() => require('throw-pkg/b.js')).toThrow('b boom');
+  expect(() => pkg.loadB()).toThrow('b boom');
+  expect(() => require('throw-pkg/b.js')).toThrow('b boom');
+  expect(globalThis.__bRuns).toBe(3);
+});
+"#,
+        );
+        let r = turbo_test(&p.dir, &["--reporter", "json", "a.test.js"], &[]);
+        let j = json_report(&r);
+        assert_eq!(
+            (j["numPassedTests"].as_u64(), j["numFailedTests"].as_u64()),
+            (Some(1), Some(0)),
+            "esbuild={esbuild}:\n{}",
+            r.all()
+        );
+    }
+}
+
+/// Identity holds in either order: a sub-path required before the package entry is the instance
+/// the entry's bundle then re-exports (the bundle does not register a second one).
+#[test]
+fn a_sub_path_required_first_is_the_instance_the_entry_re_exports() {
+    for esbuild in [true, false] {
+        let p = Project::new(&format!("esm-singleton-order-{esbuild}"));
+        if esbuild {
+            p.with_esbuild();
+        }
+        p.file("package.json", r#"{ "name": "esm-singleton" }"#);
+        identity_fixture(&p);
+        p.file(
+            "jest.config.js",
+            "module.exports = { testEnvironment: 'node' };\n",
+        );
+        p.file(
+            "a.test.js",
+            r#"
+test('sub-path first', () => {
+    const sub = require('identity-fixture/state');
+    const root = require('identity-fixture');
+    expect(root.state).toBe(sub.state);
+});
+"#,
+        );
+        let r = turbo_test(&p.dir, &["--reporter", "json", "a.test.js"], &[]);
+        let j = json_report(&r);
+        assert_eq!(
+            (j["numPassedTests"].as_u64(), j["numFailedTests"].as_u64()),
+            (Some(1), Some(0)),
+            "esbuild={esbuild}:\n{}",
+            r.all()
+        );
+    }
+}

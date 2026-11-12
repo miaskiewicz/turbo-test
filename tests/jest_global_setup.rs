@@ -204,3 +204,249 @@ test('regex keys, order, captures, lists, require.resolve', () => {
     let r = turbo_test(&p.dir, &["--reporter", "json", "--jobs", "1"], &[]);
     assert_eq!(counts(&r), (1, 0), "{}", r.all());
 }
+
+/// jest runs globalSetup and globalTeardown in one context: teardown reads what setup left on
+/// `globalThis` (a server / container handle). A failing teardown fails the run (exit 1).
+#[test]
+fn global_teardown_sees_setup_globals_and_its_failure_fails_the_run() {
+    for (teardown, code) in [
+        (
+            "module.exports = () => { globalThis.__server.stop(); };\n",
+            Some(0),
+        ),
+        (
+            "module.exports = () => { throw new Error('teardown boom'); };\n",
+            Some(1),
+        ),
+    ] {
+        let p = Project::new("jest-global-shared");
+        p.with_esbuild();
+        p.file("package.json", r#"{ "name": "globalsetup" }"#);
+        p.file(
+            "jest.config.js",
+            "module.exports = { testEnvironment: 'node', globalSetup: './setup.js', globalTeardown: './teardown.js' };\n",
+        );
+        p.file(
+            "setup.js",
+            "const fs = require('fs');\nmodule.exports = () => { globalThis.__server = { stop() { fs.writeFileSync(__dirname + '/stopped.txt', 'yes'); } }; };\n",
+        );
+        p.file("teardown.js", teardown);
+        p.file("a.test.js", "test('t', () => {});\n");
+        let r = turbo_test(&p.dir, &["--reporter", "json", "--jobs", "1"], &[]);
+        assert_eq!(r.code, code, "{}", r.all());
+        if code == Some(0) {
+            assert!(p.path("stopped.txt").exists(), "{}", r.all());
+        } else {
+            assert!(r.stderr.contains("teardown boom"), "{}", r.all());
+        }
+    }
+}
+
+/// globalSetup's `process.env` writes reach the test files as Node stores them: values coerced to
+/// strings, deleted keys removed.
+#[test]
+fn global_setup_env_is_coerced_and_deletions_apply() {
+    let p = Project::new("jest-global-env");
+    p.with_esbuild();
+    p.file("package.json", r#"{ "name": "globalsetup" }"#);
+    p.file(
+        "jest.config.js",
+        "module.exports = { testEnvironment: 'node', globalSetup: './setup.js' };\n",
+    );
+    p.file(
+        "setup.js",
+        "module.exports = () => { process.env.TT_PORT = 4000; process.env.TT_FLAG = true; delete process.env.TT_TO_DELETE; };\n",
+    );
+    p.file(
+        "a.test.js",
+        "test('env', () => expect([process.env.TT_PORT, process.env.TT_FLAG, process.env.TT_TO_DELETE]).toEqual(['4000', 'true', undefined]));\n",
+    );
+    let r = turbo_test(
+        &p.dir,
+        &["--reporter", "json", "--jobs", "1"],
+        &[("TT_TO_DELETE", "x")],
+    );
+    assert_eq!(counts(&r), (1, 0), "{}", r.all());
+}
+
+/// moduleNameMapper as jest evaluates it, within what reading the config text can know: a key
+/// whose value is computed (`path.join(...)`) is skipped instead of breaking the specifiers it
+/// matches; literal entries next to a spread still apply (with a warning that the spread is not
+/// read); template literals; ECMAScript lookaround; `require.resolve('pkg')` is resolved from the
+/// config's directory.
+#[test]
+fn module_name_mapper_handles_what_jest_configs_write() {
+    let p = Project::new("jest-modulenamemapper-forms");
+    p.with_esbuild();
+    p.file("package.json", r#"{ "name": "mapper" }"#);
+    p.file(
+        "jest.config.js",
+        r#"const path = require('path');
+const extra = { '^extra$': '<rootDir>/extra.js' };
+module.exports = {
+    testEnvironment: 'node',
+    moduleNameMapper: {
+        ...extra,
+        '^real$': path.join(__dirname, 'computed.js'),
+        '^tpl$': `<rootDir>/tpl.js`,
+        '^(?!keep)(\\w+)-mapped$': '<rootDir>/mapped.js',
+        '^cfg$': require.resolve('cfgpkg'),
+    },
+};
+"#,
+    );
+    p.file(
+        "node_modules/real/package.json",
+        r#"{ "name": "real", "main": "i.js" }"#,
+    );
+    p.file("node_modules/real/i.js", "module.exports = 'real';\n");
+    p.file("tpl.js", "module.exports = 'tpl';\n");
+    p.file("mapped.js", "module.exports = 'mapped';\n");
+    p.file(
+        "node_modules/keep-mapped/package.json",
+        r#"{ "name": "keep-mapped", "main": "i.js" }"#,
+    );
+    p.file(
+        "node_modules/keep-mapped/i.js",
+        "module.exports = 'kept';\n",
+    );
+    p.file(
+        "node_modules/cfgpkg/package.json",
+        r#"{ "name": "cfgpkg", "main": "i.js" }"#,
+    );
+    p.file("node_modules/cfgpkg/i.js", "module.exports = 'root cfg';\n");
+    p.file(
+        "sub/node_modules/cfgpkg/package.json",
+        r#"{ "name": "cfgpkg", "main": "i.js" }"#,
+    );
+    p.file(
+        "sub/node_modules/cfgpkg/i.js",
+        "module.exports = 'shadowed cfg';\n",
+    );
+    p.file(
+        "sub/a.test.js",
+        r#"
+test('jest config forms', () => {
+    expect(require('real')).toBe('real');
+    expect(require('tpl')).toBe('tpl');
+    expect(require('foo-mapped')).toBe('mapped');
+    expect(require('keep-mapped')).toBe('kept');
+    expect(require('cfg')).toBe('root cfg');
+});
+"#,
+    );
+    let r = turbo_test(&p.dir, &["--reporter", "json", "--jobs", "1"], &[]);
+    assert_eq!(counts(&r), (1, 0), "{}", r.all());
+    assert!(
+        r.stderr.contains("moduleNameMapper") && r.stderr.contains("spread"),
+        "warns about the unread spread: {}",
+        r.all()
+    );
+}
+
+/// The shapes a global script takes: a package's script named by module (`pkg/setup`), an ES
+/// module's `export default`, a script with side effects only (no function to call), and one that
+/// fails to load (exit 1, its error on stderr).
+#[test]
+fn global_scripts_by_module_name_default_export_side_effect_and_load_failure() {
+    let cases: [(&str, &str, &str, Option<i32>); 4] = [
+        (
+            "setup-pkg/setup",
+            "node_modules/setup-pkg/setup.js",
+            "module.exports = () => { process.env.TT_SETUP = 'pkg'; };\n",
+            Some(0),
+        ),
+        (
+            "./setup.js",
+            "setup.js",
+            "module.exports = { default: async () => { process.env.TT_SETUP = 'default'; } };\n",
+            Some(0),
+        ),
+        (
+            "./setup.js",
+            "setup.js",
+            "process.env.TT_SETUP = 'side effect';\n",
+            Some(0),
+        ),
+        (
+            "./setup.js",
+            "setup.js",
+            "require('./missing-dep');\n",
+            Some(1),
+        ),
+    ];
+    for (i, (config_path, file, body, code)) in cases.iter().enumerate() {
+        let p = Project::new(&format!("jest-global-shapes-{i}"));
+        p.with_esbuild();
+        p.file("package.json", r#"{ "name": "globalsetup" }"#);
+        p.file(
+            "jest.config.js",
+            &format!(
+                "module.exports = {{ testEnvironment: 'node', globalSetup: '{config_path}' }};\n"
+            ),
+        );
+        p.file(file, body);
+        p.file(
+            "a.test.js",
+            "test('ran', () => expect(typeof process.env.TT_SETUP).toBe('string'));\n",
+        );
+        let r = turbo_test(&p.dir, &["--reporter", "json", "--jobs", "1"], &[]);
+        assert_eq!(r.code, *code, "case {i}: {}", r.all());
+        if *code == Some(1) {
+            assert!(
+                r.stderr.contains("globalSetup failed") && r.stderr.contains("missing-dep"),
+                "case {i}: {}",
+                r.all()
+            );
+        }
+    }
+}
+
+/// A `$` not followed by a group number stays literal in a target; a mapper the config builds in
+/// code (`moduleNameMapper: mapper`) cannot be read from its text and is reported, not silently
+/// dropped.
+#[test]
+fn module_name_mapper_literal_dollar_and_unreadable_mapper() {
+    let p = Project::new("jest-modulenamemapper-dollar");
+    p.with_esbuild();
+    p.file("package.json", r#"{ "name": "mapper" }"#);
+    p.file(
+        "jest.config.js",
+        "module.exports = { testEnvironment: 'node', moduleNameMapper: { '^dollar$': '<rootDir>/$lib.js' } };\n",
+    );
+    p.file("$lib.js", "module.exports = 'dollar';\n");
+    p.file(
+        "a.test.js",
+        "test('$', () => expect(require('dollar')).toBe('dollar'));\n",
+    );
+    let r = turbo_test(&p.dir, &["--reporter", "json", "--jobs", "1"], &[]);
+    assert_eq!(counts(&r), (1, 0), "{}", r.all());
+
+    let q = Project::new("jest-modulenamemapper-variable");
+    q.with_esbuild();
+    q.file("package.json", r#"{ "name": "mapper" }"#);
+    q.file(
+        "jest.config.js",
+        "const mapper = { '^x$': '<rootDir>/x.js' };\nmodule.exports = { testEnvironment: 'node', moduleNameMapper: mapper };\n",
+    );
+    q.file("a.test.js", "test('t', () => {});\n");
+    let r = turbo_test(&q.dir, &["--reporter", "json", "--jobs", "1"], &[]);
+    assert_eq!(counts(&r), (1, 0), "{}", r.all());
+    assert!(
+        r.stderr.contains("moduleNameMapper") && r.stderr.contains("not an object literal"),
+        "{}",
+        r.all()
+    );
+
+    // a mapper whose text does not parse (here a stray token) is reported too
+    let b = Project::new("jest-modulenamemapper-broken");
+    b.with_esbuild();
+    b.file("package.json", r#"{ "name": "mapper" }"#);
+    b.file(
+        "jest.config.js",
+        "module.exports = { testEnvironment: 'node', moduleNameMapper: { '^x$': '<rootDir>/x.js' %% } };\n",
+    );
+    b.file("a.test.js", "test('t', () => {});\n");
+    let r = turbo_test(&b.dir, &["--reporter", "json", "--jobs", "1"], &[]);
+    assert!(r.stderr.contains("does not parse"), "{}", r.all());
+}

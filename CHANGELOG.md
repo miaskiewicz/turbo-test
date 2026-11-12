@@ -10,15 +10,21 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 ### Added
 - Jest `globalSetup` / `globalTeardown` (#335): resolved as jest does (`<rootDir>`,
   rootDir-relative, or a module name; the nearest jest config up from the cwd), loaded as
-  CJS in a fresh V8 isolate and called once — with jest's `(globalConfig, projectConfig)`
-  (their `rootDir`) — before all suites (setup) / after all suites (teardown); the
-  `process.env` globalSetup leaves reaches every test file, as with jest (which runs it in
-  the parent before forking workers). Why: many Jest projects use `globalSetup` for
+  CJS and called once — with jest's `(globalConfig, projectConfig)` (their `rootDir`) —
+  before all suites (setup) / after all suites (teardown), both in one V8 context, so
+  teardown reads what setup left on `globalThis` (a server / container handle), as with
+  jest. The `process.env` changes globalSetup makes reach every test file as Node stores
+  them (values coerced to strings, deletions applied), as with jest (which runs it in the
+  parent before forking workers). A failing globalTeardown fails the run (exit 1). Why: many Jest projects use `globalSetup` for
   database seeding or server startup and pass its address on through `process.env`
   (`@shelf/jest-mongodb`'s `MONGO_URL`).
-- Jest `moduleNameMapper` (#335): keys are regexes tried in config order (first match
-  wins), `$n` is the n-th capture, a value may be a target, a list of targets (the first
-  that resolves) or `require.resolve('…')`; `<rootDir>` expanded. Applied before the oxc
+- Jest `moduleNameMapper` (#335): keys are ECMAScript regexes (lookaround and
+  backreferences included) tried in config order (first match wins), `$n` is the n-th
+  capture, a value may be a target, a template literal, a list of targets (the first that
+  resolves) or `require.resolve('…')` (resolved from the config's directory); `<rootDir>`
+  expanded. The mapper is read from the config text: an entry whose value is computed is
+  skipped (its specifiers resolve as without it) and a spread or a mapper built in code is
+  reported once on stderr — write those mappings as literal entries. Applied before the oxc
   resolver; the resolve memo is keyed by the jest config, so two projects of one run that
   map the same specifier differently each get their own.
 - Jest `testMatch` discovery (#340): when the vitest `include` array is absent, falls back
@@ -67,7 +73,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   return the same module instance, preserving `===` identity. A bundle registers its
   sub-modules lazily: each still runs on its first require only (esbuild's `__commonJS`,
   Node), so a lazily required file that needs an uninstalled optional peer, or has side
-  effects, costs nothing until it is used.
+  effects, costs nothing until it is used; one that throws is not cached and runs again on
+  the next require, as Node drops a failed module. Identity holds in either order: a sub-path
+  required before its package entry is the instance the entry's bundle uses.
 - `process.env.JEST_WORKER_ID` (#342) is set for every jest project's test files — any
   `testEnvironment`, jsdom included — and not for vitest ones, as jest and vitest do. Why:
   per-worker resources (database names, ports) are commonly keyed on it.
@@ -89,8 +97,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   name no other binding uses, and points its export at it: `const require =
   createRequire(import.meta.url)` failed with "Identifier has already been declared", and a
   `function module` / `var require` replaced the wrapper's own `module` / `require`
-  (empty exports, broken imports). Imports keep their name, and a CommonJS file is left as
-  Node runs it (`var exports = exports || {}` keeps the wrapper's object).
+  (empty exports, broken imports). Assignments, updates and destructuring follow the
+  rename, and a renamed function or class keeps its source `.name`. Imports keep their
+  name, and a CommonJS file is left as Node runs it (`var exports = exports || {}` keeps the
+  wrapper's object).
 
 - ES modules run in strict mode on the CommonJS load path too. A test file or app module
   with `import` / `export` (or a `.mjs` / `.mts` file, or any file of a `"type": "module"`
@@ -99,7 +109,16 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `this` was `module.exports`. Node, vitest and babel-jest / ts-jest run them strict; the
   wrapper now opens with `"use strict"` on its own line (no source line moves). CommonJS
   files and node_modules bundles are unchanged. A suite that relied on sloppy mode in an ES
-  module will now see the `ReferenceError` / `TypeError` Node and vitest give it.
+  module will now see the `ReferenceError` / `TypeError` Node and vitest give it. In a jest
+  project, assigning a namespace export (`import * as mod; mod.fn = jest.fn()`) works as
+  under babel-jest / ts-jest — the namespace and its importers read the new value — instead
+  of failing on the getter-only export; vitest's namespaces stay read-only, as in vitest.
+
+### Tests
+- Restored three test fixtures (`tests/data/snapshots/inline.test.ts`,
+  `tests/data/expect_surface/serializer.test.js`, `serializer_config/cfg.test.js`) that the
+  #335 commit had committed after a local run rewrote them: the inline-snapshot fixture had
+  its new snapshots filled in, so the "writes new inline snapshots" path was no longer tested.
 
 ### CI
 - `cargo test --no-fail-fast`: one red run lists every failing suite. Without it cargo

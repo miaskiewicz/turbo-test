@@ -157,6 +157,41 @@ fn lexical_wrapper_param_bindings_are_renamed_without_lowered_module_syntax() {
 }
 
 #[test]
+fn a_renamed_function_or_class_keeps_its_source_name() {
+    let o = e(
+        "export default function module() {}\nexport class exports {}\nconst require = () => 1;\n",
+    );
+    for (renamed, name) in [("_module", "module"), ("_exports", "exports")] {
+        assert!(
+            o.contains(&format!(
+                "Object.defineProperty({renamed}, \"name\", {{ value: \"{name}\", configurable: true }});"
+            )),
+            "{renamed}.name stays {name}:\n{o}"
+        );
+    }
+    assert!(
+        !o.contains("Object.defineProperty(_require, \"name\""),
+        "a const arrow's name is the binding's, renamed like Node never sees:\n{o}"
+    );
+}
+
+#[test]
+fn a_shorthand_target_with_a_default_keeps_its_default() {
+    let o = e("let module = 1;\n({ module = 5 } = {});\nexport const m = () => module;\n");
+    let flat: String = after_exports(&o).split_whitespace().collect();
+    assert!(flat.contains("({module:_module=5}={})"), "{o}");
+}
+
+#[test]
+fn new_target_is_not_import_meta() {
+    let o = e("export function F() { return new.target === F; }\n");
+    assert!(
+        o.contains("new.target") && !o.contains("__ttImportMeta"),
+        "{o}"
+    );
+}
+
+#[test]
 fn a_rename_never_collides_with_a_name_in_use() {
     let o = e(
         "const require = 1;\nconst _require = 2;\nconst f = () => _require2;\n\

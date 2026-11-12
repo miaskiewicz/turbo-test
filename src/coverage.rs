@@ -1057,7 +1057,7 @@ fn inject_unexecuted_files() {
         .unwrap_or_default();
     for file in discover_source_files(&cwd, &inc, &exc) {
         if !existing.contains(&canonical(&file)) {
-            inject_zero_file(&file);
+            inject_zero_file(&file, &std::fs::read_to_string(&file).unwrap_or_default());
         }
     }
 }
@@ -1068,21 +1068,18 @@ fn canonical(p: &Path) -> PathBuf {
 
 /// Record a never-loaded file at zero: its executable statements (and their lines), functions
 /// and branch arms — every metric — unless it carries the coverage-ignore directive.
-fn inject_zero_file(file: &Path) {
-    let Ok(src) = std::fs::read_to_string(file) else {
-        return;
-    };
-    scan_ignore_directive(file, &src);
+fn inject_zero_file(file: &Path, src: &str) {
+    scan_ignore_directive(file, src);
     if is_ignored(file) {
         return;
     }
     let line_of = |off: u32| src[..(off as usize).min(src.len())].matches('\n').count() as u32 + 1;
-    let (branches, stmts) = crate::coverage_branch::extract_all(file, &src);
+    let (branches, stmts) = crate::coverage_branch::extract_all(file, src);
     for (idx, &off) in stmts.iter().enumerate() {
         record(file, line_of(off), 0);
         record_stmt(file, idx as u32, line_of(off), 0);
     }
-    for (off, name) in crate::coverage_branch::function_starts(file, &src) {
+    for (off, name) in crate::coverage_branch::function_starts(file, src) {
         record_fn(file, line_of(off), &name, 0);
     }
     for (block, br) in branches.iter().enumerate() {
@@ -1131,10 +1128,8 @@ fn skip_dir(name: &std::ffi::OsStr) -> bool {
 }
 
 fn walk_dir(dir: &Path, root: &Path, inc: &[String], exc: &[String], out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    // an unreadable directory contributes nothing
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = entry.path();
         // a symlinked directory is not followed (a link to an ancestor would loop)
         let real_dir = entry.file_type().is_ok_and(|t| t.is_dir());

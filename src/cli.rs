@@ -1893,27 +1893,32 @@ pub fn run(opts: Options) -> i32 {
         &files,
         std::env::var_os("TURBO_ROOT").map(PathBuf::from).as_deref(),
     );
-    if let Some(code) = run_jest_global_script("globalSetup") {
+    // one context for globalSetup and globalTeardown, made only when the project has either
+    let mut globals = None;
+    if let Some(code) = run_jest_global_script(&mut globals, "globalSetup") {
         return code;
     }
     let res = run_files(&Engine::v8(), &files, &names, &order, jobs, opts.bail);
-    run_jest_global_script("globalTeardown");
+    let teardown_failed = run_jest_global_script(&mut globals, "globalTeardown").is_some();
+    drop(globals);
     let wall_ms = wall.elapsed().as_secs_f64() * 1000.0;
 
     let t = tally(&res);
-    if let Some(kind) = human {
-        return report_human(
+    let code = match human {
+        Some(kind) => report_human(
             kind, &opts, &files, &names, &res, &t, &colors, start_ms, wall_ms, &hist_path, hist,
-        );
-    }
-    report_machine(
-        &opts, &files, &names, &res, &t, start_ms, wall_ms, jobs, &hist_path, hist,
-    )
+        ),
+        None => report_machine(
+            &opts, &files, &names, &res, &t, start_ms, wall_ms, jobs, &hist_path, hist,
+        ),
+    };
+    // a failing globalTeardown fails the run, as with jest
+    code.max(i32::from(teardown_failed))
 }
 
 /// Run a jest `globalSetup` or `globalTeardown` script if configured.
 /// Returns `Some(1)` when the script fails (for globalSetup: abort the run).
-fn run_jest_global_script(key: &str) -> Option<i32> {
+fn run_jest_global_script(globals: &mut Option<runner::JestGlobalRealm>, key: &str) -> Option<i32> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let scripts = runner::jest_global_scripts(&cwd)?;
     let path = if key == "globalSetup" {
@@ -1922,7 +1927,8 @@ fn run_jest_global_script(key: &str) -> Option<i32> {
         scripts.teardown
     };
     let path = path?;
-    if let Err(e) = runner::run_global_script(&path, &scripts.root_dir) {
+    let realm = globals.get_or_insert_with(runner::JestGlobalRealm::default);
+    if let Err(e) = realm.run(&path, &scripts.root_dir) {
         eprintln!("{key} failed: {e}");
         return Some(1);
     }

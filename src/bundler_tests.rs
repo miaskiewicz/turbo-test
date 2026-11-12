@@ -21,15 +21,23 @@ fn pkg(name: &str, files: &[(&str, &str)]) -> PathBuf {
     dir.canonicalize().unwrap()
 }
 
-/// Split a bundle into its module bodies, indexed by id (`var require_m<id> = __commonJS(…)`).
+/// Split a bundle into its module bodies, indexed by id (`var require_m<id> = __commonJS(…)`, a
+/// sub-module's wrapped in `__ttRegBundled("<path>", …)`).
 fn modules_of(out: &str) -> Vec<String> {
     let mut mods = Vec::new();
     for (i, chunk) in out.split("var require_m").skip(1).enumerate() {
-        let (id, rest) = chunk
-            .split_once(" = __commonJS((exports, module, __export, __toCommonJS, __toESM, __reExport) => {\n")
+        let (id, rest) = chunk.split_once(" = ").unwrap();
+        let rest = match rest.strip_prefix("__ttRegBundled(\"") {
+            Some(r) => r.split_once("\", ").unwrap().1,
+            None => rest,
+        };
+        let rest = rest
+            .strip_prefix(
+                "__commonJS((exports, module, __export, __toCommonJS, __toESM, __reExport) => {\n",
+            )
             .unwrap();
         assert_eq!(id, i.to_string(), "ids are dense and in order");
-        let body = rest.rsplit_once("\n});\n").unwrap().0;
+        let body = rest.rsplit_once("\n})").unwrap().0;
         mods.push(body.to_string());
     }
     mods
@@ -113,9 +121,10 @@ fn bundles_a_cyclic_esm_graph_with_assets_ts_and_cjs() {
     let out = bundle(&dir.join("index.mjs")).expect("bundle");
     assert!(out.starts_with(esm_cjs::PREAMBLE), "{out}");
     assert!(out.contains("module.exports = require_m0();\n"), "{out}");
-    // turbo-test#316: sub-module registration lines follow the entry call.
+    // turbo-test#316: every sub-module's init is registered (the entry's is not)
     assert!(
-        out.contains("__ttRegBundled("),
+        out.contains("var require_m1 = __ttRegBundled(\"")
+            && !out.contains("var require_m0 = __ttRegBundled("),
         "bundle must register sub-modules: {out}"
     );
     let mods = modules_of(&out);
@@ -258,11 +267,11 @@ fn helpers_are_closure_params_except_those_a_module_declares_lexically() {
     // a lexical declaration (let / const / class / import) would clash: a placeholder takes its
     // place (the graph walk reaches fn.js, m1, before lex.js, m2)
     assert!(
-        out.contains("var require_m2 = __commonJS((exports, module, __tt_helper0, __toCommonJS, __tt_helper2, __tt_helper3) => {\n"),
+        out.contains(&format!("var require_m2 = __ttRegBundled(\"{}\", __commonJS((exports, module, __tt_helper0, __toCommonJS, __tt_helper2, __tt_helper3) => {{\n", dir.join("lex.js").display())),
         "{out}"
     );
     assert!(
-        out.contains("var require_m1 = __commonJS((exports, module, __export, __toCommonJS, __tt_helper2, __reExport) => {\n"),
+        out.contains(&format!("var require_m1 = __ttRegBundled(\"{}\", __commonJS((exports, module, __export, __toCommonJS, __tt_helper2, __reExport) => {{\n", dir.join("fn.js").display())),
         "{out}"
     );
     // __commonJS hands them over in that order

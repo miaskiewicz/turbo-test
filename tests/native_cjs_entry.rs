@@ -135,3 +135,44 @@ test('test file and app module are strict', () => {
     );
     assert_passes(&p, &["a.test.ts"], 1);
 }
+
+/// `import * as mod; mod.fn = jest.fn()` — common in jest suites — works as under babel-jest /
+/// ts-jest (whose exports are writable): the namespace and every importer read the new value,
+/// the module's own references keep the original. Vitest's namespaces stay read-only (a
+/// TypeError, as vitest throws).
+#[test]
+fn namespace_export_assignment_follows_the_test_runner() {
+    for jest in [true, false] {
+        let p = Project::new(&format!("ncjs-ns-assign-{jest}"));
+        p.with_esbuild();
+        p.file("package.json", r#"{ "name": "ncjs-ns" }"#);
+        if jest {
+            p.file(
+                "jest.config.js",
+                "module.exports = { testEnvironment: 'node' };\n",
+            );
+        } else {
+            p.file("vitest.config.js", "export default { test: {} };\n");
+        }
+        p.file(
+            "mod.ts",
+            "export const fn = () => 'real';\nexport const callFn = () => fn();\n",
+        );
+        p.file(
+            "via.ts",
+            "import { fn } from './mod';\nexport const viaImport = () => fn();\n",
+        );
+        let body = if jest {
+            "mod.fn = jest.fn(() => 'mocked');\n  expect(mod.fn()).toBe('mocked');\n  expect(viaImport()).toBe('mocked');\n  expect(mod.callFn()).toBe('real');"
+        } else {
+            "expect(() => { (mod as any).fn = () => 'x'; }).toThrow(TypeError);\n  expect(mod.fn()).toBe('real');"
+        };
+        p.file(
+            "a.test.ts",
+            &format!(
+                "import * as mod from './mod';\nimport {{ viaImport }} from './via';\ntest('ns', () => {{\n  {body}\n}});\n"
+            ),
+        );
+        assert_passes(&p, &["a.test.ts"], 1);
+    }
+}

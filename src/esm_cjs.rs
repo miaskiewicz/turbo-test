@@ -735,6 +735,24 @@ fn unused_name(scoping: &Scoping, name: &str) -> String {
         .unwrap_or_default()
 }
 
+/// A renamed function / class keeps its source `.name` (`function module` stays `module`), set
+/// once the module body has defined it.
+fn source_names(renames: &HashMap<SymbolId, String>, scoping: &Scoping) -> String {
+    let named = SymbolFlags::Function | SymbolFlags::Class;
+    let mut fixes: Vec<String> = renames
+        .iter()
+        .filter(|(sym, _)| scoping.symbol_flags(**sym).intersects(named))
+        .map(|(sym, renamed)| {
+            format!(
+                "\nObject.defineProperty({renamed}, \"name\", {{ value: \"{}\", configurable: true }});",
+                scoping.symbol_name(*sym)
+            )
+        })
+        .collect();
+    fixes.sort();
+    fixes.concat()
+}
+
 /// Point a local export's getter at its renamed binding (`export const require` → `_require`).
 fn renamed_exports(
     exports: Vec<ExportEntry>,
@@ -776,6 +794,7 @@ fn lower<'a>(
         && !p.default_needs_rewrite);
     let wrapper_renames = wrapper_renames(&scoping, has_module_syntax);
     let exports = renamed_exports(exports, &wrapper_renames, &scoping);
+    let name_fixes = source_names(&wrapper_renames, &scoping);
     let mut state = EmitState {
         ast,
         imports: p.imports,
@@ -795,6 +814,8 @@ fn lower<'a>(
         // same-line replacement → does not shift line numbers, map stays valid.
         body_code = body_code.replacen("export default ", "var __tt_default = ", 1);
     }
+    // after the body: no source line moves
+    body_code.push_str(&name_fixes);
 
     let uses_to_esm = state.uses_to_esm;
     Some((
@@ -1374,13 +1395,13 @@ var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => { for (var name in all) __defProp(target, name, { get: all[name], enumerable: true, configurable: true }); };
-var __copyProps = (to, from, except, desc) => { if (from && typeof from === "object" || typeof from === "function") { for (let key of __getOwnPropNames(from)) if (!__hasOwnProp.call(to, key) && key !== except) __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable, configurable: true }); } return to; };
+var __copyProps = (to, from, except, desc) => { if (from && typeof from === "object" || typeof from === "function") { for (let key of __getOwnPropNames(from)) if (!__hasOwnProp.call(to, key) && key !== except) __defProp(to, key, { get: () => from[key], ...globalThis.__ttExportSetter?.(to, key), enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable, configurable: true }); } return to; };
 var __reExport = (target, mod, secondTarget) => (mod = __toESMStar(mod), __copyProps(target, mod, "default"), secondTarget && __copyProps(secondTarget, mod, "default"));
 "#,
     to_esm_helper!(),
     star_helper!(),
     r#"var __toCommonJS = (mod) => __copyProps(__defProp(__defProp({}, "__esModule", { value: true, configurable: true }), Symbol.for("turbo-test.esm"), { value: true }), mod);
-var __commonJS = (cb) => { var mod; return () => (mod || (mod = { exports: {} }, cb(mod.exports, mod, __export, __toCommonJS, __toESM, __reExport)), mod.exports); };
+var __commonJS = (cb) => { var mod; return () => { if (!mod) { mod = { exports: {} }; try { cb(mod.exports, mod, __export, __toCommonJS, __toESM, __reExport); } catch (e) { mod = undefined; throw e; } } return mod.exports; }; };
 var __esm = (fn) => { var done, res; return () => (done || (done = 1, res = fn()), res); };
 "#
 );

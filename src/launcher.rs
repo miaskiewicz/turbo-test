@@ -357,7 +357,8 @@ fn vitest_coverage(start_dir: &Path, forced: Option<&Path>) -> Option<CoverageCf
     } else {
         Some(parts.join(","))
     };
-    let all = scan_bool_true(slice, "all");
+    // `all` of the coverage object itself, not a later option block's
+    let all = coverage_object(slice).is_some_and(|block| scan_bool_true(&block, "all"));
     Some(CoverageCfg {
         include,
         exclude,
@@ -410,6 +411,12 @@ fn scan_braced(text: &str, key: &str) -> Option<String> {
 /// tail of another identifier so `branches` doesn't match `subBranches`). vitest's withTimeout
 /// treats `<= 0 || Infinity` as "no timeout" (turbo-test#273), so `test.hookTimeout: Infinity`
 /// in a config must forward too.
+/// The `{ ... }` body of the `coverage: { ... }` object `slice` starts with (balanced braces).
+fn coverage_object(slice: &str) -> Option<String> {
+    let open = slice.find('{')?;
+    Some(balanced_block_end(slice, open)?.0)
+}
+
 fn scan_bool_true(text: &str, key: &str) -> bool {
     let b = text.as_bytes();
     let mut from = 0usize;

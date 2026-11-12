@@ -6141,6 +6141,13 @@ function __ttToESMAddDefault(m) {
     return __ttCjsView(m);
   }
 }
+// Under jest an export getter gets a setter (esbuild's / esm_cjs's `__copyProps`): assigning a
+// namespace export (`mod.fn = jest.fn()`) makes it a writable value every importer reads, as
+// babel-jest's / ts-jest's `exports.fn` is. Vitest's namespaces stay read-only.
+globalThis.__ttExportSetter = (to, key) => globalThis.__ttJestProject ? {
+  set(v) { Object.defineProperty(to, key, { value: v, writable: true, enumerable: true, configurable: true }); },
+  configurable: true,
+} : undefined;
 globalThis.__ttToESM = (m) => {
   if (__ttToESMAsIs(m)) return m;
   if (m[__ttEsmMark]) return __ttEsmNs(m);
