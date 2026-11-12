@@ -162,7 +162,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned: each rustc release maps LLVM coverage regions to source lines differently, so
+      # `stable` moving (1.99.1 -> 1.100.0 on 2026-11-09) shifted every file's line totals and
+      # the gate's percentage with no code change (99.92% -> 99.54%). Bump deliberately, and
+      # re-check the uncovered list in tarpaulin.toml when you do.
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: coverage

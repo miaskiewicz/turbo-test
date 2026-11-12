@@ -149,6 +149,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   its new snapshots filled in, so the "writes new inline snapshots" path was no longer tested.
 
 ### CI
+- The coverage job pins rustc 1.99.1: each rustc release maps coverage regions to source
+  lines differently, and `stable` moving to 1.100.0 shifted every file's line totals and the
+  gate (99.92% -> 99.54%) with no code change. The toolchain is now bumped on purpose.
 - `cargo test --no-fail-fast`: one red run lists every failing suite. Without it cargo
   stopped at the first failing test binary, which is how the regressions above hid behind
   an earlier failure on the release PR.
