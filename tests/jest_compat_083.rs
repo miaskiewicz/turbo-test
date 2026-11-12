@@ -106,6 +106,35 @@ test('requireMock generates a mock for an unmocked module', () => {
     assert_eq!(counts(&r), (1, 0), "{}", r.all());
 }
 
+#[test]
+fn require_mock_returns_the_registered_mock() {
+    let p = Project::new("jest-338-require-mock-registered");
+    base_jest(&p);
+    p.file("helper.js", "module.exports = { add: (a, b) => a + b };\n");
+    p.file("other.js", "module.exports = { sub: (a, b) => a - b };\n");
+    p.file(
+        "a.test.js",
+        r#"
+jest.mock('./helper', () => ({ add: () => 'factory' }));
+test('a jest.mock factory is what requireMock returns', () => {
+    expect(jest.requireMock('./helper').add()).toBe('factory');
+});
+test('jest.setMock replaces it', () => {
+    jest.setMock('./other', { sub: 'set' });
+    expect(jest.requireMock('./other')).toEqual({ sub: 'set' });
+});
+test('after jest.unmock requireMock automocks the real module again', () => {
+    jest.unmock('./other');
+    const m = jest.requireMock('./other');
+    expect(jest.isMockFunction(m.sub)).toBe(true);
+    expect(m.sub(3, 1)).toBe(undefined);
+});
+"#,
+    );
+    let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+    assert_eq!(counts(&r), (3, 0), "{}", r.all());
+}
+
 // ---- #339: runAllTicks flushes nextTick under fake timers ----
 
 #[test]
@@ -135,7 +164,10 @@ test('runAllTicks flushes process.nextTick', () => {
 fn isolate_modules_async_preserves_outer_registry() {
     let p = Project::new("jest-336-isolate-async");
     base_jest(&p);
-    p.file("counter.js", "let n = 0; module.exports = { inc: () => ++n, get: () => n };\n");
+    p.file(
+        "counter.js",
+        "let n = 0; module.exports = { inc: () => ++n, get: () => n };\n",
+    );
     p.file(
         "a.test.js",
         r#"
@@ -167,7 +199,10 @@ test('isolateModulesAsync preserves outer module registry', async () => {
 fn isolate_modules_async_restores_on_rejection() {
     let p = Project::new("jest-336-isolate-reject");
     base_jest(&p);
-    p.file("counter.js", "let n = 0; module.exports = { inc: () => ++n, get: () => n };\n");
+    p.file(
+        "counter.js",
+        "let n = 0; module.exports = { inc: () => ++n, get: () => n };\n",
+    );
     p.file(
         "a.test.js",
         r#"

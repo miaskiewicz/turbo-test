@@ -112,10 +112,7 @@ fn bundles_a_cyclic_esm_graph_with_assets_ts_and_cjs() {
     );
     let out = bundle(&dir.join("index.mjs")).expect("bundle");
     assert!(out.starts_with(esm_cjs::PREAMBLE), "{out}");
-    assert!(
-        out.contains("module.exports = require_m0();\n"),
-        "{out}"
-    );
+    assert!(out.contains("module.exports = require_m0();\n"), "{out}");
     // turbo-test#316: sub-module registration lines follow the entry call.
     assert!(
         out.contains("__ttRegBundled("),

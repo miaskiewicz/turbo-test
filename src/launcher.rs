@@ -1313,7 +1313,11 @@ fn excludes_dir(exclude: &[String], rel: &str) -> bool {
 fn discover(cwd: &Path, forced_config: Option<&Path>) -> Vec<PathBuf> {
     let mut all = Vec::new();
     let pats = vitest_patterns(cwd, forced_config);
-    let jest_match = if pats.is_none() { jest_test_match(cwd) } else { None };
+    let jest_match = if pats.is_none() {
+        jest_test_match(cwd)
+    } else {
+        None
+    };
     let base = pats.as_ref().map_or(cwd, |p| p.root.as_path());
     let include = pats.as_ref().and_then(|p| p.include.as_deref());
     let exclude: Vec<String> = match pats.as_ref().and_then(|p| p.exclude.clone()) {

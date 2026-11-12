@@ -80,14 +80,8 @@ module.exports = async function () {
     );
     let r = turbo_test(&p.dir, &["--reporter", "json", "--jobs", "1"], &[]);
     let (pass, fail) = counts(&r);
-    assert_eq!(
-        (pass, fail),
-        (1, 0),
-        "test should pass: {}",
-        r.all()
-    );
-    let flag = std::fs::read_to_string(p.dir.join("teardown-ran.txt"))
-        .unwrap_or_default();
+    assert_eq!((pass, fail), (1, 0), "test should pass: {}", r.all());
+    let flag = std::fs::read_to_string(p.dir.join("teardown-ran.txt")).unwrap_or_default();
     assert_eq!(flag, "yes", "globalTeardown should have run after tests");
 }
 
@@ -105,7 +99,10 @@ fn module_name_mapper_resolves_aliases() {
 };
 "#,
     );
-    p.file("src/helper.js", "module.exports = { greet: () => 'hello' };\n");
+    p.file(
+        "src/helper.js",
+        "module.exports = { greet: () => 'hello' };\n",
+    );
     p.file(
         "a.test.js",
         r#"

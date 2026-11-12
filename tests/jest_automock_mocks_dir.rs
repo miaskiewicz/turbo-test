@@ -52,7 +52,10 @@ fn factory_less_jest_mock_falls_back_to_automock_without_mocks_dir() {
     // When no __mocks__/greet.js exists, factory-less jest.mock still generates a stub.
     let p = Project::new("jest-automock-no-mocks-dir-341");
     base_jest(&p);
-    p.file("greet.js", "module.exports = { hello: () => 'real', name: 'alice' };\n");
+    p.file(
+        "greet.js",
+        "module.exports = { hello: () => 'real', name: 'alice' };\n",
+    );
     p.file(
         "a.test.js",
         "jest.mock('./greet');\n\
@@ -94,7 +97,10 @@ fn colocated_manual_mock_in_subdirectory() {
     // __mocks__ next to the module in a subdirectory.
     let p = Project::new("jest-automock-subdir-mocks-341");
     base_jest(&p);
-    p.file("lib/math.js", "module.exports = { add: (a, b) => a + b };\n");
+    p.file(
+        "lib/math.js",
+        "module.exports = { add: (a, b) => a + b };\n",
+    );
     p.file(
         "lib/__mocks__/math.js",
         "module.exports = { add: () => 42 };\n",

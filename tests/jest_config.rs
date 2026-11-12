@@ -34,7 +34,12 @@ fn jest_config_test_timeout_is_honoured() {
     );
     let r = turbo_test(&p.dir, &["--reporter", "json", "--jobs", "1"], &[]);
     let (pass, fail) = counts(&r);
-    assert_eq!((pass, fail), (0, 1), "should time out with config timeout: {}", r.all());
+    assert_eq!(
+        (pass, fail),
+        (0, 1),
+        "should time out with config timeout: {}",
+        r.all()
+    );
 
     // CLI --testTimeout overrides the config
     let r2 = turbo_test(
@@ -43,7 +48,12 @@ fn jest_config_test_timeout_is_honoured() {
         &[],
     );
     let (pass2, fail2) = counts(&r2);
-    assert_eq!((pass2, fail2), (1, 0), "CLI should override config: {}", r2.all());
+    assert_eq!(
+        (pass2, fail2),
+        (1, 0),
+        "CLI should override config: {}",
+        r2.all()
+    );
 }
 
 // #343: jest config clearMocks, resetMocks, restoreMocks.
@@ -64,7 +74,12 @@ test('cleared between tests', () => { expect(fn).toHaveBeenCalledTimes(0); });\n
     );
     let r = turbo_test(&p.dir, &["--reporter", "json", "--jobs", "1"], &[]);
     let (pass, fail) = counts(&r);
-    assert_eq!((pass, fail), (2, 0), "clearMocks should clear call history: {}", r.all());
+    assert_eq!(
+        (pass, fail),
+        (2, 0),
+        "clearMocks should clear call history: {}",
+        r.all()
+    );
 }
 
 // #344: setupFiles runs before the test framework (typeof expect === 'undefined').
@@ -76,14 +91,8 @@ fn jest_setup_files_run_before_framework() {
         "jest.config.js",
         "module.exports = { testEnvironment: 'node', setupFiles: ['./early.js'], setupFilesAfterEnv: ['./late.js'] };\n",
     );
-    p.file(
-        "early.js",
-        "globalThis.__earlyExpect = typeof expect;\n",
-    );
-    p.file(
-        "late.js",
-        "globalThis.__lateExpect = typeof expect;\n",
-    );
+    p.file("early.js", "globalThis.__earlyExpect = typeof expect;\n");
+    p.file("late.js", "globalThis.__lateExpect = typeof expect;\n");
     p.file(
         "a.test.js",
         "test('setupFiles runs before framework', () => {\n\
@@ -115,5 +124,10 @@ fn jest_worker_id_is_set() {
     );
     let r = turbo_test(&p.dir, &["--reporter", "json", "--jobs", "1"], &[]);
     let (pass, fail) = counts(&r);
-    assert_eq!((pass, fail), (1, 0), "JEST_WORKER_ID should be set: {}", r.all());
+    assert_eq!(
+        (pass, fail),
+        (1, 0),
+        "JEST_WORKER_ID should be set: {}",
+        r.all()
+    );
 }

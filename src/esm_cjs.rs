@@ -197,9 +197,10 @@ struct EmitState<'a, 'r> {
     uses_to_esm: bool,
     /// `LowerCtx::module_path`
     module_path: Option<String>,
-    /// Root-level `const/let/var require = …` clashes with the CJS wrapper's `require` param;
-    /// rename to `_require` (like esbuild's `require2`).
-    require_sym: Option<SymbolId>,
+    /// Root-level bindings that shadow the CJS wrapper's parameters (`exports`, `module`,
+    /// `require`, `__filename`, `__dirname`) must be renamed to avoid strict-mode redeclaration
+    /// errors. Maps the SymbolId to the replacement name.
+    wrapper_renames: HashMap<SymbolId, &'static str>,
 }
 
 impl<'a> EmitState<'a, '_> {
@@ -399,10 +400,12 @@ impl<'a> EmitState<'a, '_> {
         let Expression::Identifier(id) = expr else {
             return false;
         };
-        if let Some(req_sym) = self.require_sym {
-            if let Some(rid) = id.reference_id.get() {
-                if self.scoping.get_reference(rid).symbol_id() == Some(req_sym) {
-                    *expr = self.ast.expression_identifier(id.span, self.ast.ident("_require"));
+        if let Some(rid) = id.reference_id.get() {
+            if let Some(sym) = self.scoping.get_reference(rid).symbol_id() {
+                if let Some(renamed) = self.wrapper_renames.get(&sym) {
+                    *expr = self
+                        .ast
+                        .expression_identifier(id.span, self.ast.ident(renamed));
                     return true;
                 }
             }
@@ -475,9 +478,9 @@ impl<'a> VisitMut<'a> for EmitState<'a, '_> {
     }
 
     fn visit_binding_identifier(&mut self, id: &mut BindingIdentifier<'a>) {
-        if let Some(req_sym) = self.require_sym {
-            if id.symbol_id.get() == Some(req_sym) {
-                id.name = self.ast.ident("_require");
+        if let Some(sym) = id.symbol_id.get() {
+            if let Some(renamed) = self.wrapper_renames.get(&sym) {
+                id.name = self.ast.ident(renamed);
             }
         }
     }
@@ -643,6 +646,20 @@ pub(crate) fn transform_to_parts(js: &str, ctx: &LowerCtx) -> Option<ModuleParts
 /// Core: classify imports/exports under `ctx`, rewrite imported-local refs + dynamic `import()` +
 /// (bundler) `require()` calls, codegen the body. `map_src = Some((path, original_src))` enables a
 /// codegen source map (returned as the raw VLQ `mappings` string for the body).
+/// The module's top-level bindings that shadow a CJS wrapper parameter, with their new names.
+fn wrapper_renames(scoping: &Scoping) -> HashMap<SymbolId, &'static str> {
+    [
+        ("exports", "_exports"),
+        ("module", "_module"),
+        ("require", "_require"),
+        ("__filename", "___filename"),
+        ("__dirname", "___dirname"),
+    ]
+    .into_iter()
+    .filter_map(|(name, renamed)| Some((scoping.get_root_binding(name.into())?, renamed)))
+    .collect()
+}
+
 fn lower<'a>(
     ast: AstBuilder<'a>,
     scoping: Scoping,
@@ -654,7 +671,7 @@ fn lower<'a>(
     let p = plan(&ast, &scoping, ctx, program)?;
     let (requires, re_exports, exports) = (p.requires, p.re_exports, p.exports);
 
-    let require_sym = scoping.get_root_binding("require".into());
+    let wrapper_renames = wrapper_renames(&scoping);
     let mut state = EmitState {
         ast,
         imports: p.imports,
@@ -662,7 +679,7 @@ fn lower<'a>(
         resolve: ctx.resolve,
         uses_to_esm: false,
         module_path: ctx.module_path.clone(),
-        require_sym,
+        wrapper_renames,
     };
     let mut body = p.body_stmts;
     for stmt in body.iter_mut() {

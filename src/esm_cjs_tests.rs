@@ -31,6 +31,49 @@ fn inline_map(o: &str) -> serde_json::Value {
     serde_json::from_slice(&json).unwrap()
 }
 
+// ---- CJS wrapper parameter shadows ----------------------------------------------------------
+
+#[test]
+fn top_level_bindings_named_like_wrapper_params_are_renamed() {
+    let o = e("import { createRequire } from 'node:module';\n\
+               const require = createRequire(import.meta.url);\n\
+               const __dirname = 'own';\nlet __filename = 'f';\nvar exports = 1;\nvar module = 2;\n\
+               export const all = [require, __dirname, __filename, exports, module];\n");
+    let body = after_exports(&o);
+    for (orig, renamed) in [
+        ("require", "_require"),
+        ("__dirname", "___dirname"),
+        ("__filename", "___filename"),
+        ("exports", "_exports"),
+        ("module", "_module"),
+    ] {
+        assert!(
+            body.contains(&format!(" {renamed} = ")),
+            "{orig} binding renamed:\n{o}"
+        );
+    }
+    let flat: String = body.split_whitespace().collect();
+    assert!(
+        flat.contains("[_require,___dirname,___filename,_exports,_module]"),
+        "references follow the rename:\n{o}"
+    );
+    // import.meta still reads the wrapper's own __filename, no longer shadowed
+    assert!(body.contains("__ttImportMeta(__filename)"), "{o}");
+}
+
+#[test]
+fn wrapper_params_used_without_a_local_binding_are_left_alone() {
+    let o = e("export const d = __dirname;\nexport const r = require('x');\nmodule.exports.y = exports;\n");
+    let body = after_exports(&o);
+    for renamed in ["___dirname", "_require", "_module", "_exports"] {
+        assert!(!body.contains(renamed), "{renamed} not introduced:\n{o}");
+    }
+    assert!(
+        body.contains("= __dirname") && body.contains("require("),
+        "{o}"
+    );
+}
+
 // ---- env switches ---------------------------------------------------------------------------
 
 #[test]

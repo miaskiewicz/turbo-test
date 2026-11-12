@@ -58,6 +58,23 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - Module resolution cache respects custom conditions (#317): the oxc resolver thread-local
   cache is keyed by the full set of resolve options including custom export conditions,
   preventing stale cache hits when conditions change between test files.
+- Projects without esbuild load through the ESM graph loader again: the #316 change sent
+  every entry the native emitter could transform down the CommonJS module-runner path,
+  which cannot reproduce top-level await, vite's `import()` rejection messages, link-time
+  reloads after `vi.resetModules()` or `jest.setMock`. Only a CommonJS entry of a jest
+  node project (what #316 needs) takes the native CJS path without esbuild now.
+- `jest.requireMock` returns the registered mock (`jest.mock` factory, `jest.setMock`)
+  again, and automocks the real module only when none is registered or after
+  `jest.unmock` — #338 had made it always automock.
+- The native ESM→CJS emitter renames a top-level binding that shadows a CommonJS wrapper
+  parameter (`require`, `module`, `exports`, `__filename`, `__dirname`), e.g.
+  `const require = createRequire(import.meta.url)`, which failed with "Identifier has
+  already been declared".
+
+### CI
+- `cargo test --no-fail-fast`: one red run lists every failing suite. Without it cargo
+  stopped at the first failing test binary, which is how the regressions above hid behind
+  an earlier failure on the release PR.
 
 ### Performance
 - `runtime.js` `__ttApplyConfig` refactored: extracted `__ttApplyJestFields` helper to

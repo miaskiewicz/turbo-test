@@ -115,8 +115,10 @@ jobs:
             echo "::error::bin/${{ matrix.binname }} did not pass the smoke test file (exit $rc)"; exit 1
           fi
 
+      # --no-fail-fast: every failing test binary is reported in one run (cargo test otherwise
+      # stops at the first, hiding the failures of the suites after it).
       - name: Rust tests
-        run: cargo test --locked --target ${{ matrix.target }}
+        run: cargo test --locked --no-fail-fast --target ${{ matrix.target }}
 
       # Not on Windows (turbo-test#199): these suites spawn cli.js against fixture projects and
       # compare posix-path output (paths, `/`-joined file names, shell-style env) byte-for-byte with

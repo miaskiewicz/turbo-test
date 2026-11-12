@@ -1082,5 +1082,9 @@ fn coverage_without_all_excludes_unexecuted_files() {
         .filter(|k| *k != "total")
         .map(|k| k.as_str())
         .collect();
-    assert_eq!(keys.len(), 1, "only src/used.js without --coverage-all: {j}");
+    assert_eq!(
+        keys.len(),
+        1,
+        "only src/used.js without --coverage-all: {j}"
+    );
 }

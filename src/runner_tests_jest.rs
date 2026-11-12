@@ -62,9 +62,7 @@ fn a_jest_configs_test_timeout_reaches_the_runtime() {
     .unwrap();
     let cfg = runtime_config_for(&d, None);
     assert!(
-        cfg.as_deref()
-            .unwrap_or("")
-            .contains("jestTestTimeout: 35"),
+        cfg.as_deref().unwrap_or("").contains("jestTestTimeout: 35"),
         "expected jestTestTimeout: 35, got {cfg:?}"
     );
     // a non-numeric testTimeout is ignored
@@ -113,11 +111,11 @@ fn jest_config_clear_reset_restore_mocks() {
     )
     .unwrap();
     let cfg = runtime_config_for(&d, None).unwrap();
-    assert!(cfg.contains("clearMocks: true"), "clearMocks missing: {cfg}");
     assert!(
-        cfg.contains("mockReset: true"),
-        "mockReset missing: {cfg}"
+        cfg.contains("clearMocks: true"),
+        "clearMocks missing: {cfg}"
     );
+    assert!(cfg.contains("mockReset: true"), "mockReset missing: {cfg}");
     assert!(
         cfg.contains("restoreMocks: true"),
         "restoreMocks missing: {cfg}"

@@ -252,11 +252,12 @@ fn assemble_bundle(
     // module instance (identity). `__ttRegBundled` is a native function that calls the lazy
     // `__commonJS` init (idempotent — returns the cached `mod.exports`) and registers the result
     // under the file's absolute path.
-    for idx in 1..order.len() {
-        let escaped = order[idx].to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
-        out.push_str(&format!(
-            "__ttRegBundled(\"{escaped}\", require_m{idx});\n"
-        ));
+    for (idx, path) in order.iter().enumerate().skip(1) {
+        let escaped = path
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        out.push_str(&format!("__ttRegBundled(\"{escaped}\", require_m{idx});\n"));
     }
     Some(out)
 }

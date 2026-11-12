@@ -99,14 +99,14 @@ thread_local! {
     static CJS_FIRST_RESOLUTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Jest `moduleDirectories`: additional directories to search for bare modules besides
     /// `node_modules` (turbo-test#345). Empty when unconfigured (only `node_modules`).
-    static CUSTOM_MODULE_DIRS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    static CUSTOM_MODULE_DIRS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Jest `customExportConditions`: additional package.json export conditions appended to
     /// the resolver's condition set (turbo-test#345). Empty when unconfigured.
-    static CUSTOM_EXPORT_CONDITIONS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    static CUSTOM_EXPORT_CONDITIONS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Jest `moduleNameMapper`: pairs of (prefix, replacement) derived from the jest config's
     /// moduleNameMapper object (turbo-test#335). Each entry maps a simple `^prefix(.*)$`
     /// pattern to a replacement path (`$1` is the capture). Empty when unconfigured.
-    static MODULE_NAME_MAPPER: RefCell<Vec<(String, String)>> = RefCell::new(Vec::new());
+    static MODULE_NAME_MAPPER: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
     /// Set while resolve+drain of pending vi.mock factories is in progress. An async factory's
     /// `await import('<self>')` re-enters load_cjs(drain_mocks=true) for the real module; without
     /// this guard that nested call would drain (and clear) the very queue we're mid-resolving,
@@ -495,8 +495,7 @@ fn nearest_tsconfig_uncached(dir: &Path) -> Option<PathBuf> {
 
 /// Whether `dir` is inside a `node_modules` tree (any ancestor is named `node_modules`).
 fn in_node_modules(dir: &Path) -> bool {
-    dir.components()
-        .any(|c| c.as_os_str() == "node_modules")
+    dir.components().any(|c| c.as_os_str() == "node_modules")
 }
 
 /// Is `abs` an ES module (so its imports resolve with the "import" condition)? .mjs/.ts/.tsx are
@@ -1501,10 +1500,7 @@ fn set_file_env(scope: &mut v8::PinScope, file: &Path) {
     let (pool, seq) = WORKER_SLOT.with(|w| w.get());
     let worker = if on_reuse_path() { pool } else { seq };
     let jest_worker = if CJS_FIRST_RESOLUTION.with(|c| c.get()) {
-        format!(
-            " globalThis.process.env.JEST_WORKER_ID = '{}';",
-            pool + 1
-        )
+        format!(" globalThis.process.env.JEST_WORKER_ID = '{}';", pool + 1)
     } else {
         String::new()
     };
@@ -2075,7 +2071,9 @@ fn extract_simple_prefix(pattern: &str) -> Option<String> {
 fn config_u64_value(s: &str, key: &str) -> Option<u64> {
     let start = find_config_key(s, key)?;
     let after = s[start..].split_once(':')?.1.trim_start();
-    let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+    let end = after
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after.len());
     after[..end].parse().ok()
 }
 
@@ -2324,11 +2322,17 @@ fn run_jest_early_setup(scope: &mut v8::PinScope, plan: &EntryPlan) -> Result<()
     if early.is_empty() {
         return Ok(());
     }
-    run_js(scope, "globalThis.__ttHideFramework && globalThis.__ttHideFramework();");
+    run_js(
+        scope,
+        "globalThis.__ttHideFramework && globalThis.__ttHideFramework();",
+    );
     for sf in &early {
         run_setup_file(scope, sf, plan.externals, plan.mock_targets)?;
     }
-    run_js(scope, "globalThis.__ttRestoreFramework && globalThis.__ttRestoreFramework();");
+    run_js(
+        scope,
+        "globalThis.__ttRestoreFramework && globalThis.__ttRestoreFramework();",
+    );
     Ok(())
 }
 
@@ -4639,17 +4643,33 @@ fn read_transformed_mr_app(abs: &Path, prefer_metadata: bool) -> Option<Option<S
     esbuild_transform_cjs(abs, prefer_metadata).map(Some)
 }
 
-/// Whether the entry file can be CJS-transformed for the module-runner path: the native oxc
-/// emitter (no esbuild needed) or the esbuild single-file transform. Used as the guard for
-/// `load_and_drive_cjs_entry` so projects without esbuild still take the CJS path when the
-/// native emitter handles the file (turbo-test#316: needed for singleton dep bundling).
+/// Whether the entry takes the module-runner CJS path: the esbuild single-file transform, or —
+/// for a CommonJS entry of a CJS-first (jest node) project only — the native oxc emitter
+/// (turbo-test#316: singleton dep bundling without esbuild). Any other entry of a project without
+/// esbuild keeps the ESM graph loader, whose top-level await, import() errors, link-time reloads
+/// and jest.setMock a CJS wrapper does not reproduce.
 fn mr_entry_transformable(abs: &Path) -> bool {
-    if crate::esm_cjs::enabled() && !crate::coverage::enabled() {
-        if let Some(Some(_)) = read_transformed_native(abs) {
-            return true;
-        }
+    if cjs_first_project(abs) && entry_is_commonjs(abs) && native_entry_transformable(abs) {
+        return true;
     }
     esbuild_transform_cjs(abs, false).is_some()
+}
+
+/// Whether `abs` parses without static `import` / `export` (a CommonJS file).
+fn entry_is_commonjs(abs: &Path) -> bool {
+    let src = std::fs::read_to_string(abs).ok();
+    let stype = oxc_span::SourceType::from_path(abs).ok();
+    src.zip(stype).is_some_and(|(src, stype)| {
+        let alloc = oxc_allocator::Allocator::default();
+        let parsed = oxc_parser::Parser::new(&alloc, &src, stype).parse();
+        !parsed.module_record.has_module_syntax
+    })
+}
+
+fn native_entry_transformable(abs: &Path) -> bool {
+    crate::esm_cjs::enabled()
+        && !crate::coverage::enabled()
+        && matches!(read_transformed_native(abs), Some(Some(_)))
 }
 
 fn mr_app_meta_wanted(abs: &Path) -> bool {
@@ -7176,11 +7196,21 @@ fn native_save_modules(
             esm_by_path: HashMap::new(),
         };
         for p in &app {
-            if let Some(v) = reg.cjs_exports.remove(p) { snap.cjs_exports.insert(p.clone(), v); }
-            if let Some(v) = reg.real_exports.remove(p) { snap.real_exports.insert(p.clone(), v); }
-            if let Some(v) = reg.cjs_synth_by_path.remove(p) { snap.cjs_synth_by_path.insert(p.clone(), v); }
-            if let Some(v) = reg.cjs_export_names.remove(p) { snap.cjs_export_names.insert(p.clone(), v); }
-            if let Some(v) = reg.esm_by_path.remove(p) { snap.esm_by_path.insert(p.clone(), v); }
+            if let Some(v) = reg.cjs_exports.remove(p) {
+                snap.cjs_exports.insert(p.clone(), v);
+            }
+            if let Some(v) = reg.real_exports.remove(p) {
+                snap.real_exports.insert(p.clone(), v);
+            }
+            if let Some(v) = reg.cjs_synth_by_path.remove(p) {
+                snap.cjs_synth_by_path.insert(p.clone(), v);
+            }
+            if let Some(v) = reg.cjs_export_names.remove(p) {
+                snap.cjs_export_names.insert(p.clone(), v);
+            }
+            if let Some(v) = reg.esm_by_path.remove(p) {
+                snap.esm_by_path.insert(p.clone(), v);
+            }
         }
         REGISTRY_STACK.with(|s| s.borrow_mut().push(snap));
     });
@@ -10265,7 +10295,8 @@ fn apply_runtime_config(scope: &mut v8::PinScope, entry_abs: &Path) {
 fn jest_inject_globals_false(entry: &Path) -> bool {
     let dir = entry.parent().unwrap_or(entry);
     let text = jest_config_text(dir);
-    text.as_ref().is_some_and(|s| config_is_false(s, "injectGlobals"))
+    text.as_ref()
+        .is_some_and(|s| config_is_false(s, "injectGlobals"))
 }
 
 fn remove_framework_globals(scope: &mut v8::PinScope) {
@@ -10273,8 +10304,14 @@ fn remove_framework_globals(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     let undef = v8::undefined(scope);
     for name in [
-        "expect", "test", "it", "describe", "beforeAll",
-        "afterAll", "beforeEach", "afterEach",
+        "expect",
+        "test",
+        "it",
+        "describe",
+        "beforeAll",
+        "afterAll",
+        "beforeEach",
+        "afterEach",
     ] {
         if let Some(k) = v8::String::new(scope, name) {
             global.set(scope, k.into(), undef.into());
@@ -10551,13 +10588,11 @@ fn prepare_reused_context(
 /// Reuse path: run the worker's setup files once (first file) and snapshot the hook / config
 /// baseline and the setup-registered mocks.
 fn run_setup_files_once(scope: &mut v8::PinScope, plan: &EntryPlan) {
-    let setup_err = run_jest_early_setup(scope, plan)
-        .err()
-        .or_else(|| {
-            plan.setup_files
-                .iter()
-                .find_map(|sf| run_setup_file(scope, sf, plan.externals, plan.mock_targets).err())
-        });
+    let setup_err = run_jest_early_setup(scope, plan).err().or_else(|| {
+        plan.setup_files
+            .iter()
+            .find_map(|sf| run_setup_file(scope, sf, plan.externals, plan.mock_targets).err())
+    });
     REUSE_SETUP_ERROR.with(|e| *e.borrow_mut() = setup_err);
     SETUP_MOCKS.with(|s| {
         *s.borrow_mut() = REGISTRY.with(|r| r.borrow().mocks.keys().cloned().collect());
@@ -10847,14 +10882,13 @@ fn global_script_callable<'s>(
     }
     let obj = exports.to_object(scope)?;
     let default_key = v8::String::new(scope, "default")?;
-    let val = obj.get(scope, default_key.into()).filter(|v| v.is_function())?;
+    let val = obj
+        .get(scope, default_key.into())
+        .filter(|v| v.is_function())?;
     v8::Local::<v8::Function>::try_from(val).ok()
 }
 
-fn call_global_script_export(
-    scope: &mut v8::PinScope,
-    abs: &Path,
-) -> Result<(), String> {
+fn call_global_script_export(scope: &mut v8::PinScope, abs: &Path) -> Result<(), String> {
     let Some(func) = global_script_callable(scope, abs) else {
         return Ok(());
     };

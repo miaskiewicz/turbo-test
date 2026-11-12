@@ -1075,7 +1075,11 @@ fn zero_line_map(file: &Path) -> Option<HashMap<u32, u64>> {
             lines.insert((i + 1) as u32, 0);
         }
     }
-    if lines.is_empty() { None } else { Some(lines) }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines)
+    }
 }
 
 /// Walk `root` recursively, returning absolute paths that pass the include/exclude globs.

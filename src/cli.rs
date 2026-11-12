@@ -1916,7 +1916,11 @@ pub fn run(opts: Options) -> i32 {
 fn run_jest_global_script(key: &str) -> Option<i32> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let (setup, teardown) = runner::jest_global_scripts(&cwd);
-    let path = if key == "globalSetup" { setup } else { teardown };
+    let path = if key == "globalSetup" {
+        setup
+    } else {
+        teardown
+    };
     let path = path?;
     if let Err(e) = runner::run_global_script(&path) {
         eprintln!("{key} failed: {e}");

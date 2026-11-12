@@ -4078,12 +4078,22 @@ function __ttAutomockResolve(dir, spec) {
   }
   return v;
 }
-function __ttAutomockMark(dir, spec) {
+function __ttSpecKey(dir, spec) {
   const s = String(spec);
-  const key = (dir && __ttAutomockResolve(dir, s)) || '\0' + s;
-  __ttAutomockExplicit.add(key);
+  return (dir && __ttAutomockResolve(dir, s)) || '\0' + s;
+}
+function __ttAutomockMark(dir, spec) {
+  __ttAutomockExplicit.add(__ttSpecKey(dir, spec));
 }
 globalThis.__ttAutomockMark = __ttAutomockMark;
+// Specs with a registered mock (jest.mock/doMock/setMock, vi.mock) not unmocked since, by their
+// resolved key: jest.requireMock returns that mock, else an automock of the real module.
+const __ttMockedKeys = new Set();
+function __ttRequireMock(p) {
+  const dir = globalThis.__ttDir || globalThis.__ttEntryDir;
+  if (__ttMockedKeys.has(__ttSpecKey(dir, p))) return globalThis.__nativeRequire(dir, String(p));
+  return __automock(globalThis.jest.requireActual(p));
+}
 // A specifier that automock may touch: relative ('./x', '../x') or absolute ('/x') only —
 // never a bare package ('react') or node: builtin. Bare specifiers always fall through.
 function __ttAutomockLocalSpec(s) {
@@ -4120,6 +4130,7 @@ function __ttAutomockResetForNextFile() {
   __ttAutomockOn = false;
   __ttAutomockGenerator = __ttAutomockDefaultGen;
   __ttAutomockExplicit.clear();
+  __ttMockedKeys.clear();
   __ttAutomockResolveCache.clear();
 }
 globalThis.__mkRequire = (dir, isEsm, importer) => {
@@ -6287,6 +6298,7 @@ function __ttMock(spec, factory, vitest, isDoMock, options) {
   // bypass does NOT re-mock it on require. Resolution may fail (non-existent spec from a
   // prepass): we still fall through to normal mock logic.
   __ttAutomockMark(dir, spec);
+  __ttMockedKeys.add(__ttSpecKey(dir, spec));
   if (!globalThis.__ttMockPrepass && __ttMockPrepassed(spec, vitest, key, dir)) return;
   // jest 30: `jest.mock(spec, factory)` defers the factory to the module's first require
   // (turbo-test#275). `vi.mock` keeps its eager hoist-time semantics.
@@ -6560,6 +6572,7 @@ function __viUnmock(spec) {
   if (globalThis.__ttUnmock && dir) { try { globalThis.__ttUnmock(dir, String(spec)); } catch (e) {} }
   // jest automock (turbo-test#184): a `jest.unmock(spec)` opts the module out of automock.
   if (globalThis.__ttAutomockMark) globalThis.__ttAutomockMark(dir, spec);
+  __ttMockedKeys.delete(__ttSpecKey(dir, spec));
 }
 function __viSpyLookup(obj, key, accessor) {
   __spyCheckTarget(obj);
@@ -6916,7 +6929,7 @@ globalThis.jest = {
   // jest.requireActual / requireMock are SYNCHRONOUS (return the module, not a Promise) —
   // unlike vi.importActual. Bridge to the native sync loader directly.
   requireActual: (p) => globalThis.__ttImportActual(globalThis.__ttDir || globalThis.__ttEntryDir, String(p)),
-  requireMock: (p) => __automock(globalThis.jest.requireActual(p)),
+  requireMock: (p) => __ttRequireMock(p),
   // jest.isolateModules(fn): run `fn` with a fresh module registry. Approximate with a
   // resetModules around the (sync) callback — enough for the common "re-require with new env".
   isolateModules: (fn) => { globalThis.__ttSaveModules(); try { fn(); } finally { globalThis.__ttRestoreModules(); } },

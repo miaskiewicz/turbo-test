@@ -18,7 +18,10 @@ fn module_directories_resolves_from_custom_dir() {
         "module.exports = { testEnvironment: 'node', moduleDirectories: ['node_modules', 'src'] };\n",
     );
     // A utility in src/utils/math.js reachable as bare `utils/math`.
-    p.file("src/utils/math.js", "module.exports = { add: (a, b) => a + b };\n");
+    p.file(
+        "src/utils/math.js",
+        "module.exports = { add: (a, b) => a + b };\n",
+    );
     p.file(
         "a.test.js",
         r#"
@@ -100,14 +103,23 @@ fn module_directories_and_custom_conditions_together() {
          };\n",
     );
     // A local module in lib/.
-    p.file("lib/helpers/greet.js", "module.exports = name => `Hi ${name}`;\n");
+    p.file(
+        "lib/helpers/greet.js",
+        "module.exports = name => `Hi ${name}`;\n",
+    );
     // A package with a custom-env condition.
     p.file(
         "node_modules/env-pkg/package.json",
         r#"{"name":"env-pkg","exports":{".":{"custom-env":"./custom.js","default":"./fallback.js"}}}"#,
     );
-    p.file("node_modules/env-pkg/custom.js", "module.exports = 'CUSTOM';\n");
-    p.file("node_modules/env-pkg/fallback.js", "module.exports = 'FALLBACK';\n");
+    p.file(
+        "node_modules/env-pkg/custom.js",
+        "module.exports = 'CUSTOM';\n",
+    );
+    p.file(
+        "node_modules/env-pkg/fallback.js",
+        "module.exports = 'FALLBACK';\n",
+    );
     p.file(
         "a.test.js",
         r#"
