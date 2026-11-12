@@ -37,7 +37,7 @@ path = "src/bin/m5_affected.rs"
 v8 = { package = "turbo-dom-v8", version = "~150.4" }
 # The browser environment (window, document, CSSOM, forms, events) the runner
 # installs into each test context.
-turbo-dom-browser-env = "0.8.2"
+turbo-dom-browser-env = "0.8.3"
 oxc_allocator = "0.134"
 oxc_parser = "0.134"
 oxc_span = "0.134"
@@ -72,6 +72,13 @@ fancy-regex = "0.20"
 # `cargo tarpaulin` builds with `--cfg tarpaulin` (napi_host's coverage flush before an abort).
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tarpaulin)"] }
+
+# turbo-dom 0.8.3 is not on crates.io yet: pinned to its release commit (TouchEvent jsdom mode).
+# release-guard fails a tag while a git pin is here — replace with the published 0.8.3 first.
+[patch.crates-io]
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "6827656c8da5533bc2512a90220c9df4c647bc26" }
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "6827656c8da5533bc2512a90220c9df4c647bc26" }
+turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "6827656c8da5533bc2512a90220c9df4c647bc26" }
 
 [profile.release]
 opt-level = 3
