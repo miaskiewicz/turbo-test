@@ -123,27 +123,59 @@ pub fn extract_all(file: &Path, source: &str) -> (Vec<RawBranch>, Vec<u32>) {
     (c.out, c.stmts)
 }
 
-/// The start offset and name of each function of `source` (declarations, expressions, methods,
-/// arrows; `(anonymous)` when unnamed): a never-loaded file's functions, for `--coverage-all`.
+/// The start offset and name of each function of `source` — declarations, expressions, arrows,
+/// class and object methods (named by their key, `get x` / `set x` for accessors) — each under its
+/// own key (`(anonymous_N)` when unnamed, so two on one line stay two): a never-loaded file's
+/// functions, for `--coverage-all`.
 pub fn function_starts(file: &Path, source: &str) -> Vec<(u32, String)> {
-    struct Fns(Vec<(u32, String)>);
-    impl<'a> Visit<'a> for Fns {
-        fn visit_function(&mut self, f: &Function<'a>, flags: oxc_semantic::ScopeFlags) {
-            let name = f.id.as_ref().map_or("(anonymous)", |id| id.name.as_str());
-            self.0.push((f.span.start, name.to_string()));
-            walk::walk_function(self, f, flags);
-        }
-        fn visit_arrow_function_expression(&mut self, a: &ArrowFunctionExpression<'a>) {
-            self.0.push((a.span.start, "(anonymous)".to_string()));
-            walk::walk_arrow_function_expression(self, a);
-        }
-    }
     let st = SourceType::from_path(file).unwrap_or_default();
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, st).parse();
-    let mut fns = Fns(Vec::new());
+    let mut fns = Fns::default();
     fns.visit_program(&ret.program);
-    fns.0
+    fns.out
+}
+
+#[derive(Default)]
+struct Fns {
+    out: Vec<(u32, String)>,
+    /// the key of the method / property whose function is visited next
+    pending: Option<String>,
+}
+
+impl Fns {
+    fn push(&mut self, start: u32, own: Option<&str>) {
+        let n = self.out.len();
+        let name = self.pending.take().or_else(|| own.map(str::to_string));
+        self.out
+            .push((start, name.unwrap_or_else(|| format!("(anonymous_{n})"))));
+    }
+}
+
+impl<'a> Visit<'a> for Fns {
+    fn visit_method_definition(&mut self, m: &MethodDefinition<'a>) {
+        let key = m.key.static_name().map(|k| match m.kind {
+            MethodDefinitionKind::Get => format!("get {k}"),
+            MethodDefinitionKind::Set => format!("set {k}"),
+            _ => k.to_string(),
+        });
+        self.pending = key;
+        walk::walk_method_definition(self, m);
+    }
+    fn visit_object_property(&mut self, p: &ObjectProperty<'a>) {
+        if p.value.is_function() {
+            self.pending = p.key.static_name().map(|k| k.to_string());
+        }
+        walk::walk_object_property(self, p);
+    }
+    fn visit_function(&mut self, f: &Function<'a>, flags: oxc_semantic::ScopeFlags) {
+        self.push(f.span.start, f.id.as_ref().map(|id| id.name.as_str()));
+        walk::walk_function(self, f, flags);
+    }
+    fn visit_arrow_function_expression(&mut self, a: &ArrowFunctionExpression<'a>) {
+        self.push(a.span.start, None);
+        walk::walk_arrow_function_expression(self, a);
+    }
 }
 
 #[cfg(test)]

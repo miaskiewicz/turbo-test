@@ -11,9 +11,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - Jest `globalSetup` / `globalTeardown` (#335): resolved as jest does (`<rootDir>`,
   rootDir-relative, or a module name; the nearest jest config up from the cwd), loaded as
   CJS and called once — with jest's `(globalConfig, projectConfig)` (their `rootDir`) —
-  before all suites (setup) / after all suites (teardown), both in one V8 context, so
-  teardown reads what setup left on `globalThis` (a server / container handle), as with
-  jest. The `process.env` changes globalSetup makes reach every test file as Node stores
+  before all suites (setup) / after all suites (teardown), both in one V8 context with one
+  require cache, so teardown reads what setup left on `globalThis` and gets the same module
+  instances (a server / container handle), as with jest. The `process.env` changes globalSetup makes reach every test file as Node stores
   them (values coerced to strings, deletions applied), as with jest (which runs it in the
   parent before forking workers). A failing globalTeardown fails the run (exit 1). Why: many Jest projects use `globalSetup` for
   database seeding or server startup and pass its address on through `process.env`
@@ -59,11 +59,14 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - `--coverage-all` flag (#320): includes unexecuted source files (matched by
   `--coverage-include` globs) in coverage reports at zero hits, so the denominator
   reflects the full source surface. Auto-read from vitest config `coverage.all: true`.
-  Each unexecuted file counts its statements (and their lines), functions and branch arms
-  at zero, so every metric and threshold sees it. Left out as vitest leaves them out: test
-  / spec / bench files, `.d.ts`, `*.config.*`, root `test/` / `tests/`, `__tests__` /
+  Each unexecuted file counts its statements (and their lines), functions (methods and
+  accessors by name, every anonymous one on its own) and branch arms at zero, so every
+  metric and threshold sees it. Left out as vitest leaves them out: test / spec / bench files
+  (a final `.test` / `-spec` / `.bench` marker), `.d.ts`, named tools' configs
+  (`vite.config.ts`, not `app.config.ts`), root `test/` / `tests/`, `__tests__` /
   `__mocks__`, non-JS/TS files and files with the coverage-ignore directive; symlinked
-  directories are not followed. Why: without this, coverage percentages are misleadingly
+  directories are not followed. `coverage.all` is read from the config's coverage object
+  only, comments included (an apostrophe in `// don't …` no longer hides it). Why: without this, coverage percentages are misleadingly
   high when most source files have no test touching them — matching vitest's
   `coverage.all` and Jest's `collectCoverageFrom` behaviour.
 
@@ -75,7 +78,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   Node), so a lazily required file that needs an uninstalled optional peer, or has side
   effects, costs nothing until it is used; one that throws is not cached and runs again on
   the next require, as Node drops a failed module. Identity holds in either order: a sub-path
-  required before its package entry is the instance the entry's bundle uses.
+  required before its package entry is the instance the entry's bundle uses — a real one
+  only: a `vi.mock` of the sub-path reaches the test's import, never the package's own
+  internal require (vitest leaves node_modules to Node), nor the next file of a reused
+  isolate.
 - `process.env.JEST_WORKER_ID` (#342) is set for every jest project's test files — any
   `testEnvironment`, jsdom included — and not for vitest ones, as jest and vitest do. Why:
   per-worker resources (database names, ports) are commonly keyed on it.

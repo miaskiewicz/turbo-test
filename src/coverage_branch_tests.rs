@@ -160,3 +160,20 @@ fn a_parse_error_yields_a_best_effort_result_without_panicking() {
     assert!(b.is_empty());
     assert!(st.is_empty());
 }
+
+#[test]
+fn function_starts_names_methods_and_keeps_anonymous_functions_apart() {
+    let src =
+        "class C { m() {} get x() { return 1; } }\nconst o = { a() {}, b: function () {} };\n\
+               [1].map((x) => x).filter((y) => y);\nfunction f() {}\n";
+    let fns = function_starts(std::path::Path::new("t.ts"), src);
+    let names: Vec<&str> = fns.iter().map(|(_, n)| n.as_str()).collect();
+    assert_eq!(fns.len(), 7, "{names:?}");
+    for want in ["m", "get x", "a", "b", "f"] {
+        assert!(names.contains(&want), "{want} in {names:?}");
+    }
+    let mut keys: Vec<&String> = fns.iter().map(|(_, n)| n).collect();
+    keys.sort();
+    keys.dedup();
+    assert_eq!(keys.len(), 7, "every function has its own key: {names:?}");
+}

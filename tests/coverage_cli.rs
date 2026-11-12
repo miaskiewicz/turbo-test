@@ -1175,7 +1175,11 @@ fn coverage_all_is_read_from_the_vitest_coverage_block_only() {
         p.with_esbuild();
         p.file("package.json", r#"{ "name": "cov-all-config" }"#);
         let (cov_all, elsewhere) = match all_in_coverage {
-            true => ("all: true, ", ""),
+            // a comment's apostrophe is not a string quote
+            true => (
+                "// don't count generated files\n      all: true, /* on */ ",
+                "",
+            ),
             // `allowExternal` merely contains `all`
             false => (
                 "allowExternal: true, ",

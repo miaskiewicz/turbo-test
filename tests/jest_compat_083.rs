@@ -246,3 +246,45 @@ test('isolateModulesAsync restores outer registry on rejection', async () => {
     let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
     assert_eq!(counts(&r), (1, 0), "{}", r.all());
 }
+
+/// jest.isolateModules sets the outer registry aside and puts it back: an ES module loaded before
+/// it is the same instance after it, while inside the callback the module is loaded afresh.
+#[test]
+fn isolate_modules_restores_an_es_module_loaded_before_it() {
+    let p = Project::new("jest-isolate-esm");
+    base_jest(&p);
+    p.file("m.mjs", "export const id = {};\n");
+    p.file(
+        "a.test.js",
+        r#"
+test('isolateModules keeps the outer ES module', () => {
+    const before = require('./m.mjs').id;
+    let inside;
+    jest.isolateModules(() => { inside = require('./m.mjs').id; });
+    expect(inside).not.toBe(before);
+    expect(require('./m.mjs').id).toBe(before);
+});
+"#,
+    );
+    let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+    assert_eq!(counts(&r), (1, 0), "{}", r.all());
+}
+
+/// A virtual jest.mock whose factory returns nothing registers no module: requiring it fails as an
+/// unresolvable module would.
+#[test]
+fn a_virtual_mock_without_exports_is_not_registered() {
+    let p = Project::new("jest-virtual-undefined");
+    base_jest(&p);
+    p.file(
+        "a.test.js",
+        r#"
+jest.mock('not-a-package', () => undefined, { virtual: true });
+test('nothing registered', () => {
+    expect(() => require('not-a-package')).toThrow("Cannot find module 'not-a-package'");
+});
+"#,
+    );
+    let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+    assert_eq!(counts(&r), (1, 0), "{}", r.all());
+}

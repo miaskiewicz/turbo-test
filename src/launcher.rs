@@ -504,8 +504,8 @@ pub(crate) fn balanced_block_end(text: &str, open_at: usize) -> Option<(String, 
     let mut i = open_at;
     let mut quote: Option<u8> = None;
     while i < b.len() {
-        if let Some(q) = quote {
-            i += advance_in_quote(b[i], q, &mut quote);
+        if let Some(next) = skip_non_code(b, i, &mut quote) {
+            i = next;
             continue;
         }
         let c = b[i];
@@ -523,6 +523,27 @@ pub(crate) fn balanced_block_end(text: &str, open_at: usize) -> Option<(String, 
         i += 1;
     }
     None
+}
+
+/// Where scanning resumes when byte `i` is inside a string (`quote`) or starts a comment — a
+/// comment's quotes and braces are not code (`// don't …`). `None` at code.
+fn skip_non_code(b: &[u8], i: usize, quote: &mut Option<u8>) -> Option<usize> {
+    match *quote {
+        Some(q) => Some(i + advance_in_quote(b[i], q, quote)),
+        None => comment_end(b, i),
+    }
+}
+
+/// The index past the `//` line / `/* */` comment that starts at `i`, if one does.
+fn comment_end(b: &[u8], i: usize) -> Option<usize> {
+    let rest = b.get(i..)?;
+    let (close, skip): (&[u8], usize) = match rest.get(..2)? {
+        b"//" => (b"\n", 0),
+        b"/*" => (b"*/", 2),
+        _ => return None,
+    };
+    let at = rest.windows(close.len()).position(|w| w == close);
+    Some(i + at.map_or(rest.len(), |a| a + skip))
 }
 
 /// Inside a quoted run: consume the next byte(s), close the quote on `q`, return advance.

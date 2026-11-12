@@ -450,3 +450,32 @@ fn module_name_mapper_literal_dollar_and_unreadable_mapper() {
     let r = turbo_test(&b.dir, &["--reporter", "json", "--jobs", "1"], &[]);
     assert!(r.stderr.contains("does not parse"), "{}", r.all());
 }
+
+/// jest loads globalSetup and globalTeardown with one require cache: a module both require is one
+/// instance, so the handle setup's `start()` keeps is there for teardown's `stop()`.
+#[test]
+fn global_setup_and_teardown_share_module_instances() {
+    let p = Project::new("jest-global-modules");
+    p.with_esbuild();
+    p.file("package.json", r#"{ "name": "globalsetup" }"#);
+    p.file(
+        "jest.config.js",
+        "module.exports = { testEnvironment: 'node', globalSetup: './setup.js', globalTeardown: './teardown.js' };\n",
+    );
+    p.file(
+        "server.js",
+        "let handle;\nexports.start = () => { handle = { up: true }; };\nexports.stop = () => { if (!handle) throw new Error('stop: no server started'); handle = undefined; };\n",
+    );
+    p.file(
+        "setup.js",
+        "module.exports = () => require('./server').start();\n",
+    );
+    p.file(
+        "teardown.js",
+        "module.exports = () => require('./server').stop();\n",
+    );
+    p.file("a.test.js", "test('t', () => {});\n");
+    let r = turbo_test(&p.dir, &["--reporter", "json", "--jobs", "1"], &[]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(!r.stderr.contains("no server started"), "{}", r.all());
+}

@@ -1096,23 +1096,37 @@ fn inject_zero_file(file: &Path, src: &str) {
     }
 }
 
-/// What vitest's coverage leaves out of `all` by default: test and benchmark files
-/// (`*.test.*`, `*-spec.*`, …), type declarations, tool config files (`*.config.*`), `test/` /
-/// `tests/` at the root, `__tests__` / `__mocks__`, and anything that is not a JS/TS source.
+/// What vitest's coverage leaves out of `all` by default: test and benchmark files (a final
+/// `.test` / `-spec` / `.bench` … marker, `-d` type tests included), type declarations, named
+/// tools' config files (`vite.config.ts`, not `app.config.ts`), `test/` / `tests/` at the root,
+/// `__tests__` / `__mocks__`, and anything that is not a JS/TS source.
 fn default_coverage_excluded(rel: &str) -> bool {
     const SOURCE: [&str; 8] = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"];
     let name = rel.rsplit('/').next().unwrap_or(rel);
-    let parts: Vec<&str> = name.split(['.', '-']).collect();
-    // a marker counts after the first part and before the extension (`a.test.ts`, not `test.ts`)
-    let markers = &parts[1.min(parts.len())..parts.len().saturating_sub(1)];
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
     let first_dir = rel.split('/').next().filter(|_| rel.contains('/'));
-    !SOURCE.contains(parts.last().unwrap_or(&""))
-        || markers.contains(&"d")
-        || markers
-            .iter()
-            .any(|p| matches!(*p, "test" | "spec" | "bench" | "benchmark" | "config"))
+    !SOURCE.contains(&ext)
+        || stem.ends_with(".d")
+        || is_test_stem(stem.strip_suffix("-d").unwrap_or(stem))
+        || is_tool_config(stem)
         || matches!(first_dir, Some("test" | "tests"))
         || rel.split('/').any(|c| c == "__tests__" || c == "__mocks__")
+}
+
+/// `a.test`, `a-spec`, `a.bench` …: a test / benchmark marker as the stem's last part.
+fn is_test_stem(stem: &str) -> bool {
+    stem.rsplit_once(['.', '-'])
+        .is_some_and(|(_, m)| matches!(m, "test" | "spec" | "bench" | "benchmark"))
+}
+
+/// `<tool>.config` for the tools vitest's coverage excludes the config of.
+fn is_tool_config(stem: &str) -> bool {
+    const TOOLS: [&str; 14] = [
+        "karma", "rollup", "webpack", "vite", "vitest", "jest", "ava", "babel", "nyc", "cypress",
+        "tsup", "build", "eslint", "prettier",
+    ];
+    stem.split_once('.')
+        .is_some_and(|(tool, rest)| rest == "config" && TOOLS.contains(&tool))
 }
 
 /// Walk `root` recursively, returning absolute paths that pass the include/exclude globs.

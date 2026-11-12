@@ -9301,6 +9301,9 @@ fn native_reg_bundled(
 ) {
     let abs = PathBuf::from(&*args.get(0).to_rust_string_lossy(scope));
     let init = args.get(1);
+    // only a REAL loaded instance: a mock of the sub-path is the test's, never the package's
+    // own internal require (vitest leaves node_modules to Node)
+    let mocked = REGISTRY.with(|r| r.borrow().mocks.contains_key(&abs));
     let loaded = REGISTRY.with(|r| {
         let reg = r.borrow();
         reg.cjs_synth_by_path
@@ -9308,6 +9311,7 @@ fn native_reg_bundled(
             .then(|| reg.cjs_exports.get(&abs).cloned())
             .flatten()
     });
+    let loaded = loaded.filter(|_| !mocked);
     let returned = match loaded {
         Some(exports) => {
             let exports = v8::Local::new(scope, &exports);
@@ -9317,7 +9321,10 @@ fn native_reg_bundled(
                 .map(Into::into)
         }
         None => {
-            if let Ok(f) = v8::Local::<v8::Function>::try_from(init) {
+            if let Some(f) = v8::Local::<v8::Function>::try_from(init)
+                .ok()
+                .filter(|_| !mocked)
+            {
                 let f = v8::Global::new(scope, f);
                 REGISTRY.with(|r| r.borrow_mut().cjs_lazy.insert(abs, f));
             }
@@ -11111,9 +11118,16 @@ impl JestGlobalRealm {
         let result = load_global_script(scope, &abs)
             .and_then(|()| call_global_script_export(scope, &abs, root_dir));
         export_process_env(scope, &env_before);
-        // the registry is per thread: test files may run on this one
-        clear_registry();
         result
+    }
+}
+
+/// The realm's module registry (one require cache for setup and teardown, as Node's) lives in
+/// this thread's registry — test files run on worker threads — until the realm is dropped; its
+/// handles go before the isolate does.
+impl Drop for JestGlobalRealm {
+    fn drop(&mut self) {
+        clear_registry();
     }
 }
 

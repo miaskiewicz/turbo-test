@@ -217,3 +217,60 @@ test('sub-path first', () => {
         );
     }
 }
+
+/// A bundle adopts only a REAL instance of its sub-path: under vitest a `vi.mock` of `pkg/sub`
+/// reaches the test's import, never the package's own internal require (vitest leaves
+/// node_modules to Node), and with `isolate: false` it does not leak into the next file.
+#[test]
+fn a_mocked_sub_path_never_replaces_the_packages_own_instance() {
+    let p = Project::new("esm-bundle-mock");
+    p.with_esbuild();
+    p.file("package.json", r#"{ "name": "esm-bundle-mock" }"#);
+    p.file(
+        "vitest.config.js",
+        "export default { test: { isolate: false, fileParallelism: false } };\n",
+    );
+    p.file(
+        "node_modules/bpkg/package.json",
+        r#"{ "name": "bpkg", "main": "index.js" }"#,
+    );
+    p.file(
+        "node_modules/bpkg/index.js",
+        "const sub = require('./sub.js');\nexports.v = () => sub.v;\n",
+    );
+    p.file("node_modules/bpkg/sub.js", "exports.v = 'real';\n");
+    p.file(
+        "a.test.js",
+        r#"import { v as subV } from 'bpkg/sub.js';
+import { v } from 'bpkg';
+vi.mock('bpkg/sub.js', () => ({ v: 'mock', default: { v: 'mock' } }));
+test('the test sees the mock, the package its own module', () => {
+  expect(subV).toBe('mock');
+  expect(v()).toBe('real');
+});
+"#,
+    );
+    p.file(
+        "b.test.js",
+        "import { v } from 'bpkg';\ntest('unmocked file', () => expect(v()).toBe('real'));\n",
+    );
+    let r = turbo_test(
+        &p.dir,
+        &[
+            "--reporter",
+            "json",
+            "--jobs",
+            "1",
+            "a.test.js",
+            "b.test.js",
+        ],
+        &[],
+    );
+    let j = json_report(&r);
+    assert_eq!(
+        (j["numPassedTests"].as_u64(), j["numFailedTests"].as_u64()),
+        (Some(2), Some(0)),
+        "{}",
+        r.all()
+    );
+}

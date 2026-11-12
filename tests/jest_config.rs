@@ -148,3 +148,27 @@ fn jest_worker_id_case(env: &str) {
         r.all()
     );
 }
+
+/// `injectGlobals: false` holds on a reused isolate too (TURBO_REUSE_ISOLATE): every file gets
+/// the framework only from `@jest/globals`.
+#[test]
+fn inject_globals_false_on_a_reused_isolate() {
+    let p = Project::new("jest-inject-globals-reuse");
+    base_jest(&p);
+    p.file(
+        "jest.config.js",
+        "module.exports = { testEnvironment: 'node', injectGlobals: false };\n",
+    );
+    for n in ["a", "b"] {
+        p.file(
+            &format!("{n}.test.js"),
+            "const { test, expect } = require('@jest/globals');\ntest('no globals', () => expect(typeof globalThis.describe).toBe('undefined'));\n",
+        );
+    }
+    let r = turbo_test(
+        &p.dir,
+        &["--reporter", "json", "--jobs", "1"],
+        &[("TURBO_REUSE_ISOLATE", "1")],
+    );
+    assert_eq!(counts(&r), (2, 0), "{}", r.all());
+}
