@@ -37,7 +37,7 @@ path = "src/bin/m5_affected.rs"
 v8 = { package = "turbo-dom-v8", version = "~150.4" }
 # The browser environment (window, document, CSSOM, forms, events) the runner
 # installs into each test context.
-turbo-dom-browser-env = "0.8.3"
+turbo-dom-browser-env = "0.8.2"
 oxc_allocator = "0.134"
 oxc_parser = "0.134"
 oxc_span = "0.134"
@@ -69,11 +69,6 @@ idna = "1"
 # `cargo tarpaulin` builds with `--cfg tarpaulin` (napi_host's coverage flush before an abort).
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tarpaulin)"] }
-
-[patch.crates-io]
-turbo-dom-browser-env = { path = "../turbo-dom/crates/turbo-dom-browser-env" }
-turbo-dom = { path = "../turbo-dom/crates/turbo-dom" }
-turbo-dom-layout = { path = "../turbo-dom/crates/turbo-dom-layout" }
 
 [profile.release]
 opt-level = 3
