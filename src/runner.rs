@@ -9301,17 +9301,7 @@ fn native_reg_bundled(
 ) {
     let abs = PathBuf::from(&*args.get(0).to_rust_string_lossy(scope));
     let init = args.get(1);
-    // only a REAL loaded instance: a mock of the sub-path is the test's, never the package's
-    // own internal require (vitest leaves node_modules to Node)
-    let mocked = REGISTRY.with(|r| r.borrow().mocks.contains_key(&abs));
-    let loaded = REGISTRY.with(|r| {
-        let reg = r.borrow();
-        reg.cjs_synth_by_path
-            .contains_key(&abs)
-            .then(|| reg.cjs_exports.get(&abs).cloned())
-            .flatten()
-    });
-    let loaded = loaded.filter(|_| !mocked);
+    let loaded = REGISTRY.with(|r| real_loaded_exports(&r.borrow(), &abs));
     let returned = match loaded {
         Some(exports) => {
             let exports = v8::Local::new(scope, &exports);
@@ -9321,10 +9311,9 @@ fn native_reg_bundled(
                 .map(Into::into)
         }
         None => {
-            if let Some(f) = v8::Local::<v8::Function>::try_from(init)
-                .ok()
-                .filter(|_| !mocked)
-            {
+            // also when the path is mocked: a mocked require never reaches it, the original
+            // (importOriginal / requireActual) does — the package's own instance
+            if let Ok(f) = v8::Local::<v8::Function>::try_from(init) {
                 let f = v8::Global::new(scope, f);
                 REGISTRY.with(|r| r.borrow_mut().cjs_lazy.insert(abs, f));
             }
@@ -9334,6 +9323,19 @@ fn native_reg_bundled(
     if let Some(v) = returned {
         rv.set(v);
     }
+}
+
+/// The REAL instance of `abs` already loaded, for a bundle to share: never a mock (the test's,
+/// not the package's own internal require — vitest leaves node_modules to Node); for a mocked
+/// path, the real exports its original was loaded with, if it was.
+fn real_loaded_exports(reg: &Registry, abs: &Path) -> Option<v8::Global<v8::Value>> {
+    if reg.mocks.contains_key(abs) {
+        return reg.real_exports.get(abs).cloned();
+    }
+    reg.cjs_synth_by_path
+        .contains_key(abs)
+        .then(|| reg.cjs_exports.get(abs).cloned())
+        .flatten()
 }
 
 /// `load_cjs`'s short cuts: an already loaded module, or a bundled one's lazy init.

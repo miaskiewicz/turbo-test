@@ -274,3 +274,58 @@ test('the test sees the mock, the package its own module', () => {
         r.all()
     );
 }
+
+/// A partial mock of a sub-path (`importOriginal` / `jest.requireActual` spread into the factory)
+/// gets the package's OWN instance as the original: one instance for the package and the test.
+#[test]
+fn a_partial_mock_of_a_sub_path_wraps_the_packages_own_instance() {
+    for jest in [false, true] {
+        let p = Project::new(&format!("esm-partial-mock-{jest}"));
+        p.with_esbuild();
+        p.file("package.json", r#"{ "name": "esm-partial-mock" }"#);
+        p.file(
+            "node_modules/pk/package.json",
+            r#"{"name":"pk","exports":{".":"./index.js","./state":"./state.js"}}"#,
+        );
+        p.file(
+            "node_modules/pk/index.js",
+            "const s = require('./state.js');\nexports.state = s.state;\nexports.bump = s.bump;\n",
+        );
+        p.file(
+            "node_modules/pk/state.js",
+            "exports.state = { n: 0 };\nexports.bump = () => { exports.state.n++; };\n",
+        );
+        let (config, test) = if jest {
+            (
+                (
+                    "jest.config.js",
+                    "module.exports = { testEnvironment: 'node' };\n",
+                ),
+                r#"jest.mock('pk/state', () => ({ ...jest.requireActual('pk/state'), extra: 1 }));
+const { state: rootState, bump } = require('pk');
+const sub = require('pk/state');
+test('one instance', () => { bump(); expect({ same: rootState === sub.state, n: sub.state.n, extra: sub.extra }).toEqual({ same: true, n: 1, extra: 1 }); });
+"#,
+            )
+        } else {
+            (
+                ("vitest.config.js", "export default { test: {} };\n"),
+                r#"import { state as rootState, bump } from 'pk';
+import * as sub from 'pk/state';
+vi.mock('pk/state', async (orig) => ({ ...(await orig()), extra: 1 }));
+test('one instance', () => { bump(); expect({ same: rootState === sub.state, n: sub.state.n, extra: sub.extra }).toEqual({ same: true, n: 1, extra: 1 }); });
+"#,
+            )
+        };
+        p.file(config.0, config.1);
+        p.file("a.test.js", test);
+        let r = turbo_test(&p.dir, &["--reporter", "json", "a.test.js"], &[]);
+        let j = json_report(&r);
+        assert_eq!(
+            (j["numPassedTests"].as_u64(), j["numFailedTests"].as_u64()),
+            (Some(1), Some(0)),
+            "jest={jest}:\n{}",
+            r.all()
+        );
+    }
+}

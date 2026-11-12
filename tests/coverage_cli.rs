@@ -1254,3 +1254,47 @@ fn coverage_all_without_include_reports_executed_files_only() {
         .collect();
     assert!(files.iter().all(|k| !k.ends_with("unused.js")), "{j}");
 }
+
+/// #320: a file `--coverage-all` adds counts the functions it would count had a test loaded it —
+/// two identical files, one loaded and one not, report the same function total.
+#[test]
+fn coverage_all_function_totals_match_a_loaded_file() {
+    let p = Project::new("cov-all-320-fn-parity");
+    p.with_esbuild();
+    p.file("package.json", r#"{ "name": "cov-all" }"#);
+    let src = "export const f = (xs) => xs.map((a) => a + 1).filter((b) => b > 1);\n\
+               export class K { get v() { return 1; } set v(x) {} m() { return 2; } }\n\
+               export const o = { p() { return 3; }, q: function () { return 4; } };\n\
+               export function d() { return 5; }\n";
+    p.file("src/a.js", src);
+    p.file("src/b.js", src);
+    p.file(
+        "a.test.js",
+        "import { f } from './src/a.js';\ntest('a', () => { expect(f([1, 2])).toEqual([2, 3]); });\n",
+    );
+    let r = turbo_test(
+        &p.dir,
+        &[
+            "--coverage",
+            "--coverage-all",
+            "--coverage-include",
+            "src/**",
+            "--coverage-reporter",
+            "json-summary",
+            "a.test.js",
+        ],
+        &[],
+    );
+    assert_eq!(r.code, Some(0), "run should pass: {}", r.all());
+    let j = json(&p, "coverage/coverage-summary.json");
+    let total = |file: &str| {
+        let (_, v) = j
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(k, _)| k.ends_with(file))
+            .unwrap_or_else(|| panic!("{file} in {j}"));
+        v["functions"]["total"].as_u64()
+    };
+    assert_eq!(total("src/a.js"), total("src/b.js"), "{j}");
+}

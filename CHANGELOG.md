@@ -59,9 +59,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - `--coverage-all` flag (#320): includes unexecuted source files (matched by
   `--coverage-include` globs) in coverage reports at zero hits, so the denominator
   reflects the full source surface. Auto-read from vitest config `coverage.all: true`.
-  Each unexecuted file counts its statements (and their lines), functions (methods and
-  accessors by name, every anonymous one on its own) and branch arms at zero, so every
-  metric and threshold sees it. Left out as vitest leaves them out: test / spec / bench files
+  Each unexecuted file counts its statements (and their lines), functions and branch arms at
+  zero, so every metric and threshold sees it — the functions a loaded file's coverage
+  counts (those V8 names: declarations, methods and accessors, functions assigned to a
+  variable / property / member), so a file's totals do not depend on whether a test loaded
+  it. Left out as vitest leaves them out: test / spec / bench files
   (a final `.test` / `-spec` / `.bench` marker), `.d.ts`, named tools' configs
   (`vite.config.ts`, not `app.config.ts`), root `test/` / `tests/`, `__tests__` /
   `__mocks__`, non-JS/TS files and files with the coverage-ignore directive; symlinked
@@ -81,7 +83,8 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   required before its package entry is the instance the entry's bundle uses — a real one
   only: a `vi.mock` of the sub-path reaches the test's import, never the package's own
   internal require (vitest leaves node_modules to Node), nor the next file of a reused
-  isolate.
+  isolate; and a partial mock's original (`importOriginal` / `vi.importActual` /
+  `jest.requireActual`) is the package's own instance, not a second copy.
 - `process.env.JEST_WORKER_ID` (#342) is set for every jest project's test files — any
   `testEnvironment`, jsdom included — and not for vitest ones, as jest and vitest do. Why:
   per-worker resources (database names, ports) are commonly keyed on it.

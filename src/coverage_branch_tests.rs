@@ -162,18 +162,17 @@ fn a_parse_error_yields_a_best_effort_result_without_panicking() {
 }
 
 #[test]
-fn function_starts_names_methods_and_keeps_anonymous_functions_apart() {
-    let src =
-        "class C { m() {} get x() { return 1; } }\nconst o = { a() {}, b: function () {} };\n\
-               [1].map((x) => x).filter((y) => y);\nfunction f() {}\n";
+fn function_starts_counts_the_functions_v8_names() {
+    // V8 names declarations, methods / accessors by key, and functions assigned to a variable,
+    // property or member; an inline callback stays unnamed and, as on the loaded path, uncounted
+    let src = "class C { m() {} get x() { return 1; } y = () => 2; }\nconst o = { a() {}, b: function () {} };\n\
+               [1].map((x) => x).filter((y) => y);\nfunction f() {}\nconst g = () => 1;\nexports.h = function () {};\n";
     let fns = function_starts(std::path::Path::new("t.ts"), src);
-    let names: Vec<&str> = fns.iter().map(|(_, n)| n.as_str()).collect();
-    assert_eq!(fns.len(), 7, "{names:?}");
-    for want in ["m", "get x", "a", "b", "f"] {
-        assert!(names.contains(&want), "{want} in {names:?}");
-    }
-    let mut keys: Vec<&String> = fns.iter().map(|(_, n)| n).collect();
-    keys.sort();
-    keys.dedup();
-    assert_eq!(keys.len(), 7, "every function has its own key: {names:?}");
+    let mut names: Vec<&str> = fns.iter().map(|(_, n)| n.as_str()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["a", "b", "exports.h", "f", "g", "get x", "m", "y"],
+        "{fns:?}"
+    );
 }
