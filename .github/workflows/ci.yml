@@ -211,7 +211,7 @@ jobs:
   # to turn it green; split the function instead. Rust: turbo-html2pdf's tools/cc-check
   # installed from its home at a pinned rev (not copied here) over every tracked .rs file; JS:
   # oxlint's `complexity` rule (.oxlintrc.complexity.json) over cli.js, index.js and
-  # src/runtime.js and src/node_streams.js. On failure the step summary lists every function over the limit.
+  # src/runtime.js and src/node_*.js. On failure the step summary lists every function over the limit.
   complexity-rust:
     name: complexity / rust (cc <= 7)
     runs-on: ubuntu-latest
@@ -247,7 +247,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: oxlint complexity max 7 (cli.js, index.js, runtime and Node streams)
+      - name: oxlint complexity max 7 (cli.js, index.js, runtime modules)
         shell: bash  # -eo pipefail: tee must not mask the gate's exit code
         run: npm run -s complexity:js 2>&1 | tee complexity.txt
       - name: List the functions over the limit

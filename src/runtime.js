@@ -2795,6 +2795,7 @@ const __subtleCrypto = {
   },
 };
 
+/* __TT_NODE_KEYS__ */
 const __crypto = {
   randomUUID: () => {
     const b = __pseudoRandomBytes(16);
@@ -2830,6 +2831,7 @@ const __crypto = {
   scryptSync: () => { throw new Error('turbo-test: crypto.scryptSync is not available in the V8 runtime'); },
   timingSafeEqual: (a, b) => { if (a.length !== b.length) return false; let r = 0; for (let i = 0; i < a.length; i++) r |= a[i] ^ b[i]; return r === 0; },
 };
+Object.assign(__crypto, __nodeKeys);
 if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.randomUUID) {
   globalThis.crypto = Object.assign(globalThis.crypto || {}, { randomUUID: __crypto.randomUUID, getRandomValues: __crypto.getRandomValues });
 }
