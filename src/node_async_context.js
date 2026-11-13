@@ -19,6 +19,12 @@ function __asyncCallback(fn) {
 }
 function __asyncCallFrame(frame, fn, receiver, args) {
   __asyncCallback(fn);
+  if (!__asyncFrameActivated && frame === undefined) {
+    try { return fn.apply(receiver, args); }
+    finally {
+      if (__asyncFrameActivated) globalThis.__ttAsyncFrameSet(undefined);
+    }
+  }
   const previous = globalThis.__ttAsyncFrameGet();
   __asyncSetFrame(frame);
   try { return fn.apply(receiver, args); }
