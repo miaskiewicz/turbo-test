@@ -36,5 +36,6 @@ test('Vue options TypeScript and template-only SFCs compile and render', () => {
     expect(options.root.textContent).toBe('options work');
     expect(template.root.textContent).toBe('template works');
     expect(template.root.querySelector('strong').hasAttribute(TemplateOnly.__scopeId)).toBe(true);
+    expect(template.root.querySelector('span').hasAttribute(TemplateOnly.__scopeId)).toBe(true);
   } finally { options.cleanup(); template.cleanup(); }
 });

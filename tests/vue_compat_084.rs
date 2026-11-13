@@ -95,3 +95,22 @@ fn malformed_vue_source_reports_the_real_compiler_error() {
     );
     assert!(run.all().contains("Unexpected token"), "{}", run.all());
 }
+
+#[test]
+fn vue_sfc_coverage_rejects_unmapped_generated_code_explicitly() {
+    let p = project("vue-coverage-084", false);
+    p.file("Counter.vue", include_str!("data/vue/Counter.vue"));
+    p.file("coverage.test.js", "import Counter from './Counter.vue'; test('not reached', () => expect(Counter).toBeDefined());\n");
+    let run = turbo_test(
+        &p.dir,
+        &["--reporter", "json", "--coverage"],
+        &[("TURBO_VUE", "1")],
+    );
+    assert_ne!(run.code, Some(0), "{}", run.all());
+    assert!(
+        run.all()
+            .contains("Vue SFC coverage source mapping is not supported yet"),
+        "{}",
+        run.all()
+    );
+}
