@@ -38,3 +38,5 @@ pub mod vite_asset;
 pub mod vm_compat;
 
 pub mod message_port;
+
+pub mod process_compat;

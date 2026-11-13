@@ -74,6 +74,7 @@ globalThis.process = {
   // napi: the Node-API version the native host implements (src/napi_host.rs NAPI_VERSION)
   versions: { node: '24.0.0', v8: '12.0.0', modules: '127', napi: '10' },
   argv: ['node', 'turbo-test'],
+  get execPath() { return globalThis.__ttNodeExecutable; },
   cwd: () => globalThis.__ttProcessCwd || globalThis.__cwd || '/',
   nextTick: (fn, ...a) => __loop.nextTicks.push(__captureAsyncContext(() => fn(...a))),
   // the real clock (real time plus the drive loop's jumps) since the runtime started
@@ -4058,6 +4059,7 @@ const __inspector = {
     disconnect() {}
   },
 };
+/* __TT_NODE_PROCESSES__ */
 globalThis.__nodeBuiltins = {
   fs: __fs,
   'node:fs': __fs,
@@ -4067,8 +4069,8 @@ globalThis.__nodeBuiltins = {
   'node:module': __module,
   os: __os,
   'node:os': __os,
-  child_process: { execSync: () => '', exec: () => {}, spawnSync: () => ({ status: 0 }) },
-  'node:child_process': { execSync: () => '' },
+  child_process: __childProcess,
+  'node:child_process': __childProcess,
   url: { fileURLToPath: globalThis.__fileURLToPath, pathToFileURL: globalThis.__pathToFileURL, URL: globalThis.URL },
   util: __util,
   'node:util': __util,
