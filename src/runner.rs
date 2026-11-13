@@ -11489,7 +11489,23 @@ fn step_macrotask(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bo
             return true;
         }
     }
+    pace_http_io(scope, global);
     call_global_bool(scope, global, "__stepMacro")
+}
+
+/// Pace real HTTP handles against kernel readiness before the virtual timer step. This
+/// prevents a listening test's timeout from elapsing before another process can connect.
+fn pace_http_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+    if !crate::http_compat::has_pending_io() {
+        return;
+    }
+    let delay = call_global_number(scope, global, "__ttNextMacroDelay");
+    let millis = if delay.is_finite() && delay > 0.0 {
+        delay.min(10.0)
+    } else {
+        0.0
+    };
+    crate::http_compat::wait_for_io(std::time::Duration::from_secs_f64(millis / 1000.0));
 }
 
 /// Convert the final promise state into the `run_event_loop` result: `Ok(())` on fulfilled, a
