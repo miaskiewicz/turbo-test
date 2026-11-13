@@ -1,0 +1,53 @@
+name: Windows experimental
+
+on:
+  push:
+    branches: [main, release/0.8.4]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-experimental-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  windows-test:
+    name: Windows build and tests (nonblocking)
+    runs-on: windows-latest
+    # This observation lane does not replace or weaken the release binary build matrix.
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-experimental
+      - name: Install test dependencies
+        id: npm
+        run: npm ci
+      - name: Build the native runner
+        id: build
+        run: cargo build --release --locked --bin turbo-test
+      - name: Run locked Rust tests, including Windows path fixtures
+        id: tests
+        if: ${{ !cancelled() && steps.npm.outcome == 'success' }}
+        run: cargo test --locked
+        env:
+          TURBO_CHAI: ${{ github.workspace }}/node_modules/chai/index.js
+      - name: Record actual outcomes
+        if: always()
+        shell: pwsh
+        run: |
+          "## Windows experimental (nonblocking)" >> $env:GITHUB_STEP_SUMMARY
+          "- Dependencies: ${{ steps.npm.outcome }}" >> $env:GITHUB_STEP_SUMMARY
+          "- Release build: ${{ steps.build.outcome }}" >> $env:GITHUB_STEP_SUMMARY
+          "- Locked tests: ${{ steps.tests.outcome }}" >> $env:GITHUB_STEP_SUMMARY
+          "This lane is informational. The existing release binary matrix is unchanged." >> $env:GITHUB_STEP_SUMMARY

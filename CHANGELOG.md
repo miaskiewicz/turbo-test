@@ -7,6 +7,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [0.8.4] — Unreleased candidate — Node compatibility and shared DOM performance
 
+### Added
+- An informational Windows CI lane installs the real test dependencies, builds the
+  native runner and runs locked Rust tests, including Windows path fixtures. It
+  records actual outcomes without changing the existing release binary gates (#278).
+
 ### Fixed
 - Classify IPv4 and IPv6 literals through the native IP parser (#329), propagate
   unhandled EventEmitter errors and report successful once-listener delivery (#330),
