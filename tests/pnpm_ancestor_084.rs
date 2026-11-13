@@ -114,6 +114,16 @@ test('the opt-in follows actual hoist links and resolution memoization follows t
   delete process.env.TURBO_PNPM_ANCESTOR;
   assert.throws(() => require.resolve('pkg'), /Cannot find module/);
 });
+test('dynamic imports read the same current runtime opt-in', async () => {
+  process.env.TURBO_PNPM_ANCESTOR = '1';
+  try {
+    const module = await import('pkg');
+    assert.equal(module.default.origin, 'selected-one');
+    await assert.rejects(import('unlinked'), /Cannot find module/);
+  } finally {
+    delete process.env.TURBO_PNPM_ANCESTOR;
+  }
+});
 "#,
     );
     let r = turbo_test(&p.dir, &["--jobs", "1"], &[]);
