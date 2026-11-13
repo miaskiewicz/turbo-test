@@ -154,21 +154,28 @@ fn decorated_dependency_hoists_its_own_named_and_default_mocks() {
         r#"
 import { value } from './dep';
 import defaultValue from './default-dep';
+const direct = require('./dep').value;
+const derived = require('./dep') + sideEffect();
+function sideEffect() { (globalThis as any).__manualImportCalls = ((globalThis as any).__manualImportCalls || 0) + 1; return '!'; }
 function Tag<T extends Function>(constructor: T): T { return constructor; }
 @Tag
 export class Holder { named = value; defaultValue = defaultValue; }
 jest.mock('./dep', () => ({ value: 'mocked' }));
 jest.mock('./default-dep', () => ({ __esModule: true, default: 'mock-default' }));
 export const captured = [value, defaultValue];
+export const manualCalls = () => (globalThis as any).__manualImportCalls;
+export const manualValues = [direct, derived];
 "#,
     );
     p.file(
         "mock.test.ts",
         r#"
 import assert from 'node:assert/strict';
-import { Holder, captured } from './decorated';
+import { Holder, captured, manualCalls, manualValues } from './decorated';
 test('the decorated dependency registers its mocks before imported values are captured', () => {
   assert.deepEqual(captured, ['mocked', 'mock-default']);
+  assert.equal(manualCalls(), 1);
+  assert.equal(typeof manualValues[1], 'string');
   const holder = new Holder();
   assert.equal(holder.named, 'mocked');
   assert.equal(holder.defaultValue, 'mock-default');
