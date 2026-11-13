@@ -254,21 +254,45 @@ testCase('pipeline waits for every asynchronous destroy callback before rejectin
   const sink = new Writable({ write(chunk, encoding, callback) { callback(failure); } });
   await assert.rejects(streamPromises().pipeline(source, sink), (error) => error === failure);
   assert.equal(cleaned, true);
+  let successCleaned = false;
+  const successSink = new Writable({
+    write(chunk, encoding, callback) { callback(); },
+    destroy(error, callback) { later(() => { successCleaned = true; callback(error); }); },
+  });
+  await streamPromises().pipeline(Readable.from(['a']), successSink);
+  assert.equal(successCleaned, true);
+  const cleanupFailure = new Error('async successful-write cleanup failed');
+  const cleanupSink = new Writable({
+    write(chunk, encoding, callback) { callback(); },
+    destroy(error, callback) { later(() => callback(cleanupFailure)); },
+  });
+  await assert.rejects(streamPromises().pipeline(Readable.from(['a']), cleanupSink), (error) => error === cleanupFailure);
+  const persistentSource = Readable.from(['a'], { autoDestroy: false });
+  const persistentSink = new Writable({ autoDestroy: false, write(chunk, encoding, callback) { callback(); } });
+  await streamPromises().pipeline(persistentSource, persistentSink);
+  assert.equal(persistentSource.destroyed, false);
+  assert.equal(persistentSink.destroyed, false);
 });
 
 testCase('Transform stops processing queued writes while its readable side is full', async () => {
-  let transformed = 0;
-  const transform = new Transform({ objectMode: true, highWaterMark: 1,
-    transform(chunk, encoding, callback) { transformed++; callback(null, chunk); },
-  });
-  transform.write(1); transform.write(2); transform.write(3); transform.end();
-  await new Promise((resolve) => later(resolve));
-  assert.equal(transformed, 1);
-  const chunks = [];
-  const done = streamPromises().finished(transform, { cleanup: true });
-  transform.on('data', (chunk) => chunks.push(chunk));
-  await done;
-  assert.deepEqual(chunks, [1, 2, 3]);
+  for (const explicitPush of [false, true]) {
+    let transformed = 0;
+    const transform = new Transform({ objectMode: true, highWaterMark: 1,
+      transform(chunk, encoding, callback) {
+        transformed++;
+        if (explicitPush) { this.push(chunk); callback(); }
+        else callback(null, chunk);
+      },
+    });
+    transform.write(1); transform.write(2); transform.write(3); transform.end();
+    await new Promise((resolve) => later(resolve));
+    assert.equal(transformed, 1);
+    const chunks = [];
+    const done = streamPromises().finished(transform, { cleanup: true });
+    transform.on('data', (chunk) => chunks.push(chunk));
+    await done;
+    assert.deepEqual(chunks, [1, 2, 3]);
+  }
 });
 
 testCase('Readable UTF8 decoding preserves characters split across push boundaries', async () => {
