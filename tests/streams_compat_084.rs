@@ -18,6 +18,6 @@ fn streams_pipeline_finished_and_lifecycle_compatibility() {
     );
     let run = turbo_test(&p.dir, &["--reporter", "json"], &[]);
     let report = json_report(&run);
-    assert_eq!(report["numPassedTests"], 14, "{}", run.all());
+    assert_eq!(report["numPassedTests"], 19, "{}", run.all());
     assert_eq!(report["numFailedTests"], 0, "{}", run.all());
 }

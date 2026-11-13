@@ -221,3 +221,69 @@ testCase('finished and pipeline reject premature close instead of reporting succ
   const abandoned = new Writable({ write(chunk, encoding, callback) { this.destroy(); } });
   await assert.rejects(streamPromises().pipeline(Readable.from(['a']), abandoned), { code: 'ERR_STREAM_PREMATURE_CLOSE' });
 });
+
+testCase('pipeline copies only the supplied Uint8Array byte range', async () => {
+  const view = new Uint8Array([0, 97, 98, 0]).subarray(1, 3);
+  const { sink, chunks } = collecting();
+  await streamPromises().pipeline(Readable.from([view]), sink);
+  assert.deepEqual([...Buffer.concat(chunks)], [97, 98]);
+});
+
+testCase('Writable reports the original failure to active and queued write callbacks', async () => {
+  const failure = new Error('queued write failure');
+  const received = [];
+  const sink = new Writable({ write(chunk, encoding, callback) { later(() => callback(failure)); } });
+  sink.on('error', () => {});
+  const closed = new Promise((resolve) => sink.once('close', resolve));
+  sink.write('a', (error) => received.push(['a', error]));
+  sink.write('b', (error) => received.push(['b', error]));
+  await closed;
+  assert.deepEqual(received.map(([value]) => value), ['a', 'b']);
+  assert.equal(received[0][1], failure);
+  assert.equal(received[1][1], failure);
+});
+
+testCase('pipeline waits for every asynchronous destroy callback before rejecting', async () => {
+  const failure = new Error('sink triggers async cleanup');
+  let pushed = false;
+  let cleaned = false;
+  const source = new Readable({
+    read() { if (!pushed) { pushed = true; this.push('a'); } },
+    destroy(error, callback) { later(() => { cleaned = true; callback(error); }); },
+  });
+  const sink = new Writable({ write(chunk, encoding, callback) { callback(failure); } });
+  await assert.rejects(streamPromises().pipeline(source, sink), (error) => error === failure);
+  assert.equal(cleaned, true);
+});
+
+testCase('Transform stops processing queued writes while its readable side is full', async () => {
+  let transformed = 0;
+  const transform = new Transform({ objectMode: true, highWaterMark: 1,
+    transform(chunk, encoding, callback) { transformed++; callback(null, chunk); },
+  });
+  transform.write(1); transform.write(2); transform.write(3); transform.end();
+  await new Promise((resolve) => later(resolve));
+  assert.equal(transformed, 1);
+  const chunks = [];
+  const done = streamPromises().finished(transform, { cleanup: true });
+  transform.on('data', (chunk) => chunks.push(chunk));
+  await done;
+  assert.deepEqual(chunks, [1, 2, 3]);
+});
+
+testCase('Readable UTF8 decoding preserves characters split across push boundaries', async () => {
+  let pushed = false;
+  const source = new Readable({ read() {
+    if (pushed) return;
+    pushed = true;
+    this.push(Buffer.from([0xf0, 0x9f]));
+    later(() => { this.push(Buffer.from([0x9a, 0x80])); this.push(null); });
+  } });
+  source.setEncoding('utf8');
+  const chunks = [];
+  const done = streamPromises().finished(source, { cleanup: true });
+  source.on('data', (chunk) => chunks.push(chunk));
+  await done;
+  assert.equal(chunks.every((chunk) => typeof chunk === 'string'), true);
+  assert.equal(chunks.join(''), '\u{1f680}');
+});
