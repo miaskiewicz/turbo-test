@@ -2546,6 +2546,7 @@ dependencies = [
  "base64",
  "encoding_rs",
  "fancy-regex",
+ "flate2",
  "idna",
  "libc",
  "libloading 0.9.0",

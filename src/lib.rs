@@ -26,6 +26,7 @@ pub mod location;
 pub mod mock_read;
 pub mod mock_scope;
 pub mod napi_host;
+pub mod node_compat;
 pub mod parse_error;
 pub mod runner;
 pub mod structured_clone;

@@ -9444,6 +9444,20 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         "__ttSha256",
         crate::crypto_compat::native_sha256,
     );
+    bind_fn(scope, global, "__ttIsIP", crate::node_compat::native_is_ip);
+    bind_fn(scope, global, "__ttGzip", crate::node_compat::native_gzip);
+    bind_fn(
+        scope,
+        global,
+        "__ttV8Serialize",
+        crate::node_compat::native_serialize,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttV8Deserialize",
+        crate::node_compat::native_deserialize,
+    );
     bind_fn(
         scope,
         global,
