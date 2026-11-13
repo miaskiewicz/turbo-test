@@ -9174,6 +9174,10 @@ fn framework_prelude(scope: &mut v8::PinScope) {
         .replace(
             "/* __TT_NODE_PORTS__ */",
             include_str!("node_message_ports.js"),
+        )
+        .replace(
+            "/* __TT_NODE_PROCESSES__ */",
+            include_str!("node_processes.js"),
         );
     let code = v8::String::new(scope, &runtime).unwrap();
     let s = v8::Script::compile(scope, code, None).unwrap();
@@ -9446,6 +9450,12 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         "__ttPortDetach",
         crate::message_port::native_detach,
     );
+    bind_fn(
+        scope,
+        global,
+        "__ttSpawnSync",
+        crate::process_compat::native_spawn_sync,
+    );
     bind_fn(scope, global, "log", native_log);
     bind_fn(scope, global, "__ttWrite", native_write);
     bind_fn(scope, global, "__ttCallSite", native_call_site);
@@ -9480,6 +9490,10 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let cwd = std::env::current_dir().map(|d| d.to_string_lossy().into_owned());
     for (name, value) in [
         ("__ttProcessCwd", cwd.ok()),
+        (
+            "__ttNodeExecutable",
+            crate::process_compat::node_executable(),
+        ),
         ("__ttTmpdir", Some(node_tmpdir(|k| std::env::var(k).ok()))),
         ("__ttHomedir", std::env::var("HOME").ok()),
     ] {
