@@ -31,10 +31,10 @@ path = "src/bin/m5_affected.rs"
 
 [dependencies]
 # V8 bindings for the runner, the Node-API host and the module loader: turbo-dom's
-# rusty_v8 fork (the interceptor ShouldThrowOnError fix). `~150.4` admits fork patch
+# rusty_v8 fork (the interceptor ShouldThrowOnError fix). `~150.4.2` admits fork patch
 # releases only and must resolve to the same single turbo-dom-v8 that
 # turbo-dom-browser-env links (scripts/check-single-v8.sh).
-v8 = { package = "turbo-dom-v8", version = "~150.4" }
+v8 = { package = "turbo-dom-v8", version = "~150.4.2" }
 # The browser environment (window, document, CSSOM, forms, events) the runner
 # installs into each test context.
 turbo-dom-browser-env = "=0.8.4"
@@ -88,6 +88,9 @@ lto = "thin"
 codegen-units = 1
 
 [patch.crates-io]
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "26272a83e8f8c1f335d9c615c942674b1de8ec1a" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "26272a83e8f8c1f335d9c615c942674b1de8ec1a" }
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "26272a83e8f8c1f335d9c615c942674b1de8ec1a" }
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "8266b30a366758a591f4d9952823576a468637a3" }
+turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "8266b30a366758a591f4d9952823576a468637a3" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "8266b30a366758a591f4d9952823576a468637a3" }
+
+# Matching unpublished V8 candidate required by turbo-dom-browser-env at this pin.
+turbo-dom-v8 = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "0cfe2c3a405ce33809c23afd7dd30a05fab3f06c" }
