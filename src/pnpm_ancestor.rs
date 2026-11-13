@@ -62,9 +62,17 @@ fn scoped_name(spec: &str) -> Option<&str> {
     }
     Some(&spec[..scope.len() + 1 + name.len()])
 }
+/// A selected link remains selected when dangling or inaccessible. Only a
+/// genuinely missing entry allows the ancestry walk to continue.
+fn selected_entry(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
+}
 fn installed_normally(from: &Path, package: &str) -> bool {
     from.ancestors()
-        .any(|ancestor| ancestor.join("node_modules").join(package).is_dir())
+        .any(|ancestor| selected_entry(&ancestor.join("node_modules").join(package)))
 }
 
 /// Try the nearest explicit hoist link once. A blocked/unusable nearest package
@@ -84,7 +92,7 @@ pub fn resolve(
     }
     for ancestor in from.ancestors() {
         let store = ancestor.join("node_modules/.pnpm");
-        if store.join("node_modules").join(package).is_dir() {
+        if selected_entry(&store.join("node_modules").join(package)) {
             return lookup(&store);
         }
     }

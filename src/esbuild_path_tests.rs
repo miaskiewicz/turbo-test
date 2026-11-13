@@ -57,3 +57,53 @@ fn unix_ignores_windows_wrappers_and_keeps_extensionless_priority() {
     let plain = fixture.add("esbuild");
     assert_eq!(local(&fixture.0), Some(plain));
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_executes_the_installed_npm_cmd_and_transforms_typescript() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let executable = local(root).expect("npm ci must install the Windows esbuild entry point");
+    assert_eq!(executable.file_name().unwrap(), "esbuild.cmd");
+    let version = Command::new(&executable).arg("--version").output().unwrap();
+    assert!(
+        version.status.success(),
+        "{}",
+        String::from_utf8_lossy(&version.stderr)
+    );
+    assert!(
+        !version.stdout.is_empty(),
+        "installed esbuild must report its version"
+    );
+    let mut child = Command::new(&executable)
+        .args(["--loader=ts", "--format=cjs", "--log-level=error"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"const value: number = 42; module.exports = value;")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let javascript = String::from_utf8(output.stdout).unwrap();
+    assert!(!javascript.contains(": number"), "{javascript}");
+    let result = Command::new("node").arg("-e")
+        .arg("const module = { exports: undefined }; new Function('module', process.argv[1])(module); process.stdout.write(String(module.exports));")
+        .arg(javascript).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"42");
+}
