@@ -1317,7 +1317,7 @@ if (globalThis.URL && typeof globalThis.URL.parse !== 'function') {
 }
 if (typeof globalThis.DOMException === 'undefined') {
   globalThis.DOMException = class DOMException extends Error {
-    constructor(message, name) { super(message); this.name = name || 'Error'; this.code = 0; }
+    constructor(message, name) { super(message); this.name = name || 'Error'; this.code = this.name === 'TimeoutError' ? 23 : 0; }
   };
 }
 globalThis.__STATUS_TEXT = globalThis.__STATUS_TEXT || {
@@ -1336,7 +1336,17 @@ if (typeof globalThis.AbortController === 'undefined') {
     _fire() { const ev = { type: 'abort', target: this }; if (typeof this.onabort === 'function') this.onabort(ev); this._listeners.slice().forEach((f) => { try { f(ev); } catch (e) {} }); }
     throwIfAborted() { if (this.aborted) throw this.reason; }
     static abort(reason) { const s = new globalThis.AbortSignal(); s.aborted = true; s.reason = reason || new DOMException('Aborted', 'AbortError'); return s; }
-    static timeout() { return new globalThis.AbortSignal(); }
+    static timeout(delay) {
+      if (typeof delay !== 'number') throw Object.assign(new TypeError('The delay argument must be a number'), { code: 'ERR_INVALID_ARG_TYPE' });
+      if (!Number.isInteger(delay) || delay < 0 || delay > 4294967295) throw Object.assign(new RangeError('The delay argument must be an integer between 0 and 4294967295'), { code: 'ERR_OUT_OF_RANGE' });
+      const signal = new globalThis.AbortSignal();
+      __realTimers.setTimeout(() => {
+        signal.aborted = true;
+        signal.reason = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+        signal._fire();
+      }, delay);
+      return signal;
+    }
   };
   globalThis.AbortController = class AbortController {
     constructor() { this.signal = new globalThis.AbortSignal(); }
