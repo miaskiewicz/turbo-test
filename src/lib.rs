@@ -32,6 +32,7 @@ pub mod napi_host;
 pub mod node_compat;
 pub mod parse_error;
 pub mod pnpm_ancestor;
+pub mod rsa_compat;
 pub mod runner;
 pub mod structured_clone;
 pub mod text_decoder;
