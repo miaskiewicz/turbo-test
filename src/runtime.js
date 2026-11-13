@@ -2269,35 +2269,7 @@ if (typeof globalThis.Buffer === 'undefined') {
   }
   globalThis.Buffer = Buffer;
 }
-if (typeof globalThis.MessageChannel === 'undefined') {
-  // React's scheduler posts work via MessageChannel; postMessage MUST deliver to the other
-  // port's onmessage asynchronously (as a macrotask) or async React updates never flush.
-  globalThis.MessageChannel = class MessageChannel {
-    constructor() {
-      const mk = () => ({
-        onmessage: null,
-        onmessageerror: null,
-        _other: null,
-        postMessage(data) {
-          const o = this._other;
-          // a real-clock task: Node's MessagePort is not a faked timer
-          if (o) __realTimers.setImmediate(() => {
-            const ev = { data };
-            if (typeof o.onmessage === 'function') o.onmessage(ev);
-            (o._listeners || []).forEach((f) => f(ev));
-          }, 0);
-        },
-        close() {},
-        start() {},
-        addEventListener(t, f) { if (t === 'message') (this._listeners || (this._listeners = [])).push(f); },
-        removeEventListener(t, f) { if (this._listeners) this._listeners = this._listeners.filter((x) => x !== f); },
-      });
-      this.port1 = mk(); this.port2 = mk();
-      this.port1._other = this.port2; this.port2._other = this.port1;
-    }
-  };
-  globalThis.MessagePort = class MessagePort { postMessage() {} close() {} start() {} addEventListener() {} removeEventListener() {} };
-}
+/* __TT_NODE_PORTS__ */
 if (typeof globalThis.performance === 'undefined') {
   // now(): ms on the real clock since timeOrigin, the runtime's start (turbo-test#178; it was a
   // constant 0)

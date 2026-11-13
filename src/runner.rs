@@ -9170,6 +9170,10 @@ fn framework_prelude(scope: &mut v8::PinScope) {
         .replace(
             "/* __TT_NODE_ASYNC_CONTEXT__ */",
             include_str!("node_async_context.js"),
+        )
+        .replace(
+            "/* __TT_NODE_PORTS__ */",
+            include_str!("node_message_ports.js"),
         );
     let code = v8::String::new(scope, &runtime).unwrap();
     let s = v8::Script::compile(scope, code, None).unwrap();
@@ -9422,6 +9426,25 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         global,
         "__ttAsyncFrameSet",
         crate::async_context::native_set_frame,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttPortCreate",
+        crate::message_port::native_create,
+    );
+    bind_fn(scope, global, "__ttPortId", crate::message_port::native_id);
+    bind_fn(
+        scope,
+        global,
+        "__ttPortDetached",
+        crate::message_port::native_detached,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttPortDetach",
+        crate::message_port::native_detach,
     );
     bind_fn(scope, global, "log", native_log);
     bind_fn(scope, global, "__ttWrite", native_write);
