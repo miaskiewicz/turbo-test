@@ -10874,7 +10874,6 @@ fn build_entry_plan_pieces(
 /// Thread-local plumbing `run_test_file` sets before loading an entry: location state, the
 /// current test file, the lenient-load flag, and the CJS-first resolution switch.
 fn prepare_entry_thread_locals(entry_abs: &Path) {
-    crate::vue::prepare_project(entry_abs);
     crate::location::begin(
         entry_abs,
         &std::fs::read_to_string(entry_abs).unwrap_or_default(),
