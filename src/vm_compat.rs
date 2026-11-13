@@ -79,7 +79,7 @@ const ANCHOR: &str = r#"(() => {
 
 /// Add this before setting the NORMAL framework snapshot's default context. Window blobs
 /// reserve index zero for their DOM context and must not call this helper.
-pub fn register_pristine_context(scope: &mut v8::PinScope) {
+pub fn register_pristine_context(scope: &mut v8::PinScope<'_, '_, ()>) {
     let context = v8::Context::new(scope, Default::default());
     assert_eq!(scope.add_context(context), 0);
 }
@@ -187,7 +187,7 @@ fn timeout_error<'s>(scope: &mut v8::PinScope<'s, '_>, timeout: u64) -> v8::Loca
 
 fn run_code<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    args: &v8::FunctionCallbackArguments,
+    args: &v8::FunctionCallbackArguments<'s>,
 ) -> Option<v8::Local<'s, v8::Value>> {
     let code = args.get(0).to_string(scope)?;
     compile_vm(scope, code, args.get(3)).and_then(|script| script.run(scope))
