@@ -370,6 +370,27 @@ const { status } = run(['src/a.test.ts'], { jobs: 8, env: { TURBO_REUSE_ISOLATE:
 process.exit(status);
 ```
 
+## Vue 3 Single File Components
+
+Vue SFC loading is opt-in. A project declaring `@vitejs/plugin-vue` is enabled automatically;
+other Vue 3 projects can enable it explicitly:
+
+```sh
+TURBO_VUE=1 npx turbo-test
+```
+
+Use the `jsdom` test environment when mounting components into the DOM. The loader uses the
+project's real `vue/compiler-sfc` (or `@vue/compiler-sfc`), then oxc for TypeScript lowering.
+It supports `<script setup lang="ts">`, ordinary TypeScript scripts, templates and scoped CSS
+through both import and require graphs. Local extensionless `.vue` resolution is enabled only
+for opted-in projects. `TURBO_VUE=0` disables it explicitly.
+
+This first loader supports inline JavaScript/TypeScript and CSS blocks. External blocks,
+preprocessors and CSS modules produce explicit unsupported errors. Vue coverage source-map
+composition is not implemented yet, so coverage runs that load an SFC fail explicitly rather
+than attributing generated render code to incorrect source positions. The standalone compiler
+oracle can be checked with `npm run test:vue-oracle` when developing this repository.
+
 ## TypeScript types (drop the `vitest` devDependency)
 
 turbo-test injects `describe` / `it` / `test` / `expect` / `vi` / `jest` and the hook functions as
@@ -505,6 +526,7 @@ link the repo's esbuild/typescript installs into throwaway fixture projects and 
 npm ci
 cargo test --locked          # unit + CLI integration tests
 npm test                     # node --test test/*.mjs (CLI compat + tsc type checks)
+npm run test:vue-oracle       # real @vitejs/plugin-vue / Vitest component controls
 cargo tarpaulin              # line-coverage gate (tarpaulin.toml, fail-under = 99.9)
 cargo fmt --check            # CI job `lint`, with:
 cargo clippy --all-targets -- -D warnings

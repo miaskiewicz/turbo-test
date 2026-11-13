@@ -7,6 +7,12 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [0.8.4] — Unreleased candidate — Node compatibility and shared DOM performance
 
+### Added
+- Opt-in Vue 3 SFC loading through the project's real Vue compiler (#279), including
+  script-setup TypeScript, templates, scoped CSS and import/require module graphs.
+  Other projects keep their existing extension resolution. Unsupported preprocessors,
+  external blocks and unmapped SFC coverage report explicit errors.
+
 ### Fixed
 - Classify IPv4 and IPv6 literals through the native IP parser (#329), propagate
   unhandled EventEmitter errors and report successful once-listener delivery (#330),
