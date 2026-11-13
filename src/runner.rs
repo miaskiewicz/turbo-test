@@ -41,6 +41,7 @@ enum Variant {
 
 #[derive(Default)]
 struct Registry {
+    propagated_cjs_errors: HashMap<PathBuf, v8::Global<v8::Value>>,
     esm_by_path: HashMap<PathBuf, v8::Global<v8::Module>>,
     cjs_synth_by_path: HashMap<PathBuf, v8::Global<v8::Module>>,
     cjs_exports: HashMap<PathBuf, v8::Global<v8::Value>>,
@@ -316,6 +317,7 @@ fn reset_app_registry(stale: &[PathBuf]) {
         reg.mocks.retain(|p, _| setup_mocks.contains(p));
         reg.extra_exports.clear();
         reg.loading.clear();
+        reg.propagated_cjs_errors.clear();
         reg.lazy_stub_ns.clear();
     });
 }
@@ -6099,12 +6101,47 @@ fn load_cjs_inner<'s>(
         ctx.dir_str,
     );
     restore_tt_dir(scope, ctx.global, prev_dir);
+    let propagated = take_propagated_cjs_error(scope, abs, body_exc.as_ref());
     if !call_ok {
-        return handle_cjs_body_throw(scope, abs, drain_mocks, prefer_metadata, body_exc);
+        return handle_cjs_body_throw(
+            scope,
+            abs,
+            drain_mocks,
+            prefer_metadata || propagated,
+            body_exc,
+        );
     }
     settle_module_mocks(scope, abs, drain_mocks);
     let final_exports = module_obj.get(scope, exports_key.into())?;
     register_cjs_exports(scope, ctx.global, abs, final_exports)
+}
+
+// A child failure cannot be repaired by re-emitting its importing decorator class.
+// Keep provenance only for the active importer body, never cache a failed module.
+fn take_propagated_cjs_error(
+    scope: &mut v8::PinScope,
+    abs: &Path,
+    error: Option<&v8::Global<v8::Value>>,
+) -> bool {
+    let child = REGISTRY.with(|r| r.borrow_mut().propagated_cjs_errors.remove(abs));
+    match (child, error) {
+        (Some(child), Some(error)) => {
+            v8::Local::new(scope, &child).strict_equals(v8::Local::new(scope, error))
+        }
+        _ => false,
+    }
+}
+
+fn mark_propagated_cjs_error(scope: &mut v8::PinScope, error: v8::Local<v8::Value>) {
+    // Equal primitive values do not establish exception provenance.
+    if !error.is_object() {
+        return;
+    }
+    let importer = REQUIRE_STACK.with(|stack| stack.borrow().last().cloned());
+    if let Some(importer) = importer {
+        let error = v8::Global::new(scope, error);
+        REGISTRY.with(|r| r.borrow_mut().propagated_cjs_errors.insert(importer, error));
+    }
 }
 
 /// Locals a CJS call needs (global, dir, filename, require).
@@ -7313,6 +7350,7 @@ fn require_load_cjs(
         Some(e) => {
             let e = v8::Local::new(scope, &e);
             let e = as_import_compile_error(scope, args, abs, spec, e);
+            mark_propagated_cjs_error(scope, e);
             scope.throw_exception(e);
         }
         None => throw(scope, &format!("failed to load {spec}")),
@@ -12372,6 +12410,7 @@ fn clear_registry() {
         reg.mocks.clear();
         reg.extra_exports.clear();
         reg.loading.clear();
+        reg.propagated_cjs_errors.clear();
         reg.lazy_stub_ns.clear();
         reg.import_edges.clear();
     });
