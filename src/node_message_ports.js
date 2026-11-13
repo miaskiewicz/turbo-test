@@ -37,6 +37,7 @@ function __portForget(id, generation, keepResource = false) {
   if (!record || record.generation !== generation) return;
   __portMapDelete(__portEndpoints, id);
   record.queue.length = 0;
+  record.pendingOwner = null;
   if (!keepResource) __portDestroyResource(record.resource);
   const peer = __portMapGet(__portEndpoints, record.peer);
   if (!peer) return;
@@ -52,7 +53,7 @@ function __portRegister(port, record) {
 function __portCreate(id, peer) {
   const port = globalThis.__ttPortCreate(id, __NodeMessagePort.prototype, __portCommit);
   __portNewHandle(port);
-  const record = { id, peer, queue: [], started: false, scheduled: false, generation: 0, owner: null, resource: __portResource() };
+  const record = { id, peer, queue: [], started: false, scheduled: false, pendingOwner: null, generation: 0, owner: null, resource: __portResource() };
   __portMapSet(__portEndpoints, id, record);
   __portRegister(port, record);
   return port;
@@ -67,12 +68,17 @@ function __portCommit(before, after) {
     record.resource = __portResource();
     record.generation++;
     record.started = false;
+    record.pendingOwner = null;
     __portRegister(port, record);
     __portCloseEvent(old, previousResource, true);
   }
 }
 function __portSchedule(record) {
-  if (record.scheduled || !record.started || !record.queue.length) return;
+  if (!record.started || !record.queue.length) return;
+  // A posted task owns its receiver until delivery, even when the channel was local
+  // to enqueueTask (React act). Weak-only ownership can collect it before the task.
+  record.pendingOwner = __portOwner(record);
+  if (record.scheduled) return;
   record.scheduled = true;
   __realTimers.setImmediate(() => __portDeliver(record.id));
 }
@@ -80,12 +86,12 @@ function __portDeliver(id) {
   const record = __portMapGet(__portEndpoints, id);
   if (!record) return;
   record.scheduled = false;
-  if (!record.started || !record.queue.length) return;
-  const owner = __portOwner(record);
+  if (!record.started || !record.queue.length) { record.pendingOwner = null; return; }
+  const owner = record.pendingOwner || __portOwner(record);
   if (!owner) { __portForget(id, record.generation); return; }
   const message = record.queue.shift();
   try { record.resource.runInAsyncScope(__portDispatch, owner, owner, 'message', message.data, message.ports); }
-  finally { __portSchedule(record); }
+  finally { record.pendingOwner = null; __portSchedule(record); }
 }
 function __portEvent(port, type, data, ports) {
   return { type, target: port, currentTarget: port, data, ports: ports || [], defaultPrevented: false,
