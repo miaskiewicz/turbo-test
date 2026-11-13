@@ -19,6 +19,8 @@ test('unused resources and captured callbacks avoid native transitions until act
   assert.equal(reads, 0);
   assert.equal(writes, 0);
   const storage = new AsyncLocalStorage();
+  assert.throws(() => resource.runInAsyncScope(() => { storage.enterWith('activated inside'); throw failure; }), error => error === failure);
+  assert.equal(storage.getStore(), undefined);
   storage.run('active', () => {
     assert.equal(resource.runInAsyncScope(() => storage.getStore()), undefined);
     assert.equal(captured(1), 2);
