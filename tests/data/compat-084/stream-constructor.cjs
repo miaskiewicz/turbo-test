@@ -49,11 +49,34 @@ testCase('legacy stream pipe forwards bytes and completes the destination', () =
   assert.equal(source.pipe(destination), destination);
   source.emit('data', 'one'); source.emit('data', 'two'); source.emit('end');
   assert.deepEqual(seen, ['one', 'two', 'finished']);
+  source.emit('end'); source.emit('data', 'late');
+  assert.deepEqual(seen, ['one', 'two', 'finished']);
+  assert.equal(source.listenerCount('data'), 0);
+  assert.equal(destination.listenerCount('drain'), 0);
   const unpausable = new Stream(); const blocked = new Stream();
   unpausable.readable = true; unpausable.pause = false; unpausable.resume = false;
   blocked.writable = true; blocked.write = () => false; blocked.end = () => {};
   unpausable.pipe(blocked);
   assert.doesNotThrow(() => { unpausable.emit('data', 'bytes'); blocked.emit('drain'); });
+  const closing = new Stream(); const target = new Stream(); const terminal = [];
+  closing.readable = true; target.writable = true;
+  target.write = (chunk) => { terminal.push(chunk); return true; };
+  target.end = () => terminal.push('end'); target.destroy = () => terminal.push('destroy');
+  closing.pipe(target); closing.emit('data', 'before'); closing.emit('close');
+  closing.emit('close'); closing.emit('end'); closing.emit('data', 'after');
+  assert.deepEqual(terminal, ['before', 'destroy']);
+  assert.equal(closing.listenerCount('data'), 0); assert.equal(target.listenerCount('drain'), 0);
+  const retained = new Stream(); const open = new Stream(); let ended = false;
+  retained.readable = true; open.writable = true; open.write = () => true;
+  open.end = () => { ended = true; }; open.destroy = () => { ended = true; };
+  retained.pipe(open, { end: false }); retained.emit('close');
+  assert.equal(ended, false); assert.equal(retained.listenerCount('data'), 0);
+  const broken = new Stream(); const sink = new Stream(); const failure = new Error('pipe failure');
+  broken.readable = true; sink.writable = true; sink.write = () => true; sink.end = () => {};
+  const errors = []; broken.on('error', (error) => errors.push(error)); broken.pipe(sink);
+  broken.emit('error', failure); broken.emit('data', 'late');
+  assert.deepEqual(errors, [failure]); assert.equal(broken.listenerCount('data'), 0);
+
 });
 testCase('default and named stream imports retain constructor and implementation identity', async () => {
   const plain = await import('stream'); const prefixed = await import('node:stream');
