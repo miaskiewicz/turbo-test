@@ -87,3 +87,100 @@ fn decorator_cycles_match_typescript_commonjs_partial_exports() {
     assert_eq!(report["numPassedTests"], 3, "{}", run.all());
     assert_eq!(report["numFailedTests"], 0, "{}", run.all());
 }
+
+fn set_jest_mode(p: &Project, jest: bool) {
+    let (keep, remove, config) = if jest {
+        (
+            "jest.config.js",
+            "vitest.config.ts",
+            "module.exports = { testEnvironment: 'node' };\n",
+        )
+    } else {
+        (
+            "vitest.config.ts",
+            "jest.config.js",
+            "export default { test: { environment: 'node' } };\n",
+        )
+    };
+    if p.path(remove).exists() {
+        std::fs::remove_file(p.path(remove)).unwrap();
+    }
+    p.file(keep, config);
+}
+
+fn check_mode(p: &Project, jest: bool) {
+    set_jest_mode(p, jest);
+    let run = turbo_test(
+        &p.dir,
+        &["--jobs", "1", "--reporter", "json", "cycle.test.ts"],
+        &[],
+    );
+    let report = json_report(&run);
+    assert_eq!(report["success"], jest, "{}", run.all());
+    if jest {
+        assert_eq!(report["numPassedTests"], 3, "{}", run.all());
+    } else {
+        assert!(
+            report["testResults"]
+                .to_string()
+                .contains("before initialization"),
+            "{}",
+            run.all()
+        );
+    }
+}
+
+#[test]
+fn warm_esm_metadata_cache_cannot_change_commonjs_cycle_semantics() {
+    let p = fixture();
+    check_mode(&p, false);
+    check_mode(&p, true);
+}
+
+#[test]
+fn warm_commonjs_metadata_cache_cannot_change_esm_cycle_semantics() {
+    let p = fixture();
+    check_mode(&p, true);
+    check_mode(&p, false);
+}
+
+#[test]
+fn decorated_dependency_hoists_its_own_named_and_default_mocks() {
+    let p = fixture();
+    p.file("dep.ts", "export const value = 'real';\n");
+    p.file("default-dep.ts", "export default 'real-default';\n");
+    p.file(
+        "decorated.ts",
+        r#"
+import { value } from './dep';
+import defaultValue from './default-dep';
+function Tag<T extends Function>(constructor: T): T { return constructor; }
+@Tag
+export class Holder { named = value; defaultValue = defaultValue; }
+jest.mock('./dep', () => ({ value: 'mocked' }));
+jest.mock('./default-dep', () => ({ __esModule: true, default: 'mock-default' }));
+export const captured = [value, defaultValue];
+"#,
+    );
+    p.file(
+        "mock.test.ts",
+        r#"
+import assert from 'node:assert/strict';
+import { Holder, captured } from './decorated';
+test('the decorated dependency registers its mocks before imported values are captured', () => {
+  assert.deepEqual(captured, ['mocked', 'mock-default']);
+  const holder = new Holder();
+  assert.equal(holder.named, 'mocked');
+  assert.equal(holder.defaultValue, 'mock-default');
+});
+"#,
+    );
+    let run = turbo_test(
+        &p.dir,
+        &["--jobs", "1", "--reporter", "json", "mock.test.ts"],
+        &[],
+    );
+    let report = json_report(&run);
+    assert_eq!(report["numPassedTests"], 1, "{}", run.all());
+    assert_eq!(report["numFailedTests"], 0, "{}", run.all());
+}
