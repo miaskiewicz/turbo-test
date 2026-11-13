@@ -481,6 +481,18 @@ impl Transport {
         self.connections.insert(id, connection);
         Ok(json!({"id":id,"socket":info}))
     }
+    fn set_nodelay(&mut self, args: &Value) -> Result<Value> {
+        let enabled = args["enabled"]
+            .as_bool()
+            .ok_or_else(|| fail("ERR_INVALID_ARG_TYPE", "TCP_NODELAY requires a boolean"))?;
+        let id = args["id"].as_u64().unwrap_or(0);
+        let connection = self
+            .connections
+            .get(&id)
+            .ok_or_else(|| fail("ERR_SOCKET_CLOSED", "HTTP socket is closed"))?;
+        connection.socket.set_nodelay(enabled).map_err(io_error)?;
+        Ok(Value::Null)
+    }
     fn send(&mut self, args: &Value) -> Result<Value> {
         let id = args["id"].as_u64().unwrap_or(0);
         let bytes = decoded(&args["data"])?;
@@ -586,6 +598,7 @@ fn operation(name: &str, args: &Value) -> Result<Value> {
             "listen" => table.listen(args),
             "connect" => table.connect(args),
             "send" => table.send(args),
+            "setNoDelay" => table.set_nodelay(args),
             "poll" => table.poll(),
             "close" => Ok(table.close(args)),
             "reset" => Ok(table.reset()),
@@ -677,6 +690,30 @@ pub fn native_http(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn request_nodelay_changes_the_real_socket_option() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut transport = super::Transport::default();
+        let connected = transport.connect(&serde_json::json!({"host":"127.0.0.1", "port":listener.local_addr().unwrap().port()})).unwrap();
+        let id = connected["id"].as_u64().unwrap();
+        for enabled in [true, false, true] {
+            transport
+                .set_nodelay(&serde_json::json!({"id":id,"enabled":enabled}))
+                .unwrap();
+            assert_eq!(
+                transport.connections[&id].socket.nodelay().unwrap(),
+                enabled
+            );
+        }
+        assert_eq!(
+            transport
+                .set_nodelay(&serde_json::json!({"id":0,"enabled":true}))
+                .unwrap_err()
+                .code,
+            "ERR_SOCKET_CLOSED"
+        );
+    }
+
     use super::*;
     #[test]
     fn chunked_binary_frames_parse_incrementally() {

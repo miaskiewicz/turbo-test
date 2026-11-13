@@ -138,3 +138,20 @@ testCase('HTTP destroyed requests close without reporting a response or leaking 
   try { await assert.rejects(exchange({ hostname: '127.0.0.1', port: other.port }), { code: 'ECONNRESET' }); }
   finally { await close(destroyed); }
 });
+
+testCase('client request setNoDelay is chainable before sending real HTTP bytes', async () => {
+  const server = http.createServer((req, res) => res.end('nodelay'));
+  const address = await listen(server);
+  try {
+    await new Promise((resolve, reject) => {
+      const request = http.request({ hostname: '127.0.0.1', port: address.port }, (response) => {
+        response.resume(); response.on('end', resolve);
+      });
+      request.on('error', reject);
+      assert.equal(request.setNoDelay(), request);
+      assert.equal(request.setNoDelay(false), request);
+      assert.equal(request.setNoDelay(true), request);
+      request.end();
+    });
+  } finally { await close(server); }
+});
