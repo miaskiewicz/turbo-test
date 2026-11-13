@@ -398,8 +398,8 @@ process.exit(status);
 
 ## Vue 3 Single File Components
 
-Vue SFC loading is opt-in. A project declaring `@vitejs/plugin-vue` is enabled automatically;
-other Vue 3 projects can enable it explicitly:
+Vue SFC loading is off by default, including projects declaring `@vitejs/plugin-vue`.
+Enable it explicitly for a Vue test run:
 
 ```sh
 TURBO_VUE=1 npx turbo-test
@@ -409,7 +409,8 @@ Use the `jsdom` test environment when mounting components into the DOM. The load
 project's real `vue/compiler-sfc` (or `@vue/compiler-sfc`), then oxc for TypeScript lowering.
 It supports `<script setup lang="ts">`, ordinary TypeScript scripts, templates and scoped CSS
 through both import and require graphs. Local extensionless `.vue` resolution is enabled only
-for opted-in projects. `TURBO_VUE=0` disables it explicitly.
+for opted-in projects. `TURBO_VUE=0` disables it explicitly. With the flag unset, Vue
+resolution and compiler hooks stay disabled; no plugin-manifest or Vue-file discovery runs.
 
 This first loader supports inline JavaScript/TypeScript and CSS blocks. External blocks,
 preprocessors and CSS modules produce explicit unsupported errors. Vue coverage source-map

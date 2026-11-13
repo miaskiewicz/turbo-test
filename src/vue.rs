@@ -9,8 +9,6 @@ use std::process::{Command, Stdio};
 const COMPILER: &str = include_str!("../scripts/vue-transform.cjs");
 thread_local! {
     static RUNTIME_FLAG: Cell<Option<Option<bool>>> = const { Cell::new(None) };
-    static PLUGIN_CACHE: RefCell<PluginCache> = RefCell::new(PluginCache::default());
-    static PROJECT_ENABLED: Cell<bool> = const { Cell::new(false) };
     static COMPILED: RefCell<HashMap<(PathBuf, u64), String>> = RefCell::new(HashMap::new());
 }
 
@@ -19,57 +17,11 @@ pub fn is_component(path: &Path) -> bool {
 }
 
 fn manifest(from: &Path) -> Option<PathBuf> {
+    #[cfg(test)]
+    MANIFEST_READS.with(|reads| reads.set(reads.get() + 1));
     from.ancestors()
         .map(|directory| directory.join("package.json"))
         .find(|path| path.is_file())
-}
-
-#[derive(Default)]
-struct PluginCache {
-    paths: HashMap<PathBuf, bool>,
-    manifests: HashMap<PathBuf, bool>,
-}
-
-fn declares_plugin(from: &Path) -> bool {
-    PLUGIN_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if let Some(enabled) = cache.paths.get(from) {
-            return *enabled;
-        }
-        let enabled = plugin_from_manifest(&mut cache, from);
-        cache.paths.insert(from.to_path_buf(), enabled);
-        enabled
-    })
-}
-
-fn plugin_from_manifest(cache: &mut PluginCache, from: &Path) -> bool {
-    let Some(path) = manifest(from) else {
-        return false;
-    };
-    *cache
-        .manifests
-        .entry(path.clone())
-        .or_insert_with(|| read_plugin_manifest(&path))
-}
-
-fn read_plugin_manifest(path: &Path) -> bool {
-    #[cfg(test)]
-    MANIFEST_READS.with(|reads| reads.set(reads.get() + 1));
-    let Some(package) = std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-    else {
-        return false;
-    };
-    ["dependencies", "devDependencies", "optionalDependencies"]
-        .iter()
-        .any(|key| package[*key]["@vitejs/plugin-vue"].is_string())
-}
-
-pub fn prepare_project(entry: &Path) {
-    // Every entry starts a new manifest snapshot; runtime overrides remain uncached.
-    PLUGIN_CACHE.with(|cache| *cache.borrow_mut() = PluginCache::default());
-    PROJECT_ENABLED.with(|enabled| enabled.set(declares_plugin(entry)));
 }
 
 pub(crate) struct RuntimeFlagGuard {
@@ -104,8 +56,8 @@ fn effective_flag() -> Option<bool> {
 }
 
 pub fn enabled(from: &Path) -> bool {
-    effective_flag()
-        .unwrap_or_else(|| PROJECT_ENABLED.with(|enabled| enabled.get()) || declares_plugin(from))
+    let _ = from;
+    effective_flag().unwrap_or(false)
 }
 
 pub fn runtime_esm(specifier: &str, from: &Path) -> bool {
@@ -217,7 +169,7 @@ fn javascript(path: &Path) -> Result<String, String> {
 pub fn load(path: &Path, as_cjs: bool) -> Result<String, String> {
     if !enabled(path) {
         return Err(format!(
-            "Vue SFC support requires TURBO_VUE=1 or a declared @vitejs/plugin-vue: {}",
+            "Vue SFC support requires explicit TURBO_VUE=1: {}",
             path.display()
         ));
     }
