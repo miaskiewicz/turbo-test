@@ -1666,7 +1666,6 @@ if (typeof globalThis.FileReader === 'undefined') {
   });
 }
 if (typeof globalThis.fetch === 'undefined') {
-  globalThis.fetch = () => Promise.reject(new Error('fetch is not supported in turbo-test env'));
   globalThis.Headers = class Headers {
     constructor(init) {
       this._ = new Map();
@@ -1736,9 +1735,104 @@ if (typeof globalThis.fetch === 'undefined') {
     static error() { return new globalThis.Response(null, { status: 500 }); }
     static redirect(url, status) { const r = new globalThis.Response(null, { status: status || 302 }); r.headers.set('location', String(url)); return r; }
   };
+  function __dataUrlBytes(payload) {
+    const bytes = [];
+    payload = Array.from(payload);
+    for (let i = 0; i < payload.length; i++) {
+      if (payload[i] === '%' && /^[0-9a-f]{2}$/i.test(payload.slice(i + 1, i + 3).join(''))) {
+        bytes.push(parseInt(payload.slice(i + 1, i + 3).join(''), 16)); i += 2;
+      } else bytes.push(...new TextEncoder().encode(payload[i]));
+    }
+    return new Uint8Array(bytes);
+  }
+  function __dataUrlBase64(bytes) {
+    const text = new TextDecoder().decode(bytes).replace(/[\t\n\f\r ]/g, '');
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text) || text.length % 4 === 1) throw new TypeError('fetch failed');
+    if (text.includes('=') && text.length % 4 !== 0) throw new TypeError('fetch failed');
+    return new Uint8Array(globalThis.__b64decodeToBytes(text));
+  }
+  function __dataUrlDecode(url) {
+    const raw = url.slice(5).split('#')[0];
+    const comma = raw.indexOf(',');
+    if (comma < 0) throw new TypeError('fetch failed');
+    let type = raw.slice(0, comma).trim();
+    const base64 = /;base64$/i.test(type);
+    if (base64) type = type.slice(0, -7);
+    if (type.startsWith(';')) type = 'text/plain' + type;
+    if (!/^[^;/]+\/[^;]+/.test(type)) type = 'text/plain;charset=US-ASCII';
+    let bytes = __dataUrlBytes(raw.slice(comma + 1));
+    if (base64) bytes = __dataUrlBase64(bytes);
+    return [type, bytes];
+  }
+  class __DataResponse extends globalThis.Response {
+    constructor(bytes, type, url) {
+      super(null, { headers: { 'content-type': type } });
+      this._bytes = bytes;
+      this.url = url;
+      this.bodyUsed = false;
+      const self = this;
+      this.body = new ReadableStream({ start(controller) { controller.enqueue(bytes.slice()); controller.close(); } });
+      const cancel = this.body.cancel.bind(this.body);
+      this.body.cancel = (...args) => {
+        if (!this.body.locked) this.bodyUsed = true;
+        return cancel(...args);
+      };
+      const reader = this.body.getReader.bind(this.body);
+      this.body.getReader = (...args) => {
+        const result = reader(...args);
+        const read = result.read.bind(result);
+        result.read = (...values) => { self.bodyUsed = true; return read(...values); };
+        const cancel = result.cancel.bind(result);
+        result.cancel = (...values) => { self.bodyUsed = true; return cancel(...values); };
+        return result;
+      };
+    }
+    async arrayBuffer() {
+      if (this.bodyUsed || this.body.locked) throw new TypeError('Body is unusable');
+      const reader = this.body.getReader();
+      while (!(await reader.read()).done) {}
+      return this._bytes.slice().buffer;
+    }
+    async text() { return new TextDecoder().decode(await this.arrayBuffer()); }
+    async json() { return JSON.parse(await this.text()); }
+    async blob() { return new Blob([await this.arrayBuffer()], { type: this.headers.get('content-type') }); }
+    clone() {
+      if (this.bodyUsed || this.body.locked) throw new TypeError('Body is unusable');
+      return new __DataResponse(this._bytes.slice(), this.headers.get('content-type'), this.url);
+    }
+  }
+  globalThis.fetch = async (input, init = {}) => {
+    const signal = init.signal || (input && input.signal);
+    if (signal && signal.aborted) throw signal.reason;
+    const url = new URL(__requestUrl(input)).href;
+    if (!url.startsWith('data:')) throw new TypeError('fetch is not supported for this URL in turbo-test env');
+    const [type, bytes] = __dataUrlDecode(url);
+    return new __DataResponse(bytes, type, url);
+  };
 }
 if (typeof globalThis.FormData === 'undefined') {
-  globalThis.FormData = class FormData { constructor() { this._ = []; } append(k, v) { this._.push([k, v]); } get(k) { const e = this._.find((x) => x[0] === k); return e ? e[1] : null; } getAll(k) { return this._.filter((x) => x[0] === k).map((x) => x[1]); } has(k) { return this._.some((x) => x[0] === k); } forEach(f) { this._.forEach(([k, v]) => f(v, k)); } };
+  globalThis.FormData = class FormData {
+    constructor() { this._ = []; }
+    append(k, v) { this._.push([String(k), this._value(v)]); }
+    _value(v) { return v instanceof Blob ? v : String(v); }
+    get(k) { const e = this._.find((x) => x[0] === String(k)); return e ? e[1] : null; }
+    getAll(k) { return this._.filter((x) => x[0] === String(k)).map((x) => x[1]); }
+    has(k) { return this._.some((x) => x[0] === String(k)); }
+    delete(k) { this._ = this._.filter((x) => x[0] !== String(k)); }
+    set(k, v) {
+      k = String(k);
+      const index = this._.findIndex((x) => x[0] === k);
+      const entry = [k, this._value(v)];
+      if (index < 0) { this._.push(entry); return; }
+      this._[index] = entry;
+      this._ = this._.filter((x, i) => x[0] !== k || i === index);
+    }
+    *entries() { for (const [k, v] of this._) yield [k, v]; }
+    *keys() { for (const [k] of this._) yield k; }
+    *values() { for (const [, v] of this._) yield v; }
+    forEach(f, thisArg) { for (const [k, v] of this._) f.call(thisArg, v, k, this); }
+    [Symbol.iterator]() { return this.entries(); }
+  };
 }
 if (typeof globalThis.structuredClone === 'undefined') {
   // V8's structured clone (src/structured_clone.rs), with Node's argument checks: the ArrayBuffers
@@ -2649,16 +2743,28 @@ const __crypto = {
 if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.randomUUID) {
   globalThis.crypto = Object.assign(globalThis.crypto || {}, { randomUUID: __crypto.randomUUID, getRandomValues: __crypto.getRandomValues });
 }
+function __unhandledEventError(value) {
+  if (value instanceof Error) throw value;
+  const error = new Error('Unhandled error.' + (value === undefined ? '' : ' (' + String(value) + ')'));
+  error.code = 'ERR_UNHANDLED_ERROR';
+  error.context = value;
+  throw error;
+}
 class __EventEmitter {
-  constructor() { this._ev = {}; }
+  constructor() { this._ev = Object.create(null); }
   on(e, f) { (this._ev[e] || (this._ev[e] = [])).push(f); return this; }
   addListener(e, f) { return this.on(e, f); }
-  once(e, f) { const g = (...a) => { this.off(e, g); f(...a); }; return this.on(e, g); }
-  off(e, f) { if (this._ev[e]) this._ev[e] = this._ev[e].filter((x) => x !== f); return this; }
+  once(e, f) { const self = this; function g(...a) { self.off(e, g); return f.apply(this, a); } g.listener = f; return this.on(e, g); }
+  off(e, f) { if (this._ev[e]) this._ev[e] = this._ev[e].filter((x) => x !== f && x.listener !== f); return this; }
   removeListener(e, f) { return this.off(e, f); }
-  removeAllListeners(e) { if (e) delete this._ev[e]; else this._ev = {}; return this; }
-  emit(e, ...a) { (this._ev[e] || []).slice().forEach((f) => f(...a)); return (this._ev[e] || []).length > 0; }
-  listeners(e) { return (this._ev[e] || []).slice(); }
+  removeAllListeners(e) { if (e !== undefined) delete this._ev[e]; else this._ev = Object.create(null); return this; }
+  emit(e, ...a) {
+    const listeners = (this._ev[e] || []).slice();
+    if (e === 'error' && listeners.length === 0) __unhandledEventError(a[0]);
+    listeners.forEach((f) => f.apply(this, a));
+    return listeners.length > 0;
+  }
+  listeners(e) { return (this._ev[e] || []).map((f) => f.listener || f); }
   listenerCount(e) { return (this._ev[e] || []).length; }
   setMaxListeners() { return this; }
   prependListener(e, f) { (this._ev[e] || (this._ev[e] = [])).unshift(f); return this; }
@@ -2688,7 +2794,35 @@ const __http2 = { connect: () => new __EventEmitter(), createServer: __mkServer,
 const __dgram = { createSocket: () => Object.assign(new __EventEmitter(), { bind() { return this; }, send() {}, close() {}, address: () => ({ port: 0 }) }) }; __dgram.default = __dgram;
 const __readline = { createInterface: () => Object.assign(new __EventEmitter(), { question: (_q, cb) => cb && cb(''), close() {}, prompt() {}, write() {} }), clearLine: () => {}, cursorTo: () => {}, moveCursor: () => {} }; __readline.default = __readline;
 const __v8 = { serialize: (x) => { try { return JSON.stringify(x); } catch (e) { return '{}'; } }, deserialize: () => ({}), getHeapStatistics: () => ({ total_heap_size: 0, used_heap_size: 0 }), setFlagsFromString: () => {} }; __v8.default = __v8;
-const __dc = { channel: () => ({ publish: () => {}, subscribe: () => {}, unsubscribe: () => {}, hasSubscribers: false }), hasSubscribers: () => false, subscribe: () => {}, unsubscribe: () => {} }; __dc.default = __dc;
+const __dcChannels = new Map();
+class __DiagnosticChannel {
+  constructor(name) { this.name = name; this._subscribers = []; }
+  get hasSubscribers() { return this._subscribers.length > 0; }
+  subscribe(fn) {
+    if (typeof fn !== 'function') throw new TypeError('subscriber must be a function');
+    this._subscribers.push(fn);
+  }
+  unsubscribe(fn) {
+    const index = this._subscribers.indexOf(fn);
+    if (index < 0) return false;
+    this._subscribers.splice(index, 1);
+    return true;
+  }
+  publish(message) { this._subscribers.slice().forEach((fn) => fn(message, this.name)); }
+}
+function __diagnosticChannel(name) {
+  if (typeof name !== 'string' && typeof name !== 'symbol') throw new TypeError('channel name must be a string or symbol');
+  if (!__dcChannels.has(name)) __dcChannels.set(name, new __DiagnosticChannel(name));
+  return __dcChannels.get(name);
+}
+const __dc = {
+  Channel: __DiagnosticChannel,
+  channel: __diagnosticChannel,
+  hasSubscribers: (name) => __diagnosticChannel(name).hasSubscribers,
+  subscribe: (name, fn) => __diagnosticChannel(name).subscribe(fn),
+  unsubscribe: (name, fn) => __diagnosticChannel(name).unsubscribe(fn),
+};
+__dc.default = __dc;
 class __AsyncLocalStorage { constructor() { this._store = undefined; } run(store, cb, ...a) { const p = this._store; this._store = store; try { return cb(...a); } finally { this._store = p; } } getStore() { return this._store; } enterWith(s) { this._store = s; } disable() {} exit(cb, ...a) { return cb(...a); } }
 const __async_hooks = { AsyncLocalStorage: __AsyncLocalStorage, AsyncResource: class { runInAsyncScope(fn, thisArg, ...a) { return fn.apply(thisArg, a); } emitDestroy() { return this; } bind(fn) { return fn; } }, createHook: () => ({ enable() { return this; }, disable() { return this; } }), executionAsyncId: () => 0, triggerAsyncId: () => 0 }; __async_hooks.default = __async_hooks;
 // ---- Node's util.inspect / util.format (Node 26; turbo-test#93) ----
