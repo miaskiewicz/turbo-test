@@ -41,6 +41,19 @@ test('ordinary error retains identity and explicit require retries exactly once'
   }
   assert.deepEqual(observations, [1, 2]);
 });
+test('the first of multiple caught child errors retains provenance', () => {
+  globalThis.__firstAttempts = 0;
+  globalThis.__secondAttempts = 0;
+  globalThis.__firstError = new Error('first');
+  globalThis.__secondError = new Error('second');
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    let caught;
+    try { require('./multiple'); } catch (error) { caught = error; }
+    assert.equal(caught, globalThis.__firstError);
+    assert.equal(globalThis.__firstAttempts, attempt);
+    assert.equal(globalThis.__secondAttempts, attempt);
+  }
+});
 test('caught equal primitive does not suppress local decorator metadata fallback', () => {
   const Own = require('./own').Own;
   assert.equal(new Own().value, 42);
@@ -59,6 +72,26 @@ export class Own {
   @requireType
   value: number = 42;
 }
+"#,
+    );
+    p.file(
+        "first.ts",
+        "globalThis.__firstAttempts++; throw globalThis.__firstError;\n",
+    );
+    p.file(
+        "second.ts",
+        "globalThis.__secondAttempts++; throw globalThis.__secondError;\n",
+    );
+    p.file(
+        "multiple.ts",
+        r#"
+function marker(value) { return value; }
+@marker
+class Multiple {}
+let saved;
+try { require('./first'); } catch (error) { saved = error; }
+try { require('./second'); } catch (_) {}
+throw saved;
 "#,
     );
     let oracle = r#"
@@ -88,6 +121,6 @@ global.test=(_name,fn)=>fn(); require(path.join(out,'retry.test.js'));
         &[],
     );
     let report = json_report(&run);
-    assert_eq!(report["numPassedTests"], 2, "{}", run.all());
+    assert_eq!(report["numPassedTests"], 3, "{}", run.all());
     assert_eq!(report["numFailedTests"], 0, "{}", run.all());
 }
