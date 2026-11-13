@@ -64,3 +64,15 @@ test('next file clears prior frame without capture overhead until reactivated', 
         2,
     );
 }
+
+#[test]
+fn inactive_resource_dispatch_avoids_native_transitions_and_preserves_later_activation() {
+    for environment in ["node", "jsdom"] {
+        let p = fixture_project(&format!("async-resource-lazy-{environment}"), environment);
+        p.file(
+            "resource.test.cjs",
+            include_str!("data/compat-084/async-resource-lazy.cjs"),
+        );
+        assert_passes(&turbo_test(&p.dir, &["--reporter", "json"], &[]), 1);
+    }
+}

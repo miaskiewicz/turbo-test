@@ -1,0 +1,31 @@
+const assert = require('node:assert/strict');
+const { AsyncLocalStorage, AsyncResource } = require('node:async_hooks');
+const nativeGet = globalThis.__ttAsyncFrameGet;
+const nativeSet = globalThis.__ttAsyncFrameSet;
+let reads = 0, writes = 0;
+globalThis.__ttAsyncFrameGet = () => { reads++; return nativeGet(); };
+globalThis.__ttAsyncFrameSet = frame => { writes++; return nativeSet(frame); };
+test('unused resources and captured callbacks avoid native transitions until activation', () => {
+  const receiver = { value: 41 };
+  const resource = new AsyncResource('lazy-resource');
+  const bound = resource.bind(function (increment) { assert.equal(this, receiver); return this.value + increment; }, receiver);
+  const captured = AsyncLocalStorage.bind(value => value + 1);
+  const snapshot = AsyncLocalStorage.snapshot();
+  assert.equal(bound(1), 42);
+  assert.equal(captured(1), 2);
+  assert.equal(snapshot(value => value + 1, 2), 3);
+  const failure = new Error('original failure');
+  assert.throws(() => resource.runInAsyncScope(() => { throw failure; }), error => error === failure);
+  assert.equal(reads, 0);
+  assert.equal(writes, 0);
+  const storage = new AsyncLocalStorage();
+  storage.run('active', () => {
+    assert.equal(resource.runInAsyncScope(() => storage.getStore()), undefined);
+    assert.equal(captured(1), 2);
+    assert.equal(snapshot(() => storage.getStore()), undefined);
+    assert.throws(() => resource.runInAsyncScope(() => { assert.equal(storage.getStore(), undefined); throw failure; }), error => error === failure);
+    assert.equal(storage.getStore(), 'active');
+  });
+  assert.ok(reads > 0);
+  assert.ok(writes > 0);
+});
