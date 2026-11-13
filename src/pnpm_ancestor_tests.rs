@@ -135,3 +135,40 @@ fn runtime_scopes_restore_nested_flags_without_changing_the_host_environment() {
     assert_eq!(enabled(), original);
     assert_eq!(std::env::var_os("TURBO_PNPM_ANCESTOR"), host);
 }
+
+#[cfg(unix)]
+#[test]
+fn dangling_nearest_hoist_does_not_select_a_valid_older_ancestor() {
+    let fixture = Fixture::new();
+    fixture.directory("node_modules/.pnpm/node_modules/pkg");
+    let near = fixture.directory("workspace/node_modules/.pnpm");
+    let links = fixture.directory("workspace/node_modules/.pnpm/node_modules");
+    std::os::unix::fs::symlink("missing-package", links.join("pkg")).unwrap();
+    let from = fixture.directory("workspace/tests");
+    let mut seen = Vec::new();
+    let result = resolve("pkg", &from, true, |store| {
+        seen.push(store.to_path_buf());
+        (store != near).then(|| PathBuf::from("wrong-older-version"))
+    });
+    assert_eq!(result, None);
+    assert_eq!(seen, [near]);
+}
+
+#[cfg(unix)]
+#[test]
+fn inaccessible_nearest_hoist_metadata_does_not_fall_through() {
+    let fixture = Fixture::new();
+    fixture.directory("node_modules/.pnpm/node_modules/pkg");
+    let near = fixture.directory("workspace/node_modules/.pnpm");
+    std::fs::write(near.join("node_modules"), "not a directory").unwrap();
+    let from = fixture.directory("workspace/tests");
+    let mut seen = Vec::new();
+    assert_eq!(
+        resolve("pkg", &from, true, |store| {
+            seen.push(store.to_path_buf());
+            (store != near).then(|| PathBuf::from("wrong-older-version"))
+        }),
+        None
+    );
+    assert_eq!(seen, [near]);
+}

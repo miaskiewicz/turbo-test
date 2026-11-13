@@ -205,3 +205,29 @@ test('disabled worker never inherits the other runtime flag', () => {
     let r = turbo_test(&p.dir, &["--jobs", "2"], &[]);
     assert_eq!(r.code, Some(0), "{}", r.all());
 }
+
+#[test]
+fn dangling_selected_hoist_reports_missing_instead_of_loading_a_farther_version() {
+    let p = project("pnpm-dangling-hoist");
+    package(
+        &p,
+        "node_modules/.pnpm/pkg@1/node_modules",
+        "pkg",
+        "wrong-farther-version",
+    );
+    hoist(&p, "pkg", "pkg@1");
+    let near = p.dir.join("workspace/node_modules/.pnpm/node_modules");
+    std::fs::create_dir_all(&near).unwrap();
+    std::os::unix::fs::symlink("missing-version", near.join("pkg")).unwrap();
+    p.file(
+        "workspace/tests/dangling.test.cjs",
+        r#"
+const assert = require('node:assert/strict');
+test('an unusable selected hoist never silently picks an older ancestor', () => {
+  assert.throws(() => require('pkg'), /Cannot find module/);
+});
+"#,
+    );
+    let run = turbo_test(&p.dir, &["--jobs", "1"], &[("TURBO_PNPM_ANCESTOR", "1")]);
+    assert_eq!(run.code, Some(0), "{}", run.all());
+}
