@@ -2,6 +2,7 @@
 #![cfg(unix)]
 mod common;
 use common::{json_report, turbo_test, Project};
+use std::process::Command;
 
 #[test]
 fn ephemeral_message_channel_survives_collection_before_delivery() {
@@ -12,6 +13,7 @@ fn ephemeral_message_channel_survives_collection_before_delivery() {
     p.file(
         "port.test.cjs",
         r#"
+const test = globalThis.test || require('node:test');
 const assert = require('node:assert/strict');
 test('a short-lived channel delivers through a preceding collection task', async () => {
   assert.equal(typeof gc, 'function');
@@ -28,6 +30,16 @@ test('a short-lived channel delivers through a preceding collection task', async
   assert.equal(delivered, 1);
 });
 "#,
+    );
+    let control = Command::new("node")
+        .args(["--expose-gc", "--test"])
+        .arg(p.path("port.test.cjs"))
+        .output()
+        .unwrap();
+    assert!(
+        control.status.success(),
+        "Node control: {}",
+        String::from_utf8_lossy(&control.stderr)
     );
     let run = turbo_test(
         &p.dir,
