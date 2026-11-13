@@ -24,6 +24,7 @@ testCase('HTTP messages share the actual accepted socket and expose connection e
     assert.equal(accepted instanceof EventEmitter, true);
     assert.equal(accepted.readable, true); assert.equal(accepted.writable, true);
     assert.equal(accepted.destroyed, false); assert.equal(accepted.remoteAddress, '127.0.0.1');
+    assert.equal(accepted.setNoDelay(false), accepted); assert.equal(accepted.setNoDelay(), accepted);
     response.end('shared-socket');
   });
   server.on('connection', (socket) => { accepted = socket; });
