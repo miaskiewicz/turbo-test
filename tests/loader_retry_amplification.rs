@@ -41,7 +41,26 @@ test('ordinary error retains identity and explicit require retries exactly once'
   }
   assert.deepEqual(observations, [1, 2]);
 });
+test('caught equal primitive does not suppress local decorator metadata fallback', () => {
+  const Own = require('./own').Own;
+  assert.equal(new Own().value, 42);
+});
 "#);
+    p.file("primitive.ts", "throw 'local metadata missing';\n");
+    p.file(
+        "own.ts",
+        r#"
+try { require('./primitive'); } catch (_) {}
+Reflect.metadata = (key, type) => target => { target.__fieldType = type; };
+function requireType(target, key) {
+  if (target.__fieldType !== Number) throw 'local metadata missing';
+}
+export class Own {
+  @requireType
+  value: number = 42;
+}
+"#,
+    );
     let oracle = r#"
 const fs=require('node:fs'),path=require('node:path'),ts=require(process.argv[1]),root=process.argv[2],out=path.join(root,'oracle');
 fs.mkdirSync(out);
@@ -69,6 +88,6 @@ global.test=(_name,fn)=>fn(); require(path.join(out,'retry.test.js'));
         &[],
     );
     let report = json_report(&run);
-    assert_eq!(report["numPassedTests"], 1, "{}", run.all());
+    assert_eq!(report["numPassedTests"], 2, "{}", run.all());
     assert_eq!(report["numFailedTests"], 0, "{}", run.all());
 }
