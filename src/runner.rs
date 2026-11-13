@@ -6029,12 +6029,58 @@ fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks: bool)
     load_cjs_inner(scope, abs, drain_mocks, false)
 }
 
+// Opt-in bounded diagnostics distinguish repeated failed loads from a large unique graph.
+struct CjsLoadProbe {
+    path: PathBuf,
+    metadata: bool,
+    started: std::time::Instant,
+}
+
+impl CjsLoadProbe {
+    fn start(path: &Path, metadata: bool) -> Option<Self> {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ENABLED
+            .get_or_init(|| std::env::var("TURBO_CJS_LOAD_DIAGNOSTIC").as_deref() == Ok("1"))
+        {
+            return None;
+        }
+        cjs_load_diagnostic("start", path, metadata, 0);
+        Some(Self {
+            path: path.to_path_buf(),
+            metadata,
+            started: std::time::Instant::now(),
+        })
+    }
+}
+
+impl Drop for CjsLoadProbe {
+    fn drop(&mut self) {
+        cjs_load_diagnostic(
+            "return",
+            &self.path,
+            self.metadata,
+            self.started.elapsed().as_millis(),
+        );
+    }
+}
+
+fn cjs_load_diagnostic(event: &str, path: &Path, metadata: bool, millis: u128) {
+    static LINES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let sequence = LINES.fetch_add(1, Ordering::Relaxed);
+    if sequence >= 4096 {
+        return;
+    }
+    let depth = REQUIRE_STACK.with(|stack| stack.borrow().len());
+    eprintln!("[cjs-load] seq={sequence} event={event} metadata={metadata} depth={depth} ms={millis} path={}", path.display());
+}
+
 fn load_cjs_inner<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     abs: &Path,
     drain_mocks: bool,
     prefer_metadata: bool,
 ) -> Option<()> {
+    let _probe = CjsLoadProbe::start(abs, prefer_metadata);
     if let Some(done) = loaded_or_lazy(scope, abs) {
         return done;
     }
@@ -6187,6 +6233,9 @@ fn handle_cjs_body_throw<'s>(
     prefer_metadata: bool,
     body_exc: Option<v8::Global<v8::Value>>,
 ) -> Option<()> {
+    if std::env::var("TURBO_CJS_LOAD_DIAGNOSTIC").as_deref() == Ok("1") {
+        cjs_load_diagnostic("body-failed", abs, prefer_metadata, 0);
+    }
     if !prefer_metadata && wants_metadata_retry(abs) {
         return load_cjs_inner(scope, abs, drain_mocks, true);
     }
