@@ -9178,7 +9178,8 @@ fn framework_prelude(scope: &mut v8::PinScope) {
         .replace(
             "/* __TT_NODE_PROCESSES__ */",
             include_str!("node_processes.js"),
-        );
+        )
+        .replace("/* __TT_NODE_HTTP__ */", include_str!("node_http.js"));
     let code = v8::String::new(scope, &runtime).unwrap();
     let s = v8::Script::compile(scope, code, None).unwrap();
     s.run(scope).unwrap();
@@ -9417,6 +9418,7 @@ fn load_lazy_bundled(scope: &mut v8::PinScope, abs: &Path) -> Option<Option<()>>
 }
 
 fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+    crate::http_compat::reset();
     let empty = v8::undefined(scope);
     scope.set_continuation_preserved_embedder_data(empty.into());
     bind_fn(
@@ -9456,6 +9458,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         "__ttSpawnSync",
         crate::process_compat::native_spawn_sync,
     );
+    bind_fn(scope, global, "__ttHttp", crate::http_compat::native_http);
     bind_fn(scope, global, "log", native_log);
     bind_fn(scope, global, "__ttWrite", native_write);
     bind_fn(scope, global, "__ttCallSite", native_call_site);

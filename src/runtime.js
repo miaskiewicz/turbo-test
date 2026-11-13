@@ -2851,6 +2851,10 @@ const __mkServer = () => { const s = new __EventEmitter(); s.listen = (..._a) =>
 const __http = { Agent: __Agent, globalAgent: new __Agent(), ClientRequest: __ClientRequest, IncomingMessage: __IncomingMessage, ServerResponse: class extends __EventEmitter { setHeader() {} end() { return this; } write() { return true; } writeHead() { return this; } }, Server: class extends __EventEmitter {}, METHODS: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'], STATUS_CODES: {}, createServer: __mkServer, request: () => new __ClientRequest(), get: () => new __ClientRequest() };
 __http.default = __http;
 const __https = Object.assign({}, __http, { Agent: __Agent, globalAgent: new __Agent() }); __https.default = __https;
+/* __TT_NODE_HTTP__ */
+Object.assign(__http, __nodeHttp);
+function __httpUnsupportedTls() { throw Object.assign(new Error('HTTPS is not supported by the loopback HTTP transport'), { code: 'ERR_HTTP_UNSUPPORTED_TLS' }); }
+Object.assign(__https, { request: __httpUnsupportedTls, get: __httpUnsupportedTls, createServer: __httpUnsupportedTls });
 const __net = { Socket: class extends __EventEmitter { connect() { return this; } write() { return true; } end() { return this; } destroy() { return this; } setTimeout() { return this; } setNoDelay() { return this; } setKeepAlive() { return this; } ref() { return this; } unref() { return this; } }, Server: class extends __EventEmitter { listen(..._a) { const cb = _a[_a.length - 1]; if (typeof cb === 'function') cb(); return this; } close() { return this; } address() { return { port: 0 }; } }, createConnection: () => new __EventEmitter(), connect: () => new __EventEmitter(), createServer: __mkServer, isIP: (input) => globalThis.__ttIsIP(input), isIPv4: (input) => globalThis.__ttIsIP(input) === 4, isIPv6: (input) => globalThis.__ttIsIP(input) === 6 }; __net.default = __net;
 const __tls = { TLSSocket: class extends __EventEmitter { connect() { return this; } }, connect: () => new __EventEmitter(), createSecureContext: () => ({}), createServer: __mkServer, checkServerIdentity: () => undefined, rootCertificates: [] }; __tls.default = __tls;
 function __gzipBytes(input) {
@@ -10225,6 +10229,7 @@ globalThis.__ttResetForNextFile = () => {
   // broke ~40 async tests).
   __loop.gen++;
   __resetAsyncContext();
+  __httpReset();
   // jest.setTimeout / jest.retryTimes are per-file overrides (turbo-test#273)
   globalThis.__TT_JEST_TIMEOUT = undefined;
   globalThis.__TT_JEST_RETRY = undefined;
