@@ -2741,7 +2741,9 @@ function __hashOutput(bytes, encoding) {
 }
 function __createHash(algorithm) {
   if (typeof algorithm !== 'string') throw Object.assign(new TypeError('The algorithm argument must be a string'), { code: 'ERR_INVALID_ARG_TYPE' });
-  if (algorithm.toLowerCase() !== 'sha256') throw new Error(`Digest method not supported: ${algorithm}`);
+  const name = algorithm.toLowerCase();
+  const hash = name === 'sha1' ? globalThis.__ttSha1 : name === 'sha256' ? globalThis.__ttSha256 : null;
+  if (!hash) throw new Error(`Digest method not supported: ${algorithm}`);
   const chunks = [];
   let finalized = false;
   const check = () => { if (finalized) throw __hashError('Digest already called', 'ERR_CRYPTO_HASH_FINALIZED'); };
@@ -2749,7 +2751,7 @@ function __createHash(algorithm) {
     update(data, encoding) { check(); chunks.push(__hashBytes(data, encoding)); return this; },
     digest(encoding) {
       check();
-      const output = new Uint8Array(globalThis.__ttSha256(globalThis.Buffer.concat(chunks)));
+      const output = new Uint8Array(hash(globalThis.Buffer.concat(chunks)));
       finalized = true;
       chunks.length = 0;
       return __hashOutput(output, encoding);

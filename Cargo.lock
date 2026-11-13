@@ -2959,6 +2959,7 @@ dependencies = [
  "rolldown-ariadne",
  "rsa",
  "serde_json",
+ "sha1",
  "sha2",
  "turbo-dom-browser-env",
  "turbo-dom-v8",

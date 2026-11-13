@@ -12,10 +12,7 @@ fn sha1_known_answers_and_lifecycle() {
         "jest.config.js",
         "module.exports = { testEnvironment: 'node' };\n",
     );
-    p.file(
-        "sha1.test.cjs",
-        include_str!("data/compat-084/sha1.cjs"),
-    );
+    p.file("sha1.test.cjs", include_str!("data/compat-084/sha1.cjs"));
     let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
     let report = json_report(&r);
     assert_eq!(report["numPassedTests"], 4, "{}", r.all());

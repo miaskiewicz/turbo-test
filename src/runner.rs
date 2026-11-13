@@ -9777,6 +9777,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
             global.set(scope, key.into(), value.into());
         }
     }
+    bind_fn(scope, global, "__ttSha1", crate::crypto_compat::native_sha1);
     bind_fn(
         scope,
         global,
