@@ -546,7 +546,15 @@ fn is_esm_module_uncached(abs: &Path) -> bool {
 /// The resolvers by (nearest tsconfig, ESM importer, CJS-first resolution, require_fallback,
 /// custom module dirs, custom export conditions).
 type ResolverCache = HashMap<
-    (Option<PathBuf>, bool, bool, bool, Vec<String>, Vec<String>),
+    (
+        Option<PathBuf>,
+        bool,
+        bool,
+        bool,
+        Vec<String>,
+        Vec<String>,
+        bool,
+    ),
     std::rc::Rc<oxc_resolver::Resolver>,
 >;
 
@@ -574,16 +582,17 @@ fn resolver_with(
         require_fallback,
         CUSTOM_MODULE_DIRS.with(|m| m.borrow().clone()),
         CUSTOM_EXPORT_CONDITIONS.with(|c| c.borrow().clone()),
+        crate::vue::enabled(from_dir),
     );
     RESOLVERS.with(|m| {
         if let Some(r) = m.borrow().get(&key) {
             return r.clone();
         }
-        let r = std::rc::Rc::new(oxc_resolver::Resolver::new(base_resolve_options(
-            key.0.clone(),
-            esm,
-            require_fallback,
-        )));
+        let mut options = base_resolve_options(key.0.clone(), esm, require_fallback);
+        if key.6 {
+            options.extensions.push(".vue".into());
+        }
+        let r = std::rc::Rc::new(oxc_resolver::Resolver::new(options));
         m.borrow_mut().insert(key, r.clone());
         r
     })
@@ -731,26 +740,34 @@ pub fn resolve_spec(spec: &str, from_dir: &Path) -> Option<PathBuf> {
 }
 
 /// Resolutions keyed by specifier, importer, module/condition mode, config and pnpm opt-in.
-type ResolveMemo = HashMap<(String, PathBuf, bool, bool, u64, bool), Option<PathBuf>>;
+type ResolveMemo = HashMap<(String, PathBuf, bool, bool, u64, bool, bool), Option<PathBuf>>;
 
-/// Preserve explicit project mappings before selecting the shared Vue runtime.
-fn vue_runtime_specifier<'a>(spec: &'a str, from_dir: &Path) -> &'a str {
-    if spec != "vue" {
-        return spec;
+/// Project mappings must retain their original import/require conditions.
+fn vue_runtime_resolution(spec: &str, from: &Path, esm: bool, resolved: PathBuf) -> PathBuf {
+    if !crate::vue::runtime_esm(spec, from) || explicitly_mapped(spec) {
+        return resolved;
     }
-    let aliased = config_alias_list()
-        .iter()
-        .any(|(name, _)| name.trim_end_matches('$') == spec);
-    if aliased || apply_module_name_mapper(spec).is_some() {
-        return spec;
+    let mut options = base_resolve_options(None, esm, false);
+    options.alias.clear();
+    let plain = oxc_resolver::Resolver::new(options)
+        .resolve(from, spec)
+        .ok()
+        .and_then(|result| crate::canon::canonicalize(result.path()).ok());
+    if plain.as_ref() != Some(&resolved) {
+        return resolved;
     }
-    crate::vue::runtime_specifier(spec, from_dir)
+    crate::vue::runtime_path(spec, &resolved).unwrap_or(resolved)
+}
+
+fn explicitly_mapped(spec: &str) -> bool {
+    config_alias_list().iter().any(|(name, _)| {
+        let bare = name.trim_end_matches('$');
+        spec == bare || (!name.ends_with('$') && spec.starts_with(&format!("{bare}/")))
+    }) || apply_module_name_mapper(spec).is_some()
 }
 
 /// Resolve with the importer's module kind (`esm`) selecting ESM vs CJS export conditions.
 pub fn resolve_spec_as(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
-    let esm = esm || crate::vue::runtime_esm(spec, from_dir);
-    let spec = vue_runtime_specifier(spec, from_dir);
     // E12: memoize per (spec, from_dir, esm, cjs-first). native_require repeats the same
     // specifier from the same importer dir across every module/file that imports it; the oxc
     // resolve + canonicalize is deterministic for a run. cjs-first is in the key because it
@@ -769,6 +786,7 @@ pub fn resolve_spec_as(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf
             cjs,
             cfg,
             crate::pnpm_ancestor::enabled(),
+            crate::vue::enabled(from_dir),
         );
         if let Some(v) = RES_MEMO.with(|m| m.borrow().get(&key).cloned()) {
             return v;
@@ -798,10 +816,7 @@ fn resolve_unmapped_spec(spec: &str, from_dir: &Path, esm: bool) -> Option<PathB
     // is really a bare specifier — strip the prefix so oxc resolves it from node_modules.
     let spec = spec.strip_prefix("node_modules/").unwrap_or(spec);
     if let Some(p) = resolve_via_oxc(spec, from_dir, esm) {
-        return Some(p);
-    }
-    if let Some(path) = crate::vue::resolve(from_dir, spec) {
-        return Some(path);
+        return Some(vue_runtime_resolution(spec, from_dir, esm, p));
     }
     // fallback: manual probing for local files oxc may skip (incl. bare "." / ".." directory specs)
     if spec.starts_with('.') || spec.starts_with('/') {

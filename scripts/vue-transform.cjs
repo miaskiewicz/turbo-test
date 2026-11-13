@@ -28,6 +28,16 @@ function scriptPart(compiler, descriptor, id) {
   const script = compiler.compileScript(descriptor, { id, inlineTemplate: false, isProd: false });
   return { code: compiler.rewriteDefault(script.content, '__sfc__', ['typescript']), bindings: script.bindings };
 }
+function templateAssets(template, id) {
+  const imports = [];
+  const bindings = [];
+  for (const [index, asset] of template.ast.imports.entries()) {
+    const name = '__ttAsset_' + id.replaceAll('-', '_') + '_' + index;
+    imports.push('import ' + name + ' from ' + JSON.stringify(asset.path) + ';');
+    bindings.push('const ' + asset.exp.content + ' = ' + name + ';');
+  }
+  return { imports: imports.join('\n'), bindings: bindings.join('\n') };
+}
 function templatePart(compiler, descriptor, filename, id, bindings) {
   if (!descriptor.template) return '';
   if (descriptor.template.src || descriptor.template.lang) throw new Error('External or preprocessed Vue templates are not supported');
@@ -38,7 +48,9 @@ function templatePart(compiler, descriptor, filename, id, bindings) {
       runtimeGlobalName: '__ttVue', bindingMetadata: bindings },
   });
   check(template.errors);
-  return "import * as __ttVue from 'vue';\n__sfc__.render = (() => {\n" + template.code + '\n})();';
+  const assets = templateAssets(template, id);
+  return assets.imports + "\nimport * as __ttVue from 'vue';\n__sfc__.render = (() => {\n"
+    + assets.bindings + '\n' + template.code + '\n})();';
 }
 function stylePart(compiler, style, filename, id) {
   if (style.src || style.module) throw new Error('External or module Vue styles are not supported');

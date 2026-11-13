@@ -27,6 +27,7 @@ fn project(name: &str, plugin: bool) -> Project {
 fn fixture(p: &Project) {
     for (name, source) in [
         ("Counter.vue", include_str!("data/vue/Counter.vue")),
+        ("Asset.vue", include_str!("data/vue/Asset.vue")),
         ("Options.vue", include_str!("data/vue/Options.vue")),
         (
             "TemplateOnly.vue",
@@ -41,12 +42,14 @@ fn fixture(p: &Project) {
     ] {
         p.file(name, source);
     }
+    std::fs::write(p.path("logo.png"), include_bytes!("data/vue/logo.png")).unwrap();
+    std::fs::write(p.path("logo2.png"), include_bytes!("data/vue/logo2.png")).unwrap();
 }
 
 fn passes(p: &Project, env: &[(&str, &str)]) {
     let run = turbo_test(&p.dir, &["--reporter", "json"], env);
     let report = json_report(&run);
-    assert_eq!(report["numPassedTests"], 5, "{}", run.all());
+    assert_eq!(report["numPassedTests"], 6, "{}", run.all());
     assert_eq!(report["numFailedTests"], 0, "{}", run.all());
 }
 
