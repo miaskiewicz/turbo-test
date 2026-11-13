@@ -2191,3 +2191,20 @@ fn mock_import_rhs_requires_a_complete_static_import_expression() {
         "const value = require('./dep').value;\nconst count = require('./dep') + sideEffect();";
     assert_eq!(normalize_mock_require_declarations(user), user);
 }
+
+#[test]
+fn mock_normalization_borrows_existing_var_imports_and_preserves_line_endings() {
+    let code = "var import_dep = require('dep');\r\nvi.mock('dep', () => ({}));\r\n";
+    let borrowed = normalize_mock_require_declarations(code);
+    assert_eq!(
+        borrowed.as_ptr(),
+        code.as_ptr(),
+        "unchanged imports should borrow the input"
+    );
+    assert_eq!(borrowed, code);
+    let source = "const dep_1 = require('dep');\r\nlet other_1 = __importDefault(require('other'));\nconst user = require('user');\nvi.mock('dep', () => ({}));\n";
+    let expected = "var dep_1 = require('dep');\r\nvar other_1 = __importDefault(require('other'));\nconst user = require('user');\nvi.mock('dep', () => ({}));\n";
+    let owned = normalize_mock_require_declarations(source);
+    assert_ne!(owned.as_ptr(), source.as_ptr());
+    assert_eq!(owned, expected);
+}
