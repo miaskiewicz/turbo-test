@@ -62,6 +62,13 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   loop alive for external peers. HTTPS, persistent/custom-agent HTTP and asynchronous
   child-process APIs fail explicitly rather than reporting placeholder success.
 
+- Implement real AES-256-GCM encryption/decryption for 12-byte IVs and 12–16 byte
+  authentication tags (#350), including incremental updates, AAD, output encodings,
+  tag verification and state validation. Flux secret and cursor encryption no longer
+  needs a cipher stub; tampered data and incorrect keys fail authentication.
+- Back `crypto.randomBytes` with OS entropy so generated encryption IVs are independent
+  of test clocks and the runtime's deterministic PRNG. Preserve asynchronous callback delivery.
+
 ### Tests
 - Add Node controls and native runner regressions for the compatibility fixes,
   including known hashes, independent gzip/V8 fixtures and malformed-input errors.

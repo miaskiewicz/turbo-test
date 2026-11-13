@@ -9435,6 +9435,7 @@ fn framework_prelude(scope: &mut v8::PinScope) {
     let runtime = RUNTIME_JS
         .replace("/* __TT_NODE_STREAMS__ */", include_str!("node_streams.js"))
         .replace("/* __TT_NODE_KEYS__ */", include_str!("node_keys.js"))
+        .replace("/* __TT_NODE_AES__ */", include_str!("node_aes.js"))
         .replace("/* __TT_NODE_VM__ */", include_str!("node_vm.js"))
         .replace(
             "/* __TT_NODE_ASYNC_CONTEXT__ */",
@@ -9795,6 +9796,18 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     );
     bind_fn(scope, global, "__ttEc", crate::key_compat::native_ec);
     bind_fn(scope, global, "__ttRsa", crate::rsa_compat::native_rsa);
+    bind_fn(
+        scope,
+        global,
+        "__ttAesGcm",
+        crate::aes_compat::native_aes_gcm,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttRandomBytes",
+        crate::aes_compat::native_random_bytes,
+    );
     bind_fn(scope, global, "__ttIsIP", crate::node_compat::native_is_ip);
     bind_fn(scope, global, "__ttGzip", crate::node_compat::native_gzip);
     bind_fn(
