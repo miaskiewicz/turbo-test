@@ -100,3 +100,27 @@ fn collect_canon_offenders(path: &Path, name: &str, offenders: &mut Vec<String>)
         }
     }
 }
+
+#[cfg(not(windows))]
+#[test]
+fn production_prefix_normalization_preserves_unix_literal_names() {
+    for name in [r"\\?\C:\literal.ts", r"\\?\UNC\server\share\literal.ts"] {
+        let path = PathBuf::from(name);
+        assert_eq!(strip_verbatim(path.clone()), path);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_canonical_paths_open_the_same_file_without_the_prefix() {
+    let dir = std::env::temp_dir().join(format!("turbo-canon-windows-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("fixture.js");
+    std::fs::write(&file, "export const answer = 42;").unwrap();
+    let native = std::fs::canonicalize(&file).unwrap();
+    assert!(native.to_string_lossy().starts_with(r"\\?\"));
+    let normalized = canonicalize(&file).unwrap();
+    assert!(!normalized.to_string_lossy().starts_with(r"\\?\"));
+    assert_eq!(std::fs::read(normalized).unwrap(), std::fs::read(native).unwrap());
+    std::fs::remove_dir_all(dir).unwrap();
+}
