@@ -677,6 +677,19 @@ pub fn native_http(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn request_nodelay_changes_the_real_socket_option() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut transport = super::Transport::default();
+        let connected = transport.connect(&serde_json::json!({"host":"127.0.0.1", "port":listener.local_addr().unwrap().port()})).unwrap();
+        let id = connected["id"].as_u64().unwrap();
+        for enabled in [true, false, true] {
+            transport.set_nodelay(&serde_json::json!({"id":id,"enabled":enabled})).unwrap();
+            assert_eq!(transport.connections[&id].socket.nodelay().unwrap(), enabled);
+        }
+        assert_eq!(transport.set_nodelay(&serde_json::json!({"id":0,"enabled":true})).unwrap_err().code, "ERR_SOCKET_CLOSED");
+    }
+
     use super::*;
     #[test]
     fn chunked_binary_frames_parse_incrementally() {

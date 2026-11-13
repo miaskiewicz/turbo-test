@@ -15,7 +15,7 @@ fn loopback_http_server_client_and_lifecycle_batch() {
     p.file("http.test.cjs", include_str!("data/compat-084/http.cjs"));
     let run = turbo_test(&p.dir, &["--reporter", "json"], &[]);
     let report = json_report(&run);
-    assert_eq!(report["numPassedTests"], 8, "{}", run.all());
+    assert_eq!(report["numPassedTests"], 9, "{}", run.all());
     assert_eq!(report["numFailedTests"], 0, "{}", run.all());
 }
 
