@@ -13,6 +13,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   records actual outcomes without changing the existing release binary gates (#278).
 
 ### Fixed
+- Add the explicit `TURBO_PNPM_ANCESTOR=1` fallback for actual ancestor pnpm hoist
+  links after ordinary package resolution fails. Preserve selected versions,
+  package exports and default resolution; require real `tslib`/`hey-listen`
+  installations rather than returning shadow modules (#278).
 - Apply verbatim DOS/UNC canonical-path normalization only on Windows and discover
   local npm esbuild entry points there in `.cmd`, `.exe`, extensionless order, while
   preserving Unix lookup and literal path names (#278).
