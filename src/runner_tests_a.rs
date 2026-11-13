@@ -2239,3 +2239,45 @@ fn concurrent_native_dependency_cache_misses_bundle_only_once() {
         "same-key cold workers must not repeat bundling"
     );
 }
+
+#[test]
+fn dependency_transform_flights_allow_other_keys_and_prune_finished_keys() {
+    let dir = tmp("dependency-flight-lifetime");
+    let first = dir.join("first");
+    let next = dir.join("next");
+    let one = dependency_transform_flight(&first);
+    let same = dependency_transform_flight(&first);
+    assert!(Arc::ptr_eq(&one, &same));
+    let held = one.lock().unwrap();
+    let other = dependency_transform_flight(&next);
+    assert!(
+        other.try_lock().is_ok(),
+        "another cache key must not wait on the first"
+    );
+    let weak = Arc::downgrade(&one);
+    drop(held);
+    drop(one);
+    drop(same);
+    assert!(
+        weak.upgrade().is_none(),
+        "registry must not retain completed lock owners"
+    );
+    let _sweep = dependency_transform_flight(&next);
+    assert!(!dependency_transform_flights()
+        .lock()
+        .unwrap()
+        .contains_key(&first));
+}
+
+#[test]
+fn failed_native_dependency_transform_can_retry_the_same_key() {
+    let dir = tmp("dependency-flight-failure");
+    let path = dir.join("entry.js");
+    std::fs::write(&path, "module.exports = require('./missing.js');\n").unwrap();
+    assert!(native_dep_cjs(&path).is_none());
+    std::fs::write(dir.join("missing.js"), "module.exports = 42;\n").unwrap();
+    assert!(
+        native_dep_cjs(&path).is_some(),
+        "a failed transform cannot become a negative cache entry"
+    );
+}

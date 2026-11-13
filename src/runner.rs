@@ -3449,6 +3449,27 @@ fn native_transform_cjs_mapped(file: &Path) -> Option<(String, crate::location::
 /// ONE instance via the require cache exactly like `--packages=external`. CJS/plain files pass
 /// through unchanged (emit's no-module-syntax path). No vi.mock hoisting (deps don't mock). Cached.
 /// Returns `None` on an unhandled form → caller falls back to the esbuild bundle.
+type DependencyTransformFlights =
+    std::sync::Mutex<HashMap<PathBuf, std::sync::Weak<std::sync::Mutex<()>>>>;
+
+// Weak entries are pruned on each cold lookup, so completed keys do not accumulate.
+// Held only around pure dependency transformation, never around module evaluation.
+fn dependency_transform_flights() -> &'static DependencyTransformFlights {
+    static FLIGHTS: std::sync::OnceLock<DependencyTransformFlights> = std::sync::OnceLock::new();
+    FLIGHTS.get_or_init(Default::default)
+}
+
+fn dependency_transform_flight(cache: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let mut flights = dependency_transform_flights().lock().unwrap();
+    flights.retain(|_, flight| flight.strong_count() > 0);
+    if let Some(flight) = flights.get(cache).and_then(std::sync::Weak::upgrade) {
+        return flight;
+    }
+    let flight = std::sync::Arc::new(std::sync::Mutex::new(()));
+    flights.insert(cache.to_path_buf(), std::sync::Arc::downgrade(&flight));
+    flight
+}
+
 #[cfg(test)]
 type NativeDepRaceHook = (
     std::sync::Arc<std::sync::Barrier>,
@@ -3505,6 +3526,15 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
     }
     #[cfg(test)]
     let race_count = native_dep_race_probe(file);
+    let flight = dependency_transform_flight(&cache);
+    let _guard = flight
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Another worker can publish while this worker waits. Failed transforms are not cached.
+    if let Ok(code) = std::fs::read_to_string(&cache) {
+        CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+        return Some(code);
+    }
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     // Bundle the package's relative graph with lazy __commonJS init wrappers (circular-safe),
     // bare imports left external (shared via require cache). None → caller falls back to esbuild.
