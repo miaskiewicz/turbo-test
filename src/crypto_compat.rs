@@ -20,3 +20,24 @@ pub fn native_sha256<'s>(
     let store = v8::ArrayBuffer::new_backing_store_from_boxed_slice(digest).make_shared();
     rv.set(v8::ArrayBuffer::with_backing_store(scope, &store).into());
 }
+
+/// Native SHA-1 for Node createHash consumers such as HTTP etags.
+pub fn native_sha1<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue,
+) {
+    let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(args.get(0)) else {
+        let message = v8::String::new(scope, "SHA-1 input must be an ArrayBufferView").unwrap();
+        let error = v8::Exception::type_error(scope, message);
+        scope.throw_exception(error);
+        return;
+    };
+    let mut bytes = vec![0; view.byte_length()];
+    view.copy_contents(&mut bytes);
+    let digest = <sha1::Sha1 as sha1::Digest>::digest(&bytes)
+        .to_vec()
+        .into_boxed_slice();
+    let store = v8::ArrayBuffer::new_backing_store_from_boxed_slice(digest).make_shared();
+    rv.set(v8::ArrayBuffer::with_backing_store(scope, &store).into());
+}
