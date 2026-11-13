@@ -17,6 +17,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   external blocks and unmapped SFC coverage report explicit errors.
 
 ### Fixed
+- Expose a distinct `tls.Server` constructor so plain-HTTP clients can check server
+  types without failing during module loading. TLS server construction and
+  `tls.createServer` report `ERR_TLS_UNSUPPORTED_SERVER`; no TLS transport is implied.
 - Support the Flux Assistant's real RSA-2048 / RS256 path with OS-seeded key
   generation, blinded SHA-256 PKCS#1 v1.5 signatures, PKCS#8/SPKI imports/exports,
   and synchronous signer/verifier `end()`, while preserving P-256 support (#349).
