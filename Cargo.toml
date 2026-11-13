@@ -88,9 +88,9 @@ lto = "thin"
 codegen-units = 1
 
 [patch.crates-io]
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "8266b30a366758a591f4d9952823576a468637a3" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "8266b30a366758a591f4d9952823576a468637a3" }
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "8266b30a366758a591f4d9952823576a468637a3" }
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "628e3efeb6cc90e233411cc608debc9a85729dd6" }
+turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "628e3efeb6cc90e233411cc608debc9a85729dd6" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "628e3efeb6cc90e233411cc608debc9a85729dd6" }
 
 # Matching unpublished V8 candidate required by turbo-dom-browser-env at this pin.
 turbo-dom-v8 = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "0cfe2c3a405ce33809c23afd7dd30a05fab3f06c" }
