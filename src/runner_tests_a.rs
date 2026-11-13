@@ -2208,3 +2208,34 @@ fn mock_normalization_borrows_existing_var_imports_and_preserves_line_endings() 
     assert_ne!(owned.as_ptr(), source.as_ptr());
     assert_eq!(owned, expected);
 }
+
+#[test]
+fn concurrent_native_dependency_cache_misses_bundle_only_once() {
+    let dir = tmp("native-dep-singleflight");
+    let path = dir.join("entry.js");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::fs::write(&path, format!("exports.value = '{nonce}';\n")).unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    native_dep_race_hooks().lock().unwrap().insert(
+        path.clone(),
+        (Arc::new(std::sync::Barrier::new(8)), count.clone()),
+    );
+    let jobs: Vec<_> = (0..8)
+        .map(|_| {
+            let path = path.clone();
+            std::thread::spawn(move || native_dep_cjs(&path).unwrap())
+        })
+        .collect();
+    let outputs: Vec<_> = jobs.into_iter().map(|job| job.join().unwrap()).collect();
+    native_dep_race_hooks().lock().unwrap().remove(&path);
+    assert!(outputs.iter().all(|output| output == &outputs[0]));
+    assert_eq!(native_dep_cjs(&path), Some(outputs[0].clone()));
+    assert_eq!(
+        count.load(Ordering::Relaxed),
+        1,
+        "same-key cold workers must not repeat bundling"
+    );
+}

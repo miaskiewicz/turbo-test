@@ -3449,6 +3449,24 @@ fn native_transform_cjs_mapped(file: &Path) -> Option<(String, crate::location::
 /// ONE instance via the require cache exactly like `--packages=external`. CJS/plain files pass
 /// through unchanged (emit's no-module-syntax path). No vi.mock hoisting (deps don't mock). Cached.
 /// Returns `None` on an unhandled form → caller falls back to the esbuild bundle.
+#[cfg(test)]
+type NativeDepRaceHook = (
+    std::sync::Arc<std::sync::Barrier>,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+);
+#[cfg(test)]
+fn native_dep_race_hooks() -> &'static std::sync::Mutex<HashMap<PathBuf, NativeDepRaceHook>> {
+    static HOOKS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, NativeDepRaceHook>>> =
+        std::sync::OnceLock::new();
+    HOOKS.get_or_init(Default::default)
+}
+#[cfg(test)]
+fn native_dep_race_probe(file: &Path) -> Option<std::sync::Arc<std::sync::atomic::AtomicUsize>> {
+    let (barrier, count) = native_dep_race_hooks().lock().unwrap().get(file).cloned()?;
+    barrier.wait();
+    Some(count)
+}
+
 fn native_dep_cjs(file: &Path) -> Option<String> {
     use std::hash::{Hash, Hasher};
     let raw = std::fs::read_to_string(file).ok()?;
@@ -3485,9 +3503,15 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
         return Some(c);
     }
+    #[cfg(test)]
+    let race_count = native_dep_race_probe(file);
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     // Bundle the package's relative graph with lazy __commonJS init wrappers (circular-safe),
     // bare imports left external (shared via require cache). None → caller falls back to esbuild.
+    #[cfg(test)]
+    if let Some(count) = race_count {
+        count.fetch_add(1, Ordering::Relaxed);
+    }
     let code = dep_interop(crate::bundler::bundle(file)?, node);
     write_atomic(&cache, &code);
     Some(code)
