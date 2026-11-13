@@ -3500,7 +3500,7 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     let raw = with_binder(file, read_app_source(file)?, true);
     let use_meta = wants_decorator_metadata(file, prefer_metadata, &raw);
     let cov = crate::coverage::enabled();
-    let cache = mr_cjs_cache_path(file, &raw, use_meta, cov);
+    let cache = mr_cjs_cache_path(file, &root, &raw, use_meta, cov);
     if let Some(c) = read_cached_cjs(&cache) {
         return Some(c);
     }
@@ -3574,7 +3574,7 @@ fn finish_mr_cjs(code: String, raw: &str) -> String {
 }
 
 /// Cache path of `esbuild_transform_cjs`'s output for this source / transform flavour.
-fn mr_cjs_cache_path(file: &Path, raw: &str, use_meta: bool, cov: bool) -> PathBuf {
+fn mr_cjs_cache_path(file: &Path, root: &Path, raw: &str, use_meta: bool, cov: bool) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
@@ -3601,6 +3601,10 @@ fn mr_cjs_cache_path(file: &Path, raw: &str, use_meta: bool, cov: bool) -> PathB
     use_meta.hash(&mut h);
     if use_meta {
         "ts-commonjs-partial-exports-v1".hash(&mut h);
+        decorator_tsc_module_kind(file).hash(&mut h);
+        root.join("node_modules/typescript/package.json")
+            .is_file()
+            .hash(&mut h);
     }
     // Coverage emits an inline source map (needed to remap V8 byte ranges → original lines), so
     // the output differs — key it separately. Only perturb the key when coverage is ON, so the
@@ -3622,10 +3626,21 @@ fn esbuild_transform_cjs_meta(file: &Path, root: &Path, raw: &str, cache: &Path)
 }
 
 fn decorator_cjs_via_tsc(file: &Path, root: &Path) -> Option<String> {
-    if cjs_first_project(file) {
-        return tsc_transform_with_kind(file, root, "commonjs");
+    let kind = decorator_tsc_module_kind(file);
+    let code = tsc_transform_with_kind(file, root, kind)?;
+    if kind == "commonjs" {
+        Some(code)
+    } else {
+        esbuild_format_cjs(root, &code)
     }
-    tsc_transform_esm(file, root).and_then(|esm| esbuild_format_cjs(root, &esm))
+}
+
+fn decorator_tsc_module_kind(file: &Path) -> &'static str {
+    if cjs_first_project(file) {
+        "commonjs"
+    } else {
+        "esm"
+    }
 }
 
 fn decorator_cjs_via_oxc(file: &Path, root: &Path, raw: &str) -> Option<String> {
