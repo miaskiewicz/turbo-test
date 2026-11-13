@@ -3803,10 +3803,15 @@ fn mock_require_declaration(line: &str) -> Option<(&str, &str)> {
 }
 
 fn mock_require_name(name: &str) -> bool {
+    let generated = name.starts_with("import_")
+        || name.rsplit_once('_').is_some_and(|(_, suffix)| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        });
     let mut chars = name.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+    generated
+        && chars
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
         && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
 }
 
