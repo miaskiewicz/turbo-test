@@ -3,6 +3,7 @@
 //! Shared substrate used by the milestone spikes and (eventually) the consolidated
 //! ModuleRunner. Public surface is deliberately small: plumbing, not framework.
 
+pub mod aes_compat;
 pub mod agent;
 pub mod async_context;
 pub mod bundler;
