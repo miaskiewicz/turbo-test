@@ -135,8 +135,8 @@ function __readableFrom(iterable, options) {
   return stream;
 }
 function __readablePipe(source, destination, options = {}) {
-  const data = (chunk) => { if (!destination.write(chunk)) source.pause?.(); };
-  const drain = () => source.resume?.();
+  const data = (chunk) => { if (destination.write(chunk) === false && source.pause) source.pause(); };
+  const drain = () => { if (source.resume) source.resume(); };
   const end = () => { if (options.end !== false) destination.end(); };
   const cleanup = () => {
     source.off('data', data); source.off('end', end);

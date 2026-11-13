@@ -49,6 +49,11 @@ testCase('legacy stream pipe forwards bytes and completes the destination', () =
   assert.equal(source.pipe(destination), destination);
   source.emit('data', 'one'); source.emit('data', 'two'); source.emit('end');
   assert.deepEqual(seen, ['one', 'two', 'finished']);
+  const unpausable = new Stream(); const blocked = new Stream();
+  unpausable.readable = true; unpausable.pause = false; unpausable.resume = false;
+  blocked.writable = true; blocked.write = () => false; blocked.end = () => {};
+  unpausable.pipe(blocked);
+  assert.doesNotThrow(() => { unpausable.emit('data', 'bytes'); blocked.emit('drain'); });
 });
 testCase('default and named stream imports retain constructor and implementation identity', async () => {
   const plain = await import('stream'); const prefixed = await import('node:stream');
