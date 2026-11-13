@@ -46,7 +46,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   `setupFilesAfterEnv` still runs with them.
 - Jest automock (#341): a factory-less `jest.mock('./x')` and `enableAutomock` load a
   colocated `__mocks__/x.js` (next to the resolved module) when present, and
-  `jest.onGenerateMock` callbacks chain, each receiving `(path, mock)`.
+  `jest.onGenerateMock` callbacks chain, each receiving `(path, mock)`. As in jest, a
+  factory-less `jest.mock` generates its automock on the module's first require, so
+  `onGenerateMock` callbacks registered after the (hoisted) call still shape the mock.
+  Without this, the mock prepass built the automock before the test body ran, and the
+  callbacks never saw it.
 
 - `--coverage-all` flag (#320): includes unexecuted source files (matched by
   `--coverage-include` globs) in coverage reports at zero hits, so the denominator

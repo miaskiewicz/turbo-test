@@ -171,3 +171,32 @@ fn on_generate_mock_receives_module_path() {
     let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
     assert_eq!(counts(&r), (1, 0), "{}", r.all());
 }
+
+/// jest passes every automock it generates through the `onGenerateMock` callbacks, in order —
+/// the one a factory-less `jest.mock('./x')` makes too, not only `enableAutomock`'s
+/// (turbo-test#341; the #315 repro kit's jest-edge probe).
+#[test]
+fn on_generate_mock_callbacks_shape_a_factory_less_jest_mock() {
+    let p = Project::new("jest-automock-ongenerate-factoryless");
+    base_jest(&p);
+    p.file("edge-generated.js", "exports.load = () => 7;\n");
+    p.file(
+        "a.test.js",
+        r#"test('callbacks run in order on the generated mock', () => {
+  const seen = [];
+  jest.onGenerateMock((path, mock) => {
+    seen.push(path.endsWith('edge-generated.js'));
+    return { ...mock, first: true };
+  });
+  jest.onGenerateMock((_path, mock) => ({ ...mock, second: true }));
+  jest.mock('./edge-generated.js');
+  const generated = require('./edge-generated.js');
+  expect(seen).toEqual([true]);
+  expect([generated.first, generated.second]).toEqual([true, true]);
+  expect(jest.isMockFunction(generated.load)).toBe(true);
+});
+"#,
+    );
+    let r = turbo_test(&p.dir, &["--reporter", "json", "--jobs", "1"], &[]);
+    assert_eq!(counts(&r), (1, 0), "{}", r.all());
+}
