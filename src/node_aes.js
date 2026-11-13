@@ -4,6 +4,7 @@ function __aesCheckOpen(state) {
   if (state.closed) throw __aesError('Invalid state', 'ERR_CRYPTO_INVALID_STATE');
 }
 function __aesBytes(value, encoding, strings = true) {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
   if (typeof value === 'string' && !strings) throw new TypeError('Expected a byte view');
   return __hashBytes(value, encoding);
 }
@@ -42,7 +43,7 @@ function __aesOutput(state, bytes, encoding, final) {
 }
 function __aesUpdate(state, data, encoding, outputEncoding) {
   __aesCheckOpen(state);
-  const bytes = __aesBytes(data, encoding);
+  const bytes = __hashBytes(data, encoding);
   state.chunks.push(bytes);
   if (bytes.length) state.started = true;
   const input = Buffer.concat(state.chunks);
