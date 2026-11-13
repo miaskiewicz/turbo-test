@@ -2859,7 +2859,12 @@ Object.assign(__http, __nodeHttp);
 function __httpUnsupportedTls() { throw Object.assign(new Error('HTTPS is not supported by the loopback HTTP transport'), { code: 'ERR_HTTP_UNSUPPORTED_TLS' }); }
 Object.assign(__https, { request: __httpUnsupportedTls, get: __httpUnsupportedTls, createServer: __httpUnsupportedTls });
 const __net = { Socket: class extends __EventEmitter { connect() { return this; } write() { return true; } end() { return this; } destroy() { return this; } setTimeout() { return this; } setNoDelay() { return this; } setKeepAlive() { return this; } ref() { return this; } unref() { return this; } }, Server: class extends __EventEmitter { listen(..._a) { const cb = _a[_a.length - 1]; if (typeof cb === 'function') cb(); return this; } close() { return this; } address() { return { port: 0 }; } }, createConnection: () => new __EventEmitter(), connect: () => new __EventEmitter(), createServer: __mkServer, isIP: (input) => globalThis.__ttIsIP(input), isIPv4: (input) => globalThis.__ttIsIP(input) === 4, isIPv6: (input) => globalThis.__ttIsIP(input) === 6 }; __net.default = __net;
-const __tls = { TLSSocket: class extends __EventEmitter { connect() { return this; } }, connect: () => new __EventEmitter(), createSecureContext: () => ({}), createServer: __mkServer, checkServerIdentity: () => undefined, rootCertificates: [] }; __tls.default = __tls;
+// HTTP clients inspect this constructor even on plain HTTP paths. Its identity must not
+// imply that a fake listener supplies TLS: construction still reports the capability limit.
+function __TlsServer() { throw Object.assign(new Error('TLS server transport is not supported'), { code: 'ERR_TLS_UNSUPPORTED_SERVER' }); }
+Object.setPrototypeOf(__TlsServer.prototype, __net.Server.prototype);
+Object.setPrototypeOf(__TlsServer, __net.Server);
+const __tls = { Server: __TlsServer, TLSSocket: class extends __EventEmitter { connect() { return this; } }, connect: () => new __EventEmitter(), createSecureContext: () => ({}), createServer: __TlsServer, checkServerIdentity: () => undefined, rootCertificates: [] }; __tls.default = __tls;
 function __gzipBytes(input) {
   if (typeof input === 'string') return Buffer.from(input);
   if (input instanceof ArrayBuffer) return new Uint8Array(input);
