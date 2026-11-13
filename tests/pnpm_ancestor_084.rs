@@ -114,6 +114,16 @@ test('the opt-in follows actual hoist links and resolution memoization follows t
   delete process.env.TURBO_PNPM_ANCESTOR;
   assert.throws(() => require.resolve('pkg'), /Cannot find module/);
 });
+test('dynamic imports read the same current runtime opt-in', async () => {
+  process.env.TURBO_PNPM_ANCESTOR = '1';
+  try {
+    const module = await import('pkg');
+    assert.equal(module.default.origin, 'selected-one');
+    await assert.rejects(import('unlinked'), /Cannot find module/);
+  } finally {
+    delete process.env.TURBO_PNPM_ANCESTOR;
+  }
+});
 "#,
     );
     let r = turbo_test(&p.dir, &["--jobs", "1"], &[]);
@@ -159,5 +169,39 @@ test('installed packages supply exports rather than runtime substitutes', () => 
 "#,
     );
     let r = turbo_test(&p.dir, &["--jobs", "1"], &[("TURBO_PNPM_ANCESTOR", "1")]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+}
+
+#[test]
+fn concurrent_files_keep_their_pnpm_optin_in_their_own_runtime_context() {
+    let p = project("pnpm-runtime-workers");
+    package(
+        &p,
+        "node_modules/.pnpm/pkg@1/node_modules",
+        "pkg",
+        "selected-one",
+    );
+    hoist(&p, "pkg", "pkg@1");
+    p.file(
+        "enabled.test.cjs",
+        r#"
+const assert = require('node:assert/strict');
+process.env.TURBO_PNPM_ANCESTOR = '1';
+test('enabled worker resolves the selected real package', () => {
+  for (let i = 0; i < 8; i++) assert.equal(require('pkg').origin, 'selected-one');
+});
+"#,
+    );
+    p.file(
+        "disabled.test.cjs",
+        r#"
+const assert = require('node:assert/strict');
+process.env.TURBO_PNPM_ANCESTOR = '0';
+test('disabled worker never inherits the other runtime flag', () => {
+  for (let i = 0; i < 8; i++) assert.throws(() => require.resolve('pkg'), /Cannot find module/);
+});
+"#,
+    );
+    let r = turbo_test(&p.dir, &["--jobs", "2"], &[]);
     assert_eq!(r.code, Some(0), "{}", r.all());
 }

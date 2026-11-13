@@ -6781,7 +6781,74 @@ fn stub_failed_deps() -> bool {
     ENTRY_LENIENT.with(|c| c.get()) && std::env::var("TURBO_NO_STUB_FAIL").is_err()
 }
 
+/// Scope resolver configuration to the calling JS context. Never export these
+/// mutable process.env values into Rust's process-wide environment across workers.
+type RuntimeResolverFlags = (
+    crate::pnpm_ancestor::RuntimeFlagGuard,
+    crate::vue::RuntimeFlagGuard,
+);
+
+fn resolver_property<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    name: &str,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let key = v8::String::new(scope, name)?;
+    object.get(scope, key.into())
+}
+
+fn resolver_environment<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> Option<Option<v8::Local<'s, v8::Object>>> {
+    let global = scope.get_current_context().global(scope);
+    let process = resolver_property(scope, global, "process")?;
+    let Ok(process) = v8::Local::<v8::Object>::try_from(process) else {
+        return Some(None);
+    };
+    let env = resolver_property(scope, process, "env")?;
+    Some(v8::Local::<v8::Object>::try_from(env).ok())
+}
+
+fn resolver_env_string<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    env: v8::Local<'s, v8::Object>,
+    name: &str,
+) -> Option<Option<String>> {
+    let value = resolver_property(scope, env, name)?;
+    if value.is_undefined() {
+        return Some(None);
+    }
+    value
+        .to_string(scope)
+        .map(|value| Some(value.to_rust_string_lossy(scope)))
+}
+
+fn resolver_runtime_flags(scope: &mut v8::PinScope) -> Option<RuntimeResolverFlags> {
+    let (pnpm, vue) = match resolver_environment(scope)? {
+        Some(env) => (
+            resolver_env_string(scope, env, "TURBO_PNPM_ANCESTOR")?,
+            resolver_env_string(scope, env, "TURBO_VUE")?,
+        ),
+        None => (None, None),
+    };
+    Some((
+        crate::pnpm_ancestor::runtime_flag(pnpm.as_deref()),
+        crate::vue::runtime_flag(vue.as_deref()),
+    ))
+}
+
 fn native_require(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let Some(_flags) = resolver_runtime_flags(scope) else {
+        return;
+    };
+    native_require_scoped(scope, args, rv);
+}
+
+fn native_require_scoped(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
@@ -7195,6 +7262,17 @@ fn query_mock_variant(spec: &str, abs: PathBuf) -> PathBuf {
 fn native_register_mock(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let Some(_flags) = resolver_runtime_flags(scope) else {
+        return;
+    };
+    native_register_mock_scoped(scope, args, rv);
+}
+
+fn native_register_mock_scoped(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
 ) {
     let dir = args.get(0).to_rust_string_lossy(scope);
@@ -7308,6 +7386,17 @@ fn actual_exports(scope: &mut v8::PinScope, abs: &Path) -> Option<v8::Global<v8:
 fn native_import_actual(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let Some(_flags) = resolver_runtime_flags(scope) else {
+        return;
+    };
+    native_import_actual_scoped(scope, args, rv);
+}
+
+fn native_import_actual_scoped(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
     let dir = args.get(0).to_rust_string_lossy(scope);
@@ -7335,6 +7424,17 @@ fn native_import_actual(
 fn native_resolve_spec(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let Some(_flags) = resolver_runtime_flags(scope) else {
+        return;
+    };
+    native_resolve_spec_scoped(scope, args, rv);
+}
+
+fn native_resolve_spec_scoped(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
     let dir = args.get(0).to_rust_string_lossy(scope);
@@ -7349,6 +7449,17 @@ fn native_resolve_spec(
 /// __ttUnmock(dir, spec): vi.unmock()/doUnmock() — remove a registered mock + its loaded module
 /// so the next import loads the REAL module.
 fn native_unmock(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let Some(_flags) = resolver_runtime_flags(scope) else {
+        return;
+    };
+    native_unmock_scoped(scope, args, rv);
+}
+
+fn native_unmock_scoped(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
@@ -7533,6 +7644,17 @@ fn native_require_stack(
 /// __ttRequireResolve(dir, spec, esm) -> require.resolve(spec) from `dir`: the resolved path
 /// (a builtin or a test API module is its own name), undefined when nothing resolves.
 fn native_require_resolve(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let Some(_flags) = resolver_runtime_flags(scope) else {
+        return;
+    };
+    native_require_resolve_scoped(scope, args, rv);
+}
+
+fn native_require_resolve_scoped(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
@@ -8325,6 +8447,7 @@ fn resolve_callback<'s>(
     referrer: v8::Local<'s, v8::Module>,
 ) -> Option<v8::Local<'s, v8::Module>> {
     v8::callback_scope!(unsafe scope, context);
+    let _flags = resolver_runtime_flags(scope)?;
     let spec = specifier.to_rust_string_lossy(scope);
     let lookup = resolve_spec_lookup(scope, referrer, &spec);
     let abs = query_mock_variant(&spec, lookup?);
@@ -8540,6 +8663,7 @@ fn dynamic_import_callback<'s>(
     specifier: v8::Local<'s, v8::String>,
     _import_attributes: v8::Local<'s, v8::FixedArray>,
 ) -> Option<v8::Local<'s, v8::Promise>> {
+    let _flags = resolver_runtime_flags(scope)?;
     // vitest awaits a vi.doMock's async factory before an import() of its module resolves
     // (turbo-test#42 item 6): while one is pending (runtime.js __ttImportWait), the import runs
     // once it is registered
@@ -8773,6 +8897,7 @@ fn dynamic_import<'s>(
     resource_name: v8::Local<'s, v8::Value>,
     specifier: v8::Local<'s, v8::String>,
 ) -> Option<v8::Local<'s, v8::Promise>> {
+    let _flags = resolver_runtime_flags(scope)?;
     let resolver = v8::PromiseResolver::new(scope)?;
     let promise = resolver.get_promise(scope);
 
