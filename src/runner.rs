@@ -3112,13 +3112,19 @@ fn set_environment_modes(scope: &mut v8::PinScope, entry: &Path) {
 /// `Object`) instead of naming an export that doesn't exist.
 /// Returns None if the project ships no `typescript` (caller falls back to oxc).
 fn tsc_transform_esm(file: &Path, root: &Path) -> Option<String> {
+    tsc_transform_with_kind(file, root, "esm")
+}
+
+/// CJS-first Jest backends need TypeScript's partial-export initialization for circular
+/// decorator metadata. ESM graph callers retain ESNext and their live-binding TDZ semantics.
+fn tsc_transform_with_kind(file: &Path, root: &Path, module_kind: &str) -> Option<String> {
     let src = read_app_source(file)?;
     let ts_dir = root.join("node_modules/typescript");
     if !ts_dir.join("package.json").is_file() {
         return None;
     }
     // Small node program: transpile with the project's TS (no checker — same isolatedModules
-    // semantics ts-jest uses), keeping ESM module syntax + inlined helpers + decorator metadata.
+    // semantics ts-jest uses), with the requested module kind + inlined helpers + decorator metadata.
     const SCRIPT: &str = r#"
 const ts = require(process.argv[1]);
 const fs = require('fs');
@@ -3209,7 +3215,7 @@ try { input = nsTypeOnlyImports(src); } catch (e) {} // e.g. a typescript withou
 const out = ts.transpileModule(input, {
   fileName: file,
   compilerOptions: {
-    module: ts.ModuleKind.ESNext,
+    module: process.argv[3] === 'commonjs' ? ts.ModuleKind.CommonJS : ts.ModuleKind.ESNext,
     target: ts.ScriptTarget.ES2021,
     experimentalDecorators: true,
     emitDecoratorMetadata: true,
@@ -3222,7 +3228,7 @@ const out = ts.transpileModule(input, {
 });
 process.stdout.write(out.outputText);
 "#;
-    run_tsc_transpile(root, &ts_dir, file, SCRIPT, &src)
+    run_tsc_transpile(root, &ts_dir, file, SCRIPT, &src, module_kind)
 }
 
 fn run_tsc_transpile(
@@ -3231,8 +3237,9 @@ fn run_tsc_transpile(
     file: &Path,
     script: &str,
     src: &str,
+    module_kind: &str,
 ) -> Option<String> {
-    let out = spawn_tsc_stdin(root, ts_dir, file, script, src)?;
+    let out = spawn_tsc_stdin(root, ts_dir, file, script, src, module_kind)?;
     if !out.status.success() {
         return None;
     }
@@ -3249,6 +3256,7 @@ fn spawn_tsc_stdin(
     file: &Path,
     script: &str,
     src: &str,
+    module_kind: &str,
 ) -> Option<std::process::Output> {
     let mut child = std::process::Command::new("node")
         .current_dir(root)
@@ -3257,6 +3265,7 @@ fn spawn_tsc_stdin(
             script,
             &ts_dir.to_string_lossy(),
             &file.to_string_lossy(),
+            module_kind,
         ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3590,6 +3599,9 @@ fn mr_cjs_cache_path(file: &Path, raw: &str, use_meta: bool, cov: bool) -> PathB
     // Retry-on-failure keeps the common case on fast esbuild and never regresses files that load
     // fine without metadata. Keyed separately so the two transforms never collide in cache.
     use_meta.hash(&mut h);
+    if use_meta {
+        "ts-commonjs-partial-exports-v1".hash(&mut h);
+    }
     // Coverage emits an inline source map (needed to remap V8 byte ranges → original lines), so
     // the output differs — key it separately. Only perturb the key when coverage is ON, so the
     // normal (no-map) cache keys are byte-identical to before → zero cache churn on default runs.
@@ -3599,26 +3611,30 @@ fn mr_cjs_cache_path(file: &Path, raw: &str, use_meta: bool, cov: bool) -> PathB
     cache_dir().join(format!("mr-{:016x}.cjs", h.finish()))
 }
 
-/// The decorator-metadata transform of `esbuild_transform_cjs` (tsc, else oxc, then esbuild CJS).
+/// Decorator metadata for the CJS loader. TypeScript's own CommonJS output preserves
+/// partial exports in Jest backend cycles; ESM/vitest and the oxc fallback keep ESM lowering.
 fn esbuild_transform_cjs_meta(file: &Path, root: &Path, raw: &str, cache: &Path) -> Option<String> {
-    // Primary: the project's own TypeScript (ts.transpileModule) → exact ts-jest parity for
-    // emitDecoratorMetadata (resolves local type aliases, nullable types, etc.). Fallback:
-    // oxc lowers decorators+metadata (ESM) then esbuild converts ESM->CJS — used when the
-    // project ships no `typescript`. oxc can panic on some inputs, so it's caught; either way
-    // we fall through to the plain esbuild transform (metadata-less but loads) on failure.
-    // Get ESM-with-metadata from tsc (preferred) or oxc (fallback), then a single esbuild
-    // ESM->CJS pass so every path yields the same esbuild-shaped CJS the loader/hoisting want.
-    let meta_esm = tsc_transform_esm(file, root).or_else(|| {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::transform::transform_decorators_with_metadata(file, raw)
-        }))
-        .ok()
-        .and_then(|r| r.ok())
-    });
-    let cjs = meta_esm.and_then(|esm| esbuild_format_cjs(root, &esm))?;
+    let cjs =
+        decorator_cjs_via_tsc(file, root).or_else(|| decorator_cjs_via_oxc(file, root, raw))?;
     let code = finish_mr_cjs(postprocess_mr_cjs(cjs), raw);
     write_atomic(cache, &code);
     Some(code)
+}
+
+fn decorator_cjs_via_tsc(file: &Path, root: &Path) -> Option<String> {
+    if cjs_first_project(file) {
+        return tsc_transform_with_kind(file, root, "commonjs");
+    }
+    tsc_transform_esm(file, root).and_then(|esm| esbuild_format_cjs(root, &esm))
+}
+
+fn decorator_cjs_via_oxc(file: &Path, root: &Path, raw: &str) -> Option<String> {
+    let esm = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::transform::transform_decorators_with_metadata(file, raw)
+    }))
+    .ok()?
+    .ok()?;
+    esbuild_format_cjs(root, &esm)
 }
 
 /// Run esbuild's per-file CJS transform for `esbuild_transform_cjs`; its raw stdout.
