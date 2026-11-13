@@ -11,6 +11,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - An informational Windows CI lane installs the real test dependencies, builds the
   native runner and runs locked Rust tests, including Windows path fixtures. It
   records actual outcomes without changing the existing release binary gates (#278).
+- Opt-in Vue 3 SFC loading through the project's real Vue compiler (#279), including
+  script-setup TypeScript, templates, scoped CSS and import/require module graphs.
+  Other projects keep their existing extension resolution. Unsupported preprocessors,
+  external blocks and unmapped SFC coverage report explicit errors.
 
 ### Fixed
 - Add the explicit `TURBO_PNPM_ANCESTOR=1` fallback for actual ancestor pnpm hoist
