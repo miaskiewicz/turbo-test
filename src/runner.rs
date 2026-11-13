@@ -41,7 +41,7 @@ enum Variant {
 
 #[derive(Default)]
 struct Registry {
-    propagated_cjs_errors: HashMap<PathBuf, v8::Global<v8::Value>>,
+    propagated_cjs_errors: HashMap<PathBuf, Vec<v8::Global<v8::Value>>>,
     esm_by_path: HashMap<PathBuf, v8::Global<v8::Module>>,
     cjs_synth_by_path: HashMap<PathBuf, v8::Global<v8::Module>>,
     cjs_exports: HashMap<PathBuf, v8::Global<v8::Value>>,
@@ -6130,9 +6130,9 @@ fn take_propagated_cjs_error(
 ) -> bool {
     let child = REGISTRY.with(|r| r.borrow_mut().propagated_cjs_errors.remove(abs));
     match (child, error) {
-        (Some(child), Some(error)) => {
-            v8::Local::new(scope, &child).strict_equals(v8::Local::new(scope, error))
-        }
+        (Some(children), Some(error)) => children
+            .iter()
+            .any(|child| v8::Local::new(scope, child).strict_equals(v8::Local::new(scope, error))),
         _ => false,
     }
 }
@@ -6145,7 +6145,13 @@ fn mark_propagated_cjs_error(scope: &mut v8::PinScope, error: v8::Local<v8::Valu
     let importer = REQUIRE_STACK.with(|stack| stack.borrow().last().cloned());
     if let Some(importer) = importer {
         let error = v8::Global::new(scope, error);
-        REGISTRY.with(|r| r.borrow_mut().propagated_cjs_errors.insert(importer, error));
+        REGISTRY.with(|r| {
+            r.borrow_mut()
+                .propagated_cjs_errors
+                .entry(importer)
+                .or_default()
+                .push(error);
+        });
     }
 }
 
