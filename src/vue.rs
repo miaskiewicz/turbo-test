@@ -27,6 +27,8 @@ fn declares_plugin(from: &Path) -> bool {
     let Some(path) = manifest(from) else {
         return false;
     };
+    #[cfg(test)]
+    MANIFEST_READS.with(|reads| reads.set(reads.get() + 1));
     let Some(package) = std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -202,3 +204,9 @@ pub fn load(path: &Path, as_cjs: bool) -> Result<String, String> {
     crate::esm_cjs::emit_with(&path.with_extension("vue.js"), &code, false)
         .ok_or_else(|| format!("Vue SFC JavaScript lowering failed: {}", path.display()))
 }
+
+#[cfg(test)]
+thread_local! { static MANIFEST_READS: Cell<usize> = const { Cell::new(0) }; }
+#[cfg(test)]
+#[path = "vue_plugin_memo_tests.rs"]
+mod plugin_memo_tests;
