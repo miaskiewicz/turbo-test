@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 
 const COMPILER: &str = include_str!("../scripts/vue-transform.cjs");
 thread_local! {
+    static RUNTIME_FLAG: Cell<Option<Option<bool>>> = const { Cell::new(None) };
     static PROJECT_ENABLED: Cell<bool> = const { Cell::new(false) };
     static COMPILED: RefCell<HashMap<(PathBuf, u64), String>> = RefCell::new(HashMap::new());
 }
@@ -41,24 +42,42 @@ pub fn prepare_project(entry: &Path) {
     PROJECT_ENABLED.with(|enabled| enabled.set(declares_plugin(entry)));
 }
 
+pub(crate) struct RuntimeFlagGuard {
+    previous: Option<Option<bool>>,
+}
+
+impl Drop for RuntimeFlagGuard {
+    fn drop(&mut self) {
+        RUNTIME_FLAG.with(|flag| flag.set(self.previous));
+    }
+}
+
+pub(crate) fn runtime_flag(value: Option<&str>) -> RuntimeFlagGuard {
+    let mode = match value {
+        Some("1") => Some(true),
+        Some("0") => Some(false),
+        _ => None,
+    };
+    RuntimeFlagGuard {
+        previous: RUNTIME_FLAG.with(|flag| flag.replace(Some(mode))),
+    }
+}
+
+fn effective_flag() -> Option<bool> {
+    RUNTIME_FLAG.with(|flag| flag.get()).unwrap_or_else(|| {
+        match std::env::var("TURBO_VUE").ok().as_deref() {
+            Some("1") => Some(true),
+            Some("0") => Some(false),
+            _ => None,
+        }
+    })
+}
+
 pub fn enabled(from: &Path) -> bool {
-    match std::env::var("TURBO_VUE").ok().as_deref() {
-        Some("1") => true,
-        Some("0") => false,
-        _ => PROJECT_ENABLED.with(|enabled| enabled.get()) || declares_plugin(from),
-    }
+    effective_flag()
+        .unwrap_or_else(|| PROJECT_ENABLED.with(|enabled| enabled.get()) || declares_plugin(from))
 }
 
-/// Keep the runtime compiler available while sharing Vue's runtime between both graphs.
-pub fn runtime_specifier<'a>(specifier: &'a str, from: &Path) -> &'a str {
-    if specifier == "vue" && enabled(from) {
-        "vue/dist/vue.esm-bundler.js"
-    } else {
-        specifier
-    }
-}
-
-/// An opted-in Vue application has one runtime across import and require module graphs.
 pub fn runtime_esm(specifier: &str, from: &Path) -> bool {
     matches!(
         specifier,
@@ -66,19 +85,27 @@ pub fn runtime_esm(specifier: &str, from: &Path) -> bool {
     ) && enabled(from)
 }
 
-/// Only opt-in local extension/index probing; the resolver's global extension list is unchanged.
-pub fn resolve(from: &Path, specifier: &str) -> Option<PathBuf> {
-    if !enabled(from) || !(specifier.starts_with('.') || Path::new(specifier).is_absolute()) {
-        return None;
-    }
-    let base = from.join(specifier);
-    if base.extension().is_some() {
-        return None;
-    }
-    [base.with_extension("vue"), base.join("index.vue")]
-        .into_iter()
-        .find(|candidate| candidate.is_file())
-        .and_then(|candidate| crate::canon::canonicalize(candidate).ok())
+/// Choose only a genuine Vue package's bundled runtime, after project mappings resolve.
+pub fn runtime_path(specifier: &str, resolved: &Path) -> Option<PathBuf> {
+    let package = runtime_package(specifier, resolved)?;
+    let name = if specifier == "vue" {
+        "vue"
+    } else {
+        specifier.strip_prefix("@vue/")?
+    };
+    let path = package
+        .parent()?
+        .join(format!("dist/{name}.esm-bundler.js"));
+    crate::canon::canonicalize(path)
+        .ok()
+        .filter(|path| path.is_file())
+}
+
+fn runtime_package(specifier: &str, resolved: &Path) -> Option<PathBuf> {
+    let package = manifest(resolved.parent()?)?;
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&package).ok()?).ok()?;
+    (metadata["name"].as_str()? == specifier).then_some(package)
 }
 
 fn stamp(path: &Path, source: &str) -> u64 {
