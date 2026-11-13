@@ -3809,17 +3809,18 @@ fn mock_require_name(name: &str) -> bool {
 }
 
 fn mock_require_rhs(rhs: &str) -> bool {
-    static IMPORT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static IMPORT: std::sync::OnceLock<fancy_regex::Regex> = std::sync::OnceLock::new();
     IMPORT
         .get_or_init(|| {
             let path = r#"(?:"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*')"#;
             let require = format!(r"require\(\s*{path}\s*\)");
-            regex::Regex::new(&format!(
+            fancy_regex::Regex::new(&format!(
                 r"^(?:{require}|__(?:importDefault|importStar)\({require}\)|__toESM\({require}(?:,\s*1)?\))\s*;?\s*$"
             ))
             .expect("static import expression regex")
         })
         .is_match(rhs)
+        .unwrap_or(false)
 }
 
 /// Keep the same number of lines for tracked source locations. Mutable import temporaries
