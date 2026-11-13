@@ -37,7 +37,7 @@ fn disabled_and_non_bare_requests_do_not_probe_the_store() {
     let fixture = Fixture::new();
     fixture.directory("node_modules/.pnpm/node_modules/pkg");
     let calls = Cell::new(0);
-    let probe = |_| {
+    let probe = |_: &Path| {
         calls.set(calls.get() + 1);
         Some(PathBuf::from("unexpected"))
     };

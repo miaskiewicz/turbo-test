@@ -75,6 +75,10 @@ fn optin_follows_the_selected_pnpm_hoist_and_does_not_leak_memoized_flag_values(
         "unlinked",
         "must-not-load",
     );
+    p.file(
+        "node_modules/.pnpm/pkg@1/node_modules/pkg/package.json",
+        r#"{"name":"pkg","exports":{".":"./index.cjs"}}"#,
+    );
     hoist(&p, "pkg", "pkg@1");
     hoist(&p, "@scope/pkg", "scoped@1");
     node_control(
@@ -89,6 +93,7 @@ assert.throws(() => local.resolve('pkg'), { code: 'MODULE_NOT_FOUND' });
 const hoisted = createRequire(path.join(root, 'node_modules/.pnpm/package.json'));
 assert.equal(hoisted('pkg').origin, 'selected-one');
 assert.equal(hoisted('@scope/pkg').origin, 'scoped-one');
+assert.throws(() => hoisted('pkg/private'), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' });
 assert.throws(() => hoisted('unlinked'), { code: 'MODULE_NOT_FOUND' });
 "#,
     );
@@ -104,6 +109,7 @@ test('the opt-in follows actual hoist links and resolution memoization follows t
   process.env.TURBO_PNPM_ANCESTOR = '1';
   assert.equal(require('pkg').origin, 'selected-one');
   assert.equal(require('@scope/pkg').origin, 'scoped-one');
+  assert.throws(() => require('pkg/private'), /Cannot find module/);
   assert.throws(() => require('unlinked'), /Cannot find module/);
   delete process.env.TURBO_PNPM_ANCESTOR;
   assert.throws(() => require.resolve('pkg'), /Cannot find module/);
