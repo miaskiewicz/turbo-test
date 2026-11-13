@@ -67,6 +67,15 @@ testCase('GCM updates preserve byte view offsets and copy constructor material',
   const ciphertext = Buffer.concat([first, second, cipher.final()]);
   assert.equal(first.length, 2); assert.equal(second.length, 1);
   assert.equal(decrypt(ciphertext, cipher.getAuthTag()).toString(), 'abc');
+  const rawKey = new Uint8Array(32).buffer; const rawIv = new Uint8Array(12).buffer;
+  const rawAAD = new Uint8Array([97, 97, 100]).buffer;
+  const rawCipher = crypto.createCipheriv('aes-256-gcm', rawKey, rawIv);
+  rawCipher.setAAD(rawAAD);
+  const rawBytes = Buffer.concat([rawCipher.update('raw buffers'), rawCipher.final()]);
+  const rawDecipher = crypto.createDecipheriv('aes-256-gcm', rawKey, rawIv);
+  rawDecipher.setAAD(rawAAD);
+  rawDecipher.setAuthTag(Uint8Array.from(rawCipher.getAuthTag()).buffer);
+  assert.equal(Buffer.concat([rawDecipher.update(rawBytes), rawDecipher.final()]).toString(), 'raw buffers');
 });
 testCase('GCM output encodings stream base64 and UTF8 without chunk corruption', () => {
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
