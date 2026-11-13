@@ -4,7 +4,7 @@
 use super::*;
 
 fn strip(s: &str) -> String {
-    strip_verbatim(PathBuf::from(s))
+    strip_windows_verbatim(PathBuf::from(s))
         .to_str()
         .unwrap()
         .to_string()
@@ -53,6 +53,7 @@ fn other_paths_are_unchanged() {
 fn a_non_utf8_path_is_unchanged() {
     use std::os::unix::ffi::OsStrExt;
     let p = PathBuf::from(std::ffi::OsStr::from_bytes(b"\\\\?\\C:\\\xff"));
+    assert_eq!(strip_windows_verbatim(p.clone()), p);
     assert_eq!(strip_verbatim(p.clone()), p);
 }
 
@@ -121,6 +122,9 @@ fn windows_canonical_paths_open_the_same_file_without_the_prefix() {
     assert!(native.to_string_lossy().starts_with(r"\\?\"));
     let normalized = canonicalize(&file).unwrap();
     assert!(!normalized.to_string_lossy().starts_with(r"\\?\"));
-    assert_eq!(std::fs::read(normalized).unwrap(), std::fs::read(native).unwrap());
+    assert_eq!(
+        std::fs::read(normalized).unwrap(),
+        std::fs::read(native).unwrap()
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }

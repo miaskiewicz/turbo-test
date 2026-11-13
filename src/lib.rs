@@ -12,6 +12,7 @@ pub mod colors;
 pub mod coverage;
 pub mod coverage_branch;
 pub mod crypto_compat;
+pub mod esbuild_path;
 pub mod esm_cjs;
 pub mod esm_spy;
 pub mod failure;

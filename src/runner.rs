@@ -1173,7 +1173,7 @@ fn project_root(file: &Path) -> Option<PathBuf> {
 fn project_root_uncached(file: &Path) -> Option<PathBuf> {
     let mut d = file.parent();
     while let Some(dir) = d {
-        if dir.join("node_modules/.bin/esbuild").exists() {
+        if crate::esbuild_path::local(dir).is_some() {
             return Some(dir.to_path_buf());
         }
         d = dir.parent();
@@ -1195,16 +1195,15 @@ fn project_root_uncached(file: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The esbuild binary for `root`: the project's own `node_modules/.bin/esbuild` when it has one,
+/// The esbuild binary for `root`: the project's platform-specific npm entry point when present,
 /// otherwise turbo-test's bundled esbuild (`TURBO_ESBUILD`, resolved by cli.js).
 fn esbuild_bin(root: &Path) -> PathBuf {
-    let local = root.join("node_modules/.bin/esbuild");
-    if local.exists() {
+    if let Some(local) = crate::esbuild_path::local(root) {
         return local;
     }
     match std::env::var_os("TURBO_ESBUILD") {
         Some(p) => PathBuf::from(p),
-        None => local,
+        None => root.join("node_modules/.bin/esbuild"),
     }
 }
 

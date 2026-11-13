@@ -13,6 +13,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   records actual outcomes without changing the existing release binary gates (#278).
 
 ### Fixed
+- Apply verbatim DOS/UNC canonical-path normalization only on Windows and discover
+  local npm esbuild entry points there in `.cmd`, `.exe`, extensionless order, while
+  preserving Unix lookup and literal path names (#278).
 - Classify IPv4 and IPv6 literals through the native IP parser (#329), propagate
   unhandled EventEmitter errors and report successful once-listener delivery (#330),
   and deliver diagnostics-channel publications through a named subscriber registry (#331).
