@@ -157,6 +157,14 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   an earlier failure on the release PR.
 
 ### Performance
+- V8's young generation starts at 32 MB (`--min-semi-space-size=32`, added to the default
+  `--single-threaded`): a test file's mostly short-lived objects (React trees, DOM nodes,
+  matcher diffs) take fewer scavenges. Measured on the four reference projects with
+  interleaved warm runs (7-9 each): ui-design-components -8.1% wall / -7.2% CPU,
+  payroll-app -5.5% / -4.6%, website-global -4.8% / -5.8%, standalone-chat-app -2.9% /
+  -4.7%; identical results, peak memory within about 0.3 GB. Other flags measured and not
+  taken: `--no-maglev` (+5-17%), `--max-lazy` (+6-8%), `--always-sparkplug` (+1-8% CPU),
+  16 / 64 MB young generations (no better than 32).
 - `runtime.js` `__ttApplyConfig` refactored: extracted `__ttApplyJestFields` helper to
   bring cyclomatic complexity from 9 back within the cc ≤ 7 gate.
 

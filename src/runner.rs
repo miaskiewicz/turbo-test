@@ -11931,8 +11931,13 @@ fn clear_registry() {
 /// machine, shared by every isolate) only contend with the other workers: payroll's full run
 /// takes about 9% less wall and CPU time, ui about the same, a run of a few dozen files at most
 /// a tenth of a second more.
+/// `--min-semi-space-size=32`: a 32 MB young generation from the start, so a test file's mostly
+/// short-lived objects (React trees, DOM nodes, matcher diffs) take fewer scavenges: 3-8% less
+/// wall and 5-7% less CPU on the four reference projects (ui-design-components 8%, payroll 5%),
+/// identical results, peak memory within about 0.3 GB.
 fn v8_flags(env: Option<&str>) -> String {
-    env.unwrap_or("--single-threaded").to_string()
+    env.unwrap_or("--single-threaded --min-semi-space-size=32")
+        .to_string()
 }
 
 /// This run's V8 flags ([`v8_flags`] of `TURBO_V8_FLAGS`).

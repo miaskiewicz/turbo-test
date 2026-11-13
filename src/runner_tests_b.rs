@@ -938,11 +938,12 @@ fn saved_blob_keys_follow_their_inputs() {
 
 /// Every worker isolate runs single-threaded by default: with one isolate per core, V8's
 /// background compile and GC helpers only contend with the other workers (payroll: about 9%
-/// wall and CPU). `TURBO_V8_FLAGS` replaces the defaults; set empty, it runs none. The startup
-/// blob is keyed on the effective flags.
+/// wall and CPU); and with a 32 MB young generation, so a test file's short-lived objects take
+/// fewer scavenges (ui-design-components: about 8% wall). `TURBO_V8_FLAGS` replaces the
+/// defaults; set empty, it runs none. The startup blob is keyed on the effective flags.
 #[test]
 fn v8_runs_single_threaded_unless_turbo_v8_flags_says_otherwise() {
-    assert_eq!(v8_flags(None), "--single-threaded");
+    assert_eq!(v8_flags(None), "--single-threaded --min-semi-space-size=32");
     assert_eq!(v8_flags(Some("")), "");
     assert_eq!(v8_flags(Some("--max-lazy")), "--max-lazy");
 }
