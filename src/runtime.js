@@ -75,7 +75,7 @@ globalThis.process = {
   versions: { node: '24.0.0', v8: '12.0.0', modules: '127', napi: '10' },
   argv: ['node', 'turbo-test'],
   cwd: () => globalThis.__ttProcessCwd || globalThis.__cwd || '/',
-  nextTick: (fn, ...a) => __loop.nextTicks.push(() => fn(...a)),
+  nextTick: (fn, ...a) => __loop.nextTicks.push(__captureAsyncContext(() => fn(...a))),
   // the real clock (real time plus the drive loop's jumps) since the runtime started
   // (turbo-test#178; it was a constant [0, 0])
   hrtime: __realHrtime,
@@ -166,6 +166,7 @@ function __hrtimeOf(ms, prev) {
 function __realHrtime(prev) { return __hrtimeOf(__loop.elapsed() - __perfOrigin, prev); }
 __realHrtime.bigint = () => { const [s, n] = __realHrtime(); return BigInt(s) * 1000000000n + BigInt(n); };
 function __schedule(cb, delay, interval, fake, immediate, clamped) {
+  cb = __captureAsyncContext(cb);
   const id = __loop.seq++;
   // `immediate`: a setImmediate (jest's legacy runAllImmediates)
   if (fake) __loop.fmacro.push({ id, due: __loop.fnow + Math.max(0, delay | 0), cb, interval, gen: __loop.gen, immediate });
@@ -2930,8 +2931,8 @@ const __dc = {
   unsubscribe: (name, fn) => __diagnosticChannel(name).unsubscribe(fn),
 };
 __dc.default = __dc;
-class __AsyncLocalStorage { constructor() { this._store = undefined; } run(store, cb, ...a) { const p = this._store; this._store = store; try { return cb(...a); } finally { this._store = p; } } getStore() { return this._store; } enterWith(s) { this._store = s; } disable() {} exit(cb, ...a) { return cb(...a); } }
-const __async_hooks = { AsyncLocalStorage: __AsyncLocalStorage, AsyncResource: class { runInAsyncScope(fn, thisArg, ...a) { return fn.apply(thisArg, a); } emitDestroy() { return this; } bind(fn) { return fn; } }, createHook: () => ({ enable() { return this; }, disable() { return this; } }), executionAsyncId: () => 0, triggerAsyncId: () => 0 }; __async_hooks.default = __async_hooks;
+/* __TT_NODE_ASYNC_CONTEXT__ */
+const __async_hooks = { AsyncLocalStorage: __AsyncLocalStorage, AsyncResource: __AsyncResource, createHook: () => ({ enable() { return this; }, disable() { return this; } }), executionAsyncId: () => 0, triggerAsyncId: () => 0 }; __async_hooks.default = __async_hooks;
 // ---- Node's util.inspect / util.format (Node 26; turbo-test#93) ----
 // The shape of Node's formatValue / formatRaw / reduceToSingleString / groupArrayElements:
 // depth 2, breakLength 80, compact 3, maxArrayLength 100; console.log formats through it.
@@ -10249,6 +10250,7 @@ globalThis.__ttResetForNextFile = () => {
   // file's own pending one-shots. Do NOT clear macro/nextTicks or reset the clock here (that
   // broke ~40 async tests).
   __loop.gen++;
+  __resetAsyncContext();
   // jest.setTimeout / jest.retryTimes are per-file overrides (turbo-test#273)
   globalThis.__TT_JEST_TIMEOUT = undefined;
   globalThis.__TT_JEST_RETRY = undefined;
