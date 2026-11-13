@@ -21,6 +21,7 @@ pub mod highlight;
 pub mod human;
 pub mod idna;
 pub mod import_glob;
+pub mod key_compat;
 pub mod launcher;
 pub mod location;
 pub mod mock_read;
