@@ -1,9 +1,14 @@
 // V8 owns Promise/await propagation; the runner captures this frame for scheduled resources.
 let __asyncContextGeneration = 0;
+let __asyncFrameActivated = false;
 function __asyncFrame() {
-  if (typeof globalThis.__ttAsyncFrameGet !== 'function') return undefined;
+  if (!__asyncFrameActivated || typeof globalThis.__ttAsyncFrameGet !== 'function') return undefined;
   const frame = globalThis.__ttAsyncFrameGet();
   return frame && frame.generation === __asyncContextGeneration ? frame : undefined;
+}
+function __asyncSetFrame(frame) {
+  if (frame !== undefined) __asyncFrameActivated = true;
+  globalThis.__ttAsyncFrameSet(frame);
 }
 function __asyncCopyFrame() {
   const previous = __asyncFrame();
@@ -15,21 +20,21 @@ function __asyncCallback(fn) {
 function __asyncCallFrame(frame, fn, receiver, args) {
   __asyncCallback(fn);
   const previous = globalThis.__ttAsyncFrameGet();
-  globalThis.__ttAsyncFrameSet(frame);
+  __asyncSetFrame(frame);
   try { return fn.apply(receiver, args); }
-  finally { globalThis.__ttAsyncFrameSet(previous); }
+  finally { __asyncSetFrame(previous); }
 }
 function __asyncCallStorage(storage, frame, fn, args) {
   __asyncCallback(fn);
   const previous = __asyncFrame();
   const record = previous && previous.stores.get(storage);
-  globalThis.__ttAsyncFrameSet(frame);
+  __asyncSetFrame(frame);
   try { return fn.apply(null, args); }
   finally {
     const restored = __asyncCopyFrame();
     if (record) restored.stores.set(storage, record);
     else restored.stores.delete(storage);
-    globalThis.__ttAsyncFrameSet(restored);
+    __asyncSetFrame(restored);
   }
 }
 function __captureAsyncContext(fn) {
@@ -39,7 +44,8 @@ function __captureAsyncContext(fn) {
 }
 function __resetAsyncContext() {
   __asyncContextGeneration++;
-  globalThis.__ttAsyncFrameSet(undefined);
+  __asyncSetFrame(undefined);
+  __asyncFrameActivated = false;
 }
 class __AsyncLocalStorage {
   constructor() { this._enabled = true; this._version = 0; }
@@ -61,7 +67,7 @@ class __AsyncLocalStorage {
   }
   enterWith(store) {
     this._enabled = true;
-    globalThis.__ttAsyncFrameSet(this._frame(store));
+    __asyncSetFrame(this._frame(store));
   }
   exit(fn, ...args) {
     const frame = __asyncCopyFrame();
@@ -73,7 +79,7 @@ class __AsyncLocalStorage {
     this._version++;
     const frame = __asyncCopyFrame();
     frame.stores.delete(this);
-    globalThis.__ttAsyncFrameSet(frame);
+    __asyncSetFrame(frame);
   }
   static bind(fn) {
     __asyncCallback(fn);
