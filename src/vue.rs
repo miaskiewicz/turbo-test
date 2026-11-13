@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 const COMPILER: &str = include_str!("../scripts/vue-transform.cjs");
 thread_local! {
     static RUNTIME_FLAG: Cell<Option<Option<bool>>> = const { Cell::new(None) };
+    static PLUGIN_CACHE: RefCell<PluginCache> = RefCell::new(PluginCache::default());
     static PROJECT_ENABLED: Cell<bool> = const { Cell::new(false) };
     static COMPILED: RefCell<HashMap<(PathBuf, u64), String>> = RefCell::new(HashMap::new());
 }
@@ -23,10 +24,35 @@ fn manifest(from: &Path) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+#[derive(Default)]
+struct PluginCache {
+    paths: HashMap<PathBuf, bool>,
+    manifests: HashMap<PathBuf, bool>,
+}
+
 fn declares_plugin(from: &Path) -> bool {
+    PLUGIN_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(enabled) = cache.paths.get(from) {
+            return *enabled;
+        }
+        let enabled = plugin_from_manifest(&mut cache, from);
+        cache.paths.insert(from.to_path_buf(), enabled);
+        enabled
+    })
+}
+
+fn plugin_from_manifest(cache: &mut PluginCache, from: &Path) -> bool {
     let Some(path) = manifest(from) else {
         return false;
     };
+    *cache
+        .manifests
+        .entry(path.clone())
+        .or_insert_with(|| read_plugin_manifest(&path))
+}
+
+fn read_plugin_manifest(path: &Path) -> bool {
     #[cfg(test)]
     MANIFEST_READS.with(|reads| reads.set(reads.get() + 1));
     let Some(package) = std::fs::read(path)
@@ -41,6 +67,8 @@ fn declares_plugin(from: &Path) -> bool {
 }
 
 pub fn prepare_project(entry: &Path) {
+    // Every entry starts a new manifest snapshot; runtime overrides remain uncached.
+    PLUGIN_CACHE.with(|cache| *cache.borrow_mut() = PluginCache::default());
     PROJECT_ENABLED.with(|enabled| enabled.set(declares_plugin(entry)));
 }
 
