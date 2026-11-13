@@ -8910,6 +8910,11 @@ fn bind_fn(
 /// behind the same snapshot mechanism.)
 const RUNTIME_JS: &str = include_str!("runtime.js");
 
+/// Pristine VM context index zero is reserved only in the runner-owned Node snapshot.
+pub(crate) fn vm_context_snapshot_available() -> bool {
+    framework_snapshot().references.is_none()
+}
+
 /// Build the framework snapshot once: a context with RUNTIME_JS evaluated, set as the
 /// default context, serialized. Native callbacks (log/__nativeRequire) are NOT in the
 /// snapshot — V8 can't serialize native function pointers — so they are re-bound per
@@ -8936,6 +8941,7 @@ pub(crate) fn framework_snapshot() -> &'static FrameworkSnapshot {
         let mut creator = v8::Isolate::snapshot_creator(None, None);
         {
             v8::scope!(let scope, &mut creator);
+            crate::vm_compat::register_pristine_context(scope);
             let context = v8::Context::new(scope, Default::default());
             let scope = &mut v8::ContextScope::new(scope, context);
             framework_prelude(scope);
@@ -9159,7 +9165,8 @@ fn framework_prelude(scope: &mut v8::PinScope) {
     }
     let runtime = RUNTIME_JS
         .replace("/* __TT_NODE_STREAMS__ */", include_str!("node_streams.js"))
-        .replace("/* __TT_NODE_KEYS__ */", include_str!("node_keys.js"));
+        .replace("/* __TT_NODE_KEYS__ */", include_str!("node_keys.js"))
+        .replace("/* __TT_NODE_VM__ */", include_str!("node_vm.js"));
     let code = v8::String::new(scope, &runtime).unwrap();
     let s = v8::Script::compile(scope, code, None).unwrap();
     s.run(scope).unwrap();
@@ -9446,6 +9453,18 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         global,
         "__ttSha256",
         crate::crypto_compat::native_sha256,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttVmCreate",
+        crate::vm_compat::native_create_context,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttVmRun",
+        crate::vm_compat::native_run_context,
     );
     bind_fn(scope, global, "__ttEc", crate::key_compat::native_ec);
     bind_fn(scope, global, "__ttIsIP", crate::node_compat::native_is_ip);

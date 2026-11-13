@@ -4036,27 +4036,23 @@ const __timers = {
   ...__realTimers,
   promises: __timersPromises,
 };
-// ---- vm / worker_threads / inspector: what one V8 context in one thread can truthfully offer;
-// the rest throws a clear error instead of pretending ----
+// ---- vm / worker_threads / inspector: owned host capabilities; unsupported operations throw ----
 const __unavailable = (what, why) => () => { throw new Error('turbo-test: ' + what + ' is not available (' + why + ')'); };
-const __oneContext = 'tests run in a single V8 context';
+/* __TT_NODE_VM__ */
 class __VmScript {
   constructor(code) { this._code = String(code); }
   runInThisContext() { return (0, eval)(this._code); }
 }
-__VmScript.prototype.runInContext = __unavailable('vm.Script.runInContext', __oneContext);
-__VmScript.prototype.runInNewContext = __unavailable('vm.Script.runInNewContext', __oneContext);
+__VmScript.prototype.runInContext = function(sandbox, options) { return __vmRunInContext(this._code, sandbox, options); };
+__VmScript.prototype.runInNewContext = function(sandbox, options) { return __vmRunInNewContext(this._code, sandbox, options); };
 const __vm = {
   Script: __VmScript,
   runInThisContext: (code) => (0, eval)(String(code)),
   compileFunction: (code, params) => new Function(...(params || []), String(code)),
-  isContext: (o) => {
-    if (o === null || typeof o !== 'object') { const e = new TypeError('The "object" argument must be of type object'); e.code = 'ERR_INVALID_ARG_TYPE'; throw e; }
-    return false; // no other contexts can exist here
-  },
-  createContext: __unavailable('vm.createContext', __oneContext),
-  runInContext: __unavailable('vm.runInContext', __oneContext),
-  runInNewContext: __unavailable('vm.runInNewContext', __oneContext),
+  isContext: __vmIsContext,
+  createContext: __vmCreateContext,
+  runInContext: __vmRunInContext,
+  runInNewContext: __vmRunInNewContext,
 };
 const __envData = new Map();
 const __untransferable = new WeakSet();
