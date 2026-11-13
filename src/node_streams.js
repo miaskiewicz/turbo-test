@@ -1,4 +1,46 @@
 // In-memory Node stream lifecycle. Host sockets/processes supply their own I/O.
+// Legacy consumers call Stream.call(this); an ES class cannot provide that API.
+function __Stream() { this._ev = Object.create(null); }
+Object.setPrototypeOf(__Stream, __EventEmitter);
+Object.setPrototypeOf(__Stream.prototype, __EventEmitter.prototype);
+__Stream.prototype.pipe = function(destination, options) { return __legacyPipe(this, destination, options); };
+function __legacyPipeListen(state, target, name, listener, prepend = false) {
+  state.listeners.push([target, name, listener]);
+  if (prepend) target.prependListener(name, listener);
+  else target.on(name, listener);
+}
+function __legacyPipeCleanup(state) {
+  const listeners = state.listeners.splice(0);
+  for (const [target, name, listener] of listeners) target.removeListener(name, listener);
+}
+function __legacyPipeFinish(state, closed) {
+  if (state.completed) return;
+  state.completed = true;
+  try {
+    if (!state.ending) return;
+    if (!closed) state.destination.end();
+    else if (typeof state.destination.destroy === 'function') state.destination.destroy();
+  } finally { __legacyPipeCleanup(state); }
+}
+function __legacyPipe(source, destination, options = {}) {
+  const state = { destination, listeners: [], completed: false, ending: !destination._isStdio && (!options || options.end !== false) };
+  const data = (chunk) => { if (destination.writable && destination.write(chunk) === false && source.pause) source.pause(); };
+  const drain = () => { if (source.readable && source.resume) source.resume(); };
+  const cleanup = () => __legacyPipeCleanup(state);
+  const error = function(failure) {
+    cleanup();
+    if (typeof this.listenerCount === 'function' && this.listenerCount('error') === 0) this.emit('error', failure);
+  };
+  __legacyPipeListen(state, source, 'data', data);
+  __legacyPipeListen(state, destination, 'drain', drain);
+  __legacyPipeListen(state, source, 'end', () => __legacyPipeFinish(state, false));
+  __legacyPipeListen(state, source, 'close', () => __legacyPipeFinish(state, true));
+  __legacyPipeListen(state, source, 'error', error, true);
+  __legacyPipeListen(state, destination, 'error', error, true);
+  __legacyPipeListen(state, destination, 'close', cleanup);
+  destination.emit('pipe', source);
+  return destination;
+}
 const __streamDefer = (fn) => queueMicrotask(fn);
 function __streamError(code, message) { const error = new Error(message); error.code = code; return error; }
 function __streamInit(stream, options) {
@@ -130,8 +172,8 @@ function __readableFrom(iterable, options) {
   return stream;
 }
 function __readablePipe(source, destination, options = {}) {
-  const data = (chunk) => { if (!destination.write(chunk)) source.pause(); };
-  const drain = () => source.resume();
+  const data = (chunk) => { if (destination.write(chunk) === false && source.pause) source.pause(); };
+  const drain = () => { if (source.resume) source.resume(); };
   const end = () => { if (options.end !== false) destination.end(); };
   const cleanup = () => {
     source.off('data', data); source.off('end', end);
@@ -144,7 +186,7 @@ function __readablePipe(source, destination, options = {}) {
   destination.emit('pipe', source);
   return destination;
 }
-class __Readable extends __EventEmitter {
+class __Readable extends __Stream {
   constructor(options = {}) { super(); __streamInit(this, options); __readableInit(this, options); }
   static from(iterable, options = {}) { return __readableFrom(iterable, options); }
   _read() { this.destroy(__streamError('ERR_METHOD_NOT_IMPLEMENTED', '_read() is not implemented')); }
@@ -260,7 +302,7 @@ function __writableEnd(stream, chunk, encoding, callback) {
   __streamDefer(() => __writableAdvance(stream));
   return stream;
 }
-class __Writable extends __EventEmitter {
+class __Writable extends __Stream {
   constructor(options = {}) { super(); __streamInit(this, options); __writableInit(this, options); }
   _write(chunk, encoding, callback) { callback(__streamError('ERR_METHOD_NOT_IMPLEMENTED', '_write() is not implemented')); }
   _final(callback) { callback(); }
@@ -443,6 +485,6 @@ function __pipelinePromise(...args) {
 }
 const __streamPromises = { pipeline: __pipelinePromise, finished: __finishedPromise };
 __streamPromises.default = __streamPromises;
-const __stream = { Readable: __Readable, Writable: __Writable, Duplex: __Duplex, Transform: __Transform,
-  PassThrough: __PassThrough, Stream: __EventEmitter, pipeline: __pipeline, finished: __finished, promises: __streamPromises };
+const __stream = Object.assign(__Stream, { Readable: __Readable, Writable: __Writable, Duplex: __Duplex, Transform: __Transform,
+  PassThrough: __PassThrough, Stream: __Stream, pipeline: __pipeline, finished: __finished, promises: __streamPromises });
 __stream.default = __stream;
