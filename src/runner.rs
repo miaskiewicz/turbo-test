@@ -3112,13 +3112,19 @@ fn set_environment_modes(scope: &mut v8::PinScope, entry: &Path) {
 /// `Object`) instead of naming an export that doesn't exist.
 /// Returns None if the project ships no `typescript` (caller falls back to oxc).
 fn tsc_transform_esm(file: &Path, root: &Path) -> Option<String> {
+    tsc_transform_with_kind(file, root, "esm")
+}
+
+/// CJS-first Jest backends need TypeScript's partial-export initialization for circular
+/// decorator metadata. ESM graph callers retain ESNext and their live-binding TDZ semantics.
+fn tsc_transform_with_kind(file: &Path, root: &Path, module_kind: &str) -> Option<String> {
     let src = read_app_source(file)?;
     let ts_dir = root.join("node_modules/typescript");
     if !ts_dir.join("package.json").is_file() {
         return None;
     }
     // Small node program: transpile with the project's TS (no checker — same isolatedModules
-    // semantics ts-jest uses), keeping ESM module syntax + inlined helpers + decorator metadata.
+    // semantics ts-jest uses), with the requested module kind + inlined helpers + decorator metadata.
     const SCRIPT: &str = r#"
 const ts = require(process.argv[1]);
 const fs = require('fs');
@@ -3209,7 +3215,7 @@ try { input = nsTypeOnlyImports(src); } catch (e) {} // e.g. a typescript withou
 const out = ts.transpileModule(input, {
   fileName: file,
   compilerOptions: {
-    module: ts.ModuleKind.ESNext,
+    module: process.argv[3] === 'commonjs' ? ts.ModuleKind.CommonJS : ts.ModuleKind.ESNext,
     target: ts.ScriptTarget.ES2021,
     experimentalDecorators: true,
     emitDecoratorMetadata: true,
@@ -3222,7 +3228,7 @@ const out = ts.transpileModule(input, {
 });
 process.stdout.write(out.outputText);
 "#;
-    run_tsc_transpile(root, &ts_dir, file, SCRIPT, &src)
+    run_tsc_transpile(root, &ts_dir, file, SCRIPT, &src, module_kind)
 }
 
 fn run_tsc_transpile(
@@ -3231,8 +3237,9 @@ fn run_tsc_transpile(
     file: &Path,
     script: &str,
     src: &str,
+    module_kind: &str,
 ) -> Option<String> {
-    let out = spawn_tsc_stdin(root, ts_dir, file, script, src)?;
+    let out = spawn_tsc_stdin(root, ts_dir, file, script, src, module_kind)?;
     if !out.status.success() {
         return None;
     }
@@ -3249,6 +3256,7 @@ fn spawn_tsc_stdin(
     file: &Path,
     script: &str,
     src: &str,
+    module_kind: &str,
 ) -> Option<std::process::Output> {
     let mut child = std::process::Command::new("node")
         .current_dir(root)
@@ -3257,6 +3265,7 @@ fn spawn_tsc_stdin(
             script,
             &ts_dir.to_string_lossy(),
             &file.to_string_lossy(),
+            module_kind,
         ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3491,7 +3500,7 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     let raw = with_binder(file, read_app_source(file)?, true);
     let use_meta = wants_decorator_metadata(file, prefer_metadata, &raw);
     let cov = crate::coverage::enabled();
-    let cache = mr_cjs_cache_path(file, &raw, use_meta, cov);
+    let cache = mr_cjs_cache_path(file, &root, &raw, use_meta, cov);
     if let Some(c) = read_cached_cjs(&cache) {
         return Some(c);
     }
@@ -3565,7 +3574,7 @@ fn finish_mr_cjs(code: String, raw: &str) -> String {
 }
 
 /// Cache path of `esbuild_transform_cjs`'s output for this source / transform flavour.
-fn mr_cjs_cache_path(file: &Path, raw: &str, use_meta: bool, cov: bool) -> PathBuf {
+fn mr_cjs_cache_path(file: &Path, root: &Path, raw: &str, use_meta: bool, cov: bool) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
@@ -3590,6 +3599,13 @@ fn mr_cjs_cache_path(file: &Path, raw: &str, use_meta: bool, cov: bool) -> PathB
     // Retry-on-failure keeps the common case on fast esbuild and never regresses files that load
     // fine without metadata. Keyed separately so the two transforms never collide in cache.
     use_meta.hash(&mut h);
+    if use_meta {
+        "ts-commonjs-partial-exports-v1".hash(&mut h);
+        decorator_tsc_module_kind(file).hash(&mut h);
+        root.join("node_modules/typescript/package.json")
+            .is_file()
+            .hash(&mut h);
+    }
     // Coverage emits an inline source map (needed to remap V8 byte ranges → original lines), so
     // the output differs — key it separately. Only perturb the key when coverage is ON, so the
     // normal (no-map) cache keys are byte-identical to before → zero cache churn on default runs.
@@ -3599,26 +3615,41 @@ fn mr_cjs_cache_path(file: &Path, raw: &str, use_meta: bool, cov: bool) -> PathB
     cache_dir().join(format!("mr-{:016x}.cjs", h.finish()))
 }
 
-/// The decorator-metadata transform of `esbuild_transform_cjs` (tsc, else oxc, then esbuild CJS).
+/// Decorator metadata for the CJS loader. TypeScript's own CommonJS output preserves
+/// partial exports in Jest backend cycles; ESM/vitest and the oxc fallback keep ESM lowering.
 fn esbuild_transform_cjs_meta(file: &Path, root: &Path, raw: &str, cache: &Path) -> Option<String> {
-    // Primary: the project's own TypeScript (ts.transpileModule) → exact ts-jest parity for
-    // emitDecoratorMetadata (resolves local type aliases, nullable types, etc.). Fallback:
-    // oxc lowers decorators+metadata (ESM) then esbuild converts ESM->CJS — used when the
-    // project ships no `typescript`. oxc can panic on some inputs, so it's caught; either way
-    // we fall through to the plain esbuild transform (metadata-less but loads) on failure.
-    // Get ESM-with-metadata from tsc (preferred) or oxc (fallback), then a single esbuild
-    // ESM->CJS pass so every path yields the same esbuild-shaped CJS the loader/hoisting want.
-    let meta_esm = tsc_transform_esm(file, root).or_else(|| {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::transform::transform_decorators_with_metadata(file, raw)
-        }))
-        .ok()
-        .and_then(|r| r.ok())
-    });
-    let cjs = meta_esm.and_then(|esm| esbuild_format_cjs(root, &esm))?;
+    let cjs =
+        decorator_cjs_via_tsc(file, root).or_else(|| decorator_cjs_via_oxc(file, root, raw))?;
     let code = finish_mr_cjs(postprocess_mr_cjs(cjs), raw);
     write_atomic(cache, &code);
     Some(code)
+}
+
+fn decorator_cjs_via_tsc(file: &Path, root: &Path) -> Option<String> {
+    let kind = decorator_tsc_module_kind(file);
+    let code = tsc_transform_with_kind(file, root, kind)?;
+    if kind == "commonjs" {
+        Some(code)
+    } else {
+        esbuild_format_cjs(root, &code)
+    }
+}
+
+fn decorator_tsc_module_kind(file: &Path) -> &'static str {
+    if cjs_first_project(file) {
+        "commonjs"
+    } else {
+        "esm"
+    }
+}
+
+fn decorator_cjs_via_oxc(file: &Path, root: &Path, raw: &str) -> Option<String> {
+    let esm = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::transform::transform_decorators_with_metadata(file, raw)
+    }))
+    .ok()?
+    .ok()?;
+    esbuild_format_cjs(root, &esm)
 }
 
 /// Run esbuild's per-file CJS transform for `esbuild_transform_cjs`; its raw stdout.
@@ -3755,6 +3786,54 @@ fn fill_import_meta(code: String, bundle_root: Option<&Path>) -> String {
     out
 }
 
+/// Static require declarations generated by esbuild or TypeScript. Their binding can be
+/// re-fetched after a mock registration; user expressions with nested requires stay untouched.
+fn mock_require_declaration(line: &str) -> Option<(&str, &str)> {
+    let declaration = line
+        .strip_prefix("var ")
+        .or_else(|| line.strip_prefix("const "))
+        .or_else(|| line.strip_prefix("let "))?;
+    let (name, rhs) = declaration.split_once(" = ")?;
+    if !mock_require_name(name) || !mock_require_rhs(rhs) {
+        return None;
+    }
+    Some((name, rhs))
+}
+
+fn mock_require_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+fn mock_require_rhs(rhs: &str) -> bool {
+    static IMPORT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    IMPORT
+        .get_or_init(|| {
+            let path = r#"(?:"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*')"#;
+            let require = format!(r"require\(\s*{path}\s*\)");
+            regex::Regex::new(&format!(
+                r"^(?:{require}|__(?:importDefault|importStar)\({require}\)|__toESM\({require}(?:,\s*1)?\))\s*;?\s*$"
+            ))
+            .expect("static import expression regex")
+        })
+        .is_match(rhs)
+}
+
+/// Keep the same number of lines for tracked source locations. Mutable import temporaries
+/// permit the existing post-registration rebind on TypeScript's const/let import declarations.
+fn normalize_mock_require_declarations(code: &str) -> String {
+    code.lines()
+        .map(|line| match mock_require_declaration(line) {
+            Some((name, rhs)) => format!("var {name} = {rhs}"),
+            None => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// vitest-style vi.mock hoisting on esbuild CJS output: esbuild emits all `require(...)` at the
 /// top, then the body (module decls + vi.mock + tests). A vi.mock must be registered before the
 /// mocked module loads, so we move the requires NOT referenced by the mock-setup region (the
@@ -3776,8 +3855,9 @@ fn hoist_mock_setup_tracked(code: &str) -> (String, Vec<Option<usize>>) {
     if !code.contains(".mock(") {
         return unchanged();
     }
-    let lines: Vec<&str> = code.lines().collect();
-    let is_req = |l: &str| l.starts_with("var import_") && l.contains("require(");
+    let normalized = normalize_mock_require_declarations(code);
+    let lines: Vec<&str> = normalized.lines().collect();
+    let is_req = |l: &str| mock_require_declaration(l).is_some();
     // contiguous require block
     let Some(req_start) = lines.iter().position(|l| is_req(l)) else {
         return unchanged();

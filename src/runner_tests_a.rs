@@ -2163,3 +2163,31 @@ fn module_maps_for_failure_frames_are_built_on_demand() {
         "the frame maps to the source line of the throw"
     );
 }
+
+#[test]
+fn mock_import_rhs_requires_a_complete_static_import_expression() {
+    for rhs in [
+        "require(\"./dep\");",
+        "__importDefault(require('./dep'));",
+        "__importStar(require('./dep'));",
+        "__toESM(require('./dep'));",
+        "__toESM(require('./dep'), 1);",
+    ] {
+        assert!(mock_require_rhs(rhs), "{rhs}");
+    }
+    for rhs in [
+        "require('./dep').value;",
+        "require('./dep') + sideEffect();",
+        "require('./dep'); sideEffect();",
+        "require('./dep'), sideEffect();",
+        "__importDefault(require('./dep')).value;",
+        "__importDefault(require('./dep') + sideEffect());",
+        "__toESM(require('./dep'), sideEffect());",
+        "require(variable);",
+    ] {
+        assert!(!mock_require_rhs(rhs), "{rhs}");
+    }
+    let user =
+        "const value = require('./dep').value;\nconst count = require('./dep') + sideEffect();";
+    assert_eq!(normalize_mock_require_declarations(user), user);
+}
