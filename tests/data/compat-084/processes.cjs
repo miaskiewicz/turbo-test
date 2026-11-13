@@ -36,11 +36,13 @@ testCase('spawnSync forwards arguments without shell interpolation and accepts i
   assert.deepEqual(JSON.parse(result.stderr.toString()), ['a b', '$(not-a-command)', '"quoted"']);
 });
 testCase('spawnSync applies cwd and an explicit environment', () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'turbo-process-cwd-'));
+  // The harness gives each batch its own canonical fixture directory.
+  const directory = path.join(__dirname, 'process-cwd-fixture');
+  fs.mkdirSync(directory, { recursive: true });
   try {
     const result = cp.spawnSync(node, ['-e', 'process.stdout.write(JSON.stringify([process.cwd(),process.env.TURBO_PROCESS_VALUE,process.env.TURBO_PROCESS_MISSING]))'], { cwd: directory, env: { TURBO_PROCESS_VALUE: 'actual' }, encoding: 'utf8' });
     assert.equal(result.status, 0);
-    assert.deepEqual(JSON.parse(result.stdout), [fs.realpathSync(directory), 'actual', null]);
+    assert.deepEqual(JSON.parse(result.stdout), [directory, 'actual', null]);
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
   const previous = process.env.TURBO_PROCESS_MUTATED;
   process.env.TURBO_PROCESS_MUTATED = 'new-value';
