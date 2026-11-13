@@ -61,10 +61,17 @@ fn vue_sfc_opt_in_loads_import_require_and_native_esm_graphs() {
 }
 
 #[test]
-fn declared_vue_plugin_enables_sfc_loading_without_changing_other_projects() {
+fn declared_vue_plugin_requires_explicit_opt_in() {
     let p = project("vue-plugin-084", true);
     fixture(&p);
-    passes(&p, &[]);
+    let disabled = turbo_test(&p.dir, &["--reporter", "json"], &[("TURBO_VUE", "")]);
+    assert_ne!(disabled.code, Some(0), "{}", disabled.all());
+    assert!(
+        disabled.all().contains("Vue SFC support requires"),
+        "{}",
+        disabled.all()
+    );
+    passes(&p, &[("TURBO_VUE", "1")]);
 }
 
 #[test]
