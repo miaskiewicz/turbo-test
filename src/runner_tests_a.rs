@@ -2274,6 +2274,8 @@ fn failed_native_dependency_transform_can_retry_the_same_key() {
     let dir = tmp("dependency-flight-failure");
     let path = dir.join("entry.js");
     std::fs::write(&path, "module.exports = require('./missing.js');\n").unwrap();
+    // Missing relative imports remain external; a malformed resolved child is a true transform failure.
+    std::fs::write(dir.join("missing.js"), "const = ;\n").unwrap();
     assert!(native_dep_cjs(&path).is_none());
     std::fs::write(dir.join("missing.js"), "module.exports = 42;\n").unwrap();
     assert!(
