@@ -51,6 +51,9 @@ testCase('EC signing and verification preserve input byte views and reject chang
   assert.equal(Buffer.isBuffer(signature), true);
   assert.equal(crypto.verify('sha256', Buffer.from('abc'), keys.publicKey, signature), true);
   assert.equal(crypto.verify('sha256', Buffer.from('abd'), keys.publicKey, signature), false);
+  const raw = new Uint8Array([97, 98, 99]).buffer;
+  const rawSignature = crypto.sign('sha256', raw, keys.privateKey);
+  assert.equal(crypto.verify('sha256', raw, keys.publicKey, new Uint8Array(rawSignature).buffer), true);
   assert.equal(crypto.verify('sha256', Buffer.from('abc'), keys.publicKey, Buffer.from([1, 2, 3])), false);
 });
 testCase('EC streaming sign and verify support incremental bytes and signature encodings', () => {
@@ -68,7 +71,7 @@ testCase('EC exported keys import for further signing and public derivation', ()
   const keys = pair();
   const importedPrivate = crypto.createPrivateKey(keys.privateKey.export({ type: 'pkcs8', format: 'pem' }));
   const importedPublic = crypto.createPublicKey({ key: keys.publicKey.export({ type: 'spki', format: 'der' }), type: 'spki', format: 'der' });
-  const derivedPublic = crypto.createPublicKey(importedPrivate);
+  const derivedPublic = crypto.createPublicKey({ key: importedPrivate });
   const signature = crypto.sign('sha256', message, importedPrivate);
   assert.equal(crypto.verify('sha256', message, importedPublic, signature), true);
   assert.equal(crypto.verify('sha256', message, derivedPublic, signature), true);
@@ -80,6 +83,9 @@ testCase('EC options and key material errors never manufacture successful keys',
   assert.throws(() => pair({ publicKeyEncoding: { type: 'pkcs8', format: 'pem' } }));
   assert.throws(() => pair({ privateKeyEncoding: { type: 'spki', format: 'pem' } }));
   assert.throws(() => crypto.createPrivateKey('not a key'));
+  assert.throws(() => crypto.createPrivateKey({ key: Buffer.from([1, 2, 3]), format: 'der', type: 'pkcs8' }));
+  assert.throws(() => crypto.createPublicKey({ key: Buffer.from([1, 2, 3]), format: 'der', type: 'spki' }));
+  assert.throws(() => crypto.createPublicKey(pair().publicKey), { code: 'ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE' });
   assert.throws(() => crypto.sign('not-a-digest', message, pair().privateKey));
   assert.throws(() => crypto.sign('sha256', message, pair().publicKey));
 });
