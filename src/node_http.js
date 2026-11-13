@@ -15,7 +15,28 @@ function __httpBytes(value, encoding) {
 }
 function __httpLater(fn) { queueMicrotask(fn); }
 function __httpCapture(fn) { return typeof __captureAsyncContext === 'function' ? __captureAsyncContext(fn) : fn; }
+class __HttpSocket extends __EventEmitter {
+  constructor(connection, address) { super(); Object.assign(this, address); this._connection = connection; }
+  get readable() { return !this._connection.closed; }
+  get writable() { return !this._connection.closed; }
+  get destroyed() { return Boolean(this._connection.closed); }
+  destroy(error) { __httpClose(this._connection, error); return this; }
+  setNoDelay(noDelay = true) {
+    if (!this.destroyed) __httpNative('setNoDelay', { id: this._connection.id, enabled: !!noDelay });
+    return this;
+  }
+  address() { return { address: this.localAddress, port: this.localPort, family: this.localAddress.includes(':') ? 'IPv6' : 'IPv4' }; }
+}
+function __httpSocketClosed(connection, error) {
+  const socket = connection.socket;
+  if (!socket) return;
+  __httpLater(() => {
+    if (error && socket.listenerCount('error')) socket.emit('error', error);
+    socket.emit('close', Boolean(error));
+  });
+}
 function __httpRegister(connection) {
+  connection.socket = new __HttpSocket(connection, connection.socket);
   connection.dispatch = __httpCapture((event) => __httpConnectionEvent(connection, event));
   __httpConnections.set(connection.id, connection);
 }
@@ -55,6 +76,7 @@ function __httpClose(connection, reason, owner) {
   connection.callbacks.splice(0).forEach((callback) => callback(error));
   if (connection.incoming !== owner) __httpIncomingClosed(connection.incoming, error);
   if (connection.outgoing !== owner) __httpOutgoingClosed(connection, error);
+  __httpSocketClosed(connection, reason);
 }
 function __httpEvent(event) {
   if (event.kind === 'accept') { __httpAccept(event); return; }
@@ -80,6 +102,7 @@ function __httpAccept(event) {
 function __httpAccepted(server, event) {
   const connection = { id: event.id, server, callbacks: [], incoming: null, outgoing: null, socket: event.socket };
   __httpRegister(connection); server._connections.add(connection);
+  server.emit('connection', connection.socket);
 }
 function __httpHeaderObject(pairs) {
   const headers = Object.create(null);
@@ -110,6 +133,7 @@ function __httpClosed(connection, data) {
   connection.callbacks.splice(0).forEach((callback) => callback(error || __streamError('ECONNRESET', 'Socket closed')));
   __httpIncomingClosed(connection.incoming, error);
   __httpOutgoingClosed(connection, error);
+  __httpSocketClosed(connection, error);
   if (connection.server && !connection.incoming && error) connection.server.emit('clientError', error, { destroy() {} });
 }
 function __httpOutgoingClosed(connection, error) {
@@ -141,7 +165,7 @@ class __HttpIncoming extends __Readable {
     this.httpVersionMajor = Number(this.httpVersion.split('.')[0]); this.httpVersionMinor = Number(this.httpVersion.split('.')[1]);
     if (connection.server) { this.method = parts[0]; this.url = parts[1]; this.on('error', () => {}); }
     else { this.statusCode = Number(parts[1]); this.statusMessage = parts.slice(2).join(' '); }
-    this.socket = { ...connection.socket, destroy: (error) => this.destroy(error) };
+    this.socket = connection.socket; this.connection = this.socket;
   }
   _read() {}
   _destroy(error, callback) { __httpClose(this._connection, error, this); callback(error); }
@@ -230,7 +254,7 @@ function __httpFrame(bytes, chunked) {
   return Buffer.concat([Buffer.from(bytes.length.toString(16) + '\r\n'), bytes, Buffer.from('\r\n')]);
 }
 class __HttpResponse extends __HttpOutgoing {
-  constructor(connection, incoming) { super(connection); this.req = incoming; this.statusCode = 200; this.statusMessage = undefined; }
+  constructor(connection, incoming) { super(connection); this.socket = connection.socket; this.connection = this.socket; this.req = incoming; this.statusCode = 200; this.statusMessage = undefined; }
   _noBody() { return this.req.method === 'HEAD' || this.statusCode === 204 || this.statusCode === 304; }
   _firstLine() {
     if (!Number.isInteger(this.statusCode) || this.statusCode < 100 || this.statusCode > 999) throw new RangeError('Invalid HTTP status');
@@ -279,7 +303,9 @@ class __HttpRequest extends __HttpOutgoing {
     for (const [name, value] of Object.entries(options.headers || {})) this.setHeader(name, value);
     try {
       const result = __httpNative('connect', { host: options.hostname, port: options.port, head: options.method === 'HEAD' });
-      connection.id = result.id; connection.socket = result.socket; this.socket = { ...result.socket, destroy: (error) => this.destroy(error) }; __httpRegister(connection); __httpEnsurePoll();
+      connection.id = result.id; connection.socket = result.socket; __httpRegister(connection);
+      this.socket = connection.socket; this.connection = this.socket;
+      __httpLater(() => this.emit('socket', this.socket)); __httpEnsurePoll();
     } catch (error) { this._connectionError = error; __httpLater(() => this.destroy(error)); }
   }
   _firstLine() { return this.method + ' ' + this.path + ' HTTP/1.1'; }
