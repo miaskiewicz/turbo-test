@@ -116,3 +116,22 @@ fn scoped_links_are_supported_but_unlinked_store_versions_are_not_scanned() {
         Some(store)
     );
 }
+
+#[test]
+fn runtime_scopes_restore_nested_flags_without_changing_the_host_environment() {
+    let host = std::env::var_os("TURBO_PNPM_ANCESTOR");
+    let original = enabled();
+    {
+        let _on = runtime_flag(Some("1"));
+        assert!(enabled());
+        {
+            let _absent = runtime_flag(None);
+            assert!(!enabled());
+        }
+        assert!(enabled());
+        let _off = runtime_flag(Some("0"));
+        assert!(!enabled());
+    }
+    assert_eq!(enabled(), original);
+    assert_eq!(std::env::var_os("TURBO_PNPM_ANCESTOR"), host);
+}
