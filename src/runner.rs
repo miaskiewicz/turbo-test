@@ -6112,7 +6112,8 @@ fn load_cjs_inner<'s>(
             scope,
             abs,
             drain_mocks,
-            prefer_metadata || propagated,
+            prefer_metadata,
+            propagated,
             body_exc,
         );
     }
@@ -6279,12 +6280,13 @@ fn handle_cjs_body_throw<'s>(
     abs: &Path,
     drain_mocks: bool,
     prefer_metadata: bool,
+    propagated: bool,
     body_exc: Option<v8::Global<v8::Value>>,
 ) -> Option<()> {
     if std::env::var("TURBO_CJS_LOAD_DIAGNOSTIC").as_deref() == Ok("1") {
         cjs_load_diagnostic("body-failed", abs, prefer_metadata, 0);
     }
-    if !prefer_metadata && wants_metadata_retry(abs) {
+    if !prefer_metadata && !propagated && wants_metadata_retry(abs) {
         return load_cjs_inner(scope, abs, drain_mocks, true);
     }
     if let Some(e) = body_exc {
