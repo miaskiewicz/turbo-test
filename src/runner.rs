@@ -9166,7 +9166,11 @@ fn framework_prelude(scope: &mut v8::PinScope) {
     let runtime = RUNTIME_JS
         .replace("/* __TT_NODE_STREAMS__ */", include_str!("node_streams.js"))
         .replace("/* __TT_NODE_KEYS__ */", include_str!("node_keys.js"))
-        .replace("/* __TT_NODE_VM__ */", include_str!("node_vm.js"));
+        .replace("/* __TT_NODE_VM__ */", include_str!("node_vm.js"))
+        .replace(
+            "/* __TT_NODE_ASYNC_CONTEXT__ */",
+            include_str!("node_async_context.js"),
+        );
     let code = v8::String::new(scope, &runtime).unwrap();
     let s = v8::Script::compile(scope, code, None).unwrap();
     s.run(scope).unwrap();
@@ -9405,6 +9409,20 @@ fn load_lazy_bundled(scope: &mut v8::PinScope, abs: &Path) -> Option<Option<()>>
 }
 
 fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+    let empty = v8::undefined(scope);
+    scope.set_continuation_preserved_embedder_data(empty.into());
+    bind_fn(
+        scope,
+        global,
+        "__ttAsyncFrameGet",
+        crate::async_context::native_get_frame,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttAsyncFrameSet",
+        crate::async_context::native_set_frame,
+    );
     bind_fn(scope, global, "log", native_log);
     bind_fn(scope, global, "__ttWrite", native_write);
     bind_fn(scope, global, "__ttCallSite", native_call_site);

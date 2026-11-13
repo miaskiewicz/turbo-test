@@ -4,6 +4,7 @@
 //! ModuleRunner. Public surface is deliberately small: plumbing, not framework.
 
 pub mod agent;
+pub mod async_context;
 pub mod bundler;
 pub mod canon;
 pub mod ci;
