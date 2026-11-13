@@ -2705,6 +2705,86 @@ function __pseudoRandomBytes(n) {
   for (let i = 0; i < n; i++) { __seedCtr = (__seedCtr * 1103515245 + 12345) & 0x7fffffff; b[i] = (__seedCtr >> 16) & 255; }
   return b;
 }
+function __hashError(message, code) { return Object.assign(new Error(message), { code }); }
+function __hashEncoding(enc) {
+  const name = String(enc || 'utf8').toLowerCase().replace(/-/g, '');
+  const aliases = { binary: 'latin1', 'ucs2': 'utf16le' };
+  const normalized = aliases[name] || name;
+  if (!['utf8', 'hex', 'base64', 'base64url', 'ascii', 'latin1', 'utf16le'].includes(normalized)) return undefined;
+  return normalized;
+}
+function __hashHexBytes(data) {
+  if (data.length % 2) throw Object.assign(new TypeError('The hex encoding is invalid for data of odd length'), { code: 'ERR_INVALID_ARG_VALUE' });
+  const bytes = [];
+  for (let i = 0; i < data.length; i += 2) {
+    const pair = data.slice(i, i + 2);
+    if (!/^[0-9a-f]{2}$/i.test(pair)) break;
+    bytes.push(parseInt(pair, 16));
+  }
+  return new Uint8Array(bytes);
+}
+function __hashUtf16Output(bytes) {
+  let output = '';
+  for (let i = 0; i + 1 < bytes.length; i += 2) output += String.fromCharCode(bytes[i] | (bytes[i + 1] << 8));
+  return output;
+}
+function __hashLatinBytes(data) {
+  const bytes = new Uint8Array(data.length);
+  for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 255;
+  return bytes;
+}
+function __hashStringBytes(data, encoding) {
+  const enc = __hashEncoding(encoding) || 'utf8';
+  if (enc === 'hex') return __hashHexBytes(data);
+  if (enc === 'ascii' || enc === 'latin1') return __hashLatinBytes(data);
+  if (enc !== 'utf16le') return globalThis.Buffer.from(data, enc);
+  const bytes = new Uint8Array(data.length * 2);
+  for (let i = 0; i < data.length; i++) { const c = data.charCodeAt(i); bytes[i * 2] = c & 255; bytes[i * 2 + 1] = c >>> 8; }
+  return bytes;
+}
+function __hashBytes(data, encoding) {
+  if (typeof data === 'string') return __hashStringBytes(data, encoding);
+  if (!ArrayBuffer.isView(data)) throw Object.assign(new TypeError('The data argument must be a string, Buffer, TypedArray, or DataView'), { code: 'ERR_INVALID_ARG_TYPE' });
+  return new Uint8Array(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+}
+function __hashOutput(bytes, encoding) {
+  const enc = encoding && __hashEncoding(encoding);
+  if (!enc) return globalThis.Buffer.from(bytes);
+  if (enc === 'latin1') return Array.from(bytes, (b) => String.fromCharCode(b)).join('');
+  if (enc === 'ascii') return Array.from(bytes, (b) => String.fromCharCode(b & 127)).join('');
+  if (enc === 'utf16le') return __hashUtf16Output(bytes);
+  return globalThis.Buffer.from(bytes).toString(enc);
+}
+function __createHash(algorithm) {
+  if (typeof algorithm !== 'string') throw Object.assign(new TypeError('The algorithm argument must be a string'), { code: 'ERR_INVALID_ARG_TYPE' });
+  if (algorithm.toLowerCase() !== 'sha256') throw new Error(`Digest method not supported: ${algorithm}`);
+  const chunks = [];
+  let finalized = false;
+  const check = () => { if (finalized) throw __hashError('Digest already called', 'ERR_CRYPTO_HASH_FINALIZED'); };
+  return {
+    update(data, encoding) { check(); chunks.push(__hashBytes(data, encoding)); return this; },
+    digest(encoding) {
+      check();
+      const output = new Uint8Array(globalThis.__ttSha256(globalThis.Buffer.concat(chunks)));
+      finalized = true;
+      chunks.length = 0;
+      return __hashOutput(output, encoding);
+    },
+  };
+}
+const __subtleCrypto = {
+  async digest(algorithm, data) {
+    const name = typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name;
+    if (typeof name !== 'string') throw new TypeError('Algorithm name must be a string');
+    if (name.toUpperCase() !== 'SHA-256') throw new DOMException(`Unrecognized algorithm name: ${name}`, 'NotSupportedError');
+    let bytes;
+    if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
+    else if (ArrayBuffer.isView(data)) bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    else throw new TypeError('The data argument must be an ArrayBuffer or ArrayBufferView');
+    return globalThis.__ttSha256(bytes);
+  },
+};
+
 const __crypto = {
   randomUUID: () => {
     const b = __pseudoRandomBytes(16);
@@ -2715,7 +2795,7 @@ const __crypto = {
   randomBytes: (n) => globalThis.Buffer ? globalThis.Buffer.from(__pseudoRandomBytes(n)) : __pseudoRandomBytes(n),
   getRandomValues: (arr) => { const b = __pseudoRandomBytes(arr.length); for (let i = 0; i < arr.length; i++) arr[i] = b[i]; return arr; },
   randomInt: (min, max) => { if (max === undefined) { max = min; min = 0; } return min + (__pseudoRandomBytes(4).reduce((a, x) => a * 256 + x, 0) % (max - min)); },
-  createHash: () => { let data = ''; const h = { update: (d) => { data += String(d); return h; }, digest: (enc) => { let n = 0; for (let i = 0; i < data.length; i++) { n = (n * 31 + data.charCodeAt(i)) & 0x7fffffff; } const hex = n.toString(16).padStart(8, '0'); return enc === 'hex' || !enc ? hex.repeat(8).slice(0, 64) : hex; } }; return h; },
+  createHash: __createHash,
   createHmac: () => { let data = ''; const h = { update: (d) => { data += String(d); return h; }, digest: () => 'hmac' }; return h; },
   // Node crypto constants — many packages (e.g. @propelauth/node) read these at module load to
   // pick a padding/algorithm. turbo-test runs in bare V8 (no real OpenSSL), so the values just
@@ -2743,6 +2823,9 @@ const __crypto = {
 if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.randomUUID) {
   globalThis.crypto = Object.assign(globalThis.crypto || {}, { randomUUID: __crypto.randomUUID, getRandomValues: __crypto.getRandomValues });
 }
+if (!globalThis.crypto.subtle) globalThis.crypto.subtle = __subtleCrypto;
+__crypto.webcrypto = globalThis.crypto;
+__crypto.subtle = globalThis.crypto.subtle;
 function __unhandledEventError(value) {
   if (value instanceof Error) throw value;
   const error = new Error('Unhandled error.' + (value === undefined ? '' : ' (' + String(value) + ')'));

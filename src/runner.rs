@@ -9441,6 +9441,12 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(
         scope,
         global,
+        "__ttSha256",
+        crate::crypto_compat::native_sha256,
+    );
+    bind_fn(
+        scope,
+        global,
         "__ttStructuredClone",
         crate::structured_clone::native_structured_clone,
     );
