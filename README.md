@@ -1,7 +1,7 @@
 # turbo-test
 
 **A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
-(and, experimentally, jest).** Release **0.8.2**.
+(and, experimentally, jest).** Release **0.8.3**.
 
 turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
 work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
@@ -24,13 +24,13 @@ Since 0.6.0 the browser engine lives in one place,
 | `turbo-dom-layout` | HTML/CSS layout | turbo-html2pdf, turbo-surf |
 | `turbo-dom-raster` | synthetic screenshots | turbo-surf |
 
-turbo-test links `turbo-dom-browser-env` 0.8.2 and `turbo-dom-v8 ~150.4` (under the local alias
+turbo-test links `turbo-dom-browser-env` 0.8.3 and `turbo-dom-v8 ~150.4` (under the local alias
 `v8`; `scripts/check-single-v8.sh` keeps exactly one V8 in the graph). This repository carries no
 copy of the binding or of V8: the binding, its probes and the Chrome-control collectors that
 record their oracles live in turbo-dom's
 [`crates/turbo-dom-browser-env`](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
-— fix DOM behaviour and recollect controls there. turbo-dom-v8 150.4.0 and
-turbo-dom / -layout / -browser-env 0.8.2 come from crates.io.
+— fix DOM behaviour and recollect controls there. turbo-dom-v8 150.4.1 and
+turbo-dom / -layout / -browser-env 0.8.3 come from crates.io.
 
 ## Install and run
 
@@ -154,6 +154,15 @@ media switch are independent: either can be on without the other.
 
 `test.cssTransitions` is not in vitest's `InlineConfig` type either (`// @ts-expect-error`).
 
+**Touch events and computed `text-decoration`: as jsdom / happy-dom report them.** Under
+`environment: 'jsdom'` or `'happy-dom'` (and with no environment set, turbo-test's DOM default), a
+`TouchEvent`'s `touches` / `targetTouches` / `changedTouches` keep plain objects, so
+`fireEvent.touchStart(el, { touches: [{ clientX: 10, clientY: 20 }] })` works (jsdom has no `Touch`
+class), and `getComputedStyle(el).textDecoration` is the declared shorthand (`line-through`, not
+Chrome's `line-through rgb(0, 0, 0)`), which is what jest-dom's `toHaveStyle` compares against
+under vitest. A file declaring `// @vitest-environment turbo-dom` gets Chrome's behaviour instead
+(`Touch` objects only, Chrome's serialization). Both are set per file, also on a reused isolate.
+
 ## Isolate-reuse (extra speed, zero config)
 
 By default turbo-test isolates every file (like vitest's `isolate: true`). If your vitest config
@@ -177,20 +186,35 @@ TURBO_NO_REUSE=1       npx turbo-test   # force fresh isolation
 
 turbo-test also runs **jest** suites — no rewrite to `vi`. A `jest` global maps onto the same
 machinery as `vi` (`jest.fn`, `jest.mock`/`doMock`, `jest.spyOn`, `jest.mocked`,
-`clearAllMocks`/`resetAllMocks`/`restoreAllMocks`, fake timers, `jest.requireActual`,
-`jest.isolateModules`, …); the type-only members (`jest.Mock`, `jest.Mocked`, `jest.SpyInstance`)
-are erased by the transform. When there's **no vitest config**, the nearest **jest config**
-(`jest.config.{js,cjs,mjs,ts,json}` or a `package.json` `"jest"` block) is read for `setupFiles` /
-`setupFilesAfterEnv` (with `<rootDir>` resolved), so your existing setup runs unchanged. Its
-`fakeTimers` block is read too (0.8.0+): `enableGlobally: true` fakes the timers before each test
-file loads, and `now` / `doNotFake` / `timerLimit` / `advanceTimers` become the defaults of
-`jest.useFakeTimers()` (the call's own argument wins). Mocks from `jest.fn()` / `jest.spyOn()`
-have jest-mock's `whenCalledWith(...matchers)` (0.8.0+; `vi.fn()` has none, as in vitest).
-Automock (`enableAutomock`, `automock: true`, …) is not supported yet (#184). Under a jest
-project, `mockReset` / `jest.resetAllMocks` / `mockRestore` drop a mock's implementation so it
-returns `undefined` (jest 30 semantics, 0.8.0+); `vi.fn()` / `vi.spyOn()` keep vitest's behaviour
-(the impl stays and a spy keeps calling through). When a vitest config applies, the jest config's
-`fakeTimers` is ignored.
+`clearAllMocks`/`resetAllMocks`/`restoreAllMocks`, fake timers, `jest.requireActual` /
+`jest.requireMock`, `jest.isolateModules` / `isolateModulesAsync`, `jest.replaceProperty`, …); the
+type-only members (`jest.Mock`, `jest.Mocked`, `jest.SpyInstance`) are erased by the transform.
+When there's **no vitest config**, the nearest **jest config** (`jest.config.{js,cjs,mjs,ts,json}`
+or a `package.json` `"jest"` block) is read, `<rootDir>` resolved:
+
+- `setupFiles` (run before the test framework is installed, as in jest) and `setupFilesAfterEnv`;
+- `globalSetup` / `globalTeardown` (0.8.3+): run once before / after all files in one shared
+  context and require cache, called with `(globalConfig, projectConfig)`; the `process.env`
+  changes globalSetup makes reach every test file, and a failing teardown fails the run;
+- `moduleNameMapper` (0.8.3+): regex keys in config order, `$n` captures, a list of targets or
+  `require.resolve(...)`; it is read from the config text, so mappings built in code (a spread, a
+  helper's result) are reported on stderr and should be written as literal entries;
+- `testMatch`, `injectGlobals: false`, `moduleDirectories`, `customExportConditions`,
+  `testTimeout`, `clearMocks` / `resetMocks` / `restoreMocks` (0.8.3+);
+- `fakeTimers` (0.8.0+): `enableGlobally: true` fakes the timers before each test file loads, and
+  `now` / `doNotFake` / `timerLimit` / `advanceTimers` become the defaults of `jest.useFakeTimers()`
+  (the call's own argument wins);
+- `automock: true` (0.8.2+; also `jest.enableAutomock()`), with colocated `__mocks__/` manual mocks
+  and chained `jest.onGenerateMock` callbacks.
+
+Mocks from `jest.fn()` / `jest.spyOn()` have jest-mock's `whenCalledWith(...matchers)` (0.8.0+;
+`vi.fn()` has none, as in vitest). Under a jest project, `mockReset` / `jest.resetAllMocks` /
+`mockRestore` drop a mock's implementation so it returns `undefined` (jest 30 semantics, 0.8.0+);
+`vi.fn()` / `vi.spyOn()` keep vitest's behaviour (the impl stays and a spy keeps calling through).
+Assigning a namespace import's member (`import * as api from './api'; api.fetch = jest.fn()`) takes
+effect for the namespace and its other importers, as under babel-jest / ts-jest (0.8.3+); vitest's
+namespaces stay read-only. Test files get `process.env.JEST_WORKER_ID`. When a vitest config
+applies, the jest config's `fakeTimers` is ignored.
 
 Both the injected globals **and** the explicit-import form work — a suite with `injectGlobals: false`
 that does `import { describe, it, expect, jest } from '@jest/globals'` resolves that specifier from
@@ -242,6 +266,9 @@ npx turbo-test --coverage --coverage-per-file \
 
 # pick reporters (default: lcov,json-summary,text). html is opt-in.
 npx turbo-test --coverage --coverage-reporter lcov,json-summary,text,html
+
+# also report source files no test loaded, at zero (the include globs define the surface)
+npx turbo-test --coverage --coverage-all --coverage-include 'src/**/*.{ts,tsx}'
 ```
 
 Coverage uses **V8's native precise coverage** (the engine's own per-function/block counters via
@@ -290,6 +317,14 @@ config are applied to the report set automatically (or pass `--coverage-include`
 (`src/**/*.{ts,tsx}`). To exempt a single file, add a
 `/* turbo-test-coverage-ignore-file */` comment near its top.
 
+**Unexecuted files (`--coverage-all`, 0.8.3+).** By default the report lists the files the tests
+loaded. `--coverage-all` (or `test.coverage.all: true`) adds every source file the include globs
+match that no test loaded, with its statements, functions and branches at zero, so totals and
+thresholds reflect the whole surface. Like vitest, it leaves out test / spec / bench files, `.d.ts`,
+tools' config files (`vite.config.ts`, …), `test/` / `tests/` at the root, `__tests__` /
+`__mocks__`, non-JS/TS files and files with the ignore comment; symlinked directories are not
+followed. Without an include glob it adds nothing.
+
 **Speed.** Collection is opt-in and runs ~2–3× slower than a plain run (V8 block coverage keeps
 code un-optimized to count blocks) — in line with vitest's own coverage. Normal runs are completely
 unaffected (no `--coverage` → no inspector, no source maps, identical transform cache). Branch
@@ -315,7 +350,7 @@ turbo-test [files...] [--jobs N] [--shard i/n] [--reporter json]
            [--coverage] [--coverage-dir DIR]
            [--coverage-thresholds lines=,functions=,branches=] [--coverage-per-file]
            [--coverage-reporter lcov,json-summary,text,html]
-           [--coverage-include GLOB] [--coverage-exclude GLOB]
+           [--coverage-include GLOB] [--coverage-exclude GLOB] [--coverage-all]
 ```
 
 No file args → discovers test files. If a `vitest.config.*` is found, turbo-test honors its
@@ -501,12 +536,12 @@ npm run complexity:js        # CI job `complexity / js (cc <= 7)`
 - **Release** (`v*` tag): `release-guard` (no `[patch]`, no git sources, versions equal the tag),
   then the npm and crates.io publish jobs ([RELEASING.md](RELEASING.md)).
 
-## Status (0.8.2)
+## Status (0.8.3)
 
 - vitest suites: drop-in; the `vi` / mock / `expect` surface is vitest 4.1.12's
   ([vitest.compat.md](vitest.compat.md) lists what is covered and what is approximated).
 - jest suites: experimental (see above).
-- DOM: turbo-dom-browser-env 0.8.2, Chrome 156-controlled in turbo-dom.
+- DOM: turbo-dom-browser-env 0.8.3, Chrome 156-controlled in turbo-dom.
 - Open work is tracked as GitHub issues in this repository and in turbo-dom.
 
 ## License

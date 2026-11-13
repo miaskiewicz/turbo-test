@@ -64,13 +64,13 @@ A release where these disagree is a bug. Bump both in the same commit.
   `turbo_dom_browser_env::browser_env::{install, enabled, reset, flush_ownership}`. Fix DOM behaviour there.
 - V8 is turbo-dom's rusty_v8 fork `turbo-dom-v8` (aliased `v8`). No V8 source is vendored
   here. `bash scripts/check-single-v8.sh` must pass (one turbo-dom-v8, no v8/v8x/turbo-surf-v8).
-- turbo-dom-v8 150.4.0 and turbo-dom / -layout / -browser-env 0.8.0 all come from crates.io
+- turbo-dom-v8 150.4.1 and turbo-dom / -layout / -browser-env 0.8.3 all come from crates.io
   (no `[patch.crates-io]`); `release-guard` fails a tag if a git pin comes back.
 
 ## Coverage CLI (v0.2.3+)
 `--coverage` `--coverage-dir DIR` `--coverage-thresholds lines=,functions=,branches=,statements=`
 `--coverage-per-file` `--coverage-reporter lcov,json-summary,text,html`
-`--coverage-include GLOB` `--coverage-exclude GLOB`.
+`--coverage-include GLOB` `--coverage-exclude GLOB` `--coverage-all` (v0.8.3+: unexecuted matching files at zero).
 Thresholds/include/exclude are auto-read from the vitest config `coverage` block by `cli.js`
 when not passed explicitly (flags win).
 `statements` (v0.2.6+) is DERIVED: oxc parses each source once (shared with the branch pass —

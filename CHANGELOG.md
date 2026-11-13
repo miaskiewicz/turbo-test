@@ -5,7 +5,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
-## [0.8.3] — 2026-11-11 — jest compat: full config surface + module resolution fixes
+## [0.8.3] — 2026-11-13 — jest compat: full config surface, module resolution, jsdom parity, faster GC
 
 ### Added
 - Jest `globalSetup` / `globalTeardown` (#335): resolved as jest does (`<rootDir>`,
@@ -38,24 +38,16 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   module lookup (beyond `node_modules`), e.g. `["node_modules", "src"]`.
 - Jest `customExportConditions` (#345): forwards custom export conditions to the oxc
   resolver so packages with conditional exports resolve correctly under Jest config.
-- Jest `isolateModulesAsync` preserves outer module registry (#336): the async variant
-  now snapshots and restores the CJS registry around the callback, matching Jest's
-  semantics where modules loaded inside the callback are isolated.
-- Jest `jest.setTimeout` / `jest.retryTimes` / `jest.getSeed` / `jest.isGeneratingDiff`
-  shims (#337, #338, #339): `setTimeout` sets the default test timeout,
-  `retryTimes` stores retry config (foundation for retry execution), `getSeed` returns
-  the PRNG seed, `isGeneratingDiff` returns false (no snapshot diff in turbo-test).
-- Jest `each` table-driven tests (#341): `test.each` / `describe.each` / `it.each` with
-  array-of-arrays, array-of-primitives, and tagged-template-literal formats.
-- Jest `jest.advanceTimersByTimeAsync` / `jest.advanceTimersToNextTimerAsync` (#342):
-  async timer advancement that flushes microtasks between steps, matching Jest 29+.
-- Jest `jest.replaceProperty` / `jest.spyOn` getter/setter (#343): `replaceProperty`
-  replaces an object property with a value and returns a replacer with `.restore()`;
-  `spyOn` with `'get'`/`'set'` accessor type creates spies on property accessors.
-- Jest `expect.addSnapshotSerializer` (#344): registers custom serializers that are
-  consulted during snapshot matching, matching Jest's `addSnapshotSerializer` API.
-- Jest `expect.closeTo` asymmetric matcher (#346): `expect.closeTo(number, numDigits?)`
-  for use inside `toEqual` / `toMatchObject` patterns, matching Jest's asymmetric API.
+- Jest config `testTimeout` (#346) is the default per-test timeout (the CLI `--testTimeout`
+  still wins), and `clearMocks` / `resetMocks` / `restoreMocks` (#343) apply before each test,
+  as jest does. Why: they were silently ignored, so suites relying on them leaked mock state.
+- Jest `setupFiles` run before the test framework is installed (#344): `expect` / `test` /
+  `describe` and the hooks are undefined while they run, as in jest's two-phase lifecycle;
+  `setupFilesAfterEnv` still runs with them.
+- Jest automock (#341): a factory-less `jest.mock('./x')` and `enableAutomock` load a
+  colocated `__mocks__/x.js` (next to the resolved module) when present, and
+  `jest.onGenerateMock` callbacks chain, each receiving `(path, mock)`.
+
 - `--coverage-all` flag (#320): includes unexecuted source files (matched by
   `--coverage-include` globs) in coverage reports at zero hits, so the denominator
   reflects the full source surface. Auto-read from vitest config `coverage.all: true`.
@@ -91,9 +83,17 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - `process.env.JEST_WORKER_ID` (#342) is set for every jest project's test files — any
   `testEnvironment`, jsdom included — and not for vitest ones, as jest and vitest do. Why:
   per-worker resources (database names, ports) are commonly keyed on it.
-- Module resolution cache respects custom conditions (#317): the oxc resolver thread-local
-  cache is keyed by the full set of resolve options including custom export conditions,
-  preventing stale cache hits when conditions change between test files.
+- A dependency's published `tsconfig.json` whose `extends` target is not installed (a
+  dev-only dependency of that package) no longer breaks `require()` of the package's compiled
+  JS (#317): Node resolution inside node_modules does not depend on it.
+- `jest.isolateModulesAsync` / `jest.isolateModules` keep the outer module registry (#336):
+  modules loaded inside the callback are isolated and the ones loaded before it are restored
+  afterwards, also when the callback rejects (it used to clear the cache without saving it).
+- `jest.restoreAllMocks` undoes `jest.replaceProperty` (#337), and the replacement's handle
+  has `replaceValue`, as jest's does.
+- `jest.requireActual` throws when the module does not resolve instead of hiding the error
+  (#338).
+- `jest.runAllTicks` flushes `process.nextTick` callbacks under modern fake timers (#339).
 - Projects without esbuild load through the ESM graph loader again: the #316 change sent
   every entry the native emitter could transform down the CommonJS module-runner path,
   which cannot reproduce top-level await, vite's `import()` rejection messages, link-time
@@ -138,9 +138,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   now fails here too.
 
 ### Dependencies
-- turbo-dom-browser-env / turbo-dom / turbo-dom-layout 0.8.3, pinned to the turbo-dom
-  release commit `ce3d0d0b` until 0.8.3 is on crates.io (release-guard refuses the tag while
-  that git pin is in Cargo.toml).
+- turbo-dom-browser-env / turbo-dom / turbo-dom-layout 0.8.3 from crates.io: TouchEvent and
+  computed-style jsdom modes (set per test file by turbo-test), the jsdom-parity fixes they
+  carry, one turbo-dom-v8 150.4.1.
 
 ### Tests
 - Restored three test fixtures (`tests/data/snapshots/inline.test.ts`,
