@@ -1,7 +1,7 @@
 # turbo-test
 
 **A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
-(and, experimentally, jest).** Release **0.8.3**.
+(and, experimentally, jest).** Release candidate **0.8.4** (unreleased; the published release is **0.8.3**).
 
 turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
 work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
@@ -24,13 +24,15 @@ Since 0.6.0 the browser engine lives in one place,
 | `turbo-dom-layout` | HTML/CSS layout | turbo-html2pdf, turbo-surf |
 | `turbo-dom-raster` | synthetic screenshots | turbo-surf |
 
-turbo-test links `turbo-dom-browser-env` 0.8.3 and `turbo-dom-v8 ~150.4` (under the local alias
+turbo-test links `turbo-dom-browser-env` 0.8.4 and `turbo-dom-v8 ~150.4` (under the local alias
 `v8`; `scripts/check-single-v8.sh` keeps exactly one V8 in the graph). This repository carries no
 copy of the binding or of V8: the binding, its probes and the Chrome-control collectors that
 record their oracles live in turbo-dom's
 [`crates/turbo-dom-browser-env`](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
 — fix DOM behaviour and recollect controls there. turbo-dom-v8 150.4.1 and
-turbo-dom / -layout / -browser-env 0.8.3 come from crates.io.
+turbo-dom / -layout / -browser-env 0.8.4 use an exact pre-publication git pin on this
+release branch (`25f59eac79993c5851f39ed75c3c233d0df96a6b`). The V8 fork remains the published crates.io version. Drop the DOM
+pin after the 0.8.4 crates are published and before tagging a runner release.
 
 ## Install and run
 

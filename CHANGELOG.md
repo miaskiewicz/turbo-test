@@ -5,6 +5,21 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.8.4] — Unreleased candidate — shared DOM layout performance
+
+### Performance
+- Consume turbo-dom's v0.8.4 candidate, including bounded font shaping-plan reuse and
+  reuse of intrinsic table measurements during final layout. These shared-engine
+  changes avoid repeated shaping setup and table work without changing DOM behavior.
+  Performance measurements belong to the turbo-dom/turbo-html2pdf harness; no runner
+  speedup is claimed before consumer validation.
+
+### Release preparation
+- Align the Rust and npm package versions at 0.8.4. The release branch uses an exact
+  pre-publication turbo-dom source pin (`25f59eac79993c5851f39ed75c3c233d0df96a6b`)
+  for reproducible validation; remove it only
+  after compatible 0.8.4 crates are published, before tagging this runner release.
+
 ## [0.8.3] — 2026-11-13 — jest compat: full config surface, module resolution, jsdom parity, faster GC
 
 ### Added
