@@ -141,8 +141,9 @@ test('real Node client exchanges bytes with native server',async()=>{{
     let output = client.join().unwrap();
     assert!(
         output.status.success(),
-        "Node client: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "Node client: {}\nNative runner: {}",
+        String::from_utf8_lossy(&output.stderr),
+        run.all()
     );
     one_pass(&run);
 }

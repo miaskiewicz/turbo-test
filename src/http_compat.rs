@@ -593,6 +593,64 @@ fn operation(name: &str, args: &Value) -> Result<Value> {
         }
     })
 }
+/// Real OS handles must give external peers time to run before virtual timer advancement.
+/// No-I/O runners keep their existing fast timer path.
+pub fn has_pending_io() -> bool {
+    TRANSPORT.with(|table| {
+        let table = table.borrow();
+        !table.listeners.is_empty() || !table.connections.is_empty()
+    })
+}
+
+#[cfg(unix)]
+pub fn wait_for_io(timeout: Duration) {
+    use std::os::fd::AsRawFd;
+    let mut descriptors = TRANSPORT.with(|table| {
+        let table = table.borrow();
+        let mut descriptors: Vec<libc::pollfd> = table
+            .listeners
+            .values()
+            .map(|listener| libc::pollfd {
+                fd: listener.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            })
+            .collect();
+        descriptors.extend(table.connections.values().map(connection_descriptor));
+        descriptors
+    });
+    if descriptors.is_empty() {
+        return;
+    }
+    let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
+    // The table owns every descriptor until this same worker returns from poll.
+    unsafe {
+        libc::poll(
+            descriptors.as_mut_ptr(),
+            descriptors.len() as libc::nfds_t,
+            millis,
+        );
+    }
+}
+
+#[cfg(unix)]
+fn connection_descriptor(connection: &Connection) -> libc::pollfd {
+    use std::os::fd::AsRawFd;
+    let writable = connection.sent < connection.output.len();
+    libc::pollfd {
+        fd: connection.socket.as_raw_fd(),
+        events: libc::POLLIN | if writable { libc::POLLOUT } else { 0 },
+        revents: 0,
+    }
+}
+
+#[cfg(not(unix))]
+pub fn wait_for_io(timeout: Duration) {
+    if has_pending_io() {
+        std::thread::sleep(timeout);
+    }
+}
+
 /// Close all transport resources when a worker starts a fresh test context.
 pub fn reset() {
     TRANSPORT.with(|table| {
