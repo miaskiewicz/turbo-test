@@ -48,7 +48,7 @@ fn public(bytes: &[u8]) -> Result<RsaPublicKey, String> {
     RsaPublicKey::from_public_key_der(bytes).map_err(|error| error.to_string())
 }
 fn valid_parameters(bits: usize, exponent: u32) -> bool {
-    (512..=4096).contains(&bits) && exponent >= 3 && exponent % 2 != 0
+    (512..=4096).contains(&bits) && exponent >= 3 && !exponent.is_multiple_of(2)
 }
 fn key_pair(key: &RsaPrivateKey) -> Result<Output, String> {
     Ok(Output::Pair(
