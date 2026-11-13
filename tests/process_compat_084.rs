@@ -8,8 +8,14 @@ fn child_process_sync_execution_output_errors_and_cleanup() {
     let p = Project::new("process-084");
     p.with_esbuild();
     p.file("package.json", r#"{"name":"process-084"}"#);
-    p.file("jest.config.js", "module.exports = { testEnvironment: 'node' };\n");
-    p.file("processes.test.cjs", include_str!("data/compat-084/processes.cjs"));
+    p.file(
+        "jest.config.js",
+        "module.exports = { testEnvironment: 'node' };\n",
+    );
+    p.file(
+        "processes.test.cjs",
+        include_str!("data/compat-084/processes.cjs"),
+    );
     let run = turbo_test(&p.dir, &["--reporter", "json"], &[]);
     let report = json_report(&run);
     assert_eq!(report["numPassedTests"], 8, "{}", run.all());
