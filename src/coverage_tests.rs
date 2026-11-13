@@ -1102,3 +1102,42 @@ fn channel_keeps_only_the_latest_response_and_ignores_notifications() {
     ch.send_response(4, v8::UniquePtr::default());
     assert_eq!(resp.borrow().as_deref(), Some("{\"id\":3,\"result\":{}}"));
 }
+
+#[test]
+fn coverage_all_leaves_out_what_vitest_does() {
+    for rel in [
+        "src/a.test.ts",
+        "src/a.spec.tsx",
+        "src/a-test.js",
+        "src/a.bench.mjs",
+        "src/a.test-d.ts",
+        "src/a-spec.d.ts",
+        "vitest.config.mts",
+        "src/types.d.ts",
+        "src/types.d.mts",
+        "vite.config.ts",
+        "src/jest.config.cjs",
+        "src/__tests__/a.js",
+        "src/__mocks__/a.js",
+        "test/helper.js",
+        "tests/helper.ts",
+        "src/data.json",
+        "src/styles.css",
+    ] {
+        assert!(default_coverage_excluded(rel), "{rel} is excluded");
+    }
+    for rel in [
+        "src/config.ts",
+        "src/test.js",
+        "src/testing/utils.ts",
+        "src/spec-parser.ts",
+        "src/render-test-helpers.ts",
+        "src/use-d-pad.ts",
+        "src/app.config.ts",
+        "src/id.dto.ts",
+        "src/a.tsx",
+        "lib/x.cjs",
+    ] {
+        assert!(!default_coverage_excluded(rel), "{rel} is a source file");
+    }
+}

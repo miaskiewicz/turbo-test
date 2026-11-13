@@ -123,6 +123,86 @@ pub fn extract_all(file: &Path, source: &str) -> (Vec<RawBranch>, Vec<u32>) {
     (c.out, c.stmts)
 }
 
+/// The start offset and name of each function of `source` that V8 names — declarations, class
+/// and object methods (by key; `get x` / `set x` for accessors) and functions assigned to a
+/// variable, property, class field or member (`exports.h`) — as the loaded path's function
+/// coverage counts them: a never-loaded file's functions, for `--coverage-all`. An inline
+/// callback V8 leaves unnamed is not counted there, nor here.
+pub fn function_starts(file: &Path, source: &str) -> Vec<(u32, String)> {
+    let st = SourceType::from_path(file).unwrap_or_default();
+    let allocator = Allocator::default();
+    let ret = Parser::new(&allocator, source, st).parse();
+    let mut fns = Fns {
+        source,
+        out: Vec::new(),
+        pending: None,
+    };
+    fns.visit_program(&ret.program);
+    fns.out
+}
+
+struct Fns<'s> {
+    source: &'s str,
+    out: Vec<(u32, String)>,
+    /// the name V8 infers for the function visited next (its key / binding / target)
+    pending: Option<String>,
+}
+
+impl Fns<'_> {
+    fn push(&mut self, start: u32, own: Option<&str>) {
+        let name = own.map(str::to_string).or_else(|| self.pending.take());
+        self.pending = None;
+        if let Some(name) = name {
+            self.out.push((start, name));
+        }
+    }
+
+    /// Name the next function `name` when `value` is one.
+    fn name_next(&mut self, value: Option<&Expression>, name: Option<String>) {
+        if value.is_some_and(|v| v.without_parentheses().is_function()) {
+            self.pending = name;
+        }
+    }
+}
+
+impl<'a> Visit<'a> for Fns<'_> {
+    fn visit_method_definition(&mut self, m: &MethodDefinition<'a>) {
+        let key = m.key.static_name().map(|k| match m.kind {
+            MethodDefinitionKind::Get => format!("get {k}"),
+            MethodDefinitionKind::Set => format!("set {k}"),
+            _ => k.to_string(),
+        });
+        self.pending = key;
+        walk::walk_method_definition(self, m);
+    }
+    fn visit_object_property(&mut self, p: &ObjectProperty<'a>) {
+        self.name_next(Some(&p.value), p.key.static_name().map(|k| k.to_string()));
+        walk::walk_object_property(self, p);
+    }
+    fn visit_property_definition(&mut self, p: &PropertyDefinition<'a>) {
+        self.name_next(p.value.as_ref(), p.key.static_name().map(|k| k.to_string()));
+        walk::walk_property_definition(self, p);
+    }
+    fn visit_variable_declarator(&mut self, d: &VariableDeclarator<'a>) {
+        let name = d.id.get_identifier_name().map(|n| n.to_string());
+        self.name_next(d.init.as_ref(), name);
+        walk::walk_variable_declarator(self, d);
+    }
+    fn visit_assignment_expression(&mut self, a: &AssignmentExpression<'a>) {
+        let target = &self.source[a.left.span().start as usize..a.left.span().end as usize];
+        self.name_next(Some(&a.right), Some(target.to_string()));
+        walk::walk_assignment_expression(self, a);
+    }
+    fn visit_function(&mut self, f: &Function<'a>, flags: oxc_semantic::ScopeFlags) {
+        self.push(f.span.start, f.id.as_ref().map(|id| id.name.as_str()));
+        walk::walk_function(self, f, flags);
+    }
+    fn visit_arrow_function_expression(&mut self, a: &ArrowFunctionExpression<'a>) {
+        self.push(a.span.start, None);
+        walk::walk_arrow_function_expression(self, a);
+    }
+}
+
 #[cfg(test)]
 #[path = "coverage_branch_tests.rs"]
 mod unit_tests;

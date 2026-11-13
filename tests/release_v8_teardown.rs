@@ -4,7 +4,7 @@
 //! this crate resolves.
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 
 fn initialize() {
     static INIT: Once = Once::new();
@@ -28,7 +28,14 @@ impl Drop for WeakOwner {
     }
 }
 
+/// The two checks run one at a time: a snapshot-creator isolate alive alongside a default one
+/// (cargo runs tests on parallel threads) shares V8's process-wide read-only heap and aborts.
+static ONE_ISOLATE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
 fn check_retirement(snapshot: bool) {
+    let _serial = ONE_ISOLATE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     initialize();
     let retired = Rc::new(Cell::new(false));
     let finalized = Rc::new(Cell::new(false));

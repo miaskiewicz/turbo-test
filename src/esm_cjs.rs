@@ -31,7 +31,7 @@ use oxc_ast::{AstBuilder, NONE};
 use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
-use oxc_semantic::{Scoping, SemanticBuilder, SymbolId};
+use oxc_semantic::{Scoping, SemanticBuilder, SymbolFlags, SymbolId};
 use oxc_span::{SourceType, Span, SPAN};
 use oxc_transformer::{HelperLoaderMode, TransformOptions, Transformer};
 
@@ -197,9 +197,51 @@ struct EmitState<'a, 'r> {
     uses_to_esm: bool,
     /// `LowerCtx::module_path`
     module_path: Option<String>,
+    /// Root-level bindings that shadow the CJS wrapper's parameters (`exports`, `module`,
+    /// `require`, `__filename`, `__dirname`) must be renamed to avoid strict-mode redeclaration
+    /// errors. Maps the SymbolId to the replacement name.
+    wrapper_renames: HashMap<SymbolId, String>,
 }
 
 impl<'a> EmitState<'a, '_> {
+    /// The new name of a reference to a renamed wrapper-parameter binding (`wrapper_renames`).
+    fn renamed_ref(&self, id: &IdentifierReference) -> Option<&String> {
+        let sym = self
+            .scoping
+            .get_reference(id.reference_id.get()?)
+            .symbol_id()?;
+        self.wrapper_renames.get(&sym)
+    }
+
+    /// `{ name }` / `{ name = init }` as `{ name: renamed }` / `{ name: renamed = init }`.
+    fn expanded_shorthand_target(
+        &self,
+        p: &mut AssignmentTargetPropertyIdentifier<'a>,
+        renamed: &str,
+    ) -> AssignmentTargetProperty<'a> {
+        let span = p.span;
+        let key = self
+            .ast
+            .property_key_static_identifier(span, p.binding.name);
+        let target = AssignmentTarget::from(
+            self.ast
+                .simple_assignment_target_assignment_target_identifier(
+                    span,
+                    self.ast.ident(renamed),
+                ),
+        );
+        let binding = match p.init.take() {
+            Some(init) => self
+                .ast
+                .assignment_target_maybe_default_assignment_target_with_default(span, target, init),
+            None => AssignmentTargetMaybeDefault::from(target),
+        };
+        self.ast
+            .assignment_target_property_assignment_target_property_property(
+                span, key, binding, false,
+            )
+    }
+
     fn access_for_ref(&self, id: &IdentifierReference) -> Option<&Access> {
         let rid = id.reference_id.get()?;
         let sym = self.scoping.get_reference(rid).symbol_id()?;
@@ -396,6 +438,12 @@ impl<'a> EmitState<'a, '_> {
         let Expression::Identifier(id) = expr else {
             return false;
         };
+        if let Some(renamed) = self.renamed_ref(id) {
+            *expr = self
+                .ast
+                .expression_identifier(id.span, self.ast.ident(renamed));
+            return true;
+        }
         let Some(access) = self.access_for_ref(id).cloned() else {
             return false;
         };
@@ -461,6 +509,33 @@ impl<'a> VisitMut<'a> for EmitState<'a, '_> {
             return;
         }
         walk_mut::walk_expression(self, expr);
+    }
+
+    /// Assignment / update targets (`module = 2`, `exports++`, `[exports] = …`) of a renamed
+    /// binding; expression reads are rewritten by `rewrite_ident_ref`.
+    fn visit_identifier_reference(&mut self, id: &mut IdentifierReference<'a>) {
+        if let Some(renamed) = self.renamed_ref(id) {
+            id.name = self.ast.ident(renamed);
+        }
+    }
+
+    /// `({ module } = obj)`: the shorthand's name is also the property read, so a renamed target
+    /// becomes `({ module: _module } = obj)`.
+    fn visit_assignment_target_property(&mut self, prop: &mut AssignmentTargetProperty<'a>) {
+        if let AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(p) = prop {
+            if let Some(renamed) = self.renamed_ref(&p.binding).cloned() {
+                *prop = self.expanded_shorthand_target(p, &renamed);
+            }
+        }
+        walk_mut::walk_assignment_target_property(self, prop);
+    }
+
+    fn visit_binding_identifier(&mut self, id: &mut BindingIdentifier<'a>) {
+        if let Some(sym) = id.symbol_id.get() {
+            if let Some(renamed) = self.wrapper_renames.get(&sym) {
+                id.name = self.ast.ident(renamed);
+            }
+        }
     }
 
     fn visit_object_property(&mut self, prop: &mut ObjectProperty<'a>) {
@@ -621,6 +696,84 @@ pub(crate) fn transform_to_parts(js: &str, ctx: &LowerCtx) -> Option<ModuleParts
     Some(parts)
 }
 
+/// Top-level bindings named like a CJS wrapper parameter, with fresh names. A `let` / `const` /
+/// `class` one always: in the wrapper it redeclares the parameter (a SyntaxError), also in an ES
+/// module whose only module syntax (`export {}`, `import.meta`) lowers to nothing. In an ES module
+/// (`module_syntax`) a `var` / function one too: it would replace the `module` / `require` the
+/// emitted `module.exports = …` and import `require(…)` calls use. Imports are lowered away and
+/// keep their name; a CommonJS file's `var exports = exports || {}` re-declares the parameter on
+/// purpose, as Node runs it.
+fn wrapper_renames(scoping: &Scoping, module_syntax: bool) -> HashMap<SymbolId, String> {
+    let lexical = SymbolFlags::BlockScopedVariable | SymbolFlags::Class;
+    ["exports", "module", "require", "__filename", "__dirname"]
+        .into_iter()
+        .filter_map(|name| Some((scoping.get_root_binding(name.into())?, name)))
+        .filter(|(sym, _)| {
+            let flags = scoping.symbol_flags(*sym);
+            !flags.contains(SymbolFlags::Import) && (module_syntax || flags.intersects(lexical))
+        })
+        .map(|(sym, name)| (sym, unused_name(scoping, name)))
+        .collect()
+}
+
+/// `_name`, else `_name2`, `_name3`, … : the first one the module neither binds nor reads as a
+/// global.
+fn unused_name(scoping: &Scoping, name: &str) -> String {
+    let taken = |n: &str| {
+        scoping.symbol_names().any(|s| s == n)
+            || scoping
+                .root_unresolved_references()
+                .keys()
+                .any(|k| k.as_str() == n)
+    };
+    (1..)
+        .map(|i| match i {
+            1 => format!("_{name}"),
+            _ => format!("_{name}{i}"),
+        })
+        .find(|n| !taken(n))
+        .unwrap_or_default()
+}
+
+/// A renamed function / class keeps its source `.name` (`function module` stays `module`), set
+/// once the module body has defined it.
+fn source_names(renames: &HashMap<SymbolId, String>, scoping: &Scoping) -> String {
+    let named = SymbolFlags::Function | SymbolFlags::Class;
+    let mut fixes: Vec<String> = renames
+        .iter()
+        .filter(|(sym, _)| scoping.symbol_flags(**sym).intersects(named))
+        .map(|(sym, renamed)| {
+            format!(
+                "\nObject.defineProperty({renamed}, \"name\", {{ value: \"{}\", configurable: true }});",
+                scoping.symbol_name(*sym)
+            )
+        })
+        .collect();
+    fixes.sort();
+    fixes.concat()
+}
+
+/// Point a local export's getter at its renamed binding (`export const require` → `_require`).
+fn renamed_exports(
+    exports: Vec<ExportEntry>,
+    renames: &HashMap<SymbolId, String>,
+    scoping: &Scoping,
+) -> Vec<ExportEntry> {
+    let by_name: HashMap<&str, &str> = renames
+        .iter()
+        .map(|(sym, renamed)| (scoping.symbol_name(*sym), renamed.as_str()))
+        .collect();
+    exports
+        .into_iter()
+        .map(|mut e| {
+            if let Some(renamed) = by_name.get(e.value_js.as_str()) {
+                e.value_js = (*renamed).to_string();
+            }
+            e
+        })
+        .collect()
+}
+
 /// Core: classify imports/exports under `ctx`, rewrite imported-local refs + dynamic `import()` +
 /// (bundler) `require()` calls, codegen the body. `map_src = Some((path, original_src))` enables a
 /// codegen source map (returned as the raw VLQ `mappings` string for the body).
@@ -635,6 +788,13 @@ fn lower<'a>(
     let p = plan(&ast, &scoping, ctx, program)?;
     let (requires, re_exports, exports) = (p.requires, p.re_exports, p.exports);
 
+    let has_module_syntax = !(requires.is_empty()
+        && re_exports.is_empty()
+        && exports.is_empty()
+        && !p.default_needs_rewrite);
+    let wrapper_renames = wrapper_renames(&scoping, has_module_syntax);
+    let exports = renamed_exports(exports, &wrapper_renames, &scoping);
+    let name_fixes = source_names(&wrapper_renames, &scoping);
     let mut state = EmitState {
         ast,
         imports: p.imports,
@@ -642,6 +802,7 @@ fn lower<'a>(
         resolve: ctx.resolve,
         uses_to_esm: false,
         module_path: ctx.module_path.clone(),
+        wrapper_renames,
     };
     let mut body = p.body_stmts;
     for stmt in body.iter_mut() {
@@ -653,11 +814,9 @@ fn lower<'a>(
         // same-line replacement → does not shift line numbers, map stays valid.
         body_code = body_code.replacen("export default ", "var __tt_default = ", 1);
     }
+    // after the body: no source line moves
+    body_code.push_str(&name_fixes);
 
-    let has_module_syntax = !(requires.is_empty()
-        && re_exports.is_empty()
-        && exports.is_empty()
-        && !p.default_needs_rewrite);
     let uses_to_esm = state.uses_to_esm;
     Some((
         ModuleParts {
@@ -1236,13 +1395,13 @@ var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => { for (var name in all) __defProp(target, name, { get: all[name], enumerable: true, configurable: true }); };
-var __copyProps = (to, from, except, desc) => { if (from && typeof from === "object" || typeof from === "function") { for (let key of __getOwnPropNames(from)) if (!__hasOwnProp.call(to, key) && key !== except) __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable, configurable: true }); } return to; };
+var __copyProps = (to, from, except, desc) => { if (from && typeof from === "object" || typeof from === "function") { for (let key of __getOwnPropNames(from)) if (!__hasOwnProp.call(to, key) && key !== except) __defProp(to, key, { get: () => from[key], ...globalThis.__ttExportSetter?.(to, key), enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable, configurable: true }); } return to; };
 var __reExport = (target, mod, secondTarget) => (mod = __toESMStar(mod), __copyProps(target, mod, "default"), secondTarget && __copyProps(secondTarget, mod, "default"));
 "#,
     to_esm_helper!(),
     star_helper!(),
     r#"var __toCommonJS = (mod) => __copyProps(__defProp(__defProp({}, "__esModule", { value: true, configurable: true }), Symbol.for("turbo-test.esm"), { value: true }), mod);
-var __commonJS = (cb) => { var mod; return () => (mod || (mod = { exports: {} }, cb(mod.exports, mod, __export, __toCommonJS, __toESM, __reExport)), mod.exports); };
+var __commonJS = (cb) => { var mod; return () => { if (!mod) { mod = { exports: {} }; try { cb(mod.exports, mod, __export, __toCommonJS, __toESM, __reExport); } catch (e) { mod = undefined; throw e; } } return mod.exports; }; };
 var __esm = (fn) => { var done, res; return () => (done || (done = 1, res = fn()), res); };
 "#
 );

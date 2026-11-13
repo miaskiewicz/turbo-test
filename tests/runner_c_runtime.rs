@@ -1268,3 +1268,18 @@ fn transitions_are_jsdom_by_default_and_chrome_on_opt_in() {
         1,
     );
 }
+
+/// A `TURBO_ZERO_DELAY_TIMERS` value that is not a switch is ignored with a warning (the config
+/// decides), not read as either setting.
+#[test]
+fn an_invalid_zero_delay_timers_env_is_ignored_with_a_warning() {
+    let off = loop_order_project("loop-env-bogus", "zeroDelayTimers: false", NODE_ORDER);
+    let r = turbo_test(&off.dir, &[], &[("TURBO_ZERO_DELAY_TIMERS", "maybe")]);
+    assert!(r.stdout.contains("Tests  1 passed (1)"), "{}", r.all());
+    assert!(
+        r.stderr
+            .contains("ignoring TURBO_ZERO_DELAY_TIMERS=\"maybe\" (expected 0, 1, true or false)"),
+        "{}",
+        r.all()
+    );
+}

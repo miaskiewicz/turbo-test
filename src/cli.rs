@@ -109,6 +109,7 @@ pub enum CoverageOp {
     OutDir(String),
     Thresholds(String),
     PerFile,
+    All,
     Reporters(String),
     Include(String),
     Exclude(String),
@@ -122,6 +123,7 @@ impl CoverageOp {
             CoverageOp::OutDir(d) => coverage::set_out_dir(d),
             CoverageOp::Thresholds(v) => coverage::set_thresholds(v),
             CoverageOp::PerFile => coverage::set_per_file(true),
+            CoverageOp::All => coverage::set_all(true),
             CoverageOp::Reporters(v) => coverage::set_reporters(v),
             CoverageOp::Include(v) => coverage::add_include(v),
             CoverageOp::Exclude(v) => coverage::add_exclude(v),
@@ -281,6 +283,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             // launcher.
             "--coverage-include" => push_coverage(&mut o.coverage, CoverageOp::Include, value()),
             "--coverage-exclude" => push_coverage(&mut o.coverage, CoverageOp::Exclude, value()),
+            "--coverage-all" => {
+                o.coverage.push(CoverageOp::Enable);
+                o.coverage.push(CoverageOp::All);
+            }
             // `--no-file-parallelism` (vitest: run test files serially) → jobs = 1.
             "--no-file-parallelism" => o.jobs = 1,
             // Value-taking vitest flags with no effect on a native single-run runner. Consume the
@@ -1887,18 +1893,46 @@ pub fn run(opts: Options) -> i32 {
         &files,
         std::env::var_os("TURBO_ROOT").map(PathBuf::from).as_deref(),
     );
+    // one context for globalSetup and globalTeardown, made only when the project has either
+    let mut globals = None;
+    if let Some(code) = run_jest_global_script(&mut globals, "globalSetup") {
+        return code;
+    }
     let res = run_files(&Engine::v8(), &files, &names, &order, jobs, opts.bail);
+    let teardown_failed = run_jest_global_script(&mut globals, "globalTeardown").is_some();
+    drop(globals);
     let wall_ms = wall.elapsed().as_secs_f64() * 1000.0;
 
     let t = tally(&res);
-    if let Some(kind) = human {
-        return report_human(
+    let code = match human {
+        Some(kind) => report_human(
             kind, &opts, &files, &names, &res, &t, &colors, start_ms, wall_ms, &hist_path, hist,
-        );
+        ),
+        None => report_machine(
+            &opts, &files, &names, &res, &t, start_ms, wall_ms, jobs, &hist_path, hist,
+        ),
+    };
+    // a failing globalTeardown fails the run, as with jest
+    code.max(i32::from(teardown_failed))
+}
+
+/// Run a jest `globalSetup` or `globalTeardown` script if configured.
+/// Returns `Some(1)` when the script fails (for globalSetup: abort the run).
+fn run_jest_global_script(globals: &mut Option<runner::JestGlobalRealm>, key: &str) -> Option<i32> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let scripts = runner::jest_global_scripts(&cwd)?;
+    let path = if key == "globalSetup" {
+        scripts.setup
+    } else {
+        scripts.teardown
+    };
+    let path = path?;
+    let realm = globals.get_or_insert_with(runner::JestGlobalRealm::default);
+    if let Err(e) = realm.run(&path, &scripts.root_dir) {
+        eprintln!("{key} failed: {e}");
+        return Some(1);
     }
-    report_machine(
-        &opts, &files, &names, &res, &t, start_ms, wall_ms, jobs, &hist_path, hist,
-    )
+    None
 }
 
 /// Apply `opts`'s side effects (warnings, env, coverage, allowOnly). Returns `Some(code)` when

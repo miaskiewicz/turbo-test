@@ -299,9 +299,10 @@ fn human_reporters_print_what_vitest_prints() {
                     &[("NO_COLOR", "1"), ("TURBO_LEGACY_REPORTER", "0")],
                 );
                 let ctx = format!("{scenario} {reporter} esbuild={esbuild}\n{}", r.all());
+                let want = reference(scenario, reporter, "out");
                 assert_eq!(
-                    normalize(&r.stdout, &root),
-                    reference(scenario, reporter, "out"),
+                    without_unreferenced_slow_lines(normalize(&r.stdout, &root), &want),
+                    want,
                     "{ctx}"
                 );
                 assert_eq!(
@@ -327,9 +328,10 @@ fn an_agent_gets_vitests_agent_reporter() {
             &[("AI_AGENT", "claude-code"), ("TURBO_LEGACY_REPORTER", "0")],
         );
         let ctx = format!("{scenario}\n{}", r.all());
+        let want = reference(scenario, "agent", "out");
         assert_eq!(
-            normalize(&r.stdout, &root),
-            reference(scenario, "agent", "out"),
+            without_unreferenced_slow_lines(normalize(&r.stdout, &root), &want),
+            want,
             "{ctx}"
         );
         assert_eq!(
@@ -364,9 +366,10 @@ fn slow_tests_retries_and_obsolete_snapshots_print_what_vitest_prints() {
             }
             let r = turbo_test(&p.dir, &argv, &env);
             let ctx = format!("{scenario} {reporter} esbuild={esbuild}\n{}", r.all());
+            let want = reference(scenario, reporter, "out");
             assert_eq!(
-                normalize(&r.stdout, &root),
-                reference(scenario, reporter, "out"),
+                without_unreferenced_slow_lines(normalize(&r.stdout, &root), &want),
+                want,
                 "{ctx}"
             );
             assert_eq!(
@@ -376,6 +379,39 @@ fn slow_tests_retries_and_obsolete_snapshots_print_what_vitest_prints() {
             );
         }
     }
+}
+
+/// A loaded machine can take a test over vitest's 300ms slowTestThreshold where vitest's
+/// reference run was fast: the default reporter then (rightly) lists it under its file as slow
+/// (`   ✓ name  <ms>`). Such a line, absent from the reference, is dropped before comparing —
+/// turbo-test#109's rule for coloured durations, uncoloured.
+fn without_unreferenced_slow_lines(actual: String, reference: &str) -> String {
+    let slow = |l: &str| l.starts_with("   ✓ ") && l.ends_with("  <ms>");
+    actual
+        .split('\n')
+        .filter(|l| !slow(l) || reference.split('\n').any(|r| r == *l))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn a_slow_line_vitests_reference_lacks_is_dropped() {
+    let reference = " ✓ a.test.ts (1 test) <ms>\n\n Test Files  1 passed (1)\n";
+    let loaded = " ✓ a.test.ts (1 test) <ms>\n   ✓ values  <ms>\n\n Test Files  1 passed (1)\n";
+    assert_eq!(
+        without_unreferenced_slow_lines(loaded.into(), reference),
+        reference
+    );
+    // a slow line the reference has (a slow-test scenario) stays, and so does any other line
+    let slow_ref = " ✓ a.test.ts (1 test) <ms>\n   ✓ slow  <ms>\n";
+    assert_eq!(
+        without_unreferenced_slow_lines(slow_ref.into(), slow_ref),
+        slow_ref
+    );
+    assert_eq!(
+        without_unreferenced_slow_lines("   × values  <ms>\n".into(), ""),
+        "   × values  <ms>\n"
+    );
 }
 
 /// The colour vitest's getDurationPrefix gives a duration: yellow over its 300ms
@@ -628,9 +664,10 @@ fn skip_notes_and_annotations_print_what_vitest_prints() {
         };
         let r = turbo_test(&p.dir, argv, &env);
         let ctx = format!("s20 {reporter} esbuild={esbuild}\n{}", r.all());
+        let want = reference("s20", reporter, "out");
         assert_eq!(
-            normalize(&r.stdout, &root),
-            reference("s20", reporter, "out"),
+            without_unreferenced_slow_lines(normalize(&r.stdout, &root), &want),
+            want,
             "{ctx}"
         );
         assert_eq!(
@@ -675,9 +712,10 @@ fn thrown_values_and_error_properties_print_what_vitest_prints() {
             };
             let r = turbo_test(&p.dir, argv, &env);
             let ctx = format!("{scenario} {reporter} esbuild={esbuild}\n{}", r.all());
+            let want = reference(scenario, reporter, "out");
             assert_eq!(
-                normalize(&r.stdout, &root),
-                reference(scenario, reporter, "out"),
+                without_unreferenced_slow_lines(normalize(&r.stdout, &root), &want),
+                want,
                 "{ctx}"
             );
             assert_eq!(

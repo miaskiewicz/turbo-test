@@ -324,6 +324,7 @@ struct CoverageCfg {
     include: Vec<String>,
     exclude: Vec<String>,
     thresholds: Option<String>,
+    all: bool,
 }
 
 fn vitest_coverage(start_dir: &Path, forced: Option<&Path>) -> Option<CoverageCfg> {
@@ -336,6 +337,7 @@ fn vitest_coverage(start_dir: &Path, forced: Option<&Path>) -> Option<CoverageCf
             include: vec![],
             exclude: vec![],
             thresholds: None,
+            all: false,
         });
     };
     let slice = &text[ci..];
@@ -355,10 +357,13 @@ fn vitest_coverage(start_dir: &Path, forced: Option<&Path>) -> Option<CoverageCf
     } else {
         Some(parts.join(","))
     };
+    // `all` of the coverage object itself, not a later option block's
+    let all = coverage_object(slice).is_some_and(|block| scan_bool_true(&block, "all"));
     Some(CoverageCfg {
         include,
         exclude,
         thresholds,
+        all,
     })
 }
 
@@ -406,6 +411,32 @@ fn scan_braced(text: &str, key: &str) -> Option<String> {
 /// tail of another identifier so `branches` doesn't match `subBranches`). vitest's withTimeout
 /// treats `<= 0 || Infinity` as "no timeout" (turbo-test#273), so `test.hookTimeout: Infinity`
 /// in a config must forward too.
+/// The `{ ... }` body of the `coverage: { ... }` object `slice` starts with (balanced braces).
+fn coverage_object(slice: &str) -> Option<String> {
+    let open = slice.find('{')?;
+    Some(balanced_block_end(slice, open)?.0)
+}
+
+fn scan_bool_true(text: &str, key: &str) -> bool {
+    let b = text.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = text[from..].find(key) {
+        let at = from + rel;
+        let after = at + key.len();
+        if is_key_boundary_prev(b, at) {
+            let i = skip_ws(b, after);
+            if i < b.len() && b[i] == b':' {
+                let j = skip_ws(b, i + 1);
+                if text[j..].starts_with("true") {
+                    return true;
+                }
+            }
+        }
+        from = after;
+    }
+    false
+}
+
 fn scan_number(text: &str, key: &str) -> Option<String> {
     let b = text.as_bytes();
     let mut from = 0usize;
@@ -473,8 +504,8 @@ pub(crate) fn balanced_block_end(text: &str, open_at: usize) -> Option<(String, 
     let mut i = open_at;
     let mut quote: Option<u8> = None;
     while i < b.len() {
-        if let Some(q) = quote {
-            i += advance_in_quote(b[i], q, &mut quote);
+        if let Some(next) = skip_non_code(b, i, &mut quote) {
+            i = next;
             continue;
         }
         let c = b[i];
@@ -492,6 +523,27 @@ pub(crate) fn balanced_block_end(text: &str, open_at: usize) -> Option<(String, 
         i += 1;
     }
     None
+}
+
+/// Where scanning resumes when byte `i` is inside a string (`quote`) or starts a comment — a
+/// comment's quotes and braces are not code (`// don't …`). `None` at code.
+fn skip_non_code(b: &[u8], i: usize, quote: &mut Option<u8>) -> Option<usize> {
+    match *quote {
+        Some(q) => Some(i + advance_in_quote(b[i], q, quote)),
+        None => comment_end(b, i),
+    }
+}
+
+/// The index past the `//` line / `/* */` comment that starts at `i`, if one does.
+fn comment_end(b: &[u8], i: usize) -> Option<usize> {
+    let rest = b.get(i..)?;
+    let (close, skip): (&[u8], usize) = match rest.get(..2)? {
+        b"//" => (b"\n", 0),
+        b"/*" => (b"*/", 2),
+        _ => return None,
+    };
+    let at = rest.windows(close.len()).position(|w| w == close);
+    Some(i + at.map_or(rest.len(), |a| a + skip))
 }
 
 /// Inside a quoted run: consume the next byte(s), close the quote on `q`, return advance.
@@ -1289,6 +1341,11 @@ fn excludes_dir(exclude: &[String], rel: &str) -> bool {
 fn discover(cwd: &Path, forced_config: Option<&Path>) -> Vec<PathBuf> {
     let mut all = Vec::new();
     let pats = vitest_patterns(cwd, forced_config);
+    let jest_match = if pats.is_none() {
+        jest_test_match(cwd)
+    } else {
+        None
+    };
     let base = pats.as_ref().map_or(cwd, |p| p.root.as_path());
     let include = pats.as_ref().and_then(|p| p.include.as_deref());
     let exclude: Vec<String> = match pats.as_ref().and_then(|p| p.exclude.clone()) {
@@ -1307,19 +1364,55 @@ fn discover(cwd: &Path, forced_config: Option<&Path>) -> Vec<PathBuf> {
             .join("/")
     };
     let prune = |d: &Path| excludes_dir(&exclude, &rel(d));
-    match include {
-        // a config include is matched against every file
-        Some(_) => walk(cwd, &mut all, &|_| true, &prune),
-        // vitest's default include
-        None => walk(cwd, &mut all, &is_test_file, &prune),
+    let has_include = include.is_some() || jest_match.is_some();
+    if has_include {
+        walk(cwd, &mut all, &|_| true, &prune);
+    } else {
+        walk(cwd, &mut all, &is_test_file, &prune);
     }
     all.retain(|f| {
         let r = rel(f);
-        include.is_none_or(|inc| inc.iter().any(|g| glob_matches(g, &r)))
-            && !exclude.iter().any(|g| glob_matches(g, &r))
+        let inc_ok = if let Some(inc) = include {
+            inc.iter().any(|g| glob_matches(g, &r))
+        } else if let Some(ref jm) = jest_match {
+            jm.iter().any(|g| glob_matches(g, &r))
+        } else {
+            true
+        };
+        inc_ok && !exclude.iter().any(|g| glob_matches(g, &r))
     });
     all.sort();
     all
+}
+
+const JEST_CONFIG_NAMES: [&str; 5] = [
+    "jest.config.js",
+    "jest.config.cjs",
+    "jest.config.mjs",
+    "jest.config.ts",
+    "jest.config.json",
+];
+
+fn jest_test_match(cwd: &Path) -> Option<Vec<String>> {
+    let text = jest_config_text_in(cwd)?;
+    scan_string_array(&text, "testMatch")
+}
+
+fn jest_config_text_in(dir: &Path) -> Option<String> {
+    for n in &JEST_CONFIG_NAMES {
+        if let Ok(s) = std::fs::read_to_string(dir.join(n)) {
+            return Some(s);
+        }
+    }
+    std::fs::read_to_string(dir.join("package.json"))
+        .ok()
+        .and_then(|pkg| package_json_jest_block(&pkg))
+}
+
+fn package_json_jest_block(pkg: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(pkg).ok()?;
+    let jest = v.get("jest")?;
+    jest.is_object().then(|| jest.to_string())
 }
 
 /// `--changed [since]`: absolute paths git reports changed vs `since` (default working-tree vs
@@ -1811,6 +1904,9 @@ fn coverage_forward(cov: &CoverageCfg, forward: &mut Vec<String>) {
     forward_coverage_thresholds(cov.thresholds.as_ref(), forward);
     forward_coverage_globs(&cov.include, "--coverage-include", forward);
     forward_coverage_globs(&cov.exclude, "--coverage-exclude", forward);
+    if cov.all && !has_flag(forward, "--coverage-all") {
+        forward.push("--coverage-all".to_string());
+    }
 }
 
 fn forward_coverage_thresholds(thr: Option<&String>, forward: &mut Vec<String>) {

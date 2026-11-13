@@ -5,6 +5,173 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-11-13 — jest compat: full config surface, module resolution, jsdom parity, faster GC
+
+### Added
+- Jest `globalSetup` / `globalTeardown` (#335): resolved as jest does (`<rootDir>`,
+  rootDir-relative, or a module name; the nearest jest config up from the cwd), loaded as
+  CJS and called once — with jest's `(globalConfig, projectConfig)` (their `rootDir`) —
+  before all suites (setup) / after all suites (teardown), both in one V8 context with one
+  require cache, so teardown reads what setup left on `globalThis` and gets the same module
+  instances (a server / container handle), as with jest. The `process.env` changes globalSetup makes reach every test file as Node stores
+  them (values coerced to strings, deletions applied), as with jest (which runs it in the
+  parent before forking workers). A failing globalTeardown fails the run (exit 1). Why: many Jest projects use `globalSetup` for
+  database seeding or server startup and pass its address on through `process.env`
+  (`@shelf/jest-mongodb`'s `MONGO_URL`).
+- Jest `moduleNameMapper` (#335): keys are ECMAScript regexes (lookaround and
+  backreferences included) tried in config order (first match wins), `$n` is the n-th
+  capture, a value may be a target, a template literal, a list of targets (the first that
+  resolves) or `require.resolve('…')` (resolved from the config's directory); `<rootDir>`
+  expanded. The mapper is read from the config text: an entry whose value is computed is
+  skipped (its specifiers resolve as without it) and a spread or a mapper built in code is
+  reported once on stderr — write those mappings as literal entries. Applied before the oxc
+  resolver; the resolve memo is keyed by the jest config, so two projects of one run that
+  map the same specifier differently each get their own.
+- Jest `testMatch` discovery (#340): when the vitest `include` array is absent, falls back
+  to the Jest config's `testMatch` globs for file discovery. Why: projects migrating from
+  Jest keep their `testMatch` and expect it honoured.
+- Jest `injectGlobals: false` (#340): reads the jest config flag, caches
+  expect/test/describe/it into the `@jest/globals` synthetic module via
+  `ensure_vitest_builtin`, then removes them from globalThis. Why: some Jest projects
+  opt into explicit imports to avoid global namespace pollution.
+- Jest `moduleDirectories` (#345): configures additional directories for bare-specifier
+  module lookup (beyond `node_modules`), e.g. `["node_modules", "src"]`.
+- Jest `customExportConditions` (#345): forwards custom export conditions to the oxc
+  resolver so packages with conditional exports resolve correctly under Jest config.
+- Jest config `testTimeout` (#346) is the default per-test timeout (the CLI `--testTimeout`
+  still wins), and `clearMocks` / `resetMocks` / `restoreMocks` (#343) apply before each test,
+  as jest does. Why: they were silently ignored, so suites relying on them leaked mock state.
+- Jest `setupFiles` run before the test framework is installed (#344): `expect` / `test` /
+  `describe` and the hooks are undefined while they run, as in jest's two-phase lifecycle;
+  `setupFilesAfterEnv` still runs with them.
+- Jest automock (#341): a factory-less `jest.mock('./x')` and `enableAutomock` load a
+  colocated `__mocks__/x.js` (next to the resolved module) when present, and
+  `jest.onGenerateMock` callbacks chain, each receiving `(path, mock)`. As in jest, a
+  factory-less `jest.mock` generates its automock on the module's first require, so
+  `onGenerateMock` callbacks registered after the (hoisted) call still shape the mock.
+  Without this, the mock prepass built the automock before the test body ran, and the
+  callbacks never saw it.
+
+- `--coverage-all` flag (#320): includes unexecuted source files (matched by
+  `--coverage-include` globs) in coverage reports at zero hits, so the denominator
+  reflects the full source surface. Auto-read from vitest config `coverage.all: true`.
+  Each unexecuted file counts its statements (and their lines), functions and branch arms at
+  zero, so every metric and threshold sees it — the functions a loaded file's coverage
+  counts (those V8 names: declarations, methods and accessors, functions assigned to a
+  variable / property / member), so a file's totals do not depend on whether a test loaded
+  it. Left out as vitest leaves them out: test / spec / bench files
+  (a final `.test` / `-spec` / `.bench` marker), `.d.ts`, named tools' configs
+  (`vite.config.ts`, not `app.config.ts`), root `test/` / `tests/`, `__tests__` /
+  `__mocks__`, non-JS/TS files and files with the coverage-ignore directive; symlinked
+  directories are not followed. `coverage.all` is read from the config's coverage object
+  only, comments included (an apostrophe in `// don't …` no longer hides it). Why: without this, coverage percentages are misleadingly
+  high when most source files have no test touching them — matching vitest's
+  `coverage.all` and Jest's `collectCoverageFrom` behaviour.
+
+### Fixed
+- ESM singleton identity for subpath exports (#316): modules resolved through different
+  subpath export entries (e.g. `pkg` vs `pkg/sub`) but pointing to the same file now
+  return the same module instance, preserving `===` identity. A bundle registers its
+  sub-modules lazily: each still runs on its first require only (esbuild's `__commonJS`,
+  Node), so a lazily required file that needs an uninstalled optional peer, or has side
+  effects, costs nothing until it is used; one that throws is not cached and runs again on
+  the next require, as Node drops a failed module. Identity holds in either order: a sub-path
+  required before its package entry is the instance the entry's bundle uses — a real one
+  only: a `vi.mock` of the sub-path reaches the test's import, never the package's own
+  internal require (vitest leaves node_modules to Node), nor the next file of a reused
+  isolate; and a partial mock's original (`importOriginal` / `vi.importActual` /
+  `jest.requireActual`) is the package's own instance, not a second copy. A module one entry's bundle has
+  registered but not yet run is the instance every other entry bundle of the package uses
+  too (one instance per file, as in Node), so a context provider and its consumers from
+  different entries (MUI's `FormControl` / `FormLabel`) share their context module.
+- `process.env.JEST_WORKER_ID` (#342) is set for every jest project's test files — any
+  `testEnvironment`, jsdom included — and not for vitest ones, as jest and vitest do. Why:
+  per-worker resources (database names, ports) are commonly keyed on it.
+- A dependency's published `tsconfig.json` whose `extends` target is not installed (a
+  dev-only dependency of that package) no longer breaks `require()` of the package's compiled
+  JS (#317): Node resolution inside node_modules does not depend on it.
+- `jest.isolateModulesAsync` / `jest.isolateModules` keep the outer module registry (#336):
+  modules loaded inside the callback are isolated and the ones loaded before it are restored
+  afterwards, also when the callback rejects (it used to clear the cache without saving it).
+- `jest.restoreAllMocks` undoes `jest.replaceProperty` (#337), and the replacement's handle
+  has `replaceValue`, as jest's does.
+- `jest.requireActual` throws when the module does not resolve instead of hiding the error
+  (#338).
+- `jest.runAllTicks` flushes `process.nextTick` callbacks under modern fake timers (#339).
+- Projects without esbuild load through the ESM graph loader again: the #316 change sent
+  every entry the native emitter could transform down the CommonJS module-runner path,
+  which cannot reproduce top-level await, vite's `import()` rejection messages, link-time
+  reloads after `vi.resetModules()` or `jest.setMock`. Only a CommonJS entry of a jest
+  node project (what #316 needs) takes the native CJS path without esbuild now — by Node's
+  rule: `.cjs`/`.cts` are CommonJS, `.mjs`/`.mts` and files of a `"type": "module"`
+  package are not (they stay strict), else a file without static `import`/`export`.
+- `jest.requireMock` returns the registered mock (`jest.mock` factory, `jest.setMock`)
+  again, else the colocated `__mocks__/<name>` manual mock, and automocks the real module
+  only when there is neither or after `jest.unmock` — #338 had made it always automock.
+- The native ESM→CJS emitter gives an ES module's top-level binding named like a CommonJS
+  wrapper parameter (`require`, `module`, `exports`, `__filename`, `__dirname`) a fresh
+  name no other binding uses, and points its export at it: `const require =
+  createRequire(import.meta.url)` failed with "Identifier has already been declared", and a
+  `function module` / `var require` replaced the wrapper's own `module` / `require`
+  (empty exports, broken imports). Assignments, updates and destructuring follow the
+  rename, and a renamed function or class keeps its source `.name`. Imports keep their
+  name, and a CommonJS file is left as Node runs it (`var exports = exports || {}` keeps the
+  wrapper's object).
+
+- ES modules run in strict mode on the CommonJS load path too. A test file or app module
+  with `import` / `export` (or a `.mjs` / `.mts` file, or any file of a `"type": "module"`
+  package) loaded through esbuild's or the native emitter's ESM→CJS output ran sloppy —
+  neither emits `"use strict"` — so `undeclared = 1` silently made a global and top-level
+  `this` was `module.exports`. Node, vitest and babel-jest / ts-jest run them strict; the
+  wrapper now opens with `"use strict"` on its own line (no source line moves). CommonJS
+  files and node_modules bundles are unchanged. A suite that relied on sloppy mode in an ES
+  module will now see the `ReferenceError` / `TypeError` Node and vitest give it. In a jest
+  project, assigning a namespace export (`import * as mod; mod.fn = jest.fn()`) works as
+  under babel-jest / ts-jest — the namespace and its importers read the new value — instead
+  of failing on the getter-only export; vitest's namespaces stay read-only, as in vitest.
+
+- jsdom-compatibility modes follow the test file's environment (turbo-dom 0.8.3's
+  TouchEventMode / ComputedStyleMode): under jsdom and happy-dom — and turbo-test's auto DOM,
+  its jsdom-parity default — a `TouchEvent`'s `touches` / `targetTouches` / `changedTouches`
+  keep plain-object entries, so `fireEvent.touchStart(el, { touches: [{ clientX, clientY }] })`
+  works as it does there (jsdom has no `Touch` class), and computed `text-decoration` is the
+  declared shorthand (`line-through`, as jest-dom's `toHaveStyle` reads it there) instead of
+  Chrome's `line-through rgb(0, 0, 0)`; the native `turbo-dom` environment stays Chrome's.
+  Set per file, so a reused isolate follows each file's environment. A test that asserted
+  Chrome's computed text-decoration under `environment: 'jsdom'` (which real vitest fails)
+  now fails here too.
+
+### Dependencies
+- turbo-dom-browser-env / turbo-dom / turbo-dom-layout 0.8.3 from crates.io: TouchEvent and
+  computed-style jsdom modes (set per test file by turbo-test), the jsdom-parity fixes they
+  carry, one turbo-dom-v8 150.4.1.
+
+### Tests
+- Restored three test fixtures (`tests/data/snapshots/inline.test.ts`,
+  `tests/data/expect_surface/serializer.test.js`, `serializer_config/cfg.test.js`) that the
+  #335 commit had committed after a local run rewrote them: the inline-snapshot fixture had
+  its new snapshots filled in, so the "writes new inline snapshots" path was no longer tested.
+
+### CI
+- The coverage job pins rustc 1.99.1: each rustc release maps coverage regions to source
+  lines differently, and `stable` moving to 1.100.0 shifted every file's line totals and the
+  gate (99.92% -> 99.54%) with no code change. The toolchain is now bumped on purpose.
+- `cargo test --no-fail-fast`: one red run lists every failing suite. Without it cargo
+  stopped at the first failing test binary, which is how the regressions above hid behind
+  an earlier failure on the release PR.
+
+### Performance
+- V8's young generation starts at 32 MB (`--min-semi-space-size=32`, added to the default
+  `--single-threaded`): a test file's mostly short-lived objects (React trees, DOM nodes,
+  matcher diffs) take fewer scavenges. Measured on the four reference projects with
+  interleaved warm runs (7-9 each): ui-design-components -8.1% wall / -7.2% CPU,
+  payroll-app -5.5% / -4.6%, website-global -4.8% / -5.8%, standalone-chat-app -2.9% /
+  -4.7%; identical results, peak memory within about 0.3 GB. Other flags measured and not
+  taken: `--no-maglev` (+5-17%), `--max-lazy` (+6-8%), `--always-sparkplug` (+1-8% CPU),
+  16 / 64 MB young generations (no better than 32).
+- `runtime.js` `__ttApplyConfig` refactored: extracted `__ttApplyJestFields` helper to
+  bring cyclomatic complexity from 9 back within the cc ≤ 7 gate.
+
 ## [0.8.2] — 2026-11-09 — jest compat: automock + virtual mocks, shim gaps
 
 ### Added

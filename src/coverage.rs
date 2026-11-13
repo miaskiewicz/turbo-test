@@ -56,6 +56,10 @@ pub struct Thresholds {
 }
 static THRESHOLDS: Mutex<Option<Thresholds>> = Mutex::new(None);
 static PER_FILE: AtomicBool = AtomicBool::new(false);
+static ALL: AtomicBool = AtomicBool::new(false);
+pub fn set_all(on: bool) {
+    ALL.store(on, Ordering::Relaxed);
+}
 
 /// Parse `lines=90,functions=80,branches=80,statements=90` (any subset, any order). Unknown
 /// keys ignored.
@@ -1034,10 +1038,137 @@ impl Row {
     }
 }
 
+/// Walk the cwd for source files matching the include globs that were never executed, and inject
+/// them into COV with every non-blank line counted at zero hits. Called when `--coverage-all` /
+/// `coverage.all: true` is set, so the report denominator reflects the full source surface.
+fn inject_unexecuted_files() {
+    let inc = INCLUDE.lock().unwrap().clone();
+    if inc.is_empty() {
+        return;
+    }
+    let exc = EXCLUDE.lock().unwrap().clone();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // executed files under any spelling of their path (symlink, `..`) are not "unexecuted"
+    let existing: HashSet<PathBuf> = COV
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|m| m.keys().map(|k| canonical(k)).collect())
+        .unwrap_or_default();
+    for file in discover_source_files(&cwd, &inc, &exc) {
+        if !existing.contains(&canonical(&file)) {
+            inject_zero_file(&file, &std::fs::read_to_string(&file).unwrap_or_default());
+        }
+    }
+}
+
+fn canonical(p: &Path) -> PathBuf {
+    crate::canon::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Record a never-loaded file at zero: its executable statements (and their lines), functions
+/// and branch arms — every metric — unless it carries the coverage-ignore directive.
+fn inject_zero_file(file: &Path, src: &str) {
+    scan_ignore_directive(file, src);
+    if is_ignored(file) {
+        return;
+    }
+    let line_of = |off: u32| src[..(off as usize).min(src.len())].matches('\n').count() as u32 + 1;
+    let (branches, stmts) = crate::coverage_branch::extract_all(file, src);
+    for (idx, &off) in stmts.iter().enumerate() {
+        record(file, line_of(off), 0);
+        record_stmt(file, idx as u32, line_of(off), 0);
+    }
+    for (off, name) in crate::coverage_branch::function_starts(file, src) {
+        record_fn(file, line_of(off), &name, 0);
+    }
+    for (block, br) in branches.iter().enumerate() {
+        for arm in 0..br.arms.len() {
+            record_branch(
+                file,
+                block as u32,
+                arm as u32,
+                line_of(br.decision),
+                false,
+                0,
+            );
+        }
+    }
+}
+
+/// What vitest's coverage leaves out of `all` by default: test and benchmark files (a final
+/// `.test` / `-spec` / `.bench` … marker, `-d` type tests included), type declarations, named
+/// tools' config files (`vite.config.ts`, not `app.config.ts`), `test/` / `tests/` at the root,
+/// `__tests__` / `__mocks__`, and anything that is not a JS/TS source.
+fn default_coverage_excluded(rel: &str) -> bool {
+    const SOURCE: [&str; 8] = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"];
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
+    let first_dir = rel.split('/').next().filter(|_| rel.contains('/'));
+    !SOURCE.contains(&ext)
+        || stem.ends_with(".d")
+        || is_test_stem(stem.strip_suffix("-d").unwrap_or(stem))
+        || is_tool_config(stem)
+        || matches!(first_dir, Some("test" | "tests"))
+        || rel.split('/').any(|c| c == "__tests__" || c == "__mocks__")
+}
+
+/// `a.test`, `a-spec`, `a.bench` …: a test / benchmark marker as the stem's last part.
+fn is_test_stem(stem: &str) -> bool {
+    stem.rsplit_once(['.', '-'])
+        .is_some_and(|(_, m)| matches!(m, "test" | "spec" | "bench" | "benchmark"))
+}
+
+/// `<tool>.config` for the tools vitest's coverage excludes the config of.
+fn is_tool_config(stem: &str) -> bool {
+    const TOOLS: [&str; 14] = [
+        "karma", "rollup", "webpack", "vite", "vitest", "jest", "ava", "babel", "nyc", "cypress",
+        "tsup", "build", "eslint", "prettier",
+    ];
+    stem.split_once('.')
+        .is_some_and(|(tool, rest)| rest == "config" && TOOLS.contains(&tool))
+}
+
+/// Walk `root` recursively, returning absolute paths that pass the include/exclude globs.
+fn discover_source_files(root: &Path, inc: &[String], exc: &[String]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    walk_dir(root, root, inc, exc, &mut out);
+    out
+}
+
+fn skip_dir(name: &std::ffi::OsStr) -> bool {
+    let s = name.to_string_lossy();
+    s == "node_modules" || s == ".git" || s == "target" || s.starts_with('.')
+}
+
+fn walk_dir(dir: &Path, root: &Path, inc: &[String], exc: &[String], out: &mut Vec<PathBuf>) {
+    // an unreadable directory contributes nothing
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        // a symlinked directory is not followed (a link to an ancestor would loop)
+        let real_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        if real_dir && !skip_dir(&entry.file_name()) {
+            walk_dir(&path, root, inc, exc, out);
+        } else if !path.is_dir() && path.is_file() && is_coverable(&path, root, inc, exc) {
+            out.push(path);
+        }
+    }
+}
+
+/// A discovered file `--coverage-all` reports: within the globs and not left out by default.
+fn is_coverable(path: &Path, root: &Path, inc: &[String], exc: &[String]) -> bool {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    glob_filter(&rel_str, inc, exc) && !default_coverage_excluded(&rel_str)
+}
+
 /// Emit the configured coverage reporters and apply threshold gating. Returns `true` if the gate
 /// passed (or no thresholds were configured), `false` if any threshold was unmet — the caller
 /// turns a `false` into a non-zero process exit.
 pub fn report() -> bool {
+    if ALL.load(Ordering::Relaxed) {
+        inject_unexecuted_files();
+    }
     let g = COV.lock().unwrap();
     let map = g.as_ref();
     // Zero instrumented source files is a hard FAILURE, not a vacuous 100% (0/0) green. Almost

@@ -160,3 +160,19 @@ fn a_parse_error_yields_a_best_effort_result_without_panicking() {
     assert!(b.is_empty());
     assert!(st.is_empty());
 }
+
+#[test]
+fn function_starts_counts_the_functions_v8_names() {
+    // V8 names declarations, methods / accessors by key, and functions assigned to a variable,
+    // property or member; an inline callback stays unnamed and, as on the loaded path, uncounted
+    let src = "class C { m() {} get x() { return 1; } y = () => 2; }\nconst o = { a() {}, b: function () {} };\n\
+               [1].map((x) => x).filter((y) => y);\nfunction f() {}\nconst g = () => 1;\nexports.h = function () {};\n";
+    let fns = function_starts(std::path::Path::new("t.ts"), src);
+    let mut names: Vec<&str> = fns.iter().map(|(_, n)| n.as_str()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["a", "b", "exports.h", "f", "g", "get x", "m", "y"],
+        "{fns:?}"
+    );
+}

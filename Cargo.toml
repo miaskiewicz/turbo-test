@@ -1,6 +1,6 @@
 [package]
 name = "turbo-test"
-version = "0.8.2"
+version = "0.8.3"
 edition = "2021"
 license = "MIT"
 description = "A blazing-fast native test runner — drop-in replacement for Vitest"
@@ -37,7 +37,7 @@ path = "src/bin/m5_affected.rs"
 v8 = { package = "turbo-dom-v8", version = "~150.4" }
 # The browser environment (window, document, CSSOM, forms, events) the runner
 # installs into each test context.
-turbo-dom-browser-env = "0.8.2"
+turbo-dom-browser-env = "0.8.3"
 oxc_allocator = "0.134"
 oxc_parser = "0.134"
 oxc_span = "0.134"
@@ -65,6 +65,9 @@ ariadne = { package = "rolldown-ariadne", version = "=0.6.0" }
 # UTS#46 ToASCII for the URL polyfill's host parse: `new URL('http://ü.com').host`
 # must come back as `xn--tda.com` like Node/vitest (turbo-test#259).
 idna = "1"
+# jest `moduleNameMapper` keys are ECMAScript regexes, lookaround and backreferences included
+# (turbo-test#335)
+fancy-regex = "0.20"
 
 # `cargo tarpaulin` builds with `--cfg tarpaulin` (napi_host's coverage flush before an abort).
 [lints.rust]

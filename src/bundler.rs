@@ -241,13 +241,30 @@ fn assemble_bundle(
     for (idx, module) in modules.iter().enumerate() {
         let (module_text, lexical) = module_text(module, &order[idx], id_of)?;
         let params = helper_params(&lexical);
+        let init = format!("__commonJS((exports, module, {params}) => {{\n{module_text}\n}})");
         out.push_str(&format!(
-            "var require_m{idx} = __commonJS((exports, module, {params}) => {{\n{module_text}\n}});\n"
+            "var require_m{idx} = {};\n",
+            registered(idx, &order[idx], init)
         ));
     }
     // the entry is the first module walked, so its id is always 0.
     out.push_str("module.exports = require_m0();\n");
     Some(out)
+}
+
+/// turbo-test#316: a sub-module's lazy init goes through `__ttRegBundled(path, init)` (native),
+/// which hands back the instance a `require('pkg/subpath')` already loaded, else registers `init`
+/// under the file's path (run on its first require, from here or outside) — one instance either
+/// way. The entry (id 0) is the package's own load.
+fn registered(idx: usize, path: &Path, init: String) -> String {
+    if idx == 0 {
+        return init;
+    }
+    let escaped = path
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!("__ttRegBundled(\"{escaped}\", {init})")
 }
 
 /// Record one module (stub or JS) into the walk; push each unseen edge onto the queue.
