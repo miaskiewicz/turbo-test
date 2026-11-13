@@ -3832,14 +3832,35 @@ fn mock_require_rhs(rhs: &str) -> bool {
 
 /// Keep the same number of lines for tracked source locations. Mutable import temporaries
 /// permit the existing post-registration rebind on TypeScript's const/let import declarations.
-fn normalize_mock_require_declarations(code: &str) -> String {
-    code.lines()
-        .map(|line| match mock_require_declaration(line) {
-            Some((name, rhs)) => format!("var {name} = {rhs}"),
-            None => line.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+fn mutable_mock_import(line: &str) -> Option<(&str, &str)> {
+    if line.starts_with("const ") || line.starts_with("let ") {
+        mock_require_declaration(line)
+    } else {
+        None
+    }
+}
+
+fn normalize_mock_require_declarations(code: &str) -> std::borrow::Cow<'_, str> {
+    if !code.lines().any(|line| mutable_mock_import(line).is_some()) {
+        return std::borrow::Cow::Borrowed(code);
+    }
+    let mut normalized = String::with_capacity(code.len());
+    for line in code.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        match mutable_mock_import(body) {
+            Some((name, rhs)) => {
+                normalized.push_str("var ");
+                normalized.push_str(name);
+                normalized.push_str(" = ");
+                normalized.push_str(rhs);
+                if line.ends_with('\n') {
+                    normalized.push('\n');
+                }
+            }
+            None => normalized.push_str(line),
+        }
+    }
+    std::borrow::Cow::Owned(normalized)
 }
 
 /// vitest-style vi.mock hoisting on esbuild CJS output: esbuild emits all `require(...)` at the
