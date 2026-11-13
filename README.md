@@ -471,6 +471,11 @@ import.meta.url))`, string concatenation (`__dirname + '/z'`, `path.resolve(__di
 - pnpm's isolated layout resolves as Node does: a package's bare imports from its real path in
   `node_modules/.pnpm/<name>@<version>/node_modules/<name>`. On Windows, canonical paths are
   spelled as Node spells them (`C:\...`, `\\server\share\...`), never with the `\\?\` prefix.
+  `TURBO_PNPM_ANCESTOR=1` additionally permits an unresolved bare import to use the
+  nearest ancestor's explicit `node_modules/.pnpm/node_modules` hoist link. It is off
+  by default, never scans arbitrary version directories, and does not override a
+  normal installed package or bypass its exports. Install real `tslib` and
+  `hey-listen` dependencies when needed; turbo-test provides no shadow substitutes.
 
 ## Benchmarks (0.8.2, 2026-11-10, macOS arm64)
 
@@ -534,6 +539,10 @@ npm run complexity:js        # CI job `complexity / js (cc <= 7)`
   ubuntu (x64, arm64) and Windows x64, plus the smoke test, the CLI compatibility/type tests and
   the native DOM compatibility fixtures on linux x64. The aarch64-apple-darwin build runs only on
   `main` and `v*` tag pushes, i.e. in the release.
+- **Windows experimental — nonblocking.** The separate `windows-experimental.yml`
+  workflow installs dependencies, builds the runner and runs locked Rust tests on
+  Windows, including platform path fixtures. Its actual results are informational;
+  it does not weaken the existing release binary matrix.
 - **Coverage — blocking.** `coverage` (ubuntu) runs `cargo tarpaulin` (Llvm engine) and fails
   below `fail-under = 99.9` line coverage. Subprocess runs of the instrumented binaries are
   attributed through `tarpaulin.toml`'s `objects`; the `#[path]` unit-test modules are excluded.

@@ -730,22 +730,30 @@ pub fn resolve_spec(spec: &str, from_dir: &Path) -> Option<PathBuf> {
     resolve_spec_as(spec, from_dir, true)
 }
 
-/// The resolutions by (specifier, importer dir, ESM importer, CJS-first resolution).
-type ResolveMemo = HashMap<(String, PathBuf, bool, bool, u64), Option<PathBuf>>;
+/// Resolutions keyed by specifier, importer, module/condition mode, config and pnpm opt-in.
+type ResolveMemo = HashMap<(String, PathBuf, bool, bool, u64, bool), Option<PathBuf>>;
 
 /// Resolve with the importer's module kind (`esm`) selecting ESM vs CJS export conditions.
 pub fn resolve_spec_as(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
     // E12: memoize per (spec, from_dir, esm, cjs-first). native_require repeats the same
     // specifier from the same importer dir across every module/file that imports it; the oxc
     // resolve + canonicalize is deterministic for a run. cjs-first is in the key because it
-    // flips the resolver conditions (mirrors resolver_for's own cache key).
+    // flips the resolver conditions (mirrors resolver_for's own cache key). The pnpm flag
+    // is also part of the key so toggling it cannot reuse an earlier miss or hit.
     if e12_enabled() {
         thread_local! {
             static RES_MEMO: RefCell<ResolveMemo> = RefCell::new(HashMap::new());
         }
         let cjs = CJS_FIRST_RESOLUTION.with(|c| c.get());
         let cfg = RESOLVE_CONFIG_ID.with(|c| c.get());
-        let key = (spec.to_string(), from_dir.to_path_buf(), esm, cjs, cfg);
+        let key = (
+            spec.to_string(),
+            from_dir.to_path_buf(),
+            esm,
+            cjs,
+            cfg,
+            crate::pnpm_ancestor::enabled(),
+        );
         if let Some(v) = RES_MEMO.with(|m| m.borrow().get(&key).cloned()) {
             return v;
         }
@@ -780,7 +788,9 @@ fn resolve_unmapped_spec(spec: &str, from_dir: &Path, esm: bool) -> Option<PathB
     if spec.starts_with('.') || spec.starts_with('/') {
         return probe_local_file(from_dir, spec);
     }
-    None
+    crate::pnpm_ancestor::resolve(spec, from_dir, crate::pnpm_ancestor::enabled(), |lookup| {
+        resolve_via_oxc_from(spec, from_dir, lookup, esm)
+    })
 }
 
 /// Vite/plugin query suffixes (`./icon.svg?react`, `./x.svg?url`, `./y?raw`). oxc can't resolve a
@@ -803,16 +813,25 @@ fn resolve_queried_spec(spec: &str, qpos: usize, from_dir: &Path, esm: bool) -> 
 /// A require() of a package with no `require` / `default` build: as an import (an ES-only
 /// package, which Node's require(esm) loads).
 fn resolve_via_oxc(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
-    let resolved = resolver_for(from_dir, esm)
-        .resolve(from_dir, spec)
+    resolve_via_oxc_from(spec, from_dir, from_dir, esm)
+}
+
+fn resolve_via_oxc_from(
+    spec: &str,
+    config_dir: &Path,
+    lookup_dir: &Path,
+    esm: bool,
+) -> Option<PathBuf> {
+    let resolved = resolver_for(config_dir, esm)
+        .resolve(lookup_dir, spec)
         .or_else(|e| {
             if esm {
                 // an import of a require-only package (no import/default build): its `require`
-                resolver_with(from_dir, true, true)
-                    .resolve(from_dir, spec)
+                resolver_with(config_dir, true, true)
+                    .resolve(lookup_dir, spec)
                     .map_err(|_| e)
             } else {
-                resolver_for(from_dir, true).resolve(from_dir, spec)
+                resolver_for(config_dir, true).resolve(lookup_dir, spec)
             }
         });
     let res = resolved.ok()?;
@@ -1173,7 +1192,7 @@ fn project_root(file: &Path) -> Option<PathBuf> {
 fn project_root_uncached(file: &Path) -> Option<PathBuf> {
     let mut d = file.parent();
     while let Some(dir) = d {
-        if dir.join("node_modules/.bin/esbuild").exists() {
+        if crate::esbuild_path::local(dir).is_some() {
             return Some(dir.to_path_buf());
         }
         d = dir.parent();
@@ -1195,16 +1214,15 @@ fn project_root_uncached(file: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The esbuild binary for `root`: the project's own `node_modules/.bin/esbuild` when it has one,
+/// The esbuild binary for `root`: the project's platform-specific npm entry point when present,
 /// otherwise turbo-test's bundled esbuild (`TURBO_ESBUILD`, resolved by cli.js).
 fn esbuild_bin(root: &Path) -> PathBuf {
-    let local = root.join("node_modules/.bin/esbuild");
-    if local.exists() {
+    if let Some(local) = crate::esbuild_path::local(root) {
         return local;
     }
     match std::env::var_os("TURBO_ESBUILD") {
         Some(p) => PathBuf::from(p),
-        None => local,
+        None => root.join("node_modules/.bin/esbuild"),
     }
 }
 

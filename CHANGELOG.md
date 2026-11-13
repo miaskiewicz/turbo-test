@@ -7,7 +7,19 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [0.8.4] — Unreleased candidate — Node compatibility and shared DOM performance
 
+### Added
+- An informational Windows CI lane installs the real test dependencies, builds the
+  native runner and runs locked Rust tests, including Windows path fixtures. It
+  records actual outcomes without changing the existing release binary gates (#278).
+
 ### Fixed
+- Add the explicit `TURBO_PNPM_ANCESTOR=1` fallback for actual ancestor pnpm hoist
+  links after ordinary package resolution fails. Preserve selected versions,
+  package exports and default resolution; require real `tslib`/`hey-listen`
+  installations rather than returning shadow modules (#278).
+- Apply verbatim DOS/UNC canonical-path normalization only on Windows and discover
+  local npm esbuild entry points there in `.cmd`, `.exe`, extensionless order, while
+  preserving Unix lookup and literal path names (#278).
 - Classify IPv4 and IPv6 literals through the native IP parser (#329), propagate
   unhandled EventEmitter errors and report successful once-listener delivery (#330),
   and deliver diagnostics-channel publications through a named subscriber registry (#331).
