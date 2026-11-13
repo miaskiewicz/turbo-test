@@ -291,6 +291,11 @@ class __HttpRequest extends __HttpOutgoing {
     if (this._connectionError) { callback(this._connectionError); return; }
     super._final(callback);
   }
+  setNoDelay(noDelay = true) {
+    if (this._connectionError || this._connection.closed) return this;
+    __httpNative('setNoDelay', { id: this._connection.id, enabled: !!noDelay });
+    return this;
+  }
   abort() { this.destroy(); return this; }
   setTimeout(delay, callback) {
     if (callback) this.once('timeout', callback);
