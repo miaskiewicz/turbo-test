@@ -65,6 +65,14 @@ fn declared_vue_plugin_enables_sfc_loading_without_changing_other_projects() {
 }
 
 #[test]
+fn explicit_vue_runtime_aliases_are_preserved() {
+    let p = project("vue-alias-084", false);
+    fixture(&p);
+    p.file("vitest.config.mjs", "export default { resolve: { alias: { vue: 'vue/dist/vue.esm-bundler.js' } }, test: { environment: 'jsdom' } };\n");
+    passes(&p, &[("TURBO_VUE", "1")]);
+}
+
+#[test]
 fn vue_sfc_disabled_mode_reports_the_missing_opt_in() {
     let p = project("vue-disabled-084", true);
     p.file("Counter.vue", include_str!("data/vue/Counter.vue"));
