@@ -21,6 +21,10 @@ class __HttpSocket extends __EventEmitter {
   get writable() { return !this._connection.closed; }
   get destroyed() { return Boolean(this._connection.closed); }
   destroy(error) { __httpClose(this._connection, error); return this; }
+  setNoDelay(noDelay = true) {
+    if (!this.destroyed) __httpNative('setNoDelay', { id: this._connection.id, enabled: !!noDelay });
+    return this;
+  }
   address() { return { address: this.localAddress, port: this.localPort, family: this.localAddress.includes(':') ? 'IPv6' : 'IPv4' }; }
 }
 function __httpSocketClosed(connection, error) {
