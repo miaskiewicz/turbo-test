@@ -733,8 +733,24 @@ pub fn resolve_spec(spec: &str, from_dir: &Path) -> Option<PathBuf> {
 /// The resolutions by (specifier, importer dir, ESM importer, CJS-first resolution).
 type ResolveMemo = HashMap<(String, PathBuf, bool, bool, u64), Option<PathBuf>>;
 
+/// Preserve explicit project mappings before selecting the shared Vue runtime.
+fn vue_runtime_specifier<'a>(spec: &'a str, from_dir: &Path) -> &'a str {
+    if spec != "vue" {
+        return spec;
+    }
+    let aliased = config_alias_list()
+        .iter()
+        .any(|(name, _)| name.trim_end_matches('$') == spec);
+    if aliased || apply_module_name_mapper(spec).is_some() {
+        return spec;
+    }
+    crate::vue::runtime_specifier(spec, from_dir)
+}
+
 /// Resolve with the importer's module kind (`esm`) selecting ESM vs CJS export conditions.
 pub fn resolve_spec_as(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
+    let esm = esm || crate::vue::runtime_esm(spec, from_dir);
+    let spec = vue_runtime_specifier(spec, from_dir);
     // E12: memoize per (spec, from_dir, esm, cjs-first). native_require repeats the same
     // specifier from the same importer dir across every module/file that imports it; the oxc
     // resolve + canonicalize is deterministic for a run. cjs-first is in the key because it
@@ -775,6 +791,9 @@ fn resolve_unmapped_spec(spec: &str, from_dir: &Path, esm: bool) -> Option<PathB
     let spec = spec.strip_prefix("node_modules/").unwrap_or(spec);
     if let Some(p) = resolve_via_oxc(spec, from_dir, esm) {
         return Some(p);
+    }
+    if let Some(path) = crate::vue::resolve(from_dir, spec) {
+        return Some(path);
     }
     // fallback: manual probing for local files oxc may skip (incl. bare "." / ".." directory specs)
     if spec.starts_with('.') || spec.starts_with('/') {
@@ -4724,6 +4743,15 @@ fn esbuild_cjs_fallback(abs: &Path, prefer_metadata: bool) -> Option<String> {
 }
 
 fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<String> {
+    if crate::vue::is_component(abs) {
+        return match crate::vue::load(abs, as_cjs) {
+            Ok(code) => Some(code),
+            Err(error) => {
+                eprintln!("{error}");
+                None
+            }
+        };
+    }
     // Module-runner: per-module CJS transform (app) / per-package CJS bundle (node_modules)
     // so imports are live + mockable and react is shared. Only on the CJS load path (the test
     // entry, setup files + their require-graph); the legacy ESM path (DOM boot) stays oxc.
@@ -5580,6 +5608,9 @@ fn cjs_wrapper_open(abs: &Path) -> &'static str {
 /// frames keep, not under coverage. A module the shared cache skips loads as before, with the
 /// transform's per-file side effects.
 fn shareable_source(abs: &Path) -> bool {
+    if crate::vue::is_component(abs) {
+        return false;
+    }
     let app = !abs.components().any(|c| c.as_os_str() == "node_modules");
     !crate::coverage::enabled()
         && !TEST_FILE.with(|f| *f.borrow() == abs)
@@ -10411,6 +10442,7 @@ fn build_entry_plan_pieces(
 /// Thread-local plumbing `run_test_file` sets before loading an entry: location state, the
 /// current test file, the lenient-load flag, and the CJS-first resolution switch.
 fn prepare_entry_thread_locals(entry_abs: &Path) {
+    crate::vue::prepare_project(entry_abs);
     crate::location::begin(
         entry_abs,
         &std::fs::read_to_string(entry_abs).unwrap_or_default(),
