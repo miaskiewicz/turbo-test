@@ -246,6 +246,22 @@ npx turbo-test            # discovers *.spec.* too; reads jest config when no vi
 > with a node test environment, so React/vitest suites are unaffected. The last measured jest
 > numbers (0.2.11) are in [docs/BENCHMARKS-history.md](docs/BENCHMARKS-history.md).
 
+
+Node-mode support in the 0.8.4 candidate includes SHA-256, P-256 KeyObjects with
+PKCS#8/SPKI PEM/DER and SHA-256 ECDSA, gzip, native V8 serialization, transferable
+MessagePorts, and AsyncLocalStorage across native await and scheduled resources.
+
+The host I/O surface supports synchronous `spawnSync`/`execFileSync`/`execSync` and
+loopback HTTP/1.0–1.1 with content-length or chunked bodies. HTTP uses one request per
+connection; TLS, custom agents, persistent connections and asynchronous child-process
+APIs report unsupported errors. This does not yet provide a complete MongoDB driver
+execution environment.
+
+Fresh `vm` contexts support injected bindings, isolated globals, real values/errors
+and timeouts. They currently require the framework-only snapshot: use
+`TURBO_SNAPSHOT=0` in mixed DOM projects. Unsupported immutable-global shadows report
+`ERR_VM_UNSUPPORTED_GLOBAL` rather than silently changing the sandbox semantics.
+
 ## How it works
 
 - **Transform** — per-module oxc/esbuild → CJS; node_modules bundled once per package (Vite-style),

@@ -13,13 +13,13 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   and deliver diagnostics-channel publications through a named subscriber registry (#331).
 - Convert scalar FormData values to strings and expose ordered entries in the Node
   environment (#333). Fetch offline data URLs with percent/base64 byte decoding,
-  Response consumption and clone checks (#326); network fetch remains separate work.
+  Response consumption and clone checks (#326); this remains an offline fetch path.
 - Replace placeholder hashes with native SHA-256 for `crypto.createHash` (#323) and
   `crypto.subtle.digest` (#328), including byte views, real encodings and explicit
   rejection of unsupported algorithms. Replace pass-through gzipSync/gunzipSync with
   real gzip bytes and decompression errors (#324).
 - Return Buffer-backed V8 serialization and deserialize Maps, cycles and typed arrays
-  using V8's native serializer (#348). VM context lifecycle work remains tracked in #332.
+  using V8's native serializer (#348).
 - Implement Node-mode `AbortSignal.timeout` on the real timer clock (#325), with
   validated delays, asynchronous ordering and a `TimeoutError` reason even while test
   timers are faked.
@@ -27,6 +27,21 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   before callback or promise pipeline completion (#319, #334). Expose both
   `stream/promises` aliases, propagate failures and observe `finished` lifecycle.
   Operating-system stream integration remains separate work.
+
+
+- Generate real P-256 signing keys from OS entropy, export/import PKCS#8/SPKI PEM or
+  DER, and sign/verify SHA-256 ECDSA with usable KeyObjects (#318).
+- Evaluate scripts in fresh Node VM contexts with sandbox bindings, isolation,
+  real V8 results/errors and cancellable timeouts (#332). Framework-only snapshots
+  are required; unsupported immutable-global shadows report a capability error.
+- Preserve concurrent AsyncLocalStorage stores across native await and scheduled
+  resources, including reused-file cleanup (#322), using V8 continuation frames.
+- Transfer native MessagePort ownership transactionally, retaining queued delivery,
+  peer relationships and receiver async context while detaching the old handle (#327).
+- Exchange real loopback HTTP/1 bytes and run synchronous child processes with actual
+  output, status, errors and bounded cleanup (#321). Socket readiness keeps the event
+  loop alive for external peers. HTTPS, persistent/custom-agent HTTP and asynchronous
+  child-process APIs fail explicitly rather than reporting placeholder success.
 
 ### Tests
 - Add Node controls and native runner regressions for the compatibility fixes,
