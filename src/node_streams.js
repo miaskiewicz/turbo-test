@@ -1,4 +1,9 @@
 // In-memory Node stream lifecycle. Host sockets/processes supply their own I/O.
+// Legacy consumers call Stream.call(this); an ES class cannot provide that API.
+function __Stream() { this._ev = Object.create(null); }
+Object.setPrototypeOf(__Stream, __EventEmitter);
+Object.setPrototypeOf(__Stream.prototype, __EventEmitter.prototype);
+__Stream.prototype.pipe = function(destination, options) { return __readablePipe(this, destination, options); };
 const __streamDefer = (fn) => queueMicrotask(fn);
 function __streamError(code, message) { const error = new Error(message); error.code = code; return error; }
 function __streamInit(stream, options) {
@@ -130,8 +135,8 @@ function __readableFrom(iterable, options) {
   return stream;
 }
 function __readablePipe(source, destination, options = {}) {
-  const data = (chunk) => { if (!destination.write(chunk)) source.pause(); };
-  const drain = () => source.resume();
+  const data = (chunk) => { if (!destination.write(chunk)) source.pause?.(); };
+  const drain = () => source.resume?.();
   const end = () => { if (options.end !== false) destination.end(); };
   const cleanup = () => {
     source.off('data', data); source.off('end', end);
@@ -144,7 +149,7 @@ function __readablePipe(source, destination, options = {}) {
   destination.emit('pipe', source);
   return destination;
 }
-class __Readable extends __EventEmitter {
+class __Readable extends __Stream {
   constructor(options = {}) { super(); __streamInit(this, options); __readableInit(this, options); }
   static from(iterable, options = {}) { return __readableFrom(iterable, options); }
   _read() { this.destroy(__streamError('ERR_METHOD_NOT_IMPLEMENTED', '_read() is not implemented')); }
@@ -260,7 +265,7 @@ function __writableEnd(stream, chunk, encoding, callback) {
   __streamDefer(() => __writableAdvance(stream));
   return stream;
 }
-class __Writable extends __EventEmitter {
+class __Writable extends __Stream {
   constructor(options = {}) { super(); __streamInit(this, options); __writableInit(this, options); }
   _write(chunk, encoding, callback) { callback(__streamError('ERR_METHOD_NOT_IMPLEMENTED', '_write() is not implemented')); }
   _final(callback) { callback(); }
@@ -443,6 +448,6 @@ function __pipelinePromise(...args) {
 }
 const __streamPromises = { pipeline: __pipelinePromise, finished: __finishedPromise };
 __streamPromises.default = __streamPromises;
-const __stream = { Readable: __Readable, Writable: __Writable, Duplex: __Duplex, Transform: __Transform,
-  PassThrough: __PassThrough, Stream: __EventEmitter, pipeline: __pipeline, finished: __finished, promises: __streamPromises };
+const __stream = Object.assign(__Stream, { Readable: __Readable, Writable: __Writable, Duplex: __Duplex, Transform: __Transform,
+  PassThrough: __PassThrough, Stream: __Stream, pipeline: __pipeline, finished: __finished, promises: __streamPromises });
 __stream.default = __stream;
