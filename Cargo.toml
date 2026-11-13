@@ -58,6 +58,8 @@ base64 = "0.22"
 sha2 = "0.10.9"
 p256 = { version = "0.13.2", features = ["ecdsa", "pkcs8", "pem"] }
 getrandom = "0.2.17"
+rsa = { version = "0.9.10", features = ["sha2"] }
+rand_chacha = "0.3.1"
 flate2 = "1"
 # TextDecoder's legacy encodings (Shift_JIS, UTF-16, windows-125x, ...): the WHATWG Encoding
 # Standard implementation (turbo-test#119)

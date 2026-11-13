@@ -17,6 +17,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   external blocks and unmapped SFC coverage report explicit errors.
 
 ### Fixed
+- Support the Flux Assistant's real RSA-2048 / RS256 path with OS-seeded key
+  generation, blinded SHA-256 PKCS#1 v1.5 signatures, PKCS#8/SPKI imports/exports,
+  and synchronous signer/verifier `end()`, while preserving P-256 support (#349).
 - Add the explicit `TURBO_PNPM_ANCESTOR=1` fallback for actual ancestor pnpm hoist
   links after ordinary package resolution fails. Preserve selected versions,
   package exports and default resolution; require real `tslib`/`hey-listen`

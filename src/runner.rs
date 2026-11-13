@@ -9794,6 +9794,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         crate::vm_compat::native_run_context,
     );
     bind_fn(scope, global, "__ttEc", crate::key_compat::native_ec);
+    bind_fn(scope, global, "__ttRsa", crate::rsa_compat::native_rsa);
     bind_fn(scope, global, "__ttIsIP", crate::node_compat::native_is_ip);
     bind_fn(scope, global, "__ttGzip", crate::node_compat::native_gzip);
     bind_fn(
