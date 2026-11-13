@@ -55,6 +55,8 @@ libc = "0.2"
 # js-tokens' identifier classes, for vitest's code-frame highlighting
 unicode-id-start = "1.4"
 base64 = "0.22"
+sha2 = "0.10.9"
+flate2 = "1"
 # TextDecoder's legacy encodings (Shift_JIS, UTF-16, windows-125x, ...): the WHATWG Encoding
 # Standard implementation (turbo-test#119)
 encoding_rs = "0.8"
@@ -79,6 +81,6 @@ lto = "thin"
 codegen-units = 1
 
 [patch.crates-io]
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "25f59eac79993c5851f39ed75c3c233d0df96a6b" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "25f59eac79993c5851f39ed75c3c233d0df96a6b" }
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "25f59eac79993c5851f39ed75c3c233d0df96a6b" }
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "b1f604013287382ca2cc82c823603199027df4ea" }
+turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "b1f604013287382ca2cc82c823603199027df4ea" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "b1f604013287382ca2cc82c823603199027df4ea" }

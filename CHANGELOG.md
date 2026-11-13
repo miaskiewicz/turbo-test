@@ -5,7 +5,32 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
-## [0.8.4] — Unreleased candidate — shared DOM layout performance
+## [0.8.4] — Unreleased candidate — Node compatibility and shared DOM performance
+
+### Fixed
+- Classify IPv4 and IPv6 literals through the native IP parser (#329), propagate
+  unhandled EventEmitter errors and report successful once-listener delivery (#330),
+  and deliver diagnostics-channel publications through a named subscriber registry (#331).
+- Convert scalar FormData values to strings and expose ordered entries in the Node
+  environment (#333). Fetch offline data URLs with percent/base64 byte decoding,
+  Response consumption and clone checks (#326); network fetch remains separate work.
+- Replace placeholder hashes with native SHA-256 for `crypto.createHash` (#323) and
+  `crypto.subtle.digest` (#328), including byte views, real encodings and explicit
+  rejection of unsupported algorithms. Replace pass-through gzipSync/gunzipSync with
+  real gzip bytes and decompression errors (#324).
+- Return Buffer-backed V8 serialization and deserialize Maps, cycles and typed arrays
+  using V8's native serializer (#348). VM context lifecycle work remains tracked in #332.
+- Implement Node-mode `AbortSignal.timeout` on the real timer clock (#325), with
+  validated delays, asynchronous ordering and a `TimeoutError` reason even while test
+  timers are faked.
+- Forward bytes through in-memory Node streams and wait for write/final callbacks
+  before callback or promise pipeline completion (#319, #334). Expose both
+  `stream/promises` aliases, propagate failures and observe `finished` lifecycle.
+  Operating-system stream integration remains separate work.
+
+### Tests
+- Add Node controls and native runner regressions for the compatibility fixes,
+  including known hashes, independent gzip/V8 fixtures and malformed-input errors.
 
 ### Performance
 - Consume turbo-dom's v0.8.4 candidate, including bounded font shaping-plan reuse and
@@ -16,7 +41,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ### Release preparation
 - Align the Rust and npm package versions at 0.8.4. The release branch uses an exact
-  pre-publication turbo-dom source pin (`25f59eac79993c5851f39ed75c3c233d0df96a6b`)
+  pre-publication turbo-dom source pin (`b1f604013287382ca2cc82c823603199027df4ea`)
   for reproducible validation; remove it only
   after compatible 0.8.4 crates are published, before tagging this runner release.
 

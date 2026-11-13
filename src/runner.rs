@@ -9157,7 +9157,8 @@ fn framework_prelude(scope: &mut v8::PinScope) {
             .and_then(|s| s.run(tc))
             .unwrap_or_else(|| chai_missing("chai failed to load"));
     }
-    let code = v8::String::new(scope, RUNTIME_JS).unwrap();
+    let runtime = RUNTIME_JS.replace("/* __TT_NODE_STREAMS__ */", include_str!("node_streams.js"));
+    let code = v8::String::new(scope, &runtime).unwrap();
     let s = v8::Script::compile(scope, code, None).unwrap();
     s.run(scope).unwrap();
 }
@@ -9438,6 +9439,26 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
             global.set(scope, key.into(), value.into());
         }
     }
+    bind_fn(
+        scope,
+        global,
+        "__ttSha256",
+        crate::crypto_compat::native_sha256,
+    );
+    bind_fn(scope, global, "__ttIsIP", crate::node_compat::native_is_ip);
+    bind_fn(scope, global, "__ttGzip", crate::node_compat::native_gzip);
+    bind_fn(
+        scope,
+        global,
+        "__ttV8Serialize",
+        crate::node_compat::native_serialize,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttV8Deserialize",
+        crate::node_compat::native_deserialize,
+    );
     bind_fn(
         scope,
         global,
@@ -9952,7 +9973,7 @@ fn fs_stat(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv
 #[rustfmt::skip]
 const NODE_BUILTINS: &[&str] = &[
     "fs", "fs/promises", "path", "module", "os", "child_process", "url", "util", "events",
-    "stream", "assert", "assert/strict", "perf_hooks", "crypto", "buffer", "querystring",
+    "stream", "stream/promises", "assert", "assert/strict", "perf_hooks", "crypto", "buffer", "querystring",
     "string_decoder", "timers", "timers/promises", "http", "http2", "https", "net", "tls", "zlib",
     "dns", "dns/promises", "tty", "constants", "dgram", "readline", "v8", "diagnostics_channel",
     "process", "async_hooks", "worker_threads", "vm", "inspector",

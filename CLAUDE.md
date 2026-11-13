@@ -51,13 +51,16 @@ A release where these disagree is a bug. Bump both in the same commit.
 - CI jobs `complexity / rust (cc <= 7)` (`npm run complexity:rust`: turbo-html2pdf's `cc-check`,
   installed from its home at the pinned rev in ci.yml, over every tracked `.rs` file) and
   `complexity / js (cc <= 7)` (`npm run complexity:js`: oxlint `complexity` over cli.js,
-  index.js, src/runtime.js). One limit, no allow-list, no baseline.
+  index.js, src/runtime.js, src/node_streams.js). One limit, no allow-list, no baseline.
 - Both are blocking since 0.8.0 (turbo-test#240 cleared the backlog; lowered to <= 10 in 0.8.0
   and to <= 7 in 0.8.1 per turbo-test#263; on failure the step summary lists the functions over
   the limit). Every new or changed function stays <= 7: split it, never raise the limit, never
   add an allow-list or a lint-disable comment.
 
 ## Where the DOM and V8 live
+
+- The in-memory Node stream implementation is `src/node_streams.js`, expanded into the
+  runtime at its marker before creating the framework snapshot. It is runner-owned.
 - The DOM binding (window/document/CSSOM/forms/events, its probes, Chrome controls and
   tests) is the `turbo-dom-browser-env` crate in miaskiewicz/turbo-dom
   (`crates/turbo-dom-browser-env`); the runner only calls

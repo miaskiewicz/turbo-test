@@ -1317,7 +1317,7 @@ if (globalThis.URL && typeof globalThis.URL.parse !== 'function') {
 }
 if (typeof globalThis.DOMException === 'undefined') {
   globalThis.DOMException = class DOMException extends Error {
-    constructor(message, name) { super(message); this.name = name || 'Error'; this.code = 0; }
+    constructor(message, name) { super(message); this.name = name || 'Error'; this.code = this.name === 'TimeoutError' ? 23 : 0; }
   };
 }
 globalThis.__STATUS_TEXT = globalThis.__STATUS_TEXT || {
@@ -1336,7 +1336,17 @@ if (typeof globalThis.AbortController === 'undefined') {
     _fire() { const ev = { type: 'abort', target: this }; if (typeof this.onabort === 'function') this.onabort(ev); this._listeners.slice().forEach((f) => { try { f(ev); } catch (e) {} }); }
     throwIfAborted() { if (this.aborted) throw this.reason; }
     static abort(reason) { const s = new globalThis.AbortSignal(); s.aborted = true; s.reason = reason || new DOMException('Aborted', 'AbortError'); return s; }
-    static timeout() { return new globalThis.AbortSignal(); }
+    static timeout(delay) {
+      if (typeof delay !== 'number') throw Object.assign(new TypeError('The delay argument must be a number'), { code: 'ERR_INVALID_ARG_TYPE' });
+      if (!Number.isInteger(delay) || delay < 0 || delay > 4294967295) throw Object.assign(new RangeError('The delay argument must be an integer between 0 and 4294967295'), { code: 'ERR_OUT_OF_RANGE' });
+      const signal = new globalThis.AbortSignal();
+      __realTimers.setTimeout(() => {
+        signal.aborted = true;
+        signal.reason = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+        signal._fire();
+      }, delay);
+      return signal;
+    }
   };
   globalThis.AbortController = class AbortController {
     constructor() { this.signal = new globalThis.AbortSignal(); }
@@ -1666,7 +1676,6 @@ if (typeof globalThis.FileReader === 'undefined') {
   });
 }
 if (typeof globalThis.fetch === 'undefined') {
-  globalThis.fetch = () => Promise.reject(new Error('fetch is not supported in turbo-test env'));
   globalThis.Headers = class Headers {
     constructor(init) {
       this._ = new Map();
@@ -1736,9 +1745,104 @@ if (typeof globalThis.fetch === 'undefined') {
     static error() { return new globalThis.Response(null, { status: 500 }); }
     static redirect(url, status) { const r = new globalThis.Response(null, { status: status || 302 }); r.headers.set('location', String(url)); return r; }
   };
+  function __dataUrlBytes(payload) {
+    const bytes = [];
+    payload = Array.from(payload);
+    for (let i = 0; i < payload.length; i++) {
+      if (payload[i] === '%' && /^[0-9a-f]{2}$/i.test(payload.slice(i + 1, i + 3).join(''))) {
+        bytes.push(parseInt(payload.slice(i + 1, i + 3).join(''), 16)); i += 2;
+      } else bytes.push(...new TextEncoder().encode(payload[i]));
+    }
+    return new Uint8Array(bytes);
+  }
+  function __dataUrlBase64(bytes) {
+    const text = new TextDecoder().decode(bytes).replace(/[\t\n\f\r ]/g, '');
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text) || text.length % 4 === 1) throw new TypeError('fetch failed');
+    if (text.includes('=') && text.length % 4 !== 0) throw new TypeError('fetch failed');
+    return new Uint8Array(globalThis.__b64decodeToBytes(text));
+  }
+  function __dataUrlDecode(url) {
+    const raw = url.slice(5).split('#')[0];
+    const comma = raw.indexOf(',');
+    if (comma < 0) throw new TypeError('fetch failed');
+    let type = raw.slice(0, comma).trim();
+    const base64 = /;base64$/i.test(type);
+    if (base64) type = type.slice(0, -7);
+    if (type.startsWith(';')) type = 'text/plain' + type;
+    if (!/^[^;/]+\/[^;]+/.test(type)) type = 'text/plain;charset=US-ASCII';
+    let bytes = __dataUrlBytes(raw.slice(comma + 1));
+    if (base64) bytes = __dataUrlBase64(bytes);
+    return [type, bytes];
+  }
+  class __DataResponse extends globalThis.Response {
+    constructor(bytes, type, url) {
+      super(null, { headers: { 'content-type': type } });
+      this._bytes = bytes;
+      this.url = url;
+      this.bodyUsed = false;
+      const self = this;
+      this.body = new ReadableStream({ start(controller) { controller.enqueue(bytes.slice()); controller.close(); } });
+      const cancel = this.body.cancel.bind(this.body);
+      this.body.cancel = (...args) => {
+        if (!this.body.locked) this.bodyUsed = true;
+        return cancel(...args);
+      };
+      const reader = this.body.getReader.bind(this.body);
+      this.body.getReader = (...args) => {
+        const result = reader(...args);
+        const read = result.read.bind(result);
+        result.read = (...values) => { self.bodyUsed = true; return read(...values); };
+        const cancel = result.cancel.bind(result);
+        result.cancel = (...values) => { self.bodyUsed = true; return cancel(...values); };
+        return result;
+      };
+    }
+    async arrayBuffer() {
+      if (this.bodyUsed || this.body.locked) throw new TypeError('Body is unusable');
+      const reader = this.body.getReader();
+      while (!(await reader.read()).done) {}
+      return this._bytes.slice().buffer;
+    }
+    async text() { return new TextDecoder().decode(await this.arrayBuffer()); }
+    async json() { return JSON.parse(await this.text()); }
+    async blob() { return new Blob([await this.arrayBuffer()], { type: this.headers.get('content-type') }); }
+    clone() {
+      if (this.bodyUsed || this.body.locked) throw new TypeError('Body is unusable');
+      return new __DataResponse(this._bytes.slice(), this.headers.get('content-type'), this.url);
+    }
+  }
+  globalThis.fetch = async (input, init = {}) => {
+    const signal = init.signal || (input && input.signal);
+    if (signal && signal.aborted) throw signal.reason;
+    const url = new URL(__requestUrl(input)).href;
+    if (!url.startsWith('data:')) throw new TypeError('fetch is not supported for this URL in turbo-test env');
+    const [type, bytes] = __dataUrlDecode(url);
+    return new __DataResponse(bytes, type, url);
+  };
 }
 if (typeof globalThis.FormData === 'undefined') {
-  globalThis.FormData = class FormData { constructor() { this._ = []; } append(k, v) { this._.push([k, v]); } get(k) { const e = this._.find((x) => x[0] === k); return e ? e[1] : null; } getAll(k) { return this._.filter((x) => x[0] === k).map((x) => x[1]); } has(k) { return this._.some((x) => x[0] === k); } forEach(f) { this._.forEach(([k, v]) => f(v, k)); } };
+  globalThis.FormData = class FormData {
+    constructor() { this._ = []; }
+    append(k, v) { this._.push([String(k), this._value(v)]); }
+    _value(v) { return v instanceof Blob ? v : String(v); }
+    get(k) { const e = this._.find((x) => x[0] === String(k)); return e ? e[1] : null; }
+    getAll(k) { return this._.filter((x) => x[0] === String(k)).map((x) => x[1]); }
+    has(k) { return this._.some((x) => x[0] === String(k)); }
+    delete(k) { this._ = this._.filter((x) => x[0] !== String(k)); }
+    set(k, v) {
+      k = String(k);
+      const index = this._.findIndex((x) => x[0] === k);
+      const entry = [k, this._value(v)];
+      if (index < 0) { this._.push(entry); return; }
+      this._[index] = entry;
+      this._ = this._.filter((x, i) => x[0] !== k || i === index);
+    }
+    *entries() { for (const [k, v] of this._) yield [k, v]; }
+    *keys() { for (const [k] of this._) yield k; }
+    *values() { for (const [, v] of this._) yield v; }
+    forEach(f, thisArg) { for (const [k, v] of this._) f.call(thisArg, v, k, this); }
+    [Symbol.iterator]() { return this.entries(); }
+  };
 }
 if (typeof globalThis.structuredClone === 'undefined') {
   // V8's structured clone (src/structured_clone.rs), with Node's argument checks: the ArrayBuffers
@@ -2611,6 +2715,86 @@ function __pseudoRandomBytes(n) {
   for (let i = 0; i < n; i++) { __seedCtr = (__seedCtr * 1103515245 + 12345) & 0x7fffffff; b[i] = (__seedCtr >> 16) & 255; }
   return b;
 }
+function __hashError(message, code) { return Object.assign(new Error(message), { code }); }
+function __hashEncoding(enc) {
+  const name = String(enc || 'utf8').toLowerCase().replace(/-/g, '');
+  const aliases = { binary: 'latin1', 'ucs2': 'utf16le' };
+  const normalized = aliases[name] || name;
+  if (!['utf8', 'hex', 'base64', 'base64url', 'ascii', 'latin1', 'utf16le'].includes(normalized)) return undefined;
+  return normalized;
+}
+function __hashHexBytes(data) {
+  if (data.length % 2) throw Object.assign(new TypeError('The hex encoding is invalid for data of odd length'), { code: 'ERR_INVALID_ARG_VALUE' });
+  const bytes = [];
+  for (let i = 0; i < data.length; i += 2) {
+    const pair = data.slice(i, i + 2);
+    if (!/^[0-9a-f]{2}$/i.test(pair)) break;
+    bytes.push(parseInt(pair, 16));
+  }
+  return new Uint8Array(bytes);
+}
+function __hashUtf16Output(bytes) {
+  let output = '';
+  for (let i = 0; i + 1 < bytes.length; i += 2) output += String.fromCharCode(bytes[i] | (bytes[i + 1] << 8));
+  return output;
+}
+function __hashLatinBytes(data) {
+  const bytes = new Uint8Array(data.length);
+  for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 255;
+  return bytes;
+}
+function __hashStringBytes(data, encoding) {
+  const enc = __hashEncoding(encoding) || 'utf8';
+  if (enc === 'hex') return __hashHexBytes(data);
+  if (enc === 'ascii' || enc === 'latin1') return __hashLatinBytes(data);
+  if (enc !== 'utf16le') return globalThis.Buffer.from(data, enc);
+  const bytes = new Uint8Array(data.length * 2);
+  for (let i = 0; i < data.length; i++) { const c = data.charCodeAt(i); bytes[i * 2] = c & 255; bytes[i * 2 + 1] = c >>> 8; }
+  return bytes;
+}
+function __hashBytes(data, encoding) {
+  if (typeof data === 'string') return __hashStringBytes(data, encoding);
+  if (!ArrayBuffer.isView(data)) throw Object.assign(new TypeError('The data argument must be a string, Buffer, TypedArray, or DataView'), { code: 'ERR_INVALID_ARG_TYPE' });
+  return new Uint8Array(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+}
+function __hashOutput(bytes, encoding) {
+  const enc = encoding && __hashEncoding(encoding);
+  if (!enc) return globalThis.Buffer.from(bytes);
+  if (enc === 'latin1') return Array.from(bytes, (b) => String.fromCharCode(b)).join('');
+  if (enc === 'ascii') return Array.from(bytes, (b) => String.fromCharCode(b & 127)).join('');
+  if (enc === 'utf16le') return __hashUtf16Output(bytes);
+  return globalThis.Buffer.from(bytes).toString(enc);
+}
+function __createHash(algorithm) {
+  if (typeof algorithm !== 'string') throw Object.assign(new TypeError('The algorithm argument must be a string'), { code: 'ERR_INVALID_ARG_TYPE' });
+  if (algorithm.toLowerCase() !== 'sha256') throw new Error(`Digest method not supported: ${algorithm}`);
+  const chunks = [];
+  let finalized = false;
+  const check = () => { if (finalized) throw __hashError('Digest already called', 'ERR_CRYPTO_HASH_FINALIZED'); };
+  return {
+    update(data, encoding) { check(); chunks.push(__hashBytes(data, encoding)); return this; },
+    digest(encoding) {
+      check();
+      const output = new Uint8Array(globalThis.__ttSha256(globalThis.Buffer.concat(chunks)));
+      finalized = true;
+      chunks.length = 0;
+      return __hashOutput(output, encoding);
+    },
+  };
+}
+const __subtleCrypto = {
+  async digest(algorithm, data) {
+    const name = typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name;
+    if (typeof name !== 'string') throw new TypeError('Algorithm name must be a string');
+    if (name.toUpperCase() !== 'SHA-256') throw new DOMException(`Unrecognized algorithm name: ${name}`, 'NotSupportedError');
+    let bytes;
+    if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
+    else if (ArrayBuffer.isView(data)) bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    else throw new TypeError('The data argument must be an ArrayBuffer or ArrayBufferView');
+    return globalThis.__ttSha256(bytes);
+  },
+};
+
 const __crypto = {
   randomUUID: () => {
     const b = __pseudoRandomBytes(16);
@@ -2621,7 +2805,7 @@ const __crypto = {
   randomBytes: (n) => globalThis.Buffer ? globalThis.Buffer.from(__pseudoRandomBytes(n)) : __pseudoRandomBytes(n),
   getRandomValues: (arr) => { const b = __pseudoRandomBytes(arr.length); for (let i = 0; i < arr.length; i++) arr[i] = b[i]; return arr; },
   randomInt: (min, max) => { if (max === undefined) { max = min; min = 0; } return min + (__pseudoRandomBytes(4).reduce((a, x) => a * 256 + x, 0) % (max - min)); },
-  createHash: () => { let data = ''; const h = { update: (d) => { data += String(d); return h; }, digest: (enc) => { let n = 0; for (let i = 0; i < data.length; i++) { n = (n * 31 + data.charCodeAt(i)) & 0x7fffffff; } const hex = n.toString(16).padStart(8, '0'); return enc === 'hex' || !enc ? hex.repeat(8).slice(0, 64) : hex; } }; return h; },
+  createHash: __createHash,
   createHmac: () => { let data = ''; const h = { update: (d) => { data += String(d); return h; }, digest: () => 'hmac' }; return h; },
   // Node crypto constants — many packages (e.g. @propelauth/node) read these at module load to
   // pick a padding/algorithm. turbo-test runs in bare V8 (no real OpenSSL), so the values just
@@ -2649,25 +2833,37 @@ const __crypto = {
 if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.randomUUID) {
   globalThis.crypto = Object.assign(globalThis.crypto || {}, { randomUUID: __crypto.randomUUID, getRandomValues: __crypto.getRandomValues });
 }
+if (!globalThis.crypto.subtle) globalThis.crypto.subtle = __subtleCrypto;
+__crypto.webcrypto = globalThis.crypto;
+__crypto.subtle = globalThis.crypto.subtle;
+function __unhandledEventError(value) {
+  if (value instanceof Error) throw value;
+  const error = new Error('Unhandled error.' + (value === undefined ? '' : ' (' + String(value) + ')'));
+  error.code = 'ERR_UNHANDLED_ERROR';
+  error.context = value;
+  throw error;
+}
 class __EventEmitter {
-  constructor() { this._ev = {}; }
+  constructor() { this._ev = Object.create(null); }
   on(e, f) { (this._ev[e] || (this._ev[e] = [])).push(f); return this; }
   addListener(e, f) { return this.on(e, f); }
-  once(e, f) { const g = (...a) => { this.off(e, g); f(...a); }; return this.on(e, g); }
-  off(e, f) { if (this._ev[e]) this._ev[e] = this._ev[e].filter((x) => x !== f); return this; }
+  once(e, f) { const self = this; function g(...a) { self.off(e, g); return f.apply(this, a); } g.listener = f; return this.on(e, g); }
+  off(e, f) { if (this._ev[e]) this._ev[e] = this._ev[e].filter((x) => x !== f && x.listener !== f); return this; }
   removeListener(e, f) { return this.off(e, f); }
-  removeAllListeners(e) { if (e) delete this._ev[e]; else this._ev = {}; return this; }
-  emit(e, ...a) { (this._ev[e] || []).slice().forEach((f) => f(...a)); return (this._ev[e] || []).length > 0; }
-  listeners(e) { return (this._ev[e] || []).slice(); }
+  removeAllListeners(e) { if (e !== undefined) delete this._ev[e]; else this._ev = Object.create(null); return this; }
+  emit(e, ...a) {
+    const listeners = (this._ev[e] || []).slice();
+    if (e === 'error' && listeners.length === 0) __unhandledEventError(a[0]);
+    listeners.forEach((f) => f.apply(this, a));
+    return listeners.length > 0;
+  }
+  listeners(e) { return (this._ev[e] || []).map((f) => f.listener || f); }
   listenerCount(e) { return (this._ev[e] || []).length; }
   setMaxListeners() { return this; }
   prependListener(e, f) { (this._ev[e] || (this._ev[e] = [])).unshift(f); return this; }
 }
 const __events = Object.assign(__EventEmitter, { EventEmitter: __EventEmitter, default: __EventEmitter, once: (em, e) => new Promise((res) => em.once(e, (...a) => res(a))) });
-class __Readable extends __EventEmitter { pipe(d) { return d; } read() { return null; } push() { return true; } destroy() { return this; } setEncoding() { return this; } resume() { return this; } pause() { return this; } }
-class __Writable extends __EventEmitter { write() { return true; } end() { return this; } destroy() { return this; } }
-class __Duplex extends __Readable { write() { return true; } end() { return this; } }
-const __stream = { Readable: __Readable, Writable: __Writable, Duplex: __Duplex, Transform: __Duplex, PassThrough: __Readable, Stream: __EventEmitter, pipeline: (...a) => { const cb = a[a.length - 1]; if (typeof cb === 'function') cb(); }, finished: (_s, cb) => { if (typeof cb === 'function') cb(); } };
+/* __TT_NODE_STREAMS__ */
 // http/https/net/tls: enough surface that connection-agent libs (agent-base, https-proxy-agent —
 // pulled in transitively by e.g. @playwright/test) load. agent-base does `class X extends
 // http.Agent`, so http.Agent MUST be a real (extendable) class. No real networking happens in
@@ -2679,16 +2875,59 @@ const __mkServer = () => { const s = new __EventEmitter(); s.listen = (..._a) =>
 const __http = { Agent: __Agent, globalAgent: new __Agent(), ClientRequest: __ClientRequest, IncomingMessage: __IncomingMessage, ServerResponse: class extends __EventEmitter { setHeader() {} end() { return this; } write() { return true; } writeHead() { return this; } }, Server: class extends __EventEmitter {}, METHODS: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'], STATUS_CODES: {}, createServer: __mkServer, request: () => new __ClientRequest(), get: () => new __ClientRequest() };
 __http.default = __http;
 const __https = Object.assign({}, __http, { Agent: __Agent, globalAgent: new __Agent() }); __https.default = __https;
-const __net = { Socket: class extends __EventEmitter { connect() { return this; } write() { return true; } end() { return this; } destroy() { return this; } setTimeout() { return this; } setNoDelay() { return this; } setKeepAlive() { return this; } ref() { return this; } unref() { return this; } }, Server: class extends __EventEmitter { listen(..._a) { const cb = _a[_a.length - 1]; if (typeof cb === 'function') cb(); return this; } close() { return this; } address() { return { port: 0 }; } }, createConnection: () => new __EventEmitter(), connect: () => new __EventEmitter(), createServer: __mkServer, isIP: () => 0, isIPv4: () => false, isIPv6: () => false }; __net.default = __net;
+const __net = { Socket: class extends __EventEmitter { connect() { return this; } write() { return true; } end() { return this; } destroy() { return this; } setTimeout() { return this; } setNoDelay() { return this; } setKeepAlive() { return this; } ref() { return this; } unref() { return this; } }, Server: class extends __EventEmitter { listen(..._a) { const cb = _a[_a.length - 1]; if (typeof cb === 'function') cb(); return this; } close() { return this; } address() { return { port: 0 }; } }, createConnection: () => new __EventEmitter(), connect: () => new __EventEmitter(), createServer: __mkServer, isIP: (input) => globalThis.__ttIsIP(input), isIPv4: (input) => globalThis.__ttIsIP(input) === 4, isIPv6: (input) => globalThis.__ttIsIP(input) === 6 }; __net.default = __net;
 const __tls = { TLSSocket: class extends __EventEmitter { connect() { return this; } }, connect: () => new __EventEmitter(), createSecureContext: () => ({}), createServer: __mkServer, checkServerIdentity: () => undefined, rootCertificates: [] }; __tls.default = __tls;
-const __zlib = { createGzip: () => new __Duplex(), createGunzip: () => new __Duplex(), createDeflate: () => new __Duplex(), createInflate: () => new __Duplex(), createBrotliCompress: () => new __Duplex(), createBrotliDecompress: () => new __Duplex(), gzip: (_b, cb) => cb && cb(null, _b), gunzip: (_b, cb) => cb && cb(null, _b), gzipSync: (b) => b, gunzipSync: (b) => b, deflateSync: (b) => b, inflateSync: (b) => b }; __zlib.default = __zlib;
+function __gzipBytes(input) {
+  if (typeof input === 'string') return Buffer.from(input);
+  if (input instanceof ArrayBuffer) return new Uint8Array(input);
+  if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+  throw new TypeError('Expected a string, Buffer, TypedArray, DataView or ArrayBuffer');
+}
+function __gzipLevel(options) {
+  const level = options.level ?? -1;
+  if (typeof level !== 'number') throw new TypeError('level must be a number');
+  if (!Number.isInteger(level) || level < -1 || level > 9) throw new RangeError('level must be between -1 and 9');
+  return level === -1 ? 6 : level;
+}
+function __gzipSync(input, options = {}, decompress = false) {
+  return Buffer.from(globalThis.__ttGzip(__gzipBytes(input), decompress, __gzipLevel(options || {})));
+}
+const __zlib = { createGzip: () => new __Duplex(), createGunzip: () => new __Duplex(), createDeflate: () => new __Duplex(), createInflate: () => new __Duplex(), createBrotliCompress: () => new __Duplex(), createBrotliDecompress: () => new __Duplex(), gzip: (_b, cb) => cb && cb(null, _b), gunzip: (_b, cb) => cb && cb(null, _b), gzipSync: (b, opts) => __gzipSync(b, opts), gunzipSync: (b, opts) => __gzipSync(b, opts, true), deflateSync: (b) => b, inflateSync: (b) => b }; __zlib.default = __zlib;
 const __tty = { isatty: () => false, ReadStream: __EventEmitter, WriteStream: __EventEmitter }; __tty.default = __tty;
 const __dns = { lookup: (_h, _o, cb) => { const c = typeof _o === 'function' ? _o : cb; if (c) c(null, '127.0.0.1', 4); }, resolve: (_h, cb) => cb && cb(null, []), promises: { lookup: () => Promise.resolve({ address: '127.0.0.1', family: 4 }), resolve: () => Promise.resolve([]) } }; __dns.default = __dns;
 const __http2 = { connect: () => new __EventEmitter(), createServer: __mkServer, createSecureServer: __mkServer, constants: {}, getDefaultSettings: () => ({}), Http2ServerRequest: __EventEmitter, Http2ServerResponse: __EventEmitter }; __http2.default = __http2;
 const __dgram = { createSocket: () => Object.assign(new __EventEmitter(), { bind() { return this; }, send() {}, close() {}, address: () => ({ port: 0 }) }) }; __dgram.default = __dgram;
 const __readline = { createInterface: () => Object.assign(new __EventEmitter(), { question: (_q, cb) => cb && cb(''), close() {}, prompt() {}, write() {} }), clearLine: () => {}, cursorTo: () => {}, moveCursor: () => {} }; __readline.default = __readline;
-const __v8 = { serialize: (x) => { try { return JSON.stringify(x); } catch (e) { return '{}'; } }, deserialize: () => ({}), getHeapStatistics: () => ({ total_heap_size: 0, used_heap_size: 0 }), setFlagsFromString: () => {} }; __v8.default = __v8;
-const __dc = { channel: () => ({ publish: () => {}, subscribe: () => {}, unsubscribe: () => {}, hasSubscribers: false }), hasSubscribers: () => false, subscribe: () => {}, unsubscribe: () => {} }; __dc.default = __dc;
+const __v8 = { serialize: (value) => Buffer.from(globalThis.__ttV8Serialize(value)), deserialize: (bytes) => { if (!ArrayBuffer.isView(bytes)) throw new TypeError('buffer must be a TypedArray or DataView'); return globalThis.__ttV8Deserialize(bytes); }, getHeapStatistics: () => ({ total_heap_size: 0, used_heap_size: 0 }), setFlagsFromString: () => {} }; __v8.default = __v8;
+const __dcChannels = new Map();
+class __DiagnosticChannel {
+  constructor(name) { this.name = name; this._subscribers = []; }
+  get hasSubscribers() { return this._subscribers.length > 0; }
+  subscribe(fn) {
+    if (typeof fn !== 'function') throw new TypeError('subscriber must be a function');
+    this._subscribers.push(fn);
+  }
+  unsubscribe(fn) {
+    const index = this._subscribers.indexOf(fn);
+    if (index < 0) return false;
+    this._subscribers.splice(index, 1);
+    return true;
+  }
+  publish(message) { this._subscribers.slice().forEach((fn) => fn(message, this.name)); }
+}
+function __diagnosticChannel(name) {
+  if (typeof name !== 'string' && typeof name !== 'symbol') throw new TypeError('channel name must be a string or symbol');
+  if (!__dcChannels.has(name)) __dcChannels.set(name, new __DiagnosticChannel(name));
+  return __dcChannels.get(name);
+}
+const __dc = {
+  Channel: __DiagnosticChannel,
+  channel: __diagnosticChannel,
+  hasSubscribers: (name) => __diagnosticChannel(name).hasSubscribers,
+  subscribe: (name, fn) => __diagnosticChannel(name).subscribe(fn),
+  unsubscribe: (name, fn) => __diagnosticChannel(name).unsubscribe(fn),
+};
+__dc.default = __dc;
 class __AsyncLocalStorage { constructor() { this._store = undefined; } run(store, cb, ...a) { const p = this._store; this._store = store; try { return cb(...a); } finally { this._store = p; } } getStore() { return this._store; } enterWith(s) { this._store = s; } disable() {} exit(cb, ...a) { return cb(...a); } }
 const __async_hooks = { AsyncLocalStorage: __AsyncLocalStorage, AsyncResource: class { runInAsyncScope(fn, thisArg, ...a) { return fn.apply(thisArg, a); } emitDestroy() { return this; } bind(fn) { return fn; } }, createHook: () => ({ enable() { return this; }, disable() { return this; } }), executionAsyncId: () => 0, triggerAsyncId: () => 0 }; __async_hooks.default = __async_hooks;
 // ---- Node's util.inspect / util.format (Node 26; turbo-test#93) ----
@@ -3868,6 +4107,8 @@ globalThis.__nodeBuiltins = {
   'node:events': __events,
   stream: __stream,
   'node:stream': __stream,
+  'stream/promises': __streamPromises,
+  'node:stream/promises': __streamPromises,
   http: __http,
   'node:http': __http,
   https: __https,
