@@ -2,6 +2,9 @@ import { createApp, nextTick } from 'vue';
 import Counter from './Counter';
 import Options from './Options.vue';
 import TemplateOnly from './TemplateOnly.vue';
+import Asset from './Asset.vue';
+import logo from './logo.png';
+import logo2 from './logo2.png';
 
 function mounted(component, props) {
   const root = document.createElement('div');
@@ -38,4 +41,14 @@ test('Vue options TypeScript and template-only SFCs compile and render', () => {
     expect(template.root.querySelector('strong').hasAttribute(TemplateOnly.__scopeId)).toBe(true);
     expect(template.root.querySelector('span').hasAttribute(TemplateOnly.__scopeId)).toBe(true);
   } finally { options.cleanup(); template.cleanup(); }
+});
+
+test('Vue template image and srcset assets use real module imports', () => {
+  const view = mounted(Asset);
+  try {
+    const image = view.root.querySelector('img');
+    expect(image.getAttribute('src')).toBe(logo);
+    expect(image.getAttribute('srcset')).toContain(logo + ' 1x');
+    expect(image.getAttribute('srcset')).toContain(logo2 + ' 2x');
+  } finally { view.cleanup(); }
 });
