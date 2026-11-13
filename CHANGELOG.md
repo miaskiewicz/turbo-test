@@ -20,6 +20,13 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   real gzip bytes and decompression errors (#324).
 - Return Buffer-backed V8 serialization and deserialize Maps, cycles and typed arrays
   using V8's native serializer (#348). VM context lifecycle work remains tracked in #332.
+- Implement Node-mode `AbortSignal.timeout` on the real timer clock (#325), with
+  validated delays, asynchronous ordering and a `TimeoutError` reason even while test
+  timers are faked.
+- Forward bytes through in-memory Node streams and wait for write/final callbacks
+  before callback or promise pipeline completion (#319, #334). Expose both
+  `stream/promises` aliases, propagate failures and observe `finished` lifecycle.
+  Operating-system stream integration remains separate work.
 
 ### Tests
 - Add Node controls and native runner regressions for the compatibility fixes,

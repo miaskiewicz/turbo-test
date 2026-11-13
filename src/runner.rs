@@ -9157,7 +9157,8 @@ fn framework_prelude(scope: &mut v8::PinScope) {
             .and_then(|s| s.run(tc))
             .unwrap_or_else(|| chai_missing("chai failed to load"));
     }
-    let code = v8::String::new(scope, RUNTIME_JS).unwrap();
+    let runtime = RUNTIME_JS.replace("/* __TT_NODE_STREAMS__ */", include_str!("node_streams.js"));
+    let code = v8::String::new(scope, &runtime).unwrap();
     let s = v8::Script::compile(scope, code, None).unwrap();
     s.run(scope).unwrap();
 }
@@ -9972,7 +9973,7 @@ fn fs_stat(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv
 #[rustfmt::skip]
 const NODE_BUILTINS: &[&str] = &[
     "fs", "fs/promises", "path", "module", "os", "child_process", "url", "util", "events",
-    "stream", "assert", "assert/strict", "perf_hooks", "crypto", "buffer", "querystring",
+    "stream", "stream/promises", "assert", "assert/strict", "perf_hooks", "crypto", "buffer", "querystring",
     "string_decoder", "timers", "timers/promises", "http", "http2", "https", "net", "tls", "zlib",
     "dns", "dns/promises", "tty", "constants", "dgram", "readline", "v8", "diagnostics_channel",
     "process", "async_hooks", "worker_threads", "vm", "inspector",

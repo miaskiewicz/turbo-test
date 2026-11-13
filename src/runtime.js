@@ -2863,10 +2863,7 @@ class __EventEmitter {
   prependListener(e, f) { (this._ev[e] || (this._ev[e] = [])).unshift(f); return this; }
 }
 const __events = Object.assign(__EventEmitter, { EventEmitter: __EventEmitter, default: __EventEmitter, once: (em, e) => new Promise((res) => em.once(e, (...a) => res(a))) });
-class __Readable extends __EventEmitter { pipe(d) { return d; } read() { return null; } push() { return true; } destroy() { return this; } setEncoding() { return this; } resume() { return this; } pause() { return this; } }
-class __Writable extends __EventEmitter { write() { return true; } end() { return this; } destroy() { return this; } }
-class __Duplex extends __Readable { write() { return true; } end() { return this; } }
-const __stream = { Readable: __Readable, Writable: __Writable, Duplex: __Duplex, Transform: __Duplex, PassThrough: __Readable, Stream: __EventEmitter, pipeline: (...a) => { const cb = a[a.length - 1]; if (typeof cb === 'function') cb(); }, finished: (_s, cb) => { if (typeof cb === 'function') cb(); } };
+/* __TT_NODE_STREAMS__ */
 // http/https/net/tls: enough surface that connection-agent libs (agent-base, https-proxy-agent —
 // pulled in transitively by e.g. @playwright/test) load. agent-base does `class X extends
 // http.Agent`, so http.Agent MUST be a real (extendable) class. No real networking happens in
@@ -4110,6 +4107,8 @@ globalThis.__nodeBuiltins = {
   'node:events': __events,
   stream: __stream,
   'node:stream': __stream,
+  'stream/promises': __streamPromises,
+  'node:stream/promises': __streamPromises,
   http: __http,
   'node:http': __http,
   https: __https,
