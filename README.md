@@ -240,21 +240,31 @@ npx turbo-test            # discovers *.spec.* too; reads jest config when no vi
 ```
 
 > **Status — experimental.** The jest shim, jest-config reading, decorator metadata and
-> CommonJS-first resolution work. Suites that lean on node-native modules bare V8 cannot run yet
-> (the `mongodb` driver, real OpenSSL crypto such as `createCipheriv`/RSA, full ICU `Intl` time
-> zones) need a Node-compat native layer. CommonJS-first resolution is scoped to jest projects
+> CommonJS-first resolution work. The native compatibility surface below is bounded;
+> complete MongoDB driver execution and full ICU `Intl` time-zone support remain unavailable. CommonJS-first resolution is scoped to jest projects
 > with a node test environment, so React/vitest suites are unaffected. The last measured jest
 > numbers (0.2.11) are in [docs/BENCHMARKS-history.md](docs/BENCHMARKS-history.md).
 
 
-Node-mode support in the 0.8.4 candidate includes SHA-256, P-256 KeyObjects with
-PKCS#8/SPKI PEM/DER and SHA-256 ECDSA, gzip, native V8 serialization, transferable
-MessagePorts, and AsyncLocalStorage across native await and scheduled resources.
+Node-mode support in the 0.8.4 candidate includes native SHA-1/SHA-256 hashing,
+P-256 ECDSA and RSA PKCS#1 v1.5 SHA-256 signing with PKCS#8/SPKI PEM/DER KeyObjects,
+and AES-256-GCM with 12-byte IVs, 12–16-byte authentication tags and AAD. Key generation
+and `randomBytes` use OS entropy; unsupported algorithms and encrypted key formats
+report errors. It also includes gzip, native V8 serialization, transferable MessagePorts,
+and AsyncLocalStorage across native await and scheduled resources.
+
+CommonJS-first decorator metadata preserves partial exports in cyclic TypeScript
+imports. `require('stream')` is a callable Stream constructor with matching named/default
+identity and legacy inheritance support. These additions do not establish full Jest or
+Flux APIs compatibility; consumer validation remains in progress.
 
 The host I/O surface supports synchronous `spawnSync`/`execFileSync`/`execSync` and
 loopback HTTP/1.0–1.1 with content-length or chunked bodies. HTTP uses one request per
-connection; TLS, custom agents, persistent connections and asynchronous child-process
-APIs report unsupported errors. This does not yet provide a complete MongoDB driver
+connection, shared message/socket identity, socket close events and native TCP_NODELAY.
+HTTP socket state reflects the real connection; it does not expose general-purpose raw TCP
+stream I/O. `tls.Server` supports type discrimination, while construction and
+`tls.createServer` throw `ERR_TLS_UNSUPPORTED_SERVER`. TLS transport, custom agents,
+persistent connections and asynchronous child-process APIs remain unsupported. This does not yet provide a complete MongoDB driver
 execution environment.
 
 Fresh `vm` contexts support injected bindings, isolated globals, real values/errors

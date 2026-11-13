@@ -17,6 +17,14 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   external blocks and unmapped SFC coverage report explicit errors.
 
 ### Fixed
+- Hash HTTP etags with native SHA-1 through `crypto.createHash`, preserving SHA-256.
+- Preserve CommonJS partial exports for cyclic decorated TypeScript classes, isolate
+  metadata transform cache modes, and hoist static TypeScript imports around mocks (#351).
+- Export a callable `stream.Stream` with named/default identity and legacy inheritance;
+  legacy pipes clean up listeners and complete once (#352).
+- Expose shared HTTP request/response socket identity, connection state and close events,
+  and apply TCP_NODELAY to real native connections. General raw TCP stream I/O remains
+  outside this HTTP-only surface.
 - Expose a distinct `tls.Server` constructor so plain-HTTP clients can check server
   types without failing during module loading. TLS server construction and
   `tls.createServer` report `ERR_TLS_UNSUPPORTED_SERVER`; no TLS transport is implied.
