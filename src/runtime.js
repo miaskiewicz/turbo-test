@@ -4105,12 +4105,6 @@ const __timers = {
 // ---- vm / worker_threads / inspector: owned host capabilities; unsupported operations throw ----
 const __unavailable = (what, why) => () => { throw new Error('turbo-test: ' + what + ' is not available (' + why + ')'); };
 /* __TT_NODE_VM__ */
-class __VmScript {
-  constructor(code) { this._code = String(code); }
-  runInThisContext() { return (0, eval)(this._code); }
-}
-__VmScript.prototype.runInContext = function(sandbox, options) { return __vmRunInContext(this._code, sandbox, options); };
-__VmScript.prototype.runInNewContext = function(sandbox, options) { return __vmRunInNewContext(this._code, sandbox, options); };
 const __vm = {
   Script: __VmScript,
   runInThisContext: (code) => (0, eval)(String(code)),

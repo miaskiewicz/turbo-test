@@ -39,3 +39,32 @@ function __vmRunInContext(code, sandbox, options) {
   if (!__vmIsContext(sandbox)) throw Object.assign(new TypeError('The contextifiedObject must be a vm.Context'), { code: 'ERR_INVALID_ARG_TYPE' });
   return __vmEvaluate(code, sandbox, options);
 }
+
+function __vmScriptOptions(options) {
+  if (options === undefined) return {};
+  if (typeof options === 'string') return { filename: options };
+  if (options === null || typeof options !== 'object') throw __vmArgument('The options argument must be an object');
+  return options;
+}
+function __vmScriptSource(code, options) {
+  if (typeof code === 'symbol') throw new TypeError('Cannot convert a Symbol value to a string');
+  const source = String(code);
+  const optionFilename = __vmScriptOptions(options).filename;
+  const filename = optionFilename === undefined ? 'evalmachine.<anonymous>' : optionFilename;
+  if (typeof filename !== 'string') throw __vmArgument('The filename option must be a string');
+  globalThis.__ttVmCompile(source, filename);
+  return { source, filename };
+}
+function __vmScriptRunOptions(filename, options) {
+  return { filename, timeout: __vmOptions(options).timeout };
+}
+class __VmScript {
+  constructor(code, options) {
+    const compiled = __vmScriptSource(code, options);
+    this._code = compiled.source;
+    this._filename = compiled.filename;
+  }
+  runInThisContext() { return (0, eval)(this._code); }
+  runInContext(sandbox, options) { return __vmRunInContext(this._code, sandbox, __vmScriptRunOptions(this._filename, options)); }
+  runInNewContext(sandbox, options) { return __vmRunInNewContext(this._code, sandbox, __vmScriptRunOptions(this._filename, options)); }
+}

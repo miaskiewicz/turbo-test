@@ -171,6 +171,38 @@ fn compile_vm<'s>(
     v8::Script::compile(scope, code, Some(&origin))
 }
 
+/// Validate Script grammar immediately without executing or binding it to a context.
+pub fn native_compile_script<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    _rv: v8::ReturnValue,
+) {
+    use v8::script_compiler as compiler;
+    let Some(code) = args.get(0).to_string(scope) else {
+        return;
+    };
+    let origin = v8::ScriptOrigin::new(
+        scope,
+        args.get(1),
+        0,
+        0,
+        false,
+        0,
+        None,
+        false,
+        false,
+        false,
+        None,
+    );
+    let mut source = compiler::Source::new(code, Some(&origin));
+    let _ = compiler::compile_unbound_script(
+        scope,
+        &mut source,
+        compiler::CompileOptions::NoCompileOptions,
+        compiler::NoCacheReason::NoReason,
+    );
+}
+
 fn timeout_error<'s>(scope: &mut v8::PinScope<'s, '_>, timeout: u64) -> v8::Local<'s, v8::Value> {
     let message = v8::String::new(
         scope,

@@ -9983,6 +9983,12 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         "__ttVmRun",
         crate::vm_compat::native_run_context,
     );
+    bind_fn(
+        scope,
+        global,
+        "__ttVmCompile",
+        crate::vm_compat::native_compile_script,
+    );
     bind_fn(scope, global, "__ttEc", crate::key_compat::native_ec);
     bind_fn(scope, global, "__ttRsa", crate::rsa_compat::native_rsa);
     bind_fn(
