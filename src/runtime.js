@@ -2867,7 +2867,7 @@ const __crypto = {
   getRandomValues: __getRandomValues,
   randomInt: (min, max) => { if (max === undefined) { max = min; min = 0; } return min + (__pseudoRandomBytes(4).reduce((a, x) => a * 256 + x, 0) % (max - min)); },
   createHash: __createHash,
-  createHmac: () => { let data = ''; const h = { update: (d) => { data += String(d); return h; }, digest: () => 'hmac' }; return h; },
+  createHmac: __cryptoCreateHmac,
   // Node crypto constants — many packages (e.g. @propelauth/node) read these at module load to
   // pick a padding/algorithm. turbo-test runs in bare V8 (no real OpenSSL), so the values just
   // need to EXIST so modules load; tests that exercise actual crypto mock it or are out of scope.
@@ -2887,7 +2887,7 @@ const __crypto = {
   createDecipheriv: () => { throw new Error('turbo-test: crypto.createDecipheriv is not available in the V8 runtime (no OpenSSL) — mock it in the test'); },
   createSign: () => { throw new Error('turbo-test: crypto.createSign is not available in the V8 runtime'); },
   createVerify: () => { throw new Error('turbo-test: crypto.createVerify is not available in the V8 runtime'); },
-  pbkdf2Sync: () => { throw new Error('turbo-test: crypto.pbkdf2Sync is not available in the V8 runtime'); },
+  pbkdf2Sync: __cryptoPbkdf2,
   scryptSync: () => { throw new Error('turbo-test: crypto.scryptSync is not available in the V8 runtime'); },
   timingSafeEqual: (a, b) => { if (a.length !== b.length) return false; let r = 0; for (let i = 0; i < a.length; i++) r |= a[i] ^ b[i]; return r === 0; },
 };
