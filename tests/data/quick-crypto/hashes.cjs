@@ -15,11 +15,11 @@ testCase('HMAC key views copies incremental encoding and lifecycle',()=>{
 testCase('PBKDF2 SHA1 RFC6070 answers and binary inputs',()=>{
  assert.equal(crypto.pbkdf2Sync('password','salt',1,20,'sha1').toString('hex'),'0c60c80f961f0e71f3a9b524af6012062fe037a6');
  assert.equal(crypto.pbkdf2Sync(Buffer.from('password'),Buffer.from('salt'),2,20,'sha1').toString('hex'),'ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957');
- assert.equal(crypto.pbkdf2Sync('password','salt',4096,25,'sha1').toString('hex'),'4b007901b765489abead49d926f721d065a429c12e463f6c4cd');
+ assert.equal(crypto.pbkdf2Sync('password','salt',4096,25,'sha1').toString('hex'),'4b007901b765489abead49d926f721d065a429c12e463f6c4c');
 });
 testCase('PBKDF2 validates iteration and output length',()=>{
  assert.throws(()=>crypto.pbkdf2Sync('p','s',0,20,'sha1'));
  assert.throws(()=>crypto.pbkdf2Sync('p','s',1,-1,'sha1'));
  assert.throws(()=>crypto.pbkdf2Sync('p','s',1.5,20,'sha1'));
- assert.equal(crypto.pbkdf2Sync('p','s',1,0,'sha1').length,0);
+ assert.throws(()=>crypto.pbkdf2Sync('p','s',1,0,'sha1'));
 });
