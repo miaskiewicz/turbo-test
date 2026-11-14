@@ -340,21 +340,27 @@ function __writableAbort(stream, error) {
     if (item.callback) item.callback(failure);
   }
 }
-class __Transform extends __Duplex {
-  constructor(options = {}) {
-    super(options);
-    if (options.transform) this._transform = options.transform;
-    if (options.flush) this._flush = options.flush;
-  }
+function __Transform(options = {}) {
+  if (!(this instanceof __Transform)) return new __Transform(options);
+  __Stream.call(this);
+  __streamInit(this, options);
+  __readableInit(this, options);
+  __writableInit(this, options);
+  if (options.transform) this._transform = options.transform;
+  if (options.flush) this._flush = options.flush;
+}
+Object.setPrototypeOf(__Transform, __Duplex);
+Object.setPrototypeOf(__Transform.prototype, __Duplex.prototype);
+Object.assign(__Transform.prototype, {
   _read() {
     const callback = this._transformCallback;
     this._transformCallback = null;
     if (callback) callback();
-  }
-  _transform(chunk, encoding, callback) { callback(__streamError('ERR_METHOD_NOT_IMPLEMENTED', '_transform() is not implemented')); }
+  },
+  _transform(chunk, encoding, callback) { callback(__streamError('ERR_METHOD_NOT_IMPLEMENTED', '_transform() is not implemented')); },
   _write(chunk, encoding, callback) {
     this._transform(chunk, encoding, (error, value) => __transformComplete(this, callback, error, value));
-  }
+  },
   _final(callback) {
     if (!this._flush) { this.push(null); return callback(); }
     this._flush((error, value) => {
@@ -362,8 +368,8 @@ class __Transform extends __Duplex {
       if (value !== undefined && value !== null) this.push(value);
       this.push(null); callback();
     });
-  }
-}
+  },
+});
 class __PassThrough extends __Transform {
   _transform(chunk, encoding, callback) { callback(null, chunk); }
 }
