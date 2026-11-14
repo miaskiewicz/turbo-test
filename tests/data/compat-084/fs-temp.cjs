@@ -43,6 +43,9 @@ test('mkdtempSync validates input and keeps the OS error template path', () => {
   assert.throws(() => fs.mkdtempSync(42), { code: 'ERR_INVALID_ARG_TYPE' });
   assert.throws(() => fs.mkdtempSync('bad\0prefix'), { code: 'ERR_INVALID_ARG_VALUE' });
   assert.throws(() => fs.mkdtempSync('x-', { encoding: 'not-an-encoding' }), { code: 'ERR_INVALID_ARG_VALUE' });
+  assert.throws(() => fs.mkdtempSync(path.join(base, 'invalid-'), 42), { code: 'ERR_INVALID_ARG_TYPE' });
+  assert.throws(() => fs.mkdtempSync(path.join(base, 'invalid-'), true), { code: 'ERR_INVALID_ARG_TYPE' });
+  assert.throws(() => fs.mkdtempSync(path.join(base, 'invalid-'), { encoding: 42 }), { code: 'ERR_INVALID_ARG_VALUE' });
   const prefix = path.join(base, 'missing-parent', 'prefix-');
   assert.throws(() => fs.mkdtempSync(prefix), { code: 'ENOENT', syscall: 'mkdtemp', path: prefix + 'XXXXXX' });
 });
