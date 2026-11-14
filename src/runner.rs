@@ -9629,7 +9629,11 @@ fn framework_prelude(scope: &mut v8::PinScope) {
             "/* __TT_NODE_PROCESSES__ */",
             include_str!("node_processes.js"),
         )
-        .replace("/* __TT_NODE_HTTP__ */", include_str!("node_http.js"));
+        .replace("/* __TT_NODE_HTTP__ */", include_str!("node_http.js"))
+        .replace(
+            "/* __TT_NODE_BLOCKLIST__ */",
+            include_str!("node_blocklist.js"),
+        );
     let code = v8::String::new(scope, &runtime).unwrap();
     let s = v8::Script::compile(scope, code, None).unwrap();
     s.run(scope).unwrap();
@@ -9964,6 +9968,12 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         global,
         "__ttCryptoHashes",
         crate::crypto_compat::native_crypto_hashes,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttBlockList",
+        crate::blocklist::native_blocklist,
     );
     bind_fn(
         scope,
