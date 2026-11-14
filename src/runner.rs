@@ -10340,7 +10340,9 @@ fn fs_copy_stream(mut input: std::fs::File, mut output: std::fs::File) -> std::i
 
 #[cfg(windows)]
 fn fs_copy_windows(source: &str, destination: &str) -> std::io::Result<()> {
-    if std::fs::canonicalize(source)? == std::fs::canonicalize(destination).unwrap_or_default() {
+    if crate::canon::canonicalize(source)?
+        == crate::canon::canonicalize(destination).unwrap_or_default()
+    {
         return Ok(());
     }
     std::fs::copy(source, destination).map(|_| ())
