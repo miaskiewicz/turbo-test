@@ -2259,6 +2259,16 @@ if (typeof globalThis.Buffer === 'undefined') {
     static allocUnsafe(n) { return new Buffer(n); }
     static isBuffer(x) { return x instanceof Buffer; }
     static concat(list) { const len = list.reduce((n, b) => n + b.length, 0); const out = new Buffer(len); let o = 0; for (const b of list) { out.set(b, o); o += b.length; } return out; }
+    static #readUInt32Offset(bytes, offset) {
+      if (typeof offset !== 'number') throw Object.assign(new TypeError('The offset argument must be a number'), { code: 'ERR_INVALID_ARG_TYPE' });
+      if (Math.floor(offset) !== offset) throw Object.assign(new RangeError('The offset must be an integer'), { code: 'ERR_OUT_OF_RANGE' });
+      if (bytes.length < 4) throw Object.assign(new RangeError('Attempt to access memory outside buffer bounds'), { code: 'ERR_BUFFER_OUT_OF_BOUNDS' });
+      if (offset < 0 || offset > bytes.length - 4) throw Object.assign(new RangeError('The offset is outside the buffer bounds'), { code: 'ERR_OUT_OF_RANGE' });
+    }
+    readUInt32BE(offset = 0) {
+      Buffer.#readUInt32Offset(this, offset);
+      return this[offset] * 16777216 + this[offset + 1] * 65536 + this[offset + 2] * 256 + this[offset + 3];
+    }
     toString(enc) {
       if (enc === 'hex') return Array.from(this).map((b) => b.toString(16).padStart(2, '0')).join('');
       if (enc === 'base64') return globalThis.__b64encodeBytes(Array.from(this));
