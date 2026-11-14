@@ -4,6 +4,7 @@ const crypto=require('node:crypto');
 testCase('HMAC known SHA1 and SHA256 answers',()=>{
  assert.equal(crypto.createHmac('sha1',Buffer.alloc(20,11)).update('Hi There').digest('hex'),'b617318655057264e28bc0b6fb378c8ef146be00');
  assert.equal(crypto.createHmac('sha256',Buffer.alloc(20,11)).update('Hi There').digest('hex'),'b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7');
+ assert.equal(crypto.createHmac('sha256',Buffer.alloc(131,170)).update('Test Using Larger Than Block-Size Key - Hash Key First').digest('hex'),'60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54');
 });
 testCase('HMAC key views copies incremental encoding and lifecycle',()=>{
  const key=Buffer.from('!key!');const h=crypto.createHmac('SHA256',key.subarray(1,4));key.fill(0);
