@@ -9937,6 +9937,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__fs_writeFile", fs_write_file);
     bind_fn(scope, global, "__fs_mkdir", fs_mkdir);
     bind_fn(scope, global, "__fs_mkdtemp", fs_mkdtemp);
+    bind_fn(scope, global, "__fs_copyFile", fs_copy_file);
     bind_fn(scope, global, "__fs_remove", fs_remove);
     bind_fn(scope, global, "__fs_symlinkSync", fs_symlink_sync);
     // process.cwd(): the process's working directory, as vitest's workers report it; os.tmpdir()
@@ -10204,13 +10205,16 @@ fn fs_exists_sync(
 /// The Node error code and description of an OS error (`EEXIST`, "file already exists"), as
 /// libuv names them; None for an error that is not one of these.
 fn errno_name(e: &std::io::Error) -> Option<(&'static str, &'static str)> {
-    const NAMES: [(i32, &str, &str); 6] = [
+    const NAMES: [(i32, &str, &str); 9] = [
         (2, "ENOENT", "no such file or directory"),
         (13, "EACCES", "permission denied"),
         (17, "EEXIST", "file already exists"),
         (20, "ENOTDIR", "not a directory"),
         (1, "EPERM", "operation not permitted"),
         (21, "EISDIR", "illegal operation on a directory"),
+        (libc::ENOSYS, "ENOSYS", "function not implemented"),
+        (libc::ENOTSUP, "ENOTSUP", "operation not supported"),
+        (libc::ENAMETOOLONG, "ENAMETOOLONG", "name too long"),
     ];
     // ENOTEMPTY's number differs by OS (66 on macOS, 39 on Linux)
     if e.kind() == std::io::ErrorKind::DirectoryNotEmpty {
@@ -10281,6 +10285,99 @@ fn fs_mkdtemp(
             };
             throw_fs_error(scope, &error, "mkdtemp", &path);
         }
+    }
+}
+
+#[cfg(unix)]
+fn fs_same_file(source: &std::fs::File, destination: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let src = source.metadata()?;
+    let dest = destination.metadata()?;
+    Ok(src.dev() == dest.dev() && src.ino() == dest.ino())
+}
+
+#[cfg(not(unix))]
+fn fs_same_file(_source: &std::fs::File, _destination: &std::fs::File) -> std::io::Result<bool> {
+    // The default Windows copy uses the platform copy operation instead of this streaming path.
+    Ok(false)
+}
+
+fn fs_copy_source(path: &str) -> std::io::Result<std::fs::File> {
+    let file = std::fs::File::open(path)?;
+    if file.metadata()?.is_dir() {
+        let errno = if cfg!(target_os = "macos") {
+            libc::ENOTSUP
+        } else {
+            libc::EISDIR
+        };
+        return Err(std::io::Error::from_raw_os_error(errno));
+    }
+    Ok(file)
+}
+
+fn fs_copy_bytes(source: &str, destination: &str, flags: i32) -> std::io::Result<()> {
+    let mut input = fs_copy_source(source)?;
+    if flags & 4 != 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+    }
+    #[cfg(windows)]
+    if flags & 1 == 0 {
+        if std::fs::canonicalize(source)? == std::fs::canonicalize(destination).unwrap_or_default()
+        {
+            return Ok(());
+        }
+        return std::fs::copy(source, destination).map(|_| ());
+    }
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .create_new(flags & 1 != 0)
+        .open(destination)?;
+    if fs_same_file(&input, &output)? {
+        return Ok(());
+    }
+    output.set_len(0)?;
+    std::io::copy(&mut input, &mut output)?;
+    output.set_permissions(input.metadata()?.permissions())
+}
+
+fn throw_fs_copy_error(
+    scope: &mut v8::PinScope,
+    error: &std::io::Error,
+    source: &str,
+    destination: &str,
+) {
+    let (code, description) = errno_name(error).unwrap_or(("EIO", "i/o error"));
+    let message = format!("{code}: {description}, copyfile '{source}' -> '{destination}'");
+    let message = v8::String::new(scope, &message).unwrap();
+    let exception = v8::Exception::error(scope, message);
+    let object = exception.cast::<v8::Object>();
+    for (key, value) in [
+        ("code", code),
+        ("syscall", "copyfile"),
+        ("path", source),
+        ("dest", destination),
+    ] {
+        let key = v8::String::new(scope, key).unwrap();
+        let value = v8::String::new(scope, value).unwrap();
+        object.set(scope, key.into(), value.into());
+    }
+    let key = v8::String::new(scope, "errno").unwrap();
+    let value = v8::Integer::new(scope, -error.raw_os_error().unwrap_or(5));
+    object.set(scope, key.into(), value.into());
+    scope.throw_exception(exception);
+}
+
+fn fs_copy_file(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let source = args.get(0).to_rust_string_lossy(scope);
+    let destination = args.get(1).to_rust_string_lossy(scope);
+    let flags = args.get(2).int32_value(scope).unwrap_or(0);
+    if let Err(error) = fs_copy_bytes(&source, &destination, flags) {
+        throw_fs_copy_error(scope, &error, &source, &destination);
     }
 }
 

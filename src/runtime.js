@@ -2664,7 +2664,7 @@ const __fsDeferred = (operation, callback) => {
 };
 const __tempEncoding = (options) => {
   const encoding = __encodingOf(options) || 'utf8';
-  if (encoding !== 'buffer' && !Buffer.isEncoding(encoding)) throw __fsArgumentError('ERR_INVALID_ARG_VALUE', `Invalid encoding: ${encoding}`);
+  if (encoding !== 'buffer' && (typeof encoding !== 'string' || !__hashEncoding(encoding))) throw __fsArgumentError('ERR_INVALID_ARG_VALUE', `Invalid encoding: ${encoding}`);
   return encoding;
 };
 const __tempOperation = (prefix, options, sync) => {
@@ -2673,13 +2673,28 @@ const __tempOperation = (prefix, options, sync) => {
     const result = globalThis.__fs_mkdtemp(path, sync);
     if (encoding === 'utf8' || encoding === 'utf-8') return result;
     const bytes = Buffer.from(result);
-    return encoding === 'buffer' ? bytes : bytes.toString(encoding);
+    return encoding === 'buffer' ? bytes : __hashOutput(bytes, encoding);
   };
 };
 const __mkdtempSync = (prefix, options) => __tempOperation(prefix, options, true)();
 const __mkdtemp = (prefix, options, callback) => {
   if (typeof options === 'function') { callback = options; options = undefined; }
   return __fsDeferred(__tempOperation(prefix, options, false), callback);
+};
+const __copyMode = (mode) => {
+  if (mode == null) return 0;
+  if (typeof mode !== 'number') throw __fsArgumentError('ERR_INVALID_ARG_TYPE', 'The mode argument must be a number');
+  if (!Number.isFinite(mode) || mode < 0 || mode > 7) throw __fsArgumentError('ERR_OUT_OF_RANGE', 'The mode argument must be between 0 and 7', RangeError);
+  return mode | 0;
+};
+const __copyOperation = (source, destination, mode) => {
+  const src = __fsCheckedPath(source, 'src'), dest = __fsCheckedPath(destination, 'dest'), flags = __copyMode(mode);
+  return () => globalThis.__fs_copyFile(src, dest, flags);
+};
+const __copyFileSync = (source, destination, mode) => __copyOperation(source, destination, mode)();
+const __copyFile = (source, destination, mode, callback) => {
+  if (typeof mode === 'function') { callback = mode; mode = undefined; }
+  return __fsDeferred(__copyOperation(source, destination, mode), callback);
 };
 const __fs = {
   Dirent,
@@ -2693,6 +2708,8 @@ const __fs = {
   mkdirSync: __mkdir,
   mkdtempSync: __mkdtempSync,
   mkdtemp: __mkdtemp,
+  copyFileSync: __copyFileSync,
+  copyFile: __copyFile,
   rmSync: __rm,
   rmdirSync: (p) => globalThis.__fs_remove(__fsPath(p), 'rmdir'),
   unlinkSync: (p) => globalThis.__fs_remove(__fsPath(p), 'unlink'),
@@ -2707,6 +2724,7 @@ const __fs = {
     appendFile: __promised((p, data) => __writeFile(p, data, true)),
     mkdir: __promised(__mkdir),
     mkdtemp: __promised((prefix, options) => __tempOperation(prefix, options, false)()),
+    copyFile: __promised(__copyFileSync),
     rm: __promised(__rm),
     rmdir: __promised((p) => globalThis.__fs_remove(__fsPath(p), 'rmdir')),
     unlink: __promised((p) => globalThis.__fs_remove(__fsPath(p), 'unlink')),
