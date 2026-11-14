@@ -262,6 +262,10 @@ Synchronous zlib deflate/inflate exchange real compressed bytes with Node;
 dictionary/tuning options and asynchronous or streaming deflate/inflate report
 explicit unsupported-capability errors.
 
+`crypto.X509Certificate` parses DER/PEM certificates and exposes raw bytes, serial,
+validity, subject/issuer and real RSA/P-256 public keys. It does not verify certificate
+signatures or trust chains; `verify()` reports `ERR_X509_UNSUPPORTED_OPERATION`.
+
 CommonJS-first decorator metadata preserves partial exports in cyclic TypeScript
 imports. `require('stream')` is a callable Stream constructor with matching named/default
 identity and legacy inheritance support. These additions do not establish full Jest or

@@ -9616,6 +9616,7 @@ fn framework_prelude(scope: &mut v8::PinScope) {
             "/* __TT_NODE_CRYPTO_HASHES__ */",
             include_str!("node_crypto_hashes.js"),
         )
+        .replace("/* __TT_NODE_X509__ */", include_str!("node_x509.js"))
         .replace("/* __TT_NODE_VM__ */", include_str!("node_vm.js"))
         .replace(
             "/* __TT_NODE_ASYNC_CONTEXT__ */",
@@ -10001,6 +10002,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     );
     bind_fn(scope, global, "__ttEc", crate::key_compat::native_ec);
     bind_fn(scope, global, "__ttRsa", crate::rsa_compat::native_rsa);
+    bind_fn(scope, global, "__ttX509", crate::x509_compat::native_x509);
     bind_fn(
         scope,
         global,

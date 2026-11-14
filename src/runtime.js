@@ -2856,6 +2856,7 @@ function __getRandomValues(array) {
   bytes.set(globalThis.__ttRandomBytes(length));
   return array;
 }
+/* __TT_NODE_X509__ */
 const __crypto = {
   randomUUID: () => {
     const b = __pseudoRandomBytes(16);
@@ -2891,7 +2892,7 @@ const __crypto = {
   scryptSync: () => { throw new Error('turbo-test: crypto.scryptSync is not available in the V8 runtime'); },
   timingSafeEqual: (a, b) => { if (a.length !== b.length) return false; let r = 0; for (let i = 0; i < a.length; i++) r |= a[i] ^ b[i]; return r === 0; },
 };
-Object.assign(__crypto, __nodeKeys, __nodeAes, __nodeCryptoHashes);
+Object.assign(__crypto, __nodeKeys, __nodeAes, __nodeCryptoHashes, __nodeX509);
 if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.randomUUID) {
   globalThis.crypto = Object.assign(globalThis.crypto || {}, { randomUUID: __crypto.randomUUID, getRandomValues: __crypto.getRandomValues });
 }

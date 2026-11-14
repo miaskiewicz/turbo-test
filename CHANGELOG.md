@@ -8,6 +8,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 ## [0.8.4] — Unreleased candidate — Node compatibility and shared DOM performance
 
 ### Added
+- Parse DER/PEM X.509 certificates into real serial, validity, subject/issuer and
+  SPKI public-key facts, with owned raw bytes and existing RSA/P-256 KeyObjects
+  (#367). Parsing does not perform signature or trust-chain verification.
 - An informational Windows CI lane installs the real test dependencies, builds the
   native runner and runs locked Rust tests, including Windows path fixtures. It
   records actual outcomes without changing the existing release binary gates (#278).
