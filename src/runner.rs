@@ -9610,6 +9610,10 @@ fn framework_prelude(scope: &mut v8::PinScope) {
     }
     let runtime = RUNTIME_JS
         .replace("/* __TT_NODE_STREAMS__ */", include_str!("node_streams.js"))
+        .replace(
+            "/* __TT_NODE_WARNINGS__ */",
+            include_str!("node_warnings.js"),
+        )
         .replace("/* __TT_NODE_KEYS__ */", include_str!("node_keys.js"))
         .replace("/* __TT_NODE_AES__ */", include_str!("node_aes.js"))
         .replace(

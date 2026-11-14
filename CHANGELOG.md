@@ -95,6 +95,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - Back `crypto.randomBytes` with OS entropy so generated encryption IVs are independent
   of test clocks and the runtime's deterministic PRNG. Preserve asynchronous callback delivery.
 
+- Emit real asynchronous process warnings (#375), including string/Error/options
+  metadata, warning listeners bound to the existing process object and default stderr
+  output. Mongoose can issue its unmodified Jest warning without an unsupported API;
+  reused files do not inherit previous files' warning listeners.
+
 ### Tests
 - Add Node controls and native runner regressions for the compatibility fixes,
   including known hashes, independent gzip/V8 fixtures and malformed-input errors.

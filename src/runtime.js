@@ -2925,6 +2925,7 @@ class __EventEmitter {
   setMaxListeners() { return this; }
   prependListener(e, f) { (this._ev[e] || (this._ev[e] = [])).unshift(f); return this; }
 }
+/* __TT_NODE_WARNINGS__ */
 const __events = Object.assign(__EventEmitter, { EventEmitter: __EventEmitter, default: __EventEmitter, once: (em, e) => new Promise((res) => em.once(e, (...a) => res(a))) });
 /* __TT_NODE_STREAMS__ */
 // http/https/net/tls: enough surface that connection-agent libs (agent-base, https-proxy-agent —
@@ -10329,6 +10330,7 @@ globalThis.__ttResetForNextFile = () => {
   // file's own pending one-shots. Do NOT clear macro/nextTicks or reset the clock here (that
   // broke ~40 async tests).
   __loop.gen++;
+  __resetProcessWarnings();
   __resetAsyncContext();
   __httpReset();
   // jest.setTimeout / jest.retryTimes are per-file overrides (turbo-test#273)
