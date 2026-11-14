@@ -253,10 +253,26 @@ and `randomBytes` use OS entropy; unsupported algorithms and encrypted key forma
 report errors. It also includes gzip, native V8 serialization, transferable MessagePorts,
 and AsyncLocalStorage across native await and scheduled resources.
 
+Keyed hashes support real SHA-1/SHA-256 HMAC and synchronous PBKDF2-SHA1, including
+binary inputs and independent known-answer controls. PBKDF2 output is bounded to
+1–1,048,576 bytes; other derivation digests report an unsupported-algorithm error.
+WebCrypto `getRandomValues` accepts integer typed arrays, uses OS entropy, and
+enforces its 65,536-byte quota. `Buffer.readUInt32BE` respects view and offset bounds.
+Synchronous zlib deflate/inflate exchange real compressed bytes with Node;
+dictionary/tuning options and asynchronous or streaming deflate/inflate report
+explicit unsupported-capability errors.
+
 CommonJS-first decorator metadata preserves partial exports in cyclic TypeScript
 imports. `require('stream')` is a callable Stream constructor with matching named/default
 identity and legacy inheritance support. These additions do not establish full Jest or
 Flux APIs compatibility; consumer validation remains in progress.
+`Transform.call(this, options)` also supports legacy transform subclasses.
+
+Filesystem helpers include real private temporary directories and file copies through
+synchronous, callback and promise APIs. Exclusive copies preserve an existing target;
+same-file copies do not truncate the source. Forced clone copies report `ENOSYS`.
+`net.BlockList` supports IPv4/IPv6 address, range and subnet membership, including
+IPv4-mapped addresses; this does not itself provide socket transport.
 
 The host I/O surface supports synchronous `spawnSync`/`execFileSync`/`execSync` and
 loopback HTTP/1.0–1.1 with content-length or chunked bodies. HTTP uses one request per
@@ -271,6 +287,8 @@ Fresh `vm` contexts support injected bindings, isolated globals, real values/err
 and timeouts. They currently require the framework-only snapshot: use
 `TURBO_SNAPSHOT=0` in mixed DOM projects. Unsupported immutable-global shadows report
 `ERR_VM_UNSUPPORTED_GLOBAL` rather than silently changing the sandbox semantics.
+`vm.Script` checks syntax during construction without executing its body and preserves
+the compile filename in syntax errors and contextual execution.
 
 ## How it works
 

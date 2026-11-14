@@ -17,6 +17,18 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   external blocks and unmapped SFC coverage report explicit errors.
 
 ### Fixed
+- Implement real SHA-1/SHA-256 HMAC and bounded PBKDF2-SHA1 with independent RFC
+  known-answer tests, replacing the constant HMAC result (#359, #365).
+- Create real private temporary directories and copy actual file bytes through sync,
+  callback and promise APIs, with exclusive-copy and same-file safeguards (#360, #361).
+- Support legacy `Transform.call` inheritance while retaining transformed bytes,
+  flush callbacks and error/close behavior (#362).
+- Compile `vm.Script` syntax eagerly without execution and preserve compile origins (#364).
+- Match real IPv4/IPv6 address, range and subnet boundaries in `net.BlockList` (#366).
+- Produce and validate real zlib deflate/inflate bytes; reject unsupported stream and
+  tuning capabilities explicitly instead of passing bytes through (#369).
+- Validate WebCrypto integer-array brands and byte quotas and fill them with OS
+  entropy; read unsigned big-endian Buffer words within the supplied view (#370, #373).
 - Hash HTTP etags with native SHA-1 through `crypto.createHash`, preserving SHA-256.
 - Preserve CommonJS partial exports for cyclic decorated TypeScript classes, isolate
   metadata transform cache modes, and hoist static TypeScript imports around mocks (#351).
