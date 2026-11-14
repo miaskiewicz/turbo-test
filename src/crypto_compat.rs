@@ -67,18 +67,23 @@ fn hmac_digest(algorithm: &str, key: &[u8], data: &[u8]) -> Result<Vec<u8>, Stri
     keyed_digest(algorithm, &outer)
 }
 
-fn pbkdf2_sha1(
-    password: &[u8],
-    salt: &[u8],
-    iterations: u32,
-    length: usize,
-) -> Result<Vec<u8>, String> {
+fn validate_pbkdf2(iterations: u32, length: usize) -> Result<(), String> {
     if iterations == 0 || length == 0 || length > 1_048_576 {
         return Err(
             "PBKDF2 requires positive iterations and output length of 1 through 1048576 bytes"
                 .into(),
         );
     }
+    Ok(())
+}
+
+fn pbkdf2_sha1(
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    length: usize,
+) -> Result<Vec<u8>, String> {
+    validate_pbkdf2(iterations, length)?;
     let mut output = Vec::with_capacity(length);
     for block in 1..=length.div_ceil(20) {
         let mut input = salt.to_vec();
