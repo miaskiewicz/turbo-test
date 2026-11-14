@@ -94,7 +94,7 @@ pub fn inflate(data: &[u8]) -> std::io::Result<Vec<u8>> {
             .decompress(
                 &data[before_in as usize..],
                 &mut chunk,
-                flate2::FlushDecompress::Finish,
+                flate2::FlushDecompress::None,
             )
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let written = (decoder.total_out() - before_out) as usize;
