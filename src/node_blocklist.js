@@ -15,7 +15,7 @@ function __blockListNative(request) {
 }
 function __blockListAdd(owner, request) {
   const rules = __blockListGet(owner);
-  rules.push(__blockListNative(request));
+  rules.unshift(__blockListNative(request));
 }
 class __NodeBlockList {
   constructor() { __blockListRules.set(this, []); }
