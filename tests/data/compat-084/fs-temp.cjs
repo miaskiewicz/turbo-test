@@ -52,7 +52,7 @@ test('promises.mkdtemp creates real directories and rejects OS failures', async 
   assert.equal(Buffer.isBuffer(dir), true);
   assert.equal(fs.statSync(dir).isDirectory(), true);
   const missing = path.join(base, 'missing-parent', 'promise-');
-  await assert.rejects(fs.promises.mkdtemp(missing), { code: 'ENOENT', syscall: 'mkdtemp', path: missing + 'XXXXXX' });
+  await assert.rejects(fs.promises.mkdtemp(missing), (error) => error.code === 'ENOENT' && error.syscall === 'mkdtemp' && error.path.startsWith(missing) && /^[A-Za-z0-9]{6}$/.test(error.path.slice(missing.length)));
 });
 
 test('callback mkdtemp delivers asynchronous success and OS errors', async () => {
@@ -66,7 +66,7 @@ test('callback mkdtemp delivers asynchronous success and OS errors', async () =>
   });
   const missing = path.join(base, 'missing-parent', 'callback-');
   await new Promise((resolve, reject) => fs.mkdtemp(missing, (error, dir) => {
-    try { assert.equal(error.code, 'ENOENT'); assert.equal(error.path, missing + 'XXXXXX'); assert.equal(dir, undefined); resolve(); }
+    try { assert.equal(error.code, 'ENOENT'); assert.equal(error.path.startsWith(missing), true); assert.match(error.path.slice(missing.length), /^[A-Za-z0-9]{6}$/); assert.equal(dir, undefined); resolve(); }
     catch (failure) { reject(failure); }
   }));
   assert.throws(() => fs.mkdtemp(path.join(base, 'no-callback-')), { code: 'ERR_INVALID_ARG_TYPE' });

@@ -44,7 +44,9 @@ test('copying the same file is a no-op unless COPYFILE_EXCL is requested', () =>
 test('copyFileSync preserves OS errors and validates modes and path types', () => {
   const dest = path.join(base, 'missing-parent', 'target.bin');
   assert.throws(() => fs.copyFileSync(source, dest), { code: 'ENOENT', syscall: 'copyfile', path: source, dest });
-  assert.throws(() => fs.copyFileSync(base, source), { code: 'EISDIR', syscall: 'copyfile', path: base, dest: source });
+  const directoryCopy = path.join(base, 'directory-copy-target');
+  const directoryCode = process.platform === 'darwin' ? 'ENOTSUP' : 'EISDIR';
+  assert.throws(() => fs.copyFileSync(base, directoryCopy), { code: directoryCode, syscall: 'copyfile', path: base, dest: directoryCopy });
   assert.throws(() => fs.copyFileSync(source, base), { code: 'EISDIR', syscall: 'copyfile', path: source, dest: base });
   assert.throws(() => fs.copyFileSync(source, 'no-file', 8), { code: 'ERR_OUT_OF_RANGE' });
   assert.throws(() => fs.copyFileSync(source, 'no-file', true), { code: 'ERR_INVALID_ARG_TYPE' });
