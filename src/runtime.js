@@ -2960,7 +2960,21 @@ function __gzipLevel(options) {
 function __gzipSync(input, options = {}, decompress = false) {
   return Buffer.from(globalThis.__ttGzip(__gzipBytes(input), decompress, __gzipLevel(options || {})));
 }
-const __zlib = { createGzip: () => new __Duplex(), createGunzip: () => new __Duplex(), createDeflate: () => new __Duplex(), createInflate: () => new __Duplex(), createBrotliCompress: () => new __Duplex(), createBrotliDecompress: () => new __Duplex(), gzip: (_b, cb) => cb && cb(null, _b), gunzip: (_b, cb) => cb && cb(null, _b), gzipSync: (b, opts) => __gzipSync(b, opts), gunzipSync: (b, opts) => __gzipSync(b, opts, true), deflateSync: (b) => b, inflateSync: (b) => b }; __zlib.default = __zlib;
+function __deflateOptions(options) {
+  const value = options || {};
+  for (const name of ['dictionary', 'windowBits', 'memLevel', 'strategy', 'flush', 'finishFlush', 'maxOutputLength']) {
+    if (value[name] !== undefined) throw Object.assign(new Error(`turbo-test: zlib option ${name} is unsupported`), {code: 'ERR_TURBO_UNSUPPORTED_ZLIB_OPTION'});
+  }
+  return value;
+}
+function __deflateSync(input, options, decompress = false) {
+  const level = __gzipLevel(__deflateOptions(options));
+  return Buffer.from(globalThis.__ttGzip(__gzipBytes(input), decompress, level, true));
+}
+function __unsupportedDeflateStream() {
+  throw Object.assign(new Error('turbo-test: asynchronous and streaming deflate/inflate are unsupported; use the synchronous APIs'), {code: 'ERR_TURBO_UNSUPPORTED_ZLIB_STREAM'});
+}
+const __zlib = { createGzip: () => new __Duplex(), createGunzip: () => new __Duplex(), createDeflate: __unsupportedDeflateStream, createInflate: __unsupportedDeflateStream, createBrotliCompress: () => new __Duplex(), createBrotliDecompress: () => new __Duplex(), gzip: (_b, cb) => cb && cb(null, _b), gunzip: (_b, cb) => cb && cb(null, _b), gzipSync: (b, opts) => __gzipSync(b, opts), gunzipSync: (b, opts) => __gzipSync(b, opts, true), deflateSync: (b, opts) => __deflateSync(b, opts), inflateSync: (b, opts) => __deflateSync(b, opts, true), deflate: __unsupportedDeflateStream, inflate: __unsupportedDeflateStream }; __zlib.default = __zlib;
 const __tty = { isatty: () => false, ReadStream: __EventEmitter, WriteStream: __EventEmitter }; __tty.default = __tty;
 const __dns = { lookup: (_h, _o, cb) => { const c = typeof _o === 'function' ? _o : cb; if (c) c(null, '127.0.0.1', 4); }, resolve: (_h, cb) => cb && cb(null, []), promises: { lookup: () => Promise.resolve({ address: '127.0.0.1', family: 4 }), resolve: () => Promise.resolve([]) } }; __dns.default = __dns;
 const __http2 = { connect: () => new __EventEmitter(), createServer: __mkServer, createSecureServer: __mkServer, constants: {}, getDefaultSettings: () => ({}), Http2ServerRequest: __EventEmitter, Http2ServerResponse: __EventEmitter }; __http2.default = __http2;

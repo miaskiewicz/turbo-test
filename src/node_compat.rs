@@ -77,7 +77,55 @@ pub fn gunzip(mut data: &[u8]) -> std::io::Result<Vec<u8>> {
     }
 }
 
-/// `__ttGzip(bytes, decompress, level)`: JS validates options and supplies a byte view.
+pub fn deflate(data: &[u8], level: u32) -> std::io::Result<Vec<u8>> {
+    let mut writer = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(level));
+    writer.write_all(data)?;
+    writer.finish()
+}
+
+pub fn inflate(data: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut decoder = flate2::Decompress::new(true);
+    let mut output = Vec::new();
+    loop {
+        let mut chunk = [0; 8192];
+        let before_in = decoder.total_in();
+        let before_out = decoder.total_out();
+        let status = decoder
+            .decompress(
+                &data[before_in as usize..],
+                &mut chunk,
+                flate2::FlushDecompress::Finish,
+            )
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let written = (decoder.total_out() - before_out) as usize;
+        output.extend_from_slice(&chunk[..written]);
+        if status == flate2::Status::StreamEnd {
+            return Ok(output);
+        }
+        if decoder.total_in() == before_in && written == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Incomplete zlib stream",
+            ));
+        }
+    }
+}
+
+fn compression_bytes(
+    data: &[u8],
+    decompress: bool,
+    level: u32,
+    zlib: bool,
+) -> std::io::Result<Vec<u8>> {
+    match (zlib, decompress) {
+        (true, true) => inflate(data),
+        (true, false) => deflate(data, level),
+        (false, true) => gunzip(data),
+        (false, false) => gzip(data, level),
+    }
+}
+
+/// `__ttGzip(bytes, decompress, level, zlib)`: JS validates options and supplies a byte view.
 pub fn native_gzip(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -86,11 +134,10 @@ pub fn native_gzip(
     let Some(data) = bytes(args.get(0)) else {
         return throw_error(scope, "Expected a byte view");
     };
-    let result = if args.get(1).boolean_value(scope) {
-        gunzip(&data)
-    } else {
-        gzip(&data, args.get(2).uint32_value(scope).unwrap_or(6))
-    };
+    let decompress = args.get(1).boolean_value(scope);
+    let level = args.get(2).uint32_value(scope).unwrap_or(6);
+    let zlib = args.get(3).boolean_value(scope);
+    let result = compression_bytes(&data, decompress, level, zlib);
     match result {
         Ok(data) => return_bytes(scope, &mut rv, data),
         Err(error) => throw_error(scope, &error.to_string()),
