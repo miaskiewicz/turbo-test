@@ -177,9 +177,32 @@ pub fn native_compile_script<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     _rv: v8::ReturnValue,
 ) {
+    let tc = std::pin::pin!(v8::TryCatch::new(scope));
+    let tc = &mut tc.init();
+    if compile_unbound_script(tc, &args) {
+        return;
+    }
+    let message = tc.message();
+    let location = compile_error_location(tc, message);
+    if let Some(error) = tc.exception() {
+        tc.reset();
+        if let Some(location) = location {
+            let _ = prepend_compile_location(tc, error, &location);
+        }
+        // A guest stack formatter must not replace the original parser exception.
+        tc.reset();
+        tc.throw_exception(error);
+    }
+    tc.rethrow();
+}
+
+fn compile_unbound_script<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: &v8::FunctionCallbackArguments<'s>,
+) -> bool {
     use v8::script_compiler as compiler;
     let Some(code) = args.get(0).to_string(scope) else {
-        return;
+        return false;
     };
     let origin = v8::ScriptOrigin::new(
         scope,
@@ -195,12 +218,39 @@ pub fn native_compile_script<'s>(
         None,
     );
     let mut source = compiler::Source::new(code, Some(&origin));
-    let _ = compiler::compile_unbound_script(
+    compiler::compile_unbound_script(
         scope,
         &mut source,
         compiler::CompileOptions::NoCompileOptions,
         compiler::NoCacheReason::NoReason,
-    );
+    )
+    .is_some()
+}
+
+fn compile_error_location(
+    scope: &mut v8::PinScope,
+    message: Option<v8::Local<v8::Message>>,
+) -> Option<String> {
+    let message = message?;
+    let filename = message.get_script_resource_name(scope)?;
+    let filename = filename.to_rust_string_lossy(scope);
+    let line = message.get_line_number(scope)?;
+    let column = message.get_start_column() + 1;
+    Some(format!("{filename}:{line}:{column}"))
+}
+
+fn prepend_compile_location(
+    scope: &mut v8::PinScope,
+    error: v8::Local<v8::Value>,
+    location: &str,
+) -> Option<()> {
+    let object = error.to_object(scope)?;
+    let key = v8::String::new(scope, "stack").unwrap();
+    let original = object.get(scope, key.into())?.to_string(scope)?;
+    let original = original.to_rust_string_lossy(scope);
+    let stack = v8::String::new(scope, &format!("{location}\n{original}"))?;
+    object.set(scope, key.into(), stack.into())?;
+    Some(())
 }
 
 fn timeout_error<'s>(scope: &mut v8::PinScope<'s, '_>, timeout: u64) -> v8::Local<'s, v8::Value> {
