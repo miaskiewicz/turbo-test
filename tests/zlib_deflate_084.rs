@@ -57,3 +57,30 @@ fn deflate_and_inflate_exchange_real_bytes_with_node() {
         String::from_utf8_lossy(&independent.stderr)
     );
 }
+
+#[test]
+fn unsupported_deflate_options_and_streams_report_capability_errors() {
+    let project = Project::new("zlib-deflate-bounds-084");
+    project.with_esbuild();
+    project.file("package.json", r#"{"name":"zlib-deflate-bounds-084"}"#);
+    project.file(
+        "jest.config.js",
+        "module.exports = {testEnvironment:'node'};",
+    );
+    project.file("bounds.test.cjs", r#"
+const assert = require('node:assert/strict');
+const zlib = require('node:zlib');
+test('unsupported options and streams throw instead of silently copying bytes', () => {
+  for (const name of ['createDeflate', 'createInflate', 'deflate', 'inflate']) {
+    assert.throws(() => zlib[name](), {code:'ERR_TURBO_UNSUPPORTED_ZLIB_STREAM'});
+  }
+  for (const name of ['dictionary', 'windowBits', 'memLevel', 'strategy', 'flush', 'finishFlush', 'maxOutputLength']) {
+    assert.throws(() => zlib.deflateSync('input', {[name]: 1}), {code:'ERR_TURBO_UNSUPPORTED_ZLIB_OPTION'});
+  }
+});
+"#);
+    let run = turbo_test(&project.dir, &["--reporter", "json"], &[]);
+    let report = json_report(&run);
+    assert_eq!(report["numPassedTests"], 1, "{}", run.all());
+    assert_eq!(report["numFailedTests"], 0, "{}", run.all());
+}

@@ -23,8 +23,11 @@ test('empty inputs and explicit compression levels roundtrip', () => {
   for (const level of [0, 1, 9]) {
     assert.equal(zlib.inflateSync(zlib.deflateSync(clear, {level})).toString('hex'), oracle.clear);
   }
+  const large = Buffer.alloc(32769, 65);
+  assert.equal(zlib.inflateSync(zlib.deflateSync(large)).toString('hex'), large.toString('hex'));
   assert.throws(() => zlib.deflateSync(clear, {level: 10}), RangeError);
   assert.throws(() => zlib.deflateSync(clear, {level: '1'}), TypeError);
+  for (const options of [42, true, 'invalid']) assert.throws(() => zlib.deflateSync(clear, options), TypeError);
 });
 test('malformed and truncated zlib input rejects', () => {
   const compressed = Buffer.from(oracle.compressed, 'hex');
