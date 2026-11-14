@@ -9612,6 +9612,10 @@ fn framework_prelude(scope: &mut v8::PinScope) {
         .replace("/* __TT_NODE_STREAMS__ */", include_str!("node_streams.js"))
         .replace("/* __TT_NODE_KEYS__ */", include_str!("node_keys.js"))
         .replace("/* __TT_NODE_AES__ */", include_str!("node_aes.js"))
+        .replace(
+            "/* __TT_NODE_CRYPTO_HASHES__ */",
+            include_str!("node_crypto_hashes.js"),
+        )
         .replace("/* __TT_NODE_VM__ */", include_str!("node_vm.js"))
         .replace(
             "/* __TT_NODE_ASYNC_CONTEXT__ */",
@@ -9953,6 +9957,12 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         }
     }
     bind_fn(scope, global, "__ttSha1", crate::crypto_compat::native_sha1);
+    bind_fn(
+        scope,
+        global,
+        "__ttCryptoHashes",
+        crate::crypto_compat::native_crypto_hashes,
+    );
     bind_fn(
         scope,
         global,
