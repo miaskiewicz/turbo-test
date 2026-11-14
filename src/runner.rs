@@ -10321,30 +10321,42 @@ fn fs_copy_source(path: &str) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
-fn fs_copy_bytes(source: &str, destination: &str, flags: i32) -> std::io::Result<()> {
-    let mut input = fs_copy_source(source)?;
-    if flags & 4 != 0 {
-        return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
-    }
-    #[cfg(windows)]
-    if flags & 1 == 0 {
-        if std::fs::canonicalize(source)? == std::fs::canonicalize(destination).unwrap_or_default()
-        {
-            return Ok(());
-        }
-        return std::fs::copy(source, destination).map(|_| ());
-    }
-    let mut output = std::fs::OpenOptions::new()
+fn fs_copy_output(destination: &str, flags: i32) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .create_new(flags & 1 != 0)
-        .open(destination)?;
+        .open(destination)
+}
+
+fn fs_copy_stream(mut input: std::fs::File, mut output: std::fs::File) -> std::io::Result<()> {
     if fs_same_file(&input, &output)? {
         return Ok(());
     }
     output.set_len(0)?;
     std::io::copy(&mut input, &mut output)?;
     output.set_permissions(input.metadata()?.permissions())
+}
+
+#[cfg(windows)]
+fn fs_copy_windows(source: &str, destination: &str) -> std::io::Result<()> {
+    if std::fs::canonicalize(source)? == std::fs::canonicalize(destination).unwrap_or_default() {
+        return Ok(());
+    }
+    std::fs::copy(source, destination).map(|_| ())
+}
+
+fn fs_copy_bytes(source: &str, destination: &str, flags: i32) -> std::io::Result<()> {
+    let input = fs_copy_source(source)?;
+    if flags & 4 != 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+    }
+    #[cfg(windows)]
+    if flags & 1 == 0 {
+        return fs_copy_windows(source, destination);
+    }
+    let output = fs_copy_output(destination, flags)?;
+    fs_copy_stream(input, output)
 }
 
 fn throw_fs_copy_error(

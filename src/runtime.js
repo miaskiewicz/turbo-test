@@ -2672,8 +2672,11 @@ const __fsDeferred = (operation, callback) => {
     callback(error, value);
   });
 };
-const __tempEncoding = (options) => {
+const __tempOptions = (options) => {
   if (options != null && typeof options !== 'string' && typeof options !== 'object') throw __fsArgumentError('ERR_INVALID_ARG_TYPE', 'The options argument must be a string or object');
+};
+const __tempEncoding = (options) => {
+  __tempOptions(options);
   const encoding = __encodingOf(options) || 'utf8';
   if (encoding !== 'buffer' && (typeof encoding !== 'string' || !__hashEncoding(encoding))) throw __fsArgumentError('ERR_INVALID_ARG_VALUE', `Invalid encoding: ${encoding}`);
   return encoding;
