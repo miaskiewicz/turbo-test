@@ -9936,6 +9936,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__fs_readFile", fs_read_file);
     bind_fn(scope, global, "__fs_writeFile", fs_write_file);
     bind_fn(scope, global, "__fs_mkdir", fs_mkdir);
+    bind_fn(scope, global, "__fs_mkdtemp", fs_mkdtemp);
     bind_fn(scope, global, "__fs_remove", fs_remove);
     bind_fn(scope, global, "__fs_symlinkSync", fs_symlink_sync);
     // process.cwd(): the process's working directory, as vitest's workers report it; os.tmpdir()
@@ -10220,6 +10221,67 @@ fn errno_name(e: &std::io::Error) -> Option<(&'static str, &'static str)> {
         .iter()
         .find(|(n, _, _)| *n == errno)
         .map(|&(_, c, d)| (c, d))
+}
+
+fn fs_temp_suffix() -> std::io::Result<String> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut suffix = String::with_capacity(6);
+    while suffix.len() < 6 {
+        let mut bytes = [0u8; 16];
+        getrandom::getrandom(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
+        for byte in bytes.into_iter().filter(|byte| *byte < 248) {
+            suffix.push(ALPHABET[usize::from(byte) % 62] as char);
+            if suffix.len() == 6 {
+                break;
+            }
+        }
+    }
+    Ok(suffix)
+}
+
+fn fs_private_directory(path: &str) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+fn fs_temp_directory(prefix: &str) -> Result<String, (std::io::Error, String)> {
+    for _ in 0..128 {
+        let suffix = fs_temp_suffix().map_err(|e| (e, prefix.to_owned()))?;
+        let path = format!("{prefix}{suffix}");
+        match fs_private_directory(&path) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err((e, path)),
+        }
+    }
+    Err((
+        std::io::Error::from(std::io::ErrorKind::AlreadyExists),
+        prefix.to_owned(),
+    ))
+}
+
+fn fs_mkdtemp(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let prefix = args.get(0).to_rust_string_lossy(scope);
+    match fs_temp_directory(&prefix) {
+        Ok(path) => rv.set(v8::String::new(scope, &path).unwrap().into()),
+        Err((error, path)) => {
+            let path = if args.get(1).boolean_value(scope) {
+                format!("{prefix}XXXXXX")
+            } else {
+                path
+            };
+            throw_fs_error(scope, &error, "mkdtemp", &path);
+        }
+    }
 }
 
 /// native fs.symlinkSync(target, path): a symbolic link at `path` to `target`; a failure throws

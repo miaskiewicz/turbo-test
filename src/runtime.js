@@ -2646,6 +2646,41 @@ const __rm = (p, options) => {
   globalThis.__fs_remove(path, 'rm');
 };
 const __promised = (f) => (...a) => { try { return Promise.resolve(f(...a)); } catch (e) { return Promise.reject(e); } };
+const __fsArgumentError = (code, message, Type = TypeError) => Object.assign(new Type(message), { code });
+const __fsCheckedPath = (value, name) => {
+  const valid = typeof value === 'string' || Buffer.isBuffer(value) || value instanceof URL;
+  if (!valid) throw __fsArgumentError('ERR_INVALID_ARG_TYPE', `The "${name}" argument must be a string, Buffer, or URL`);
+  const path = __fsPath(value);
+  if (path.includes('\0')) throw __fsArgumentError('ERR_INVALID_ARG_VALUE', `The "${name}" argument must not contain null bytes`);
+  return path;
+};
+const __fsDeferred = (operation, callback) => {
+  if (typeof callback !== 'function') throw __fsArgumentError('ERR_INVALID_ARG_TYPE', 'The callback argument must be a function');
+  queueMicrotask(() => {
+    let error = null, value;
+    try { value = operation(); } catch (e) { error = e; }
+    callback(error, value);
+  });
+};
+const __tempEncoding = (options) => {
+  const encoding = __encodingOf(options) || 'utf8';
+  if (encoding !== 'buffer' && !Buffer.isEncoding(encoding)) throw __fsArgumentError('ERR_INVALID_ARG_VALUE', `Invalid encoding: ${encoding}`);
+  return encoding;
+};
+const __tempOperation = (prefix, options, sync) => {
+  const path = __fsCheckedPath(prefix, 'prefix'), encoding = __tempEncoding(options);
+  return () => {
+    const result = globalThis.__fs_mkdtemp(path, sync);
+    if (encoding === 'utf8' || encoding === 'utf-8') return result;
+    const bytes = Buffer.from(result);
+    return encoding === 'buffer' ? bytes : bytes.toString(encoding);
+  };
+};
+const __mkdtempSync = (prefix, options) => __tempOperation(prefix, options, true)();
+const __mkdtemp = (prefix, options, callback) => {
+  if (typeof options === 'function') { callback = options; options = undefined; }
+  return __fsDeferred(__tempOperation(prefix, options, false), callback);
+};
 const __fs = {
   Dirent,
   Stats,
@@ -2656,6 +2691,8 @@ const __fs = {
   // one file would otherwise overwrite each other's lines.
   appendFileSync: (p, data) => __writeFile(p, data, true),
   mkdirSync: __mkdir,
+  mkdtempSync: __mkdtempSync,
+  mkdtemp: __mkdtemp,
   rmSync: __rm,
   rmdirSync: (p) => globalThis.__fs_remove(__fsPath(p), 'rmdir'),
   unlinkSync: (p) => globalThis.__fs_remove(__fsPath(p), 'unlink'),
@@ -2669,6 +2706,7 @@ const __fs = {
     writeFile: __promised((p, data) => __writeFile(p, data, false)),
     appendFile: __promised((p, data) => __writeFile(p, data, true)),
     mkdir: __promised(__mkdir),
+    mkdtemp: __promised((prefix, options) => __tempOperation(prefix, options, false)()),
     rm: __promised(__rm),
     rmdir: __promised((p) => globalThis.__fs_remove(__fsPath(p), 'rmdir')),
     unlink: __promised((p) => globalThis.__fs_remove(__fsPath(p), 'unlink')),
