@@ -10,7 +10,7 @@ function __blockListFamily(type = 'ipv4') {
 }
 function __blockListNative(request) {
   const response = JSON.parse(globalThis.__ttBlockList(JSON.stringify(request)));
-  if (response.error) throw Object.assign(new Error(response.error), { code: 'ERR_INVALID_ARG_VALUE' });
+  if (response.error) throw Object.assign(new Error(response.error), { code: response.code });
   return response.value;
 }
 function __blockListAdd(owner, request) {

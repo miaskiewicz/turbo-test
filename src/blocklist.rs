@@ -70,6 +70,16 @@ fn rule_bounds(
         _ => Err("Invalid BlockList operation".into()),
     }
 }
+fn error_response(message: String) -> Value {
+    let code = match message.as_str() {
+        "Invalid subnet prefix" => "ERR_OUT_OF_RANGE",
+        "Invalid socket address" | "Invalid address family" => "ERR_INVALID_ADDRESS",
+        "address must be a string" => "ERR_INVALID_ARG_TYPE",
+        _ => "ERR_INVALID_ARG_VALUE",
+    };
+    json!({"error":message,"code":code})
+}
+
 pub fn native_blocklist(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -81,7 +91,7 @@ pub fn native_blocklist(
         .and_then(|request| operation(&request));
     let response = match result {
         Ok(value) => json!({"value":value}),
-        Err(error) => json!({"error":error}),
+        Err(error) => error_response(error),
     };
     if let Some(value) = v8::String::new(scope, &response.to_string()) {
         rv.set(value.into());
