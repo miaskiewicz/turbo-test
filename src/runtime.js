@@ -2841,6 +2841,18 @@ const __subtleCrypto = {
 /* __TT_NODE_KEYS__ */
 /* __TT_NODE_AES__ */
 /* __TT_NODE_CRYPTO_HASHES__ */
+const __randomArrayFields = Object.getOwnPropertyDescriptors(Object.getPrototypeOf(Uint8Array.prototype));
+const __randomIntegerArrayNames = new Set(['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'BigInt64Array', 'BigUint64Array']);
+function __getRandomValues(array) {
+  if (!ArrayBuffer.isView(array)) throw new TypeError('The data argument must be an ArrayBufferView');
+  const name = __randomArrayFields[Symbol.toStringTag].get.call(array);
+  if (!__randomIntegerArrayNames.has(name)) throw new DOMException('The data argument must be an integer-type TypedArray', 'TypeMismatchError');
+  const length = __randomArrayFields.byteLength.get.call(array);
+  if (length > 65536) throw new DOMException('The requested length exceeds 65536 bytes', 'QuotaExceededError');
+  const bytes = new Uint8Array(__randomArrayFields.buffer.get.call(array), __randomArrayFields.byteOffset.get.call(array), length);
+  bytes.set(globalThis.__ttRandomBytes(length));
+  return array;
+}
 const __crypto = {
   randomUUID: () => {
     const b = __pseudoRandomBytes(16);
@@ -2849,7 +2861,7 @@ const __crypto = {
     return `${h[0]}${h[1]}${h[2]}${h[3]}-${h[4]}${h[5]}-${h[6]}${h[7]}-${h[8]}${h[9]}-${h[10]}${h[11]}${h[12]}${h[13]}${h[14]}${h[15]}`;
   },
   randomBytes: (n) => globalThis.Buffer ? globalThis.Buffer.from(__pseudoRandomBytes(n)) : __pseudoRandomBytes(n),
-  getRandomValues: (arr) => { const b = __pseudoRandomBytes(arr.length); for (let i = 0; i < arr.length; i++) arr[i] = b[i]; return arr; },
+  getRandomValues: __getRandomValues,
   randomInt: (min, max) => { if (max === undefined) { max = min; min = 0; } return min + (__pseudoRandomBytes(4).reduce((a, x) => a * 256 + x, 0) % (max - min)); },
   createHash: __createHash,
   createHmac: () => { let data = ''; const h = { update: (d) => { data += String(d); return h; }, digest: () => 'hmac' }; return h; },
