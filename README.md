@@ -288,7 +288,7 @@ persistent connections and callback `exec`/`execFile` remain unsupported.
 
 On Unix, `spawn` uses real asynchronous child pipes and `fork` exchanges JSON messages
 with an actual Node child over `NODE_CHANNEL_FD`. Standard pipe/ignore/inherit modes,
-stdin writes, output backpressure, exit/close/error events, signals and timeouts are
+stdin writes, output backpressure, exit/close/error events, SIGINT/SIGTERM/SIGKILL and timeouts are
 supported. Each context owns at most 32 children; input/IPC queues and JSON messages
 are bounded to 1 MiB. Context reset terminates and reaps its owned process groups.
 Windows asynchronous pipes/IPC, advanced serialization, handle transfer, AbortSignal,

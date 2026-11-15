@@ -291,3 +291,16 @@ fn pipe_reaches_eof(pipe: &mut dyn ReadFd) -> bool {
     }
     false
 }
+
+#[test]
+fn peer_handle_transfer_reports_an_explicit_unsupported_capability() {
+    let (mut process, mut peer) = socket_process();
+    peer.write_all(b"{\"cmd\":\"NODE_HANDLE\"}\n").unwrap();
+    let mut events = Vec::new();
+    process.read_ipc(&mut events);
+    assert!(process.channel.is_none());
+    assert!(events
+        .iter()
+        .any(|event| event["error"]["code"] == "ERR_IPC_HANDLE_UNSUPPORTED"));
+    assert!(!events.iter().any(|event| event["kind"] == "message"));
+}

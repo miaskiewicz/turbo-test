@@ -425,17 +425,30 @@ impl Process {
             }
             let line: Vec<_> = self.ipc_bytes.drain(..=end).collect();
             match serde_json::from_slice::<Value>(&line) {
-                Ok(message) => events.push(event(
-                    self.id,
-                    ipc_message_kind(&message),
-                    json!({"message":message}),
-                )),
+                Ok(message) => self.dispatch_message(message, events),
                 Err(error) => {
                     self.channel_error(failure("ERR_IPC_PROTOCOL", error.to_string()), events);
                     return;
                 }
             }
         }
+    }
+    fn dispatch_message(&mut self, message: Value, events: &mut Vec<Value>) {
+        if message["cmd"].as_str() == Some("NODE_HANDLE") {
+            self.channel_error(
+                failure(
+                    "ERR_IPC_HANDLE_UNSUPPORTED",
+                    "IPC handle transfer is not supported",
+                ),
+                events,
+            );
+            return;
+        }
+        events.push(event(
+            self.id,
+            ipc_message_kind(&message),
+            json!({"message":message}),
+        ));
     }
     fn disconnect(&mut self, events: &mut Vec<Value>) {
         if self.channel.take().is_some() {
@@ -638,13 +651,14 @@ impl Table {
         match command.spawn() {
             Ok(child) => self.register(id, child, channel, args),
             Err(error) => {
+                let code = -error.raw_os_error().unwrap_or(1);
                 self.pending.push(event(
                     id,
                     "error",
                     json!({"error":error_value(&io_failure(error))}),
                 ));
                 self.pending
-                    .push(event(id, "close", json!({"code":-2,"signal":null})));
+                    .push(event(id, "close", json!({"code":code,"signal":null})));
                 Ok(json!({"id":id,"pid":null}))
             }
         }
