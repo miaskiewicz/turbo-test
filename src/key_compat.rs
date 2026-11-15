@@ -33,15 +33,18 @@ fn generate_with_entropy(
     mut fill: impl FnMut(&mut [u8]) -> Result<(), String>,
 ) -> Result<Output, String> {
     let mut scalar = Zeroizing::new([0u8; 32]);
-    loop {
+    // Keep rejection sampling separate from serialization: only a validated scalar leaves
+    // this loop, and a later OS entropy error still aborts rather than fabricating a key.
+    let key = loop {
         fill(scalar.as_mut())?;
         if let Ok(key) = SecretKey::from_slice(scalar.as_ref()) {
-            return Ok(Output::Pair(
-                private_der(&key)?,
-                public_der(&key.public_key())?,
-            ));
+            break key;
         }
-    }
+    };
+    Ok(Output::Pair(
+        private_der(&key)?,
+        public_der(&key.public_key())?,
+    ))
 }
 
 fn import_private(bytes: &[u8]) -> Result<Output, String> {
