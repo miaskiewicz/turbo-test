@@ -348,3 +348,7 @@ fn finish_evaluation(
         rv.set(v8::Local::new(scope, result));
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "vm_compat_tests.rs"]
+mod tests;

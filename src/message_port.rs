@@ -304,3 +304,7 @@ fn capture_transferred<'s>(
 }
 
 pub type SharedPorts = Rc<PortTransfers>;
+
+#[cfg(all(test, unix))]
+#[path = "message_port_tests.rs"]
+mod tests;
