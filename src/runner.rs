@@ -12152,7 +12152,9 @@ fn step_macrotask(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bo
         }
     }
     pace_http_io(scope, global);
-    pace_tcp_io(scope, global);
+    if pace_tcp_io(scope, global) {
+        return true;
+    }
     call_global_bool(scope, global, "__stepMacro")
 }
 
@@ -12172,12 +12174,12 @@ fn pace_http_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
 }
 
 /// Poll only live TCP handles; idle browser tests never enter the transport or timer hooks.
-fn pace_tcp_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+fn pace_tcp_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bool {
     if !crate::tcp_compat::has_pending_io() {
-        return;
+        return false;
     }
     if !call_global_bool(scope, global, "__ttTcpPreparePoll") {
-        return;
+        return false;
     }
     let delay = call_global_number(scope, global, "__ttNextMacroDelay");
     let millis = if delay.is_finite() && delay > 0.0 {
@@ -12186,7 +12188,7 @@ fn pace_tcp_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         1.0
     };
     crate::tcp_compat::wait_for_io(std::time::Duration::from_secs_f64(millis / 1000.0));
-    call_global_bool(scope, global, "__ttTcpPump");
+    call_global_bool(scope, global, "__ttTcpPump")
 }
 
 /// Convert the final promise state into the `run_event_loop` result: `Ok(())` on fulfilled, a

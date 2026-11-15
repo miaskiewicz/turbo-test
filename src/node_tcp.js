@@ -34,12 +34,14 @@ function __tcpPreparePoll() {
 }
 globalThis.__ttTcpPreparePoll = __tcpPreparePoll;
 // Readiness is a poll phase, so recursively queued immediates cannot starve socket events.
-globalThis.__ttTcpPump = () => { __tcpStopPoll(); __tcpPoll(); return true; };
+globalThis.__ttTcpPump = () => { __tcpStopPoll(); return __tcpPoll() > 0; };
 function __tcpPoll() {
   __tcpPollTimer = null;
-  for (const event of __tcpNative('poll')) __tcpEvent(event);
+  const events = __tcpNative('poll');
+  for (const event of events) __tcpEvent(event);
   for (const socket of __tcpSockets.values()) socket._tcpCheckTimeout();
   __tcpPreparePoll();
+  return events.length;
 }
 function __tcpReference(handle, enabled) {
   handle._tcpRef = enabled;
