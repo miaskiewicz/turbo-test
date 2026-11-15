@@ -35,8 +35,10 @@ test('realpath errors retain a real errno, operation, and original path', () => 
   }
 });
 test('realpath validates NUL paths and encodings, with native strict path types', () => {
-  assert.throws(() => fs.realpathSync(42), { code: 'ENOENT' });
-  assert.throws(() => fs.realpathSync.native(42), { code: 'ERR_INVALID_ARG_TYPE' });
+  for (const value of [42, null, undefined, {}]) {
+    assert.throws(() => fs.realpathSync(value), { code: 'ENOENT' });
+    assert.throws(() => fs.realpathSync.native(value), { code: 'ERR_INVALID_ARG_TYPE' });
+  }
   for (const realpath of [fs.realpathSync, fs.realpathSync.native]) {
     assert.throws(() => realpath('bad\0path'), { code: 'ERR_INVALID_ARG_VALUE' });
     assert.throws(() => realpath(input, 'nonsense'), { code: 'ERR_INVALID_ARG_VALUE' });

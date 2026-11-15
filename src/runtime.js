@@ -2499,7 +2499,7 @@ const __realpathNative = (value, options) => {
   return encoding === 'buffer' ? bytes : __hashOutput(bytes, encoding);
 };
 const __realpathSync = (value, options) => {
-  const path = typeof value === 'object' && value !== null ? value : String(value);
+  const path = Buffer.isBuffer(value) || value instanceof URL ? value : String(value);
   return __realpathNative(path, options);
 };
 __realpathSync.native = __realpathNative;
