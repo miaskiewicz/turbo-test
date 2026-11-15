@@ -2282,6 +2282,10 @@ if (typeof globalThis.Buffer === 'undefined') {
     }
     toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
   }
+  // Node's public static methods are enumerable; safer-buffer copies them with for-in.
+  for (const name of ['from', 'alloc', 'allocUnsafe', 'byteLength', 'isBuffer', 'concat']) {
+    Object.defineProperty(Buffer, name, { enumerable: true });
+  }
   globalThis.Buffer = Buffer;
 }
 /* __TT_NODE_PORTS__ */
