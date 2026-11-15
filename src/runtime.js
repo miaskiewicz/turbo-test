@@ -2906,24 +2906,30 @@ function __unhandledEventError(value) {
   error.context = value;
   throw error;
 }
+const __eventState = (emitter) => emitter._ev || (emitter._ev = Object.create(null));
+const __eventListeners = (emitter, event) => (emitter._ev && emitter._ev[event]) || [];
 class __EventEmitter {
   constructor() { this._ev = Object.create(null); }
-  on(e, f) { (this._ev[e] || (this._ev[e] = [])).push(f); return this; }
+  on(e, f) { const state = __eventState(this); (state[e] || (state[e] = [])).push(f); return this; }
   addListener(e, f) { return this.on(e, f); }
   once(e, f) { const self = this; function g(...a) { self.off(e, g); return f.apply(this, a); } g.listener = f; return this.on(e, g); }
-  off(e, f) { if (this._ev[e]) this._ev[e] = this._ev[e].filter((x) => x !== f && x.listener !== f); return this; }
+  off(e, f) { if (this._ev && this._ev[e]) this._ev[e] = this._ev[e].filter((x) => x !== f && x.listener !== f); return this; }
   removeListener(e, f) { return this.off(e, f); }
-  removeAllListeners(e) { if (e !== undefined) delete this._ev[e]; else this._ev = Object.create(null); return this; }
+  removeAllListeners(e) { if (!this._ev) return this; if (e !== undefined) delete this._ev[e]; else this._ev = Object.create(null); return this; }
   emit(e, ...a) {
-    const listeners = (this._ev[e] || []).slice();
+    const listeners = __eventListeners(this, e).slice();
     if (e === 'error' && listeners.length === 0) __unhandledEventError(a[0]);
     listeners.forEach((f) => f.apply(this, a));
     return listeners.length > 0;
   }
-  listeners(e) { return (this._ev[e] || []).map((f) => f.listener || f); }
-  listenerCount(e) { return (this._ev[e] || []).length; }
+  listeners(e) { return __eventListeners(this, e).map((f) => f.listener || f); }
+  listenerCount(e) { return __eventListeners(this, e).length; }
   setMaxListeners() { return this; }
-  prependListener(e, f) { (this._ev[e] || (this._ev[e] = [])).unshift(f); return this; }
+  prependListener(e, f) { const state = __eventState(this); (state[e] || (state[e] = [])).unshift(f); return this; }
+}
+// Node exposes enumerable prototype methods; libraries such as Mongoose copy them with for-in.
+for (const name of Object.getOwnPropertyNames(__EventEmitter.prototype).filter((name) => name !== 'constructor')) {
+  Object.defineProperty(__EventEmitter.prototype, name, { enumerable: true });
 }
 /* __TT_NODE_WARNINGS__ */
 const __events = Object.assign(__EventEmitter, { EventEmitter: __EventEmitter, default: __EventEmitter, once: (em, e) => new Promise((res) => em.once(e, (...a) => res(a))) });
