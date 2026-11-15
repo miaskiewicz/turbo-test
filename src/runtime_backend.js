@@ -148,6 +148,7 @@ for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors
   }
 }
 __runtimeTaskCapture = __captureBackendAsyncContext;
-__runtimeTaskResource = () => new __async_hooks.AsyncResource('MESSAGEPORT');
+const __runtimePortResourceClass = __AsyncResource;
+__runtimeTaskResource = () => new __runtimePortResourceClass('MESSAGEPORT');
 __runtimeBackendResets.push(__resetAsyncHooks, __resetAsyncContext, __httpReset, __asyncProcessReset, __tcpReset);
 __runtimeBackendInstalled = true;
