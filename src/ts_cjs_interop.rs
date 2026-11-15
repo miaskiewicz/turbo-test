@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 struct Options {
-    module: Option<String>,
-    interop: Option<bool>,
+    module: Option<Option<String>>,
+    interop: Option<Option<bool>>,
 }
 impl Options {
     fn overlay(&mut self, other: Self) {
@@ -28,10 +28,15 @@ fn parent_path(path: &Path, spec: &str) -> Option<PathBuf> {
             PathBuf::from(format!("{}.json", parent.to_string_lossy()))
         });
     }
-    oxc_resolver::Resolver::default()
-        .resolve(path.parent()?, spec)
-        .ok()
-        .map(|result| result.full_path())
+    oxc_resolver::Resolver::new(oxc_resolver::ResolveOptions {
+        main_fields: vec!["tsconfig".into()],
+        main_files: vec!["tsconfig".into()],
+        extensions: vec![".json".into()],
+        ..Default::default()
+    })
+    .resolve(path.parent()?, spec)
+    .ok()
+    .map(|result| result.full_path())
 }
 fn parent_specs(value: &Value) -> Vec<&str> {
     match &value["extends"] {
@@ -55,10 +60,12 @@ fn options(path: &Path, stack: &mut HashSet<PathBuf>) -> Option<Options> {
         result.overlay(options(&parent_path(&path, spec)?, stack)?);
     }
     result.overlay(Options {
-        module: value["compilerOptions"]["module"]
-            .as_str()
-            .map(str::to_owned),
-        interop: value["compilerOptions"]["esModuleInterop"].as_bool(),
+        module: value["compilerOptions"]
+            .get("module")
+            .map(|value| value.as_str().map(str::to_owned)),
+        interop: value["compilerOptions"]
+            .get("esModuleInterop")
+            .map(Value::as_bool),
     });
     stack.remove(&path);
     Some(result)
@@ -67,12 +74,53 @@ pub(crate) fn enabled(config: &Path) -> bool {
     options(config, &mut HashSet::new()).is_some_and(|options| {
         options
             .module
+            .flatten()
             .as_deref()
             .is_some_and(|module| module.eq_ignore_ascii_case("commonjs"))
-            && options.interop == Some(false)
+            && options.interop == Some(Some(false))
     })
 }
 
 #[cfg(test)]
 #[path = "ts_cjs_interop_tests.rs"]
 mod tests;
+
+fn literal_require(call: &oxc_ast::ast::CallExpression<'_>) -> bool {
+    use oxc_ast::ast::{Argument, Expression};
+    matches!(&call.callee, Expression::Identifier(id) if id.name == "require")
+        && matches!(call.arguments.as_slice(), [Argument::StringLiteral(_)])
+}
+fn static_wrapper(call: &oxc_ast::ast::CallExpression<'_>) -> Option<oxc_span::Span> {
+    use oxc_ast::ast::{Argument, Expression};
+    if !matches!(&call.callee, Expression::Identifier(id) if id.name == "__toESM") {
+        return None;
+    }
+    let [Argument::CallExpression(required)] = call.arguments.as_slice() else {
+        return None;
+    };
+    literal_require(required).then_some(required.span)
+}
+/// Remove only static-import wrappers; dynamic imports retain their namespace helper.
+/// Whitespace replacements preserve generated line/column positions and esbuild source maps.
+pub(crate) fn static_requires(code: String) -> String {
+    use oxc_ast::ast::{Expression, Statement};
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, &code, oxc_span::SourceType::cjs()).parse();
+    let mut bytes = code.as_bytes().to_vec();
+    for statement in &parsed.program.body {
+        let Statement::VariableDeclaration(declaration) = statement else {
+            continue;
+        };
+        for binding in &declaration.declarations {
+            let Some(Expression::CallExpression(call)) = &binding.init else {
+                continue;
+            };
+            if let Some(required) = static_wrapper(call) {
+                bytes[call.span.start as usize..required.start as usize].fill(b' ');
+                bytes[required.end as usize..call.span.end as usize].fill(b' ');
+            }
+        }
+    }
+    drop(parsed);
+    String::from_utf8(bytes).unwrap_or(code)
+}

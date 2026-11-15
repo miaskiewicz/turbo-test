@@ -3113,6 +3113,15 @@ fn tsc_transform_esm(file: &Path, root: &Path) -> Option<String> {
 /// decorator metadata. ESM graph callers retain ESNext and their live-binding TDZ semantics.
 fn tsc_transform_with_kind(file: &Path, root: &Path, module_kind: &str) -> Option<String> {
     let src = read_app_source(file)?;
+    tsc_transform_source_with_kind(file, root, module_kind, &src)
+}
+
+fn tsc_transform_source_with_kind(
+    file: &Path,
+    root: &Path,
+    module_kind: &str,
+    src: &str,
+) -> Option<String> {
     let ts_dir = root.join("node_modules/typescript");
     if !ts_dir.join("package.json").is_file() {
         return None;
@@ -3209,7 +3218,21 @@ function nsTypeOnlyImports(text) {
 }
 let input = src;
 try { input = nsTypeOnlyImports(src); } catch (e) {} // e.g. a typescript without the parser API
+let dynamicName = '__ttDynamicNamespace';
+while (input.includes(dynamicName)) dynamicName += '_';
+let usesDynamicNamespace = false;
+function preserveDynamicNamespaces(context) {
+  const visit = (node) => {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      usesDynamicNamespace = true;
+      return ts.factory.createCallExpression(ts.factory.createIdentifier(dynamicName), undefined, node.arguments.map(arg => ts.visitNode(arg, visit)));
+    }
+    return ts.visitEachChild(node, visit, context);
+  };
+  return source => ts.visitNode(source, visit);
+}
 const out = ts.transpileModule(input, {
+  transformers: { before: process.argv[3] === 'commonjs' && projectInterop === false ? [preserveDynamicNamespaces] : [] },
   fileName: file,
   compilerOptions: {
     module: process.argv[3] === 'commonjs' ? ts.ModuleKind.CommonJS : ts.ModuleKind.ESNext,
@@ -3223,9 +3246,10 @@ const out = ts.transpileModule(input, {
     useDefineForClassFields: false,
   },
 });
-process.stdout.write(out.outputText);
+const dynamicHelper = usesDynamicNamespace ? '\nfunction '+dynamicName+'(spec) { return Promise.resolve().then(() => globalThis.__ttToESM(require(spec))); }\n' : '';
+process.stdout.write(out.outputText + dynamicHelper);
 "#;
-    run_tsc_transpile(root, &ts_dir, file, SCRIPT, &src, module_kind)
+    run_tsc_transpile(root, &ts_dir, file, SCRIPT, src, module_kind)
 }
 
 fn run_tsc_transpile(
@@ -3556,9 +3580,6 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     if let Some(c) = read_cached_cjs(&cache) {
         return Some(c);
     }
-    if ts_commonjs_no_interop(file) {
-        return ts_commonjs_transform(file, &root, &raw, &cache);
-    }
     if use_meta {
         if let Some(code) = esbuild_transform_cjs_meta(file, &root, &raw, &cache) {
             return Some(code);
@@ -3587,13 +3608,6 @@ fn esbuild_transform_cjs_plain(
     Some(code)
 }
 
-fn ts_commonjs_transform(file: &Path, root: &Path, raw: &str, cache: &Path) -> Option<String> {
-    let cjs = tsc_transform_with_kind(file, root, "commonjs")?;
-    let code = finish_mr_cjs(postprocess_mr_cjs(cjs), raw);
-    write_atomic(cache, &code);
-    Some(code)
-}
-
 /// Fast-path cached CJS read: hit/miss counters, returns the content on a hit.
 fn read_cached_cjs(cache: &Path) -> Option<String> {
     if let Ok(c) = std::fs::read_to_string(cache) {
@@ -3606,6 +3620,11 @@ fn read_cached_cjs(cache: &Path) -> Option<String> {
 
 /// Post-process esbuild's CJS output (export ordering, finish_mr_cjs rewrites).
 fn finalize_esbuild_cjs(code: String, file: &Path, raw: &str) -> String {
+    let code = if ts_commonjs_no_interop(file) {
+        crate::ts_cjs_interop::static_requires(code)
+    } else {
+        code
+    };
     let code = postprocess_mr_cjs(code);
     // esbuild sorts the exports; vitest's namespace lists them in source order (turbo-test#141)
     let order = crate::transform::transform(file, raw)
@@ -3653,7 +3672,7 @@ fn mr_cjs_cache_path(file: &Path, root: &Path, raw: &str, use_meta: bool, cov: b
     // order (turbo-test#141)
     // v8: __reExport's __toESMStar calls globalThis.__ttToESM (turbo-test#165)
     // v9: export getters take runtime.js's jest setter (writable namespace exports under jest)
-    "mr-cjs-v9".hash(&mut h);
+    "mr-cjs-static-policy-v10".hash(&mut h);
     ts_commonjs_no_interop(file).hash(&mut h);
     // esbuild can't emit decorator metadata. By default we DON'T pay that cost — only when a
     // decorator file actually threw at load (Mongoose @Prop / Sequelize @Column read design:type
@@ -3663,7 +3682,7 @@ fn mr_cjs_cache_path(file: &Path, root: &Path, raw: &str, use_meta: bool, cov: b
     // fine without metadata. Keyed separately so the two transforms never collide in cache.
     use_meta.hash(&mut h);
     if use_meta {
-        "ts-commonjs-partial-exports-v1".hash(&mut h);
+        "ts-commonjs-dynamic-namespaces-v2".hash(&mut h);
         decorator_tsc_module_kind(file).hash(&mut h);
         root.join("node_modules/typescript/package.json")
             .is_file()
@@ -3681,16 +3700,16 @@ fn mr_cjs_cache_path(file: &Path, root: &Path, raw: &str, use_meta: bool, cov: b
 /// Decorator metadata for the CJS loader. TypeScript's own CommonJS output preserves
 /// partial exports in Jest backend cycles; ESM/vitest and the oxc fallback keep ESM lowering.
 fn esbuild_transform_cjs_meta(file: &Path, root: &Path, raw: &str, cache: &Path) -> Option<String> {
-    let cjs =
-        decorator_cjs_via_tsc(file, root).or_else(|| decorator_cjs_via_oxc(file, root, raw))?;
+    let cjs = decorator_cjs_via_tsc(file, root, raw)
+        .or_else(|| decorator_cjs_via_oxc(file, root, raw))?;
     let code = finish_mr_cjs(postprocess_mr_cjs(cjs), raw);
     write_atomic(cache, &code);
     Some(code)
 }
 
-fn decorator_cjs_via_tsc(file: &Path, root: &Path) -> Option<String> {
+fn decorator_cjs_via_tsc(file: &Path, root: &Path, raw: &str) -> Option<String> {
     let kind = decorator_tsc_module_kind(file);
-    let code = tsc_transform_with_kind(file, root, kind)?;
+    let code = tsc_transform_source_with_kind(file, root, kind, raw)?;
     if kind == "commonjs" {
         Some(code)
     } else {
