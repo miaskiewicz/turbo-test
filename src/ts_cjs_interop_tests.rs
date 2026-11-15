@@ -159,3 +159,148 @@ fn authored_import_helper_names_are_not_generated_esbuild_provenance() {
     let source="function __toESM(value){return {user:true,value};} const wrapped=__toESM(require('node:path'));".to_owned();
     assert_eq!(static_requires(source.clone()), source);
 }
+
+#[test]
+fn config_view_preserves_absent_malformed_and_non_utf8_config_errors() {
+    use oxc_resolver::FileSystem;
+    let dir = directory();
+    let path = dir.join("tsconfig.json");
+    let missing = ConfigFileSystem::for_config(Some(&path));
+    assert_eq!(
+        missing.read_to_string(&path).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    for bytes in [
+        b"{invalid json}".as_slice(),
+        b"{/* unterminated".as_slice(),
+        &[0xff, 0xfe, 0x80],
+    ] {
+        std::fs::write(&path, bytes).unwrap();
+        let view = ConfigFileSystem::for_config(Some(&path));
+        assert_eq!(view.read(&path).unwrap(), bytes);
+        assert!(!enabled(&path));
+        match std::str::from_utf8(bytes) {
+            Ok(text) => assert_eq!(view.read_to_string(&path).unwrap(), text),
+            Err(_) => assert_eq!(
+                view.read_to_string(&path).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            ),
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn config_view_preserves_relative_absolute_unknown_and_non_string_parents() {
+    use oxc_resolver::FileSystem;
+    let dir = directory();
+    let path = dir.join("tsconfig.json");
+    let base = dir.join("base.json");
+    std::fs::write(&base, "{}").unwrap();
+    let absolute = serde_json::to_string(&base).unwrap();
+    let inputs = [
+        "{}".to_owned(),
+        r#"{"extends":false}"#.to_owned(),
+        r#"{"extends":"missing-preset"}"#.to_owned(),
+        r#"{"extends":"./base.json"}"#.to_owned(),
+        format!("{{\"extends\":{absolute}}}"),
+    ];
+    for original in inputs {
+        std::fs::write(&path, &original).unwrap();
+        let view = ConfigFileSystem::for_config(Some(&path));
+        assert_eq!(view.read_to_string(&path).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn config_view_rewrites_only_resolved_package_entries_of_mixed_extends_arrays() {
+    use oxc_resolver::FileSystem;
+    let dir = directory();
+    let path = dir.join("tsconfig.json");
+    let package = dir.join("node_modules/preset");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"name":"preset","tsconfig":"base.json"}"#,
+    )
+    .unwrap();
+    std::fs::write(package.join("base.json"), "{}").unwrap();
+    std::fs::write(dir.join("local.json"), "{}").unwrap();
+    let original = r#"{ "extends": ["preset", "./local.json", "missing-preset", null, 42] }"#;
+    std::fs::write(&path, original).unwrap();
+    let view = ConfigFileSystem::for_config(Some(&path));
+    let rewritten: Value = serde_json::from_str(&view.read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        rewritten["extends"][0],
+        crate::canon::canonicalize(package.join("base.json"))
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(rewritten["extends"][1], "./local.json");
+    assert_eq!(rewritten["extends"][2], "missing-preset");
+    assert!(rewritten["extends"][3].is_null());
+    assert_eq!(rewritten["extends"][4], 42);
+    assert_eq!(view.read(&path).unwrap(), original.as_bytes());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn config_view_bounds_cycles_and_deep_parent_chains_without_rewriting_relative_configs() {
+    use oxc_resolver::FileSystem;
+    let dir = directory();
+    let path = dir.join("tsconfig.json");
+    let original = r#"{"extends":"./tsconfig.json"}"#;
+    std::fs::write(&path, original).unwrap();
+    assert_eq!(
+        ConfigFileSystem::for_config(Some(&path))
+            .read_to_string(&path)
+            .unwrap(),
+        original
+    );
+    for index in 0..35 {
+        std::fs::write(
+            dir.join(format!("chain-{index}.json")),
+            format!("{{\"extends\":\"./chain-{}.json\"}}", index + 1),
+        )
+        .unwrap();
+    }
+    let first = dir.join("chain-0.json");
+    let view = ConfigFileSystem::for_config(Some(&first));
+    assert_eq!(
+        view.read_to_string(&first).unwrap(),
+        std::fs::read_to_string(&first).unwrap()
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn config_filesystem_new_delegates_raw_files_and_errors_without_a_config_overlay() {
+    use oxc_resolver::FileSystem;
+    let dir = directory();
+    let path = dir.join("ordinary.json");
+    let original = "// unchanged JSONC\n{\"extends\":\"unresolved-preset\",}\n";
+    std::fs::write(&path, original).unwrap();
+    let view = <ConfigFileSystem as FileSystem>::new();
+    assert_eq!(view.read_to_string(&path).unwrap(), original);
+    assert_eq!(view.read(&path).unwrap(), original.as_bytes());
+    assert!(view.metadata(&path).unwrap().is_file());
+    assert_eq!(
+        view.read_to_string(&dir.join("absent.json"))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn static_import_policy_preserves_non_require_calls_and_destructured_bindings() {
+    let source="var __toESM = (mod, isNodeMode, target) => __copyProps(target, mod);\nconst {answer}=require('other');\nconst authored=__toESM(value);\nconst untouched=other(require('pkg'));".to_owned();
+    assert_eq!(static_requires(source.clone()), source);
+}
