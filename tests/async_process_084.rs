@@ -22,7 +22,7 @@ fn asynchronous_spawn_and_real_node_fork_ipc() {
     );
     let run = turbo_test(&p.dir, &["--jobs", "1", "--reporter", "json"], &[]);
     let report = json_report(&run);
-    assert_eq!(report["numPassedTests"], 8, "{}", run.all());
+    assert_eq!(report["numPassedTests"], 9, "{}", run.all());
     assert_eq!(report["numFailedTests"], 0, "{}", run.all());
 }
 
