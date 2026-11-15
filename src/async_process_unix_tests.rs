@@ -526,10 +526,46 @@ fn piped_process(args: &Value) -> Process {
     configure_stdio(&mut command, args);
     Process::new(5, command.spawn().unwrap(), None, args).unwrap()
 }
+// Command's child can be reaped while a concurrent fork still holds a pre-exec
+// alias of its stdin reader. Poll only terminal readiness, not writable capacity.
+fn wait_for_stdin_reader_close(input: &std::process::ChildStdin) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut fd = libc::pollfd {
+        fd: input.as_raw_fd(),
+        events: libc::POLLERR | libc::POLLHUP,
+        revents: libc::POLLERR | libc::POLLHUP,
+    };
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "inherited child stdin readers did not close"
+        );
+        let ready = unsafe {
+            libc::poll(
+                &mut fd,
+                1,
+                remaining.as_millis().min(i32::MAX as u128) as i32,
+            )
+        };
+        if ready < 0 {
+            assert_eq!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::Interrupted
+            );
+            continue;
+        }
+        if ready > 0 {
+            assert_ne!(fd.revents & (libc::POLLERR | libc::POLLHUP), 0);
+            return;
+        }
+    }
+}
 #[test]
 fn broken_stdin_aborts_queued_writes_and_end_with_separate_callback_errors() {
     let mut process = piped_process(&exited_request());
     process.child.wait().unwrap();
+    wait_for_stdin_reader_close(process.input.as_ref().unwrap());
     process.writes.push_back(queued(11));
     process.input_end = Some(12);
     let mut events = Vec::new();
@@ -539,6 +575,7 @@ fn broken_stdin_aborts_queued_writes_and_end_with_separate_callback_errors() {
     assert_eq!(events[0]["serial"], 11);
     assert_eq!(events[1]["serial"], 12);
     assert_eq!(events[0]["error"]["code"], "EPIPE");
+    assert_eq!(events[1]["error"]["code"], "EPIPE");
     assert_eq!(
         process.queue_input(&json!({"data":""})).unwrap_err().code,
         "EPIPE"
