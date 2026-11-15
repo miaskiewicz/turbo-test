@@ -16,6 +16,7 @@ const CHUNK: usize = 8192;
 const BASE64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 type Result<T> = std::result::Result<T, Failure>;
 
+#[derive(Debug)]
 struct Failure {
     code: &'static str,
     message: String,
