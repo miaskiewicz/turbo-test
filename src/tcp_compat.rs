@@ -799,8 +799,41 @@ mod tests {
             events.iter().any(|e| e["kind"] == "error")
         });
         assert_eq!(events[0]["id"], id);
-        assert_eq!(events[0]["error"]["code"], "ECONNREFUSED");
+        assert_eq!(events[0]["error"]["code"], "ECONNREFUSED", "{events:?}");
         assert!(table.connections.is_empty());
+    }
+    #[test]
+    fn peer_failure_prefers_authoritative_socket_error_after_connect_state_changes() {
+        use std::os::fd::AsRawFd;
+        let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let socket = connect_socket(address).unwrap();
+        let mut descriptor = libc::pollfd {
+            fd: socket.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 1000) }, 1);
+        // On Darwin this is EINVAL once the refused handshake changes the peer state.
+        // SO_ERROR still owns ECONNREFUSED, and must take precedence over getpeername.
+        let peer_error = socket.peer_addr().unwrap_err();
+        let connection = Connection::new(socket, true).unwrap();
+        assert_eq!(
+            connection.connect_failure(peer_error).unwrap_err().code,
+            "ECONNREFUSED"
+        );
+        let socket = connecting_socket(address).unwrap();
+        let peer_error = socket.peer_addr().unwrap_err();
+        let connection = Connection::new(socket, true).unwrap();
+        assert!(!connection.connect_failure(peer_error).unwrap());
+        assert_eq!(
+            connection
+                .connect_failure(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+                .unwrap_err()
+                .code,
+            "ERR_TCP_IO"
+        );
     }
     #[test]
     fn malformed_inputs_unknown_handles_and_bounds_are_errors() {
