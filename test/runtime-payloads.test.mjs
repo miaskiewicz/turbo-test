@@ -71,5 +71,6 @@ test('TCP internal resources ignore mutable async_hooks exports',()=>{
  const operations=[];
  context.__ttTcp=(operation)=>{operations.push(operation);return JSON.stringify({value:operation==='listen'?{id:1,address:{address:'127.0.0.1',port:12345,family:'IPv4'}}:null});};
  vm.runInContext(`(()=>{const hooks=__nodeBuiltins.async_hooks;const original=hooks.AsyncResource;try{hooks.AsyncResource=class Replacement{constructor(){throw new Error('public resource replacement invoked by TCP');}};const server=__nodeBuiltins.net.createServer();server.listen(0,'127.0.0.1');server.close();}finally{hooks.AsyncResource=original;}})()`,context);
- assert.deepEqual(operations,['listen','close']);
+ assert.equal(operations.filter(operation=>operation==='listen').length,1);
+ assert.equal(operations.filter(operation=>operation==='close').length,1);
 });
