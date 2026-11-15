@@ -305,7 +305,9 @@ fn config_environment(text: &str) -> Option<String> {
 // Node; words such as `document` in backend business data must not install DOM.
 fn project_environment(cwd: &Path, forced: Option<&Path>) -> Option<String> {
     if let Some(config) = find_config(cwd, forced) {
-        return config_environment(&config.text).or_else(|| jest_environment_value(&config.text));
+        return config_environment(&config.text)
+            .or_else(|| jest_environment_value(&config.text))
+            .or_else(|| forced.and_then(|path| forced_jest_default(path, &config.text)));
     }
     if forced.is_some() {
         return None;
@@ -314,6 +316,13 @@ fn project_environment(cwd: &Path, forced: Option<&Path>) -> Option<String> {
         .find_map(jest_config_text_in)
         .map(|text| jest_environment_value(&text).unwrap_or_else(|| "node".into()))
 }
+fn forced_jest_default(path: &Path, text: &str) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let is_jest = JEST_CONFIG_NAMES.contains(&name)
+        || (name == "package.json" && package_json_jest_block(text).is_some());
+    is_jest.then(|| "node".into())
+}
+
 fn jest_environment_value(text: &str) -> Option<String> {
     crate::runner::config_string_value(text, "testEnvironment").map(|name| {
         match name.to_ascii_lowercase().as_str() {
