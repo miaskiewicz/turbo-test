@@ -10341,6 +10341,7 @@ fn fs_copy_output(destination: &str, flags: i32) -> std::io::Result<std::fs::Fil
     std::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .create_new(flags & 1 != 0)
         .open(destination)
 }
