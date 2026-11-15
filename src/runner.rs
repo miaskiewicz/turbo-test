@@ -6327,8 +6327,8 @@ fn compile_cjs_wrapper<'s>(
         return None;
     };
     let code = source_string(scope, &module)?;
-    // Under --coverage, give the script an origin named after the file so V8's precise-coverage
-    // report carries a URL we can map back to source. Off by default (origin None) — zero change.
+    // Backend dependency discovery reads V8 CallSite filenames; coverage and
+    // locations also need the real module origin.
     // (compiled script, the compile error when neither the native output nor the esbuild retry
     // compiles: re-thrown below, outside this TryCatch, as the load's cause)
     let (script, compile_exc) = compile_cjs_module(scope, abs, &module, code, prefer_metadata);
@@ -6465,7 +6465,7 @@ fn compile_cjs_module<'s>(
 }
 
 /// Resolve the script origin for `abs`: a named origin when coverage, locations or failure
-/// frames need it — `None` otherwise.
+/// frames or backend package discovery need it — `None` otherwise.
 fn cjs_script_origin<'s>(
     tc: &mut v8::PinScope<'s, '_>,
     abs: &Path,
@@ -6478,7 +6478,8 @@ fn cjs_script_origin<'s>(
     // (failure frames name an app module's file too: junit, turbo-test#81)
     let framed = crate::location::frames_enabled()
         && !abs.components().any(|c| c.as_os_str() == "node_modules");
-    if !crate::coverage::enabled() && !located && !framed {
+    let backend = CJS_FIRST_RESOLUTION.with(|value| value.get());
+    if !crate::coverage::enabled() && !located && !framed && !backend {
         return None;
     }
     v8::String::new(tc, &abs.to_string_lossy()).map(|name| script_origin(tc, name))
@@ -6499,7 +6500,8 @@ fn esbuild_fallback_script(
         return None; // native wasn't the source (output identical) — no point retrying
     }
     let code_fb = v8::String::new(tc, &wrapped_fb)?;
-    v8::Script::compile(tc, code_fb, None).map(|s| v8::Global::new(tc, s))
+    let origin = cjs_script_origin(tc, abs);
+    v8::Script::compile(tc, code_fb, origin.as_ref()).map(|s| v8::Global::new(tc, s))
 }
 
 /// Log the native compile failure's exception text when the loader-debug env is on.
