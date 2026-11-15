@@ -97,17 +97,26 @@ class __AsyncLocalStorage {
     return (fn, ...args) => __asyncCallFrame(frame, fn, undefined, args);
   }
 }
+let __asyncResourceInitHook;
+let __asyncResourceRunHook;
+let __asyncResourceDestroyHook;
 class __AsyncResource {
-  constructor(type) {
+  constructor(type, options) {
     if (typeof type !== 'string') throw new TypeError('type must be a string');
     this._frame = __asyncFrame();
+    if (__asyncResourceInitHook) __asyncResourceInitHook(this, type, options);
   }
-  runInAsyncScope(fn, receiver, ...args) { return __asyncCallFrame(this._frame, fn, receiver, args); }
-  emitDestroy() { return this; }
-  bind(fn, receiver = this) {
+  runInAsyncScope(fn, receiver, ...args) {
+    if (__asyncResourceRunHook) return __asyncResourceRunHook(this, fn, receiver, args);
+    return __asyncCallFrame(this._frame, fn, receiver, args);
+  }
+  asyncId() { return __hookResourceRecord(this).id; }
+  triggerAsyncId() { return __hookResourceRecord(this).trigger; }
+  emitDestroy() { if (__asyncResourceDestroyHook) __asyncResourceDestroyHook(this); return this; }
+  bind(fn, receiver) {
     __asyncCallback(fn);
     const resource = this;
-    const bound = function(...args) { return resource.runInAsyncScope(fn, receiver, ...args); };
+    const bound = function(...args) { return resource.runInAsyncScope(fn, receiver === undefined ? this : receiver, ...args); };
     bound.asyncResource = this;
     return bound;
   }

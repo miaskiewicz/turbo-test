@@ -10018,6 +10018,12 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(
         scope,
         global,
+        "__ttDrainAsyncHookTasks",
+        crate::async_hooks::native_drain_hook_tasks,
+    );
+    bind_fn(
+        scope,
+        global,
         "__ttSetPromiseHooks",
         crate::async_hooks::native_set_promise_hooks,
     );

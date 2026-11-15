@@ -8,13 +8,13 @@ let __hookPromises = new WeakMap();
 let __hookResources = new WeakMap();
 let __hookTimers = new Map();
 let __hookPromiseFinalizer;
+let __hookDrainingFinalizers = false;
 let __hookCurrent = { id: 0, trigger: 0, resource: process };
 let __hookStack = [];
 const __hookOriginalSchedule = __schedule;
 const __hookOriginalClear = __clearTimer;
 const __hookOriginalNextTick = process.nextTick;
 const __hookOriginalResource = __AsyncResource;
-const __hookOriginalRun = __AsyncResource.prototype.runInAsyncScope;
 const __hookOriginalBind = __AsyncLocalStorage.bind;
 const __hookOriginalSnapshot = __AsyncLocalStorage.snapshot;
 function __dispatchAsyncHook(name, ...args) {
@@ -28,7 +28,7 @@ function __dispatchAsyncHook(name, ...args) {
   } finally { __hookDispatching = false; }
 }
 function __newHookRecord(type, resource, trigger = __hookCurrent.id, notify = true) {
-  const record = { id: __hookSequence++, trigger, resource, generation: __hookGeneration, destroyed: false, destroyQueued: false };
+  const record = { id: __hookSequence++, trigger, resource, generation: __hookGeneration, lifecycle: { destroyed: false, registered: false }, destroyQueued: false };
   if (notify) __dispatchAsyncHook('init', record.id, type, trigger, resource);
   return record;
 }
@@ -44,10 +44,11 @@ function __promiseHookInit(promise, parent) {
   const previous = __hookPromises.get(parent);
   const record = __newHookRecord('PROMISE', promise, previous ? previous.id : __hookCurrent.id, false);
   __hookPromises.set(promise, record);
-  __hookPromiseFinalizer.register(promise, { id: record.id, generation: __hookGeneration });
+  __registerHookFinalizer(record, promise);
   __dispatchAsyncHook('init', record.id, 'PROMISE', record.trigger, promise);
 }
 function __hookBefore(record) {
+  __drainAsyncHookFinalizers();
   __hookStack.push(__hookCurrent);
   __hookCurrent = record;
   __dispatchAsyncHook('before', record.id);
@@ -65,13 +66,32 @@ function __promiseHookResolve(promise) {
   const record = __hookPromises.get(promise);
   if (record) __dispatchAsyncHook('promiseResolve', record.id);
 }
+function __registerHookFinalizer(record, resource, manual) {
+  if (manual || record.lifecycle.registered) return;
+  record.lifecycle.registered = true;
+  __hookPromiseFinalizer.register(resource, { id: record.id, generation: record.generation, lifecycle: record.lifecycle });
+}
+function __finalizeAsyncHookResource(held) {
+  if (held.generation !== __hookGeneration || held.lifecycle.destroyed) return;
+  held.lifecycle.destroyed = true;
+  __dispatchAsyncHook('destroy', held.id);
+}
+function __drainAsyncHookFinalizers() {
+  if (__hookDrainingFinalizers || !__enabledAsyncHooks.size) return;
+  __hookDrainingFinalizers = true;
+  try { globalThis.__ttDrainAsyncHookTasks(); }
+  finally { __hookDrainingFinalizers = false; }
+}
+function __maybeRestoreTimerClear() {
+  if (!__enabledAsyncHooks.size && !__hookTimers.size) __clearTimer = __hookOriginalClear;
+}
 function __hookDestroy(record) {
-  if (record.destroyed) return;
-  record.destroyed = true;
+  if (record.lifecycle.destroyed) return;
+  record.lifecycle.destroyed = true;
   if (record.generation === __hookGeneration) __dispatchAsyncHook('destroy', record.id);
 }
 function __queueHookDestroy(record) {
-  if (record.destroyQueued || record.destroyed) return;
+  if (record.destroyQueued || record.lifecycle.destroyed) return;
   record.destroyQueued = true;
   __hookOriginalNextTick(() => __hookDestroy(record));
 }
@@ -85,7 +105,7 @@ function __hookTimerCallback(record, callback, repeating) {
   return function(...args) {
     try { return __hookInvoke(record, callback, this, args); }
     finally {
-      if (!repeating) { __hookTimers.delete(record.timer); __queueHookDestroy(record); }
+      if (!repeating) { __hookTimers.delete(record.timer); __queueHookDestroy(record); __maybeRestoreTimerClear(); }
     }
   };
 }
@@ -103,6 +123,7 @@ function __hookClear(timer) {
   __hookTimers.delete(timer);
   __hookOriginalClear(timer);
   if (record) __queueHookDestroy(record);
+  __maybeRestoreTimerClear();
 }
 function __hookNextTick(callback, ...args) {
   const resource = { callback };
@@ -120,9 +141,14 @@ function __hookResourceRecord(resource) {
   }
   return record;
 }
-function __hookResourceRun(callback, receiver, ...args) {
-  const record = __hookResourceRecord(this);
-  return __hookOriginalRun.call(this, function(...values) { return __hookInvoke(record, callback, receiver, values); }, receiver, ...args);
+function __hookResourceRun(resource, callback, receiver, args) {
+  __asyncCallback(callback);
+  const record = __hookResourceRecord(resource);
+  return __asyncCallFrame(resource._frame, function(...values) { return __hookInvoke(record, callback, receiver, values); }, receiver, args);
+}
+function __hookResourceDestroy(resource) {
+  const record = __hookResources.get(resource);
+  if (record) __queueHookDestroy(record);
 }
 function __hookResourceOptions(options) {
   const trigger = typeof options === 'number' ? options : options && options.triggerAsyncId;
@@ -130,47 +156,41 @@ function __hookResourceOptions(options) {
   if (!Number.isInteger(trigger) || trigger < -1) throw Object.assign(new RangeError('Invalid triggerAsyncId'), { code: 'ERR_INVALID_ASYNC_ID' });
   return trigger;
 }
-class __HookedAsyncResource extends __hookOriginalResource {
-  constructor(type, options) {
-    super(type);
-    const trigger = __hookResourceOptions(options);
-    const record = __newHookRecord(type, this, trigger, false);
-    __hookResources.set(this, record);
-    __dispatchAsyncHook('init', record.id, type, trigger, this);
-  }
-  asyncId() { return __hookResourceRecord(this).id; }
-  triggerAsyncId() { return __hookResourceRecord(this).trigger; }
-  emitDestroy() { __queueHookDestroy(__hookResourceRecord(this)); return this; }
-  static bind(callback, type = callback.name || 'bound-anonymous-fn', receiver) {
-    return new __HookedAsyncResource(type).bind(callback, receiver);
-  }
+function __hookResourceInit(resource, type, options) {
+  const trigger = __hookResourceOptions(options);
+  const record = __newHookRecord(type, resource, trigger, false);
+  __hookResources.set(resource, record);
+  __registerHookFinalizer(record, resource, options && options.requireManualDestroy);
+  __dispatchAsyncHook('init', record.id, type, trigger, resource);
 }
-function __hookBind(callback) { return __HookedAsyncResource.bind(callback); }
+function __hookBind(callback) {
+  __asyncCallback(callback);
+  const resource = new __hookOriginalResource(callback.name || 'bound-anonymous-fn');
+  return function(...args) { return resource.runInAsyncScope(callback, this, ...args); };
+}
 function __hookSnapshot() { return __hookBind((callback, ...args) => callback(...args)); }
 function __startAsyncHooks() {
   __asyncHooksUsed = true;
-  if (!__hookPromiseFinalizer) __hookPromiseFinalizer = new FinalizationRegistry((held) => {
-    if (held.generation === __hookGeneration) __dispatchAsyncHook('destroy', held.id);
-  });
+  if (!__hookPromiseFinalizer) __hookPromiseFinalizer = new FinalizationRegistry(__finalizeAsyncHookResource);
   globalThis.__ttSetPromiseHooks(__promiseHookInit, __promiseHookBefore, __promiseHookAfter, __promiseHookResolve);
   __schedule = __hookSchedule;
   __clearTimer = __hookClear;
   process.nextTick = __hookNextTick;
-  __hookOriginalResource.prototype.runInAsyncScope = __hookResourceRun;
-  __async_hooks.AsyncResource = __HookedAsyncResource;
+  __asyncResourceInitHook = __hookResourceInit;
+  __asyncResourceRunHook = __hookResourceRun;
+  __asyncResourceDestroyHook = __hookResourceDestroy;
   __AsyncLocalStorage.bind = __hookBind;
   __AsyncLocalStorage.snapshot = __hookSnapshot;
 }
 function __stopAsyncHooks() {
   globalThis.__ttSetPromiseHooks(undefined, undefined, undefined, undefined);
   __schedule = __hookOriginalSchedule;
-  __clearTimer = __hookOriginalClear;
+  if (!__hookTimers.size) __clearTimer = __hookOriginalClear;
   process.nextTick = __hookOriginalNextTick;
-  __hookOriginalResource.prototype.runInAsyncScope = __hookOriginalRun;
-  __async_hooks.AsyncResource = __hookOriginalResource;
+  __asyncResourceInitHook = undefined;
+  __asyncResourceRunHook = undefined;
   __AsyncLocalStorage.bind = __hookOriginalBind;
   __AsyncLocalStorage.snapshot = __hookOriginalSnapshot;
-  __hookTimers.clear();
   __hookStack = [];
   __hookCurrent = { id: 0, trigger: 0, resource: process };
 }
@@ -210,6 +230,9 @@ function __resetAsyncHooks() {
     __enabledAsyncHooks.clear();
     __stopAsyncHooks();
   }
+  __hookTimers.clear();
+  __clearTimer = __hookOriginalClear;
+  __asyncResourceDestroyHook = undefined;
   __hookGeneration++;
   __hookPromises = new WeakMap();
   __hookResources = new WeakMap();
