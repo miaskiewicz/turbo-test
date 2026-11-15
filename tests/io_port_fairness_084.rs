@@ -77,3 +77,33 @@ test('next file releases undeliverable task ownership without firing old listene
     assert_eq!(report["numPassedTests"], 2, "{}", run.all());
     assert_eq!(report["numFailedTests"], 0, "{}", run.all());
 }
+
+#[test]
+fn write_only_tcp_server_connections_close_on_empty_eof() {
+    let p = Project::new("tcp-empty-eof-084");
+    p.with_esbuild();
+    p.file("package.json", r#"{"name":"tcp-empty-eof-084"}"#);
+    p.file(
+        "jest.config.js",
+        "module.exports={testEnvironment:'node'};\n",
+    );
+    let fixture = p.file(
+        "eof.test.cjs",
+        include_str!("data/compat-084/tcp-empty-eof.cjs"),
+    );
+    let oracle = std::process::Command::new("node")
+        .arg("--test")
+        .arg(fixture)
+        .output()
+        .unwrap();
+    assert!(
+        oracle.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&oracle.stdout),
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    let run = turbo_test(&p.dir, &["--jobs", "1", "--reporter", "json"], &[]);
+    let report = json_report(&run);
+    assert_eq!(report["numPassedTests"], 1, "{}", run.all());
+    assert_eq!(report["numFailedTests"], 0, "{}", run.all());
+}
