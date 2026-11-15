@@ -108,7 +108,14 @@ fn configured_and_cli_environments_win_over_content_detection() {
     passed(
         &p,
         1,
-        &["--jobs", "1", "--environment", "jsdom", "--reporter", "json"],
+        &[
+            "--jobs",
+            "1",
+            "--environment",
+            "jsdom",
+            "--reporter",
+            "json",
+        ],
         &[],
     );
 }
