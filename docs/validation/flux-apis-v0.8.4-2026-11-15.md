@@ -327,7 +327,10 @@ All four full frontend suites passed on this same binary:
 Payroll uses app commit `49da952428cff8c9aec3bf46b56d3f317378e009` over staging
 `9ca35e9`: two Node-only E2E-helper unit-test files declare the Node environment,
 and a setup entry loads browser fixtures only for DOM tests. Both turbo-test and
-original Vitest passed the same 18 targeted Node/DOM controls. No package or lockfile
+an external Vitest 5.1.0 compatibility control passed the same 18 targeted Node/DOM
+checks. Payroll has no installed or locked Vitest dependency; the external control
+mirrored its aliases, SWC plugin, setup, and environment settings and is not a
+historical app baseline. No package or lockfile
 version was changed. Website has two additional passing HMAC tests that previously
 skipped; the total test identities are unchanged. No tests were excluded to obtain
 these results, and these correctness runs make no performance claim.
