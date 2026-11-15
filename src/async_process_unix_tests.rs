@@ -304,3 +304,41 @@ fn peer_handle_transfer_reports_an_explicit_unsupported_capability() {
         .any(|event| event["error"]["code"] == "ERR_IPC_HANDLE_UNSUPPORTED"));
     assert!(!events.iter().any(|event| event["kind"] == "message"));
 }
+
+#[test]
+fn all_signal_paths_fail_closed_after_an_external_reap_without_touching_a_pid() {
+    let mut args = request();
+    args["file"] = json!("/bin/true");
+    let child = crate::process_compat::command(&args).spawn().unwrap();
+    let mut process = Process::new(1, child, None, &args).unwrap();
+    process.child.wait().unwrap();
+    let mut signals = Vec::new();
+    assert!(!process.signal_with(15, false, |pid, signal| {
+        signals.push((pid, signal));
+        true
+    }));
+    assert!(!process.signal_with(9, true, |pid, signal| {
+        signals.push((pid, signal));
+        true
+    }));
+    process.cleanup_with(|pid| signals.push((-(pid as i32), 9)));
+    assert!(signals.is_empty());
+}
+
+#[test]
+fn public_kill_targets_the_leader_while_owned_timeout_cleanup_targets_its_group() {
+    let args = request();
+    let child = crate::process_compat::command(&args).spawn().unwrap();
+    let mut process = Process::new(1, child, None, &args).unwrap();
+    let pid = process.child.id() as i32;
+    let mut signals = Vec::new();
+    assert!(process.signal_with(15, false, |target, signal| {
+        signals.push((target, signal));
+        true
+    }));
+    assert!(process.signal_with(9, true, |target, signal| {
+        signals.push((target, signal));
+        true
+    }));
+    assert_eq!(signals, [(pid, 15), (-pid, 9)]);
+}
