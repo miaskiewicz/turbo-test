@@ -2389,7 +2389,7 @@ fn push_jest_setup_entry(q: &str, dir: &Path, root_dir: &Path, out: &mut Vec<Pat
 }
 
 /// First string value for a config key (`key: 'value'` / `"value"`). Used for jest `rootDir`.
-fn config_string_value(s: &str, key: &str) -> Option<String> {
+pub(crate) fn config_string_value(s: &str, key: &str) -> Option<String> {
     let start = find_config_key(s, key)?;
     let tail = s[start..].trim_start();
     // skip the key name + colon

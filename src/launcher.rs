@@ -301,6 +301,29 @@ fn config_environment(text: &str) -> Option<String> {
     None
 }
 
+// Explicit run config wins over project discovery. A Jest project defaults to
+// Node; words such as `document` in backend business data must not install DOM.
+fn project_environment(cwd: &Path, forced: Option<&Path>) -> Option<String> {
+    if let Some(config) = find_config(cwd, forced) {
+        return config_environment(&config.text).or_else(|| jest_environment_value(&config.text));
+    }
+    if forced.is_some() {
+        return None;
+    }
+    cwd.ancestors()
+        .find_map(jest_config_text_in)
+        .map(|text| jest_environment_value(&text).unwrap_or_else(|| "node".into()))
+}
+fn jest_environment_value(text: &str) -> Option<String> {
+    crate::runner::config_string_value(text, "testEnvironment").map(|name| {
+        match name.to_ascii_lowercase().as_str() {
+            "jest-environment-node" => "node".into(),
+            "jest-environment-jsdom" => "jsdom".into(),
+            _ => name.to_ascii_lowercase(),
+        }
+    })
+}
+
 /// After a match of `environment`, try to parse the `: '<name>'` value.
 fn environment_value_at(b: &[u8], text: &str, after: usize) -> Option<String> {
     let i = skip_ws(b, after);
@@ -1828,7 +1851,7 @@ fn push_config_env(
     let environment = opts
         .environment
         .clone()
-        .or_else(|| find_config(cwd, forced).and_then(|c| config_environment(&c.text)));
+        .or_else(|| project_environment(cwd, forced));
     if let Some(e) = environment {
         env.push(("TURBO_ENV", e));
     }
