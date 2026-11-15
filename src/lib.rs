@@ -48,3 +48,5 @@ pub mod process_compat;
 
 pub mod http_compat;
 pub mod vue;
+
+pub mod tcp_compat;
