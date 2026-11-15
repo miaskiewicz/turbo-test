@@ -578,6 +578,7 @@ function __installFakeDate() {
     if (args.length === 0) return new Real(__loop.systemTime + __loop.fnow);
     return new Real(...args);
   }
+  Object.defineProperty(FakeDate, 'name', { value: 'Date', configurable: true });
   FakeDate.prototype = Real.prototype;
   FakeDate.now = () => __loop.systemTime + __loop.fnow;
   FakeDate.UTC = Real.UTC;
@@ -601,6 +602,7 @@ function __installVirtualDate() {
     if (args.length === 0) return new Real(__virtualBase + __loop.now);
     return new Real(...args);
   }
+  Object.defineProperty(VDate, 'name', { value: 'Date', configurable: true });
   VDate.prototype = Real.prototype;
   VDate.now = () => __virtualBase + __loop.now;
   VDate.UTC = Real.UTC;
