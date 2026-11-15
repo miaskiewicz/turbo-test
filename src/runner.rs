@@ -10851,7 +10851,7 @@ fn fs_stat(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv
 /// test checks that), served to `import` and `require` alike by `ensure_node_builtin`.
 #[rustfmt::skip]
 const NODE_BUILTINS: &[&str] = &[
-    "fs", "fs/promises", "path", "module", "os", "child_process", "url", "util", "events",
+    "fs", "fs/promises", "path", "module", "os", "child_process", "url", "util", "util/types", "events",
     "stream", "stream/promises", "assert", "assert/strict", "perf_hooks", "crypto", "buffer", "querystring",
     "string_decoder", "timers", "timers/promises", "http", "http2", "https", "net", "tls", "zlib",
     "dns", "dns/promises", "tty", "constants", "dgram", "readline", "v8", "diagnostics_channel",

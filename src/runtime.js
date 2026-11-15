@@ -3416,6 +3416,10 @@ function __nodeFormatWith(o, ...args) {
   for (; i < args.length; i++) out += ' ' + insp(args[i]);
   return out;
 }
+const __utilDateGetTime = Date.prototype.getTime;
+const __utilIsDate = (value) => {
+  try { __utilDateGetTime.call(value); return true; } catch { return false; }
+};
 const __util = {
   inherits(ctor, superCtor) { if (ctor && ctor.prototype && superCtor && superCtor.prototype) { ctor.super_ = superCtor; Object.setPrototypeOf(ctor.prototype, superCtor.prototype); } },
   promisify: (f) => (...args) => new Promise((res, rej) => { try { f(...args, (e, v) => e ? rej(e) : res(v)); } catch (e) { rej(e); } }),
@@ -3426,7 +3430,7 @@ const __util = {
   deprecate: (fn, _msg) => fn,
   debuglog: () => (() => {}),
   isDeepStrictEqual: (a, b) => { try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return a === b; } },
-  types: { isPromise: (x) => x && typeof x.then === 'function', isDate: (x) => x instanceof Date, isRegExp: (x) => x instanceof RegExp, isNativeError: (x) => x instanceof Error, isArrayBuffer: (x) => x instanceof ArrayBuffer, isTypedArray: (x) => ArrayBuffer.isView(x) },
+  types: { isPromise: (x) => x && typeof x.then === 'function', isDate: __utilIsDate, isRegExp: (x) => x instanceof RegExp, isNativeError: (x) => x instanceof Error, isArrayBuffer: (x) => x instanceof ArrayBuffer, isTypedArray: (x) => ArrayBuffer.isView(x) },
   TextEncoder: globalThis.TextEncoder,
   TextDecoder: globalThis.TextDecoder,
 };
@@ -3886,6 +3890,8 @@ globalThis.__nodeBuiltins = {
   url: { fileURLToPath: globalThis.__fileURLToPath, pathToFileURL: globalThis.__pathToFileURL, URL: globalThis.URL },
   util: __util,
   'node:util': __util,
+  'util/types': __util.types,
+  'node:util/types': __util.types,
   crypto: __crypto,
   'node:crypto': __crypto,
   events: __events,
