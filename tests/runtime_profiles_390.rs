@@ -119,3 +119,50 @@ fn configured_and_cli_environments_win_over_content_detection() {
         &[],
     );
 }
+
+#[test]
+fn nearest_jest_environment_wins_over_a_parent_vitest_profile_in_both_directions() {
+    let p = project("runtime-nearest-framework-profile");
+    p.file(
+        "vitest.config.js",
+        "export default {test:{environment:'jsdom'}};",
+    );
+    p.file(
+        "backend/jest.config.js",
+        "module.exports={testEnvironment:'node'};",
+    );
+    p.file("backend/check.test.cjs","test('nearest Node config',()=>{expect(typeof document).toBe('undefined');expect(globalThis.__ttRuntimeBackendInstalled).toBe(true);expect(typeof require('node:net').createServer).toBe('function');});");
+    passed(
+        &p,
+        1,
+        &[
+            "--jobs",
+            "1",
+            "--reporter",
+            "json",
+            "backend/check.test.cjs",
+        ],
+        &[],
+    );
+    p.file(
+        "vitest.config.js",
+        "export default {test:{environment:'node'}};",
+    );
+    p.file(
+        "backend/jest.config.js",
+        "module.exports={testEnvironment:'jsdom'};",
+    );
+    p.file("backend/check.test.cjs","test('nearest DOM config',()=>{expect(typeof document).toBe('object');expect(globalThis.__ttRuntimeBackendInstalled).toBe(false);});");
+    passed(
+        &p,
+        1,
+        &[
+            "--jobs",
+            "1",
+            "--reporter",
+            "json",
+            "backend/check.test.cjs",
+        ],
+        &[],
+    );
+}
