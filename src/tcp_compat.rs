@@ -894,6 +894,23 @@ mod tests {
         assert!(table.connections[&client].referenced);
     }
     #[test]
+    fn encoded_write_bound_precedes_decoding_and_accepts_exact_byte_limit() {
+        let encoded_limit = (32usize * 1024 * 1024).div_ceil(3) * 4;
+        // Malformed input would be INVALID_ARG_VALUE if decoding ran first.
+        let oversized = "!".repeat(encoded_limit + 1);
+        assert_eq!(
+            decoded_write(&json!({"data":oversized})).unwrap_err().code,
+            "ERR_OUT_OF_RANGE"
+        );
+        assert_eq!(
+            decoded_write(&json!({"data":"!!!!"})).unwrap_err().code,
+            "ERR_INVALID_ARG_VALUE"
+        );
+        let limit = vec![0; 32 * 1024 * 1024];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&limit);
+        assert_eq!(decoded_write(&json!({"data":encoded})).unwrap(), limit);
+    }
+    #[test]
     fn socket_interests_cover_connect_write_pause_and_eof() {
         let mut table = Transport::default();
         let (_, client, _) = pair(&mut table, "127.0.0.1");
