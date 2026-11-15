@@ -58,3 +58,5 @@ pub mod x509_compat;
 pub mod tcp_compat;
 
 pub(crate) mod ts_cjs_interop;
+
+pub(crate) mod runtime_profile;

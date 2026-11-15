@@ -1557,6 +1557,30 @@ fn forced_env(s: &str) -> Option<String> {
     })
 }
 
+fn configured_environment(entry: &Path) -> Option<String> {
+    let mut jest = None;
+    for directory in entry.ancestors().skip(1) {
+        for filename in VITEST_CONFIG_FILES {
+            if let Ok(text) = std::fs::read_to_string(directory.join(filename)) {
+                return config_string_value(&text, "environment");
+            }
+        }
+        if jest.is_none() {
+            jest = jest_config_text(directory)
+                .and_then(|text| config_string_value(&text, "testEnvironment"));
+        }
+    }
+    jest
+}
+fn effective_file_environment(entry: &Path, source: &str) -> Option<String> {
+    forced_env(source)
+        .or_else(|| configured_environment(entry))
+        .map(|env| env.to_ascii_lowercase())
+}
+fn runtime_profile(entry: &Path) -> crate::runtime_profile::RuntimeProfile {
+    crate::runtime_profile::RuntimeProfile::from_dom(needs_dom(entry))
+}
+
 thread_local! {
     /// This worker thread's pool slot (0-based) and the run-wide sequence number of the file it
     /// is running ([`set_worker_slot`]).
@@ -1576,8 +1600,8 @@ pub fn set_worker_slot(pool: usize, seq: usize) {
 /// `environment`.
 fn set_file_env(scope: &mut v8::PinScope, file: &Path) {
     let s = std::fs::read_to_string(file).unwrap_or_default();
-    let env = forced_env(&s);
-    let web = env.as_deref().is_some_and(is_dom_env);
+    let env = effective_file_environment(file, &s);
+    let web = needs_dom(file);
     let (pool, seq) = WORKER_SLOT.with(|w| w.get());
     let worker = if on_reuse_path() { pool } else { seq };
     let jest = JEST_PROJECT.with(|c| c.get());
@@ -1598,7 +1622,7 @@ fn set_file_env(scope: &mut v8::PinScope, file: &Path) {
             json_string(match env.as_deref() {
                 Some("happydom") => "happy-dom",
                 Some(e) => e,
-                None => "node",
+                None => if web { "jsdom" } else { "node" },
             }),
         ),
     );
@@ -1607,7 +1631,15 @@ fn set_file_env(scope: &mut v8::PinScope, file: &Path) {
 /// Whether an environment name is a DOM one: vitest's `jsdom` / `happy-dom`, or `turbo-dom`, the
 /// name of the built-in DOM itself (turbo-test#217) — each installs the DOM for every file.
 fn is_dom_env(env: &str) -> bool {
-    matches!(env, "jsdom" | "happy-dom" | "happydom" | "turbo-dom")
+    matches!(
+        env,
+        "jsdom"
+            | "happy-dom"
+            | "happydom"
+            | "turbo-dom"
+            | "jest-environment-jsdom"
+            | "jest-environment-happy-dom"
+    )
 }
 
 /// Whether a file needs a DOM environment (so we don't impose one on pure-logic tests,
@@ -1618,7 +1650,7 @@ fn is_dom_env(env: &str) -> bool {
 /// fall back to the content heuristic (extension + DOM-API mentions).
 fn needs_dom(file: &Path) -> bool {
     let s = std::fs::read_to_string(file).unwrap_or_default();
-    match forced_env(&s).as_deref() {
+    match effective_file_environment(file, &s).as_deref() {
         Some("node") => return false,
         // turbo-dom is our single DOM impl; jsdom/happy-dom both map onto it.
         Some(e) if is_dom_env(e) => return true,
@@ -3047,6 +3079,7 @@ fn set_mock_prepass(scope: &mut v8::PinScope, on: bool) {
 /// document/window exist before the test evaluates. (The legacy JS turbo-dom bootstrap —
 /// installGlobals + the `.node` parser — was removed in v0.3.0; rtdom is the only DOM now.)
 fn setup_dom(scope: &mut v8::PinScope, entry: &Path) {
+    crate::runtime_profile::install_dom(scope);
     turbo_dom_browser_env::browser_env::install(scope);
     // jsdom's media by default (vitest parity); Chrome's with --chrome-media,
     // TURBO_CHROME_MEDIA=1 or test.chromeMedia: true
@@ -3089,7 +3122,7 @@ fn set_environment_modes(scope: &mut v8::PinScope, entry: &Path) {
         set_computed_style_mode, set_touch_event_mode, ComputedStyleMode, TouchEventMode,
     };
     let src = std::fs::read_to_string(entry).unwrap_or_default();
-    let chrome = forced_env(&src).as_deref() == Some("turbo-dom");
+    let chrome = effective_file_environment(entry, &src).as_deref() == Some("turbo-dom");
     let (touch, style) = match chrome {
         true => (TouchEventMode::Chrome, ComputedStyleMode::Chrome),
         false => (TouchEventMode::Jsdom, ComputedStyleMode::Jsdom),
@@ -9399,7 +9432,6 @@ fn bind_fn(
 /// once (M3 §4) so each test file gets a context *from* the snapshot instead of
 /// re-evaluating this per file. (Minimal runtime now; real @vitest/* bundle swaps in here
 /// behind the same snapshot mechanism.)
-const RUNTIME_JS: &str = include_str!("runtime.js");
 
 /// Pristine VM context index zero is reserved only in the runner-owned Node snapshot.
 pub(crate) fn vm_context_snapshot_available() -> bool {
@@ -9470,7 +9502,7 @@ fn window_snapshot(chai: &str, flags: &str) -> Option<FrameworkSnapshot> {
             references: Some(references),
         });
     }
-    let blob = turbo_dom_browser_env::browser_env::snapshot_blob_with(framework_prelude)?;
+    let blob = turbo_dom_browser_env::browser_env::snapshot_blob_with(window_framework_prelude)?;
     // saved only when built with the recorded table (the key's fingerprint)
     let same = blob.references.len() == references.len()
         && blob
@@ -9487,6 +9519,21 @@ fn window_snapshot(chai: &str, flags: &str) -> Option<FrameworkSnapshot> {
     })
 }
 
+// snapshot_blob_with calls this once for its plain default context and once for
+// its window context, before the DOM engine bootstrap. Only the latter gets DOM fallbacks.
+fn window_framework_prelude(scope: &mut v8::PinScope) {
+    thread_local! { static PHASE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+    framework_prelude(scope);
+    let phase = PHASE.with(|phase| {
+        let previous = phase.get();
+        phase.set(previous + 1);
+        previous
+    });
+    if phase == 1 {
+        crate::runtime_profile::install_dom(scope);
+    }
+}
+
 /// Where a startup blob of `kind` with `key` is kept: the build's cache dir (its name carries
 /// the build id, so another binary never reads it).
 fn saved_blob_path(kind: &str, key: u64) -> PathBuf {
@@ -9498,7 +9545,7 @@ fn saved_blob_path(kind: &str, key: u64) -> PathBuf {
 fn blob_key_from(kind: &str, fingerprint: u64, chai: &str, flags: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (kind, fingerprint, chai, flags).hash(&mut h);
+    ("runtime-profiles-v1", kind, fingerprint, chai, flags).hash(&mut h);
     h.finish()
 }
 
@@ -9654,54 +9701,7 @@ fn framework_prelude(scope: &mut v8::PinScope) {
             .and_then(|s| s.run(tc))
             .unwrap_or_else(|| chai_missing("chai failed to load"));
     }
-    let runtime = RUNTIME_JS
-        .replace(
-            "/* __TT_NODE_ZLIB_CONSTANTS__ */",
-            include_str!("node_zlib_constants.js"),
-        )
-        .replace(
-            "/* __TT_NODE_BUFFER_BYTE_LENGTH__ */",
-            include_str!("node_buffer_byte_length.js"),
-        )
-        .replace("/* __TT_NODE_STREAMS__ */", include_str!("node_streams.js"))
-        .replace(
-            "/* __TT_NODE_ASYNC_HOOKS__ */",
-            include_str!("node_async_hooks.js"),
-        )
-        .replace(
-            "/* __TT_NODE_WARNINGS__ */",
-            include_str!("node_warnings.js"),
-        )
-        .replace("/* __TT_NODE_KEYS__ */", include_str!("node_keys.js"))
-        .replace("/* __TT_NODE_AES__ */", include_str!("node_aes.js"))
-        .replace(
-            "/* __TT_NODE_CRYPTO_HASHES__ */",
-            include_str!("node_crypto_hashes.js"),
-        )
-        .replace("/* __TT_NODE_X509__ */", include_str!("node_x509.js"))
-        .replace("/* __TT_NODE_VM__ */", include_str!("node_vm.js"))
-        .replace(
-            "/* __TT_NODE_ASYNC_CONTEXT__ */",
-            include_str!("node_async_context.js"),
-        )
-        .replace(
-            "/* __TT_NODE_PORTS__ */",
-            include_str!("node_message_ports.js"),
-        )
-        .replace(
-            "/* __TT_NODE_PROCESSES__ */",
-            include_str!("node_processes.js"),
-        )
-        .replace(
-            "/* __TT_NODE_ASYNC_PROCESSES__ */",
-            include_str!("node_async_processes.js"),
-        )
-        .replace("/* __TT_NODE_HTTP__ */", include_str!("node_http.js"))
-        .replace("/* __TT_NODE_TCP__ */", include_str!("node_tcp.js"))
-        .replace(
-            "/* __TT_NODE_BLOCKLIST__ */",
-            include_str!("node_blocklist.js"),
-        );
+    let runtime = crate::runtime_sources::shared_runtime_source();
     let code = v8::String::new(scope, &runtime).unwrap();
     let s = v8::Script::compile(scope, code, None).unwrap();
     s.run(scope).unwrap();
@@ -9940,23 +9940,6 @@ fn load_lazy_bundled(scope: &mut v8::PinScope, abs: &Path) -> Option<Option<()>>
 }
 
 fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
-    crate::http_compat::reset();
-    crate::async_process::reset();
-    crate::tcp_compat::reset();
-    let empty = v8::undefined(scope);
-    scope.set_continuation_preserved_embedder_data(empty.into());
-    bind_fn(
-        scope,
-        global,
-        "__ttAsyncFrameGet",
-        crate::async_context::native_get_frame,
-    );
-    bind_fn(
-        scope,
-        global,
-        "__ttAsyncFrameSet",
-        crate::async_context::native_set_frame,
-    );
     bind_fn(
         scope,
         global,
@@ -9976,20 +9959,6 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         "__ttPortDetach",
         crate::message_port::native_detach,
     );
-    bind_fn(
-        scope,
-        global,
-        "__ttSpawnSync",
-        crate::process_compat::native_spawn_sync,
-    );
-    bind_fn(scope, global, "__ttHttp", crate::http_compat::native_http);
-    bind_fn(
-        scope,
-        global,
-        "__ttAsyncProcess",
-        crate::async_process::native_async_process,
-    );
-    bind_fn(scope, global, "__ttTcp", crate::tcp_compat::native_tcp);
     bind_fn(scope, global, "log", native_log);
     bind_fn(scope, global, "__ttWrite", native_write);
     bind_fn(scope, global, "__ttCallSite", native_call_site);
@@ -10043,65 +10012,14 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(
         scope,
         global,
-        "__ttDecryptPkcs8",
-        crate::encrypted_pkcs8::native_decrypt_pkcs8,
-    );
-    bind_fn(
-        scope,
-        global,
         "__ttCryptoHashes",
         crate::crypto_compat::native_crypto_hashes,
     );
     bind_fn(
         scope,
         global,
-        "__ttBlockList",
-        crate::blocklist::native_blocklist,
-    );
-    bind_fn(
-        scope,
-        global,
         "__ttSha256",
         crate::crypto_compat::native_sha256,
-    );
-    bind_fn(
-        scope,
-        global,
-        "__ttVmCreate",
-        crate::vm_compat::native_create_context,
-    );
-    bind_fn(
-        scope,
-        global,
-        "__ttVmRun",
-        crate::vm_compat::native_run_context,
-    );
-    bind_fn(
-        scope,
-        global,
-        "__ttVmCompile",
-        crate::vm_compat::native_compile_script,
-    );
-    bind_fn(scope, global, "__ttEc", crate::key_compat::native_ec);
-    bind_fn(
-        scope,
-        global,
-        "__ttDrainAsyncHookTasks",
-        crate::async_hooks::native_drain_hook_tasks,
-    );
-    bind_fn(
-        scope,
-        global,
-        "__ttSetPromiseHooks",
-        crate::async_hooks::native_set_promise_hooks,
-    );
-    bind_fn(scope, global, "__ttRsa", crate::rsa_compat::native_rsa);
-    bind_fn(scope, global, "__ttX509", crate::x509_compat::native_x509);
-    bind_fn(
-        scope,
-        global,
-        "__ttAesGcm",
-        crate::aes_compat::native_aes_gcm,
     );
     bind_fn(
         scope,
@@ -10163,6 +10081,99 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         }
     }
     install_host_env(scope, global);
+    if crate::runtime_profile::is_node() {
+        install_backend_natives(scope, global);
+        crate::runtime_profile::install_backend(scope);
+    }
+}
+
+fn reset_backend_transports() {
+    crate::http_compat::reset();
+    crate::async_process::reset();
+    crate::tcp_compat::reset();
+}
+
+fn install_backend_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+    reset_backend_transports();
+    let empty = v8::undefined(scope);
+    scope.set_continuation_preserved_embedder_data(empty.into());
+    bind_fn(
+        scope,
+        global,
+        "__ttAsyncFrameGet",
+        crate::async_context::native_get_frame,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttAsyncFrameSet",
+        crate::async_context::native_set_frame,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttSpawnSync",
+        crate::process_compat::native_spawn_sync,
+    );
+    bind_fn(scope, global, "__ttHttp", crate::http_compat::native_http);
+    bind_fn(
+        scope,
+        global,
+        "__ttAsyncProcess",
+        crate::async_process::native_async_process,
+    );
+    bind_fn(scope, global, "__ttTcp", crate::tcp_compat::native_tcp);
+    bind_fn(
+        scope,
+        global,
+        "__ttDecryptPkcs8",
+        crate::encrypted_pkcs8::native_decrypt_pkcs8,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttBlockList",
+        crate::blocklist::native_blocklist,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttVmCreate",
+        crate::vm_compat::native_create_context,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttVmRun",
+        crate::vm_compat::native_run_context,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttVmCompile",
+        crate::vm_compat::native_compile_script,
+    );
+    bind_fn(scope, global, "__ttEc", crate::key_compat::native_ec);
+    bind_fn(
+        scope,
+        global,
+        "__ttDrainAsyncHookTasks",
+        crate::async_hooks::native_drain_hook_tasks,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttSetPromiseHooks",
+        crate::async_hooks::native_set_promise_hooks,
+    );
+    bind_fn(scope, global, "__ttRsa", crate::rsa_compat::native_rsa);
+    bind_fn(scope, global, "__ttX509", crate::x509_compat::native_x509);
+    bind_fn(
+        scope,
+        global,
+        "__ttAesGcm",
+        crate::aes_compat::native_aes_gcm,
+    );
 }
 
 /// Stack / CI / snapshot-update / name-pattern globals for the runtime, from the CLI's env.
@@ -11551,8 +11562,18 @@ fn persist_entry_dir(scope: &mut v8::PinScope, entry_abs: &Path) {
     }
 }
 
+struct FreshBackendCleanup(bool);
+impl Drop for FreshBackendCleanup {
+    fn drop(&mut self) {
+        if self.0 {
+            reset_backend_transports();
+        }
+    }
+}
+
 /// Fresh path: run one file in its own isolate booted from the framework snapshot.
 fn run_test_file_isolated(entry_abs: &Path, plan: &EntryPlan) -> Result<TestReport, String> {
+    let _profile = runtime_profile(entry_abs).enter();
     // All Global handles live in the thread-local REGISTRY; they MUST be dropped while
     // this isolate is still alive. So every exit path runs through clear_registry()
     // before the isolate is torn down.
@@ -11561,6 +11582,7 @@ fn run_test_file_isolated(entry_abs: &Path, plan: &EntryPlan) -> Result<TestRepo
     // present). We time setup (isolate+context+natives) — the M3/M0 guardrail.
     let setup_start = std::time::Instant::now();
     let isolate = &mut v8::Isolate::new(isolate_params());
+    let _backend_cleanup = FreshBackendCleanup(crate::runtime_profile::is_node());
     isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
     isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
     crate::heap_guard::install(isolate);
@@ -11829,9 +11851,23 @@ fn log_heap(scope: &mut v8::PinScope, entry: &Path, recycled: bool) {
     );
 }
 
+thread_local! {
+    static REUSE_PROFILE: std::cell::Cell<Option<crate::runtime_profile::RuntimeProfile>> = const { std::cell::Cell::new(None) };
+}
+fn select_reuse_profile(profile: crate::runtime_profile::RuntimeProfile) {
+    let previous = REUSE_PROFILE.with(|previous| previous.get());
+    if previous.is_some_and(|previous| previous != profile) {
+        end_worker_reuse();
+    }
+    REUSE_PROFILE.with(|previous| previous.set(Some(profile)));
+}
+
 /// Reuse path: run one file on this worker's persistent isolate+context. node_modules modules
 /// stay evaluated across files; per-file framework + app state is reset between files.
 fn run_test_file_reused(entry_abs: &Path, plan: &EntryPlan) -> Result<TestReport, String> {
+    let profile = runtime_profile(entry_abs);
+    select_reuse_profile(profile);
+    let _profile = profile.enter();
     let setup_start = std::time::Instant::now();
     // init the persistent isolate once per worker
     REUSE_ISO.with(|iso_cell| {
@@ -11913,6 +11949,10 @@ fn run_test_file_reused(entry_abs: &Path, plan: &EntryPlan) -> Result<TestReport
 /// isolate is still alive, then drop the isolate. Avoids a shutdown assert from handles
 /// outliving the isolate. No-op when reuse was never used.
 pub fn end_worker_reuse() {
+    let previous = REUSE_PROFILE.with(|previous| previous.take());
+    if previous == Some(crate::runtime_profile::RuntimeProfile::Node) {
+        reset_backend_transports();
+    }
     if REUSE_ISO.with(|i| i.borrow().is_none()) {
         return;
     }
@@ -11988,6 +12028,7 @@ pub struct JestGlobalRealm {
 
 impl Default for JestGlobalRealm {
     fn default() -> Self {
+        let _profile = crate::runtime_profile::RuntimeProfile::Node.enter();
         let mut isolate = v8::Isolate::new(isolate_params());
         let context = {
             let isolate = &mut isolate;
@@ -12008,6 +12049,7 @@ impl JestGlobalRealm {
     /// it makes are applied to this process's environment, which the test workers inherit (jest
     /// runs globalSetup in the parent before forking them).
     pub fn run(&mut self, path: &Path, root_dir: &Path) -> Result<(), String> {
+        let _profile = crate::runtime_profile::RuntimeProfile::Node.enter();
         let abs = crate::canon::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let isolate = &mut self.isolate;
         v8::scope!(let scope, isolate);
@@ -12255,11 +12297,20 @@ fn step_macrotask(
             return true;
         }
     }
-    pace_http_io(scope, global);
-    let child_progress = pace_async_process_io(scope, global);
-    let tcp_progress = pace_tcp_io(scope, global);
+    let (child_progress, tcp_progress) = pace_backend_io(scope, global);
     let progressed = child_progress || tcp_progress;
     finish_io_turn(scope, global, promise, progressed)
+}
+
+fn pace_backend_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> (bool, bool) {
+    if !crate::runtime_profile::is_node() {
+        return (false, false);
+    }
+    pace_http_io(scope, global);
+    (
+        pace_async_process_io(scope, global),
+        pace_tcp_io(scope, global),
+    )
 }
 
 // Every active provider gets a poll phase, then timers get a bounded turn. Drain the
