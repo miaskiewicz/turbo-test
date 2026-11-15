@@ -25,6 +25,6 @@ fn encrypted_pkcs8_real_sat_keys_and_import_errors() {
     );
     let run = turbo_test(&p.dir, &["--jobs", "1", "--reporter", "json"], &[]);
     let r = json_report(&run);
-    assert_eq!(r["numPassedTests"], 3, "{}", run.all());
+    assert_eq!(r["numPassedTests"], 4, "{}", run.all());
     assert_eq!(r["numFailedTests"], 0, "{}", run.all());
 }
