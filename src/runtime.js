@@ -2950,7 +2950,9 @@ Object.assign(__http, __nodeHttp);
 function __httpUnsupportedTls() { throw Object.assign(new Error('HTTPS is not supported by the loopback HTTP transport'), { code: 'ERR_HTTP_UNSUPPORTED_TLS' }); }
 Object.assign(__https, { request: __httpUnsupportedTls, get: __httpUnsupportedTls, createServer: __httpUnsupportedTls });
 /* __TT_NODE_BLOCKLIST__ */
-const __net = { Socket: class extends __EventEmitter { connect() { return this; } write() { return true; } end() { return this; } destroy() { return this; } setTimeout() { return this; } setNoDelay() { return this; } setKeepAlive() { return this; } ref() { return this; } unref() { return this; } }, Server: class extends __EventEmitter { listen(..._a) { const cb = _a[_a.length - 1]; if (typeof cb === 'function') cb(); return this; } close() { return this; } address() { return { port: 0 }; } }, createConnection: () => new __EventEmitter(), connect: () => new __EventEmitter(), createServer: __mkServer, isIP: (input) => globalThis.__ttIsIP(input), isIPv4: (input) => globalThis.__ttIsIP(input) === 4, isIPv6: (input) => globalThis.__ttIsIP(input) === 6 }; __net.BlockList = __NodeBlockList; __net.default = __net;
+const __net = { isIP: (input) => globalThis.__ttIsIP(input), isIPv4: (input) => globalThis.__ttIsIP(input) === 4, isIPv6: (input) => globalThis.__ttIsIP(input) === 6 }; __net.BlockList = __NodeBlockList; __net.default = __net;
+/* __TT_NODE_TCP__ */
+Object.assign(__net, __nodeTcp);
 // HTTP clients inspect this constructor even on plain HTTP paths. Its identity must not
 // imply that a fake listener supplies TLS: construction still reports the capability limit.
 function __TlsServer() { throw Object.assign(new Error('TLS server transport is not supported'), { code: 'ERR_TLS_UNSUPPORTED_SERVER' }); }
@@ -10346,6 +10348,7 @@ globalThis.__ttResetForNextFile = () => {
   __resetAsyncContext();
   __httpReset();
   __asyncProcessReset();
+  __tcpReset();
   // jest.setTimeout / jest.retryTimes are per-file overrides (turbo-test#273)
   globalThis.__TT_JEST_TIMEOUT = undefined;
   globalThis.__TT_JEST_RETRY = undefined;

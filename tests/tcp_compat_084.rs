@@ -26,6 +26,6 @@ fn tcp_bytes_lifecycle_and_backpressure_match_node() {
     );
     let run = turbo_test(&p.dir, &["--reporter", "json"], &[]);
     let report = json_report(&run);
-    assert_eq!(report["numPassedTests"], 8, "{}", run.all());
+    assert_eq!(report["numPassedTests"], 15, "{}", run.all());
     assert_eq!(report["numFailedTests"], 0, "{}", run.all());
 }

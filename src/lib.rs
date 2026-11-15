@@ -52,3 +52,5 @@ pub mod process_compat;
 pub mod http_compat;
 pub mod vue;
 pub mod x509_compat;
+
+pub mod tcp_compat;

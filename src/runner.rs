@@ -9643,6 +9643,7 @@ fn framework_prelude(scope: &mut v8::PinScope) {
             include_str!("node_async_processes.js"),
         )
         .replace("/* __TT_NODE_HTTP__ */", include_str!("node_http.js"))
+        .replace("/* __TT_NODE_TCP__ */", include_str!("node_tcp.js"))
         .replace(
             "/* __TT_NODE_BLOCKLIST__ */",
             include_str!("node_blocklist.js"),
@@ -9887,6 +9888,7 @@ fn load_lazy_bundled(scope: &mut v8::PinScope, abs: &Path) -> Option<Option<()>>
 fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     crate::http_compat::reset();
     crate::async_process::reset();
+    crate::tcp_compat::reset();
     let empty = v8::undefined(scope);
     scope.set_continuation_preserved_embedder_data(empty.into());
     bind_fn(
@@ -9933,6 +9935,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         "__ttAsyncProcess",
         crate::async_process::native_async_process,
     );
+    bind_fn(scope, global, "__ttTcp", crate::tcp_compat::native_tcp);
     bind_fn(scope, global, "log", native_log);
     bind_fn(scope, global, "__ttWrite", native_write);
     bind_fn(scope, global, "__ttCallSite", native_call_site);
@@ -12189,7 +12192,7 @@ fn step_macrotask(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bo
         }
     }
     pace_http_io(scope, global);
-    if pace_async_process_io(scope, global) {
+    if pace_async_process_io(scope, global) || pace_tcp_io(scope, global) {
         return true;
     }
     call_global_bool(scope, global, "__stepMacro")
@@ -12223,6 +12226,24 @@ fn pace_async_process_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>
     };
     crate::async_process::wait_for_io(std::time::Duration::from_secs_f64(millis / 1000.0));
     call_global_bool(scope, global, "__ttAsyncProcessPump")
+}
+
+/// Poll only live TCP handles; idle browser tests never enter the transport or timer hooks.
+fn pace_tcp_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bool {
+    if !crate::tcp_compat::has_pending_io() {
+        return false;
+    }
+    if !call_global_bool(scope, global, "__ttTcpPreparePoll") {
+        return false;
+    }
+    let delay = call_global_number(scope, global, "__ttNextMacroDelay");
+    let millis = if delay.is_finite() && delay > 0.0 {
+        delay.min(10.0)
+    } else {
+        1.0
+    };
+    crate::tcp_compat::wait_for_io(std::time::Duration::from_secs_f64(millis / 1000.0));
+    call_global_bool(scope, global, "__ttTcpPump")
 }
 
 /// Convert the final promise state into the `run_event_loop` result: `Ok(())` on fulfilled, a
