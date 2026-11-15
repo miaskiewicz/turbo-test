@@ -96,18 +96,42 @@ pub fn native_create_context(
     _args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    if !crate::runner::vm_context_snapshot_available() {
-        return throw_error(scope, "vm contexts require the Node framework snapshot; use TURBO_SNAPSHOT=0 for mixed DOM projects");
+    let available = crate::runner::vm_context_snapshot_available();
+    if let Some(context) = pristine_context(scope, available) {
+        let scope = &mut v8::ContextScope::new(scope, context);
+        let code = v8::String::new(scope, ANCHOR).unwrap();
+        if let Some(value) =
+            v8::Script::compile(scope, code, None).and_then(|script| script.run(scope))
+        {
+            rv.set(value);
+        }
     }
-    let Some(context) = v8::Context::from_snapshot(scope, 0, Default::default()) else {
-        return throw_error(scope, "The pristine VM context snapshot is unavailable");
-    };
-    let scope = &mut v8::ContextScope::new(scope, context);
-    let code = v8::String::new(scope, ANCHOR).unwrap();
-    if let Some(value) = v8::Script::compile(scope, code, None).and_then(|script| script.run(scope))
-    {
-        rv.set(value);
+}
+
+fn required_context<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    context: Option<v8::Local<'s, v8::Context>>,
+    message: &str,
+) -> Option<v8::Local<'s, v8::Context>> {
+    context.or_else(|| {
+        throw_error(scope, message);
+        None
+    })
+}
+
+fn pristine_context<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    available: bool,
+) -> Option<v8::Local<'s, v8::Context>> {
+    if !available {
+        return required_context(scope, None, "vm contexts require the Node framework snapshot; use TURBO_SNAPSHOT=0 for mixed DOM projects");
     }
+    let context = v8::Context::from_snapshot(scope, 0, Default::default());
+    required_context(
+        scope,
+        context,
+        "The pristine VM context snapshot is unavailable",
+    )
 }
 
 /// A cancellation channel plus a joined watchdog prevents a successful evaluation's timeout
@@ -284,11 +308,11 @@ pub fn native_run_context<'s>(
     let Ok(anchor) = v8::Local::<v8::Function>::try_from(args.get(1)) else {
         return throw_error(scope, "Invalid VM context anchor");
     };
-    let Some(context) = anchor.get_creation_context(scope) else {
-        return throw_error(scope, "VM context is unavailable");
-    };
-    let scope = &mut v8::ContextScope::new(scope, context);
-    evaluate(scope, &args, anchor, &mut rv);
+    let context = anchor.get_creation_context(scope);
+    if let Some(context) = required_context(scope, context, "VM context is unavailable") {
+        let scope = &mut v8::ContextScope::new(scope, context);
+        evaluate(scope, &args, anchor, &mut rv);
+    }
 }
 
 fn evaluate<'s>(
