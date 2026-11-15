@@ -136,9 +136,19 @@ impl Connection {
                 );
                 Ok(true)
             }
-            Err(error) if pending(&error) => Ok(false),
-            Err(error) => Err(io_error(error)),
+            Err(error) => self.connect_failure(error),
         }
+    }
+    fn connect_failure(&self, peer_error: std::io::Error) -> Result<bool> {
+        // The handshake can fail between SO_ERROR and getpeername. Preserve the
+        // kernel's connection error instead of reporting that peer-state race.
+        if let Some(error) = self.socket.take_error().map_err(io_error)? {
+            return Err(io_error(error));
+        }
+        if pending(&peer_error) {
+            return Ok(false);
+        }
+        Err(io_error(peer_error))
     }
     fn flush(&mut self, id: u64, events: &mut Vec<Value>) -> Result<()> {
         while self.sent < self.output.len() {
