@@ -10,6 +10,8 @@ test('Buffer module constants are immutable engine limits and are not constructo
  assert.equal(descriptor.enumerable,true);
  assert.equal(descriptor.writable,false);
  assert.equal(descriptor.configurable,false);
+ assert.equal(Object.isExtensible(buffer.constants),true);
+ assert.equal(Object.getPrototypeOf(buffer.constants),Object.prototype);
  for(const name of ['MAX_LENGTH','MAX_STRING_LENGTH']){
   const limit=Object.getOwnPropertyDescriptor(buffer.constants,name);
   assert.equal(typeof limit.value,'number');

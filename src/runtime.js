@@ -3786,13 +3786,24 @@ const __assertStrict = __mkAssert(true);
 __assert.strict = __assertStrict;
 __assertStrict.strict = __assertStrict;
 // ---- buffer / fs/promises / process / timers ----
+// Buffer subclasses Uint8Array; limits come from this binary's linked V8, not host Node.
+const __bufferEngineLimits = { /* __TT_NODE_BUFFER_LIMITS__ */ };
 const __buffer = {
   Buffer: globalThis.Buffer,
+  kMaxLength: __bufferEngineLimits.MAX_LENGTH,
+  kStringMaxLength: __bufferEngineLimits.MAX_STRING_LENGTH,
   atob: (s) => globalThis.atob(s),
   btoa: (s) => globalThis.btoa(s),
   get Blob() { return globalThis.Blob; },
   get File() { return globalThis.File; },
 };
+Object.defineProperty(__buffer, 'constants', {
+  value: Object.defineProperties({}, {
+    MAX_LENGTH: { value: __bufferEngineLimits.MAX_LENGTH, enumerable: true },
+    MAX_STRING_LENGTH: { value: __bufferEngineLimits.MAX_STRING_LENGTH, enumerable: true },
+  }),
+  enumerable: true,
+});
 // fs.constants: the values that are the same on every platform turbo-test ships for (no O_CREAT
 // etc., which differ between Linux and macOS)
 const __fsConstants = {

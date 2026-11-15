@@ -18,9 +18,15 @@ fn expand(source: &str, fragments: &[(&str, &str)]) -> String {
 }
 
 pub(crate) fn shared_runtime_source() -> String {
+    let buffer_limits = format!(
+        "MAX_LENGTH: {}, MAX_STRING_LENGTH: {}",
+        v8::Uint8Array::MAX_LENGTH,
+        v8::String::MAX_LENGTH
+    );
     expand(
         include_str!("runtime.js"),
         &[
+            ("/* __TT_NODE_BUFFER_LIMITS__ */", &buffer_limits),
             (
                 "/* __TT_RUNTIME_SHARED_SLOTS__ */",
                 include_str!("runtime_shared_slots.js"),
