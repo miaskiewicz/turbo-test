@@ -19,9 +19,15 @@ test('Buffer module constants are immutable engine limits and are not constructo
   assert.equal(limit.enumerable,true);
   assert.equal(limit.writable,false);
   assert.equal(limit.configurable,false);
-  assert.throws(()=>{buffer.constants[name]=1},TypeError);
+  assert.equal(Reflect.set(buffer.constants,name,1),false);
+  assert.equal(buffer.constants[name],limit.value);
+  const assignStrict=new Function('target','name',"'use strict'; target[name]=1;");
+  assert.throws(()=>assignStrict(buffer.constants,name),TypeError);
  }
- assert.throws(()=>{buffer.constants={}},TypeError);
+ assert.equal(Reflect.set(buffer,'constants',{}),false);
+ assert.equal(buffer.constants,descriptor.value);
+ const replaceStrict=new Function('target',"'use strict'; target.constants={};");
+ assert.throws(()=>replaceStrict(buffer),TypeError);
 });
 
 test('Buffer legacy limit aliases retain Node module property descriptors',()=>{
