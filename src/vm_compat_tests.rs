@@ -84,3 +84,59 @@ fn external_termination_is_not_misreported_as_a_vm_timeout() {
         assert_eq!(run(scope, "42").unwrap().integer_value(scope), Some(42));
     });
 }
+
+#[test]
+fn unavailable_vm_realms_throw_recoverable_capability_errors() {
+    with_scope(|scope| {
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let scope = &mut tc.init();
+        assert!(pristine_context(scope, false).is_none());
+        assert!(scope
+            .exception()
+            .unwrap()
+            .to_rust_string_lossy(scope)
+            .contains("Node framework snapshot"));
+        scope.reset();
+        assert!(required_context(scope, None, "VM context is unavailable").is_none());
+        assert_eq!(
+            scope.exception().unwrap().to_rust_string_lossy(scope),
+            "Error: VM context is unavailable"
+        );
+        scope.reset();
+        assert!(required_context(
+            scope,
+            None,
+            "The pristine VM context snapshot is unavailable"
+        )
+        .is_none());
+        assert!(scope
+            .exception()
+            .unwrap()
+            .to_rust_string_lossy(scope)
+            .contains("pristine VM context snapshot"));
+        scope.reset();
+        assert!(pristine_context(scope, true).is_some());
+        assert_eq!(run(scope, "40 + 2").unwrap().integer_value(scope), Some(42));
+    });
+}
+#[test]
+fn external_watchdog_interrupts_vm_javascript_without_claiming_vm_timeout() {
+    with_scope(|scope| {
+        bind(scope, "execute", native_run_context);
+        let external = Watchdog::start(scope, 10);
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let scope = &mut tc.init();
+        assert!(run(
+            scope,
+            "execute('for (;;) {}', function(){}, {}, 'interrupted.js', 0)"
+        )
+        .is_none());
+        assert!(
+            external.finish(),
+            "external watchdog actually terminated execution"
+        );
+        scope.cancel_terminate_execution();
+        scope.reset();
+        assert_eq!(run(scope, "42").unwrap().integer_value(scope), Some(42));
+    });
+}
