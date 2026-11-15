@@ -73,10 +73,10 @@ fn sign(data: &[u8], key: &[u8]) -> Result<Output, String> {
 }
 fn verify(data: &[u8], key: &[u8], signature: &[u8]) -> Result<Output, String> {
     let verifier = VerifyingKey::<Sha256>::new(public(key)?);
-    let Ok(signature) = Signature::try_from(signature) else {
-        return Ok(Output::Verified(false));
-    };
-    Ok(Output::Verified(verifier.verify(data, &signature).is_ok()))
+    // rsa 0.9's byte conversion is infallible; verification still rejects bad lengths/data.
+    Ok(Output::Verified(Signature::try_from(signature).is_ok_and(
+        |signature| verifier.verify(data, &signature).is_ok(),
+    )))
 }
 fn details(key: &RsaPublicKey) -> Output {
     Output::Details(key.n().bits(), key.e().to_string())

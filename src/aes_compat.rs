@@ -78,6 +78,18 @@ fn return_bytes(scope: &mut v8::PinScope, data: Vec<u8>, rv: &mut v8::ReturnValu
     );
 }
 
+// Both entropy and AEAD failures use the same native error-to-exception boundary.
+fn finish_bytes(
+    scope: &mut v8::PinScope,
+    result: Result<Vec<u8>, String>,
+    rv: &mut v8::ReturnValue,
+) {
+    match result {
+        Ok(data) => return_bytes(scope, data, rv),
+        Err(message) => throw_error(scope, &message),
+    }
+}
+
 /// `__ttAesGcm(decrypt, key, iv, data, aad, tagLength)`; encrypted input/output includes its tag.
 pub fn native_aes_gcm(
     scope: &mut v8::PinScope,
@@ -86,10 +98,7 @@ pub fn native_aes_gcm(
 ) {
     let result = request(&args)
         .and_then(|input| operation(&input, args.get(5).uint32_value(scope).unwrap_or(0)));
-    match result {
-        Ok(data) => return_bytes(scope, data, &mut rv),
-        Err(message) => throw_error(scope, &message),
-    }
+    finish_bytes(scope, result, &mut rv);
 }
 
 fn random_with(
@@ -114,10 +123,7 @@ pub fn native_random_bytes(
     let result = random_with(size as usize, |bytes| {
         getrandom::getrandom(bytes).map_err(|error| format!("OS entropy failed: {error}"))
     });
-    match result {
-        Ok(data) => return_bytes(scope, data, &mut rv),
-        Err(message) => throw_error(scope, &message),
-    }
+    finish_bytes(scope, result, &mut rv);
 }
 
 #[cfg(test)]
