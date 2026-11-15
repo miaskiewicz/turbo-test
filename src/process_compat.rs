@@ -29,7 +29,7 @@ fn spawn_error(error: &std::io::Error) -> Value {
         "error": error_json(error_code(error), &error.to_string(), error.raw_os_error().map(|n| -n)) })
 }
 
-fn command(request: &Value) -> Command {
+pub(crate) fn command(request: &Value) -> Command {
     let mut command = Command::new(request["file"].as_str().unwrap_or_default());
     if let Some(arguments) = request["args"].as_array() {
         command.args(arguments.iter().map(|arg| arg.as_str().unwrap_or_default()));
@@ -190,7 +190,7 @@ fn join_reader(reader: Reader) -> std::io::Result<Vec<u8>> {
 }
 
 #[cfg(unix)]
-fn signal_name(status: &ExitStatus) -> Option<String> {
+pub(crate) fn signal_name(status: &ExitStatus) -> Option<String> {
     use std::os::unix::process::ExitStatusExt;
     status.signal().map(|signal| match signal {
         9 => "SIGKILL".to_owned(),

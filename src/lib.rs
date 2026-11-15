@@ -6,6 +6,7 @@
 pub mod aes_compat;
 pub mod agent;
 pub mod async_context;
+pub mod async_process;
 pub mod blocklist;
 pub mod bundler;
 pub mod canon;
