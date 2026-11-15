@@ -5764,17 +5764,17 @@ function __mockRecordCall(state, args, ctx, newTarget) {
 }
 function __mockApplyImpl(config, original, args, newTarget, ctx) {
   const implementation = config.once.shift() || config.impl || original || function () {};
-  if (newTarget) return Reflect.construct(implementation, args, newTarget);
+  if (newTarget && !config.jestConstructor) return Reflect.construct(implementation, args, newTarget);
   return implementation.apply(ctx, args);
 }
 function __mockInvoke(fn, state, config, original, args, newTarget, ctx) {
-  const { result, settled, at } = __mockRecordCall(state, args, ctx, newTarget);
+  const { result, settled, at } = __mockRecordCall(state, args, ctx, newTarget && !config.jestConstructor);
   let ret;
   try { ret = __mockApplyImpl(config, original, args, newTarget, ctx); }
   catch (e) { __handleMockError(e, result, settled, fn); throw e; }
   result.type = 'return';
   result.value = ret;
-  if (newTarget) { state.contexts[at - 1] = ret; state.instances[at - 1] = ret; }
+  if (newTarget && !config.jestConstructor) { state.contexts[at - 1] = ret; state.instances[at - 1] = ret; }
   __mockSettleResult(settled, ret);
   return ret;
 }
@@ -6879,6 +6879,8 @@ function __jestWhenPick(branches, args) {
   return undefined;
 }
 function __jestWhen(fn) {
+  // Jest invokes constructor implementations on the mock receiver, including arrows.
+  fn[__mockConfigKey].jestConstructor = true;
   if (fn.whenCalledWith) return fn; // a spyOn of an already-spied method returns the same mock
   const config = fn[__mockConfigKey];
   const branches = [];
