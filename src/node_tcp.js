@@ -101,7 +101,7 @@ class __TcpSocket extends __Duplex {
     this.bytesRead = 0; this.bytesWritten = 0;
     this.on('end', () => __tcpLater(() => { if (!this.allowHalfOpen && !this.writableEnded) this.end(); }));
     this.on('close', () => { this._tcpClearTimeout(); __tcpOwnedSockets.delete(this); __tcpDestroyResource(this); });
-    if (options.keepAlive !== undefined) this.setKeepAlive(options.keepAlive, options.keepAliveInitialDelay); 
+    if (options.keepAlive !== undefined) this.setKeepAlive(options.keepAlive, options.keepAliveInitialDelay);
   }
   emit(event, ...args) {
     if (event === 'close') args = [Boolean(this.errored)];
