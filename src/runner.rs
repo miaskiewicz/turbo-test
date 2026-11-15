@@ -1558,19 +1558,18 @@ fn forced_env(s: &str) -> Option<String> {
 }
 
 fn configured_environment(entry: &Path) -> Option<String> {
-    let mut jest = None;
     for directory in entry.ancestors().skip(1) {
         for filename in VITEST_CONFIG_FILES {
             if let Ok(text) = std::fs::read_to_string(directory.join(filename)) {
                 return config_string_value(&text, "environment");
             }
         }
-        if jest.is_none() {
-            jest = jest_config_text(directory)
-                .and_then(|text| config_string_value(&text, "testEnvironment"));
+        // The nearest framework config owns the file even when it omits an environment.
+        if let Some(text) = jest_config_text(directory) {
+            return config_string_value(&text, "testEnvironment");
         }
     }
-    jest
+    None
 }
 fn effective_file_environment(entry: &Path, source: &str) -> Option<String> {
     forced_env(source)
