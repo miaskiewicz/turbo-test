@@ -2029,6 +2029,7 @@ if (typeof globalThis.TransformStream === 'undefined') {
 }
 /* __TT_NODE_BUFFER_BYTE_LENGTH__ */
 if (typeof globalThis.Buffer === 'undefined') {
+  const byteArrayTag = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get;
   class Buffer extends Uint8Array {
     static #fromHex(d) {
       const b = new Buffer(d.length / 2);
@@ -2051,6 +2052,17 @@ if (typeof globalThis.Buffer === 'undefined') {
     }
     static alloc(n, fill) { const b = new Buffer(n); if (fill != null) b.fill(typeof fill === 'string' ? fill.charCodeAt(0) : fill); return b; }
     static allocUnsafe(n) { return new Buffer(n); }
+    static #validateByteArray(value) {
+      if (byteArrayTag.call(value) !== 'Uint8Array') throw Object.assign(new TypeError('The argument must be a Buffer or Uint8Array'), { code: 'ERR_INVALID_ARG_TYPE' });
+    }
+    static compare(a, b) {
+      Buffer.#validateByteArray(a);
+      Buffer.#validateByteArray(b);
+      for (let i = 0; i < Math.min(a.length, b.length); i++) {
+        if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+      }
+      return Math.sign(a.length - b.length);
+    }
     static byteLength(value, encoding) { return __bufferByteLength(value, encoding); }
     static isBuffer(x) { return x instanceof Buffer; }
     static concat(list) { const len = list.reduce((n, b) => n + b.length, 0); const out = new Buffer(len); let o = 0; for (const b of list) { out.set(b, o); o += b.length; } return out; }
@@ -2074,7 +2086,7 @@ if (typeof globalThis.Buffer === 'undefined') {
     toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
   }
   // Node's public static methods are enumerable; safer-buffer copies them with for-in.
-  for (const name of ['from', 'alloc', 'allocUnsafe', 'byteLength', 'isBuffer', 'concat']) {
+  for (const name of ['from', 'alloc', 'allocUnsafe', 'byteLength', 'isBuffer', 'concat', 'compare']) {
     Object.defineProperty(Buffer, name, { enumerable: true });
   }
   globalThis.Buffer = Buffer;
