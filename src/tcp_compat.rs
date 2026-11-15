@@ -75,6 +75,20 @@ fn connection_address(socket: &TcpStream) -> Result<Value> {
         json!({"localAddress":local.ip().to_string(),"localPort":local.port(),"localFamily":if local.is_ipv4(){"IPv4"}else{"IPv6"},"remoteAddress":remote.ip().to_string(),"remotePort":remote.port(),"remoteFamily":if remote.is_ipv4(){"IPv4"}else{"IPv6"}}),
     )
 }
+fn decoded_write(args: &Value) -> Result<Vec<u8>> {
+    let text = args["data"].as_str().ok_or_else(invalid)?;
+    // Reject oversized encoded payloads before allocating the decoded byte buffer.
+    if text.len() > (32usize * 1024 * 1024).div_ceil(3) * 4 {
+        return Err(fail("ERR_OUT_OF_RANGE", "TCP write exceeds 32 MiB"));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .map_err(|_| invalid())?;
+    if bytes.len() > 32 * 1024 * 1024 {
+        return Err(fail("ERR_OUT_OF_RANGE", "TCP write exceeds 32 MiB"));
+    }
+    Ok(bytes)
+}
 struct Listener {
     socket: TcpListener,
     referenced: bool,
@@ -229,13 +243,7 @@ impl Transport {
         Ok(json!({"id":id}))
     }
     fn send(&mut self, args: &Value) -> Result<Value> {
-        let text = args["data"].as_str().ok_or_else(invalid)?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(text)
-            .map_err(|_| invalid())?;
-        if bytes.len() > 32 * 1024 * 1024 {
-            return Err(fail("ERR_OUT_OF_RANGE", "TCP write exceeds 32 MiB"));
-        }
+        let bytes = decoded_write(args)?;
         let connection = self.connection(args)?;
         if connection.write_closed {
             return Err(fail("EPIPE", "TCP writable side is closed"));

@@ -54,9 +54,9 @@ function __tcpResource(owner, type) {
   owner._tcpResource = new __async_hooks.AsyncResource(type);
   owner._tcpDispatch = event => owner._tcpResource.runInAsyncScope(() => owner._tcpEvent(event), owner);
 }
-function __tcpDestroyResource(owner) {
-  if (owner._tcpResource) owner._tcpResource.emitDestroy();
-  owner._tcpResource = null;
+function __tcpDestroyResource(owner, resource = owner._tcpResource) {
+  if (owner._tcpResource === resource) owner._tcpResource = null;
+  if (resource) resource.emitDestroy();
 }
 function __tcpBytes(chunk, encoding) {
   if (typeof chunk === 'string') return Buffer.from(chunk, encoding);
@@ -135,14 +135,14 @@ class __TcpSocket extends __Duplex {
   pause() { this._tcpPause(true); return super.pause(); }
   resume() { this._tcpPause(false); return super.resume(); }
   _write(chunk, encoding, callback) {
-    this._tcpWrite = { bytes: __tcpBytes(chunk, encoding), callback };
+    this._tcpWrite = { bytes: __tcpBytes(chunk, encoding), callback, sent: false };
     if (!this.connecting) this._tcpSend();
   }
   _tcpSend() {
     const pending = this._tcpWrite;
-    if (!pending) return;
+    if (!pending || pending.sent) return;
     if (this._tcpId === null) { pending.callback(__streamError('ERR_SOCKET_CLOSED', 'TCP socket is not connected')); return; }
-    try { __tcpNative('send', { id: this._tcpId, data: pending.bytes.toString('base64') }); this._tcpActivity(); __tcpPreparePoll(); }
+    try { pending.sent = true; __tcpNative('send', { id: this._tcpId, data: pending.bytes.toString('base64') }); this._tcpActivity(); __tcpPreparePoll(); }
     catch (error) { this._tcpWrite = null; pending.callback(error); }
   }
   _final(callback) {
@@ -236,7 +236,7 @@ class __TcpServer extends __EventEmitter {
     if (this.listening) throw __streamError('ERR_SERVER_ALREADY_LISTEN', 'TCP server is already listening');
     if (callback) this.once('listening', callback);
     __tcpResource(this, 'TCPSERVERWRAP');
-    try { this._tcpListen(options); } catch (error) { __tcpLater(() => { __tcpDestroyResource(this); this.emit('error', error); }); }
+    try { this._tcpListen(options); } catch (error) { const resource = this._tcpResource; __tcpLater(() => { __tcpDestroyResource(this, resource); this.emit('error', error); }); }
     return this;
   }
   _tcpListen(options) {
@@ -264,7 +264,8 @@ class __TcpServer extends __EventEmitter {
   _tcpCheckClosed() {
     if (!this._tcpClosing || this._tcpConnections.size) return;
     this._tcpClosing = false;
-    __tcpLater(() => { this.emit('close'); __tcpDestroyResource(this); });
+    const resource = this._tcpResource;
+    __tcpLater(() => { __tcpDestroyResource(this, resource); this.emit('close'); });
   }
   ref() { return __tcpReference(this, true); }
   unref() { return __tcpReference(this, false); }
