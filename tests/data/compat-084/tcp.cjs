@@ -151,3 +151,20 @@ testCase('TCP invalid ports and never-running server close report errors', async
   synchronous = false; const error = await completion;
   assert.equal(error.code, 'ERR_SERVER_NOT_RUNNING');
 });
+testCase('TCP connect callback can write immediately without duplicate submission', async () => {
+  let peer; let received = ''; let writes = 0;
+  const server = net.createServer(socket => { peer = socket; socket.setEncoding('utf8'); socket.on('data', chunk => { received += chunk; }); socket.on('end', () => socket.end()); });
+  await listening(server, '127.0.0.1'); const client = new net.Socket(); client.resume(); client.on('error', error => { throw error; }); const done = closedSocket(client);
+  try {
+    client.connect({ host: '127.0.0.1', port: server.address().port }, () => client.write('once', () => { writes++; client.end(); }));
+    await done; assert.equal(received, 'once'); assert.equal(writes, 1);
+  } finally { client.destroy(); if (peer) peer.destroy(); await closedServer(server); }
+});
+testCase('TCP close callback can relisten and accept with a fresh resource', async () => {
+  let peer; const server = net.createServer(socket => { peer = socket; socket.end('reopened'); });
+  await listening(server, '127.0.0.1');
+  await new Promise((resolve, reject) => server.close(error => { if (error) reject(error); else server.listen(0, '127.0.0.1', resolve); }));
+  const client = new net.Socket(); const chunks = []; client.on('data', chunk => chunks.push(chunk)); client.on('error', error => { throw error; }); const done = closedSocket(client);
+  try { client.connect({ host: '127.0.0.1', port: server.address().port }); await done; assert.equal(Buffer.concat(chunks).toString(), 'reopened'); }
+  finally { client.destroy(); if (peer) peer.destroy(); await closedServer(server); }
+});
