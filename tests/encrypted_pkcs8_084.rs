@@ -23,8 +23,20 @@ fn encrypted_pkcs8_real_sat_keys_and_import_errors() {
         "password.json",
         include_str!("data/encrypted-pkcs8/password.json"),
     );
+    p.file(
+        "unicode.pbes1.der.base64",
+        include_str!("data/encrypted-pkcs8/unicode.pbes1.der.base64"),
+    );
+    p.file(
+        "unicode.pbes2.der.base64",
+        include_str!("data/encrypted-pkcs8/unicode.pbes2.der.base64"),
+    );
+    p.file(
+        "unicode-password.json",
+        include_str!("data/encrypted-pkcs8/unicode-password.json"),
+    );
     let run = turbo_test(&p.dir, &["--jobs", "1", "--reporter", "json"], &[]);
     let r = json_report(&run);
-    assert_eq!(r["numPassedTests"], 4, "{}", run.all());
+    assert_eq!(r["numPassedTests"], 5, "{}", run.all());
     assert_eq!(r["numFailedTests"], 0, "{}", run.all());
 }
