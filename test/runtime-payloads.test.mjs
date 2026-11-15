@@ -43,6 +43,8 @@ test('shared initialization creates no backend implementations or DOM-only globa
  assert.throws(()=>vm.runInContext('__nodeBuiltins.net',context),{code:'ERR_TURBO_BACKEND_CAPABILITY'});
  assert.throws(()=>vm.runInContext("__nodeBuiltins.crypto.createCipheriv()",context),{code:'ERR_TURBO_BACKEND_CAPABILITY'});
  assert.equal(vm.runInContext("__nodeBuiltins.crypto.createHmac('sha256','key').update('message').digest('hex')",context),crypto.createHmac('sha256','key').update('message').digest('hex'));
+ assert.equal(vm.runInContext('Object.values(__nodeBuiltins.crypto).length>0',context),true);
+ assert.equal(vm.runInContext("'RSA_PKCS1_PADDING' in __nodeBuiltins.crypto.constants",context),false);
  assert.equal(vm.runInContext('(()=>{const fn=()=>1;return __captureAsyncContext(fn)===fn && __runtimeBackendResets.length===0})()',context),true);
 });
 test('only the selected payload installs its corresponding capabilities',()=>{
