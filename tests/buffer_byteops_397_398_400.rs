@@ -23,7 +23,7 @@ test('comparison rejects non-byte inputs and spoofed byte brands', () => {
  for(const value of [null,[], 'a', new Uint16Array([1]),new DataView(new ArrayBuffer(1)),{[Symbol.toStringTag]:'Uint8Array'}]) {
   for(const operation of [()=>Buffer.compare(value,Buffer.alloc(0)),()=>Buffer.compare(Buffer.alloc(0),value),()=>Buffer.alloc(0).equals(value)]) {
    let error;try{operation()}catch(e){error=e}
-   expect(error).toBeInstanceOf(TypeError);expect(error.code).toBe('ERR_INVALID_ARG_TYPE');
+   expect(error.name).toBe('TypeError');expect(error.code).toBe('ERR_INVALID_ARG_TYPE');
   }
  }
 });
@@ -41,7 +41,8 @@ test('UInt32LE invalid values and offsets throw without mutating bytes', () => {
   const b=Buffer.alloc(4,99);let error;try{b.writeUInt32LE(value,offset)}catch(e){error=e}
   expect(error.code).toBe(code);expect(Array.from(b)).toEqual([99,99,99,99]);
  }
- expect(()=>Buffer.alloc(4).writeUInt32LE(1n)).toThrow(TypeError);
+ let bigintError;try{Buffer.alloc(4).writeUInt32LE(1n)}catch(e){bigintError=e}
+ expect(bigintError.name).toBe('TypeError');
  let error;try{Buffer.alloc(3).writeUInt32LE(1)}catch(e){error=e}
  expect(error.code).toBe('ERR_BUFFER_OUT_OF_BOUNDS');
 });
