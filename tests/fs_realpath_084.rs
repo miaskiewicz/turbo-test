@@ -21,7 +21,8 @@ fn realpath_sync_apis_match_node() {
         .unwrap();
     assert!(
         node.status.success(),
-        "{}",
+        "Node oracle stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&node.stdout),
         String::from_utf8_lossy(&node.stderr)
     );
     let run = turbo_test(&p.dir, &["--jobs", "1", "--reporter", "json"], &[]);
