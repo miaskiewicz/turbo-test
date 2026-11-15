@@ -1521,6 +1521,10 @@ fn file_reader_reads_the_blob_bytes() {
     let p = Project::new("rc-file-reader-bytes");
     p.file("package.json", r#"{ "type": "module" }"#);
     p.file(
+        "vitest.config.js",
+        "export default { test: { environment: 'jsdom' } }",
+    );
+    p.file(
         "t.test.js",
         r##"import { test } from 'vitest'
 import * as fs from 'node:fs'
@@ -1573,6 +1577,10 @@ fn file_reader_events_encoding_and_abort_are_jsdoms() {
     // InvalidStateError for a read while LOADING. Each row is [case, result].
     let p = Project::new("rc-file-reader-events");
     p.file("package.json", r#"{ "type": "module" }"#);
+    p.file(
+        "vitest.config.js",
+        "export default { test: { environment: 'jsdom' } }",
+    );
     p.file(
         "t.test.js",
         r##"import { test } from 'vitest'
