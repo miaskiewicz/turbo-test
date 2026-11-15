@@ -55,3 +55,23 @@ fn invalid_missing_cyclic_and_unconfigured_inputs_do_not_enable_a_policy() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn explicit_null_clears_inherited_compiler_options() {
+    let dir = directory();
+    let config = dir.join("tsconfig.json");
+    std::fs::write(
+        dir.join("base.json"),
+        r#"{"compilerOptions":{"module":"commonjs","esModuleInterop":false}}"#,
+    )
+    .unwrap();
+    for field in ["module", "esModuleInterop"] {
+        std::fs::write(
+            &config,
+            format!(r#"{{"extends":"./base.json","compilerOptions":{{"{field}":null}}}}"#),
+        )
+        .unwrap();
+        assert!(!enabled(&config));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

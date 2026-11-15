@@ -120,3 +120,82 @@ fn dynamic_imports_and_vitest_namespaces_keep_their_esm_contract() {
     );
     assert_eq!(json_report(&esm)["numPassedTests"], 2, "{}", esm.all());
 }
+
+#[test]
+fn esbuild_only_fallback_keeps_static_dynamic_and_factory_scope_contracts() {
+    let p = fixture(false, false);
+    std::fs::remove_file(p.dir.join("node_modules/typescript")).unwrap();
+    p.file("dynamic.test.ts", "test('dynamic namespace',async()=>{const ns=await import('callable-package');expect(typeof ns).toBe('object');expect(ns.default).toBe(require('callable-package'));});");
+    p.file("dep.ts", "export const value=()=>0;");
+    p.file("scope.test.ts", "import {value} from './dep'; const local=()=>42; jest.mock('./dep',()=>({value:()=>local()})); test('factory scope survives fallback',()=>expect(value()).toBe(42));");
+    let run = turbo_test(
+        &p.dir,
+        &[
+            "--jobs",
+            "1",
+            "--reporter",
+            "json",
+            "check.test.ts",
+            "dynamic.test.ts",
+            "scope.test.ts",
+        ],
+        &[("TURBO_NATIVE_CJS", "0")],
+    );
+    assert_eq!(json_report(&run)["numPassedTests"], 4, "{}", run.all());
+    assert_eq!(json_report(&run)["numFailedTests"], 0, "{}", run.all());
+}
+#[test]
+fn metadata_fallback_preserves_dynamic_namespaces_and_commonjs_cycles() {
+    let p = fixture(false, false);
+    p.file("tsconfig.json",r#"{"compilerOptions":{"module":"commonjs","esModuleInterop":false,"experimentalDecorators":true,"emitDecoratorMetadata":true}}"#);
+    p.file("metadata.test.ts","function marker(target:any){return target;} @marker class Model {} test('metadata dynamic namespace',async()=>{const ns=await import('callable-package');expect(typeof ns).toBe('object');expect(ns.default).toBe(require('callable-package'));expect(new Model()).toBeInstanceOf(Model);});");
+    let run = turbo_test(
+        &p.dir,
+        &[
+            "--jobs",
+            "1",
+            "--reporter",
+            "json",
+            "check.test.ts",
+            "metadata.test.ts",
+        ],
+        &[("TURBO_NATIVE_CJS", "0")],
+    );
+    assert_eq!(json_report(&run)["numPassedTests"], 3, "{}", run.all());
+}
+#[test]
+fn package_tsconfig_entries_match_the_project_typescript_oracle() {
+    let p = fixture(false, false);
+    p.file(
+        "node_modules/compiler-preset/package.json",
+        r#"{"name":"compiler-preset","main":"index.js","tsconfig":"configs/base.json"}"#,
+    );
+    p.file(
+        "node_modules/compiler-preset/index.js",
+        "module.exports={};",
+    );
+    p.file(
+        "node_modules/compiler-preset/configs/base.json",
+        r#"{"compilerOptions":{"module":"commonjs","esModuleInterop":false}}"#,
+    );
+    for extends in ["compiler-preset", "compiler-preset/configs/base.json"] {
+        p.file("tsconfig.json", &format!(r#"{{"extends":"{extends}"}}"#));
+        let node = std::process::Command::new("node")
+            .args(["--test", "node-control.cjs"])
+            .current_dir(&p.dir)
+            .output()
+            .unwrap();
+        assert!(
+            node.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&node.stdout),
+            String::from_utf8_lossy(&node.stderr)
+        );
+        let run = turbo_test(
+            &p.dir,
+            &["--jobs", "1", "--reporter", "json", "check.test.ts"],
+            &[],
+        );
+        assert_eq!(json_report(&run)["numPassedTests"], 2, "{}", run.all());
+    }
+}
