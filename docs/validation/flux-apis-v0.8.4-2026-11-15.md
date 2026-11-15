@@ -367,3 +367,46 @@ on hold.
 The completed repin coverage gate passed at **99.9053% (18,988/19,006 lines)**
 with the 99.9% floor unchanged and all 1,224 native tests passing. Strict Clippy,
 formatting, version consistency, and the single-V8 guard also passed.
+
+## Full Flux baseline and bounded follow-up fixes
+
+The full canonical Jest selection contains **1,531 files** on the same PR #1196
+source and lock. Frozen candidate `0961554` completed all 24 bounded batches with
+no timeouts or unknown files: **1,359 file passes, 90 assertion-failing files,
+and 82 load-error files**. It registered 32,890 tests: **31,956 passed, 911 failed,
+and 23 skipped**. All 172 affected files passed separate, unchanged Jest controls:
+**7,123/7,123 tests**. This establishes runner compatibility gaps for the observed
+cases rather than a service/environment baseline failure.
+
+Issues #393–#400 track the small shebang, constructor-mock, filesystem, Buffer and
+util fixes, each with issue-first controls, failing runner regressions and modular
+fix commits. Candidate `8146128a6ef72a864135c6084ee11ba19cc6eec4` (binary SHA-256
+`401ed1c625bea6aa728bc806e73735bdd36029ea755cec0f0cbb006abba2fe40`) passes all
+**1,231 native tests**, **90 launcher tests**, and the same four full frontend
+suites: **36,200 passed with five existing skips**. Coverage is **99.9054%
+(19,002/19,020 lines)** against the unchanged 99.9% floor. Clippy, formatting and
+complexity gates passed. A standalone Node-VM test assembler was updated to supply
+its own engine limits; native tests check the actual linked V8 limits separately.
+
+The initial impact-rerun batch passes **all 64 files and 1,402 tests**, replacing
+the baseline's 55 file passes, one assertion-failing file and eight load errors
+(1,205 registered tests). The next 64-file batch hit its 180-second cap and its
+cleanup supervisor reported EPERM; the following active batch was canceled during
+the supervisory stop. Known launcher/group and exact-artifact process checks found
+no live native worker before resuming unstarted batches. These interrupted batches
+remain explicitly unknown; detached-child cleanup was not fully proven. The final
+aggregate receipt, rather than this partial batch, defines subsequent impact totals.
+
+Larger or nontrivial gaps remain in v0.8.5: #391 (native addon), #401 (scope binding),
+#402 (Jest expected-failure tables with different hook semantics), #403 (heap-budget
+investigation), #404 (ZIP constructor investigation), #405 (filesystem automocks),
+and #406 (calculator mock-setup investigation). Full Flux/Jest replacement is not
+a v0.8.4 release requirement. No further implementation is included in this batch.
+
+Local campaign receipts:
+- `${FLUX_VALIDATION_ROOT}/flux-harness/results/campaign-0961554-node26-pr1196/`
+- `${FLUX_VALIDATION_ROOT}/flux-harness/results/impact-8146128-node26-pr1196/`
+
+The accepted benchmark timings remain tied to `f1708af`; none were rerun for this
+small-fix candidate. All app dependency PRs remain drafts until registry publication
+and the corresponding integrity metadata can be refreshed.

@@ -38,6 +38,12 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   external blocks and unmapped SFC coverage report explicit errors.
 
 ### Fixed
+- Preserve CommonJS shebangs through metadata/fallback wrapping (#393), resolve real
+  filesystem paths with the native entry point and legacy argument behavior (#395),
+  and expose `util/types` with genuine Date brand checks for PostgreSQL loading (#399).
+- Match Jest constructor mocks with arrow implementations while preserving Vitest
+  construction semantics (#394). Compare actual Buffer bytes, write validated UInt32LE
+  headers and expose immutable limits from the linked V8 engine (#396–#398, #400).
 - Preserve the standard Date constructor name for real Mongoose schema types (#383).
 - Honor explicit CommonJS `esModuleInterop: false`, including JSONC and package-provided
   tsconfig inheritance, while preserving dynamic imports and authored helpers (#384).
