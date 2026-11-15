@@ -174,18 +174,29 @@ function __readableFrom(iterable, options) {
 function __readablePipe(source, destination, options = {}) {
   const data = (chunk) => { if (destination.write(chunk) === false && source.pause) source.pause(); };
   const drain = () => { if (source.resume) source.resume(); };
-  const end = () => { if (options.end !== false) destination.end(); };
+  let detached = false;
   const cleanup = () => {
+    if (detached) return;
+    detached = true;
     source.off('data', data); source.off('end', end);
     destination.off('drain', drain); destination.off('close', cleanup);
+    destination.off('finish', cleanup); destination.off('error', error);
+  };
+  const end = () => { cleanup(); if (options.end !== false) destination.end(); };
+  const error = (failure) => {
+    cleanup();
+    if (destination.listenerCount('error') === 0) destination.emit('error', failure);
   };
   destination.on('drain', drain);
   destination.on('close', cleanup);
+  destination.on('finish', cleanup);
+  destination.prependListener('error', error);
   source.on('end', end);
   source.on('data', data);
   destination.emit('pipe', source);
   return destination;
 }
+
 class __Readable extends __Stream {
   constructor(options = {}) { super(); __streamInit(this, options); __readableInit(this, options); }
   static from(iterable, options = {}) { return __readableFrom(iterable, options); }
