@@ -12161,7 +12161,7 @@ fn run_event_loop(
         if promise.state() != v8::PromiseState::Pending {
             break;
         }
-        if step_macrotask(scope, global) {
+        if step_macrotask(scope, global, promise) {
             continue;
         }
         break;
@@ -12187,7 +12187,11 @@ fn drain_microtasks(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
 /// in flight it keeps the loop alive, as libuv's handles do, waiting up to the next timer's
 /// delay), then the runtime's `__stepMacro`. Returns `true` when something ran and the outer
 /// loop should spin again, `false` when nothing was pending.
-fn step_macrotask(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bool {
+fn step_macrotask(
+    scope: &mut v8::PinScope,
+    global: v8::Local<v8::Object>,
+    promise: v8::Local<v8::Promise>,
+) -> bool {
     if crate::napi_host::run_native_task(scope) {
         return true;
     }
@@ -12199,10 +12203,27 @@ fn step_macrotask(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bo
         }
     }
     pace_http_io(scope, global);
-    if pace_async_process_io(scope, global) || pace_tcp_io(scope, global) {
-        return true;
+    let child_progress = pace_async_process_io(scope, global);
+    let tcp_progress = pace_tcp_io(scope, global);
+    let progressed = child_progress || tcp_progress;
+    finish_io_turn(scope, global, promise, progressed)
+}
+
+// Every active provider gets a poll phase, then timers get a bounded turn. Drain the
+// callbacks first: an IO completion may finish the run, making its next deadline stale.
+fn finish_io_turn(
+    scope: &mut v8::PinScope,
+    global: v8::Local<v8::Object>,
+    promise: v8::Local<v8::Promise>,
+    progressed: bool,
+) -> bool {
+    if progressed {
+        drain_microtasks(scope, global);
+        if promise.state() != v8::PromiseState::Pending {
+            return true;
+        }
     }
-    call_global_bool(scope, global, "__stepMacro")
+    call_global_bool(scope, global, "__stepMacro") || progressed
 }
 
 /// Pace real HTTP handles against kernel readiness before the virtual timer step. This
