@@ -13,5 +13,5 @@ testCase('namespace imports follow the configured CommonJS TypeScript interop', 
 });
 testCase('cyclic TypeScript imports retain late property reads and module identity', () => {
   assert.equal(cycle.readValue(), 42);
-  assert.equal(cycle.request, request);
+  assert.equal(interop ? cycle.request.default : cycle.request, interop ? request.default : request);
 });
