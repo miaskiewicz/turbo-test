@@ -213,14 +213,12 @@ fn prepare_ipc(command: &mut Command, enabled: bool) -> Result<Option<UnixStream
     drop((parent_original, child_original));
     parent.set_nonblocking(true).map_err(io_failure)?;
     command
-        .env("NODE_CHANNEL_FD", "3")
+        .env("NODE_CHANNEL_FD", child.as_raw_fd().to_string())
         .env("NODE_CHANNEL_SERIALIZATION_MODE", "json");
     unsafe {
         command.pre_exec(move || {
-            if libc::dup2(child.as_raw_fd(), 3) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+            // Never overwrite Command's internal error pipe, which may occupy fd 3.
+            if libc::fcntl(child.as_raw_fd(), libc::F_SETFD, 0) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())

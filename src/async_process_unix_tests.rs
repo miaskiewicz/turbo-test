@@ -229,23 +229,39 @@ fn fd_probe_code(parent_source: i32, child_source: i32) -> i32 {
         libc::close(0);
         libc::close(1);
     }
-    fd_probe_write(child.as_raw_fd())
+    fd_probe_reserved_channel(parent.as_raw_fd(), child.as_raw_fd())
 }
 fn reserve_probe_endpoints() -> std::io::Result<(OwnedFd, OwnedFd)> {
     Ok((reserve_ipc_fd(0)?, reserve_ipc_fd(1)?))
 }
-fn fd_probe_write(source: i32) -> i32 {
-    if unsafe { libc::dup2(source, 3) } < 0 {
+fn fd_probe_reserved_channel(parent: i32, child: i32) -> i32 {
+    // A CLOEXEC fd 3 stands in for Command's private spawn-error pipe.
+    if unsafe { libc::dup2(parent, 3) } < 0 {
         return 24;
     }
-    if unsafe { libc::fcntl(3, libc::F_SETFD, 0) } < 0 {
+    if unsafe { libc::fcntl(3, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
         return 25;
     }
-    let count = unsafe { libc::write(3, b"ready".as_ptr().cast(), 5) };
+    let result = fd_probe_write(child);
+    if result != 0 {
+        return result;
+    }
+    let flags = unsafe { libc::fcntl(3, libc::F_GETFD) };
+    if flags & libc::FD_CLOEXEC == 0 {
+        27
+    } else {
+        0
+    }
+}
+fn fd_probe_write(source: i32) -> i32 {
+    if unsafe { libc::fcntl(source, libc::F_SETFD, 0) } < 0 {
+        return 28;
+    }
+    let count = unsafe { libc::write(source, b"ready".as_ptr().cast(), 5) };
     if count == 5 {
         0
     } else {
-        26
+        29
     }
 }
 
