@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import {createRequire} from 'node:module';
 import crypto from 'node:crypto';
+import {constants as bufferLimits} from 'node:buffer';
 import {pathToFileURL} from 'node:url';
 const read=(name)=>fs.readFileSync(new URL('../src/'+name,import.meta.url),'utf8');
 test('shared startup source physically excludes backend payload markers and reset calls',()=>{
@@ -20,6 +21,8 @@ test('backend payload owns native capabilities while frontend HMAC remains share
 
 function assembled(name) {
  const fragments=new Map([...read('runtime_sources.rs').matchAll(/"(\/\* __TT_[A-Z0-9_]+__ \*\/)",\s*include_str!\("([^"]+)"\)/g)].map(match=>[match[1],read(match[2])]));
+ // These controls run in Node's VM; native tests separately check the linked V8 limits.
+ fragments.set('/* __TT_NODE_BUFFER_LIMITS__ */',`MAX_LENGTH: ${bufferLimits.MAX_LENGTH}, MAX_STRING_LENGTH: ${bufferLimits.MAX_STRING_LENGTH}`);
  let source=read(name);
  for(const [marker,fragment] of fragments) source=source.replaceAll(marker,()=>fragment);
  assert.equal(source.includes('/* __TT_'),false);
