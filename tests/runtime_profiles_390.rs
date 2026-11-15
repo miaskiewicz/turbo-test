@@ -93,7 +93,7 @@ fn window_snapshot_plain_node_context_and_browser_context_coexist() {
     passed(&p, 9, &["--jobs", "2", "--reporter", "json"], &[]);
 }
 #[test]
-fn configured_and_runlevel_environments_win_over_content_detection() {
+fn configured_and_cli_environments_win_over_content_detection() {
     let p = project("runtime-profile-config");
     p.file(
         "vitest.config.js",
@@ -108,7 +108,7 @@ fn configured_and_runlevel_environments_win_over_content_detection() {
     passed(
         &p,
         1,
-        &["--jobs", "1", "--reporter", "json"],
-        &[("TURBO_ENV", "jsdom")],
+        &["--jobs", "1", "--environment", "jsdom", "--reporter", "json"],
+        &[],
     );
 }
