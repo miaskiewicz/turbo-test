@@ -10346,6 +10346,7 @@ globalThis.__ttResetForNextFile = () => {
   __resetAsyncHooks();
   __resetProcessWarnings();
   __resetAsyncContext();
+  __portReset();
   __httpReset();
   __asyncProcessReset();
   __tcpReset();

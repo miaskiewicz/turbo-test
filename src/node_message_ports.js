@@ -11,6 +11,20 @@ const __portHandles = new WeakMap();
 let __portSequence = 1;
 let __portRegistry = null;
 let __portResourceClass = null;
+// A posted task can retain its receiver strongly until delivery. File reset drops
+// that task's timer, so release its ownership explicitly without dispatching old events.
+function __portReset() {
+  if (!__portEndpoints.size) return;
+  for (const record of __portEndpoints.values()) {
+    const owner = __portOwner(record);
+    if (owner) { __portRegistry.unregister(owner); globalThis.__ttPortDetach(owner); }
+    record.queue.length = 0;
+    record.pendingOwner = null;
+    __portDestroyResource(record.resource);
+  }
+  __portEndpoints.clear();
+  __portRegistry = null;
+}
 function __portHandle(port) {
   const handle = __portWeakGet(__portHandles, port);
   if (!handle) throw new TypeError('Invalid MessagePort receiver');
