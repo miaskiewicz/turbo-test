@@ -167,9 +167,11 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ### Release preparation
 - Align the Rust and npm package versions at 0.8.4. The release branch uses an exact
-  pre-publication turbo-dom source pin (`7f1b70e1192a237b7c9fee27989ffeba27b4eb7d`)
+  pre-publication turbo-dom source pin (`af946ea0f8f8e0fe8d50b6470b33dbe2068393f6`)
   for reproducible validation; remove it only
   after compatible 0.8.4 crates are published, before tagging this runner release.
+  The generated `turbo-dom-v8` pin is `03839d09726f6e184d72ef83e7e73a1c2ef8d7f9`
+  (unpublished 150.4.2), retaining the official V8 150.4.0 engine/archive.
 
 ## [0.8.3] — 2026-11-13 — jest compat: full config surface, module resolution, jsdom parity, faster GC
 
