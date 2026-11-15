@@ -2073,6 +2073,14 @@ if (typeof globalThis.Buffer === 'undefined') {
       if (offset < 0 || offset > bytes.length - 4) throw Object.assign(new RangeError('The offset is outside the buffer bounds'), { code: 'ERR_OUT_OF_RANGE' });
     }
     equals(other) { return Buffer.compare(this, other) === 0; }
+    writeUInt32LE(value, offset = 0) {
+      const number = +value;
+      if (number < 0 || number > 0xffffffff) throw Object.assign(new RangeError('The value is outside the unsigned 32-bit range'), { code: 'ERR_OUT_OF_RANGE' });
+      Buffer.#readUInt32Offset(this, offset);
+      const bits = number >>> 0;
+      for (let i = 0; i < 4; i++) this[offset + i] = bits >>> (8 * i);
+      return offset + 4;
+    }
     readUInt32BE(offset = 0) {
       Buffer.#readUInt32Offset(this, offset);
       return this[offset] * 16777216 + this[offset + 1] * 65536 + this[offset + 2] * 256 + this[offset + 3];
