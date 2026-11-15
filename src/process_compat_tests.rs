@@ -165,3 +165,133 @@ fn dropping_live_child_guard_reaps_the_process() {
         Some(libc::ECHILD)
     );
 }
+
+#[test]
+fn resistant_child_escalates_to_sigkill_after_grace_period() {
+    use std::io::BufRead;
+    let mut child = command(&shell(
+        "trap '' TERM; printf 'ready\n'; while :; do sleep 1; done",
+    ))
+    .spawn()
+    .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut ready = String::new();
+    std::io::BufReader::new(stdout)
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready, "ready\n");
+    let (status, reason) = abort_child(&mut child, 15, "ETIMEDOUT").unwrap();
+    assert_eq!(signal_name(&status).as_deref(), Some("SIGKILL"));
+    assert_eq!(reason, Some("ETIMEDOUT"));
+}
+
+#[test]
+fn finish_child_reports_late_overflow_and_writer_panic() {
+    fn reader() -> Reader {
+        std::thread::spawn(|| Ok(Vec::new()))
+    }
+    let mut child = command(&shell("exit 0")).spawn().unwrap();
+    let status = child.wait().unwrap();
+    let pid = child.id();
+    let result = finish_child(
+        ChildGuard(child),
+        pid,
+        Ok((status, None)),
+        reader(),
+        reader(),
+        std::thread::spawn(|| Ok(())),
+        Arc::new(AtomicBool::new(true)),
+    )
+    .unwrap();
+    assert_eq!(result["error"]["code"], "ENOBUFS");
+    let mut child = command(&shell("exit 0")).spawn().unwrap();
+    let status = child.wait().unwrap();
+    let pid = child.id();
+    let result = finish_child(
+        ChildGuard(child),
+        pid,
+        Ok((status, None)),
+        reader(),
+        reader(),
+        std::thread::spawn(|| panic!("synthetic writer panic")),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap();
+    assert!(result["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("writer panicked"));
+    let executable = std::ffi::OsString::from("/bin/sh");
+    assert_eq!(
+        node_executable_from(Some(executable), None),
+        executable_path("/bin/sh".into())
+    );
+}
+
+fn with_native_spawn_scope(f: impl FnOnce(&mut v8::PinScope)) {
+    crate::runner::init_v8();
+    let isolate = &mut v8::Isolate::new(crate::runner::framework_snapshot().create_params());
+    v8::scope!(let scope, isolate);
+    let context = v8::Context::new(scope, Default::default());
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let name = v8::String::new(scope, "spawnNative").unwrap();
+    let function = v8::Function::new(scope, native_spawn_sync).unwrap();
+    context
+        .global(scope)
+        .set(scope, name.into(), function.into());
+    f(scope);
+}
+
+fn native_script<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    source: &str,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let source = v8::String::new(scope, source).unwrap();
+    v8::Script::compile(scope, source, None)?.run(scope)
+}
+
+#[test]
+fn native_spawn_boundary_preserves_json_and_coercion_errors() {
+    with_native_spawn_scope(|scope| {
+        let result = native_script(
+            scope,
+            r#"(() => {
+            try { spawnNative('not json', null); return false; }
+            catch (error) { return error instanceof Error; }
+        })()"#,
+        )
+        .unwrap();
+        assert!(result.is_true());
+        let result = native_script(
+            scope,
+            r#"(() => {
+            const marker = new Error('conversion failed');
+            try { spawnNative({toString() { throw marker; }}, null); return false; }
+            catch (error) { return error === marker; }
+        })()"#,
+        )
+        .unwrap();
+        assert!(result.is_true());
+        let result = native_script(scope, r#"JSON.parse(spawnNative(JSON.stringify({file:'/bin/sh',args:['-c','exit 0']}), null)).status === 0"#).unwrap();
+        assert!(result.is_true());
+    });
+}
+
+#[test]
+fn native_spawn_termination_reaps_child_and_leaves_execution_terminated() {
+    with_native_spawn_scope(|scope| {
+        let handle = scope.thread_safe_handle();
+        let terminator = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            handle.terminate_execution();
+        });
+        let result = native_script(
+            scope,
+            r#"spawnNative(JSON.stringify({file:'/bin/sh',args:['-c','sleep 60'],timeout:5000}), null)"#,
+        );
+        terminator.join().unwrap();
+        assert!(result.is_none());
+        assert!(scope.is_execution_terminating());
+        scope.cancel_terminate_execution();
+    });
+}

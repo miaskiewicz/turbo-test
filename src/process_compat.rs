@@ -340,12 +340,21 @@ pub fn native_spawn_sync(
 }
 
 pub fn node_executable() -> Option<String> {
-    if let Some(path) = std::env::var_os("TURBO_NODE_EXECUTABLE") {
+    node_executable_from(
+        std::env::var_os("TURBO_NODE_EXECUTABLE"),
+        std::env::var_os("PATH"),
+    )
+}
+fn node_executable_from(
+    override_path: Option<std::ffi::OsString>,
+    search_path: Option<std::ffi::OsString>,
+) -> Option<String> {
+    if let Some(path) = override_path {
         if let Some(path) = executable_path(std::path::PathBuf::from(path)) {
             return Some(path);
         }
     }
-    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|directory| {
+    std::env::split_paths(&search_path?).find_map(|directory| {
         let name = if cfg!(windows) { "node.exe" } else { "node" };
         executable_path(directory.join(name))
     })

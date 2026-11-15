@@ -423,28 +423,39 @@ impl Connection {
         Ok(self.finish && self.output.is_empty())
     }
     fn flush(&mut self) -> Result<bool> {
-        while self.sent < self.output.len() {
-            match self.socket.write(&self.output[self.sent..]) {
-                Ok(0) => return Err(fail("EPIPE", "Socket write returned zero")),
-                Ok(count) => self.sent += count,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
-                Err(error) => return Err(io_error(error)),
-            }
-        }
-        Ok(true)
+        flush_output(&mut self.socket, &self.output, &mut self.sent)
     }
     fn read(&mut self, id: u64, events: &mut Vec<Value>) -> Result<bool> {
-        let mut bytes = [0; 16384];
-        loop {
-            match self.socket.read(&mut bytes) {
-                Ok(0) => {
-                    self.decoder.eof(id, events)?;
-                    return Ok(true);
-                }
-                Ok(count) => self.decoder.feed(id, &bytes[..count], events)?,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
-                Err(error) => return Err(io_error(error)),
+        read_message(&mut self.socket, &mut self.decoder, id, events)
+    }
+}
+fn flush_output(writer: &mut impl Write, output: &[u8], sent: &mut usize) -> Result<bool> {
+    while *sent < output.len() {
+        match writer.write(&output[*sent..]) {
+            Ok(0) => return Err(fail("EPIPE", "Socket write returned zero")),
+            Ok(count) => *sent += count,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(io_error(error)),
+        }
+    }
+    Ok(true)
+}
+fn read_message(
+    reader: &mut impl Read,
+    decoder: &mut Decoder,
+    id: u64,
+    events: &mut Vec<Value>,
+) -> Result<bool> {
+    let mut bytes = [0; 16384];
+    loop {
+        match reader.read(&mut bytes) {
+            Ok(0) => {
+                decoder.eof(id, events)?;
+                return Ok(true);
             }
+            Ok(count) => decoder.feed(id, &bytes[..count], events)?,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(io_error(error)),
         }
     }
 }
@@ -562,8 +573,15 @@ fn accept_all(
     listener: &TcpListener,
     accepted: &mut Vec<(u64, TcpStream)>,
 ) -> Result<()> {
+    accept_with(server, || listener.accept(), accepted)
+}
+fn accept_with(
+    server: u64,
+    mut accept: impl FnMut() -> std::io::Result<(TcpStream, SocketAddr)>,
+    accepted: &mut Vec<(u64, TcpStream)>,
+) -> Result<()> {
     loop {
-        match listener.accept() {
+        match accept() {
             Ok((socket, _)) => accepted.push((server, socket)),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
             Err(error) => return Err(io_error(error)),
@@ -906,5 +924,102 @@ mod tests {
                 .code,
             "ERR_INVALID_ARG_VALUE"
         );
+    }
+    #[test]
+    fn injected_io_failures_preserve_progress_and_error_codes() {
+        struct Writer(std::io::Result<usize>);
+        impl Write for Writer {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                std::mem::replace(&mut self.0, Ok(0))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut sent = 0;
+        assert_eq!(
+            flush_output(&mut Writer(Ok(0)), b"x", &mut sent)
+                .unwrap_err()
+                .code,
+            "EPIPE"
+        );
+        assert!(!flush_output(
+            &mut Writer(Err(std::io::ErrorKind::WouldBlock.into())),
+            b"x",
+            &mut sent
+        )
+        .unwrap());
+        assert_eq!(sent, 0);
+        assert_eq!(
+            flush_output(
+                &mut Writer(Err(std::io::ErrorKind::ConnectionReset.into())),
+                b"x",
+                &mut sent
+            )
+            .unwrap_err()
+            .code,
+            "ECONNRESET"
+        );
+        assert!(flush_output(&mut Writer(Ok(1)), b"x", &mut sent).unwrap());
+        assert_eq!(sent, 1);
+        struct Reader;
+        impl Read for Reader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::ConnectionReset.into())
+            }
+        }
+        assert_eq!(
+            read_message(
+                &mut Reader,
+                &mut Decoder::new(false, false),
+                1,
+                &mut Vec::new()
+            )
+            .unwrap_err()
+            .code,
+            "ECONNRESET"
+        );
+        assert_eq!(
+            accept_with(
+                1,
+                || Err(std::io::ErrorKind::PermissionDenied.into()),
+                &mut Vec::new()
+            )
+            .unwrap_err()
+            .code,
+            "ERR_HTTP_IO"
+        );
+    }
+
+    #[test]
+    fn decoder_empty_and_header_only_edges_are_explicit() {
+        let mut decoder = Decoder::new(false, false);
+        let mut events = Vec::new();
+        decoder.input.resize(65537, b'x');
+        assert_eq!(
+            decoder.headers(1, &mut events).unwrap_err().code,
+            "HPE_HEADER_OVERFLOW"
+        );
+        decoder.input.clear();
+        decoder.phase = Phase::Eof;
+        assert!(!decoder.step(1, &mut events).unwrap());
+        assert_eq!(
+            parse_headers("GET / HTTP/1.1\r\nMissingColon\r\n")
+                .unwrap_err()
+                .code,
+            "HPE_INVALID_HEADER_TOKEN"
+        );
+        for status in ["HTTP/1.1 204 No Content", "HTTP/1.1 304 Not Modified"] {
+            assert!(matches!(
+                body_phase(status, &[], false, false).unwrap(),
+                Phase::Fixed(0)
+            ));
+        }
+        assert!(matches!(
+            body_phase("HTTP/1.1 200 OK", &[], false, true).unwrap(),
+            Phase::Fixed(0)
+        ));
+        operation("reset", &Value::Null).unwrap();
+        wait_for_io(Duration::ZERO);
     }
 }
