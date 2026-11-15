@@ -140,6 +140,13 @@ Object.assign(globalThis.__nodeBuiltins, {
   vm: __vm,
   inspector: __inspector,
 });
+// Prefix aliases must replace their DOM capability slots as well as the bare exports.
+for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(globalThis.__nodeBuiltins))) {
+  if (!name.startsWith('node:') && Object.hasOwn(descriptor, 'value')) {
+    const alias = Object.getOwnPropertyDescriptor(globalThis.__nodeBuiltins, 'node:' + name);
+    if (alias && alias.set) globalThis.__nodeBuiltins['node:' + name] = descriptor.value;
+  }
+}
 __runtimeTaskCapture = __captureBackendAsyncContext;
 __runtimeTaskResource = () => new __async_hooks.AsyncResource('MESSAGEPORT');
 __runtimeBackendResets.push(__resetAsyncHooks, __resetAsyncContext, __httpReset, __asyncProcessReset, __tcpReset);
