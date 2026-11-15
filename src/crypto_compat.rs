@@ -74,6 +74,12 @@ fn validate_pbkdf2(iterations: u32, length: usize) -> Result<(), String> {
                 .into(),
         );
     }
+    // One SHA-1 output block requires `iterations` HMACs. Division avoids
+    // multiplying attacker-controlled counts before the synchronous native loop.
+    let blocks = length.div_ceil(20);
+    if u64::from(iterations) > 1_000_000 / blocks as u64 {
+        return Err("PBKDF2 work limit exceeded (maximum 1000000 SHA1 block-rounds)".into());
+    }
     Ok(())
 }
 

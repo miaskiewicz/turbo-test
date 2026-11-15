@@ -11,6 +11,10 @@ fn real_hmac_and_pbkdf2_known_answers() {
         "hashes.test.cjs",
         include_str!("data/quick-crypto/hashes.cjs"),
     );
+    p.file(
+        "work-limit.test.cjs",
+        include_str!("data/quick-crypto/work-limit.cjs"),
+    );
     let run = turbo_test(&p.dir, &["--jobs", "1", "--reporter", "json"], &[]);
     let report = json_report(&run);
     assert_eq!(report["numPassedTests"], 5, "{}", run.all());

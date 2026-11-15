@@ -24,9 +24,3 @@ testCase('PBKDF2 validates iteration and output length',()=>{
  assert.throws(()=>crypto.pbkdf2Sync('p','s',1.5,20,'sha1'));
  assert.throws(()=>crypto.pbkdf2Sync('p','s',1,0,'sha1'));
 });
-
-testCase('PBKDF2 rejects unsupported total derivation work',()=>{
- // The previous implementation does only about one million HMACs here: safe RED,
- // unlike testing INT_MAX iterations through the synchronous native callback.
- assert.throws(()=>crypto.pbkdf2Sync('p','s',20,1048576,'sha1'),/work limit/);
-});

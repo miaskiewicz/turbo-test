@@ -259,7 +259,10 @@ and AsyncLocalStorage across native await and scheduled resources.
 
 Keyed hashes support real SHA-1/SHA-256 HMAC and synchronous PBKDF2-SHA1, including
 binary inputs and independent known-answer controls. PBKDF2 output is bounded to
-1–1,048,576 bytes; other derivation digests report an unsupported-algorithm error.
+1–1,048,576 bytes and at most 1,000,000 SHA-1 block-rounds
+(`iterations × ceil(keyLength / 20)`). Larger requests throw a work-limit error
+before derivation; this runner limit bounds synchronous native work. Other
+derivation digests report an unsupported-algorithm error.
 WebCrypto `getRandomValues` accepts integer typed arrays, uses OS entropy, and
 enforces its 65,536-byte quota. `Buffer.readUInt32BE` respects view and offset bounds.
 Synchronous zlib deflate/inflate exchange real compressed bytes with Node;
