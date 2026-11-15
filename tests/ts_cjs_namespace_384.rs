@@ -251,3 +251,25 @@ fn typescript_null_options_reset_inherited_values_instead_of_inheriting_them() {
         assert_eq!(String::from_utf8_lossy(&node.stdout).trim(), expected);
     }
 }
+
+#[test]
+fn esbuild_fallback_keeps_authored_to_esm_calls_with_and_without_static_imports() {
+    let p = fixture(false, false);
+    for prefix in ["", "import * as packageNs from 'callable-package'; if(typeof packageNs!=='function')throw Error('static import lost');"] {
+        p.file("authored.test.ts",&format!("{prefix}\nfunction __toESM(value:any){{return {{user:true,value}};}} const wrapped=__toESM(require('node:path')); test('authored helper keeps semantics',()=>{{expect(wrapped.user).toBe(true);expect(wrapped.value).toBe(require('node:path'));}});"));
+        let run=turbo_test(&p.dir,&["--jobs","1","--reporter","json","authored.test.ts"],&[("TURBO_NATIVE_CJS","0")]);
+        assert_eq!(json_report(&run)["numPassedTests"],1,"{}",run.all());
+    }
+}
+#[test]
+fn metadata_esnext_projects_keep_namespace_interop_despite_false_commonjs_option() {
+    let p = fixture(false, false);
+    p.file("tsconfig.json",r#"{"compilerOptions":{"module":"ESNext","esModuleInterop":false,"experimentalDecorators":true,"emitDecoratorMetadata":true}}"#);
+    p.file("esnext.test.ts","import * as packageNs from 'callable-package'; function marker(target:any){return target;} @marker class Model{} test('ESNext metadata keeps namespace',()=>{expect(typeof packageNs).toBe('object');expect(packageNs.default).toBe(require('callable-package'));expect(new Model()).toBeInstanceOf(Model);});");
+    let run = turbo_test(
+        &p.dir,
+        &["--jobs", "1", "--reporter", "json", "esnext.test.ts"],
+        &[("TURBO_NATIVE_CJS", "0")],
+    );
+    assert_eq!(json_report(&run)["numPassedTests"], 1, "{}", run.all());
+}
