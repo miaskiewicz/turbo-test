@@ -296,3 +296,41 @@ python3 ${FLUX_VALIDATION_ROOT}/flux-harness/run-batch-owned.py turbo --root ${F
 - [ ] Investigate the webhook mock/authorization failures with the existing mock mapping intact; do not weaken authentication assertions.
 - [ ] Resolve the additional 01 timeout and cleanup uncertainty before treating that batch as complete.
 - [ ] Re-run affected cases on a future frozen artifact; do not combine passing results from different builds into a full-suite pass claim.
+
+## Representative rerun after the runtime split
+
+The frozen reviewed candidate `f1708af6ee947d87e1d354504ad375b7a8318e50`
+(binary SHA-256 `d0a8fee9797dd43c96c37d288c6536e891f03c0c24da1a6bec3c729fc328b798`)
+passed all **595 tests in the same 16-file Flux selection**, with no failed assertions or
+load errors. The Flux PR, lockfile, selection, and external launcher were unchanged.
+The receipt is `${FLUX_VALIDATION_ROOT}/flux-harness/results/pr-1196-f1708af-runtime-reviewed-16/`.
+This was a bounded regression rerun; neither the full backend suite nor the previously
+failing additional batches were rerun. Their unresolved results above remain historical
+evidence, not a claim about the new artifact.
+
+The runtime split also has a committed 28-combination Vitest/Jest settings matrix
+(40 JS tests), mixed-profile and same-profile reuse tests, failed-load child cleanup,
+snapshot-on/off controls, and mutable-export regression tests. The extra review found
+and fixed nearest-config precedence and internal resource-constructor problems. The
+reuse edge tests additionally exposed CommonJS caller provenance losing file-owned
+hook cleanup; the reviewed candidate retains those caller filenames.
+
+All four full frontend suites passed on this same binary:
+
+| Repository | Passed | Skipped | Files |
+| --- | ---: | ---: | ---: |
+| payroll-app | 26,360 | 0 | 2,051 |
+| ui-design-components | 7,408 | 0 | 464 |
+| standalone-chat-app | 785 | 0 | 68 |
+| website-global | 1,647 | 5 | 114 |
+
+Payroll uses app commit `49da952428cff8c9aec3bf46b56d3f317378e009` over staging
+`9ca35e9`: two Node-only E2E-helper unit-test files declare the Node environment,
+and a setup entry loads browser fixtures only for DOM tests. Both turbo-test and
+original Vitest passed the same 18 targeted Node/DOM controls. No package or lockfile
+version was changed. Website has two additional passing HMAC tests that previously
+skipped; the total test identities are unchanged. No tests were excluded to obtain
+these results, and these correctness runs make no performance claim.
+
+The consolidated frontend receipt is
+`${FLUX_VALIDATION_ROOT}/bench/latest/final-f1708af-four-app-correctness.json`.
