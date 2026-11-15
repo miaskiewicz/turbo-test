@@ -9427,11 +9427,6 @@ fn bind_fn(
     target.set(scope, key.into(), func.into());
 }
 
-/// The test runtime + helpers (the "framework layer"). Baked into a V8 startup snapshot
-/// once (M3 §4) so each test file gets a context *from* the snapshot instead of
-/// re-evaluating this per file. (Minimal runtime now; real @vitest/* bundle swaps in here
-/// behind the same snapshot mechanism.)
-
 /// Pristine VM context index zero is reserved only in the runner-owned Node snapshot.
 pub(crate) fn vm_context_snapshot_available() -> bool {
     framework_snapshot().references.is_none()
