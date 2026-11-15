@@ -304,17 +304,21 @@ fn config_environment(text: &str) -> Option<String> {
 // Explicit run config wins over project discovery. A Jest project defaults to
 // Node; words such as `document` in backend business data must not install DOM.
 fn project_environment(cwd: &Path, forced: Option<&Path>) -> Option<String> {
-    if let Some(config) = find_config(cwd, forced) {
+    if let Some(path) = forced {
+        let config = find_config(cwd, Some(path))?;
         return config_environment(&config.text)
             .or_else(|| jest_environment_value(&config.text))
-            .or_else(|| forced.and_then(|path| forced_jest_default(path, &config.text)));
+            .or_else(|| forced_jest_default(path, &config.text));
     }
-    if forced.is_some() {
-        return None;
+    cwd.ancestors().find_map(directory_environment).flatten()
+}
+fn directory_environment(directory: &Path) -> Option<Option<String>> {
+    match config_in_dir(directory) {
+        ConfigScan::Found(config) => Some(config_environment(&config.text)),
+        ConfigScan::Unreadable => Some(None),
+        ConfigScan::Missing => jest_config_text_in(directory)
+            .map(|text| Some(jest_environment_value(&text).unwrap_or_else(|| "node".into()))),
     }
-    cwd.ancestors()
-        .find_map(jest_config_text_in)
-        .map(|text| jest_environment_value(&text).unwrap_or_else(|| "node".into()))
 }
 fn forced_jest_default(path: &Path, text: &str) -> Option<String> {
     let name = path.file_name()?.to_str()?;
@@ -323,7 +327,7 @@ fn forced_jest_default(path: &Path, text: &str) -> Option<String> {
     is_jest.then(|| "node".into())
 }
 
-fn jest_environment_value(text: &str) -> Option<String> {
+pub(crate) fn jest_environment_value(text: &str) -> Option<String> {
     crate::runner::config_string_value(text, "testEnvironment").map(|name| {
         match name.to_ascii_lowercase().as_str() {
             "jest-environment-node" => "node".into(),
@@ -1855,15 +1859,7 @@ fn push_config_env(
     forced: Option<&Path>,
     env: &mut Vec<(&'static str, String)>,
 ) {
-    // `--environment` → TURBO_ENV (falls back to config `test.environment`). A per-file pragma
-    // overrides this at runtime (runner.rs).
-    let environment = opts
-        .environment
-        .clone()
-        .or_else(|| project_environment(cwd, forced));
-    if let Some(e) = environment {
-        env.push(("TURBO_ENV", e));
-    }
+    push_environment(opts, cwd, forced, env);
 
     // `server.deps.inline` → TURBO_DEPS_INLINE: the packages whose own imports see vi.mock
     // (vitest runs them through its module runner, turbo-test#216). `*` = `inline: true`.
@@ -1890,6 +1886,28 @@ fn push_config_env(
     // `--includeTaskLocation` flag (which the runner reads itself).
     if find_config(cwd, forced).is_some_and(|c| config_true(&c.text, "includeTaskLocation")) {
         env.push(("TURBO_TASK_LOCATION", "1".to_string()));
+    }
+}
+
+// Keep the exported environment for launcher compatibility, but distinguish an implicit
+// project default from an explicit run override so nearer per-file configs can own profiles.
+fn push_environment(
+    opts: &Opts,
+    cwd: &Path,
+    forced: Option<&Path>,
+    env: &mut Vec<(&'static str, String)>,
+) {
+    let environment = opts
+        .environment
+        .clone()
+        .or_else(|| project_environment(cwd, forced));
+    if let Some(environment) = environment {
+        env.push(("TURBO_ENV", environment));
+        let implicit = opts.environment.is_none() && forced.is_none();
+        env.push((
+            "TURBO_ENV_FROM_CONFIG",
+            if implicit { "1" } else { "0" }.into(),
+        ));
     }
 }
 

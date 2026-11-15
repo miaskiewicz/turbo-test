@@ -1551,6 +1551,9 @@ fn file_env_pragma(s: &str) -> Option<String> {
 /// else `None` (auto — fall back to the content heuristic). Recognized: node | jsdom | happy-dom.
 fn forced_env(s: &str) -> Option<String> {
     file_env_pragma(s).or_else(|| {
+        if std::env::var("TURBO_ENV_FROM_CONFIG").as_deref() == Ok("1") {
+            return None;
+        }
         std::env::var("TURBO_ENV")
             .ok()
             .map(|v| v.to_ascii_lowercase())
@@ -1566,7 +1569,9 @@ fn configured_environment(entry: &Path) -> Option<String> {
         }
         // The nearest framework config owns the file even when it omits an environment.
         if let Some(text) = jest_config_text(directory) {
-            return config_string_value(&text, "testEnvironment");
+            return Some(
+                crate::launcher::jest_environment_value(&text).unwrap_or_else(|| "node".into()),
+            );
         }
     }
     None
