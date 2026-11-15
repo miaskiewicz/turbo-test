@@ -61,3 +61,8 @@ test('only the selected payload installs its corresponding capabilities',()=>{
  assert.equal(typeof dom.DOMPoint,'function');assert.equal(typeof dom.FileReader,'function');
  assert.throws(()=>vm.runInContext('__nodeBuiltins.child_process',dom),{code:'ERR_TURBO_BACKEND_CAPABILITY'});
 });
+test('backend task resources use the internal constructor rather than a mutable module export',()=>{
+ const context=commonContext();vm.runInContext(assembled('runtime_backend.js'),context,{timeout:3000});
+ const answer=vm.runInContext("__nodeBuiltins.async_hooks.AsyncResource=class Replacement{constructor(){throw new Error('public resource replacement invoked');}};__runtimeTaskResource().runInAsyncScope(()=>42,null)",context);
+ assert.equal(answer,42);
+});
