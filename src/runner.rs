@@ -9654,6 +9654,10 @@ fn framework_prelude(scope: &mut v8::PinScope) {
     }
     let runtime = RUNTIME_JS
         .replace(
+            "/* __TT_NODE_ZLIB_CONSTANTS__ */",
+            include_str!("node_zlib_constants.js"),
+        )
+        .replace(
             "/* __TT_NODE_BUFFER_BYTE_LENGTH__ */",
             include_str!("node_buffer_byte_length.js"),
         )
