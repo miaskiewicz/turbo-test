@@ -123,16 +123,23 @@ fn unavailable_vm_realms_throw_recoverable_capability_errors() {
 fn external_watchdog_interrupts_vm_javascript_without_claiming_vm_timeout() {
     with_scope(|scope| {
         bind(scope, "execute", native_run_context);
-        let external = Watchdog::start(scope, 10);
+        bind(
+            scope,
+            "arm",
+            |scope: &mut v8::PinScope, _: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
+                let watchdog = Watchdog::start(scope, 10);
+                scope.set_slot(watchdog);
+            },
+        );
         let tc = std::pin::pin!(v8::TryCatch::new(scope));
         let scope = &mut tc.init();
         assert!(run(
             scope,
-            "execute('for (;;) {}', function(){}, {}, 'interrupted.js', 0)"
+            "execute('arm(); for (;;) {}', function(){}, {}, 'interrupted.js', 0)"
         )
         .is_none());
         assert!(
-            external.finish(),
+            scope.remove_slot::<Watchdog>().unwrap().finish(),
             "external watchdog actually terminated execution"
         );
         scope.cancel_terminate_execution();
