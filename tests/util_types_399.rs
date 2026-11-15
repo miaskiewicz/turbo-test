@@ -12,7 +12,10 @@ fn util_types_aliases_match_node() {
         "jest.config.js",
         "module.exports = { testEnvironment: 'node' };\n",
     );
-    let fixture = p.file("util-types.test.cjs", include_str!("data/compat-084/util-types.cjs"));
+    let fixture = p.file(
+        "util-types.test.cjs",
+        include_str!("data/compat-084/util-types.cjs"),
+    );
     let node = std::process::Command::new("node")
         .arg("--test")
         .arg(fixture)
@@ -21,8 +24,9 @@ fn util_types_aliases_match_node() {
         .unwrap();
     assert!(
         node.status.success(),
-        "{}",
-        format!("{}\n{}", String::from_utf8_lossy(&node.stdout), String::from_utf8_lossy(&node.stderr))
+        "Node stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&node.stdout),
+        String::from_utf8_lossy(&node.stderr)
     );
     let run = turbo_test(&p.dir, &["--jobs", "1", "--reporter", "json"], &[]);
     let report = json_report(&run);
