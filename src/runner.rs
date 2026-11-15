@@ -9993,6 +9993,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__fs_existsSync", fs_exists_sync);
     bind_fn(scope, global, "__fs_readdir", fs_readdir);
     bind_fn(scope, global, "__fs_stat", fs_stat);
+    bind_fn(scope, global, "__fs_realpath", fs_realpath);
     bind_fn(scope, global, "__fs_readFile", fs_read_file);
     bind_fn(scope, global, "__fs_writeFile", fs_write_file);
     bind_fn(scope, global, "__fs_mkdir", fs_mkdir);
@@ -10604,6 +10605,21 @@ fn throw_fs_error_at(
         obj.set(scope, k.into(), v.into());
     }
     scope.throw_exception(err);
+}
+
+fn fs_realpath(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let path = args.get(0).to_rust_string_lossy(scope);
+    match crate::canon::canonicalize(&path) {
+        Ok(real) => {
+            let value = v8_str!(scope, &real.to_string_lossy());
+            rv.set(value.into());
+        }
+        Err(error) => throw_fs_error(scope, &error, "realpath", &path),
+    }
 }
 
 /// native fs.readFile(path, text): the file's contents (a string, else a Uint8Array); Node's
