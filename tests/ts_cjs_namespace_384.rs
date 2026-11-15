@@ -149,6 +149,8 @@ fn metadata_fallback_preserves_dynamic_namespaces_and_commonjs_cycles() {
     let p = fixture(false, false);
     p.file("tsconfig.json",r#"{"compilerOptions":{"module":"commonjs","esModuleInterop":false,"experimentalDecorators":true,"emitDecoratorMetadata":true}}"#);
     p.file("metadata.test.ts","function marker(target:any){return target;} @marker class Model {} test('metadata dynamic namespace',async()=>{const ns=await import('callable-package');expect(typeof ns).toBe('object');expect(ns.default).toBe(require('callable-package'));expect(new Model()).toBeInstanceOf(Model);});");
+    p.file("dep.ts", "export const value=()=>0;");
+    p.file("metadata-scope.test.ts", "import {value} from './dep'; const local=()=>42; jest.mock('./dep',()=>({value:()=>local()})); function marker(target:any){return target;} @marker class Model {} test('metadata factory scope',()=>{expect(value()).toBe(42);expect(new Model()).toBeInstanceOf(Model);});");
     let run = turbo_test(
         &p.dir,
         &[
@@ -158,10 +160,11 @@ fn metadata_fallback_preserves_dynamic_namespaces_and_commonjs_cycles() {
             "json",
             "check.test.ts",
             "metadata.test.ts",
+            "metadata-scope.test.ts",
         ],
         &[("TURBO_NATIVE_CJS", "0")],
     );
-    assert_eq!(json_report(&run)["numPassedTests"], 3, "{}", run.all());
+    assert_eq!(json_report(&run)["numPassedTests"], 4, "{}", run.all());
 }
 #[test]
 fn package_tsconfig_entries_match_the_project_typescript_oracle() {
