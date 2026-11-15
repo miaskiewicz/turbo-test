@@ -174,6 +174,7 @@ fn module_text(
         SourceRef::External
     };
     let ctx = LowerCtx {
+        ts_commonjs_no_interop: false,
         exports_obj: "__tt_exports".to_string(),
         resolve: Some(&resolve),
         // the bundle runs in the entry's wrapper: each module names its own path

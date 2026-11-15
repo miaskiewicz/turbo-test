@@ -2073,7 +2073,7 @@ fn shared_app_sources_are_capped_lru() {
         last_use,
         app,
     };
-    let k = |n: &str| (PathBuf::from(n), false);
+    let k = |n: &str| (PathBuf::from(n), false, false);
     m.insert(k("/nm/a"), entry(false, 0));
     m.insert(k("/app/old"), entry(true, 1));
     m.insert(k("/app/mid"), entry(true, 5));

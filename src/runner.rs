@@ -3125,6 +3125,9 @@ const fs = require('fs');
 const file = process.argv[2];
 const src = fs.readFileSync(0, 'utf8'); // the module's source (import.meta.glob expanded)
 const isTsx = file.endsWith('.tsx');
+const configFile = ts.findConfigFile(require('path').dirname(file), ts.sys.fileExists);
+const parsedConfig = configFile && ts.getParsedCommandLineOfConfigFile(configFile, {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic() {} });
+const projectInterop = parsedConfig && parsedConfig.options.esModuleInterop;
 // isolatedModules + emitDecoratorMetadata: a value import of a name used only as a type (an
 // interface) is kept for its `design:type` reference and then fails ESM linking (no such export).
 // TypeScript's own remedy (TS1272) is a namespace import: `ns.Shape` reads as undefined -> Object.
@@ -3213,7 +3216,7 @@ const out = ts.transpileModule(input, {
     target: ts.ScriptTarget.ES2021,
     experimentalDecorators: true,
     emitDecoratorMetadata: true,
-    esModuleInterop: true,
+    esModuleInterop: process.argv[3] === 'commonjs' ? projectInterop !== false : true,
     importHelpers: false,
     isolatedModules: true,
     jsx: isTsx ? ts.JsxEmit.ReactJSX : undefined,
@@ -3366,6 +3369,7 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
     // v7: ES-module namespaces without `__esModule`, `export *` of the namespace (turbo-test#133)
     // v8: export getters take runtime.js's jest setter (writable namespace exports under jest)
     "native-cjs-v8".hash(&mut h);
+    ts_commonjs_no_interop(file).hash(&mut h);
     // Legacy-decorator lowering happens inside esm_cjs::emit when the project enables
     // experimentalDecorators/emitDecoratorMetadata AND this file uses a decorator. Without it the
     // native emitter leaves `@Decorator` syntax intact (→ "Unexpected token 'export'") or lowers
@@ -3552,6 +3556,9 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     if let Some(c) = read_cached_cjs(&cache) {
         return Some(c);
     }
+    if ts_commonjs_no_interop(file) {
+        return ts_commonjs_transform(file, &root, &raw, &cache);
+    }
     if use_meta {
         if let Some(code) = esbuild_transform_cjs_meta(file, &root, &raw, &cache) {
             return Some(code);
@@ -3576,6 +3583,13 @@ fn esbuild_transform_cjs_plain(
     let tsconfig = find_tsconfig_up_to(file, root);
     let code = esbuild_cjs_run(file, root, &esbuild, raw, cache, cov, tsconfig)?;
     let code = finalize_esbuild_cjs(code, file, raw);
+    write_atomic(cache, &code);
+    Some(code)
+}
+
+fn ts_commonjs_transform(file: &Path, root: &Path, raw: &str, cache: &Path) -> Option<String> {
+    let cjs = tsc_transform_with_kind(file, root, "commonjs")?;
+    let code = finish_mr_cjs(postprocess_mr_cjs(cjs), raw);
     write_atomic(cache, &code);
     Some(code)
 }
@@ -3640,6 +3654,7 @@ fn mr_cjs_cache_path(file: &Path, root: &Path, raw: &str, use_meta: bool, cov: b
     // v8: __reExport's __toESMStar calls globalThis.__ttToESM (turbo-test#165)
     // v9: export getters take runtime.js's jest setter (writable namespace exports under jest)
     "mr-cjs-v9".hash(&mut h);
+    ts_commonjs_no_interop(file).hash(&mut h);
     // esbuild can't emit decorator metadata. By default we DON'T pay that cost — only when a
     // decorator file actually threw at load (Mongoose @Prop / Sequelize @Column read design:type
     // at class-definition) does the loader retry with `prefer_metadata`, routing it through the
@@ -3681,6 +3696,18 @@ fn decorator_cjs_via_tsc(file: &Path, root: &Path) -> Option<String> {
     } else {
         esbuild_format_cjs(root, &code)
     }
+}
+
+pub(crate) fn ts_commonjs_no_interop(file: &Path) -> bool {
+    if !matches!(
+        file.extension().and_then(|ext| ext.to_str()),
+        Some("ts" | "tsx" | "cts")
+    ) || !cjs_first_project(file)
+    {
+        return false;
+    }
+    nearest_tsconfig(file.parent().unwrap_or(Path::new(".")))
+        .is_some_and(|config| crate::ts_cjs_interop::enabled(&config))
 }
 
 fn decorator_tsc_module_kind(file: &Path) -> &'static str {
@@ -5716,8 +5743,8 @@ impl ModuleSource {
     }
 }
 
-/// (path, decorator-metadata mode)
-type SourceKey = (PathBuf, bool);
+/// (path, decorator-metadata mode, configured TypeScript CommonJS import policy)
+type SourceKey = (PathBuf, bool, bool);
 
 /// What identifies a version of a file: mtime and ctime in ns, size, inode, and for a file
 /// modified in the last 2 s (a coarse-mtime filesystem can give an edit the same mtime and size)
@@ -5901,7 +5928,11 @@ fn module_source_entries(abs: &Path) -> usize {
 fn module_source(abs: &Path, prefer_metadata: bool) -> Option<Arc<ModuleSource>> {
     static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let stamp = source_stamp(abs)?;
-    let key: SourceKey = (abs.to_path_buf(), prefer_metadata);
+    let key: SourceKey = (
+        abs.to_path_buf(),
+        prefer_metadata,
+        ts_commonjs_no_interop(abs),
+    );
     let map = shared_sources();
     let hit = |m: &mut HashMap<SourceKey, SharedSource>| {
         let e = m.get_mut(&key).filter(|e| e.stamp == stamp)?;

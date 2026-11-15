@@ -804,6 +804,7 @@ fn bundled(spec: &str) -> SourceRef {
 fn parts(js: &str) -> ModuleParts {
     let resolve = bundled;
     let ctx = LowerCtx {
+        ts_commonjs_no_interop: false,
         exports_obj: "m9_exports".into(),
         resolve: Some(&resolve),
         module_path: None,
@@ -974,6 +975,7 @@ fn transform_to_parts_flags_default_rewrite() {
 #[test]
 fn transform_to_parts_in_app_mode_keeps_everything_external() {
     let ctx = LowerCtx {
+        ts_commonjs_no_interop: false,
         exports_obj: "__tt_exports".into(),
         resolve: None,
         module_path: None,
@@ -997,6 +999,7 @@ fn transform_to_parts_in_app_mode_keeps_everything_external() {
 #[test]
 fn transform_to_parts_bails_on_parse_and_semantic_errors() {
     let ctx = LowerCtx {
+        ts_commonjs_no_interop: false,
         exports_obj: "__tt_exports".into(),
         resolve: None,
         module_path: None,
@@ -1024,6 +1027,7 @@ fn lower_raw(src: &str, stype: SourceType) -> Option<Vec<String>> {
         .semantic
         .into_scoping();
     let ctx = LowerCtx {
+        ts_commonjs_no_interop: false,
         exports_obj: "__tt_exports".into(),
         resolve: None,
         module_path: None,
