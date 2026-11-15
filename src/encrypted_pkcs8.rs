@@ -96,7 +96,8 @@ fn decrypt(der: &[u8], password: &[u8]) -> Result<Vec<u8>, String> {
 fn bytes(args: &v8::FunctionCallbackArguments, index: i32) -> Result<Zeroizing<Vec<u8>>, String> {
     let view = v8::Local::<v8::ArrayBufferView>::try_from(args.get(index))
         .map_err(|_| "PKCS8 inputs must be byte views")?;
-    if view.byte_length() > MAX_BYTES {
+    let maximum = if index == 1 { 1024 } else { MAX_BYTES };
+    if view.byte_length() > maximum {
         return Err("Encrypted PKCS8 input exceeds supported resource bounds".into());
     }
     let mut data = Zeroizing::new(vec![0; view.byte_length()]);
@@ -132,5 +133,13 @@ mod tests {
         assert!(super::bounds(1_000_001, &[0; 8]).is_err());
         assert!(super::bounds(1, &[0; 1025]).is_err());
         assert!(super::bounds(2048, &[0; 8]).is_ok());
+        assert!(super::derive_pkcs12(
+            "🔒",
+            &[0; 8],
+            1,
+            pkcs12::kdf::Pkcs12KeyType::EncryptionKey,
+            24
+        )
+        .is_err());
     }
 }
