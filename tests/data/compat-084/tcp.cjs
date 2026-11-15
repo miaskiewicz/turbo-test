@@ -104,3 +104,23 @@ testCase('TCP and TLS retain distinct constructors and stable module identities'
   assert.equal(net.createConnection, net.connect); assert.notEqual(tls.Server, net.Server);
   assert.equal(net.Server.prototype.isPrototypeOf(tls.Server.prototype), true);
 });
+testCase('TCP readiness progresses while user immediates keep rescheduling', async () => {
+  const payload = Buffer.from('ready alongside check phase'); let peer; let spinning = true; let immediate;
+  const spin = () => { if (spinning) immediate = setImmediate(spin); };
+  const server = net.createServer(socket => { peer = socket; socket.end(payload); });
+  await listening(server, '127.0.0.1'); const client = new net.Socket(); const chunks = [];
+  client.on('error', error => { throw error; }); client.on('data', bytes => chunks.push(bytes)); const done = closedSocket(client);
+  try { spin(); client.connect({ host: '127.0.0.1', port: server.address().port }); await done; assert.deepEqual(Buffer.concat(chunks), payload); }
+  finally { spinning = false; clearImmediate(immediate); client.destroy(); if (peer) peer.destroy(); await closedServer(server); }
+});
+testCase('TCP keepalive and no-delay options apply before and after connecting', async () => {
+  let peer; const server = net.createServer(socket => { peer = socket; socket.end('options'); });
+  await listening(server, '127.0.0.1'); const client = new net.Socket(); const chunks = [];
+  client.on('data', bytes => chunks.push(bytes)); client.on('error', error => { throw error; }); const done = closedSocket(client);
+  assert.equal(client.setKeepAlive(true, 1000), client); assert.equal(client.setNoDelay(false), client);
+  try {
+    await connected(client, { host: '127.0.0.1', port: server.address().port });
+    assert.equal(client.setKeepAlive(false), client); assert.equal(client.setKeepAlive(true, 2000), client);
+    await done; assert.equal(Buffer.concat(chunks).toString(), 'options');
+  } finally { client.destroy(); if (peer) peer.destroy(); await closedServer(server); }
+});
