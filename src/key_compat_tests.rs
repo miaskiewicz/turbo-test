@@ -76,3 +76,45 @@ fn a_valid_entropy_scalar_produces_the_corresponding_public_key() {
     };
     assert!(matches!(derive_public(&private), Ok(Output::Bytes(derived)) if derived==public));
 }
+
+#[test]
+fn entropy_failure_after_rejected_scalar_never_returns_a_fabricated_key() {
+    let mut attempts = 0;
+    let result = generate_with_entropy(|bytes| {
+        attempts += 1;
+        if attempts == 1 {
+            bytes.fill(0);
+            return Ok(());
+        }
+        Err("entropy source failed during rejection sampling".into())
+    });
+    assert!(
+        matches!(result, Err(message) if message == "entropy source failed during rejection sampling")
+    );
+    assert_eq!(attempts, 2);
+}
+
+#[test]
+fn zero_and_out_of_range_scalars_are_rejected_before_key_serialization() {
+    let mut attempts = 0;
+    let generated = generate_with_entropy(|bytes| {
+        attempts += 1;
+        match attempts {
+            1 => bytes.fill(0),
+            2 => bytes.fill(255),
+            _ => {
+                bytes.fill(0);
+                bytes[31] = 1;
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(attempts, 3);
+    let Output::Pair(private, public) = generated else {
+        panic!("expected real key pair");
+    };
+    let secret = SecretKey::from_pkcs8_der(&private).unwrap();
+    assert_eq!(secret.to_bytes()[31], 1);
+    assert_eq!(public_der(&secret.public_key()).unwrap(), public);
+}
