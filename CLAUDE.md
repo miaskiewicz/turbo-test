@@ -39,6 +39,11 @@ A release where these disagree is a bug. Bump both in the same commit.
   is the CI `coverage` gate. New code needs behaviour-asserting tests (happy path + edge
   cases) that keep every line covered; never add coverage-only no-op tests. The two
   remaining uncovered lines (each with its reason or open issue) are explained in tarpaulin.toml.
+- Dependency-only DOM/V8 repins do not require another full coverage run when runner
+  code is unchanged. Validate the fresh build, single-V8 graph, relevant runtime
+  regressions and app correctness instead. Keep earlier coverage/timing evidence tied
+  to its actual source revision. Rerun coverage for runner code changes or a specific
+  coverage-related concern; the 99.9% floor and CI/release requirements stay unchanged.
 - CI detection (snapshot update mode `none` on CI) is std-env's `isCI`: `src/ci.rs` over the
   provider table `src/ci_providers.json`. When vitest's std-env changes, re-check the table with
   `node scripts/check-ci-detection.mjs <dir with vitest installed>` (0 mismatches). The test

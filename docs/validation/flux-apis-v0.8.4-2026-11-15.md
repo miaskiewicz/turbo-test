@@ -337,3 +337,33 @@ these results, and these correctness runs make no performance claim.
 
 The consolidated frontend receipt is
 `${FLUX_VALIDATION_ROOT}/bench/latest/final-f1708af-four-app-correctness.json`.
+
+## Final upstream dependency repin
+
+Candidate `0961554516d6cbb67a6d8146258841440b4f44de` consumes turbo-dom release
+`af946ea0f8f8e0fe8d50b6470b33dbe2068393f6` and generated turbo-dom-v8
+`03839d09726f6e184d72ef83e7e73a1c2ef8d7f9`. The wrapper remains unpublished
+150.4.2 over the same official V8 150.4.0 engine/archive. The dependency graph
+contains one V8 crate.
+
+The optimized binary SHA-256 is
+`05ac74a580974ce4c1551c021059d608ac35cdab2887f5f584f25e7aa37b3420`.
+The unchanged 16-file Flux selection again passes **595/595**, with no failures
+or load errors. All four frontend suites also pass **36,200 tests with five
+existing skips** on this same binary and unchanged app inputs, including Payroll
+app commit `49da95242`. Native regressions pass 1,224/1,224; launcher checks pass
+90/90, DOM probes 52/52, and Vue oracle checks 5/5.
+
+Receipts:
+- `${FLUX_VALIDATION_ROOT}/flux-harness/results/pr-1196-0961554-dom-af946-16/`
+- `${FLUX_VALIDATION_ROOT}/bench/latest/final-0961554-four-app-correctness.json`
+
+Earlier failure batches remain the historical runs described above; they were
+not expanded during this repin. The accepted performance measurements remain
+associated with `f1708af` and its previous dependency pins. No new speed
+measurements or app CI checks were performed for this repin. Publication remains
+on hold.
+
+The completed repin coverage gate passed at **99.9053% (18,988/19,006 lines)**
+with the 99.9% floor unchanged and all 1,224 native tests passing. Strict Clippy,
+formatting, version consistency, and the single-V8 guard also passed.
