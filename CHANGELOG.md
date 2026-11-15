@@ -20,6 +20,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   external blocks and unmapped SFC coverage report explicit errors.
 
 ### Fixed
+- Import real password-protected PKCS#8 with PBES2/PBKDF2 and historical PKCS12
+  SHA-1/3DES, with bounded KDF work, Unicode controls and plaintext-key preservation (#368).
+- Initialize EventEmitter receiver state lazily and preserve enumerable prototype
+  mixins required by real offline Mongoose schema/document validation (#376).
 - Implement real SHA-1/SHA-256 HMAC and bounded PBKDF2-SHA1 with independent RFC
   known-answer tests, replacing the constant HMAC result (#359, #365).
 - Create real private temporary directories and copy actual file bytes through sync,
