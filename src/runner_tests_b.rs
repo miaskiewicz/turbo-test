@@ -1127,8 +1127,8 @@ fn actual_esm_cache_survives_mock_restoration_and_isolate_modules_snapshot() {
             v8::Local::new(scope, &restored).get_identity_hash(),
             original_hash
         );
-        let undefined = v8::undefined(scope);
-        let exports = v8::Global::<v8::Value>::new(scope, undefined);
+        let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
+        let exports = v8::Global::new(scope, undefined);
         REGISTRY.with(|r| {
             let mut registry = r.borrow_mut();
             registry.mocks.remove(&target);
