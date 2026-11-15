@@ -5877,6 +5877,17 @@ fn cjs_wrapper_open(abs: &Path) -> &'static str {
     }
 }
 
+/// Node strips a leading BOM and treats a file's hashbang as a comment before
+/// CommonJS wrapping. Keep its bytes/line count stable for source-map offsets.
+fn wrap_cjs_source(abs: &Path, source: &str) -> String {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let open = cjs_wrapper_open(abs);
+    match source.strip_prefix("#!") {
+        Some(rest) => format!("{open}//{rest}\n}})"),
+        None => format!("{open}{source}\n}})"),
+    }
+}
+
 /// Whether a module's transform depends only on its file, so its wrapped source can be shared:
 /// not the test file or a setup file (their factories get a binder, turbo-test#205; the test
 /// file's transform also feeds test locations), not an app module whose source map failure
@@ -5901,10 +5912,7 @@ fn module_source_for(abs: &Path, prefer_metadata: bool) -> Option<Arc<ModuleSour
         return module_source(abs, prefer_metadata);
     }
     let raw = read_transformed(abs, true, prefer_metadata)?;
-    Some(new_module_source(format!(
-        "{}{raw}\n}})",
-        cjs_wrapper_open(abs)
-    )))
+    Some(new_module_source(wrap_cjs_source(abs, &raw)))
 }
 
 /// An owned source (its text is copied into V8).
@@ -6004,7 +6012,7 @@ fn module_source(abs: &Path, prefer_metadata: bool) -> Option<Arc<ModuleSource>>
     }
     // transformed outside the lock (it can run esbuild); a racing thread's copy is dropped
     let raw = read_transformed(abs, true, prefer_metadata)?;
-    let wrapped = format!("{}{raw}\n}})", cjs_wrapper_open(abs));
+    let wrapped = wrap_cjs_source(abs, &raw);
     let mut map = map.lock().unwrap();
     if let Some(src) = hit(&mut map) {
         return Some(src);
@@ -6535,7 +6543,7 @@ fn esbuild_fallback_script(
     prefer_metadata: bool,
 ) -> Option<v8::Global<v8::Script>> {
     let src = esbuild_cjs_fallback(abs, prefer_metadata)?;
-    let wrapped_fb = format!("{}{src}\n}})", cjs_wrapper_open(abs));
+    let wrapped_fb = wrap_cjs_source(abs, &src);
     if wrapped_fb == module.wrapped {
         return None; // native wasn't the source (output identical) — no point retrying
     }
@@ -11003,7 +11011,7 @@ fn coverage_accumulate(json: &str) {
         // test file that covers it — rebuild the exact wrapper V8 compiled only on first encounter.
         if !crate::coverage::has_meta(abs) {
             if let Some(raw) = read_transformed(abs, true, false) {
-                let wrapped = format!("{}{raw}\n}})", cjs_wrapper_open(abs));
+                let wrapped = wrap_cjs_source(abs, &raw);
                 let orig = std::fs::read_to_string(abs).unwrap_or_default();
                 crate::coverage::register_meta(abs, &wrapped, &orig);
             } else {
