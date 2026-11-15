@@ -547,8 +547,14 @@ fn broken_stdin_aborts_queued_writes_and_end_with_separate_callback_errors() {
 
 #[test]
 fn broken_ipc_write_rejects_pending_send_and_disconnects() {
-    let (mut process, peer) = socket_process();
-    drop(peer);
+    let (mut process, _peer) = socket_process();
+    // Disable this endpoint's writer: peer close may remain writable through inherited aliases.
+    process
+        .channel
+        .as_ref()
+        .unwrap()
+        .shutdown(std::net::Shutdown::Write)
+        .unwrap();
     process.messages.push_back(queued(9));
     let mut events = Vec::new();
     process.write_ipc(&mut events);
