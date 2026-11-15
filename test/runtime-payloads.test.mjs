@@ -66,3 +66,10 @@ test('backend task resources use the internal constructor rather than a mutable 
  const answer=vm.runInContext("__nodeBuiltins.async_hooks.AsyncResource=class Replacement{constructor(){throw new Error('public resource replacement invoked');}};__runtimeTaskResource().runInAsyncScope(()=>42,null)",context);
  assert.equal(answer,42);
 });
+test('TCP internal resources ignore mutable async_hooks exports',()=>{
+ const context=commonContext();vm.runInContext(assembled('runtime_backend.js'),context,{timeout:3000});
+ const operations=[];
+ context.__ttTcp=(operation)=>{operations.push(operation);return JSON.stringify({value:operation==='listen'?{id:1,address:{address:'127.0.0.1',port:12345,family:'IPv4'}}:null});};
+ vm.runInContext(`(()=>{const hooks=__nodeBuiltins.async_hooks;const original=hooks.AsyncResource;try{hooks.AsyncResource=class Replacement{constructor(){throw new Error('public resource replacement invoked by TCP');}};const server=__nodeBuiltins.net.createServer();server.listen(0,'127.0.0.1');server.close();}finally{hooks.AsyncResource=original;}})()`,context);
+ assert.deepEqual(operations,['listen','close']);
+});
