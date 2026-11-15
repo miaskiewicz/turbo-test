@@ -197,9 +197,11 @@ fn prepare_ipc(command: &mut Command, enabled: bool) -> Result<Option<UnixStream
     if !enabled {
         return Ok(None);
     }
-    let (parent, child) = UnixStream::pair().map_err(io_failure)?;
+    let (parent_original, child_original) = UnixStream::pair().map_err(io_failure)?;
+    let parent = UnixStream::from(reserve_ipc_fd(parent_original.as_raw_fd()).map_err(io_failure)?);
+    let child = reserve_ipc_fd(child_original.as_raw_fd()).map_err(io_failure)?;
+    drop((parent_original, child_original));
     parent.set_nonblocking(true).map_err(io_failure)?;
-    let child = reserve_ipc_fd(child.as_raw_fd()).map_err(io_failure)?;
     command
         .env("NODE_CHANNEL_FD", "3")
         .env("NODE_CHANNEL_SERIALIZATION_MODE", "json");

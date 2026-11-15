@@ -172,7 +172,10 @@ fn exit_observation_retains_the_pid_until_owned_group_cleanup_and_reaping() {
 struct ProbePid(libc::pid_t);
 impl Drop for ProbePid {
     fn drop(&mut self) {
-        if self.0 > 0 {
+        if self.0 > 0
+            && !exited_unreaped(self.0 as u32)
+                .is_err_and(|error| error.raw_os_error() == Some(libc::ECHILD))
+        {
             unsafe {
                 libc::kill(self.0, libc::SIGKILL);
                 libc::waitpid(self.0, std::ptr::null_mut(), 0);
@@ -191,7 +194,7 @@ fn ipc_descriptor_reservation_survives_closed_standard_fds_in_an_isolated_fork()
     assert!(pid >= 0);
     if pid == 0 {
         unsafe {
-            libc::_exit(fd_probe_code(child.as_raw_fd()));
+            libc::_exit(fd_probe_code(parent.as_raw_fd(), child.as_raw_fd()));
         }
     }
 
@@ -205,34 +208,47 @@ fn ipc_descriptor_reservation_survives_closed_standard_fds_in_an_isolated_fork()
     assert_eq!(status, 0);
 }
 
-fn fd_probe_code(source: i32) -> i32 {
-    // Only descriptor syscalls and stack-only OwnedFd construction run between fork and _exit.
+fn fd_probe_code(parent_source: i32, child_source: i32) -> i32 {
+    // Only descriptor syscalls and stack-only OwnedFd construction run before _exit.
     unsafe {
         libc::close(0);
         libc::close(1);
         libc::close(2);
     }
-    if unsafe { libc::dup2(source, 0) } < 0 {
+    if unsafe { libc::dup2(parent_source, 0) } < 0 {
         return 20;
     }
-    let reserved = match reserve_ipc_fd(0) {
-        Ok(fd) => fd,
-        Err(_) => return 21,
-    };
-    if reserved.as_raw_fd() < 4 {
-        return 22;
+    if unsafe { libc::dup2(child_source, 1) } < 0 {
+        return 21;
     }
-    if unsafe { libc::dup2(reserved.as_raw_fd(), 3) } < 0 {
+    let (parent, child) = match reserve_probe_endpoints() {
+        Ok(pair) => pair,
+        Err(_) => return 22,
+    };
+    if parent.as_raw_fd() < 4 || child.as_raw_fd() < 4 {
         return 23;
     }
-    if unsafe { libc::fcntl(3, libc::F_SETFD, 0) } < 0 {
+    unsafe {
+        libc::close(0);
+        libc::close(1);
+    }
+    fd_probe_write(child.as_raw_fd())
+}
+fn reserve_probe_endpoints() -> std::io::Result<(OwnedFd, OwnedFd)> {
+    Ok((reserve_ipc_fd(0)?, reserve_ipc_fd(1)?))
+}
+fn fd_probe_write(source: i32) -> i32 {
+    if unsafe { libc::dup2(source, 3) } < 0 {
         return 24;
+    }
+    if unsafe { libc::fcntl(3, libc::F_SETFD, 0) } < 0 {
+        return 25;
     }
     let count = unsafe { libc::write(3, b"ready".as_ptr().cast(), 5) };
     if count == 5 {
         0
     } else {
-        25
+        26
     }
 }
 
