@@ -75,3 +75,26 @@ fn explicit_null_clears_inherited_compiler_options() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn esbuild_static_wrapper_removal_preserves_dynamic_code_and_offsets() {
+    let code = "var ns = __toESM(require('pkg'));\nvar dynamic = Promise.resolve().then(() => __toESM(require('pkg')));\nfunction nested() { var ns = __toESM(require('pkg')); }\n".to_owned();
+    let output = static_requires(code.clone());
+    assert_eq!(output.len(), code.len());
+    assert_eq!(output.lines().count(), code.lines().count());
+    assert!(!output.lines().next().unwrap().contains("__toESM"));
+    assert!(output
+        .lines()
+        .nth(1)
+        .unwrap()
+        .contains("__toESM(require('pkg'))"));
+    assert!(output
+        .lines()
+        .nth(2)
+        .unwrap()
+        .contains("__toESM(require('pkg'))"));
+    assert_eq!(
+        static_requires("var ns = __toESM(other());".into()),
+        "var ns = __toESM(other());"
+    );
+}

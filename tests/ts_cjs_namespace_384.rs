@@ -199,3 +199,52 @@ fn package_tsconfig_entries_match_the_project_typescript_oracle() {
         assert_eq!(json_report(&run)["numPassedTests"], 2, "{}", run.all());
     }
 }
+
+#[test]
+fn coverage_fallback_keeps_dynamic_namespaces_and_mock_factory_scope() {
+    let p = fixture(false, false);
+    p.file("dep.ts", "export const value=()=>0;");
+    p.file("coverage.test.ts","import {value} from './dep'; const local=()=>42; jest.mock('./dep',()=>({value:()=>local()})); test('coverage dynamic and scope',async()=>{const ns=await import('callable-package');expect(typeof ns).toBe('object');expect(ns.default).toBe(require('callable-package'));expect(value()).toBe(42);});");
+    let run = turbo_test(
+        &p.dir,
+        &[
+            "--jobs",
+            "1",
+            "--coverage",
+            "--reporter",
+            "json",
+            "coverage.test.ts",
+        ],
+        &[("TURBO_NATIVE_CJS", "0")],
+    );
+    assert_eq!(json_report(&run)["numPassedTests"], 1, "{}", run.all());
+}
+#[test]
+fn typescript_null_options_reset_inherited_values_instead_of_inheriting_them() {
+    let p = fixture(false, false);
+    p.file(
+        "base.json",
+        r#"{"compilerOptions":{"module":"commonjs","esModuleInterop":false}}"#,
+    );
+    let oracle="const ts=require('typescript');const config=ts.getParsedCommandLineOfConfigFile('tsconfig.json',{}, {...ts.sys,onUnRecoverableConfigFileDiagnostic(){}});console.log(JSON.stringify({module:config.options.module??null,interop:config.options.esModuleInterop??null}));";
+    for (field, expected) in [
+        ("esModuleInterop", r#"{"module":1,"interop":null}"#),
+        ("module", r#"{"module":null,"interop":false}"#),
+    ] {
+        p.file(
+            "tsconfig.json",
+            &format!(r#"{{"extends":"./base.json","compilerOptions":{{"{field}":null}}}}"#),
+        );
+        let node = std::process::Command::new("node")
+            .args(["-e", oracle])
+            .current_dir(&p.dir)
+            .output()
+            .unwrap();
+        assert!(
+            node.status.success(),
+            "{}",
+            String::from_utf8_lossy(&node.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&node.stdout).trim(), expected);
+    }
+}
