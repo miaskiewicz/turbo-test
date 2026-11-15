@@ -8,6 +8,17 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 ## [0.8.4] — Unreleased candidate — Node compatibility and shared DOM performance
 
 ### Added
+- Exchange real loopback bytes through `net.Socket` / `net.Server` (#363), including
+  ephemeral ports, Duplex backpressure, half-close, idle timeouts and ref/unref.
+  Native TCP handles are separate from HTTP; Unix uses nonblocking readiness polling.
+  Writes are limited to 32 MiB. Hostname resolution, Unix socket paths and custom
+  lookup/local-bind options report explicit errors; full MongoDB compatibility is not implied.
+- Observe actual V8 Promise init/before/after/resolve events through enabled
+  `async_hooks` (#372), with real resource/trigger identifiers for runner timers,
+  nextTicks and manual AsyncResources. Hook dispatch is recursion-guarded and
+  Promise destruction is GC-driven, not fabricated at resolution. Native hooks and
+  scheduler wrappers are absent by default and removed on last disable/file reset;
+  AsyncLocalStorage continues to use V8 continuation frames independently.
 - Run real asynchronous Unix child processes and Node `fork` JSON IPC, with native
   pipe backpressure, owned process-group cleanup and active-only polling (#371).
   Unsupported platforms, handle transfer and advanced serialization fail explicitly.
@@ -23,6 +34,20 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   external blocks and unmapped SFC coverage report explicit errors.
 
 ### Fixed
+- Cancel or replace HTTP request idle deadlines, disable them with zero, refresh
+  them on actual I/O and clear them on completion/destruction (#377).
+- Remove pipe-owned listeners after completion, `end:false` and destination errors,
+  preserving application listeners and error-handler ordering (#378).
+- Give simultaneous child-process, TCP and HTTP work fair event-loop turns without
+  starving deadline timers or running stale deadlines after completion (#379).
+- Release undeliverable MessagePort task ownership at reused-file reset without
+  firing old listeners (#380), while retaining deliverable queued receivers (#374).
+- Bound synchronous PBKDF2-SHA1 to 1,000,000 block-rounds
+  (`iterations × ceil(keyLength / 20)`) and reject excessive work before derivation (#381).
+- Let synchronous native child waits observe host-owned VM-watchdog and heap-guard
+  cancellation, terminate/reap their owned process groups and avoid ordinary spawn
+  results after cancellation (#382). This does not make arbitrary external V8
+  termination requests independently observable inside native callbacks.
 - Import real password-protected PKCS#8 with PBES2/PBKDF2 and historical PKCS12
   SHA-1/3DES, with bounded KDF work, Unicode controls and plaintext-key preservation (#368).
 - Initialize EventEmitter receiver state lazily and preserve enumerable prototype
@@ -45,8 +70,8 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - Export a callable `stream.Stream` with named/default identity and legacy inheritance;
   legacy pipes clean up listeners and complete once (#352).
 - Expose shared HTTP request/response socket identity, connection state and close events,
-  and apply TCP_NODELAY to real native connections. General raw TCP stream I/O remains
-  outside this HTTP-only surface.
+  and apply TCP_NODELAY to real native connections. HTTP keeps its one-request-per-connection
+  transport; raw TCP is provided separately through `net.Socket` / `net.Server`.
 - Expose a distinct `tls.Server` constructor so plain-HTTP clients can check server
   types without failing during module loading. TLS server construction and
   `tls.createServer` report `ERR_TLS_UNSUPPORTED_SERVER`; no TLS transport is implied.
@@ -78,8 +103,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - Forward bytes through in-memory Node streams and wait for write/final callbacks
   before callback or promise pipeline completion (#319, #334). Expose both
   `stream/promises` aliases, propagate failures and observe `finished` lifecycle.
-  Operating-system stream integration remains separate work.
-
+  This does not imply support for every Node operating-system stream API.
 
 - Generate real P-256 signing keys from OS entropy, export/import PKCS#8/SPKI PEM or
   DER, and sign/verify SHA-256 ECDSA with usable KeyObjects (#318).
@@ -92,8 +116,8 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   peer relationships and receiver async context while detaching the old handle (#327).
 - Exchange real loopback HTTP/1 bytes and run synchronous child processes with actual
   output, status, errors and bounded cleanup (#321). Socket readiness keeps the event
-  loop alive for external peers. HTTPS, persistent/custom-agent HTTP and asynchronous
-  child-process APIs fail explicitly rather than reporting placeholder success.
+  loop alive for external peers. HTTPS, persistent/custom-agent HTTP and callback
+  `exec`/`execFile` remain unsupported; Unix async child pipes and fork IPC are described above.
 
 - Implement real AES-256-GCM encryption/decryption for 12-byte IVs and 12–16 byte
   authentication tags (#350), including incremental updates, AAD, output encodings,
@@ -106,13 +130,6 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   metadata, warning listeners bound to the existing process object and default stderr
   output. Mongoose can issue its unmodified Jest warning without an unsupported API;
   reused files do not inherit previous files' warning listeners.
-
-- Observe actual V8 Promise init/before/after/resolve events through enabled
-  `async_hooks` (#372), with real resource/trigger identifiers for runner timers,
-  nextTicks and manual AsyncResources. Hook dispatch is recursion-guarded and
-  Promise destruction is GC-driven, not fabricated at resolution. Native hooks and
-  scheduler wrappers are absent by default and removed on last disable/file reset;
-  AsyncLocalStorage continues to use V8 continuation frames independently.
 
 ### Tests
 - Add Node controls and native runner regressions for the compatibility fixes,
@@ -127,7 +144,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ### Release preparation
 - Align the Rust and npm package versions at 0.8.4. The release branch uses an exact
-  pre-publication turbo-dom source pin (`26272a83e8f8c1f335d9c615c942674b1de8ec1a`)
+  pre-publication turbo-dom source pin (`7f1b70e1192a237b7c9fee27989ffeba27b4eb7d`)
   for reproducible validation; remove it only
   after compatible 0.8.4 crates are published, before tagging this runner release.
 
