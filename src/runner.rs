@@ -12186,6 +12186,7 @@ fn pace_tcp_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         1.0
     };
     crate::tcp_compat::wait_for_io(std::time::Duration::from_secs_f64(millis / 1000.0));
+    call_global_bool(scope, global, "__ttTcpPump");
 }
 
 /// Convert the final promise state into the `run_event_loop` result: `Ok(())` on fulfilled, a

@@ -33,13 +33,17 @@ function __tcpPreparePoll() {
   return true;
 }
 globalThis.__ttTcpPreparePoll = __tcpPreparePoll;
+// Readiness is a poll phase, so recursively queued immediates cannot starve socket events.
+globalThis.__ttTcpPump = () => { __tcpStopPoll(); __tcpPoll(); return true; };
 function __tcpPoll() {
   __tcpPollTimer = null;
   for (const event of __tcpNative('poll')) __tcpEvent(event);
+  for (const socket of __tcpSockets.values()) socket._tcpCheckTimeout();
   __tcpPreparePoll();
 }
 function __tcpReference(handle, enabled) {
   handle._tcpRef = enabled;
+  if (handle instanceof __TcpSocket) handle._tcpReferenceTimeout();
   if (handle._tcpId !== null) __tcpNative('ref', { id: handle._tcpId, enabled });
   __tcpPreparePoll(); return handle;
 }
@@ -75,6 +79,11 @@ function __tcpValidateOptions(options) {
   const unsupported = ['path', 'fd', 'lookup', 'localAddress', 'localPort', 'onread', 'signal', 'reusePort', 'exclusive', 'backlog'];
   for (const key of unsupported) if (options[key] !== undefined) throw __streamError('ERR_TCP_UNSUPPORTED_OPTION', `TCP option ${key} is unsupported`);
 }
+function __tcpKeepAliveDelay(value) {
+  const delay = Number(value);
+  if (!Number.isInteger(delay) || delay < 0 || delay > 4294967295) throw __streamError('ERR_OUT_OF_RANGE', 'TCP keepalive delay must be an unsigned 32-bit integer');
+  return delay;
+}
 function __tcpSocketOptions(options) {
   __tcpValidateOptions(options);
   if (options.objectMode || options.readableObjectMode || options.writableObjectMode) throw __streamError('ERR_INVALID_ARG_VALUE', 'TCP sockets carry bytes');
@@ -84,11 +93,12 @@ class __TcpSocket extends __Duplex {
   constructor(options = {}) {
     super(__tcpSocketOptions(options));
     this._tcpId = null; this._tcpRef = true; this._tcpWrite = null; this._tcpFinal = null;
-    this._tcpNoDelay = null; this._tcpNativeClosed = false; this._tcpTimeout = 0; this._tcpTimeoutId = null;
+    this._tcpNoDelay = options.noDelay === undefined ? null : Boolean(options.noDelay); this._tcpKeepAlive = null; this._tcpNativeClosed = false; this._tcpTimeout = 0; this._tcpTimeoutId = null; this._tcpTimeoutDue = null;
     this.connecting = false; this.pending = true; this.allowHalfOpen = Boolean(options.allowHalfOpen);
     this.bytesRead = 0; this.bytesWritten = 0;
     this.on('end', () => __tcpLater(() => { if (!this.allowHalfOpen && !this.writableEnded) this.end(); }));
     this.on('close', () => { this._tcpClearTimeout(); __tcpOwnedSockets.delete(this); __tcpDestroyResource(this); });
+    if (options.keepAlive !== undefined) this.setKeepAlive(options.keepAlive, options.keepAliveInitialDelay); 
   }
   emit(event, ...args) {
     if (event === 'close') args = [Boolean(this.errored)];
@@ -108,6 +118,7 @@ class __TcpSocket extends __Duplex {
     this._tcpId = id; __tcpSockets.set(id, this); __tcpOwnedSockets.add(this);
     if (!this._tcpRef) __tcpNative('ref', { id, enabled: false });
     if (this._tcpNoDelay !== null) __tcpNative('setNoDelay', { id, enabled: this._tcpNoDelay });
+    if (this._tcpKeepAlive) __tcpNative('setKeepAlive', { id, ...this._tcpKeepAlive });
     __tcpPreparePoll();
   }
   _tcpEvent(event) {
@@ -158,7 +169,12 @@ class __TcpSocket extends __Duplex {
     if (this._tcpId !== null && !this._tcpNativeClosed) __tcpNative('setNoDelay', { id: this._tcpId, enabled: this._tcpNoDelay });
     return this;
   }
-  setKeepAlive() { throw __streamError('ERR_TCP_UNSUPPORTED_OPTION', 'TCP keepalive options are unsupported'); }
+  setKeepAlive(enabled = false, initialDelay = 0) {
+    const delay = __tcpKeepAliveDelay(initialDelay);
+    this._tcpKeepAlive = { enabled: Boolean(enabled), delay };
+    if (this._tcpId !== null && !this._tcpNativeClosed) __tcpNative('setKeepAlive', { id: this._tcpId, ...this._tcpKeepAlive });
+    return this;
+  }
   setTimeout(timeout, callback) {
     const value = Number(timeout);
     if (!Number.isFinite(value) || value < 0) throw __streamError('ERR_OUT_OF_RANGE', 'TCP timeout must be a nonnegative number');
@@ -169,8 +185,16 @@ class __TcpSocket extends __Duplex {
     this._tcpTimeoutId = null;
   }
   _tcpActivity() {
+    this._tcpTimeoutDue = this._tcpTimeout > 0 ? __loop.now + this._tcpTimeout : null;
+    this._tcpReferenceTimeout();
+  }
+  _tcpReferenceTimeout() {
     this._tcpClearTimeout();
-    if (this._tcpTimeout > 0 && !this.destroyed) this._tcpTimeoutId = __realTimers.setTimeout(() => { this._tcpTimeoutId = null; this.emit('timeout'); }, this._tcpTimeout);
+    if (this._tcpRef && this._tcpTimeoutDue !== null && !this.destroyed) this._tcpTimeoutId = __realTimers.setTimeout(() => this._tcpCheckTimeout(), Math.max(0, this._tcpTimeoutDue - __loop.now));
+  }
+  _tcpCheckTimeout() {
+    if (this._tcpTimeoutDue === null || __loop.now < this._tcpTimeoutDue) return;
+    this._tcpClearTimeout(); this._tcpTimeoutDue = null; this.emit('timeout');
   }
   ref() { return __tcpReference(this, true); }
   unref() { return __tcpReference(this, false); }

@@ -265,6 +265,12 @@ impl Transport {
             .map_err(io_error)?;
         Ok(Value::Null)
     }
+    fn keepalive(&mut self, args: &Value) -> Result<Value> {
+        let enabled = flag(args, "enabled")?;
+        let delay = u32::try_from(number(args, "delay")?).map_err(|_| invalid())?;
+        set_keepalive(&self.connection(args)?.socket, enabled, delay)?;
+        Ok(Value::Null)
+    }
     fn reference(&mut self, args: &Value) -> Result<Value> {
         let id = number(args, "id")?;
         let enabled = flag(args, "enabled")?;
@@ -350,6 +356,7 @@ const OPERATIONS: &[(&str, Operation)] = &[
     ("end", Transport::end),
     ("pause", Transport::pause),
     ("setNoDelay", Transport::nodelay),
+    ("setKeepAlive", Transport::keepalive),
     ("ref", Transport::reference),
     ("close", Transport::close),
     ("poll", Transport::poll),
@@ -455,8 +462,74 @@ pub fn wait_for_io(timeout: Duration) {
 }
 
 #[cfg(unix)]
+fn socket_option(
+    socket: &TcpStream,
+    level: libc::c_int,
+    name: libc::c_int,
+    value: libc::c_int,
+) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    // The descriptor and integer option remain owned and live throughout setsockopt.
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            level,
+            name,
+            (&value as *const libc::c_int).cast(),
+            std::mem::size_of_val(&value) as _,
+        )
+    };
+    if result < 0 {
+        return Err(io_error(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+#[cfg(unix)]
+fn set_keepalive(socket: &TcpStream, enabled: bool, delay: u32) -> Result<()> {
+    socket_option(
+        socket,
+        libc::SOL_SOCKET,
+        libc::SO_KEEPALIVE,
+        i32::from(enabled),
+    )?;
+    if enabled && delay > 0 {
+        keepalive_delay(socket, (delay / 1000).max(1) as i32)?;
+    }
+    Ok(())
+}
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn keepalive_delay(socket: &TcpStream, seconds: i32) -> Result<()> {
+    socket_option(socket, libc::IPPROTO_TCP, libc::TCP_KEEPALIVE, seconds)
+}
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+fn keepalive_delay(socket: &TcpStream, seconds: i32) -> Result<()> {
+    socket_option(socket, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, seconds)
+}
+#[cfg(not(unix))]
+fn set_keepalive(_: &TcpStream, _: bool, _: u32) -> Result<()> {
+    Err(fail(
+        "ERR_TCP_UNSUPPORTED_OPTION",
+        "TCP keepalive is unsupported on this target",
+    ))
+}
+
+#[cfg(unix)]
 fn connect_socket(address: SocketAddr) -> Result<TcpStream> {
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::fd::AsRawFd;
+    let socket = connecting_socket(address)?;
+    let result = raw_connect(socket.as_raw_fd(), address);
+    if result == 0 {
+        return Ok(socket);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EINPROGRESS) || retryable(&error) {
+        return Ok(socket);
+    }
+    Err(io_error(error))
+}
+#[cfg(unix)]
+fn connecting_socket(address: SocketAddr) -> Result<TcpStream> {
+    use std::os::fd::FromRawFd;
     let family = if address.is_ipv4() {
         libc::AF_INET
     } else {
@@ -468,16 +541,12 @@ fn connect_socket(address: SocketAddr) -> Result<TcpStream> {
         return Err(io_error(std::io::Error::last_os_error()));
     }
     let socket = unsafe { TcpStream::from_raw_fd(fd) };
+    // Child-process compatibility must never inherit raw TCP handles across exec.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(io_error(std::io::Error::last_os_error()));
+    }
     socket.set_nonblocking(true).map_err(io_error)?;
-    let result = raw_connect(socket.as_raw_fd(), address);
-    if result == 0 {
-        return Ok(socket);
-    }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::EINPROGRESS) || retryable(&error) {
-        return Ok(socket);
-    }
-    Err(io_error(error))
+    Ok(socket)
 }
 #[cfg(unix)]
 fn raw_connect(fd: libc::c_int, address: SocketAddr) -> libc::c_int {
@@ -607,6 +676,29 @@ mod tests {
             let mut table = Transport::default();
             let (server, client, peer) = pair(&mut table, host);
             assert!(table.referenced());
+            use std::os::fd::AsRawFd;
+            let flags = unsafe {
+                libc::fcntl(table.connections[&client].socket.as_raw_fd(), libc::F_GETFD)
+            };
+            assert_ne!(flags & libc::FD_CLOEXEC, 0);
+            for enabled in [false, true] {
+                table
+                    .keepalive(&json!({"id":client,"enabled":enabled,"delay":2000}))
+                    .unwrap();
+                let mut value: libc::c_int = -1;
+                let mut length = std::mem::size_of_val(&value) as libc::socklen_t;
+                let result = unsafe {
+                    libc::getsockopt(
+                        table.connections[&client].socket.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_KEEPALIVE,
+                        (&mut value as *mut libc::c_int).cast(),
+                        &mut length,
+                    )
+                };
+                assert_eq!(result, 0);
+                assert_eq!(value != 0, enabled);
+            }
             for enabled in [false, true] {
                 table
                     .nodelay(&json!({"id":client,"enabled":enabled}))
