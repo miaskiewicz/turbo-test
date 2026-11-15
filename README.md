@@ -65,6 +65,15 @@ The DOM is on for `jsdom` / `happy-dom` / `turbo-dom` environments (and any file
 `// @vitest-environment jsdom` pragma); `environment: 'node'` files get clean globals, as in
 vitest. There is no environment package to install — the DOM is linked into the binary.
 
+The selected environment also controls runtime initialization. Node tests load backend
+implementations such as TCP, child processes, async hooks, and asymmetric cryptography;
+DOM tests load the browser environment without those implementations or native callbacks.
+Shared helpers include Buffer, timers, in-memory streams, fixture file access, and basic
+hashing/HMAC. Calling a backend-only capability in a DOM test reports
+`ERR_TURBO_BACKEND_CAPABILITY`; select a Node environment for that test. A worker that
+changes between Node and DOM creates a fresh isolate, including under `--no-isolate`,
+while consecutive files in the same environment retain the configured reuse behavior.
+
 ### Switches
 
 turbo-test has no Cargo feature flags; behaviour switches are environment variables:
