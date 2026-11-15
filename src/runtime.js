@@ -2236,6 +2236,7 @@ if (typeof globalThis.DOMPoint === 'undefined') {
   globalThis.DOMPoint = DOMPoint;
   globalThis.DOMPointReadOnly = DOMPoint;
 }
+/* __TT_NODE_BUFFER_BYTE_LENGTH__ */
 if (typeof globalThis.Buffer === 'undefined') {
   class Buffer extends Uint8Array {
     static #fromHex(d) {
@@ -2259,6 +2260,7 @@ if (typeof globalThis.Buffer === 'undefined') {
     }
     static alloc(n, fill) { const b = new Buffer(n); if (fill != null) b.fill(typeof fill === 'string' ? fill.charCodeAt(0) : fill); return b; }
     static allocUnsafe(n) { return new Buffer(n); }
+    static byteLength(value, encoding) { return __bufferByteLength(value, encoding); }
     static isBuffer(x) { return x instanceof Buffer; }
     static concat(list) { const len = list.reduce((n, b) => n + b.length, 0); const out = new Buffer(len); let o = 0; for (const b of list) { out.set(b, o); o += b.length; } return out; }
     static #readUInt32Offset(bytes, offset) {

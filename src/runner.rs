@@ -9649,6 +9649,10 @@ fn framework_prelude(scope: &mut v8::PinScope) {
             .unwrap_or_else(|| chai_missing("chai failed to load"));
     }
     let runtime = RUNTIME_JS
+        .replace(
+            "/* __TT_NODE_BUFFER_BYTE_LENGTH__ */",
+            include_str!("node_buffer_byte_length.js"),
+        )
         .replace("/* __TT_NODE_STREAMS__ */", include_str!("node_streams.js"))
         .replace(
             "/* __TT_NODE_ASYNC_HOOKS__ */",
