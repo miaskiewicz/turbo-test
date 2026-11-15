@@ -153,7 +153,13 @@ fn nearest_config_environment_stops_before_parent_framework_configs() {
     .unwrap();
     assert_eq!(configured_environment(&entry).as_deref(), Some("happy-dom"));
     std::fs::write(child.join("jest.config.js"), "module.exports={};").unwrap();
-    assert_eq!(configured_environment(&entry), None);
+    assert_eq!(configured_environment(&entry).as_deref(), Some("node"));
+    std::fs::write(
+        child.join("jest.config.js"),
+        "module.exports={testEnvironment:'jest-environment-node'};",
+    )
+    .unwrap();
+    assert_eq!(configured_environment(&entry).as_deref(), Some("node"));
     std::fs::write(
         child.join("vitest.config.js"),
         "export default {test:{environment:'jsdom'}};",

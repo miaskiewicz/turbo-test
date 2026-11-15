@@ -1202,7 +1202,8 @@ fn plan_isolate_environment_and_root_flags() {
         vec![
             ("TURBO_ROOT", t.p("proj")),
             ("TURBO_REUSE_ISOLATE", "1".to_string()),
-            ("TURBO_ENV", "jsdom".to_string())
+            ("TURBO_ENV", "jsdom".to_string()),
+            ("TURBO_ENV_FROM_CONFIG", "1".to_string())
         ]
     );
     assert_eq!(argv(&p), args(&["--testTimeout", "1234", a]));
@@ -1222,7 +1223,8 @@ fn plan_isolate_environment_and_root_flags() {
         p.env,
         vec![
             ("TURBO_NO_REUSE", "1".to_string()),
-            ("TURBO_ENV", "happy-dom".to_string())
+            ("TURBO_ENV", "happy-dom".to_string()),
+            ("TURBO_ENV_FROM_CONFIG", "0".to_string())
         ]
     );
     assert_eq!(argv(&p), args(&["--testTimeout", "9", a]));
@@ -1536,5 +1538,29 @@ fn explicit_known_jest_configs_preserve_the_default_node_environment() {
             "TURBO_ENV"
         ),
         None
+    );
+}
+
+#[test]
+fn auto_environment_is_file_scoped_but_cli_and_forced_config_are_authoritative() {
+    let t = Tmp::new("environment-origin");
+    t.file(
+        "vitest.config.js",
+        "export default {test:{environment:'jsdom'}};",
+    );
+    t.file(
+        "api/jest.config.js",
+        "module.exports={testEnvironment:'node'};",
+    );
+    t.file("api/check.test.ts", T);
+    let implicit = run_plan(&t, &["api/check.test.ts"]);
+    assert_eq!(env_of(&implicit, "TURBO_ENV_FROM_CONFIG"), Some("1"));
+    let explicit = run_plan(&t, &["--environment=happy-dom", "api/check.test.ts"]);
+    assert_eq!(env_of(&explicit, "TURBO_ENV_FROM_CONFIG"), Some("0"));
+    let forced = run_plan(&t, &["--config=vitest.config.js", "api/check.test.ts"]);
+    assert_eq!(env_of(&forced, "TURBO_ENV_FROM_CONFIG"), Some("0"));
+    assert_eq!(
+        project_environment(&t.0.join("api"), None).as_deref(),
+        Some("node")
     );
 }
