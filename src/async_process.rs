@@ -76,3 +76,7 @@ fn parse_operation(name: &str, encoded: &str) -> Value {
         Err(error) => json!({"error":{"code":"ERR_INVALID_ARG_VALUE","message":error.to_string()}}),
     }
 }
+
+#[cfg(test)]
+#[path = "async_process_tests.rs"]
+mod tests;

@@ -169,6 +169,12 @@ fn reserve_ipc_fd(fd: i32) -> std::io::Result<OwnedFd> {
     }
     Ok(unsafe { OwnedFd::from_raw_fd(reserved) })
 }
+fn inherit_ipc_fd(fd: i32) -> std::io::Result<()> {
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
 fn waitid_nowait(pid: u32, info: &mut libc::siginfo_t) -> std::io::Result<()> {
     loop {
         let result = unsafe {
@@ -215,14 +221,9 @@ fn prepare_ipc(command: &mut Command, enabled: bool) -> Result<Option<UnixStream
     command
         .env("NODE_CHANNEL_FD", child.as_raw_fd().to_string())
         .env("NODE_CHANNEL_SERIALIZATION_MODE", "json");
+    // Never overwrite Command's internal error pipe, which may occupy fd 3.
     unsafe {
-        command.pre_exec(move || {
-            // Never overwrite Command's internal error pipe, which may occupy fd 3.
-            if libc::fcntl(child.as_raw_fd(), libc::F_SETFD, 0) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+        command.pre_exec(move || inherit_ipc_fd(child.as_raw_fd()));
     }
     Ok(Some(parent))
 }
@@ -429,7 +430,16 @@ impl Process {
             return;
         };
         let mut bytes = [0; CHUNK];
-        match channel.read(&mut bytes) {
+        let result = channel.read(&mut bytes);
+        self.receive_ipc(result, &bytes, events);
+    }
+    fn receive_ipc(
+        &mut self,
+        result: std::io::Result<usize>,
+        bytes: &[u8],
+        events: &mut Vec<Value>,
+    ) {
+        match result {
             Ok(0) => self.ipc_eof = true,
             Ok(count) => self.ipc_bytes.extend_from_slice(&bytes[..count]),
             Err(error) if retry(&error) => {}

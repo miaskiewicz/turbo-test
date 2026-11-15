@@ -9,8 +9,12 @@ fn native_requests_preserve_conversion_exceptions_and_reject_invalid_and_oversiz
     let scope = &mut v8::ContextScope::new(scope, context);
     let key = v8::String::new(scope, "processNative").unwrap();
     let function = v8::Function::new(scope, native_async_process).unwrap();
-    context.global(scope).set(scope,key.into(),function.into());
-    let source=v8::String::new(scope,r#"(() => {
+    context
+        .global(scope)
+        .set(scope, key.into(), function.into());
+    let source = v8::String::new(
+        scope,
+        r#"(() => {
         const sentinel = new Error('conversion');
         const bad = {toString() {throw sentinel}};
         let caught=0;
@@ -20,8 +24,13 @@ fn native_requests_preserve_conversion_exceptions_and_reject_invalid_and_oversiz
         return caught===2 && code('poll','{')==='ERR_INVALID_ARG_VALUE' &&
           code('x'.repeat(33),'{}')==='ENOBUFS' &&
           code('poll',' '.repeat(2097153))==='ENOBUFS';
-    })()"#).unwrap();
-    let result=v8::Script::compile(scope,source,None).unwrap().run(scope).unwrap();
+    })()"#,
+    )
+    .unwrap();
+    let result = v8::Script::compile(scope, source, None)
+        .unwrap()
+        .run(scope)
+        .unwrap();
     assert!(result.is_true());
 }
 
@@ -30,11 +39,11 @@ fn native_requests_preserve_conversion_exceptions_and_reject_invalid_and_oversiz
 fn descriptor_wrapper_exposes_the_active_native_pipe_set() {
     reset();
     assert!(descriptors().is_empty());
-    let args=json!({"file":"/bin/cat","args":[],"env":{},"stdio":["pipe","pipe","ignore"]});
-    let result=operation("spawn",&args);
+    let args = json!({"file":"/bin/cat","args":[],"env":{},"stdio":["pipe","pipe","ignore"]});
+    let result = operation("spawn", &args);
     assert!(result["value"]["pid"].is_number());
-    let descriptors=descriptors();
-    assert_eq!(descriptors.len(),1);
+    let descriptors = descriptors();
+    assert_eq!(descriptors.len(), 1);
     assert!(descriptors[0].events & libc::POLLIN != 0);
     reset();
 }
