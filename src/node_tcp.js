@@ -212,7 +212,12 @@ function __tcpData(socket, event) {
   const bytes = Buffer.from(event.data, 'base64'); socket.bytesRead += bytes.length; socket._tcpActivity();
   if (!socket.push(bytes)) socket._tcpPause(true);
 }
-function __tcpEnd(socket) { socket.push(null); }
+function __tcpEnd(socket) {
+  socket.push(null);
+  // Native EOF must complete an empty readable side even when it never flowed.
+  // Keep paused buffered bytes intact until the application consumes them.
+  if (!socket.readableLength) socket.read(0);
+}
 function __tcpWritten(socket) {
   const pending = socket._tcpWrite; socket._tcpWrite = null;
   if (pending) pending.callback();
