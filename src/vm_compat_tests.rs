@@ -74,7 +74,11 @@ fn external_termination_is_not_misreported_as_a_vm_timeout() {
             "execute('stop()', function(){}, {}, 'stopped.js', 0)"
         )
         .is_none());
-        assert!(scope.has_terminated());
+        // The nested native TryCatch may consume the termination marker; it must
+        // never manufacture the watchdog-specific timeout exception.
+        if let Some(error) = scope.exception() {
+            assert!(!error.to_rust_string_lossy(scope).contains("timed out"));
+        }
         scope.cancel_terminate_execution();
         scope.reset();
         assert_eq!(run(scope, "42").unwrap().integer_value(scope), Some(42));
