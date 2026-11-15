@@ -124,3 +124,30 @@ testCase('TCP keepalive and no-delay options apply before and after connecting',
     await done; assert.equal(Buffer.concat(chunks).toString(), 'options');
   } finally { client.destroy(); if (peer) peer.destroy(); await closedServer(server); }
 });
+testCase('TCP idle timeout emits without destroying the live byte stream', async () => {
+  let peer; const server = net.createServer(socket => { peer = socket; socket.resume(); });
+  await listening(server, '127.0.0.1'); const client = new net.Socket(); client.on('error', error => { throw error; });
+  try {
+    await connected(client, { host: '127.0.0.1', port: server.address().port });
+    await new Promise(resolve => client.setTimeout(5, resolve));
+    assert.equal(client.destroyed, false); assert.equal(client.writable, true); assert.equal(client.setTimeout(0), client);
+  } finally { client.destroy(); if (peer) peer.destroy(); await closedServer(server); }
+});
+testCase('TCP pause prevents flowing data until resumed', async () => {
+  let peer; const payload = Buffer.alloc(64 * 1024, 95); const chunks = [];
+  const server = net.createServer(socket => { peer = socket; socket.end(payload); });
+  await listening(server, '127.0.0.1'); const client = new net.Socket(); client.on('error', error => { throw error; });
+  client.on('data', bytes => chunks.push(bytes)); client.pause(); const done = closedSocket(client);
+  try {
+    await connected(client, { host: '127.0.0.1', port: server.address().port });
+    await new Promise(resolve => setTimeout(resolve, 5)); assert.equal(chunks.length, 0);
+    client.resume(); await done; assert.deepEqual(Buffer.concat(chunks), payload);
+  } finally { client.destroy(); if (peer) peer.destroy(); await closedServer(server); }
+});
+testCase('TCP invalid ports and never-running server close report errors', async () => {
+  for (const port of [-1, 65536, 1.5]) assert.throws(() => new net.Socket().connect({ host: '127.0.0.1', port }), { code: 'ERR_SOCKET_BAD_PORT' });
+  const server = net.createServer(); let synchronous = true;
+  const completion = new Promise(resolve => server.close(error => { assert.equal(synchronous, false); resolve(error); }));
+  synchronous = false; const error = await completion;
+  assert.equal(error.code, 'ERR_SERVER_NOT_RUNNING');
+});
