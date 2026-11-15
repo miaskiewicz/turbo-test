@@ -249,8 +249,12 @@ npx turbo-test            # discovers *.spec.* too; reads jest config when no vi
 Node-mode support in the 0.8.4 candidate includes native SHA-1/SHA-256 hashing,
 P-256 ECDSA and RSA PKCS#1 v1.5 SHA-256 signing with PKCS#8/SPKI PEM/DER KeyObjects,
 and AES-256-GCM with 12-byte IVs, 12–16-byte authentication tags and AAD. Key generation
-and `randomBytes` use OS entropy; unsupported algorithms and encrypted key formats
-report errors. It also includes gzip, native V8 serialization, transferable MessagePorts,
+and `randomBytes` use OS entropy; unsupported algorithms report errors. Encrypted
+PKCS#8 import supports PBES2/PBKDF2 and PKCS12 SHA-1/3DES, with wrong-password and
+malformed-input rejection. Imports cap DER at 1 MiB, passphrases and salts at 1,024
+bytes, and KDF iterations at 1,000,000. PKCS12 passwords require valid UTF-8 BMP text;
+scrypt-based imports and encrypted exports remain unsupported.
+It also includes gzip, native V8 serialization, transferable MessagePorts,
 and AsyncLocalStorage across native await and scheduled resources.
 
 Keyed hashes support real SHA-1/SHA-256 HMAC and synchronous PBKDF2-SHA1, including
@@ -275,6 +279,10 @@ Flux APIs compatibility; consumer validation remains in progress.
 Filesystem helpers include real private temporary directories and file copies through
 synchronous, callback and promise APIs. Exclusive copies preserve an existing target;
 same-file copies do not truncate the source. Forced clone copies report `ENOSYS`.
+Warnings deliver asynchronous `process` events and visible stderr output.
+EventEmitter methods support constructor-free receivers and enumerable prototype
+mixins used by Mongoose. This covers offline schema/document validation, not a
+complete database execution environment.
 `net.BlockList` supports IPv4/IPv6 address, range and subnet membership, including
 IPv4-mapped addresses; this does not itself provide socket transport.
 
