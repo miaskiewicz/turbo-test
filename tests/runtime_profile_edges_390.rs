@@ -22,7 +22,7 @@ fn same_profile_fixture(p: &Project, environment: &str) {
         "node_modules/profile-singleton/package.json",
         r#"{"name":"profile-singleton","main":"index.cjs"}"#,
     );
-    p.file("node_modules/profile-singleton/index.cjs", "globalThis.__singletonEvaluations=(globalThis.__singletonEvaluations||0)+1;module.exports={identity:{}};");
+    p.file("node_modules/profile-singleton/index.cjs", "globalThis.__singletonEvaluations=(globalThis.__singletonEvaluations||0)+1;beforeEach(()=>{globalThis.__dependencyHookCalls=(globalThis.__dependencyHookCalls||0)+1;});module.exports={identity:{}};");
     let activate = if environment == "node" {
         "const {AsyncLocalStorage,createHook}=require('node:async_hooks');globalThis.__oldStorage=new AsyncLocalStorage();__oldStorage.enterWith('prior-file');globalThis.__staleAsyncCalls=0;globalThis.__oldTimerCalls=0;createHook({init(){if(globalThis.__secondFile)__staleAsyncCalls++;}}).enable();setInterval(()=>{if(globalThis.__secondFile)__oldTimerCalls++;},1);globalThis.__mutatedResource=function(){throw new Error('public AsyncResource must not drive private task resources');};require('node:async_hooks').AsyncResource=__mutatedResource;"
     } else {
@@ -34,7 +34,7 @@ globalThis.__singleton=require('profile-singleton');globalThis.__oldHookCalls=0;
 beforeEach(()=>{{globalThis.__oldHookCalls++;}});
 {activate}
 test('first file establishes same-profile module identity and local hooks',()=>{{
- assert.equal(__setupRuns,1);assert.equal(__setupHookCalls,1);assert.equal(__oldHookCalls,1);assert.equal(__singletonEvaluations,1);
+ assert.equal(__setupRuns,1,'__setupRuns contract');assert.equal(__setupHookCalls,1);assert.equal(__oldHookCalls,1,'__oldHookCalls contract');assert.equal(__singletonEvaluations,1,'__singletonEvaluations contract');assert.equal(__dependencyHookCalls,1,'dependency hook first file');
 }});
 "#));
     let reset = if environment == "node" {
@@ -48,7 +48,7 @@ const singleton=require('profile-singleton');
 test('same-profile reuse keeps module identity but resets file hooks and async state',async()=>{{
  await new Promise(resolve=>setImmediate(resolve));
  assert.equal(singleton,__singleton);assert.equal(singleton.identity,__singleton.identity);
- assert.equal(__singletonEvaluations,1);assert.equal(__setupRuns,1);assert.equal(__setupHookCalls,2);assert.equal(__oldHookCalls,1);
+ assert.equal(__singletonEvaluations,1,'__singletonEvaluations contract');assert.equal(__setupRuns,1,'__setupRuns contract');assert.equal(__setupHookCalls,2,'__setupHookCalls contract');assert.equal(__oldHookCalls,1,'__oldHookCalls contract');assert.equal(__dependencyHookCalls,2,'dependency hook survives next file');
  {reset}
 }});
 "#));
