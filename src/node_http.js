@@ -59,6 +59,7 @@ function __httpWrite(connection, bytes, finish, callback) {
   if (!bytes.length && !finish) { __httpLater(callback); return; }
   try {
     __httpNative('send', { id: connection.id, data: bytes.toString('base64'), finish });
+    if (bytes.length) __httpRequestActivity(connection);
     connection.callbacks.push(__httpCapture(callback)); __httpEnsurePoll();
   } catch (error) { __httpLater(() => callback(error)); }
 }
@@ -84,7 +85,11 @@ function __httpEvent(event) {
   if (!connection) return;
   connection.dispatch(event);
 }
+function __httpRequestActivity(connection) {
+  if (!connection.server) connection.outgoing._refreshTimeout();
+}
 function __httpConnectionEvent(connection, event) {
+  if (event.kind === 'headers' || event.kind === 'data') __httpRequestActivity(connection);
   if (event.kind === 'headers') __httpHeaders(connection, event);
   else __httpBodyEvent(connection, event);
 }
@@ -125,6 +130,7 @@ function __httpHeaders(connection, event) {
 function __httpEnd(connection) {
   if (!connection.incoming) return;
   connection.incoming.complete = true;
+  if (!connection.server) connection.outgoing._clearTimeout();
   connection.incoming.push(null);
 }
 function __httpClosed(connection, data) {
@@ -149,6 +155,7 @@ function __httpIncomingClosed(incoming, error) {
   else __httpLater(() => { incoming.closed = true; incoming.emit('close'); });
 }
 function __httpRequestClosed(request, error) {
+  request._clearTimeout();
   if (request.destroyed) return;
   if (error && !request._connection.incoming) request.destroy(error);
   else if (!request._connection.incoming) request.destroy(__streamError('ECONNRESET', 'Socket closed before response'));
@@ -297,7 +304,8 @@ function __httpRequestOptions(options) {
 class __HttpRequest extends __HttpOutgoing {
   constructor(options, callback) {
     const connection = { id: 0, callbacks: [], incoming: null, outgoing: null };
-    super(connection); connection.outgoing = this; this.method = options.method; this.path = options.path;
+    super(connection); this._timeoutDelay = 0; this._timeoutId = null;
+    connection.outgoing = this; this.method = options.method; this.path = options.path;
     if (callback) this.once('response', callback);
     this.setHeader('Host', options.hostname + ':' + options.port);
     for (const [name, value] of Object.entries(options.headers || {})) this.setHeader(name, value);
@@ -325,8 +333,20 @@ class __HttpRequest extends __HttpOutgoing {
   abort() { this.destroy(); return this; }
   setTimeout(delay, callback) {
     if (callback) this.once('timeout', callback);
-    __realTimers.setTimeout(() => { if (!this.closed) this.emit('timeout'); }, delay); return this;
+    this._timeoutDelay = delay; this._refreshTimeout(); return this;
   }
+  _clearTimeout() {
+    if (this._timeoutId !== null) __realTimers.clearTimeout(this._timeoutId);
+    this._timeoutId = null;
+  }
+  _refreshTimeout() {
+    this._clearTimeout();
+    if (!this._timeoutDelay || this.destroyed || this.closed || this._connection.incoming?.complete) return;
+    this._timeoutId = __realTimers.setTimeout(__httpCapture(() => {
+      this._timeoutId = null; this.emit('timeout');
+    }), this._timeoutDelay);
+  }
+  _destroy(error, callback) { this._clearTimeout(); super._destroy(error, callback); }
 }
 function __httpRequest(input, options, callback) {
   if (typeof options === 'function') { callback = options; options = undefined; }
