@@ -1503,3 +1503,38 @@ fn jest_environment_supports_json_and_forced_config_without_ancestor_fallback() 
         None
     );
 }
+
+#[test]
+fn explicit_known_jest_configs_preserve_the_default_node_environment() {
+    let t = Tmp::new("forced-jest-default-node");
+    t.file("a.spec.ts", T);
+    for name in JEST_CONFIG_NAMES {
+        let config = t.file(name, "{}");
+        let plan = run_plan(&t, &["--config", config.to_str().unwrap(), "a.spec.ts"]);
+        assert_eq!(env_of(&plan, "TURBO_ENV"), Some("node"), "{name}");
+    }
+    let package = t.file("package.json", r#"{"jest":{}}"#);
+    assert_eq!(
+        env_of(
+            &run_plan(&t, &["--config", package.to_str().unwrap(), "a.spec.ts"]),
+            "TURBO_ENV"
+        ),
+        Some("node")
+    );
+    t.file("package.json", "{}");
+    assert_eq!(
+        env_of(
+            &run_plan(&t, &["--config", package.to_str().unwrap(), "a.spec.ts"]),
+            "TURBO_ENV"
+        ),
+        None
+    );
+    let vitest = t.file("vitest.config.js", "export default {test:{}};");
+    assert_eq!(
+        env_of(
+            &run_plan(&t, &["--config", vitest.to_str().unwrap(), "a.spec.ts"]),
+            "TURBO_ENV"
+        ),
+        None
+    );
+}
