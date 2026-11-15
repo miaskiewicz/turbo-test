@@ -8,6 +8,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 ## [0.8.4] — Unreleased candidate — Node compatibility and shared DOM performance
 
 ### Added
+- Select separate Node-backend and DOM runtime payloads before context initialization
+  (#390). DOM runs omit backend cryptography, TCP/process and async-hook implementations
+  and their native callbacks; Node runs omit browser installation. Mixed-environment
+  reuse creates a clean isolate at profile changes while preserving same-profile reuse.
 - Exchange real loopback bytes through `net.Socket` / `net.Server` (#363), including
   ephemeral ports, Duplex backpressure, half-close, idle timeouts and ref/unref.
   Native TCP handles are separate from HTTP; Unix uses nonblocking readiness polling.
@@ -34,6 +38,20 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   external blocks and unmapped SFC coverage report explicit errors.
 
 ### Fixed
+- Preserve the standard Date constructor name for real Mongoose schema types (#383).
+- Honor explicit CommonJS `esModuleInterop: false`, including JSONC and package-provided
+  tsconfig inheritance, while preserving dynamic imports and authored helpers (#384).
+- Match Buffer byte lengths and static-method enumerability used by real HTTP request
+  bodies, including encoding and binary-view controls (#385, #388).
+- Normalize Jest environments and keep the nearest framework config authoritative
+  unless an explicit CLI/config selection or per-file pragma overrides it (#386, #390).
+- Expose actual zlib constants required by SaxonJS dependency loading (#387).
+- Retain real CommonJS caller filenames for native dependency discovery and file-owned
+  hook cleanup under reuse; dependency-owned hooks remain registered (#389, #390).
+- Capture private async-resource constructors for MessageChannel and TCP tasks so
+  replacing a public `async_hooks.AsyncResource` export cannot break internal resources.
+- Avoid repeated decorator-transform retries for propagated CommonJS dependency errors,
+  preserving local metadata fallback and cyclic partial exports (#357).
 - Cancel or replace HTTP request idle deadlines, disable them with zero, refresh
   them on actual I/O and clear them on completion/destruction (#377).
 - Remove pipe-owned listeners after completion, `end:false` and destination errors,
@@ -132,6 +150,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   reused files do not inherit previous files' warning listeners.
 
 ### Tests
+- Exercise 28 Vitest/Jest settings combinations (40 JS tests), both profile-transition
+  directions, snapshot on/off, same-profile state ownership and failed-load child cleanup.
+- Validate 595 tests in the unchanged representative Flux backend selection; additional
+  load errors and native-addon limits remain documented in the validation report.
 - Add Node controls and native runner regressions for the compatibility fixes,
   including known hashes, independent gzip/V8 fixtures and malformed-input errors.
 
@@ -139,8 +161,9 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - Consume turbo-dom's v0.8.4 candidate, including bounded font shaping-plan reuse and
   reuse of intrinsic table measurements during final layout. These shared-engine
   changes avoid repeated shaping setup and table work without changing DOM behavior.
-  Performance measurements belong to the turbo-dom/turbo-html2pdf harness; no runner
-  speedup is claimed before consumer validation.
+  Full four-app consumer validation passes 36,200 tests with five existing skips.
+  Matched eight-worker cold/warm ABBA timings, CPU usage and background-load limits are
+  preserved in `docs/validation/v0.8.4-app-benchmarks-2026-11-15.md`.
 
 ### Release preparation
 - Align the Rust and npm package versions at 0.8.4. The release branch uses an exact
