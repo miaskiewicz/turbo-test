@@ -292,8 +292,16 @@ connection, shared message/socket identity, socket close events and native TCP_N
 HTTP socket state reflects the real connection; it does not expose general-purpose raw TCP
 stream I/O. `tls.Server` supports type discrimination, while construction and
 `tls.createServer` throw `ERR_TLS_UNSUPPORTED_SERVER`. TLS transport, custom agents,
-persistent connections and asynchronous child-process APIs remain unsupported. This does not yet provide a complete MongoDB driver
-execution environment.
+persistent connections and callback `exec`/`execFile` remain unsupported.
+
+On Unix, `spawn` uses real asynchronous child pipes and `fork` exchanges JSON messages
+with an actual Node child over `NODE_CHANNEL_FD`. Standard pipe/ignore/inherit modes,
+stdin writes, output backpressure, exit/close/error events, SIGINT/SIGTERM/SIGKILL and timeouts are
+supported. Each context owns at most 32 children; input/IPC queues and JSON messages
+are bounded to 1 MiB. Context reset terminates and reaps its owned process groups.
+Windows asynchronous pipes/IPC, advanced serialization, handle transfer, AbortSignal,
+ref/unref and detached children report explicit unsupported errors. This remains a
+bounded process surface, not a complete MongoDB driver execution environment.
 
 Fresh `vm` contexts support injected bindings, isolated globals, real values/errors
 and timeouts. They currently require the framework-only snapshot: use

@@ -1,4 +1,4 @@
-// Synchronous child processes execute on the host; unsupported async entry points fail clearly.
+// Synchronous child processes execute on the host; async spawn/fork are installed by their own module.
 function __processType(message) { return Object.assign(new TypeError(message), { code: 'ERR_INVALID_ARG_TYPE' }); }
 function __processString(value, label) {
   if (typeof value !== 'string') throw __processType(label + ' must be a string');

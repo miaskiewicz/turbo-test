@@ -95,7 +95,8 @@ testCase('parent disconnect closes the real IPC channel and later send fails', a
   const child = fork(path.join(__dirname, 'async-fork-child.cjs'), [], { env: clean(), silent: true });
   const completed = once(child, 'exit'); await once(child, 'spawn');
   const ready = once(child, 'message'); child.send({ value: 'ready' }); await ready;
-  const disconnected = once(child, 'disconnect'); child.disconnect(); await disconnected;
+  const disconnected = once(child, 'disconnect'); child.disconnect();
+  assert.equal(child.connected, false); await disconnected;
   assert.equal(child.connected, false);
   const failure = await new Promise((resolve) => child.send({ value: 1 }, (error) => resolve(error)));
   assert.equal(failure.code, 'ERR_IPC_CHANNEL_CLOSED');
@@ -107,4 +108,16 @@ testCase('asynchronous process entry points validate arguments before creating c
   assert.throws(() => spawn(process.execPath, 'not-an-array'), { code: 'ERR_INVALID_ARG_TYPE' });
   assert.throws(() => fork(1), { code: 'ERR_INVALID_ARG_TYPE' });
   assert.throws(() => spawn(process.execPath, [], { timeout: -1 }), { code: 'ERR_OUT_OF_RANGE' });
+});
+
+testCase('real child I/O is not starved by continuously queued immediates', async () => {
+  const child = spawn(process.execPath, ['-e', 'process.stdout.write("ready")'], { env: clean() });
+  const completed = closed(child); const chunks = []; let done = false;
+  child.stdout.on('data', (chunk) => { chunks.push(chunk); done = true; });
+  const busy = () => { if (!done) setImmediate(busy); };
+  setImmediate(busy);
+  try {
+    assert.deepEqual(await completed, { code: 0, signal: null });
+    assert.equal(Buffer.concat(chunks).toString(), 'ready');
+  } finally { done = true; }
 });
