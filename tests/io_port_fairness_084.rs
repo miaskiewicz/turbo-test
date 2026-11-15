@@ -104,6 +104,6 @@ fn write_only_tcp_server_connections_close_on_empty_eof() {
     );
     let run = turbo_test(&p.dir, &["--jobs", "1", "--reporter", "json"], &[]);
     let report = json_report(&run);
-    assert_eq!(report["numPassedTests"], 1, "{}", run.all());
+    assert_eq!(report["numPassedTests"], 2, "{}", run.all());
     assert_eq!(report["numFailedTests"], 0, "{}", run.all());
 }
