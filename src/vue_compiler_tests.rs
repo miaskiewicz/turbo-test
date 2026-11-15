@@ -63,7 +63,9 @@ fn broken_compiler_input_pipe_preserves_error_and_reaps_the_owned_child() {
         .read_exact(&mut ready)
         .unwrap();
     assert_eq!(&ready, b"ready");
-    let error = request_or_terminate(&mut child.0, b"compile input").unwrap_err();
+    // Exceed pipe capacity so inherited read aliases cannot accept the entire request.
+    let source = vec![b'x'; 1_048_576];
+    let error = request_or_terminate(&mut child.0, &source).unwrap_err();
     assert_eq!(
         error,
         std::io::Error::from_raw_os_error(libc::EPIPE).to_string()
