@@ -3,9 +3,9 @@ use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -160,12 +160,46 @@ fn configure_stdio(command: &mut Command, args: &Value) {
         .stdout(stdio(&args["stdio"][1]))
         .stderr(stdio(&args["stdio"][2]));
 }
+fn reserve_ipc_fd(fd: i32) -> std::io::Result<OwnedFd> {
+    // stdio may be closed in the host; reserve outside 0..=3 before Command remaps it.
+    let reserved = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 4) };
+    if reserved < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(reserved) })
+}
+fn exited_unreaped(pid: u32) -> std::io::Result<Option<ExitStatus>> {
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            info.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let info = unsafe { info.assume_init() };
+    if unsafe { info.si_pid() } == 0 {
+        return Ok(None);
+    }
+    let status = unsafe { info.si_status() };
+    let raw = if info.si_code == libc::CLD_EXITED {
+        status << 8
+    } else {
+        status
+    };
+    Ok(Some(ExitStatus::from_raw(raw)))
+}
 fn prepare_ipc(command: &mut Command, enabled: bool) -> Result<Option<UnixStream>> {
     if !enabled {
         return Ok(None);
     }
     let (parent, child) = UnixStream::pair().map_err(io_failure)?;
     parent.set_nonblocking(true).map_err(io_failure)?;
+    let child = reserve_ipc_fd(child.as_raw_fd()).map_err(io_failure)?;
     command
         .env("NODE_CHANNEL_FD", "3")
         .env("NODE_CHANNEL_SERIALIZATION_MODE", "json");
@@ -215,6 +249,7 @@ struct Process {
     disconnecting: bool,
     input_end: Option<u64>,
     status: Option<ExitStatus>,
+    reaped: bool,
     started: Instant,
     timeout: u64,
     kill_signal: i32,
@@ -237,6 +272,7 @@ impl Process {
             disconnecting: false,
             input_end: None,
             status: None,
+            reaped: false,
             started: Instant::now(),
             timeout: args["timeout"].as_u64().unwrap_or(0),
             kill_signal: args["killSignal"].as_i64().unwrap_or(15) as i32,
@@ -381,6 +417,10 @@ impl Process {
             let Some(end) = self.ipc_bytes.iter().position(|byte| *byte == b'\n') else {
                 return;
             };
+            if end > self.maximum {
+                self.channel_error(failure("ENOBUFS", "IPC message limit exceeded"), events);
+                return;
+            }
             let line: Vec<_> = self.ipc_bytes.drain(..=end).collect();
             match serde_json::from_slice::<Value>(&line) {
                 Ok(message) => events.push(event(
@@ -431,7 +471,7 @@ impl Process {
         if self.status.is_some() {
             return;
         }
-        match self.child.try_wait() {
+        match exited_unreaped(self.child.id()) {
             Ok(Some(status)) => {
                 self.abort_input(failure("EPIPE", "Child process exited"), events);
                 events.push(event(self.id, "exit", status_value(&status)));
@@ -514,6 +554,21 @@ impl Process {
             self.maximum,
         )
     }
+    fn cleanup_with(&mut self, mut signal_group: impl FnMut(u32)) {
+        if self.reaped {
+            return;
+        }
+        // An external reaper must never turn a numeric PID into authority to signal a new group.
+        if exited_unreaped(self.child.id())
+            .is_err_and(|error| error.raw_os_error() == Some(libc::ECHILD))
+        {
+            self.reaped = true;
+            return;
+        }
+        signal_group(self.child.id());
+        let _ = self.child.wait();
+        self.reaped = true;
+    }
     fn descriptors(&self) -> Vec<libc::pollfd> {
         let mut result: Vec<_> = self
             .outputs
@@ -534,13 +589,12 @@ impl Process {
 }
 impl Drop for Process {
     fn drop(&mut self) {
-        // The command created this process group; never signal an unrelated host process.
-        unsafe {
-            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
-        }
-        let _ = self.child.wait();
+        self.cleanup_with(|pid| unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        });
     }
 }
+
 fn descriptor(fd: i32, writing: bool) -> libc::pollfd {
     libc::pollfd {
         fd,

@@ -190,41 +190,11 @@ fn ipc_descriptor_reservation_survives_closed_standard_fds_in_an_isolated_fork()
     let pid = unsafe { libc::fork() };
     assert!(pid >= 0);
     if pid == 0 {
-        // After fork, only fd syscalls and stack-only OwnedFd construction run before _exit.
         unsafe {
-            libc::close(0);
-            libc::close(1);
-            libc::close(2);
-        }
-        if unsafe { libc::dup2(child.as_raw_fd(), 0) } < 0 {
-            unsafe {
-                libc::_exit(20);
-            }
-        }
-        let reserved = match reserve_ipc_fd(0) {
-            Ok(fd) => fd,
-            Err(_) => unsafe { libc::_exit(21) },
-        };
-        if reserved.as_raw_fd() < 4 {
-            unsafe {
-                libc::_exit(22);
-            }
-        }
-        if unsafe { libc::dup2(reserved.as_raw_fd(), 3) } < 0 {
-            unsafe {
-                libc::_exit(23);
-            }
-        }
-        if unsafe { libc::fcntl(3, libc::F_SETFD, 0) } < 0 {
-            unsafe {
-                libc::_exit(24);
-            }
-        }
-        let count = unsafe { libc::write(3, b"ready".as_ptr().cast(), 5) };
-        unsafe {
-            libc::_exit(if count == 5 { 0 } else { 25 });
+            libc::_exit(fd_probe_code(child.as_raw_fd()));
         }
     }
+
     let mut guard = ProbePid(pid);
     let mut bytes = [0; 5];
     parent.read_exact(&mut bytes).unwrap();
@@ -233,4 +203,75 @@ fn ipc_descriptor_reservation_survives_closed_standard_fds_in_an_isolated_fork()
     assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
     guard.0 = 0;
     assert_eq!(status, 0);
+}
+
+fn fd_probe_code(source: i32) -> i32 {
+    // Only descriptor syscalls and stack-only OwnedFd construction run between fork and _exit.
+    unsafe {
+        libc::close(0);
+        libc::close(1);
+        libc::close(2);
+    }
+    if unsafe { libc::dup2(source, 0) } < 0 {
+        return 20;
+    }
+    let reserved = match reserve_ipc_fd(0) {
+        Ok(fd) => fd,
+        Err(_) => return 21,
+    };
+    if reserved.as_raw_fd() < 4 {
+        return 22;
+    }
+    if unsafe { libc::dup2(reserved.as_raw_fd(), 3) } < 0 {
+        return 23;
+    }
+    if unsafe { libc::fcntl(3, libc::F_SETFD, 0) } < 0 {
+        return 24;
+    }
+    let count = unsafe { libc::write(3, b"ready".as_ptr().cast(), 5) };
+    if count == 5 {
+        0
+    } else {
+        25
+    }
+}
+
+#[test]
+fn exited_leader_keeps_ownership_until_inherited_pipe_holders_are_terminated() {
+    let mut args = request();
+    args["file"] = json!("/bin/sh");
+    args["args"] = json!(["-c", "printf ready; /bin/sleep 60 & exit 0"]);
+    let child = crate::process_compat::command(&args).spawn().unwrap();
+    let mut process = Process::new(1, child, None, &args).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut events = Vec::new();
+    while process.status.is_none() && Instant::now() < deadline {
+        process.check_exit(&mut events);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(process.status.is_some());
+    let index = process
+        .outputs
+        .iter()
+        .position(|output| output.fd == 1)
+        .unwrap();
+    let mut pipe = process.outputs.remove(index).pipe;
+    process.cleanup_with(|pid| unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    });
+    assert!(pipe_reaches_eof(&mut *pipe));
+}
+
+fn pipe_reaches_eof(pipe: &mut dyn ReadFd) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut bytes = [0; 32];
+    while Instant::now() < deadline {
+        match pipe.read(&mut bytes) {
+            Ok(0) => return true,
+            Ok(_) => {}
+            Err(error) if retry(&error) => std::thread::sleep(Duration::from_millis(1)),
+            Err(_) => return false,
+        }
+    }
+    false
 }
