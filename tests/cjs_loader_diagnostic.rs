@@ -40,3 +40,43 @@ fn loader_diagnostics_preserve_commonjs_execution() {
     assert!(traced.all().contains("[cjs-load]"));
     assert!(traced.all().contains("dep.cjs"));
 }
+
+#[test]
+fn loader_diagnostics_report_real_body_failures_and_stop_at_the_record_limit() {
+    let p = Project::new("loader-diagnostic-limit");
+    p.with_esbuild();
+    p.file("package.json", r#"{"name":"loader-diagnostic-limit"}"#);
+    p.file("jest.config.js", "module.exports={testEnvironment:'node'};");
+    p.file("good.cjs", "module.exports = { value: 42 };");
+    p.file("bad.cjs", "throw globalThis.__expectedLoaderError;");
+    p.file(
+        "limit.test.cjs",
+        r#"
+      const error = globalThis.__expectedLoaderError = new Error('real body failure');
+      let caught;
+      try { require('./bad.cjs'); } catch (value) { caught = value; }
+      let result;
+      for (let i = 0; i < 2200; i++) result = require('./good.cjs');
+      test('diagnostics preserve cached exports and error identity', () => {
+        expect(caught).toBe(error);
+        expect(result.value).toBe(42);
+        expect(result).toBe(require('./good.cjs'));
+      });
+    "#,
+    );
+    let run = turbo_test(
+        &p.dir,
+        &["--jobs", "1", "--reporter", "json"],
+        &[("TURBO_CJS_LOAD_DIAGNOSTIC", "1")],
+    );
+    assert_eq!(json_report(&run)["numPassedTests"], 1, "{}", run.all());
+    let records: Vec<_> = run
+        .stderr
+        .lines()
+        .filter(|line| line.starts_with("[cjs-load]"))
+        .collect();
+    assert_eq!(records.len(), 4096);
+    assert!(records
+        .iter()
+        .any(|line| line.contains("event=body-failed") && line.contains("bad.cjs")));
+}

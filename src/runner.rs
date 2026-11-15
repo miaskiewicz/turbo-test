@@ -491,14 +491,6 @@ fn nearest_tsconfig_uncached(dir: &Path) -> Option<PathBuf> {
         if tc.is_file() {
             return Some(tc);
         }
-        if cur.join("package.json").is_file()
-            && cur
-                .file_name()
-                .map(|n| n == "node_modules")
-                .unwrap_or(false)
-        {
-            break;
-        }
         d = cur.parent();
     }
     None
@@ -8442,19 +8434,17 @@ fn variant_names<'s>(
     exports: v8::Local<'s, v8::Value>,
     kind: Variant,
 ) -> Option<Vec<String>> {
-    Some(match kind {
-        Variant::Ns => vec!["default".to_string()],
-        Variant::Star | Variant::Node => {
-            let view = variant_view(scope, exports, kind)?;
-            let global = scope.get_current_context().global(scope);
-            let mut names = object_keys(scope, global, view);
-            // (Node's view names `default` for every CommonJS module, turbo-test#193)
-            if kind == Variant::Star {
-                names.retain(|n| n != "default");
-            }
-            names
-        }
-    })
+    if kind == Variant::Ns {
+        return Some(vec!["default".to_string()]);
+    }
+    let view = variant_view(scope, exports, kind)?;
+    let global = scope.get_current_context().global(scope);
+    let mut names = object_keys(scope, global, view);
+    // Node's CommonJS view always keeps its default export (#193).
+    if kind == Variant::Star {
+        names.retain(|name| name != "default");
+    }
+    Some(names)
 }
 
 fn variant_eval<'s>(
@@ -10370,11 +10360,10 @@ fn fs_same_file(_source: &std::fs::File, _destination: &std::fs::File) -> std::i
 fn fs_copy_source(path: &str) -> std::io::Result<std::fs::File> {
     let file = std::fs::File::open(path)?;
     if file.metadata()?.is_dir() {
-        let errno = if cfg!(target_os = "macos") {
-            libc::ENOTSUP
-        } else {
-            libc::EISDIR
-        };
+        #[cfg(target_os = "macos")]
+        let errno = libc::ENOTSUP;
+        #[cfg(not(target_os = "macos"))]
+        let errno = libc::EISDIR;
         return Err(std::io::Error::from_raw_os_error(errno));
     }
     Ok(file)

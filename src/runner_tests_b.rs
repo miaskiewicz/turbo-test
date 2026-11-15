@@ -1230,3 +1230,17 @@ fn linking_an_externalized_cjs_dependency_loads_its_actual_exports_lazily() {
     });
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn unreferenced_tcp_listener_does_not_keep_an_idle_loop_polling() {
+    with_context(|scope, global| {
+        eval(scope, "globalThis.__idleServer = __mkRequire('/')('node:net').createServer(); __idleServer.listen(0); __idleServer.unref();");
+        assert!(crate::tcp_compat::has_pending_io());
+        assert!(!pace_tcp_io(scope, global));
+        eval(
+            scope,
+            "__idleServer.close(); __tcpReset(); delete globalThis.__idleServer;",
+        );
+        assert!(!crate::tcp_compat::has_pending_io());
+    });
+}
