@@ -13,14 +13,27 @@ function __asyncChildLater(callback) { queueMicrotask(__asyncChildCapture(callba
 function __asyncChildEnsurePoll() {
   if (__asyncChildTimer === null) __asyncChildTimer = __realTimers.setTimeout(__asyncChildPoll, 1);
 }
-function __asyncChildPoll() {
-  __asyncChildTimer = null;
-  for (const event of __asyncChildNative('poll')) {
+function __asyncChildDrainEvents() {
+  const events = __asyncChildNative('poll');
+  for (const event of events) {
     const child = __asyncChildren.get(event.id);
     if (child) child._dispatch(event);
   }
+  return events.length > 0;
+}
+function __asyncChildPoll() {
+  __asyncChildTimer = null;
+  __asyncChildDrainEvents();
   if (__asyncChildren.size) __asyncChildEnsurePoll();
 }
+globalThis.__ttAsyncProcessPump = () => {
+  if (!__asyncChildren.size) return false;
+  const progressed = __asyncChildDrainEvents();
+  if (!__asyncChildren.size && __asyncChildTimer !== null) {
+    __realTimers.clearTimeout(__asyncChildTimer); __asyncChildTimer = null;
+  }
+  return progressed;
+};
 function __asyncProcessReset() {
   if (__asyncChildTimer !== null) __realTimers.clearTimeout(__asyncChildTimer);
   __asyncChildTimer = null;
@@ -144,7 +157,7 @@ function __asyncChildIpc(child) {
   child.send = (...args) => __asyncChildSend(child, args);
   child.disconnect = () => {
     if (!child.connected) throw Object.assign(new Error('IPC channel is already disconnected'), { code: 'ERR_IPC_DISCONNECTED' });
-    __asyncChildNative('disconnect', { id: child._id });
+    __asyncChildNative('disconnect', { id: child._id }); child.connected = false;
   };
 }
 function __asyncChildSend(child, args) {

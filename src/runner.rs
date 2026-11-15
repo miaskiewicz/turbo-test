@@ -12166,7 +12166,9 @@ fn step_macrotask(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bo
         }
     }
     pace_http_io(scope, global);
-    pace_async_process_io(scope, global);
+    if pace_async_process_io(scope, global) {
+        return true;
+    }
     call_global_bool(scope, global, "__stepMacro")
 }
 
@@ -12186,9 +12188,9 @@ fn pace_http_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
 }
 
 /// Child pipes keep virtual time paced only while this context owns active children.
-fn pace_async_process_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+fn pace_async_process_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bool {
     if !crate::async_process::has_pending_io() {
-        return;
+        return false;
     }
     let delay = call_global_number(scope, global, "__ttNextMacroDelay");
     let millis = if delay.is_finite() && delay > 0.0 {
@@ -12197,6 +12199,7 @@ fn pace_async_process_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>
         0.0
     };
     crate::async_process::wait_for_io(std::time::Duration::from_secs_f64(millis / 1000.0));
+    call_global_bool(scope, global, "__ttAsyncProcessPump")
 }
 
 /// Convert the final promise state into the `run_event_loop` result: `Ok(())` on fulfilled, a

@@ -51,14 +51,19 @@ pub fn native_async_process(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let name = args.get(0).to_rust_string_lossy(scope);
+    let Some(name) = args.get(0).to_string(scope) else {
+        return;
+    };
     let Some(encoded) = args.get(1).to_string(scope) else {
         return;
     };
-    let result = if encoded.length() > 2_097_152 {
+    let result = if name.length() > 32 || encoded.length() > 2_097_152 {
         json!({"error":{"code":"ENOBUFS","message":"Child process request limit exceeded"}})
     } else {
-        parse_operation(&name, &encoded.to_rust_string_lossy(scope))
+        parse_operation(
+            &name.to_rust_string_lossy(scope),
+            &encoded.to_rust_string_lossy(scope),
+        )
     };
     if let Some(text) = v8::String::new(scope, &result.to_string()) {
         rv.set(text.into());
