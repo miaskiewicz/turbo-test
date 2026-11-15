@@ -76,10 +76,10 @@ testCase('timers immediates and nextTick callbacks have their own observed resou
   assert.equal(new Set(executions.map(([id]) => id)).size, 3);
 });
 testCase('cancelled timers emit destroy without executing their callbacks', async () => {
-  const destroyed = new Set(); let timerId; let called = false;
+  const destroyed = new Set(); let timerId; let called = false; let creating = false;
   function cancelled() { called = true; }
-  const hook = hooks.createHook({ init(id, type, trigger, resource) { if (type === 'Timeout' && resource._onTimeout === cancelled) timerId = id; }, destroy(id) { destroyed.add(id); } }).enable();
-  try { const timer = setTimeout(cancelled, 60000); clearTimeout(timer); await immediate(); }
+  const hook = hooks.createHook({ init(id, type, trigger, resource) { if (type === 'Timeout' && creating) timerId = id; }, destroy(id) { destroyed.add(id); } }).enable();
+  try { creating = true; const timer = setTimeout(cancelled, 60000); creating = false; clearTimeout(timer); await immediate(); }
   finally { hook.disable(); }
   assert.ok(timerId > 0); assert.equal(called, false); assert.equal(destroyed.has(timerId), true);
 });
