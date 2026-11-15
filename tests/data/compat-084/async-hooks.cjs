@@ -50,7 +50,7 @@ testCase('hook enable is idempotent and disable stops observations', () => {
 testCase('AsyncResource init before after destroy carry real resource identities', async () => {
   const seen = []; const resources = new Map(); let execution; let trigger;
   const hook = hooks.createHook({
-    init(id, type, parent, resource) { resources.set(id, resource); if (type === 'CompatResource') seen.push(['init', id, parent]); },
+    init(id, type, parent, resource) { resources.set(id, resource); if (type === 'CompatResource') { assert.equal(resource.asyncId(), id); seen.push(['init', id, parent]); } },
     before(id) { seen.push(['before', id]); }, after(id) { seen.push(['after', id]); }, destroy(id) { seen.push(['destroy', id]); },
   }).enable();
   let resource;
