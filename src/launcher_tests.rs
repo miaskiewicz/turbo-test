@@ -1427,3 +1427,79 @@ fn deps_inline_is_read_from_the_deps_block() {
     assert!(config_deps_inline("deps: { external: ['x'] }").is_empty());
     assert!(config_deps_inline("inline: ['a']").is_empty());
 }
+
+#[test]
+fn jest_node_environment_overrides_dom_content_heuristics() {
+    let t = Tmp::new("jest-node-env");
+    t.file("package.json", "{}");
+    t.file(
+        "src/a.spec.ts",
+        "test('node',()=>expect(typeof document).toBe('undefined'));",
+    );
+    t.file("jest.config.js", "module.exports={testEnvironment:'node'}");
+    assert_eq!(
+        env_of(&run_plan(&t, &["src/a.spec.ts"]), "TURBO_ENV"),
+        Some("node")
+    );
+    assert_eq!(
+        env_of(
+            &run_plan(&t, &["--environment=jsdom", "src/a.spec.ts"]),
+            "TURBO_ENV"
+        ),
+        Some("jsdom")
+    );
+    t.file(
+        "jest.config.js",
+        "module.exports={testEnvironment:'jest-environment-jsdom'}",
+    );
+    assert_eq!(
+        env_of(&run_plan(&t, &["src/a.spec.ts"]), "TURBO_ENV"),
+        Some("jsdom")
+    );
+    t.file("jest.config.js", "module.exports={}");
+    assert_eq!(
+        env_of(&run_plan(&t, &["src/a.spec.ts"]), "TURBO_ENV"),
+        Some("node")
+    );
+    t.file(
+        "vitest.config.js",
+        "export default {test:{environment:'happy-dom'}}",
+    );
+    assert_eq!(
+        env_of(&run_plan(&t, &["src/a.spec.ts"]), "TURBO_ENV"),
+        Some("happy-dom")
+    );
+}
+
+#[test]
+fn jest_environment_supports_json_and_forced_config_without_ancestor_fallback() {
+    let t = Tmp::new("jest-json-env");
+    t.file(
+        "package.json",
+        r#"{"jest":{"testEnvironment":"jest-environment-node"}}"#,
+    );
+    t.file("a.spec.ts", T);
+    assert_eq!(
+        env_of(&run_plan(&t, &["a.spec.ts"]), "TURBO_ENV"),
+        Some("node")
+    );
+    let forced = t.file(
+        "custom.config.cjs",
+        "module.exports={testEnvironment:'jsdom'}",
+    );
+    assert_eq!(
+        env_of(
+            &run_plan(&t, &["--config", forced.to_str().unwrap(), "a.spec.ts"]),
+            "TURBO_ENV"
+        ),
+        Some("jsdom")
+    );
+    t.file("custom.config.cjs", "module.exports={}");
+    assert_eq!(
+        env_of(
+            &run_plan(&t, &["--config", forced.to_str().unwrap(), "a.spec.ts"]),
+            "TURBO_ENV"
+        ),
+        None
+    );
+}
