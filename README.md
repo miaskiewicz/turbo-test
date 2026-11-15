@@ -277,11 +277,21 @@ IPv4-mapped addresses; this does not itself provide socket transport.
 The host I/O surface supports synchronous `spawnSync`/`execFileSync`/`execSync` and
 loopback HTTP/1.0–1.1 with content-length or chunked bodies. HTTP uses one request per
 connection, shared message/socket identity, socket close events and native TCP_NODELAY.
-HTTP socket state reflects the real connection; it does not expose general-purpose raw TCP
-stream I/O. `tls.Server` supports type discrimination, while construction and
+HTTP socket state reflects the real connection. `tls.Server` supports type discrimination, while construction and
 `tls.createServer` throw `ERR_TLS_UNSUPPORTED_SERVER`. TLS transport, custom agents,
 persistent connections and asynchronous child-process APIs remain unsupported. This does not yet provide a complete MongoDB driver
 execution environment.
+
+Raw `net.Socket` / `net.Server` transport supports literal IPv4/IPv6 loopback addresses
+and `localhost`, real ephemeral ports, binary Duplex reads/writes, half-close,
+backpressure, connection errors, idle timeouts and referenced/unreferenced handles.
+Raw TCP uses a separate native handle table from HTTP. Unix uses nonblocking connects
+and kernel readiness polling; other targets use a bounded 250 ms connect fallback.
+`setNoDelay` changes the native option; Unix `setKeepAlive` also changes native
+keepalive options. Hostname resolution, Unix-domain socket paths, imported file
+descriptors and custom lookup/local-bind options report explicit capability errors.
+A write is limited to 32 MiB and native reads are bounded per poll. These additions
+provide local TCP transport, rather than full Node networking or MongoDB compatibility.
 
 Fresh `vm` contexts support injected bindings, isolated globals, real values/errors
 and timeouts. They currently require the framework-only snapshot: use
