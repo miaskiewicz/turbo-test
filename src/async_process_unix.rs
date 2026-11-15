@@ -169,20 +169,28 @@ fn reserve_ipc_fd(fd: i32) -> std::io::Result<OwnedFd> {
     }
     Ok(unsafe { OwnedFd::from_raw_fd(reserved) })
 }
-fn exited_unreaped(pid: u32) -> std::io::Result<Option<ExitStatus>> {
-    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
-    let result = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            pid as libc::id_t,
-            info.as_mut_ptr(),
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
-    };
-    if result < 0 {
-        return Err(std::io::Error::last_os_error());
+fn waitid_nowait(pid: u32, info: &mut libc::siginfo_t) -> std::io::Result<()> {
+    loop {
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
     }
-    let info = unsafe { info.assume_init() };
+}
+fn exited_unreaped(pid: u32) -> std::io::Result<Option<ExitStatus>> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    waitid_nowait(pid, &mut info)?;
     if unsafe { info.si_pid() } == 0 {
         return Ok(None);
     }
@@ -194,6 +202,7 @@ fn exited_unreaped(pid: u32) -> std::io::Result<Option<ExitStatus>> {
     };
     Ok(Some(ExitStatus::from_raw(raw)))
 }
+
 fn prepare_ipc(command: &mut Command, enabled: bool) -> Result<Option<UnixStream>> {
     if !enabled {
         return Ok(None);
@@ -253,6 +262,7 @@ struct Process {
     input_end: Option<u64>,
     status: Option<ExitStatus>,
     reaped: bool,
+    owned: bool,
     started: Instant,
     timeout: u64,
     kill_signal: i32,
@@ -276,6 +286,7 @@ impl Process {
             input_end: None,
             status: None,
             reaped: false,
+            owned: true,
             started: Instant::now(),
             timeout: args["timeout"].as_u64().unwrap_or(0),
             kill_signal: args["killSignal"].as_i64().unwrap_or(15) as i32,
@@ -309,13 +320,45 @@ impl Process {
         }
         false
     }
-    fn kill(&mut self, signal: i32) -> bool {
-        if self.status.is_some() {
+    fn owns_child(&mut self) -> bool {
+        if self.reaped || !self.owned {
             return false;
         }
-        unsafe { libc::kill(-(self.child.id() as i32), signal) == 0 }
+        match exited_unreaped(self.child.id()) {
+            Ok(_) => true,
+            Err(error) => {
+                self.owned = false;
+                if error.raw_os_error() == Some(libc::ECHILD) {
+                    self.reaped = true;
+                }
+                false
+            }
+        }
+    }
+    fn signal_with(
+        &mut self,
+        signal: i32,
+        group: bool,
+        mut send: impl FnMut(i32, i32) -> bool,
+    ) -> bool {
+        if (!group && self.status.is_some()) || !self.owns_child() {
+            return false;
+        }
+        let pid = self.child.id() as i32;
+        send(if group { -pid } else { pid }, signal)
+    }
+    fn kill(&mut self, signal: i32) -> bool {
+        self.signal_with(signal, false, |pid, signal| unsafe {
+            libc::kill(pid, signal) == 0
+        })
+    }
+    fn kill_group(&mut self, signal: i32) -> bool {
+        self.signal_with(signal, true, |pid, signal| unsafe {
+            libc::kill(pid, signal) == 0
+        })
     }
     fn check_timeout(&mut self, events: &mut Vec<Value>) {
+        self.force_timeout();
         if self.status.is_some() {
             return;
         }
@@ -323,16 +366,18 @@ impl Process {
             && self.timeout > 0
             && self.started.elapsed() >= Duration::from_millis(self.timeout)
         {
-            self.kill(self.kill_signal);
+            self.kill_group(self.kill_signal);
             self.terminating = Some(Instant::now());
             events.push(event(self.id, "timeout", json!({})));
         }
+    }
+    fn force_timeout(&mut self) {
         if !self.forced
             && self
                 .terminating
                 .is_some_and(|at| at.elapsed() >= Duration::from_millis(100))
         {
-            self.kill(9);
+            self.kill_group(9);
             self.forced = true;
         }
     }
@@ -571,19 +616,13 @@ impl Process {
         )
     }
     fn cleanup_with(&mut self, mut signal_group: impl FnMut(u32)) {
-        if self.reaped {
-            return;
-        }
-        // An external reaper must never turn a numeric PID into authority to signal a new group.
-        if exited_unreaped(self.child.id())
-            .is_err_and(|error| error.raw_os_error() == Some(libc::ECHILD))
-        {
-            self.reaped = true;
+        // WNOWAIT retains this PID until cleanup; any ownership-query error fails closed.
+        if !self.owns_child() {
             return;
         }
         signal_group(self.child.id());
-        let _ = self.child.wait();
-        self.reaped = true;
+        self.reaped = self.child.wait().is_ok();
+        self.owned = false;
     }
     fn descriptors(&self) -> Vec<libc::pollfd> {
         let mut result: Vec<_> = self
