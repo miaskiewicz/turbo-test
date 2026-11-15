@@ -314,16 +314,17 @@ pub fn native_spawn_sync(
     let Some(request) = args.get(0).to_string(scope) else {
         return;
     };
+    let cancellation = crate::native_cancellation::for_isolate(scope);
     let isolate = scope.thread_safe_handle();
     let result = serde_json::from_str::<Value>(&request.to_rust_string_lossy(scope))
         .map_err(|error| error.to_string())
         .and_then(|request| {
             spawn_with_cancel(&request, input_bytes(args.get(1)), || {
-                isolate.is_execution_terminating()
+                cancellation.cancelled() || isolate.is_execution_terminating()
             })
             .map_err(|error| error.to_string())
         });
-    if isolate.is_execution_terminating() {
+    if cancellation.cancelled() || isolate.is_execution_terminating() {
         return;
     }
     match result {

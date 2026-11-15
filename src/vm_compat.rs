@@ -137,30 +137,39 @@ fn pristine_context<'s>(
 /// A cancellation channel plus a joined watchdog prevents a successful evaluation's timeout
 /// from terminating a later test. Only our own timeout clears V8's termination state.
 struct Watchdog {
+    cancellation: crate::native_cancellation::NativeCancellation,
     cancel: Sender<()>,
     thread: Option<JoinHandle<bool>>,
 }
 impl Watchdog {
-    fn start(scope: &v8::PinScope, timeout: u64) -> Self {
+    fn start(scope: &mut v8::PinScope, timeout: u64) -> Self {
+        let cancellation = crate::native_cancellation::for_isolate(scope);
+        let thread_cancellation = cancellation.clone();
         let isolate = scope.thread_safe_handle();
         let (cancel, receive) = mpsc::channel();
         let thread = std::thread::spawn(move || {
             if receive.recv_timeout(Duration::from_millis(timeout))
                 == Err(RecvTimeoutError::Timeout)
             {
+                thread_cancellation.request_vm_timeout();
                 isolate.terminate_execution();
                 return true;
             }
             false
         });
         Self {
+            cancellation,
             cancel,
             thread: Some(thread),
         }
     }
     fn finish(mut self) -> bool {
         let _ = self.cancel.send(());
-        self.thread.take().unwrap().join().unwrap_or(false)
+        let fired = self.thread.take().unwrap().join().unwrap_or(false);
+        if fired {
+            self.cancellation.finish_vm_timeout();
+        }
+        fired
     }
 }
 
@@ -168,7 +177,9 @@ impl Drop for Watchdog {
     fn drop(&mut self) {
         let _ = self.cancel.send(());
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            if thread.join().unwrap_or(false) {
+                self.cancellation.finish_vm_timeout();
+            }
         }
     }
 }
@@ -333,7 +344,20 @@ fn evaluate<'s>(
     let result = run_code(tc, args);
     let timed_out = watchdog.is_some_and(Watchdog::finish);
     if timed_out {
+        if crate::native_cancellation::for_isolate(tc).cancelled() {
+            // A VM timeout owns only its own request. Other expired VM owners
+            // and heap failure must keep unwinding instead of being cancelled.
+            tc.terminate_execution();
+            tc.rethrow();
+            return;
+        }
         tc.cancel_terminate_execution();
+        // An outer owner may expire between the first check and cancellation.
+        if crate::native_cancellation::for_isolate(tc).cancelled() {
+            tc.terminate_execution();
+            tc.rethrow();
+            return;
+        }
     } else if tc.has_terminated() {
         tc.rethrow();
         return;

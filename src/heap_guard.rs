@@ -20,9 +20,10 @@ const GRANT_BYTES: usize = 192 << 20;
 const MAX_GRANTS: u32 = 4;
 
 unsafe extern "C" fn near_heap_limit(data: *mut c_void, current: usize, _initial: usize) -> usize {
-    let handle = unsafe { &*(data as *const v8::IsolateHandle) };
+    let handle = unsafe { &*(data as *const GuardData) };
     TRIPPED.with(|t| t.set(true));
-    handle.terminate_execution();
+    handle.cancellation.request_heap_limit();
+    handle.isolate.terminate_execution();
     let grants = GRANTS.with(|g| {
         g.set(g.get() + 1);
         g.get()
@@ -33,12 +34,20 @@ unsafe extern "C" fn near_heap_limit(data: *mut c_void, current: usize, _initial
 
 /// The callback's data: owned by the isolate (a slot), so it lives exactly as long as the isolate
 /// that holds the raw pointer and is dropped with it (fresh mode creates an isolate per file).
-struct GuardHandle(#[allow(dead_code)] Box<v8::IsolateHandle>);
+struct GuardData {
+    isolate: v8::IsolateHandle,
+    cancellation: crate::native_cancellation::NativeCancellation,
+}
+struct GuardHandle(#[allow(dead_code)] Box<GuardData>);
 
 /// Register the guard on a new isolate.
 pub fn install(isolate: &mut v8::Isolate) {
-    let handle = Box::new(isolate.thread_safe_handle());
-    let data = &*handle as *const v8::IsolateHandle as *mut c_void;
+    let cancellation = crate::native_cancellation::for_isolate(isolate);
+    let handle = Box::new(GuardData {
+        isolate: isolate.thread_safe_handle(),
+        cancellation,
+    });
+    let data = &*handle as *const GuardData as *mut c_void;
     isolate.set_slot(GuardHandle(handle));
     isolate.add_near_heap_limit_callback(near_heap_limit, data);
 }

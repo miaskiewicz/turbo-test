@@ -278,7 +278,7 @@ fn native_spawn_boundary_preserves_json_and_coercion_errors() {
 }
 
 #[test]
-fn native_spawn_termination_reaps_child_without_fabricating_a_result() {
+fn vm_timeout_interrupts_native_child_and_reaps_before_resuming() {
     with_native_spawn_scope(|scope| {
         let marker = std::env::temp_dir().join(format!(
             "turbo-spawn-termination-{}-{}",
@@ -290,33 +290,28 @@ fn native_spawn_termination_reaps_child_without_fabricating_a_result() {
         ));
         let request = json!({"file":"/bin/sh", "args":["-c", "printf '%s' \"$$\" > \"$PID_FILE\"; /bin/sleep 60"],
             "env":{"PID_FILE":marker.to_str().unwrap()}, "timeout":5000});
-        let handle = scope.thread_safe_handle();
-        let observed_marker = marker.clone();
-        let terminator = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                if let Ok(text) = std::fs::read_to_string(&observed_marker) {
-                    if let Ok(pid) = text.parse::<libc::pid_t>() {
-                        handle.terminate_execution();
-                        return pid;
-                    }
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "native child did not publish its PID"
-                );
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        });
-        let source = format!(
+        let name = v8::String::new(scope, "execute").unwrap();
+        let function = v8::Function::new(scope, crate::vm_compat::native_run_context).unwrap();
+        scope
+            .get_current_context()
+            .global(scope)
+            .set(scope, name.into(), function.into());
+        let inner = format!(
             "spawnNative({}, null)",
             serde_json::to_string(&request.to_string()).unwrap()
         );
-        let result = native_script(scope, &source);
-        let pid = terminator.join().unwrap();
-        // A native callback can return undefined before V8 processes the pending
-        // termination. Either representation must omit an ordinary spawn result.
-        assert!(result.is_none_or(|value| value.is_undefined()));
+        let source = format!("(() => {{ try {{ execute({}, function(){{}}, {{}}, 'native-child.js', 200); return false; }} catch(error) {{ return error.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT'; }} }})()", serde_json::to_string(&inner).unwrap());
+        let start = Instant::now();
+        let result = native_script(scope, &source).unwrap();
+        assert!(
+            result.is_true(),
+            "VM timeout must replace the pending native result"
+        );
+        assert!(start.elapsed() < Duration::from_secs(3));
+        let pid = std::fs::read_to_string(&marker)
+            .unwrap()
+            .parse::<libc::pid_t>()
+            .unwrap();
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),
@@ -331,7 +326,6 @@ fn native_spawn_termination_reaps_child_without_fabricating_a_result() {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ECHILD)
         );
-        scope.cancel_terminate_execution();
         assert_eq!(
             native_script(scope, "42").unwrap().integer_value(scope),
             Some(42)
