@@ -4166,6 +4166,7 @@ const __inspector = {
   },
 };
 /* __TT_NODE_PROCESSES__ */
+/* __TT_NODE_ASYNC_PROCESSES__ */
 globalThis.__nodeBuiltins = {
   fs: __fs,
   'node:fs': __fs,
@@ -10333,6 +10334,7 @@ globalThis.__ttResetForNextFile = () => {
   __resetProcessWarnings();
   __resetAsyncContext();
   __httpReset();
+  __asyncProcessReset();
   // jest.setTimeout / jest.retryTimes are per-file overrides (turbo-test#273)
   globalThis.__TT_JEST_TIMEOUT = undefined;
   globalThis.__TT_JEST_RETRY = undefined;
