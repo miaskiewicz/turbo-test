@@ -65,3 +65,58 @@ fn namespace_imports_match_project_typescript_options_and_cycles() {
         assert_eq!(json_report(&run)["numFailedTests"], 0, "{}", run.all());
     }
 }
+
+#[test]
+fn changing_interop_mode_invalidates_the_same_source_cache_in_both_directions() {
+    let p = fixture(false, false);
+    for interop in [false, true, false] {
+        p.file(
+            "tsconfig.json",
+            &format!(
+                r#"{{"compilerOptions":{{"module":"commonjs","esModuleInterop":{interop}}}}}"#
+            ),
+        );
+        p.file("expected.json", &format!(r#"{{"interop":{interop}}}"#));
+        let run = turbo_test(
+            &p.dir,
+            &["--jobs", "1", "--reporter", "json", "check.test.ts"],
+            &[],
+        );
+        assert_eq!(json_report(&run)["numPassedTests"], 2, "{}", run.all());
+    }
+}
+
+#[test]
+fn dynamic_imports_and_vitest_namespaces_keep_their_esm_contract() {
+    let p = fixture(false, false);
+    let oracle = std::process::Command::new("node").args(["--input-type=module", "-e", "import * as ns from 'callable-package'; if(typeof ns !== 'object' || typeof ns.default !== 'function') throw Error('namespace mismatch');"]).current_dir(&p.dir).output().unwrap();
+    assert!(
+        oracle.status.success(),
+        "{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    p.file("dynamic.test.ts", "test('dynamic namespaces stay namespaces', async()=>{ const ns=await import('callable-package'); expect(typeof ns).toBe('object'); expect(ns.default).toBe(require('callable-package')); });");
+    let dynamic = turbo_test(
+        &p.dir,
+        &["--jobs", "1", "--reporter", "json", "dynamic.test.ts"],
+        &[],
+    );
+    assert_eq!(
+        json_report(&dynamic)["numPassedTests"],
+        1,
+        "{}",
+        dynamic.all()
+    );
+    std::fs::remove_file(p.dir.join("jest.config.js")).unwrap();
+    p.file(
+        "vitest.config.js",
+        "export default { test: { environment: 'node' } };",
+    );
+    p.file("expected.json", r#"{"interop":true}"#);
+    let esm = turbo_test(
+        &p.dir,
+        &["--jobs", "1", "--reporter", "json", "check.test.ts"],
+        &[],
+    );
+    assert_eq!(json_report(&esm)["numPassedTests"], 2, "{}", esm.all());
+}
