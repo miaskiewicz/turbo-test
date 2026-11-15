@@ -40,22 +40,25 @@ testCase('promise trigger ids identify the actual parent promise', async () => {
   assert.equal(records.get(child).trigger, records.get(parent).id);
 });
 testCase('hook enable is idempotent and disable stops observations', () => {
-  let count = 0;
+  let count = 0; const nextTick = process.nextTick; const Resource = hooks.AsyncResource;
   const hook = hooks.createHook({ init(id, type) { if (type === 'PROMISE') count++; } });
   assert.equal(hook.enable(), hook); assert.equal(hook.enable(), hook);
   Promise.resolve(); assert.equal(count, 1);
   assert.equal(hook.disable(), hook); assert.equal(hook.disable(), hook);
   Promise.resolve(); assert.equal(count, 1);
+  assert.equal(process.nextTick, nextTick); assert.equal(hooks.AsyncResource, Resource);
 });
 testCase('AsyncResource init before after destroy carry real resource identities', async () => {
   const seen = []; const resources = new Map(); let execution; let trigger;
+  const Resource = hooks.AsyncResource;
   const hook = hooks.createHook({
     init(id, type, parent, resource) { resources.set(id, resource); if (type === 'CompatResource') { assert.equal(resource.asyncId(), id); seen.push(['init', id, parent]); } },
     before(id) { seen.push(['before', id]); }, after(id) { seen.push(['after', id]); }, destroy(id) { seen.push(['destroy', id]); },
   }).enable();
   let resource;
   try {
-    resource = new hooks.AsyncResource('CompatResource', {triggerAsyncId: 123});
+    resource = new Resource('CompatResource', {triggerAsyncId: 123});
+    assert.equal(hooks.AsyncResource, Resource);
     const receiver = {};
     assert.equal(resource.runInAsyncScope(function(value) { assert.equal(this, receiver); execution = hooks.executionAsyncId(); trigger = hooks.triggerAsyncId(); assert.equal(hooks.executionAsyncResource(), resource); return value; }, receiver, 42), 42);
     resource.emitDestroy(); await immediate();
