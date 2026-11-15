@@ -1145,3 +1145,50 @@ fn actual_esm_cache_survives_mock_restoration_and_isolate_modules_snapshot() {
     });
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn temporary_directory_collisions_retry_without_modifying_existing_directories() {
+    let dir = scratch("temp-collision");
+    let prefix = dir.join("private-").to_str().unwrap().to_owned();
+    let existing = format!("{prefix}AAAAAA");
+    std::fs::create_dir(&existing).unwrap();
+    let marker = Path::new(&existing).join("marker");
+    std::fs::write(&marker, b"existing contents").unwrap();
+    let mut calls = 0;
+    let created = fs_temp_directory_with(&prefix, || {
+        calls += 1;
+        Ok(if calls == 1 { "AAAAAA" } else { "BBBBBB" }.into())
+    })
+    .unwrap();
+    assert_eq!(calls, 2);
+    assert_eq!(created, format!("{prefix}BBBBBB"));
+    assert!(Path::new(&created).is_dir());
+    assert_eq!(std::fs::read(&marker).unwrap(), b"existing contents");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn temporary_directory_collision_exhaustion_and_entropy_failure_are_real_errors() {
+    let dir = scratch("temp-exhaustion");
+    let prefix = dir.join("private-").to_str().unwrap().to_owned();
+    let existing = format!("{prefix}AAAAAA");
+    std::fs::create_dir(&existing).unwrap();
+    let mut calls = 0;
+    let (error, path) = fs_temp_directory_with(&prefix, || {
+        calls += 1;
+        Ok("AAAAAA".into())
+    })
+    .unwrap_err();
+    assert_eq!(calls, 128);
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(path, prefix);
+    assert!(Path::new(&existing).is_dir());
+    let (error, path) = fs_temp_directory_with(&prefix, || {
+        Err(std::io::Error::other("entropy unavailable"))
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "entropy unavailable");
+    assert_eq!(path, prefix);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}

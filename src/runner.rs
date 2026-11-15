@@ -10312,8 +10312,15 @@ fn fs_private_directory(path: &str) -> std::io::Result<()> {
 }
 
 fn fs_temp_directory(prefix: &str) -> Result<String, (std::io::Error, String)> {
+    fs_temp_directory_with(prefix, fs_temp_suffix)
+}
+
+fn fs_temp_directory_with(
+    prefix: &str,
+    mut suffix: impl FnMut() -> std::io::Result<String>,
+) -> Result<String, (std::io::Error, String)> {
     for _ in 0..128 {
-        let suffix = fs_temp_suffix().map_err(|e| (e, prefix.to_owned()))?;
+        let suffix = suffix().map_err(|e| (e, prefix.to_owned()))?;
         let path = format!("{prefix}{suffix}");
         match fs_private_directory(&path) {
             Ok(()) => return Ok(path),
