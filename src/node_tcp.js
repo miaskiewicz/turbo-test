@@ -34,14 +34,15 @@ function __tcpPreparePoll() {
 }
 globalThis.__ttTcpPreparePoll = __tcpPreparePoll;
 // Readiness is a poll phase, so recursively queued immediates cannot starve socket events.
-globalThis.__ttTcpPump = () => { __tcpStopPoll(); return __tcpPoll() > 0; };
+globalThis.__ttTcpPump = () => { __tcpStopPoll(); return __tcpPoll(); };
 function __tcpPoll() {
   __tcpPollTimer = null;
   const events = __tcpNative('poll');
   for (const event of events) __tcpEvent(event);
-  for (const socket of __tcpSockets.values()) socket._tcpCheckTimeout();
+  let progressed = events.length > 0;
+  for (const socket of __tcpSockets.values()) if (socket._tcpCheckTimeout()) progressed = true;
   __tcpPreparePoll();
-  return events.length;
+  return progressed;
 }
 function __tcpReference(handle, enabled) {
   handle._tcpRef = enabled;
@@ -78,7 +79,7 @@ function __tcpArguments(args) {
   return { options, callback };
 }
 function __tcpValidateOptions(options) {
-  const unsupported = ['path', 'fd', 'lookup', 'localAddress', 'localPort', 'onread', 'signal', 'reusePort', 'exclusive', 'backlog'];
+  const unsupported = ['path', 'fd', 'lookup', 'localAddress', 'localPort', 'onread', 'signal', 'reusePort', 'exclusive', 'backlog', 'pauseOnConnect', 'blockList'];
   for (const key of unsupported) if (options[key] !== undefined) throw __streamError('ERR_TCP_UNSUPPORTED_OPTION', `TCP option ${key} is unsupported`);
 }
 function __tcpKeepAliveDelay(value) {
@@ -196,7 +197,7 @@ class __TcpSocket extends __Duplex {
   }
   _tcpCheckTimeout() {
     if (this._tcpTimeoutDue === null || __loop.now < this._tcpTimeoutDue) return;
-    this._tcpClearTimeout(); this._tcpTimeoutDue = null; this.emit('timeout');
+    this._tcpClearTimeout(); this._tcpTimeoutDue = null; this.emit('timeout'); return true;
   }
   ref() { return __tcpReference(this, true); }
   unref() { return __tcpReference(this, false); }
@@ -235,7 +236,7 @@ class __TcpServer extends __EventEmitter {
     if (this.listening) throw __streamError('ERR_SERVER_ALREADY_LISTEN', 'TCP server is already listening');
     if (callback) this.once('listening', callback);
     __tcpResource(this, 'TCPSERVERWRAP');
-    try { this._tcpListen(options); } catch (error) { __tcpLater(() => this.emit('error', error)); }
+    try { this._tcpListen(options); } catch (error) { __tcpLater(() => { __tcpDestroyResource(this); this.emit('error', error); }); }
     return this;
   }
   _tcpListen(options) {
