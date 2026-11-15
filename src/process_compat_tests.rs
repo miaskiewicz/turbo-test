@@ -278,20 +278,64 @@ fn native_spawn_boundary_preserves_json_and_coercion_errors() {
 }
 
 #[test]
-fn native_spawn_termination_reaps_child_and_leaves_execution_terminated() {
+fn native_spawn_termination_reaps_child_without_fabricating_a_result() {
     with_native_spawn_scope(|scope| {
+        let marker = std::env::temp_dir().join(format!(
+            "turbo-spawn-termination-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let request = json!({"file":"/bin/sh", "args":["-c", "printf '%s' \"$$\" > \"$PID_FILE\"; /bin/sleep 60"],
+            "env":{"PID_FILE":marker.to_str().unwrap()}, "timeout":5000});
         let handle = scope.thread_safe_handle();
+        let observed_marker = marker.clone();
         let terminator = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
-            handle.terminate_execution();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&observed_marker) {
+                    if let Ok(pid) = text.parse::<libc::pid_t>() {
+                        handle.terminate_execution();
+                        return pid;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "native child did not publish its PID"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
         });
-        let result = native_script(
-            scope,
-            r#"spawnNative(JSON.stringify({file:'/bin/sh',args:['-c','sleep 60'],timeout:5000}), null)"#,
+        let source = format!(
+            "spawnNative({}, null)",
+            serde_json::to_string(&request.to_string()).unwrap()
         );
-        terminator.join().unwrap();
-        assert!(result.is_none());
-        assert!(scope.is_execution_terminating());
+        let result = native_script(scope, &source);
+        let pid = terminator.join().unwrap();
+        // A native callback can return undefined before V8 processes the pending
+        // termination. Either representation must omit an ordinary spawn result.
+        assert!(result.is_none_or(|value| value.is_undefined()));
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
         scope.cancel_terminate_execution();
+        assert_eq!(
+            native_script(scope, "42").unwrap().integer_value(scope),
+            Some(42)
+        );
+        std::fs::remove_file(marker).unwrap();
     });
 }
