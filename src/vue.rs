@@ -112,6 +112,15 @@ fn request(child: &mut std::process::Child, input: &[u8]) -> Result<(), String> 
     stdin.write_all(input).map_err(|error| error.to_string())
 }
 
+fn request_or_terminate(child: &mut std::process::Child, input: &[u8]) -> Result<(), String> {
+    if let Err(error) = request(child, input) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn invoke(path: &Path, source: &str) -> Result<String, String> {
     let node = std::env::var_os("TURBO_NODE_EXECUTABLE").unwrap_or_else(|| "node".into());
     let filename = path.to_str().ok_or("Vue SFC paths must be valid UTF-8")?;
@@ -123,11 +132,7 @@ fn invoke(path: &Path, source: &str) -> Result<String, String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("cannot start Node Vue compiler: {error}"))?;
-    if let Err(error) = request(&mut child, input.as_bytes()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
-    }
+    request_or_terminate(&mut child, input.as_bytes())?;
     let output = child
         .wait_with_output()
         .map_err(|error| error.to_string())?;
@@ -148,14 +153,18 @@ fn compiled(path: &Path, source: &str) -> Result<String, String> {
         return Ok(code);
     }
     let code = invoke(path, source)?;
+    cache_compiled(key, &code);
+    Ok(code)
+}
+
+fn cache_compiled(key: (PathBuf, u64), code: &str) {
     COMPILED.with(|cache| {
         let mut cache = cache.borrow_mut();
         if cache.len() >= 256 {
             cache.clear();
         }
-        cache.insert(key, code.clone());
+        cache.insert(key, code.to_owned());
     });
-    Ok(code)
 }
 
 fn javascript(path: &Path) -> Result<String, String> {
@@ -190,3 +199,7 @@ thread_local! { static MANIFEST_READS: Cell<usize> = const { Cell::new(0) }; }
 #[cfg(test)]
 #[path = "vue_plugin_memo_tests.rs"]
 mod plugin_memo_tests;
+
+#[cfg(all(test, unix))]
+#[path = "vue_compiler_tests.rs"]
+mod compiler_tests;
