@@ -168,3 +168,12 @@ testCase('TCP close callback can relisten and accept with a fresh resource', asy
   try { client.connect({ host: '127.0.0.1', port: server.address().port }); await done; assert.equal(Buffer.concat(chunks).toString(), 'reopened'); }
   finally { client.destroy(); if (peer) peer.destroy(); await closedServer(server); }
 });
+testCase('TCP destroy in connect callback cancels a queued write', async () => {
+  let received = ''; let peer;
+  const server = net.createServer(socket => { peer = socket; socket.setEncoding('utf8'); socket.on('data', chunk => { received += chunk; }); });
+  await listening(server, '127.0.0.1'); const client = new net.Socket(); client.on('error', error => { throw error; }); const done = closedSocket(client);
+  try {
+    client.connect({ host: '127.0.0.1', port: server.address().port }, () => client.destroy());
+    client.write('cancelled'); await done; await closedServer(server); assert.equal(received, '');
+  } finally { client.destroy(); if (peer) peer.destroy(); if (server.listening) await closedServer(server); }
+});
