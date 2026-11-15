@@ -152,11 +152,9 @@ impl Connection {
     }
     fn flush(&mut self, id: u64, events: &mut Vec<Value>) -> Result<()> {
         while self.sent < self.output.len() {
-            match self.socket.write(&self.output[self.sent..]) {
-                Ok(0) => return Err(fail("EPIPE", "TCP write returned zero")),
-                Ok(size) => self.sent += size,
-                Err(error) if retryable(&error) => return Ok(()),
-                Err(error) => return Err(io_error(error)),
+            match write_result(self.socket.write(&self.output[self.sent..]))? {
+                Some(size) => self.sent += size,
+                None => return Ok(()),
             }
         }
         self.output.clear();
@@ -181,11 +179,10 @@ impl Connection {
         }
         let mut bytes = [0u8; 16384];
         for _ in 0..16 {
-            match self.socket.read(&mut bytes) {
-                Ok(0) => { self.read_closed=true; events.push(json!({"id":id,"kind":"end"})); return Ok(()); }
-                Ok(size) => events.push(json!({"id":id,"kind":"data","data":base64::engine::general_purpose::STANDARD.encode(&bytes[..size])})),
-                Err(error) if retryable(&error) => return Ok(()),
-                Err(error) => return Err(io_error(error)),
+            match io_result(self.socket.read(&mut bytes))? {
+                Some(0) => { self.read_closed=true; events.push(json!({"id":id,"kind":"end"})); return Ok(()); }
+                Some(size) => events.push(json!({"id":id,"kind":"data","data":base64::engine::general_purpose::STANDARD.encode(&bytes[..size])})),
+                None => return Ok(()),
             }
         }
         Ok(())
@@ -199,6 +196,19 @@ impl Connection {
         Ok(self.read_closed && self.write_closed)
     }
 }
+fn io_result<T>(result: std::io::Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if retryable(&error) => Ok(None),
+        Err(error) => Err(io_error(error)),
+    }
+}
+fn write_result(result: std::io::Result<usize>) -> Result<Option<usize>> {
+    match io_result(result)? {
+        Some(0) => Err(fail("EPIPE", "TCP write returned zero")),
+        value => Ok(value),
+    }
+}
 fn retryable(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
@@ -208,6 +218,15 @@ fn retryable(error: &std::io::Error) -> bool {
 fn pending(error: &std::io::Error) -> bool {
     retryable(error) || error.raw_os_error() == Some(libc::ENOTCONN)
 }
+fn allocate_id(next: &mut u64, handles: usize) -> Result<u64> {
+    if handles >= 4096 {
+        return Err(fail("EMFILE", "TCP handle limit reached"));
+    }
+    *next = next
+        .checked_add(1)
+        .ok_or_else(|| fail("EMFILE", "TCP handle ids exhausted"))?;
+    Ok(*next)
+}
 #[derive(Default)]
 struct Transport {
     next: u64,
@@ -216,15 +235,12 @@ struct Transport {
 }
 impl Transport {
     fn id(&mut self) -> Result<u64> {
-        if self.listeners.len() + self.connections.len() >= 4096 {
-            return Err(fail("EMFILE", "TCP handle limit reached"));
-        }
-        self.next = self
-            .next
-            .checked_add(1)
-            .ok_or_else(|| fail("EMFILE", "TCP handle ids exhausted"))?;
-        Ok(self.next)
+        allocate_id(
+            &mut self.next,
+            self.listeners.len() + self.connections.len(),
+        )
     }
+
     fn connection(&mut self, args: &Value) -> Result<&mut Connection> {
         self.connections
             .get_mut(&number(args, "id")?)
@@ -307,11 +323,10 @@ impl Transport {
     }
     fn accept(&mut self, server: u64, events: &mut Vec<Value>) -> Result<()> {
         for _ in 0..64 {
-            let result = self.listeners[&server].socket.accept();
+            let result = io_result(self.listeners[&server].socket.accept())?;
             match result {
-                Ok((socket, _)) => self.accepted(server, socket, events)?,
-                Err(error) if retryable(&error) => return Ok(()),
-                Err(error) => return Err(io_error(error)),
+                Some((socket, _)) => self.accepted(server, socket, events)?,
+                None => return Ok(()),
             }
         }
         Ok(())
@@ -327,10 +342,7 @@ impl Transport {
     fn poll(&mut self, _: &Value) -> Result<Value> {
         let mut events = Vec::new();
         for server in self.listeners.keys().copied().collect::<Vec<_>>() {
-            if let Err(error) = self.accept(server, &mut events) {
-                events
-                    .push(json!({"kind":"serverError","server":server,"error":error_value(error)}));
-            }
+            accept_completed(server, self.accept(server, &mut events), &mut events);
         }
         let ids = self.connections.keys().copied().collect::<Vec<_>>();
         for id in ids {
@@ -359,6 +371,11 @@ impl Transport {
         self.listeners.clear();
         self.connections.clear();
         Ok(Value::Null)
+    }
+}
+fn accept_completed(server: u64, result: Result<()>, events: &mut Vec<Value>) {
+    if let Err(error) = result {
+        events.push(json!({"kind":"serverError","server":server,"error":error_value(error)}));
     }
 }
 thread_local! {
@@ -411,14 +428,17 @@ pub fn native_tcp(
 ) {
     let name = args.get(0).to_rust_string_lossy(scope);
     let encoded = args.get(1).to_rust_string_lossy(scope);
-    let result = serde_json::from_str(&encoded)
+    let value = response(&name, &encoded);
+    rv.set(v8::String::new(scope, &value.to_string()).unwrap().into());
+}
+fn response(name: &str, encoded: &str) -> Value {
+    let result = serde_json::from_str(encoded)
         .map_err(|_| invalid())
-        .and_then(|args| operation(&name, &args));
-    let value = match result {
+        .and_then(|args| operation(name, &args));
+    match result {
         Ok(value) => json!({"value":value}),
         Err(error) => json!({"error":error_value(error)}),
-    };
-    rv.set(v8::String::new(scope, &value.to_string()).unwrap().into());
+    }
 }
 #[cfg(unix)]
 pub fn descriptors() -> Vec<libc::pollfd> {
@@ -497,10 +517,7 @@ fn socket_option(
             std::mem::size_of_val(&value) as _,
         )
     };
-    if result < 0 {
-        return Err(io_error(std::io::Error::last_os_error()));
-    }
-    Ok(())
+    syscall(result).map_err(io_error)
 }
 #[cfg(unix)]
 fn set_keepalive(socket: &TcpStream, enabled: bool, delay: u32) -> Result<()> {
@@ -535,37 +552,53 @@ fn set_keepalive(_: &TcpStream, _: bool, _: u32) -> Result<()> {
 fn connect_socket(address: SocketAddr) -> Result<TcpStream> {
     use std::os::fd::AsRawFd;
     let socket = connecting_socket(address)?;
-    let result = raw_connect(socket.as_raw_fd(), address);
-    if result == 0 {
-        return Ok(socket);
+    let result = syscall(raw_connect(socket.as_raw_fd(), address));
+    complete_connect(socket, result)
+}
+#[cfg(unix)]
+fn complete_connect(socket: TcpStream, result: std::io::Result<()>) -> Result<TcpStream> {
+    match result {
+        Ok(()) => Ok(socket),
+        Err(error) if error.raw_os_error() == Some(libc::EINPROGRESS) || retryable(&error) => {
+            Ok(socket)
+        }
+        Err(error) => Err(io_error(error)),
     }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::EINPROGRESS) || retryable(&error) {
-        return Ok(socket);
+}
+#[cfg(unix)]
+fn syscall(result: libc::c_int) -> std::io::Result<()> {
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
     }
-    Err(io_error(error))
+    Ok(())
+}
+#[cfg(unix)]
+fn cloexec(fd: libc::c_int) -> Result<()> {
+    // Owned TCP descriptors must not leak through child-process exec.
+    syscall(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }).map_err(io_error)
+}
+#[cfg(unix)]
+fn owned_socket(family: libc::c_int) -> Result<TcpStream> {
+    use std::os::fd::FromRawFd;
+    let fd = unsafe { libc::socket(family, libc::SOCK_STREAM, 0) };
+    syscall(fd).map_err(io_error)?;
+    // Ownership transfers immediately so configuration failures close the descriptor.
+    Ok(unsafe { TcpStream::from_raw_fd(fd) })
 }
 #[cfg(unix)]
 fn connecting_socket(address: SocketAddr) -> Result<TcpStream> {
-    use std::os::fd::FromRawFd;
+    use std::os::fd::AsRawFd;
     let family = if address.is_ipv4() {
         libc::AF_INET
     } else {
         libc::AF_INET6
     };
-    // Ownership transfers immediately so all error paths close the descriptor.
-    let fd = unsafe { libc::socket(family, libc::SOCK_STREAM, 0) };
-    if fd < 0 {
-        return Err(io_error(std::io::Error::last_os_error()));
-    }
-    let socket = unsafe { TcpStream::from_raw_fd(fd) };
-    // Child-process compatibility must never inherit raw TCP handles across exec.
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-        return Err(io_error(std::io::Error::last_os_error()));
-    }
+    let socket = owned_socket(family)?;
+    cloexec(socket.as_raw_fd())?;
     socket.set_nonblocking(true).map_err(io_error)?;
     Ok(socket)
 }
+
 #[cfg(unix)]
 fn raw_connect(fd: libc::c_int, address: SocketAddr) -> libc::c_int {
     match address {
@@ -971,6 +1004,122 @@ mod tests {
         connection.paused = false;
         connection.read_closed = true;
         assert_eq!(interests(connection), 0);
+    }
+    #[test]
+    fn io_completion_preserves_partial_progress_retries_eof_and_failures() {
+        use std::io::ErrorKind::*;
+        assert_eq!(write_result(Ok(7)).unwrap(), Some(7));
+        assert_eq!(write_result(Ok(0)).unwrap_err().code, "EPIPE");
+        for kind in [WouldBlock, Interrupted] {
+            assert_eq!(write_result(Err(std::io::Error::from(kind))).unwrap(), None);
+            assert_eq!(
+                io_result::<usize>(Err(std::io::Error::from(kind))).unwrap(),
+                None
+            );
+        }
+        assert_eq!(
+            write_result(Err(std::io::Error::from(BrokenPipe)))
+                .unwrap_err()
+                .code,
+            "EPIPE"
+        );
+        assert_eq!(
+            io_result::<usize>(Err(std::io::Error::from(ConnectionReset)))
+                .unwrap_err()
+                .code,
+            "ECONNRESET"
+        );
+        assert_eq!(io_result(Ok(0)).unwrap(), Some(0));
+        assert_eq!(
+            io_result(Ok(b"bytes".to_vec())).unwrap(),
+            Some(b"bytes".to_vec())
+        );
+    }
+    #[test]
+    fn capacity_rejection_does_not_consume_or_wrap_handle_ids() {
+        let mut next = 9;
+        assert_eq!(allocate_id(&mut next, 4095).unwrap(), 10);
+        for count in [4096, usize::MAX] {
+            assert_eq!(allocate_id(&mut next, count).unwrap_err().code, "EMFILE");
+            assert_eq!(next, 10);
+        }
+        next = u64::MAX;
+        assert_eq!(allocate_id(&mut next, 0).unwrap_err().code, "EMFILE");
+        assert_eq!(next, u64::MAX);
+    }
+    #[test]
+    fn accept_budget_and_error_events_are_bounded_and_preserve_listener_identity() {
+        let mut table = Transport::default();
+        let id = table.listen(&json!({"host":"127.0.0.1","port":0})).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let address = table.listeners[&id].socket.local_addr().unwrap();
+        let clients: Vec<_> = (0..64)
+            .map(|_| TcpStream::connect_timeout(&address, Duration::from_secs(1)).unwrap())
+            .collect();
+        let mut events = Vec::new();
+        table.accept(id, &mut events).unwrap();
+        assert_eq!(events.len(), 64);
+        assert_eq!(table.connections.len(), 64);
+        assert!(events
+            .iter()
+            .all(|event| event["kind"] == "accept" && event["server"] == id));
+        table.accept(id, &mut events).unwrap();
+        assert_eq!(events.len(), 64);
+        accept_completed(id, Err(fail("EMFILE", "accept handle limit")), &mut events);
+        assert_eq!(events[64]["server"], id);
+        assert_eq!(events[64]["kind"], "serverError");
+        assert_eq!(events[64]["error"]["code"], "EMFILE");
+        accept_completed(id, Ok(()), &mut events);
+        assert_eq!(events.len(), 65);
+        assert!(table.listeners.contains_key(&id));
+        drop(clients);
+    }
+    #[test]
+    fn native_response_reports_invalid_json_and_operation_errors() {
+        assert_eq!(
+            response("poll", "{")["error"]["code"],
+            "ERR_INVALID_ARG_VALUE"
+        );
+        assert_eq!(
+            response("missing", "{}")["error"]["code"],
+            "ERR_TCP_UNSUPPORTED_OPERATION"
+        );
+        assert_eq!(
+            response("listen", r#"{"host":"127.0.0.1","port":-1}"#)["error"]["code"],
+            "ERR_INVALID_ARG_VALUE"
+        );
+        assert_eq!(response("close", r#"{"id":0}"#), json!({"value":null}));
+    }
+    #[test]
+    fn actual_syscall_errors_and_connect_result_ownership_are_preserved() {
+        assert_eq!(owned_socket(-1).unwrap_err().code, "ERR_TCP_IO");
+        assert_eq!(cloexec(-1).unwrap_err().code, "ERR_TCP_IO");
+        let socket = owned_socket(libc::AF_INET).unwrap();
+        assert_eq!(
+            socket_option(&socket, libc::SOL_SOCKET, -1, 0)
+                .unwrap_err()
+                .code,
+            "ERR_TCP_IO"
+        );
+        drop(complete_connect(socket, Ok(())).unwrap());
+        for error in [
+            std::io::Error::from_raw_os_error(libc::EINPROGRESS),
+            std::io::Error::from(std::io::ErrorKind::WouldBlock),
+        ] {
+            let socket = owned_socket(libc::AF_INET).unwrap();
+            drop(complete_connect(socket, Err(error)).unwrap());
+        }
+        let socket = owned_socket(libc::AF_INET).unwrap();
+        assert_eq!(
+            complete_connect(
+                socket,
+                Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+            )
+            .unwrap_err()
+            .code,
+            "ECONNREFUSED"
+        );
     }
     #[test]
     fn io_error_mapping_and_retry_classification_remain_distinct() {
