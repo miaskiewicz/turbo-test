@@ -2491,14 +2491,18 @@ const __copyOperation = (source, destination, mode) => {
   const src = __fsCheckedPath(source, 'src'), dest = __fsCheckedPath(destination, 'dest'), flags = __copyMode(mode);
   return () => globalThis.__fs_copyFile(src, dest, flags);
 };
-const __realpathSync = (value, options) => {
+const __realpathNative = (value, options) => {
   const path = __fsCheckedPath(value, 'path'), encoding = __tempEncoding(options);
   const result = globalThis.__fs_realpath(path);
   if (encoding === 'utf8' || encoding === 'utf-8') return result;
   const bytes = Buffer.from(result);
   return encoding === 'buffer' ? bytes : __hashOutput(bytes, encoding);
 };
-__realpathSync.native = __realpathSync;
+const __realpathSync = (value, options) => {
+  const path = typeof value === 'object' && value !== null ? value : String(value);
+  return __realpathNative(path, options);
+};
+__realpathSync.native = __realpathNative;
 const __copyFileSync = (source, destination, mode) => __copyOperation(source, destination, mode)();
 const __copyFile = (source, destination, mode, callback) => {
   if (typeof mode === 'function') { callback = mode; mode = undefined; }
