@@ -51,7 +51,7 @@ function __tcpReference(handle, enabled) {
   __tcpPreparePoll(); return handle;
 }
 function __tcpResource(owner, type) {
-  owner._tcpResource = new __async_hooks.AsyncResource(type);
+  owner._tcpResource = new __AsyncResource(type);
   owner._tcpDispatch = event => owner._tcpResource.runInAsyncScope(() => owner._tcpEvent(event), owner);
 }
 function __tcpDestroyResource(owner, resource = owner._tcpResource) {
