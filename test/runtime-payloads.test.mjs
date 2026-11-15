@@ -50,6 +50,9 @@ test('only the selected payload installs its corresponding capabilities',()=>{
  assert.equal(node.__ttRuntimeBackendInstalled,true);
  assert.equal(vm.runInContext('typeof __nodeBuiltins.net.createServer',node),'function');
  assert.equal(vm.runInContext('typeof __nodeBuiltins.crypto.createPrivateKey',node),'function');
+ assert.equal(vm.runInContext("typeof __nodeBuiltins['node:vm'].runInNewContext",node),'function');
+ assert.equal(vm.runInContext("typeof __nodeBuiltins['node:inspector'].Session",node),'function');
+ assert.equal(vm.runInContext("typeof __nodeBuiltins['node:dns/promises'].lookup",node),'function');
  assert.equal(typeof node.DOMPoint,'undefined');
  const dom=commonContext();vm.runInContext(read('runtime_dom.js'),dom,{timeout:3000});
  assert.equal(dom.__ttRuntimeBackendInstalled,false);
