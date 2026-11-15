@@ -10,7 +10,6 @@ const __portEndpoints = new Map();
 const __portHandles = new WeakMap();
 let __portSequence = 1;
 let __portRegistry = null;
-let __portResourceClass = null;
 // A posted task can retain its receiver strongly until delivery. File reset drops
 // that task's timer, so release its ownership explicitly without dispatching old events.
 function __portReset() {
@@ -35,10 +34,7 @@ function __portNewHandle(port) {
 }
 function __portEndpoint(port) { return __portMapGet(__portEndpoints, globalThis.__ttPortId(port)); }
 function __portOwner(record) { return record.owner.deref(); }
-function __portResource() {
-  if (!__portResourceClass) __portResourceClass = __async_hooks.AsyncResource;
-  return new __portResourceClass('MESSAGEPORT');
-}
+function __portResource() { return __runtimeTaskResource(); }
 function __portDestroyResource(resource) { if (typeof resource.emitDestroy === 'function') resource.emitDestroy(); }
 function __portCloseEvent(port, resource, cleanup = false) {
   __realTimers.setImmediate(() => {

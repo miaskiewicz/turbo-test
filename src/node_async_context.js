@@ -43,7 +43,7 @@ function __asyncCallStorage(storage, frame, fn, args) {
     __asyncSetFrame(restored);
   }
 }
-function __captureAsyncContext(fn) {
+function __captureBackendAsyncContext(fn) {
   const frame = __asyncFrame();
   if (!frame) return fn;
   return function(...args) { return __asyncCallFrame(frame, fn, this, args); };
