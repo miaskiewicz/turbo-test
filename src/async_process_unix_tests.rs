@@ -172,10 +172,7 @@ fn exit_observation_retains_the_pid_until_owned_group_cleanup_and_reaping() {
 struct ProbePid(libc::pid_t);
 impl Drop for ProbePid {
     fn drop(&mut self) {
-        if self.0 > 0
-            && !exited_unreaped(self.0 as u32)
-                .is_err_and(|error| error.raw_os_error() == Some(libc::ECHILD))
-        {
+        if self.0 > 0 && exited_unreaped(self.0 as u32).is_ok() {
             unsafe {
                 libc::kill(self.0, libc::SIGKILL);
                 libc::waitpid(self.0, std::ptr::null_mut(), 0);
