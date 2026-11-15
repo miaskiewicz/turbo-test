@@ -105,3 +105,27 @@ testCase('native hooks preserve AsyncLocalStorage across concurrent awaits and t
     assert.ok(promises > 0); assert.equal(storage.getStore(), undefined);
   } finally { hook.disable(); }
 });
+
+testCase('disable and re-enable preserve cancellation lifecycle for existing timers', async () => {
+  let creating = false; const ids = []; const destroyed = new Set(); let called = false;
+  const hook = hooks.createHook({ init(id, type) { if (creating && type === 'Timeout') ids.push(id); }, destroy(id) { destroyed.add(id); } }).enable();
+  try {
+    creating = true; const timer = setTimeout(() => { called = true; }, 60000); const interval = setInterval(() => { called = true; }, 60000); creating = false;
+    hook.disable(); hook.enable(); clearTimeout(timer); clearInterval(interval);
+    await immediate();
+  } finally { hook.disable(); }
+  assert.equal(called, false); assert.equal(ids.length, 2);
+  for (const id of ids) assert.equal(destroyed.has(id), true);
+});
+testCase('ALS and AsyncResource bound callbacks preserve invocation receivers with hooks enabled', () => {
+  const receiver = { marker: 42 }; const fn = function() { return this; };
+  const plain = hooks.AsyncLocalStorage.bind(fn);
+  const hook = hooks.createHook({ init() {} }).enable();
+  try {
+    assert.equal(plain.call(receiver), receiver);
+    assert.equal(hooks.AsyncLocalStorage.bind(fn).call(receiver), receiver);
+    assert.equal(hooks.AsyncResource.bind(fn).call(receiver), receiver);
+    assert.equal(new hooks.AsyncResource('BoundInstance').bind(fn).call(receiver), receiver);
+  } finally { hook.disable(); }
+  assert.equal(hooks.AsyncLocalStorage.bind(fn).call(receiver), receiver);
+});
