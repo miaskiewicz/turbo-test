@@ -100,12 +100,38 @@ fn static_wrapper(call: &oxc_ast::ast::CallExpression<'_>) -> Option<oxc_span::S
     };
     literal_require(required).then_some(required.span)
 }
+fn generated_helper(binding: &oxc_ast::ast::VariableDeclarator<'_>, code: &str) -> bool {
+    use oxc_ast::ast::{BindingPattern, Expression};
+    let BindingPattern::BindingIdentifier(id) = &binding.id else {
+        return false;
+    };
+    let Some(Expression::ArrowFunctionExpression(arrow)) = &binding.init else {
+        return false;
+    };
+    let body = &code[arrow.span.start as usize..arrow.span.end as usize];
+    id.name == "__toESM"
+        && body.starts_with("(mod, isNodeMode, target) =>")
+        && body.contains("__copyProps")
+}
+fn has_generated_helper(program: &oxc_ast::ast::Program<'_>, code: &str) -> bool {
+    program.body.iter().any(|statement| match statement {
+        oxc_ast::ast::Statement::VariableDeclaration(declaration) => declaration
+            .declarations
+            .iter()
+            .any(|binding| generated_helper(binding, code)),
+        _ => false,
+    })
+}
 /// Remove only static-import wrappers; dynamic imports retain their namespace helper.
 /// Whitespace replacements preserve generated line/column positions and esbuild source maps.
 pub(crate) fn static_requires(code: String) -> String {
     use oxc_ast::ast::{Expression, Statement};
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, &code, oxc_span::SourceType::cjs()).parse();
+    if !has_generated_helper(&parsed.program, &code) {
+        drop(parsed);
+        return code;
+    }
     let mut bytes = code.as_bytes().to_vec();
     for statement in &parsed.program.body {
         let Statement::VariableDeclaration(declaration) = statement else {
@@ -124,3 +150,7 @@ pub(crate) fn static_requires(code: String) -> String {
     drop(parsed);
     String::from_utf8(bytes).unwrap_or(code)
 }
+
+#[path = "ts_cjs_resolver_fs.rs"]
+mod resolver_fs;
+pub(crate) use resolver_fs::ConfigFileSystem;

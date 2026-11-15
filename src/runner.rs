@@ -539,6 +539,8 @@ fn is_esm_module_uncached(abs: &Path) -> bool {
 
 /// The resolvers by (nearest tsconfig, ESM importer, CJS-first resolution, require_fallback,
 /// custom module dirs, custom export conditions).
+type ProjectResolver = oxc_resolver::ResolverGeneric<crate::ts_cjs_interop::ConfigFileSystem>;
+
 type ResolverCache = HashMap<
     (
         Option<PathBuf>,
@@ -549,12 +551,12 @@ type ResolverCache = HashMap<
         Vec<String>,
         bool,
     ),
-    std::rc::Rc<oxc_resolver::Resolver>,
+    std::rc::Rc<ProjectResolver>,
 >;
 
 /// A resolver configured for the nearest tsconfig of `from_dir` + the importer's module kind
 /// (ESM vs CJS conditions), cached per (tsconfig, esm).
-fn resolver_for(from_dir: &Path, esm: bool) -> std::rc::Rc<oxc_resolver::Resolver> {
+fn resolver_for(from_dir: &Path, esm: bool) -> std::rc::Rc<ProjectResolver> {
     resolver_with(from_dir, esm, false)
 }
 
@@ -563,7 +565,7 @@ fn resolver_with(
     from_dir: &Path,
     esm: bool,
     require_fallback: bool,
-) -> std::rc::Rc<oxc_resolver::Resolver> {
+) -> std::rc::Rc<ProjectResolver> {
     thread_local! {
         static RESOLVERS: RefCell<ResolverCache> = RefCell::new(HashMap::new());
     }
@@ -586,7 +588,8 @@ fn resolver_with(
         if key.6 {
             options.extensions.push(".vue".into());
         }
-        let r = std::rc::Rc::new(oxc_resolver::Resolver::new(options));
+        let files = crate::ts_cjs_interop::ConfigFileSystem::for_config(key.0.as_deref());
+        let r = std::rc::Rc::new(ProjectResolver::new_with_file_system(files, options));
         m.borrow_mut().insert(key, r.clone());
         r
     })
@@ -3136,7 +3139,8 @@ const src = fs.readFileSync(0, 'utf8'); // the module's source (import.meta.glob
 const isTsx = file.endsWith('.tsx');
 const configFile = ts.findConfigFile(require('path').dirname(file), ts.sys.fileExists);
 const parsedConfig = configFile && ts.getParsedCommandLineOfConfigFile(configFile, {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic() {} });
-const projectInterop = parsedConfig && parsedConfig.options.esModuleInterop;
+const projectOptions = parsedConfig && parsedConfig.options;
+const commonjsNoInterop = projectOptions && projectOptions.module === ts.ModuleKind.CommonJS && projectOptions.esModuleInterop === false;
 // isolatedModules + emitDecoratorMetadata: a value import of a name used only as a type (an
 // interface) is kept for its `design:type` reference and then fails ESM linking (no such export).
 // TypeScript's own remedy (TS1272) is a namespace import: `ns.Shape` reads as undefined -> Object.
@@ -3232,14 +3236,14 @@ function preserveDynamicNamespaces(context) {
   return source => ts.visitNode(source, visit);
 }
 const out = ts.transpileModule(input, {
-  transformers: { before: process.argv[3] === 'commonjs' && projectInterop === false ? [preserveDynamicNamespaces] : [] },
+  transformers: { before: process.argv[3] === 'commonjs' && commonjsNoInterop ? [preserveDynamicNamespaces] : [] },
   fileName: file,
   compilerOptions: {
     module: process.argv[3] === 'commonjs' ? ts.ModuleKind.CommonJS : ts.ModuleKind.ESNext,
     target: ts.ScriptTarget.ES2021,
     experimentalDecorators: true,
     emitDecoratorMetadata: true,
-    esModuleInterop: process.argv[3] === 'commonjs' ? projectInterop !== false : true,
+    esModuleInterop: !(process.argv[3] === 'commonjs' && commonjsNoInterop),
     importHelpers: false,
     isolatedModules: true,
     jsx: isTsx ? ts.JsxEmit.ReactJSX : undefined,
@@ -3682,7 +3686,7 @@ fn mr_cjs_cache_path(file: &Path, root: &Path, raw: &str, use_meta: bool, cov: b
     // fine without metadata. Keyed separately so the two transforms never collide in cache.
     use_meta.hash(&mut h);
     if use_meta {
-        "ts-commonjs-dynamic-namespaces-v2".hash(&mut h);
+        "ts-commonjs-dynamic-namespaces-v3".hash(&mut h);
         decorator_tsc_module_kind(file).hash(&mut h);
         root.join("node_modules/typescript/package.json")
             .is_file()
