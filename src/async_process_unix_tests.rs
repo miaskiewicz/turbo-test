@@ -358,3 +358,172 @@ fn public_kill_targets_the_leader_while_owned_timeout_cleanup_targets_its_group(
     }));
     assert_eq!(signals, [(pid, 15), (-pid, 9)]);
 }
+
+struct FailingIo(std::io::ErrorKind);
+impl Write for FailingIo {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> { Err(self.0.into()) }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+impl Read for FailingIo {
+    fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> { Err(self.0.into()) }
+}
+impl AsRawFd for FailingIo { fn as_raw_fd(&self) -> i32 { -1 } }
+fn queued(serial: u64) -> Pending { Pending { serial, bytes: b"bytes".to_vec(), written: 0 } }
+
+#[test]
+fn errno_mapping_retry_policy_and_invalid_descriptors_are_explicit() {
+    use std::io::ErrorKind::*;
+    for (kind, code) in [(NotFound,"ENOENT"),(PermissionDenied,"EACCES"),(BrokenPipe,"EPIPE"),(InvalidInput,"EINVAL"),(Other,"EIO")] {
+        assert_eq!(io_failure(kind.into()).code, code);
+    }
+    assert!(retry(&WouldBlock.into()));
+    assert!(retry(&Interrupted.into()));
+    assert!(!retry(&BrokenPipe.into()));
+    assert!(nonblocking(-1).is_err());
+    assert!(reserve_ipc_fd(-1).is_err());
+    assert!(inherit_ipc_fd(-1).is_err());
+    let (fd, _) = UnixStream::pair().unwrap();
+    inherit_ipc_fd(fd.as_raw_fd()).unwrap();
+    assert_eq!(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
+    assert_eq!(pending(&json!({"data":"A".repeat(MAX_BYTES * 4 / 3 + 5)})).err().unwrap().code,"ENOBUFS");
+}
+
+#[test]
+fn queued_write_errors_preserve_pending_bytes_and_retry_without_acknowledgement() {
+    let mut queue = VecDeque::from([queued(7)]);
+    let mut events = Vec::new();
+    for kind in [std::io::ErrorKind::WouldBlock, std::io::ErrorKind::Interrupted] {
+        drain_queue(1, &mut queue, &mut FailingIo(kind), "written", &mut events).unwrap();
+        assert_eq!(queue_bytes(&queue), 5);
+        assert!(events.is_empty());
+    }
+    assert!(drain_queue(1,&mut queue,&mut FailingIo(std::io::ErrorKind::BrokenPipe),"written",&mut events).is_err());
+    assert_eq!(queue.len(),1);
+}
+
+#[test]
+fn paused_output_does_not_read_and_failed_output_emits_one_terminal_error() {
+    let mut output = Output {fd:2,pipe:Box::new(FailingIo(std::io::ErrorKind::PermissionDenied)),paused:true};
+    let mut events = Vec::new();
+    assert!(read_output(3,&mut output,&mut events));
+    assert!(events.is_empty());
+    output.paused = false;
+    assert!(!read_output(3,&mut output,&mut events));
+    assert_eq!(events.len(),1);
+    assert_eq!(events[0]["kind"],"streamError");
+    assert_eq!(events[0]["error"]["code"],"EACCES");
+}
+
+#[test]
+fn ipc_disconnect_and_protocol_errors_settle_all_pending_send_callbacks() {
+    let (mut process, _) = socket_process();
+    process.messages.push_back(queued(1));
+    let mut events=Vec::new();
+    process.disconnect(&mut events);
+    assert_eq!(events[0]["kind"],"sendError");
+    assert_eq!(events[0]["serial"],1);
+    assert_eq!(events[1]["kind"],"disconnect");
+    let (mut process, _) = socket_process();
+    process.messages.push_back(queued(2));
+    events.clear();
+    process.channel_error(failure("ERR_IPC_PROTOCOL","bad frame"),&mut events);
+    assert_eq!(events.len(),2);
+    assert_eq!(events[0]["error"]["code"],"ERR_IPC_PROTOCOL");
+    assert_eq!(events[0]["serial"],2);
+    assert!(process.messages.is_empty());
+}
+
+#[test]
+fn ipc_partial_frame_bound_and_internal_dispatch_are_enforced() {
+    let (mut process, mut peer)=socket_process();
+    process.maximum=4;
+    peer.write_all(b"12345").unwrap();
+    let mut events=Vec::new();
+    process.read_ipc(&mut events);
+    assert_eq!(events[0]["error"]["code"],"ENOBUFS");
+    assert!(process.channel.is_none());
+    assert_eq!(ipc_message_kind(&json!({"cmd":"NODE_TEST"})),"internalMessage");
+    assert_eq!(ipc_message_kind(&json!({"cmd":"application"})),"message");
+}
+
+#[test]
+fn ipc_read_os_failure_is_reported_and_closes_the_channel() {
+    let (mut process, _peer)=socket_process();
+    let mut events=Vec::new();
+    process.receive_ipc(Err(std::io::ErrorKind::PermissionDenied.into()),&[],&mut events);
+    assert_eq!(events[0]["error"]["code"],"EACCES");
+    assert_eq!(events[1]["kind"],"disconnect");
+    assert!(process.channel.is_none());
+}
+
+#[test]
+fn externally_reaped_child_exit_query_reports_an_error_without_signalling() {
+    let args=exited_request();
+    let child=crate::process_compat::command(&args).spawn().unwrap();
+    let mut process=Process::new(1,child,None,&args).unwrap();
+    process.child.wait().unwrap();
+    let mut events=Vec::new();
+    process.check_exit(&mut events);
+    assert_eq!(events.len(),1);
+    assert_eq!(events[0]["kind"],"error");
+    assert_eq!(events[0]["error"]["code"],"EIO");
+}
+
+fn piped_process(args:&Value)->Process {
+    let mut command=crate::process_compat::command(args);
+    configure_stdio(&mut command,args);
+    Process::new(5,command.spawn().unwrap(),None,args).unwrap()
+}
+#[test]
+fn broken_stdin_aborts_queued_writes_and_end_with_separate_callback_errors() {
+    let mut process=piped_process(&exited_request());
+    process.child.wait().unwrap();
+    process.writes.push_back(queued(11));
+    process.input_end=Some(12);
+    let mut events=Vec::new();
+    process.write_input(&mut events);
+    assert!(process.input.is_none());
+    assert_eq!(events.len(),2);
+    assert_eq!(events[0]["serial"],11);
+    assert_eq!(events[1]["serial"],12);
+    assert_eq!(events[0]["error"]["code"],"EPIPE");
+    assert_eq!(process.queue_input(&json!({"data":""})).unwrap_err().code,"EPIPE");
+}
+
+#[test]
+fn broken_ipc_write_rejects_pending_send_and_disconnects() {
+    let (mut process, peer)=socket_process();
+    drop(peer);
+    process.messages.push_back(queued(9));
+    let mut events=Vec::new();
+    process.write_ipc(&mut events);
+    assert_eq!(events[0]["kind"],"sendError");
+    assert_eq!(events[0]["serial"],9);
+    assert_eq!(events[0]["error"]["code"],"EPIPE");
+    assert!(process.channel.is_none());
+}
+
+#[test]
+fn timeout_escalation_signals_only_the_owned_group_and_runs_once() {
+    let mut args=request();
+    args["file"]=json!("/bin/sleep");args["args"]=json!(["60"]);
+    let mut process=piped_process(&args);
+    process.terminating=Some(Instant::now()-Duration::from_secs(1));
+    process.force_timeout();
+    assert!(process.forced);
+    process.force_timeout();
+    assert!(process.child.wait().unwrap().signal()==Some(libc::SIGKILL));
+}
+
+#[test]
+fn active_child_without_pipes_waits_without_polling_invalid_descriptors() {
+    reset();
+    let mut args=request();
+    args["file"]=json!("/bin/sleep");args["args"]=json!(["60"]);
+    args["stdio"]=json!(["ignore","ignore","ignore"]);
+    assert!(operation("spawn",&args).get("value").is_some());
+    assert!(super::descriptors().is_empty());
+    wait_for_io(Duration::ZERO);
+    assert!(has_pending_io());
+    reset();
+}
