@@ -140,7 +140,7 @@ class __TcpSocket extends __Duplex {
   }
   _tcpSend() {
     const pending = this._tcpWrite;
-    if (!pending || pending.sent) return;
+    if (!pending || pending.sent || this.destroyed) return;
     if (this._tcpId === null) { pending.callback(__streamError('ERR_SOCKET_CLOSED', 'TCP socket is not connected')); return; }
     try { pending.sent = true; __tcpNative('send', { id: this._tcpId, data: pending.bytes.toString('base64') }); this._tcpActivity(); __tcpPreparePoll(); }
     catch (error) { this._tcpWrite = null; pending.callback(error); }
@@ -150,6 +150,7 @@ class __TcpSocket extends __Duplex {
     if (!this.connecting) this._tcpFinish();
   }
   _tcpFinish() {
+    if (this.destroyed) return;
     if (this._tcpId === null) { this._tcpFinal(__streamError('ERR_SOCKET_CLOSED', 'TCP socket is not connected')); return; }
     __tcpNative('end', { id: this._tcpId }); __tcpPreparePoll();
   }
