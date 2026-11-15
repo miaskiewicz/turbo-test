@@ -3,6 +3,12 @@ use super::*;
 fn request() -> Value {
     json!({"file":"/bin/cat","args":[],"env":{},"stdio":["pipe","ignore","ignore"],"timeout":0,"maxBuffer":8,"killSignal":15})
 }
+fn exited_request() -> Value {
+    let mut args = request();
+    args["file"] = json!("/bin/sh");
+    args["args"] = json!(["-c", "exit 0"]);
+    args
+}
 fn socket_process() -> (Process, UnixStream) {
     let args = request();
     let child = crate::process_compat::command(&args).spawn().unwrap();
@@ -136,8 +142,7 @@ fn complete_ipc_frames_respect_the_limit_before_json_deserialization() {
 
 #[test]
 fn cleanup_signals_only_a_pid_that_is_still_an_owned_unreaped_child() {
-    let mut args = request();
-    args["file"] = json!("/bin/true");
+    let args = exited_request();
     let child = crate::process_compat::command(&args).spawn().unwrap();
     let mut process = Process::new(1, child, None, &args).unwrap();
     let _ = process.child.wait().unwrap();
@@ -150,8 +155,7 @@ fn cleanup_signals_only_a_pid_that_is_still_an_owned_unreaped_child() {
 
 #[test]
 fn exit_observation_retains_the_pid_until_owned_group_cleanup_and_reaping() {
-    let mut args = request();
-    args["file"] = json!("/bin/true");
+    let args = exited_request();
     let child = crate::process_compat::command(&args).spawn().unwrap();
     let mut process = Process::new(1, child, None, &args).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -320,8 +324,7 @@ fn peer_handle_transfer_reports_an_explicit_unsupported_capability() {
 
 #[test]
 fn all_signal_paths_fail_closed_after_an_external_reap_without_touching_a_pid() {
-    let mut args = request();
-    args["file"] = json!("/bin/true");
+    let args = exited_request();
     let child = crate::process_compat::command(&args).spawn().unwrap();
     let mut process = Process::new(1, child, None, &args).unwrap();
     process.child.wait().unwrap();
