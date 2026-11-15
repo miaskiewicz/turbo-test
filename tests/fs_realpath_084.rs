@@ -12,7 +12,10 @@ fn realpath_sync_apis_match_node() {
         "jest.config.js",
         "module.exports = { testEnvironment: 'node' };\n",
     );
-    let fixture = p.file("realpath.test.cjs", include_str!("data/compat-084/fs-realpath.cjs"));
+    let fixture = p.file(
+        "realpath.test.cjs",
+        include_str!("data/compat-084/fs-realpath.cjs"),
+    );
     let node = std::process::Command::new("node")
         .arg("--test")
         .arg(fixture)
