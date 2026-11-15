@@ -410,3 +410,7 @@ Local campaign receipts:
 The accepted benchmark timings remain tied to `f1708af`; none were rerun for this
 small-fix candidate. All app dependency PRs remain drafts until registry publication
 and the corresponding integrity metadata can be refreshed.
+
+Final full-baseline/partial-impact accounting is recorded in
+[the final Flux suite report](flux-apis-full-suite-2026-11-15.md): 1,403 reported
+impact files and 128 unknown, with no blanket full-suite pass claim.
