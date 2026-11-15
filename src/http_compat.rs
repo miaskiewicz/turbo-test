@@ -787,4 +787,124 @@ mod tests {
         response.eof(2, &mut events).unwrap();
         assert_eq!(events.last().unwrap()["kind"], "end");
     }
+    #[test]
+    fn host_and_io_failures_keep_actionable_codes() {
+        for (kind, code) in [
+            (std::io::ErrorKind::ConnectionReset, "ECONNRESET"),
+            (std::io::ErrorKind::BrokenPipe, "EPIPE"),
+            (std::io::ErrorKind::TimedOut, "ETIMEDOUT"),
+            (std::io::ErrorKind::Other, "ERR_HTTP_IO"),
+        ] {
+            assert_eq!(io_error(std::io::Error::from(kind)).code, code);
+        }
+        assert_eq!(
+            address("localhost", 123).unwrap().ip().to_string(),
+            "127.0.0.1"
+        );
+        assert_eq!(
+            address("example.invalid", 80).unwrap_err().code,
+            "ERR_HTTP_UNSUPPORTED_HOST"
+        );
+        assert_eq!(
+            address("192.0.2.1", 80).unwrap_err().code,
+            "ERR_HTTP_UNSUPPORTED_HOST"
+        );
+        assert_eq!(address("[::1]", 80).unwrap().port(), 80);
+    }
+
+    #[test]
+    fn fragmented_chunk_boundaries_wait_and_invalid_framing_fails() {
+        let mut events = Vec::new();
+        let mut decoder = Decoder::new(false, false);
+        decoder.phase = Phase::ChunkBody(2);
+        assert!(!decoder.step(1, &mut events).unwrap());
+        decoder.feed(1, b"ab\r", &mut events).unwrap();
+        assert!(matches!(decoder.phase, Phase::ChunkCrLf));
+        decoder
+            .feed(1, b"\n0\r\nX-Trailer: value\r\n", &mut events)
+            .unwrap();
+        assert!(matches!(decoder.phase, Phase::Trailers));
+        decoder.feed(1, b"\r\n", &mut events).unwrap();
+        assert_eq!(events.last().unwrap()["kind"], "end");
+        let mut invalid = Decoder::new(false, false);
+        invalid.phase = Phase::ChunkCrLf;
+        assert_eq!(
+            invalid.feed(2, b"xx", &mut events).unwrap_err().code,
+            "HPE_INVALID_CHUNK_SIZE"
+        );
+        let mut oversized = Decoder::new(false, false);
+        oversized.phase = Phase::Eof;
+        oversized.body = 8 * 1024 * 1024;
+        assert_eq!(
+            oversized.feed(3, b"x", &mut events).unwrap_err().code,
+            "ERR_HTTP_BODY_TOO_LARGE"
+        );
+        assert_eq!(
+            parse_headers("bad\r\n").unwrap_err().code,
+            "HPE_INVALID_CONSTANT"
+        );
+        assert_eq!(
+            transfer_phase("gzip").err().unwrap().code,
+            "HPE_INVALID_TRANSFER_ENCODING"
+        );
+        assert_eq!(
+            validate_response("HTTP/1.1 101 Switching Protocols", false)
+                .unwrap_err()
+                .code,
+            "HPE_INVALID_STATUS"
+        );
+    }
+
+    #[test]
+    fn transport_rejects_invalid_socket_operations_and_pending_write_overflow() {
+        let mut transport = Transport::default();
+        assert_eq!(
+            transport
+                .set_nodelay(&json!({"enabled":"yes"}))
+                .unwrap_err()
+                .code,
+            "ERR_INVALID_ARG_TYPE"
+        );
+        assert_eq!(
+            transport
+                .set_nodelay(&json!({"enabled":true,"id":42}))
+                .unwrap_err()
+                .code,
+            "ERR_SOCKET_CLOSED"
+        );
+        assert_eq!(
+            transport
+                .send(&json!({"id":42,"data":""}))
+                .unwrap_err()
+                .code,
+            "ERR_SOCKET_CLOSED"
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        let mut connection = Connection::new(client, false, false).unwrap();
+        connection.output.resize(8 * 1024 * 1024, 0);
+        transport.connections.insert(1, connection);
+        assert_eq!(
+            transport
+                .send(&json!({"id":1,"data":encoded(b"x")}))
+                .unwrap_err()
+                .code,
+            "ERR_HTTP_BODY_TOO_LARGE"
+        );
+        assert_eq!(
+            transport
+                .set_nodelay(&json!({"enabled":false,"id":1}))
+                .unwrap(),
+            Value::Null
+        );
+        transport.next = u64::MAX;
+        assert_eq!(transport.id().unwrap_err().code, "ENOSPC");
+        assert_eq!(
+            operation("not-an-operation", &Value::Null)
+                .unwrap_err()
+                .code,
+            "ERR_INVALID_ARG_VALUE"
+        );
+    }
 }
