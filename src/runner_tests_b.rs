@@ -947,3 +947,201 @@ fn v8_runs_single_threaded_unless_turbo_v8_flags_says_otherwise() {
     assert_eq!(v8_flags(Some("")), "");
     assert_eq!(v8_flags(Some("--max-lazy")), "--max-lazy");
 }
+
+#[test]
+fn native_binary_boundaries_reject_non_views_and_malformed_clone_frames() {
+    with_context(|scope, _| {
+        assert_eq!(
+            eval(
+                scope,
+                r#"JSON.stringify([__ttGzip, __ttV8Deserialize].map(fn => { try { fn({}); return false; } catch(e) { return e.message === 'Expected a byte view'; } }))"#
+            ),
+            "[true,true]"
+        );
+        assert_eq!(
+            eval(
+                scope,
+                r#"JSON.stringify([[],[255],[255,15],[255,15,255],[0,0]].map(bytes=>{try{__ttV8Deserialize(new Uint8Array(bytes));return false;}catch(e){return e instanceof Error;}}))"#
+            ),
+            "[true,true,true,true,true]"
+        );
+    });
+}
+
+#[test]
+fn poisoned_resolver_flags_preserve_original_exception_for_every_native_entry() {
+    with_context(|scope, _| {
+        assert_eq!(
+            eval(
+                scope,
+                r#"(()=>{const original=process.env; const error=new Error('env unavailable'); process.env=new Proxy({}, {get(){throw error;}}); const results=[__nativeRequire,__ttRegisterMock,__ttImportActual,__ttResolveSpec,__ttUnmock,__ttRequireResolve].map(fn=>{try{fn('unused');return false;}catch(e){return e===error;}}); process.env=original; return JSON.stringify(results);})()"#
+            ),
+            "[true,true,true,true,true,true]"
+        );
+    });
+}
+
+#[test]
+fn absent_process_environment_uses_default_runtime_flags() {
+    with_context(|scope, _| {
+        eval(
+            scope,
+            "globalThis.__savedProcess = process; globalThis.process = null",
+        );
+        let flags = resolver_runtime_flags(scope);
+        assert!(flags.is_some());
+        assert!(!crate::pnpm_ancestor::enabled());
+        assert!(!crate::vue::enabled(Path::new("/")));
+        drop(flags);
+        eval(
+            scope,
+            "globalThis.process = __savedProcess; delete globalThis.__savedProcess",
+        );
+    });
+}
+
+#[test]
+fn invalid_prepass_never_runs_module_body_or_requires() {
+    with_context(|scope, _| {
+        eval(scope, "globalThis.__bodyRan = false");
+        run_prepass_wrapper(
+            scope,
+            Path::new("/prepass.cjs"),
+            Path::new("/"),
+            "const = broken;",
+        );
+        assert_eq!(eval(scope, "__bodyRan"), "false");
+        eval(scope, "globalThis.__mkRequire = undefined");
+        run_prepass_wrapper(
+            scope,
+            Path::new("/prepass.cjs"),
+            Path::new("/"),
+            "globalThis.__bodyRan = true",
+        );
+        assert_eq!(eval(scope, "__bodyRan"), "false");
+    });
+}
+
+#[test]
+fn pending_mock_queue_rejects_nonobjects_and_propagates_spec_getter_errors() {
+    with_context(|scope, _| {
+        let arr = eval_value(
+            scope,
+            "[null, { get spec() { throw new Error('bad spec'); } }]",
+        );
+        let arr = v8::Local::<v8::Array>::try_from(arr).unwrap();
+        let spec = v8::String::new(scope, "spec").unwrap();
+        let exports = v8::String::new(scope, "exports").unwrap();
+        let mut retained = Vec::new();
+        drain_one_pending_mock(scope, arr, 0, spec, exports, Path::new("/"), &mut retained);
+        assert!(retained.is_empty());
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let tc = &mut tc.init();
+        drain_one_pending_mock(tc, arr, 1, spec, exports, Path::new("/"), &mut retained);
+        assert!(tc.has_caught());
+        assert!(retained.is_empty());
+    });
+}
+
+#[test]
+fn primitive_null_mock_exports_do_not_overwrite_existing_cached_value() {
+    with_context(|scope, _| {
+        let path = Path::new("/mock-null.cjs");
+        let object = eval_value(scope, "({sentinel: 7})");
+        let cached = v8::Global::new(scope, object);
+        REGISTRY.with(|r| {
+            r.borrow_mut().cjs_exports.insert(path.into(), cached);
+        });
+        let null = v8::null(scope).into();
+        let tc = std::pin::pin!(v8::TryCatch::new(scope));
+        let tc = &mut tc.init();
+        assert!(!remock_in_place(tc, path, null, &[]));
+        let cached = REGISTRY.with(|r| r.borrow().cjs_exports.get(path).unwrap().clone());
+        assert!(v8::Local::new(tc, &cached).strict_equals(object));
+    });
+}
+
+#[test]
+fn module_variant_names_include_real_exports_and_node_default_only_when_required() {
+    with_context(|scope, _| {
+        let exports = eval_value(scope, "({answer:42,default:9})");
+        let mut star = variant_names(scope, exports, Variant::Star).unwrap();
+        star.sort();
+        assert_eq!(star, vec!["answer"]);
+        let mut node = variant_names(scope, exports, Variant::Node).unwrap();
+        node.sort();
+        assert!(node.contains(&"answer".to_owned()));
+        assert!(node.contains(&"default".to_owned()));
+    });
+}
+
+#[test]
+fn forced_clone_failure_preserves_existing_source_and_destination() {
+    let dir = scratch("force-copy");
+    let source = dir.join("source");
+    let dest = dir.join("dest");
+    std::fs::write(&source, b"source bytes").unwrap();
+    std::fs::write(&dest, b"keep destination").unwrap();
+    let error = fs_copy_bytes(source.to_str().unwrap(), dest.to_str().unwrap(), 4).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ENOSYS));
+    assert_eq!(std::fs::read(&source).unwrap(), b"source bytes");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"keep destination");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn copy_to_a_hardlink_does_not_truncate_either_alias() {
+    let dir = scratch("hardlink-copy");
+    let source = dir.join("source");
+    let dest = dir.join("alias");
+    std::fs::write(&source, b"preserved alias bytes").unwrap();
+    std::fs::hard_link(&source, &dest).unwrap();
+    fs_copy_bytes(source.to_str().unwrap(), dest.to_str().unwrap(), 0).unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), b"preserved alias bytes");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"preserved alias bytes");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn actual_esm_cache_survives_mock_restoration_and_isolate_modules_snapshot() {
+    let dir = scratch("esm-snapshot-coverage");
+    let target = dir.join("actual.mjs");
+    let dependency = dir.join("node_modules/external/index.mjs");
+    std::fs::create_dir_all(dependency.parent().unwrap()).unwrap();
+    std::fs::write(&target, "export const answer = 42;").unwrap();
+    std::fs::write(&dependency, "export const external = true;").unwrap();
+    with_context(|scope, _| {
+        let original = load_graph(scope, &target).unwrap();
+        let referrer = load_graph(scope, &dependency).unwrap();
+        let original_hash = original.get_identity_hash();
+        REGISTRY.with(|r| {
+            r.borrow_mut()
+                .mocks
+                .insert(target.clone(), "mock marker".into());
+        });
+        let real = real_esm_for(scope, referrer, &target).unwrap();
+        let cached = real_esm_for(scope, referrer, &target).unwrap();
+        assert_eq!(real.get_identity_hash(), cached.get_identity_hash());
+        let restored = REGISTRY.with(|r| r.borrow().esm_by_path[&target].clone());
+        assert_eq!(
+            v8::Local::new(scope, &restored).get_identity_hash(),
+            original_hash
+        );
+        let undefined = v8::undefined(scope);
+        let exports = v8::Global::new(scope, undefined.into());
+        REGISTRY.with(|r| {
+            let mut registry = r.borrow_mut();
+            registry.mocks.remove(&target);
+            registry.cjs_exports.insert(target.clone(), exports);
+        });
+        eval(scope, "__ttSaveModules()");
+        assert!(!REGISTRY.with(|r| r.borrow().esm_by_path.contains_key(&target)));
+        eval(scope, "__ttRestoreModules()");
+        let restored = REGISTRY.with(|r| r.borrow().esm_by_path[&target].clone());
+        assert_eq!(
+            v8::Local::new(scope, &restored).get_identity_hash(),
+            original_hash
+        );
+    });
+    std::fs::remove_dir_all(dir).unwrap();
+}

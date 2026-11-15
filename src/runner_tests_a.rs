@@ -2283,3 +2283,20 @@ fn failed_native_dependency_transform_can_retry_the_same_key() {
         "a failed transform cannot become a negative cache entry"
     );
 }
+
+#[test]
+fn setup_without_mocks_does_not_rebind_requires() {
+    assert!(
+        mocked_require_rebinds(&["const value = 1;"], &["var dep = require('./dep');"]).is_empty()
+    );
+}
+
+#[test]
+fn tsconfig_lookup_stops_at_a_dependency_package_boundary() {
+    let dir = tmp("tsconfig-boundary");
+    put(&dir, "tsconfig.json", "{}");
+    let boundary = dir.join("node_modules");
+    put(&boundary, "package.json", r#"{"name":"boundary"}"#);
+    assert_eq!(nearest_tsconfig_uncached(&boundary), None);
+    std::fs::remove_dir_all(dir).unwrap();
+}
