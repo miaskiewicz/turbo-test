@@ -632,35 +632,6 @@ mod tests {
     fn args(id: u64) -> Value {
         json!({"id":id})
     }
-    fn refusal_reservation() -> (TcpStream, SocketAddr) {
-        use std::os::fd::AsRawFd;
-        let socket = connecting_socket("127.0.0.1:0".parse().unwrap()).unwrap();
-        let mut address: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-        address.sin_family = libc::AF_INET as _;
-        address.sin_addr.s_addr = u32::from_ne_bytes([127, 0, 0, 1]);
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "freebsd",
-            target_os = "openbsd",
-            target_os = "netbsd",
-            target_os = "dragonfly"
-        ))]
-        {
-            address.sin_len = std::mem::size_of_val(&address) as _;
-        }
-        // Bind without listen: the owned endpoint reserves the port but refuses connects.
-        let result = unsafe {
-            libc::bind(
-                socket.as_raw_fd(),
-                (&address as *const libc::sockaddr_in).cast(),
-                std::mem::size_of_val(&address) as _,
-            )
-        };
-        assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
-        let address = socket.local_addr().unwrap();
-        (socket, address)
-    }
     fn pair(table: &mut Transport, host: &str) -> (u64, u64, u64) {
         let listening = table.listen(&json!({"host":host,"port":0})).unwrap();
         let server = listening["id"].as_u64().unwrap();
@@ -825,7 +796,9 @@ mod tests {
     }
     #[test]
     fn refused_connections_emit_failure_and_release_native_handle() {
-        let (_reservation, address) = refusal_reservation();
+        let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
         let mut table = Transport::default();
         let id = table
             .connect(&json!({"host":"127.0.0.1","port":address.port()}))
@@ -842,7 +815,9 @@ mod tests {
     #[test]
     fn peer_failure_prefers_authoritative_socket_error_after_connect_state_changes() {
         use std::os::fd::AsRawFd;
-        let (_reservation, address) = refusal_reservation();
+        let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
         let socket = connect_socket(address).unwrap();
         let mut descriptor = libc::pollfd {
             fd: socket.as_raw_fd(),
