@@ -2072,6 +2072,7 @@ if (typeof globalThis.Buffer === 'undefined') {
       if (bytes.length < 4) throw Object.assign(new RangeError('Attempt to access memory outside buffer bounds'), { code: 'ERR_BUFFER_OUT_OF_BOUNDS' });
       if (offset < 0 || offset > bytes.length - 4) throw Object.assign(new RangeError('The offset is outside the buffer bounds'), { code: 'ERR_OUT_OF_RANGE' });
     }
+    equals(other) { return Buffer.compare(this, other) === 0; }
     readUInt32BE(offset = 0) {
       Buffer.#readUInt32Offset(this, offset);
       return this[offset] * 16777216 + this[offset + 1] * 65536 + this[offset + 2] * 256 + this[offset + 3];
