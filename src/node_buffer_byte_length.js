@@ -1,10 +1,18 @@
 // Count encoded bytes without decoding permissive hex/base64 into a different byte sequence.
 const __bufferArrayByteLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get;
-const __bufferSharedByteLength = typeof SharedArrayBuffer === 'function' ? Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, 'byteLength').get : null;
+let __bufferSharedByteLength = null;
+function __bufferSharedGetter() {
+  // V8 installs this constructor after deserializing the framework snapshot.
+  if (!__bufferSharedByteLength && typeof SharedArrayBuffer === 'function') {
+    __bufferSharedByteLength = Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, 'byteLength').get;
+  }
+  return __bufferSharedByteLength;
+}
 function __bufferMemoryLength(value) {
   if (ArrayBuffer.isView(value)) return value.byteLength;
   try { return __bufferArrayByteLength.call(value); } catch {}
-  if (__bufferSharedByteLength) { try { return __bufferSharedByteLength.call(value); } catch {} }
+  const shared = __bufferSharedGetter();
+  if (shared) { try { return shared.call(value); } catch {} }
   throw Object.assign(new TypeError('The string argument must be a string, Buffer, ArrayBuffer or ArrayBufferView'), { code: 'ERR_INVALID_ARG_TYPE' });
 }
 function __bufferSurrogatePair(code, next) {
