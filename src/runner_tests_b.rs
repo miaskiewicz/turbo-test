@@ -1192,3 +1192,41 @@ fn temporary_directory_collision_exhaustion_and_entropy_failure_are_real_errors(
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn linking_an_externalized_cjs_dependency_loads_its_actual_exports_lazily() {
+    let dir = scratch("lazy-cjs-link");
+    let entry = dir.join("setup.mjs");
+    let dependency = dir.join("dependency.cjs");
+    std::fs::write(&dependency, "module.exports = { answer: 42 };").unwrap();
+    with_context(|scope, _| {
+        let code = v8::String::new(
+            scope,
+            "import value from './dependency.cjs'; export default value;",
+        )
+        .unwrap();
+        let name = v8::String::new(scope, entry.to_str().unwrap()).unwrap();
+        let origin = module_origin(scope, name);
+        let mut source = v8::script_compiler::Source::new(code, Some(&origin));
+        let module = compile_graph_module(scope, &entry, &mut source).unwrap();
+        REGISTRY.with(|r| {
+            r.borrow_mut()
+                .path_by_hash
+                .insert(module.get_identity_hash().get(), entry.clone());
+        });
+        assert_eq!(
+            module.instantiate_module(scope, resolve_callback),
+            Some(true)
+        );
+        let exports = REGISTRY
+            .with(|r| r.borrow().cjs_exports.get(&dependency).cloned())
+            .unwrap();
+        let exports = v8::Local::new(scope, &exports).to_object(scope).unwrap();
+        let key = v8::String::new(scope, "answer").unwrap();
+        assert_eq!(
+            exports.get(scope, key.into()).unwrap().integer_value(scope),
+            Some(42)
+        );
+    });
+    std::fs::remove_dir_all(dir).unwrap();
+}
