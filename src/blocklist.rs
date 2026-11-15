@@ -97,3 +97,7 @@ pub fn native_blocklist(
         rv.set(value.into());
     }
 }
+
+#[cfg(test)]
+#[path = "blocklist_tests.rs"]
+mod tests;

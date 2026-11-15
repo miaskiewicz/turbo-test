@@ -128,6 +128,22 @@ pub fn native_decrypt_pkcs8(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn encrypted_import_rejects_unsupported_algorithms_and_large_direct_inputs() {
+        use base64::Engine;
+        use pkcs8::der::{Decode, Encode};
+        assert!(super::decrypt(&vec![0; 1_048_577], b"password").is_err());
+        assert!(super::decrypt(&[], &vec![0; 1025]).is_err());
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(include_str!("../tests/data/encrypted-pkcs8/matching.key.der.base64").trim())
+            .unwrap();
+        let mut info = pkcs12::pbe_params::EncryptedPrivateKeyInfo::from_der(&der).unwrap();
+        info.encryption_algorithm.oid =
+            pkcs8::ObjectIdentifier::new_unwrap("1.2.840.113549.1.5.14");
+        assert!(
+            matches!(super::decrypt(&info.to_der().unwrap(), b"password"), Err(message) if message=="Unsupported encrypted PKCS8 algorithm")
+        );
+    }
+    #[test]
     fn expensive_or_invalid_kdfs_are_rejected_before_derivation() {
         assert!(super::bounds(0, &[0; 8]).is_err());
         assert!(super::bounds(1_000_001, &[0; 8]).is_err());

@@ -148,3 +148,7 @@ pub fn native_crypto_hashes(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "crypto_compat_tests.rs"]
+mod tests;

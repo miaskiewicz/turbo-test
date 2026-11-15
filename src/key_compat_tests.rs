@@ -62,3 +62,17 @@ fn entropy_failures_propagate_and_invalid_scalars_are_retried() {
     assert!(generated.is_ok());
     assert_eq!(attempts, 2);
 }
+
+#[test]
+fn a_valid_entropy_scalar_produces_the_corresponding_public_key() {
+    let generated = generate_with_entropy(|bytes| {
+        bytes.fill(0);
+        bytes[31] = 1;
+        Ok(())
+    })
+    .unwrap();
+    let Output::Pair(private, public) = generated else {
+        panic!("expected an actual key pair");
+    };
+    assert!(matches!(derive_public(&private), Ok(Output::Bytes(derived)) if derived==public));
+}

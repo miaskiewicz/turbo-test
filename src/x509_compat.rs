@@ -119,3 +119,7 @@ pub fn native_x509(
         Err(message) => throw(scope, &message),
     }
 }
+
+#[cfg(test)]
+#[path = "x509_compat_tests.rs"]
+mod tests;
