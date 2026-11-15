@@ -13,6 +13,6 @@ fn real_hmac_and_pbkdf2_known_answers() {
     );
     let run = turbo_test(&p.dir, &["--jobs", "1", "--reporter", "json"], &[]);
     let report = json_report(&run);
-    assert_eq!(report["numPassedTests"], 4, "{}", run.all());
+    assert_eq!(report["numPassedTests"], 5, "{}", run.all());
     assert_eq!(report["numFailedTests"], 0, "{}", run.all());
 }
