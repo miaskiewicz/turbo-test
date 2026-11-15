@@ -311,10 +311,11 @@ impl Process {
         self.write_ipc(events);
         self.read_ipc(events);
         self.check_exit(events);
-        if self.status.is_some() && self.outputs.is_empty() && self.channel.is_none() {
-            let status = self.status.as_ref().unwrap();
-            events.push(event(self.id, "close", status_value(status)));
-            return true;
+        if self.outputs.is_empty() && self.channel.is_none() {
+            if let Some(status) = self.status.as_ref() {
+                events.push(event(self.id, "close", status_value(status)));
+                return true;
+            }
         }
         false
     }
