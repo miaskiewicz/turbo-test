@@ -9611,6 +9611,10 @@ fn framework_prelude(scope: &mut v8::PinScope) {
     let runtime = RUNTIME_JS
         .replace("/* __TT_NODE_STREAMS__ */", include_str!("node_streams.js"))
         .replace(
+            "/* __TT_NODE_ASYNC_HOOKS__ */",
+            include_str!("node_async_hooks.js"),
+        )
+        .replace(
             "/* __TT_NODE_WARNINGS__ */",
             include_str!("node_warnings.js"),
         )
@@ -10011,6 +10015,12 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         crate::vm_compat::native_compile_script,
     );
     bind_fn(scope, global, "__ttEc", crate::key_compat::native_ec);
+    bind_fn(
+        scope,
+        global,
+        "__ttSetPromiseHooks",
+        crate::async_hooks::native_set_promise_hooks,
+    );
     bind_fn(scope, global, "__ttRsa", crate::rsa_compat::native_rsa);
     bind_fn(scope, global, "__ttX509", crate::x509_compat::native_x509);
     bind_fn(

@@ -3023,7 +3023,11 @@ const __dc = {
 };
 __dc.default = __dc;
 /* __TT_NODE_ASYNC_CONTEXT__ */
-const __async_hooks = { AsyncLocalStorage: __AsyncLocalStorage, AsyncResource: __AsyncResource, createHook: () => ({ enable() { return this; }, disable() { return this; } }), executionAsyncId: () => 0, triggerAsyncId: () => 0 }; __async_hooks.default = __async_hooks;
+/* __TT_NODE_ASYNC_HOOKS__ */
+const __async_hooks = { AsyncLocalStorage: __AsyncLocalStorage, AsyncResource: __AsyncResource,
+  createHook: __createAsyncHook, executionAsyncId: () => __hookCurrent.id,
+  triggerAsyncId: () => __hookCurrent.trigger, executionAsyncResource: () => __hookCurrent.resource };
+__async_hooks.default = __async_hooks;
 // ---- Node's util.inspect / util.format (Node 26; turbo-test#93) ----
 // The shape of Node's formatValue / formatRaw / reduceToSingleString / groupArrayElements:
 // depth 2, breakLength 80, compact 3, maxArrayLength 100; console.log formats through it.
@@ -10336,6 +10340,7 @@ globalThis.__ttResetForNextFile = () => {
   // file's own pending one-shots. Do NOT clear macro/nextTicks or reset the clock here (that
   // broke ~40 async tests).
   __loop.gen++;
+  __resetAsyncHooks();
   __resetProcessWarnings();
   __resetAsyncContext();
   __httpReset();

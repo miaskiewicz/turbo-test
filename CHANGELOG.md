@@ -104,6 +104,13 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   output. Mongoose can issue its unmodified Jest warning without an unsupported API;
   reused files do not inherit previous files' warning listeners.
 
+- Observe actual V8 Promise init/before/after/resolve events through enabled
+  `async_hooks` (#372), with real resource/trigger identifiers for runner timers,
+  nextTicks and manual AsyncResources. Hook dispatch is recursion-guarded and
+  Promise destruction is GC-driven, not fabricated at resolution. Native hooks and
+  scheduler wrappers are absent by default and removed on last disable/file reset;
+  AsyncLocalStorage continues to use V8 continuation frames independently.
+
 ### Tests
 - Add Node controls and native runner regressions for the compatibility fixes,
   including known hashes, independent gzip/V8 fixtures and malformed-input errors.
