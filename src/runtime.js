@@ -2666,7 +2666,8 @@ Object.assign(__crypto, __nodeCryptoHashes);
 for (const name of ['generateKeyPairSync', 'createPrivateKey', 'createPublicKey', 'X509Certificate']) {
   __crypto[name] = __runtimeBackendUnavailable('crypto.' + name);
 }
-__runtimeBackendSlot(__crypto, 'constants');
+// Empty metadata is safe to enumerate for shared HMAC imports; RSA constants are backend-only.
+__crypto.constants = Object.freeze(Object.create(null));
 if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.randomUUID) {
   globalThis.crypto = Object.assign(globalThis.crypto || {}, { randomUUID: __crypto.randomUUID, getRandomValues: __crypto.getRandomValues });
 }
