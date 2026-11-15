@@ -6516,7 +6516,10 @@ fn cjs_script_origin<'s>(
     let framed = crate::location::frames_enabled()
         && !abs.components().any(|c| c.as_os_str() == "node_modules");
     let backend = CJS_FIRST_RESOLUTION.with(|value| value.get());
-    if !crate::coverage::enabled() && !located && !framed && !backend {
+    // Per-file hook ownership examines caller paths under reuse. Name dependency
+    // scripts too, so their hooks remain distinguishable from project hooks.
+    let reused = on_reuse_path();
+    if ![crate::coverage::enabled(), located, framed, backend, reused].contains(&true) {
         return None;
     }
     v8::String::new(tc, &abs.to_string_lossy()).map(|name| script_origin(tc, name))
