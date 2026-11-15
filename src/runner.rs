@@ -9971,6 +9971,12 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(
         scope,
         global,
+        "__ttDecryptPkcs8",
+        crate::encrypted_pkcs8::native_decrypt_pkcs8,
+    );
+    bind_fn(
+        scope,
+        global,
         "__ttCryptoHashes",
         crate::crypto_compat::native_crypto_hashes,
     );

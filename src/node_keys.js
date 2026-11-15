@@ -42,9 +42,9 @@ class __KeyObject {
 }
 function __keyDecodePem(input) {
   const text = typeof input === 'string' ? input : new TextDecoder().decode(input);
-  const match = /^\s*-----BEGIN (PRIVATE KEY|PUBLIC KEY)-----\s+([A-Za-z0-9+/=\s]+)-----END \1-----\s*$/.exec(text);
+  const match = /^\s*-----BEGIN (ENCRYPTED PRIVATE KEY|PRIVATE KEY|PUBLIC KEY)-----\s+([A-Za-z0-9+/=\s]+)-----END \1-----\s*$/.exec(text);
   if (!match) throw new Error('Invalid or unsupported PEM key');
-  return { type: match[1] === 'PRIVATE KEY' ? 'private' : 'public', der: Buffer.from(match[2].replace(/\s/g, ''), 'base64') };
+  return { type: match[1] === 'PUBLIC KEY' ? 'public' : 'private', encrypted: match[1] === 'ENCRYPTED PRIVATE KEY', der: Buffer.from(match[2].replace(/\s/g, ''), 'base64') };
 }
 function __keyDecodeDer(descriptor) {
   if (descriptor.format !== 'der') __keyUnsupported('Key format ' + descriptor.format);
@@ -55,9 +55,12 @@ function __keyDecodeDer(descriptor) {
 }
 function __keyDecode(input) {
   const descriptor = __keyDescriptor(input);
-  if (descriptor.passphrase !== undefined) __keyUnsupported('Encrypted key import');
-  if (descriptor.format === undefined || descriptor.format === 'pem') return __keyDecodePem(descriptor.key);
-  return __keyDecodeDer(descriptor);
+  const decoded = descriptor.format === undefined || descriptor.format === 'pem' ? __keyDecodePem(descriptor.key) : __keyDecodeDer(descriptor);
+  if (decoded.encrypted && descriptor.passphrase === undefined) throw new Error('Encrypted PKCS8 key requires a passphrase');
+  if (descriptor.passphrase !== undefined && decoded.type === 'private') {
+    decoded.der = new Uint8Array(globalThis.__ttDecryptPkcs8(decoded.der, __hashBytes(descriptor.passphrase)));
+  }
+  return decoded;
 }
 function __keyDescriptor(input) {
   return input && typeof input === 'object' && !ArrayBuffer.isView(input) ? input : { key: input };
