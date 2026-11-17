@@ -92,10 +92,11 @@ testCase('TCP writable backpressure drains while preserving a bounded large payl
   const client = new net.Socket({ writableHighWaterMark: 1024 }); const reply = []; let writes = 0; let drains = 0;
   client.on('data', chunk => reply.push(chunk)); client.on('error', error => { throw error; }); const done = closedSocket(client);
   try {
-    await connected(client, { host: '127.0.0.1', port: server.address().port });
+    const ready = connected(client, { host: '127.0.0.1', port: server.address().port });
     client.once('drain', () => { drains++; client.end(); });
+    // Write while connecting so Node queues it instead of handing it to the OS send buffer.
     assert.equal(client.write(payload, () => { writes++; }), false);
-    assert.equal(client.writableNeedDrain, true); await done;
+    assert.equal(client.writableNeedDrain, true); await ready; await done;
     assert.equal(writes, 1); assert.equal(drains, 1); assert.deepEqual(Buffer.concat(reply), payload);
   } finally { client.destroy(); if (accepted) accepted.destroy(); await closedServer(server); }
 });
