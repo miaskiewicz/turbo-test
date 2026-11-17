@@ -879,6 +879,67 @@ mod tests {
         );
     }
     #[test]
+    fn pending_handshake_never_reads_or_flushes_queued_bytes() {
+        let address = "127.0.0.1:1".parse().unwrap();
+        // A real socket before connect has no peer and no SO_ERROR. The poll must
+        // preserve pending output until the handshake actually establishes a peer.
+        let socket = connecting_socket(address).unwrap();
+        let mut connection = Connection::new(socket, true).unwrap();
+        connection.output = b"queued before handshake".to_vec();
+        connection.ack = true;
+        let mut events = Vec::new();
+        assert!(!connection.poll(17, &mut events).unwrap());
+        assert!(events.is_empty());
+        assert!(connection.connecting);
+        assert_eq!(connection.sent, 0);
+        assert_eq!(connection.output, b"queued before handshake");
+        assert!(connection.ack);
+    }
+
+    #[test]
+    fn full_native_send_buffer_retains_bytes_then_delivers_once_after_peer_resumes() {
+        let mut table = Transport::default();
+        let (_, client, peer) = pair(&mut table, "127.0.0.1");
+        socket_option(
+            &table.connections[&client].socket,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            4096,
+        )
+        .unwrap();
+        socket_option(
+            &table.connections[&peer].socket,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            65536,
+        )
+        .unwrap();
+        table.pause(&json!({"id":peer,"enabled":true})).unwrap();
+        let bytes: Vec<u8> = (0..1024 * 1024).map(|index| (index % 251) as u8).collect();
+        write(&mut table, client, &bytes);
+        let mut immediate = Vec::new();
+        let connection = table.connections.get_mut(&client).unwrap();
+        connection.flush(client, &mut immediate).unwrap();
+        assert!(connection.sent < connection.output.len());
+        assert_eq!(connection.output, bytes);
+        assert!(connection.ack);
+        assert!(immediate.is_empty());
+        table.pause(&json!({"id":peer,"enabled":false})).unwrap();
+        let events = until(&mut table, |events| data(events, peer).len() == bytes.len());
+        assert_eq!(data(&events, peer), bytes);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["id"] == client && event["kind"] == "write")
+                .count(),
+            1
+        );
+        let connection = &table.connections[&client];
+        assert!(connection.output.is_empty());
+        assert!(!connection.ack);
+    }
+
+    #[test]
     fn malformed_inputs_unknown_handles_and_bounds_are_errors() {
         let mut table = Transport::default();
         for value in [
