@@ -4141,6 +4141,16 @@ function __ttRequireMock(p) {
   if (manual) return globalThis.__ttImportActual(globalThis.__dirnameOf(manual), './' + __basename(manual));
   return __automock(globalThis.jest.requireActual(p));
 }
+// importMock shares the mock registry, but an unregistered module is explicitly automocked.
+// Load errors remain rejected promises; a fabricated empty namespace would hide broken imports.
+async function __viImportMock(p) {
+  const dir = __ttMockDir(), spec = String(p);
+  await globalThis.__ttImportReady(dir, spec);
+  if (__ttMockedKeys.has(__ttSpecKey(dir, spec))) return globalThis.__ttToESM(globalThis.__nativeRequire(dir, spec));
+  const manual = __ttManualMockPath(dir, spec);
+  if (manual) return globalThis.__ttToESM(globalThis.__ttImportActual(globalThis.__dirnameOf(manual), './' + __basename(manual)));
+  return __automock(globalThis.__ttToESM(globalThis.__ttImportActual(dir, spec)));
+}
 // A specifier that automock may touch: relative ('./x', '../x') or absolute ('/x') only —
 // never a bare package ('react') or node: builtin. Bare specifiers always fall through.
 function __ttAutomockLocalSpec(s) {
@@ -6806,7 +6816,7 @@ globalThis.vi = {
     return v;
   },
   importActual: (p) => { try { return Promise.resolve(globalThis.__ttToESM(globalThis.__ttImportActual(globalThis.__ttDir || globalThis.__ttEntryDir, String(p)))); } catch (e) { return Promise.resolve(undefined); } },
-  importMock: (p) => { try { return Promise.resolve(globalThis.__nativeRequire(globalThis.__ttDir || globalThis.__ttEntryDir, String(p))); } catch (e) { return Promise.resolve({}); } },
+  importMock: __viImportMock,
   unstubAllEnvs: () => {
     const m = globalThis.__stubbedEnvs;
     if (m) { m.forEach((val, k) => { if (val === undefined) delete globalThis.process.env[k]; else globalThis.process.env[k] = val; }); m.clear(); }
