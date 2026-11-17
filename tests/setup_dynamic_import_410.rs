@@ -69,3 +69,31 @@ fn setup_absolute_package_import_keeps_its_vitest_require_external() {
     p.file("test/a.test.ts", "import { expect, it } from 'vitest';\nit('package extends the same expect', () => expect(globalThis.SETUP_VALUE).toBeReady());\n");
     passes(&p);
 }
+
+#[test]
+fn setup_absolute_hoisted_package_import_stays_external_with_local_esbuild() {
+    let parent = project("setup-dynamic-hoisted-410", "");
+    let child = Project {
+        dir: parent.path("packages/app"),
+    };
+    child.with_esbuild();
+    child.file("package.json", r#"{"name":"nested-app","type":"module"}"#);
+    child.file(
+        "vitest.config.ts",
+        "export default { test: { environment: 'node', setupFiles: ['./test/setup.ts'] } };\n",
+    );
+    parent.file(
+        "node_modules/hoisted-matchers/package.json",
+        r#"{"name":"hoisted-matchers","main":"index.cjs"}"#,
+    );
+    let package = parent.file("node_modules/hoisted-matchers/index.cjs", "const { expect } = require('vitest');\nexpect.extend({ toBeHoisted(value) { return { pass: value === 'hoisted', message: () => 'expected hoisted' }; } });\n");
+    child.file(
+        "test/setup.ts",
+        &format!(
+            "await import({});\nglobalThis.SETUP_VALUE = 'hoisted';\n",
+            serde_json::to_string(&package.to_string_lossy()).unwrap()
+        ),
+    );
+    child.file("test/a.test.ts", "import { expect, it } from 'vitest';\nit('hoisted package shares runtime expect', () => expect(globalThis.SETUP_VALUE).toBeHoisted());\n");
+    passes(&child);
+}
