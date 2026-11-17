@@ -77,3 +77,52 @@ test('TCP internal resources ignore mutable async_hooks exports',()=>{
  assert.equal(operations.filter(operation=>operation==='listen').length,1);
  assert.equal(operations.filter(operation=>operation==='close').length,1);
 });
+function terminalTcpContext(terminal) {
+ const context=commonContext();vm.runInContext(assembled('runtime_backend.js'),context,{timeout:3000});
+ const owned=new Set();const rejected=[];let polls=0;
+ const bytes=Buffer.alloc(64*1024,127);bytes[0]=0;bytes[1]=255;
+ context.__ttTcp=(operation,encoded)=>{
+  const args=JSON.parse(encoded);
+  if(operation==='connect'){owned.add(7);return JSON.stringify({value:{id:7}});}
+  if(operation==='close'){owned.delete(args.id);return JSON.stringify({value:null});}
+  if(operation==='poll'){
+   if(polls++===0)return JSON.stringify({value:[{id:7,kind:'connect',address:{localAddress:'127.0.0.1',localPort:12345,localFamily:'IPv4',remoteAddress:'127.0.0.1',remotePort:12346,remoteFamily:'IPv4'}}]});
+   owned.delete(7);
+   const tail=terminal==='closed'?[{id:7,kind:'end'},{id:7,kind:'closed'}]:[{id:7,kind:'error',error:{code:'ECONNRESET',message:'original native reset'}}];
+   return JSON.stringify({value:[{id:7,kind:'finish'},{id:7,kind:'data',data:bytes.toString('base64')},...tail]});
+  }
+  if(!owned.has(args.id)){rejected.push({operation,id:args.id});return JSON.stringify({error:{code:'ERR_SOCKET_CLOSED',message:'TCP socket is closed'}});}
+  return JSON.stringify({value:null});
+ };
+ return {context,bytes,rejected};
+}
+test('TCP retires native handles before final data backpressure without reordering stream events',async()=>{
+ const {context,bytes,rejected}=terminalTcpContext('closed');
+ assert.throws(()=>vm.runInContext("__tcpNative('pause',{id:999,enabled:true})",context),{code:'ERR_SOCKET_CLOSED'});
+ const transfer=await vm.runInContext(`(async()=>{
+  const socket=new __nodeBuiltins.net.Socket({readableHighWaterMark:8});const chunks=[],events=[];
+  socket.on('connect',()=>events.push('connect'));socket.on('data',chunk=>{chunks.push(chunk);events.push('data');});socket.on('end',()=>events.push('end'));
+  const done=new Promise((resolve,reject)=>{socket.on('error',reject);socket.once('close',hadError=>{events.push('close');resolve(hadError);});});
+  socket.connect({host:'127.0.0.1',port:12346});socket.end();await Promise.resolve();
+  __ttTcpPump();__ttTcpPump();const hadError=await done;
+  return {bytes:Array.from(Buffer.concat(chunks)),events,hadError,destroyed:socket.destroyed};
+ })()`,context);
+ assert.deepEqual(transfer.bytes,Array.from(bytes));
+ assert.deepEqual(Array.from(transfer.events),['connect','data','end','close']);
+ assert.equal(transfer.hadError,false);assert.equal(transfer.destroyed,true);
+ assert.deepEqual(rejected,[{operation:'pause',id:999}]);
+});
+test('TCP terminal error batches preserve the native error under buffered backpressure',async()=>{
+ const {context,rejected}=terminalTcpContext('error');
+ const transfer=await vm.runInContext(`(async()=>{
+  const socket=new __nodeBuiltins.net.Socket({readableHighWaterMark:8});const events=[];let failure;
+  socket.on('connect',()=>events.push('connect'));socket.on('readable',()=>events.push('readable'));socket.on('error',error=>{failure=error;events.push('error');});
+  const done=new Promise(resolve=>socket.once('close',hadError=>{events.push('close');resolve(hadError);}));
+  socket.connect({host:'127.0.0.1',port:12346});socket.end();await Promise.resolve();
+  __ttTcpPump();__ttTcpPump();const hadError=await done;
+  return {events,hadError,code:failure.code,message:failure.message,destroyed:socket.destroyed};
+ })()`,context);
+ assert.deepEqual(Array.from(transfer.events),['connect','readable','error','close']);
+ assert.equal(transfer.code,'ECONNRESET');assert.equal(transfer.message,'original native reset');
+ assert.equal(transfer.hadError,true);assert.equal(transfer.destroyed,true);assert.deepEqual(rejected,[]);
+});
