@@ -38,6 +38,13 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   external blocks and unmapped SFC coverage report explicit errors.
 
 ### Fixed
+- Resolve dynamic imports in awaited setup bundles from their authored source directory,
+  and keep absolute local/ancestor dependency paths external so matcher packages use
+  the same runtime module instances (#410).
+- Return deep automocks from `vi.importMock`, honor manual mocks and explicit async
+  factories, reject real import errors, and keep generated mock calls independent (#411).
+- Make the real Node TCP backpressure control queue its write during connection setup,
+  avoiding platform-dependent OS send-buffer assumptions without relaxing assertions (#412).
 - Preserve CommonJS shebangs through metadata/fallback wrapping (#393), resolve real
   filesystem paths with the native entry point and legacy argument behavior (#395),
   and expose `util/types` with genuine Date brand checks for PostgreSQL loading (#399).
