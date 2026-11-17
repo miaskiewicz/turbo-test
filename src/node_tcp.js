@@ -4,6 +4,7 @@ const __tcpServers = new Map();
 const __tcpOwnedSockets = new Set();
 let __tcpPollTimer = null;
 let __tcpUsed = false;
+let __tcpTerminalBatch = new Set();
 function __tcpFailure(data) { return Object.assign(new Error(data.message), { code: data.code }); }
 function __tcpNative(operation, args = {}) {
   __tcpUsed = true;
@@ -38,16 +39,29 @@ globalThis.__ttTcpPump = () => { __tcpStopPoll(); return __tcpPoll(); };
 function __tcpPoll() {
   __tcpPollTimer = null;
   const events = __tcpNative('poll');
-  for (const event of events) __tcpEvent(event);
+  const previous = __tcpTerminalBatch;
+  __tcpTerminalBatch = __tcpTerminalIds(events);
+  try { for (const event of events) __tcpEvent(event); }
+  finally { __tcpTerminalBatch = previous; }
   let progressed = events.length > 0;
   for (const socket of __tcpSockets.values()) if (socket._tcpCheckTimeout()) progressed = true;
   __tcpPreparePoll();
   return progressed;
 }
+function __tcpTerminalIds(events) {
+  const retired = new Set();
+  for (const event of events) if (event.kind === 'closed' || event.kind === 'error') retired.add(event.id);
+  // Rust releases terminal handles before returning their ordered final event batch.
+  for (const id of retired) {
+    const socket = __tcpSockets.get(id);
+    if (socket) socket._tcpNativeClosed = true;
+  }
+  return retired;
+}
 function __tcpReference(handle, enabled) {
   handle._tcpRef = enabled;
   if (handle instanceof __TcpSocket) handle._tcpReferenceTimeout();
-  if (handle._tcpId !== null) __tcpNative('ref', { id: handle._tcpId, enabled });
+  if (handle._tcpId !== null && !handle._tcpNativeClosed) __tcpNative('ref', { id: handle._tcpId, enabled });
   __tcpPreparePoll(); return handle;
 }
 function __tcpResource(owner, type) {
@@ -119,6 +133,8 @@ class __TcpSocket extends __Duplex {
   }
   _tcpAttach(id) {
     this._tcpId = id; __tcpSockets.set(id, this); __tcpOwnedSockets.add(this);
+    this._tcpNativeClosed = __tcpTerminalBatch.has(id);
+    if (this._tcpNativeClosed) { __tcpPreparePoll(); return; }
     if (!this._tcpRef) __tcpNative('ref', { id, enabled: false });
     if (this._tcpNoDelay !== null) __tcpNative('setNoDelay', { id, enabled: this._tcpNoDelay });
     if (this._tcpKeepAlive) __tcpNative('setKeepAlive', { id, ...this._tcpKeepAlive });
@@ -140,7 +156,7 @@ class __TcpSocket extends __Duplex {
   }
   _tcpSend() {
     const pending = this._tcpWrite;
-    if (!pending || pending.sent || this.destroyed) return;
+    if (!pending || pending.sent || this.destroyed || this._tcpNativeClosed) return;
     if (this._tcpId === null) { pending.callback(__streamError('ERR_SOCKET_CLOSED', 'TCP socket is not connected')); return; }
     try { pending.sent = true; __tcpNative('send', { id: this._tcpId, data: pending.bytes.toString('base64') }); this._tcpActivity(); __tcpPreparePoll(); }
     catch (error) { this._tcpWrite = null; pending.callback(error); }
@@ -150,7 +166,7 @@ class __TcpSocket extends __Duplex {
     if (!this.connecting) this._tcpFinish();
   }
   _tcpFinish() {
-    if (this.destroyed) return;
+    if (this.destroyed || this._tcpNativeClosed) return;
     if (this._tcpId === null) { this._tcpFinal(__streamError('ERR_SOCKET_CLOSED', 'TCP socket is not connected')); return; }
     __tcpNative('end', { id: this._tcpId }); __tcpPreparePoll();
   }

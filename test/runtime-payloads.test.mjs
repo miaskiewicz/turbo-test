@@ -107,7 +107,7 @@ test('TCP retires native handles before final data backpressure without reorderi
   __ttTcpPump();__ttTcpPump();const hadError=await done;
   return {bytes:Array.from(Buffer.concat(chunks)),events,hadError,destroyed:socket.destroyed};
  })()`,context);
- assert.deepEqual(transfer.bytes,Array.from(bytes));
+ assert.deepEqual(Buffer.from(transfer.bytes),bytes);
  assert.deepEqual(Array.from(transfer.events),['connect','data','end','close']);
  assert.equal(transfer.hadError,false);assert.equal(transfer.destroyed,true);
  assert.deepEqual(rejected,[{operation:'pause',id:999}]);
