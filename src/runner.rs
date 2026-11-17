@@ -1364,7 +1364,7 @@ fn bundle_full_cache_path(
         k.hash(&mut h);
         v.hash(&mut h);
     }
-    "esb-v6-setup-import-origin".hash(&mut h);
+    "esb-v7-hoisted-setup-import-origin".hash(&mut h);
     mr_enabled().hash(&mut h);
     cache_dir().join(format!("esb-{:016x}.mjs", h.finish()))
 }
@@ -1476,10 +1476,13 @@ fn build_full_bundle_cmd(
         cmd.arg("--packages=external");
         // --packages=external does not cover absolute package entry paths. Setup files
         // importing those must still share the runtime's vitest and dependency instances.
-        cmd.arg(format!(
-            "--external:{}/*",
-            root.join("node_modules").display()
-        ));
+        for base in root.ancestors() {
+            let packages = base
+                .join("node_modules")
+                .to_string_lossy()
+                .replace('\\', "/");
+            cmd.arg(format!("--external:{packages}/*"));
+        }
     }
     if let Some(tc) = &tsconfig {
         cmd.arg(format!("--tsconfig={}", tc.display()));
