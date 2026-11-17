@@ -304,3 +304,10 @@ fn static_import_policy_preserves_non_require_calls_and_destructured_bindings() 
     let source="var __toESM = (mod, isNodeMode, target) => __copyProps(target, mod);\nconst {answer}=require('other');\nconst authored=__toESM(value);\nconst untouched=other(require('pkg'));".to_owned();
     assert_eq!(static_requires(source.clone()), source);
 }
+
+#[test]
+fn destructured_authored_import_helper_is_never_rewritten_as_generated_code() {
+    let source =
+        "const { __toESM } = userHelpers; var ns = __toESM(require('package'));".to_string();
+    assert_eq!(static_requires(source.clone()), source);
+}

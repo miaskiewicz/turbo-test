@@ -924,16 +924,42 @@ mod tests {
         assert_eq!(connection.output, bytes);
         assert!(connection.ack);
         assert!(immediate.is_empty());
+        socket_option(
+            &table.connections[&client].socket,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            1024 * 1024,
+        )
+        .unwrap();
+        socket_option(
+            &table.connections[&peer].socket,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            1024 * 1024,
+        )
+        .unwrap();
         table.pause(&json!({"id":peer,"enabled":false})).unwrap();
-        let events = until(&mut table, |events| data(events, peer).len() == bytes.len());
-        assert_eq!(data(&events, peer), bytes);
-        assert_eq!(
-            events
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut received = Vec::new();
+        let mut acknowledgements = 0;
+        while received.len() < bytes.len() {
+            let batch = table.poll(&Value::Null).unwrap();
+            let events = batch.as_array().unwrap();
+            received.extend(data(events, peer));
+            acknowledgements += events
                 .iter()
                 .filter(|event| event["id"] == client && event["kind"] == "write")
-                .count(),
-            1
-        );
+                .count();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "received {} of {} bytes",
+                received.len(),
+                bytes.len()
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(received, bytes);
+        assert_eq!(acknowledgements, 1);
         let connection = &table.connections[&client];
         assert!(connection.output.is_empty());
         assert!(!connection.ack);
