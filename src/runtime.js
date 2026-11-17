@@ -4134,6 +4134,13 @@ globalThis.__ttAutomockMark = __ttAutomockMark;
 // resolved key: jest.requireMock returns that mock, else the colocated __mocks__/<name> manual
 // mock, else an automock of the real module (jest's moduleRegistry.requireMock).
 const __ttMockedKeys = new Set();
+const __ttGeneratedMockKeys = new Set();
+function __ttMarkMockKind(dir, spec, factory) {
+  const key = __ttSpecKey(dir, spec);
+  __ttMockedKeys.add(key);
+  if (factory === undefined) __ttGeneratedMockKeys.add(key);
+  else __ttGeneratedMockKeys.delete(key);
+}
 function __ttRequireMock(p) {
   const dir = globalThis.__ttDir || globalThis.__ttEntryDir;
   if (__ttMockedKeys.has(__ttSpecKey(dir, p))) return globalThis.__nativeRequire(dir, String(p));
@@ -4146,7 +4153,8 @@ function __ttRequireMock(p) {
 async function __viImportMock(p) {
   const dir = __ttMockDir(), spec = String(p);
   await globalThis.__ttImportReady(dir, spec);
-  if (__ttMockedKeys.has(__ttSpecKey(dir, spec))) return globalThis.__ttToESM(globalThis.__nativeRequire(dir, spec));
+  const key = __ttSpecKey(dir, spec);
+  if (__ttMockedKeys.has(key) && !__ttGeneratedMockKeys.has(key)) return globalThis.__ttToESM(globalThis.__nativeRequire(dir, spec));
   const manual = __ttManualMockPath(dir, spec);
   if (manual) return globalThis.__ttToESM(globalThis.__ttImportActual(globalThis.__dirnameOf(manual), './' + __basename(manual)));
   return __automock(globalThis.__ttToESM(globalThis.__ttImportActual(dir, spec)));
@@ -4188,6 +4196,7 @@ function __ttAutomockResetForNextFile() {
   __ttAutomockGenerator = __ttAutomockDefaultGen;
   __ttAutomockExplicit.clear();
   __ttMockedKeys.clear();
+  __ttGeneratedMockKeys.clear();
   __ttAutomockResolveCache.clear();
 }
 globalThis.__mkRequire = (dir, isEsm, importer) => {
@@ -6375,7 +6384,7 @@ function __ttMock(spec, factory, vitest, isDoMock, options) {
   // bypass does NOT re-mock it on require. Resolution may fail (non-existent spec from a
   // prepass): we still fall through to normal mock logic.
   __ttAutomockMark(dir, spec);
-  __ttMockedKeys.add(__ttSpecKey(dir, spec));
+  __ttMarkMockKind(dir, spec, factory);
   if (__ttPrepassDone(spec, factory, vitest, isDoMock, key, dir)) return;
   // jest 30: `jest.mock(spec, factory)` defers the factory to the module's first require
   // (turbo-test#275). `vi.mock` keeps its eager hoist-time semantics.
@@ -6652,6 +6661,7 @@ function __viUnmock(spec) {
   // jest automock (turbo-test#184): a `jest.unmock(spec)` opts the module out of automock.
   if (globalThis.__ttAutomockMark) globalThis.__ttAutomockMark(dir, spec);
   __ttMockedKeys.delete(__ttSpecKey(dir, spec));
+  __ttGeneratedMockKeys.delete(__ttSpecKey(dir, spec));
 }
 function __viSpyLookup(obj, key, accessor) {
   __spyCheckTarget(obj);
