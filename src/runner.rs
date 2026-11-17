@@ -1364,7 +1364,7 @@ fn bundle_full_cache_path(
         k.hash(&mut h);
         v.hash(&mut h);
     }
-    "esb-v5-import-rewrite".hash(&mut h);
+    "esb-v6-setup-import-origin".hash(&mut h);
     mr_enabled().hash(&mut h);
     cache_dir().join(format!("esb-{:016x}.mjs", h.finish()))
 }
@@ -1474,6 +1474,12 @@ fn build_full_bundle_cmd(
     // from the bundle's recorded source dir (registered below) and lazy-loads them on demand.
     if mr_enabled() {
         cmd.arg("--packages=external");
+        // --packages=external does not cover absolute package entry paths. Setup files
+        // importing those must still share the runtime's vitest and dependency instances.
+        cmd.arg(format!(
+            "--external:{}/*",
+            root.join("node_modules").display()
+        ));
     }
     if let Some(tc) = &tsconfig {
         cmd.arg(format!("--tsconfig={}", tc.display()));
@@ -9267,7 +9273,11 @@ fn dynamic_import<'s>(
     let promise = resolver.get_promise(scope);
 
     let referrer = resource_name.to_rust_string_lossy(scope);
-    let from_dir = Path::new(&referrer).parent().map(|p| p.to_path_buf());
+    // Setup bundles live in the cache; dynamic imports need the same source directory
+    // as their static imports, including on a warm bundle-cache hit (#410).
+    let from_dir = REGISTRY
+        .with(|r| r.borrow().bundle_src_dir.get(Path::new(&referrer)).cloned())
+        .or_else(|| Path::new(&referrer).parent().map(|p| p.to_path_buf()));
     let spec = specifier.to_rust_string_lossy(scope);
 
     // Layer B: configured barrel -> lazy Proxy namespace (await import('@mui/icons-material')).
