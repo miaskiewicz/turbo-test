@@ -126,3 +126,42 @@ test('TCP terminal error batches preserve the native error under buffered backpr
  assert.equal(transfer.code,'ECONNRESET');assert.equal(transfer.message,'original native reset');
  assert.equal(transfer.hadError,true);assert.equal(transfer.destroyed,true);assert.deepEqual(rejected,[]);
 });
+test('TCP terminal batches keep original errors during public socket reentry',async()=>{
+ const {context,rejected}=terminalTcpContext('error');
+ const transfer=await vm.runInContext(`(async()=>{
+  const socket=new __nodeBuiltins.net.Socket({readableHighWaterMark:8});const events=[];let failure,writeError,writes=0;
+  socket.on('readable',()=>{events.push('readable');socket.ref().unref();socket.setNoDelay(true);socket.setKeepAlive(true,1000);socket.pause();socket.resume();socket.write('late',error=>{writeError=error;writes++;});socket.end();});
+  socket.on('error',error=>{failure=error;events.push('error');});
+  const done=new Promise(resolve=>socket.once('close',hadError=>{events.push('close');resolve(hadError);}));
+  socket.connect({host:'127.0.0.1',port:12346});await Promise.resolve();__ttTcpPump();__ttTcpPump();
+  const hadError=await done;return {events,hadError,code:failure.code,message:failure.message,writeCode:writeError.code,writes};
+ })()`,context);
+ assert.deepEqual(Array.from(transfer.events),['readable','error','close']);
+ assert.equal(transfer.code,'ECONNRESET');assert.equal(transfer.message,'original native reset');
+ assert.equal(transfer.writeCode,'ECONNRESET');assert.equal(transfer.writes,1);assert.equal(transfer.hadError,true);assert.deepEqual(rejected,[]);
+});
+test('TCP accepts a socket retired in the same native batch without touching its dead handle',async()=>{
+ const context=commonContext();vm.runInContext(assembled('runtime_backend.js'),context,{timeout:3000});
+ const rejected=[];const owned=new Set([1]);
+ context.__ttTcp=(operation,encoded)=>{
+  const args=JSON.parse(encoded);
+  if(operation==='listen')return JSON.stringify({value:{id:1,address:{address:'127.0.0.1',port:12345,family:'IPv4'}}});
+  if(operation==='close'){owned.delete(args.id);return JSON.stringify({value:null});}
+  if(operation==='poll')return JSON.stringify({value:[{kind:'accept',server:1,id:7,address:{localAddress:'127.0.0.1',localPort:12345,localFamily:'IPv4',remoteAddress:'127.0.0.1',remotePort:12346,remoteFamily:'IPv4'}},{kind:'data',id:7,data:Buffer.alloc(65536,127).toString('base64')},{kind:'error',id:7,error:{code:'ECONNRESET',message:'accepted native reset'}}]});
+  if(!owned.has(args.id)){rejected.push({operation,id:args.id});return JSON.stringify({error:{code:'ERR_SOCKET_CLOSED',message:'TCP socket is closed'}});}
+  return JSON.stringify({value:null});
+ };
+ const transfer=await vm.runInContext(`(async()=>{
+  const events=[];let failure;let finish;
+  const done=new Promise(resolve=>{finish=resolve;});
+  const server=__nodeBuiltins.net.createServer({noDelay:true,keepAlive:true,readableHighWaterMark:8},socket=>{
+   events.push('connection');socket.on('readable',()=>{events.push('readable');socket.ref().unref();socket.setNoDelay(true);socket.setKeepAlive(false);});
+   socket.on('error',error=>{failure=error;events.push('error');});socket.once('close',hadError=>{events.push('close');finish(hadError);});
+  });
+  server.listen(0,'127.0.0.1');__ttTcpPump();const hadError=await done;
+  await new Promise(resolve=>server.close(resolve));
+  return {events,hadError,code:failure.code,message:failure.message};
+ })()`,context);
+ assert.deepEqual(Array.from(transfer.events),['connection','readable','error','close']);
+ assert.equal(transfer.hadError,true);assert.equal(transfer.code,'ECONNRESET');assert.equal(transfer.message,'accepted native reset');assert.deepEqual(rejected,[]);
+});
