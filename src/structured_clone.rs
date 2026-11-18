@@ -12,7 +12,7 @@ use v8::{ValueDeserializerHelper, ValueSerializerHelper};
 /// The SharedArrayBuffers met while serializing, by id, for the deserializer to share.
 type Shared = Rc<RefCell<Vec<v8::Global<v8::SharedArrayBuffer>>>>;
 
-struct Serializer(Shared);
+struct Serializer(Shared, crate::message_port::SharedPorts);
 
 impl v8::ValueSerializerImpl for Serializer {
     fn throw_data_clone_error<'s>(
@@ -21,6 +21,15 @@ impl v8::ValueSerializerImpl for Serializer {
         message: v8::Local<'s, v8::String>,
     ) {
         throw_data_clone_error(scope, message);
+    }
+
+    fn write_host_object<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        object: v8::Local<'s, v8::Object>,
+        serializer: &dyn ValueSerializerHelper,
+    ) -> Option<bool> {
+        self.1.write(scope, object, serializer)
     }
 
     fn get_shared_array_buffer_id<'s>(
@@ -34,9 +43,17 @@ impl v8::ValueSerializerImpl for Serializer {
     }
 }
 
-struct Deserializer(Shared);
+struct Deserializer(Shared, crate::message_port::SharedPorts);
 
 impl v8::ValueDeserializerImpl for Deserializer {
+    fn read_host_object<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        deserializer: &dyn ValueDeserializerHelper,
+    ) -> Option<v8::Local<'s, v8::Object>> {
+        self.1.read(scope, deserializer)
+    }
+
     fn get_shared_array_buffer_from_id<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
@@ -73,28 +90,47 @@ fn throw_message(scope: &mut v8::PinScope, message: &str) {
 /// SharedArrayBuffer included) is "Found invalid value in transferList.", a repeat "Transfer
 /// list contains duplicate ArrayBuffer", a detached or non-detachable buffer "Cannot transfer
 /// object of unsupported type." None (thrown) on the first bad one.
+type Transfers<'s> = (
+    Vec<v8::Local<'s, v8::ArrayBuffer>>,
+    crate::message_port::SharedPorts,
+);
+
+fn add_array_transfer<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    item: v8::Local<'s, v8::Value>,
+    out: &mut Vec<v8::Local<'s, v8::ArrayBuffer>>,
+) -> Option<()> {
+    let Ok(ab) = v8::Local::<v8::ArrayBuffer>::try_from(item) else {
+        throw_message(scope, "Found invalid value in transferList.");
+        return None;
+    };
+    if out.iter().any(|seen| seen.strict_equals(ab.into())) {
+        throw_message(scope, "Transfer list contains duplicate ArrayBuffer");
+        return None;
+    }
+    if !ab.is_detachable() || ab.was_detached() {
+        throw_message(scope, "Cannot transfer object of unsupported type.");
+        return None;
+    }
+    out.push(ab);
+    Some(())
+}
+
 fn transfer_list<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     list: v8::Local<'s, v8::Array>,
-) -> Option<Vec<v8::Local<'s, v8::ArrayBuffer>>> {
-    let mut out: Vec<v8::Local<v8::ArrayBuffer>> = Vec::new();
+) -> Option<Transfers<'s>> {
+    let mut out = Vec::new();
+    let ports = crate::message_port::SharedPorts::default();
     for i in 0..list.length() {
         let item = list.get_index(scope, i)?;
-        let Ok(ab) = v8::Local::<v8::ArrayBuffer>::try_from(item) else {
-            throw_message(scope, "Found invalid value in transferList.");
-            return None;
-        };
-        if out.iter().any(|seen| seen.strict_equals(ab.into())) {
-            throw_message(scope, "Transfer list contains duplicate ArrayBuffer");
-            return None;
+        if crate::message_port::is_port(scope, item) {
+            ports.add(scope, item)?;
+        } else {
+            add_array_transfer(scope, item, &mut out)?;
         }
-        if !ab.is_detachable() || ab.was_detached() {
-            throw_message(scope, "Cannot transfer object of unsupported type.");
-            return None;
-        }
-        out.push(ab);
     }
-    Some(out)
+    Some((out, ports))
 }
 
 /// `__ttStructuredClone(value, transfer)`: the structured clone of `value`, the ArrayBuffers of
@@ -107,12 +143,13 @@ pub fn native_structured_clone<'s>(
     let value = args.get(0);
     let list =
         v8::Local::<v8::Array>::try_from(args.get(1)).unwrap_or_else(|_| v8::Array::new(scope, 0));
-    let Some(transfer) = transfer_list(scope, list) else {
+    let Some((transfer, ports)) = transfer_list(scope, list) else {
         return;
     };
     let context = scope.get_current_context();
     let shared = Shared::default();
-    let serializer = v8::ValueSerializer::new(scope, Box::new(Serializer(shared.clone())));
+    let serializer =
+        v8::ValueSerializer::new(scope, Box::new(Serializer(shared.clone(), ports.clone())));
     serializer.write_header();
     for (id, ab) in transfer.iter().enumerate() {
         serializer.transfer_array_buffer(id as u32, *ab);
@@ -126,16 +163,22 @@ pub fn native_structured_clone<'s>(
         .iter()
         .map(|ab| {
             let store = ab.get_backing_store();
-            ab.detach(None);
             v8::ArrayBuffer::with_backing_store(scope, &store)
         })
         .collect();
-    let deserializer = v8::ValueDeserializer::new(scope, Box::new(Deserializer(shared)), &data);
+    let deserializer =
+        v8::ValueDeserializer::new(scope, Box::new(Deserializer(shared, ports.clone())), &data);
     deserializer.read_header(context);
     for (id, ab) in moved.into_iter().enumerate() {
         deserializer.transfer_array_buffer(id as u32, ab);
     }
     if let Some(clone) = deserializer.read_value(context) {
+        if ports.commit(scope, args.get(2)).is_none() {
+            return;
+        }
+        for ab in transfer {
+            ab.detach(None);
+        }
         rv.set(clone);
     }
 }

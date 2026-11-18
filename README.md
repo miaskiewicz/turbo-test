@@ -1,7 +1,7 @@
 # turbo-test
 
 **A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
-(and, experimentally, jest).** Release **0.8.3**.
+(and, experimentally, jest).** Version **0.8.4**.
 
 turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
 work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
@@ -24,13 +24,14 @@ Since 0.6.0 the browser engine lives in one place,
 | `turbo-dom-layout` | HTML/CSS layout | turbo-html2pdf, turbo-surf |
 | `turbo-dom-raster` | synthetic screenshots | turbo-surf |
 
-turbo-test links `turbo-dom-browser-env` 0.8.3 and `turbo-dom-v8 ~150.4` (under the local alias
+turbo-test links `turbo-dom-browser-env` 0.8.4 and `turbo-dom-v8 ~150.4.2` (under the local alias
 `v8`; `scripts/check-single-v8.sh` keeps exactly one V8 in the graph). This repository carries no
 copy of the binding or of V8: the binding, its probes and the Chrome-control collectors that
 record their oracles live in turbo-dom's
 [`crates/turbo-dom-browser-env`](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
-— fix DOM behaviour and recollect controls there. turbo-dom-v8 150.4.1 and
-turbo-dom / -layout / -browser-env 0.8.3 come from crates.io.
+— fix DOM behaviour and recollect controls there. The release resolves turbo-dom-v8
+150.4.2 and turbo-dom / -layout / -browser-env 0.8.4 from crates.io. The committed
+registry lockfile and `release-guard` keep temporary Git patches out of releases.
 
 ## Install and run
 
@@ -62,6 +63,15 @@ reporter); `TURBO_LEGACY_REPORTER=1` keeps turbo-test's compact `PASS` / `FAIL` 
 The DOM is on for `jsdom` / `happy-dom` / `turbo-dom` environments (and any file with a
 `// @vitest-environment jsdom` pragma); `environment: 'node'` files get clean globals, as in
 vitest. There is no environment package to install — the DOM is linked into the binary.
+
+The selected environment also controls runtime initialization. Node tests load backend
+implementations such as TCP, child processes, async hooks, and asymmetric cryptography;
+DOM tests load the browser environment without those implementations or native callbacks.
+Shared helpers include Buffer, timers, in-memory streams, fixture file access, and basic
+hashing/HMAC. Calling a backend-only capability in a DOM test reports
+`ERR_TURBO_BACKEND_CAPABILITY`; select a Node environment for that test. A worker that
+changes between Node and DOM creates a fresh isolate, including under `--no-isolate`,
+while consecutive files in the same environment retain the configured reuse behavior.
 
 ### Switches
 
@@ -238,11 +248,88 @@ npx turbo-test            # discovers *.spec.* too; reads jest config when no vi
 ```
 
 > **Status — experimental.** The jest shim, jest-config reading, decorator metadata and
-> CommonJS-first resolution work. Suites that lean on node-native modules bare V8 cannot run yet
-> (the `mongodb` driver, real OpenSSL crypto such as `createCipheriv`/RSA, full ICU `Intl` time
-> zones) need a Node-compat native layer. CommonJS-first resolution is scoped to jest projects
+> CommonJS-first resolution work. The native compatibility surface below is bounded;
+> complete MongoDB driver execution and full ICU `Intl` time-zone support remain unavailable. CommonJS-first resolution is scoped to jest projects
 > with a node test environment, so React/vitest suites are unaffected. The last measured jest
 > numbers (0.2.11) are in [docs/BENCHMARKS-history.md](docs/BENCHMARKS-history.md).
+
+
+Node-mode support in the 0.8.4 candidate includes native SHA-1/SHA-256 hashing,
+P-256 ECDSA and RSA PKCS#1 v1.5 SHA-256 signing with PKCS#8/SPKI PEM/DER KeyObjects,
+and AES-256-GCM with 12-byte IVs, 12–16-byte authentication tags and AAD. Key generation
+and `randomBytes` use OS entropy; unsupported algorithms report errors. Encrypted
+PKCS#8 import supports PBES2/PBKDF2 and PKCS12 SHA-1/3DES, with wrong-password and
+malformed-input rejection. Imports cap DER at 1 MiB, passphrases and salts at 1,024
+bytes, and KDF iterations at 1,000,000. PKCS12 passwords require valid UTF-8 BMP text;
+scrypt-based imports and encrypted exports remain unsupported.
+It also includes gzip, native V8 serialization, transferable MessagePorts,
+and AsyncLocalStorage across native await and scheduled resources.
+
+Keyed hashes support real SHA-1/SHA-256 HMAC and synchronous PBKDF2-SHA1, including
+binary inputs and independent known-answer controls. PBKDF2 output is bounded to
+1–1,048,576 bytes and at most 1,000,000 SHA-1 block-rounds
+(`iterations × ceil(keyLength / 20)`). Larger requests throw a work-limit error
+before derivation; this runner limit bounds synchronous native work. Other
+derivation digests report an unsupported-algorithm error.
+WebCrypto `getRandomValues` accepts integer typed arrays, uses OS entropy, and
+enforces its 65,536-byte quota. `Buffer.readUInt32BE` respects view and offset bounds.
+Synchronous zlib deflate/inflate exchange real compressed bytes with Node;
+dictionary/tuning options and asynchronous or streaming deflate/inflate report
+explicit unsupported-capability errors.
+
+`crypto.X509Certificate` parses DER/PEM certificates and exposes raw bytes, serial,
+validity, subject/issuer and real RSA/P-256 public keys. It does not verify certificate
+signatures or trust chains; `verify()` reports `ERR_X509_UNSUPPORTED_OPERATION`.
+
+CommonJS-first decorator metadata preserves partial exports in cyclic TypeScript
+imports. `require('stream')` is a callable Stream constructor with matching named/default
+identity and legacy inheritance support. These additions do not establish full Jest or
+Flux APIs compatibility; consumer validation remains in progress.
+`Transform.call(this, options)` also supports legacy transform subclasses.
+
+Filesystem helpers include real private temporary directories and file copies through
+synchronous, callback and promise APIs. Exclusive copies preserve an existing target;
+same-file copies do not truncate the source. Forced clone copies report `ENOSYS`.
+Warnings deliver asynchronous `process` events and visible stderr output.
+EventEmitter methods support constructor-free receivers and enumerable prototype
+mixins used by Mongoose. This covers offline schema/document validation, not a
+complete database execution environment.
+`net.BlockList` supports IPv4/IPv6 address, range and subnet membership, including
+IPv4-mapped addresses; this does not itself provide socket transport.
+
+The host I/O surface supports synchronous `spawnSync`/`execFileSync`/`execSync` and
+loopback HTTP/1.0–1.1 with content-length or chunked bodies. HTTP uses one request per
+connection, shared message/socket identity, socket close events and native TCP_NODELAY.
+HTTP socket state reflects the real connection. `tls.Server` supports type discrimination, while construction and
+`tls.createServer` throw `ERR_TLS_UNSUPPORTED_SERVER`. TLS transport, custom agents,
+persistent connections and callback `exec`/`execFile` remain unsupported.
+
+On Unix, `spawn` uses real asynchronous child pipes and `fork` exchanges JSON messages
+with an actual Node child over `NODE_CHANNEL_FD`. Standard pipe/ignore/inherit modes,
+stdin writes, output backpressure, exit/close/error events, SIGINT/SIGTERM/SIGKILL and timeouts are
+supported. Each context owns at most 32 children; input/IPC queues and JSON messages
+are bounded to 1 MiB. Context reset terminates and reaps its owned process groups.
+Windows asynchronous pipes/IPC, advanced serialization, handle transfer, AbortSignal,
+ref/unref and detached children report explicit unsupported errors. This remains a
+bounded process surface, not a complete MongoDB driver execution environment.
+
+Raw `net.Socket` / `net.Server` transport supports literal IPv4/IPv6 loopback addresses
+and `localhost`, real ephemeral ports, binary Duplex reads/writes, half-close,
+backpressure, connection errors, idle timeouts and referenced/unreferenced handles.
+Raw TCP uses a separate native handle table from HTTP. Unix uses nonblocking connects
+and kernel readiness polling; other targets use a bounded 250 ms connect fallback.
+`setNoDelay` changes the native option; Unix `setKeepAlive` also changes native
+keepalive options. Hostname resolution, Unix-domain socket paths, imported file
+descriptors and custom lookup/local-bind options report explicit capability errors.
+A write is limited to 32 MiB and native reads are bounded per poll. These additions
+provide local TCP transport, rather than full Node networking or MongoDB compatibility.
+
+Fresh `vm` contexts support injected bindings, isolated globals, real values/errors
+and timeouts. They currently require the framework-only snapshot: use
+`TURBO_SNAPSHOT=0` in mixed DOM projects. Unsupported immutable-global shadows report
+`ERR_VM_UNSUPPORTED_GLOBAL` rather than silently changing the sandbox semantics.
+`vm.Script` checks syntax during construction without executing its body and preserves
+the compile filename in syntax errors and contextual execution.
 
 ## How it works
 
@@ -368,6 +455,28 @@ const { status } = run(['src/a.test.ts'], { jobs: 8, env: { TURBO_REUSE_ISOLATE:
 process.exit(status);
 ```
 
+## Vue 3 Single File Components
+
+Vue SFC loading is off by default, including projects declaring `@vitejs/plugin-vue`.
+Enable it explicitly for a Vue test run:
+
+```sh
+TURBO_VUE=1 npx turbo-test
+```
+
+Use the `jsdom` test environment when mounting components into the DOM. The loader uses the
+project's real `vue/compiler-sfc` (or `@vue/compiler-sfc`), then oxc for TypeScript lowering.
+It supports `<script setup lang="ts">`, ordinary TypeScript scripts, templates and scoped CSS
+through both import and require graphs. Local extensionless `.vue` resolution is enabled only
+for opted-in projects. `TURBO_VUE=0` disables it explicitly. With the flag unset, Vue
+resolution and compiler hooks stay disabled; no plugin-manifest or Vue-file discovery runs.
+
+This first loader supports inline JavaScript/TypeScript and CSS blocks. External blocks,
+preprocessors and CSS modules produce explicit unsupported errors. Vue coverage source-map
+composition is not implemented yet, so coverage runs that load an SFC fail explicitly rather
+than attributing generated render code to incorrect source positions. The standalone compiler
+oracle can be checked with `npm run test:vue-oracle` when developing this repository.
+
 ## TypeScript types (drop the `vitest` devDependency)
 
 turbo-test injects `describe` / `it` / `test` / `expect` / `vi` / `jest` and the hook functions as
@@ -453,6 +562,11 @@ import.meta.url))`, string concatenation (`__dirname + '/z'`, `path.resolve(__di
 - pnpm's isolated layout resolves as Node does: a package's bare imports from its real path in
   `node_modules/.pnpm/<name>@<version>/node_modules/<name>`. On Windows, canonical paths are
   spelled as Node spells them (`C:\...`, `\\server\share\...`), never with the `\\?\` prefix.
+  `TURBO_PNPM_ANCESTOR=1` additionally permits an unresolved bare import to use the
+  nearest ancestor's explicit `node_modules/.pnpm/node_modules` hoist link. It is off
+  by default, never scans arbitrary version directories, and does not override a
+  normal installed package or bypass its exports. Install real `tslib` and
+  `hey-listen` dependencies when needed; turbo-test provides no shadow substitutes.
 
 ## Benchmarks (0.8.2, 2026-11-10, macOS arm64)
 
@@ -503,6 +617,7 @@ link the repo's esbuild/typescript installs into throwaway fixture projects and 
 npm ci
 cargo test --locked          # unit + CLI integration tests
 npm test                     # node --test test/*.mjs (CLI compat + tsc type checks)
+npm run test:vue-oracle       # real @vitejs/plugin-vue / Vitest component controls
 cargo tarpaulin              # line-coverage gate (tarpaulin.toml, fail-under = 99.9)
 cargo fmt --check            # CI job `lint`, with:
 cargo clippy --all-targets -- -D warnings
@@ -516,6 +631,10 @@ npm run complexity:js        # CI job `complexity / js (cc <= 7)`
   ubuntu (x64, arm64) and Windows x64, plus the smoke test, the CLI compatibility/type tests and
   the native DOM compatibility fixtures on linux x64. The aarch64-apple-darwin build runs only on
   `main` and `v*` tag pushes, i.e. in the release.
+- **Windows experimental — nonblocking.** The separate `windows-experimental.yml`
+  workflow installs dependencies, builds the runner and runs locked Rust tests on
+  Windows, including platform path fixtures. Its actual results are informational;
+  it does not weaken the existing release binary matrix.
 - **Coverage — blocking.** `coverage` (ubuntu) runs `cargo tarpaulin` (Llvm engine) and fails
   below `fail-under = 99.9` line coverage. Subprocess runs of the instrumented binaries are
   attributed through `tarpaulin.toml`'s `objects`; the `#[path]` unit-test modules are excluded.

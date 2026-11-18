@@ -15,10 +15,23 @@ pub fn canonicalize(p: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(p).map(strip_verbatim)
 }
 
-/// `p` with a verbatim drive (`\\?\C:\…` → `C:\…`) or UNC (`\\?\UNC\srv\share\…` →
-/// `\\srv\share\…`) prefix removed. Any other path, a verbatim device path (`\\?\Volume{…}`,
+/// On Windows, `p` with a verbatim drive (`\\?\C:\…` → `C:\…`) or UNC (`\\?\UNC\srv\share\…` →
+/// `\\srv\share\…`) prefix removed. On Unix the input is preserved. Any other path, a
+/// verbatim device path (`\\?\Volume{…}`,
 /// `\\?\GLOBALROOT\…`) included, which has no plain spelling, comes back unchanged.
 pub fn strip_verbatim(p: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        strip_windows_verbatim(p)
+    }
+    #[cfg(not(windows))]
+    {
+        p
+    }
+}
+
+#[cfg(any(windows, test))]
+fn strip_windows_verbatim(p: PathBuf) -> PathBuf {
     let Some(s) = p.to_str() else {
         return p;
     };
@@ -34,6 +47,7 @@ pub fn strip_verbatim(p: PathBuf) -> PathBuf {
 }
 
 /// `rest` (after `\\?\`) as a plain drive path if it opens with `X:` followed by end or `\`.
+#[cfg(any(windows, test))]
 fn strip_verbatim_drive(rest: &str) -> Option<PathBuf> {
     let b = rest.as_bytes();
     let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';

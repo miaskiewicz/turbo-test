@@ -41,6 +41,7 @@ enum Variant {
 
 #[derive(Default)]
 struct Registry {
+    propagated_cjs_errors: HashMap<PathBuf, Vec<v8::Global<v8::Value>>>,
     esm_by_path: HashMap<PathBuf, v8::Global<v8::Module>>,
     cjs_synth_by_path: HashMap<PathBuf, v8::Global<v8::Module>>,
     cjs_exports: HashMap<PathBuf, v8::Global<v8::Value>>,
@@ -316,6 +317,7 @@ fn reset_app_registry(stale: &[PathBuf]) {
         reg.mocks.retain(|p, _| setup_mocks.contains(p));
         reg.extra_exports.clear();
         reg.loading.clear();
+        reg.propagated_cjs_errors.clear();
         reg.lazy_stub_ns.clear();
     });
 }
@@ -489,14 +491,6 @@ fn nearest_tsconfig_uncached(dir: &Path) -> Option<PathBuf> {
         if tc.is_file() {
             return Some(tc);
         }
-        if cur.join("package.json").is_file()
-            && cur
-                .file_name()
-                .map(|n| n == "node_modules")
-                .unwrap_or(false)
-        {
-            break;
-        }
         d = cur.parent();
     }
     None
@@ -545,14 +539,24 @@ fn is_esm_module_uncached(abs: &Path) -> bool {
 
 /// The resolvers by (nearest tsconfig, ESM importer, CJS-first resolution, require_fallback,
 /// custom module dirs, custom export conditions).
+type ProjectResolver = oxc_resolver::ResolverGeneric<crate::ts_cjs_interop::ConfigFileSystem>;
+
 type ResolverCache = HashMap<
-    (Option<PathBuf>, bool, bool, bool, Vec<String>, Vec<String>),
-    std::rc::Rc<oxc_resolver::Resolver>,
+    (
+        Option<PathBuf>,
+        bool,
+        bool,
+        bool,
+        Vec<String>,
+        Vec<String>,
+        bool,
+    ),
+    std::rc::Rc<ProjectResolver>,
 >;
 
 /// A resolver configured for the nearest tsconfig of `from_dir` + the importer's module kind
 /// (ESM vs CJS conditions), cached per (tsconfig, esm).
-fn resolver_for(from_dir: &Path, esm: bool) -> std::rc::Rc<oxc_resolver::Resolver> {
+fn resolver_for(from_dir: &Path, esm: bool) -> std::rc::Rc<ProjectResolver> {
     resolver_with(from_dir, esm, false)
 }
 
@@ -561,7 +565,7 @@ fn resolver_with(
     from_dir: &Path,
     esm: bool,
     require_fallback: bool,
-) -> std::rc::Rc<oxc_resolver::Resolver> {
+) -> std::rc::Rc<ProjectResolver> {
     thread_local! {
         static RESOLVERS: RefCell<ResolverCache> = RefCell::new(HashMap::new());
     }
@@ -574,16 +578,18 @@ fn resolver_with(
         require_fallback,
         CUSTOM_MODULE_DIRS.with(|m| m.borrow().clone()),
         CUSTOM_EXPORT_CONDITIONS.with(|c| c.borrow().clone()),
+        crate::vue::enabled(from_dir),
     );
     RESOLVERS.with(|m| {
         if let Some(r) = m.borrow().get(&key) {
             return r.clone();
         }
-        let r = std::rc::Rc::new(oxc_resolver::Resolver::new(base_resolve_options(
-            key.0.clone(),
-            esm,
-            require_fallback,
-        )));
+        let mut options = base_resolve_options(key.0.clone(), esm, require_fallback);
+        if key.6 {
+            options.extensions.push(".vue".into());
+        }
+        let files = crate::ts_cjs_interop::ConfigFileSystem::for_config(key.0.as_deref());
+        let r = std::rc::Rc::new(ProjectResolver::new_with_file_system(files, options));
         m.borrow_mut().insert(key, r.clone());
         r
     })
@@ -730,22 +736,55 @@ pub fn resolve_spec(spec: &str, from_dir: &Path) -> Option<PathBuf> {
     resolve_spec_as(spec, from_dir, true)
 }
 
-/// The resolutions by (specifier, importer dir, ESM importer, CJS-first resolution).
-type ResolveMemo = HashMap<(String, PathBuf, bool, bool, u64), Option<PathBuf>>;
+/// Resolutions keyed by specifier, importer, module/condition mode, config and pnpm opt-in.
+type ResolveMemo = HashMap<(String, PathBuf, bool, bool, u64, bool, bool), Option<PathBuf>>;
+
+/// Project mappings must retain their original import/require conditions.
+fn vue_runtime_resolution(spec: &str, from: &Path, esm: bool, resolved: PathBuf) -> PathBuf {
+    if !crate::vue::runtime_esm(spec, from) || explicitly_mapped(spec) {
+        return resolved;
+    }
+    let mut options = base_resolve_options(None, esm, false);
+    options.alias.clear();
+    let plain = oxc_resolver::Resolver::new(options)
+        .resolve(from, spec)
+        .ok()
+        .and_then(|result| crate::canon::canonicalize(result.path()).ok());
+    if plain.as_ref() != Some(&resolved) {
+        return resolved;
+    }
+    crate::vue::runtime_path(spec, &resolved).unwrap_or(resolved)
+}
+
+fn explicitly_mapped(spec: &str) -> bool {
+    config_alias_list().iter().any(|(name, _)| {
+        let bare = name.trim_end_matches('$');
+        spec == bare || (!name.ends_with('$') && spec.starts_with(&format!("{bare}/")))
+    }) || apply_module_name_mapper(spec).is_some()
+}
 
 /// Resolve with the importer's module kind (`esm`) selecting ESM vs CJS export conditions.
 pub fn resolve_spec_as(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
     // E12: memoize per (spec, from_dir, esm, cjs-first). native_require repeats the same
     // specifier from the same importer dir across every module/file that imports it; the oxc
     // resolve + canonicalize is deterministic for a run. cjs-first is in the key because it
-    // flips the resolver conditions (mirrors resolver_for's own cache key).
+    // flips the resolver conditions (mirrors resolver_for's own cache key). The pnpm flag
+    // is also part of the key so toggling it cannot reuse an earlier miss or hit.
     if e12_enabled() {
         thread_local! {
             static RES_MEMO: RefCell<ResolveMemo> = RefCell::new(HashMap::new());
         }
         let cjs = CJS_FIRST_RESOLUTION.with(|c| c.get());
         let cfg = RESOLVE_CONFIG_ID.with(|c| c.get());
-        let key = (spec.to_string(), from_dir.to_path_buf(), esm, cjs, cfg);
+        let key = (
+            spec.to_string(),
+            from_dir.to_path_buf(),
+            esm,
+            cjs,
+            cfg,
+            crate::pnpm_ancestor::enabled(),
+            crate::vue::enabled(from_dir),
+        );
         if let Some(v) = RES_MEMO.with(|m| m.borrow().get(&key).cloned()) {
             return v;
         }
@@ -774,13 +813,15 @@ fn resolve_unmapped_spec(spec: &str, from_dir: &Path, esm: bool) -> Option<PathB
     // is really a bare specifier — strip the prefix so oxc resolves it from node_modules.
     let spec = spec.strip_prefix("node_modules/").unwrap_or(spec);
     if let Some(p) = resolve_via_oxc(spec, from_dir, esm) {
-        return Some(p);
+        return Some(vue_runtime_resolution(spec, from_dir, esm, p));
     }
     // fallback: manual probing for local files oxc may skip (incl. bare "." / ".." directory specs)
     if spec.starts_with('.') || spec.starts_with('/') {
         return probe_local_file(from_dir, spec);
     }
-    None
+    crate::pnpm_ancestor::resolve(spec, from_dir, crate::pnpm_ancestor::enabled(), |lookup| {
+        resolve_via_oxc_from(spec, from_dir, lookup, esm)
+    })
 }
 
 /// Vite/plugin query suffixes (`./icon.svg?react`, `./x.svg?url`, `./y?raw`). oxc can't resolve a
@@ -803,16 +844,25 @@ fn resolve_queried_spec(spec: &str, qpos: usize, from_dir: &Path, esm: bool) -> 
 /// A require() of a package with no `require` / `default` build: as an import (an ES-only
 /// package, which Node's require(esm) loads).
 fn resolve_via_oxc(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
-    let resolved = resolver_for(from_dir, esm)
-        .resolve(from_dir, spec)
+    resolve_via_oxc_from(spec, from_dir, from_dir, esm)
+}
+
+fn resolve_via_oxc_from(
+    spec: &str,
+    config_dir: &Path,
+    lookup_dir: &Path,
+    esm: bool,
+) -> Option<PathBuf> {
+    let resolved = resolver_for(config_dir, esm)
+        .resolve(lookup_dir, spec)
         .or_else(|e| {
             if esm {
                 // an import of a require-only package (no import/default build): its `require`
-                resolver_with(from_dir, true, true)
-                    .resolve(from_dir, spec)
+                resolver_with(config_dir, true, true)
+                    .resolve(lookup_dir, spec)
                     .map_err(|_| e)
             } else {
-                resolver_for(from_dir, true).resolve(from_dir, spec)
+                resolver_for(config_dir, true).resolve(lookup_dir, spec)
             }
         });
     let res = resolved.ok()?;
@@ -1173,7 +1223,7 @@ fn project_root(file: &Path) -> Option<PathBuf> {
 fn project_root_uncached(file: &Path) -> Option<PathBuf> {
     let mut d = file.parent();
     while let Some(dir) = d {
-        if dir.join("node_modules/.bin/esbuild").exists() {
+        if crate::esbuild_path::local(dir).is_some() {
             return Some(dir.to_path_buf());
         }
         d = dir.parent();
@@ -1195,16 +1245,15 @@ fn project_root_uncached(file: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The esbuild binary for `root`: the project's own `node_modules/.bin/esbuild` when it has one,
+/// The esbuild binary for `root`: the project's platform-specific npm entry point when present,
 /// otherwise turbo-test's bundled esbuild (`TURBO_ESBUILD`, resolved by cli.js).
 fn esbuild_bin(root: &Path) -> PathBuf {
-    let local = root.join("node_modules/.bin/esbuild");
-    if local.exists() {
+    if let Some(local) = crate::esbuild_path::local(root) {
         return local;
     }
     match std::env::var_os("TURBO_ESBUILD") {
         Some(p) => PathBuf::from(p),
-        None => local,
+        None => root.join("node_modules/.bin/esbuild"),
     }
 }
 
@@ -1315,7 +1364,7 @@ fn bundle_full_cache_path(
         k.hash(&mut h);
         v.hash(&mut h);
     }
-    "esb-v5-import-rewrite".hash(&mut h);
+    "esb-v7-hoisted-setup-import-origin".hash(&mut h);
     mr_enabled().hash(&mut h);
     cache_dir().join(format!("esb-{:016x}.mjs", h.finish()))
 }
@@ -1425,6 +1474,15 @@ fn build_full_bundle_cmd(
     // from the bundle's recorded source dir (registered below) and lazy-loads them on demand.
     if mr_enabled() {
         cmd.arg("--packages=external");
+        // --packages=external does not cover absolute package entry paths. Setup files
+        // importing those must still share the runtime's vitest and dependency instances.
+        for base in root.ancestors() {
+            let packages = base
+                .join("node_modules")
+                .to_string_lossy()
+                .replace('\\', "/");
+            cmd.arg(format!("--external:{packages}/*"));
+        }
     }
     if let Some(tc) = &tsconfig {
         cmd.arg(format!("--tsconfig={}", tc.display()));
@@ -1502,10 +1560,38 @@ fn file_env_pragma(s: &str) -> Option<String> {
 /// else `None` (auto — fall back to the content heuristic). Recognized: node | jsdom | happy-dom.
 fn forced_env(s: &str) -> Option<String> {
     file_env_pragma(s).or_else(|| {
+        if std::env::var("TURBO_ENV_FROM_CONFIG").as_deref() == Ok("1") {
+            return None;
+        }
         std::env::var("TURBO_ENV")
             .ok()
             .map(|v| v.to_ascii_lowercase())
     })
+}
+
+fn configured_environment(entry: &Path) -> Option<String> {
+    for directory in entry.ancestors().skip(1) {
+        for filename in VITEST_CONFIG_FILES {
+            if let Ok(text) = std::fs::read_to_string(directory.join(filename)) {
+                return config_string_value(&text, "environment");
+            }
+        }
+        // The nearest framework config owns the file even when it omits an environment.
+        if let Some(text) = jest_config_text(directory) {
+            return Some(
+                crate::launcher::jest_environment_value(&text).unwrap_or_else(|| "node".into()),
+            );
+        }
+    }
+    None
+}
+fn effective_file_environment(entry: &Path, source: &str) -> Option<String> {
+    forced_env(source)
+        .or_else(|| configured_environment(entry))
+        .map(|env| env.to_ascii_lowercase())
+}
+fn runtime_profile(entry: &Path) -> crate::runtime_profile::RuntimeProfile {
+    crate::runtime_profile::RuntimeProfile::from_dom(needs_dom(entry))
 }
 
 thread_local! {
@@ -1527,8 +1613,8 @@ pub fn set_worker_slot(pool: usize, seq: usize) {
 /// `environment`.
 fn set_file_env(scope: &mut v8::PinScope, file: &Path) {
     let s = std::fs::read_to_string(file).unwrap_or_default();
-    let env = forced_env(&s);
-    let web = env.as_deref().is_some_and(is_dom_env);
+    let env = effective_file_environment(file, &s);
+    let web = needs_dom(file);
     let (pool, seq) = WORKER_SLOT.with(|w| w.get());
     let worker = if on_reuse_path() { pool } else { seq };
     let jest = JEST_PROJECT.with(|c| c.get());
@@ -1549,7 +1635,7 @@ fn set_file_env(scope: &mut v8::PinScope, file: &Path) {
             json_string(match env.as_deref() {
                 Some("happydom") => "happy-dom",
                 Some(e) => e,
-                None => "node",
+                None => if web { "jsdom" } else { "node" },
             }),
         ),
     );
@@ -1558,7 +1644,15 @@ fn set_file_env(scope: &mut v8::PinScope, file: &Path) {
 /// Whether an environment name is a DOM one: vitest's `jsdom` / `happy-dom`, or `turbo-dom`, the
 /// name of the built-in DOM itself (turbo-test#217) — each installs the DOM for every file.
 fn is_dom_env(env: &str) -> bool {
-    matches!(env, "jsdom" | "happy-dom" | "happydom" | "turbo-dom")
+    matches!(
+        env,
+        "jsdom"
+            | "happy-dom"
+            | "happydom"
+            | "turbo-dom"
+            | "jest-environment-jsdom"
+            | "jest-environment-happy-dom"
+    )
 }
 
 /// Whether a file needs a DOM environment (so we don't impose one on pure-logic tests,
@@ -1569,7 +1663,7 @@ fn is_dom_env(env: &str) -> bool {
 /// fall back to the content heuristic (extension + DOM-API mentions).
 fn needs_dom(file: &Path) -> bool {
     let s = std::fs::read_to_string(file).unwrap_or_default();
-    match forced_env(&s).as_deref() {
+    match effective_file_environment(file, &s).as_deref() {
         Some("node") => return false,
         // turbo-dom is our single DOM impl; jsdom/happy-dom both map onto it.
         Some(e) if is_dom_env(e) => return true,
@@ -2340,7 +2434,7 @@ fn push_jest_setup_entry(q: &str, dir: &Path, root_dir: &Path, out: &mut Vec<Pat
 }
 
 /// First string value for a config key (`key: 'value'` / `"value"`). Used for jest `rootDir`.
-fn config_string_value(s: &str, key: &str) -> Option<String> {
+pub(crate) fn config_string_value(s: &str, key: &str) -> Option<String> {
     let start = find_config_key(s, key)?;
     let tail = s[start..].trim_start();
     // skip the key name + colon
@@ -2998,6 +3092,7 @@ fn set_mock_prepass(scope: &mut v8::PinScope, on: bool) {
 /// document/window exist before the test evaluates. (The legacy JS turbo-dom bootstrap —
 /// installGlobals + the `.node` parser — was removed in v0.3.0; rtdom is the only DOM now.)
 fn setup_dom(scope: &mut v8::PinScope, entry: &Path) {
+    crate::runtime_profile::install_dom(scope);
     turbo_dom_browser_env::browser_env::install(scope);
     // jsdom's media by default (vitest parity); Chrome's with --chrome-media,
     // TURBO_CHROME_MEDIA=1 or test.chromeMedia: true
@@ -3040,7 +3135,7 @@ fn set_environment_modes(scope: &mut v8::PinScope, entry: &Path) {
         set_computed_style_mode, set_touch_event_mode, ComputedStyleMode, TouchEventMode,
     };
     let src = std::fs::read_to_string(entry).unwrap_or_default();
-    let chrome = forced_env(&src).as_deref() == Some("turbo-dom");
+    let chrome = effective_file_environment(entry, &src).as_deref() == Some("turbo-dom");
     let (touch, style) = match chrome {
         true => (TouchEventMode::Chrome, ComputedStyleMode::Chrome),
         false => (TouchEventMode::Jsdom, ComputedStyleMode::Jsdom),
@@ -3060,19 +3155,38 @@ fn set_environment_modes(scope: &mut v8::PinScope, entry: &Path) {
 /// `Object`) instead of naming an export that doesn't exist.
 /// Returns None if the project ships no `typescript` (caller falls back to oxc).
 fn tsc_transform_esm(file: &Path, root: &Path) -> Option<String> {
+    tsc_transform_with_kind(file, root, "esm")
+}
+
+/// CJS-first Jest backends need TypeScript's partial-export initialization for circular
+/// decorator metadata. ESM graph callers retain ESNext and their live-binding TDZ semantics.
+fn tsc_transform_with_kind(file: &Path, root: &Path, module_kind: &str) -> Option<String> {
     let src = read_app_source(file)?;
+    tsc_transform_source_with_kind(file, root, module_kind, &src)
+}
+
+fn tsc_transform_source_with_kind(
+    file: &Path,
+    root: &Path,
+    module_kind: &str,
+    src: &str,
+) -> Option<String> {
     let ts_dir = root.join("node_modules/typescript");
     if !ts_dir.join("package.json").is_file() {
         return None;
     }
     // Small node program: transpile with the project's TS (no checker — same isolatedModules
-    // semantics ts-jest uses), keeping ESM module syntax + inlined helpers + decorator metadata.
+    // semantics ts-jest uses), with the requested module kind + inlined helpers + decorator metadata.
     const SCRIPT: &str = r#"
 const ts = require(process.argv[1]);
 const fs = require('fs');
 const file = process.argv[2];
 const src = fs.readFileSync(0, 'utf8'); // the module's source (import.meta.glob expanded)
 const isTsx = file.endsWith('.tsx');
+const configFile = ts.findConfigFile(require('path').dirname(file), ts.sys.fileExists);
+const parsedConfig = configFile && ts.getParsedCommandLineOfConfigFile(configFile, {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic() {} });
+const projectOptions = parsedConfig && parsedConfig.options;
+const commonjsNoInterop = projectOptions && projectOptions.module === ts.ModuleKind.CommonJS && projectOptions.esModuleInterop === false;
 // isolatedModules + emitDecoratorMetadata: a value import of a name used only as a type (an
 // interface) is kept for its `design:type` reference and then fails ESM linking (no such export).
 // TypeScript's own remedy (TS1272) is a namespace import: `ns.Shape` reads as undefined -> Object.
@@ -3154,23 +3268,38 @@ function nsTypeOnlyImports(text) {
 }
 let input = src;
 try { input = nsTypeOnlyImports(src); } catch (e) {} // e.g. a typescript without the parser API
+let dynamicName = '__ttDynamicNamespace';
+while (input.includes(dynamicName)) dynamicName += '_';
+let usesDynamicNamespace = false;
+function preserveDynamicNamespaces(context) {
+  const visit = (node) => {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      usesDynamicNamespace = true;
+      return ts.factory.createCallExpression(ts.factory.createIdentifier(dynamicName), undefined, node.arguments.map(arg => ts.visitNode(arg, visit)));
+    }
+    return ts.visitEachChild(node, visit, context);
+  };
+  return source => ts.visitNode(source, visit);
+}
 const out = ts.transpileModule(input, {
+  transformers: { before: process.argv[3] === 'commonjs' && commonjsNoInterop ? [preserveDynamicNamespaces] : [] },
   fileName: file,
   compilerOptions: {
-    module: ts.ModuleKind.ESNext,
+    module: process.argv[3] === 'commonjs' ? ts.ModuleKind.CommonJS : ts.ModuleKind.ESNext,
     target: ts.ScriptTarget.ES2021,
     experimentalDecorators: true,
     emitDecoratorMetadata: true,
-    esModuleInterop: true,
+    esModuleInterop: !(process.argv[3] === 'commonjs' && commonjsNoInterop),
     importHelpers: false,
     isolatedModules: true,
     jsx: isTsx ? ts.JsxEmit.ReactJSX : undefined,
     useDefineForClassFields: false,
   },
 });
-process.stdout.write(out.outputText);
+const dynamicHelper = usesDynamicNamespace ? '\nfunction '+dynamicName+'(spec) { return Promise.resolve().then(() => globalThis.__ttToESM(require(spec))); }\n' : '';
+process.stdout.write(out.outputText + dynamicHelper);
 "#;
-    run_tsc_transpile(root, &ts_dir, file, SCRIPT, &src)
+    run_tsc_transpile(root, &ts_dir, file, SCRIPT, src, module_kind)
 }
 
 fn run_tsc_transpile(
@@ -3179,8 +3308,9 @@ fn run_tsc_transpile(
     file: &Path,
     script: &str,
     src: &str,
+    module_kind: &str,
 ) -> Option<String> {
-    let out = spawn_tsc_stdin(root, ts_dir, file, script, src)?;
+    let out = spawn_tsc_stdin(root, ts_dir, file, script, src, module_kind)?;
     if !out.status.success() {
         return None;
     }
@@ -3197,6 +3327,7 @@ fn spawn_tsc_stdin(
     file: &Path,
     script: &str,
     src: &str,
+    module_kind: &str,
 ) -> Option<std::process::Output> {
     let mut child = std::process::Command::new("node")
         .current_dir(root)
@@ -3205,6 +3336,7 @@ fn spawn_tsc_stdin(
             script,
             &ts_dir.to_string_lossy(),
             &file.to_string_lossy(),
+            module_kind,
         ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3311,6 +3443,7 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
     // v7: ES-module namespaces without `__esModule`, `export *` of the namespace (turbo-test#133)
     // v8: export getters take runtime.js's jest setter (writable namespace exports under jest)
     "native-cjs-v8".hash(&mut h);
+    ts_commonjs_no_interop(file).hash(&mut h);
     // Legacy-decorator lowering happens inside esm_cjs::emit when the project enables
     // experimentalDecorators/emitDecoratorMetadata AND this file uses a decorator. Without it the
     // native emitter leaves `@Decorator` syntax intact (→ "Unexpected token 'export'") or lowers
@@ -3386,6 +3519,45 @@ fn native_transform_cjs_mapped(file: &Path) -> Option<(String, crate::location::
 /// ONE instance via the require cache exactly like `--packages=external`. CJS/plain files pass
 /// through unchanged (emit's no-module-syntax path). No vi.mock hoisting (deps don't mock). Cached.
 /// Returns `None` on an unhandled form → caller falls back to the esbuild bundle.
+type DependencyTransformFlights =
+    std::sync::Mutex<HashMap<PathBuf, std::sync::Weak<std::sync::Mutex<()>>>>;
+
+// Weak entries are pruned on each cold lookup, so completed keys do not accumulate.
+// Held only around pure dependency transformation, never around module evaluation.
+fn dependency_transform_flights() -> &'static DependencyTransformFlights {
+    static FLIGHTS: std::sync::OnceLock<DependencyTransformFlights> = std::sync::OnceLock::new();
+    FLIGHTS.get_or_init(Default::default)
+}
+
+fn dependency_transform_flight(cache: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let mut flights = dependency_transform_flights().lock().unwrap();
+    flights.retain(|_, flight| flight.strong_count() > 0);
+    if let Some(flight) = flights.get(cache).and_then(std::sync::Weak::upgrade) {
+        return flight;
+    }
+    let flight = std::sync::Arc::new(std::sync::Mutex::new(()));
+    flights.insert(cache.to_path_buf(), std::sync::Arc::downgrade(&flight));
+    flight
+}
+
+#[cfg(test)]
+type NativeDepRaceHook = (
+    std::sync::Arc<std::sync::Barrier>,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+);
+#[cfg(test)]
+fn native_dep_race_hooks() -> &'static std::sync::Mutex<HashMap<PathBuf, NativeDepRaceHook>> {
+    static HOOKS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, NativeDepRaceHook>>> =
+        std::sync::OnceLock::new();
+    HOOKS.get_or_init(Default::default)
+}
+#[cfg(test)]
+fn native_dep_race_probe(file: &Path) -> Option<std::sync::Arc<std::sync::atomic::AtomicUsize>> {
+    let (barrier, count) = native_dep_race_hooks().lock().unwrap().get(file).cloned()?;
+    barrier.wait();
+    Some(count)
+}
+
 fn native_dep_cjs(file: &Path) -> Option<String> {
     use std::hash::{Hash, Hasher};
     let raw = std::fs::read_to_string(file).ok()?;
@@ -3422,9 +3594,24 @@ fn native_dep_cjs(file: &Path) -> Option<String> {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
         return Some(c);
     }
+    #[cfg(test)]
+    let race_count = native_dep_race_probe(file);
+    let flight = dependency_transform_flight(&cache);
+    let _guard = flight
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Another worker can publish while this worker waits. Failed transforms are not cached.
+    if let Ok(code) = std::fs::read_to_string(&cache) {
+        CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+        return Some(code);
+    }
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     // Bundle the package's relative graph with lazy __commonJS init wrappers (circular-safe),
     // bare imports left external (shared via require cache). None → caller falls back to esbuild.
+    #[cfg(test)]
+    if let Some(count) = race_count {
+        count.fetch_add(1, Ordering::Relaxed);
+    }
     let code = dep_interop(crate::bundler::bundle(file)?, node);
     write_atomic(&cache, &code);
     Some(code)
@@ -3439,7 +3626,7 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     let raw = with_binder(file, read_app_source(file)?, true);
     let use_meta = wants_decorator_metadata(file, prefer_metadata, &raw);
     let cov = crate::coverage::enabled();
-    let cache = mr_cjs_cache_path(file, &raw, use_meta, cov);
+    let cache = mr_cjs_cache_path(file, &root, &raw, use_meta, cov);
     if let Some(c) = read_cached_cjs(&cache) {
         return Some(c);
     }
@@ -3483,6 +3670,11 @@ fn read_cached_cjs(cache: &Path) -> Option<String> {
 
 /// Post-process esbuild's CJS output (export ordering, finish_mr_cjs rewrites).
 fn finalize_esbuild_cjs(code: String, file: &Path, raw: &str) -> String {
+    let code = if ts_commonjs_no_interop(file) {
+        crate::ts_cjs_interop::static_requires(code)
+    } else {
+        code
+    };
     let code = postprocess_mr_cjs(code);
     // esbuild sorts the exports; vitest's namespace lists them in source order (turbo-test#141)
     let order = crate::transform::transform(file, raw)
@@ -3513,7 +3705,7 @@ fn finish_mr_cjs(code: String, raw: &str) -> String {
 }
 
 /// Cache path of `esbuild_transform_cjs`'s output for this source / transform flavour.
-fn mr_cjs_cache_path(file: &Path, raw: &str, use_meta: bool, cov: bool) -> PathBuf {
+fn mr_cjs_cache_path(file: &Path, root: &Path, raw: &str, use_meta: bool, cov: bool) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
@@ -3530,7 +3722,8 @@ fn mr_cjs_cache_path(file: &Path, raw: &str, use_meta: bool, cov: bool) -> PathB
     // order (turbo-test#141)
     // v8: __reExport's __toESMStar calls globalThis.__ttToESM (turbo-test#165)
     // v9: export getters take runtime.js's jest setter (writable namespace exports under jest)
-    "mr-cjs-v9".hash(&mut h);
+    "mr-cjs-static-policy-v10".hash(&mut h);
+    ts_commonjs_no_interop(file).hash(&mut h);
     // esbuild can't emit decorator metadata. By default we DON'T pay that cost — only when a
     // decorator file actually threw at load (Mongoose @Prop / Sequelize @Column read design:type
     // at class-definition) does the loader retry with `prefer_metadata`, routing it through the
@@ -3538,6 +3731,13 @@ fn mr_cjs_cache_path(file: &Path, raw: &str, use_meta: bool, cov: bool) -> PathB
     // Retry-on-failure keeps the common case on fast esbuild and never regresses files that load
     // fine without metadata. Keyed separately so the two transforms never collide in cache.
     use_meta.hash(&mut h);
+    if use_meta {
+        "ts-commonjs-dynamic-namespaces-v3".hash(&mut h);
+        decorator_tsc_module_kind(file).hash(&mut h);
+        root.join("node_modules/typescript/package.json")
+            .is_file()
+            .hash(&mut h);
+    }
     // Coverage emits an inline source map (needed to remap V8 byte ranges → original lines), so
     // the output differs — key it separately. Only perturb the key when coverage is ON, so the
     // normal (no-map) cache keys are byte-identical to before → zero cache churn on default runs.
@@ -3547,26 +3747,53 @@ fn mr_cjs_cache_path(file: &Path, raw: &str, use_meta: bool, cov: bool) -> PathB
     cache_dir().join(format!("mr-{:016x}.cjs", h.finish()))
 }
 
-/// The decorator-metadata transform of `esbuild_transform_cjs` (tsc, else oxc, then esbuild CJS).
+/// Decorator metadata for the CJS loader. TypeScript's own CommonJS output preserves
+/// partial exports in Jest backend cycles; ESM/vitest and the oxc fallback keep ESM lowering.
 fn esbuild_transform_cjs_meta(file: &Path, root: &Path, raw: &str, cache: &Path) -> Option<String> {
-    // Primary: the project's own TypeScript (ts.transpileModule) → exact ts-jest parity for
-    // emitDecoratorMetadata (resolves local type aliases, nullable types, etc.). Fallback:
-    // oxc lowers decorators+metadata (ESM) then esbuild converts ESM->CJS — used when the
-    // project ships no `typescript`. oxc can panic on some inputs, so it's caught; either way
-    // we fall through to the plain esbuild transform (metadata-less but loads) on failure.
-    // Get ESM-with-metadata from tsc (preferred) or oxc (fallback), then a single esbuild
-    // ESM->CJS pass so every path yields the same esbuild-shaped CJS the loader/hoisting want.
-    let meta_esm = tsc_transform_esm(file, root).or_else(|| {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::transform::transform_decorators_with_metadata(file, raw)
-        }))
-        .ok()
-        .and_then(|r| r.ok())
-    });
-    let cjs = meta_esm.and_then(|esm| esbuild_format_cjs(root, &esm))?;
+    let cjs = decorator_cjs_via_tsc(file, root, raw)
+        .or_else(|| decorator_cjs_via_oxc(file, root, raw))?;
     let code = finish_mr_cjs(postprocess_mr_cjs(cjs), raw);
     write_atomic(cache, &code);
     Some(code)
+}
+
+fn decorator_cjs_via_tsc(file: &Path, root: &Path, raw: &str) -> Option<String> {
+    let kind = decorator_tsc_module_kind(file);
+    let code = tsc_transform_source_with_kind(file, root, kind, raw)?;
+    if kind == "commonjs" {
+        Some(code)
+    } else {
+        esbuild_format_cjs(root, &code)
+    }
+}
+
+pub(crate) fn ts_commonjs_no_interop(file: &Path) -> bool {
+    if !matches!(
+        file.extension().and_then(|ext| ext.to_str()),
+        Some("ts" | "tsx" | "cts")
+    ) || !cjs_first_project(file)
+    {
+        return false;
+    }
+    nearest_tsconfig(file.parent().unwrap_or(Path::new(".")))
+        .is_some_and(|config| crate::ts_cjs_interop::enabled(&config))
+}
+
+fn decorator_tsc_module_kind(file: &Path) -> &'static str {
+    if cjs_first_project(file) {
+        "commonjs"
+    } else {
+        "esm"
+    }
+}
+
+fn decorator_cjs_via_oxc(file: &Path, root: &Path, raw: &str) -> Option<String> {
+    let esm = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::transform::transform_decorators_with_metadata(file, raw)
+    }))
+    .ok()?
+    .ok()?;
+    esbuild_format_cjs(root, &esm)
 }
 
 /// Run esbuild's per-file CJS transform for `esbuild_transform_cjs`; its raw stdout.
@@ -3703,6 +3930,81 @@ fn fill_import_meta(code: String, bundle_root: Option<&Path>) -> String {
     out
 }
 
+/// Static require declarations generated by esbuild or TypeScript. Their binding can be
+/// re-fetched after a mock registration; user expressions with nested requires stay untouched.
+fn mock_require_declaration(line: &str) -> Option<(&str, &str)> {
+    let declaration = line
+        .strip_prefix("var ")
+        .or_else(|| line.strip_prefix("const "))
+        .or_else(|| line.strip_prefix("let "))?;
+    let (name, rhs) = declaration.split_once(" = ")?;
+    if !mock_require_name(name) || !mock_require_rhs(rhs) {
+        return None;
+    }
+    Some((name, rhs))
+}
+
+fn mock_require_name(name: &str) -> bool {
+    let generated = name.starts_with("import_")
+        || name.rsplit_once('_').is_some_and(|(_, suffix)| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        });
+    let mut chars = name.chars();
+    generated
+        && chars
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+fn mock_require_rhs(rhs: &str) -> bool {
+    static IMPORT: std::sync::OnceLock<fancy_regex::Regex> = std::sync::OnceLock::new();
+    IMPORT
+        .get_or_init(|| {
+            let path = r#"(?:"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*')"#;
+            let require = format!(r"require\(\s*{path}\s*\)");
+            fancy_regex::Regex::new(&format!(
+                r"^(?:{require}|__(?:importDefault|importStar)\({require}\)|__toESM\({require}(?:,\s*1)?\))\s*;?\s*$"
+            ))
+            .expect("static import expression regex")
+        })
+        .is_match(rhs)
+        .unwrap_or(false)
+}
+
+/// Keep the same number of lines for tracked source locations. Mutable import temporaries
+/// permit the existing post-registration rebind on TypeScript's const/let import declarations.
+fn mutable_mock_import(line: &str) -> Option<(&str, &str)> {
+    if line.starts_with("const ") || line.starts_with("let ") {
+        mock_require_declaration(line)
+    } else {
+        None
+    }
+}
+
+fn normalize_mock_require_declarations(code: &str) -> std::borrow::Cow<'_, str> {
+    if !code.lines().any(|line| mutable_mock_import(line).is_some()) {
+        return std::borrow::Cow::Borrowed(code);
+    }
+    let mut normalized = String::with_capacity(code.len());
+    for line in code.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        match mutable_mock_import(body) {
+            Some((name, rhs)) => {
+                normalized.push_str("var ");
+                normalized.push_str(name);
+                normalized.push_str(" = ");
+                normalized.push_str(rhs);
+                if line.ends_with('\n') {
+                    normalized.push('\n');
+                }
+            }
+            None => normalized.push_str(line),
+        }
+    }
+    std::borrow::Cow::Owned(normalized)
+}
+
 /// vitest-style vi.mock hoisting on esbuild CJS output: esbuild emits all `require(...)` at the
 /// top, then the body (module decls + vi.mock + tests). A vi.mock must be registered before the
 /// mocked module loads, so we move the requires NOT referenced by the mock-setup region (the
@@ -3724,8 +4026,9 @@ fn hoist_mock_setup_tracked(code: &str) -> (String, Vec<Option<usize>>) {
     if !code.contains(".mock(") {
         return unchanged();
     }
-    let lines: Vec<&str> = code.lines().collect();
-    let is_req = |l: &str| l.starts_with("var import_") && l.contains("require(");
+    let normalized = normalize_mock_require_declarations(code);
+    let lines: Vec<&str> = normalized.lines().collect();
+    let is_req = |l: &str| mock_require_declaration(l).is_some();
     // contiguous require block
     let Some(req_start) = lines.iter().position(|l| is_req(l)) else {
         return unchanged();
@@ -4724,6 +5027,15 @@ fn esbuild_cjs_fallback(abs: &Path, prefer_metadata: bool) -> Option<String> {
 }
 
 fn read_transformed(abs: &Path, as_cjs: bool, prefer_metadata: bool) -> Option<String> {
+    if crate::vue::is_component(abs) {
+        return match crate::vue::load(abs, as_cjs) {
+            Ok(code) => Some(code),
+            Err(error) => {
+                eprintln!("{error}");
+                None
+            }
+        };
+    }
     // Module-runner: per-module CJS transform (app) / per-package CJS bundle (node_modules)
     // so imports are live + mockable and react is shared. Only on the CJS load path (the test
     // entry, setup files + their require-graph); the legacy ESM path (DOM boot) stays oxc.
@@ -5500,8 +5812,8 @@ impl ModuleSource {
     }
 }
 
-/// (path, decorator-metadata mode)
-type SourceKey = (PathBuf, bool);
+/// (path, decorator-metadata mode, configured TypeScript CommonJS import policy)
+type SourceKey = (PathBuf, bool, bool);
 
 /// What identifies a version of a file: mtime and ctime in ns, size, inode, and for a file
 /// modified in the last 2 s (a coarse-mtime filesystem can give an edit the same mtime and size)
@@ -5574,12 +5886,26 @@ fn cjs_wrapper_open(abs: &Path) -> &'static str {
     }
 }
 
+/// Node strips a leading BOM and treats a file's hashbang as a comment before
+/// CommonJS wrapping. Keep its bytes/line count stable for source-map offsets.
+fn wrap_cjs_source(abs: &Path, source: &str) -> String {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let open = cjs_wrapper_open(abs);
+    match source.strip_prefix("#!") {
+        Some(rest) => format!("{open}//{rest}\n}})"),
+        None => format!("{open}{source}\n}})"),
+    }
+}
+
 /// Whether a module's transform depends only on its file, so its wrapped source can be shared:
 /// not the test file or a setup file (their factories get a binder, turbo-test#205; the test
 /// file's transform also feeds test locations), not an app module whose source map failure
 /// frames keep, not under coverage. A module the shared cache skips loads as before, with the
 /// transform's per-file side effects.
 fn shareable_source(abs: &Path) -> bool {
+    if crate::vue::is_component(abs) {
+        return false;
+    }
     let app = !abs.components().any(|c| c.as_os_str() == "node_modules");
     !crate::coverage::enabled()
         && !TEST_FILE.with(|f| *f.borrow() == abs)
@@ -5595,10 +5921,7 @@ fn module_source_for(abs: &Path, prefer_metadata: bool) -> Option<Arc<ModuleSour
         return module_source(abs, prefer_metadata);
     }
     let raw = read_transformed(abs, true, prefer_metadata)?;
-    Some(new_module_source(format!(
-        "{}{raw}\n}})",
-        cjs_wrapper_open(abs)
-    )))
+    Some(new_module_source(wrap_cjs_source(abs, &raw)))
 }
 
 /// An owned source (its text is copied into V8).
@@ -5682,7 +6005,11 @@ fn module_source_entries(abs: &Path) -> usize {
 fn module_source(abs: &Path, prefer_metadata: bool) -> Option<Arc<ModuleSource>> {
     static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let stamp = source_stamp(abs)?;
-    let key: SourceKey = (abs.to_path_buf(), prefer_metadata);
+    let key: SourceKey = (
+        abs.to_path_buf(),
+        prefer_metadata,
+        ts_commonjs_no_interop(abs),
+    );
     let map = shared_sources();
     let hit = |m: &mut HashMap<SourceKey, SharedSource>| {
         let e = m.get_mut(&key).filter(|e| e.stamp == stamp)?;
@@ -5694,7 +6021,7 @@ fn module_source(abs: &Path, prefer_metadata: bool) -> Option<Arc<ModuleSource>>
     }
     // transformed outside the lock (it can run esbuild); a racing thread's copy is dropped
     let raw = read_transformed(abs, true, prefer_metadata)?;
-    let wrapped = format!("{}{raw}\n}})", cjs_wrapper_open(abs));
+    let wrapped = wrap_cjs_source(abs, &raw);
     let mut map = map.lock().unwrap();
     if let Some(src) = hit(&mut map) {
         return Some(src);
@@ -5884,12 +6211,58 @@ fn load_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, abs: &Path, drain_mocks: bool)
     load_cjs_inner(scope, abs, drain_mocks, false)
 }
 
+// Opt-in bounded diagnostics distinguish repeated failed loads from a large unique graph.
+struct CjsLoadProbe {
+    path: PathBuf,
+    metadata: bool,
+    started: std::time::Instant,
+}
+
+impl CjsLoadProbe {
+    fn start(path: &Path, metadata: bool) -> Option<Self> {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ENABLED
+            .get_or_init(|| std::env::var("TURBO_CJS_LOAD_DIAGNOSTIC").as_deref() == Ok("1"))
+        {
+            return None;
+        }
+        cjs_load_diagnostic("start", path, metadata, 0);
+        Some(Self {
+            path: path.to_path_buf(),
+            metadata,
+            started: std::time::Instant::now(),
+        })
+    }
+}
+
+impl Drop for CjsLoadProbe {
+    fn drop(&mut self) {
+        cjs_load_diagnostic(
+            "return",
+            &self.path,
+            self.metadata,
+            self.started.elapsed().as_millis(),
+        );
+    }
+}
+
+fn cjs_load_diagnostic(event: &str, path: &Path, metadata: bool, millis: u128) {
+    static LINES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let sequence = LINES.fetch_add(1, Ordering::Relaxed);
+    if sequence >= 4096 {
+        return;
+    }
+    let depth = REQUIRE_STACK.with(|stack| stack.borrow().len());
+    eprintln!("[cjs-load] seq={sequence} event={event} metadata={metadata} depth={depth} ms={millis} path={}", path.display());
+}
+
 fn load_cjs_inner<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     abs: &Path,
     drain_mocks: bool,
     prefer_metadata: bool,
 ) -> Option<()> {
+    let _probe = CjsLoadProbe::start(abs, prefer_metadata);
     if let Some(done) = loaded_or_lazy(scope, abs) {
         return done;
     }
@@ -5908,12 +6281,54 @@ fn load_cjs_inner<'s>(
         ctx.dir_str,
     );
     restore_tt_dir(scope, ctx.global, prev_dir);
+    let propagated = take_propagated_cjs_error(scope, abs, body_exc.as_ref());
     if !call_ok {
-        return handle_cjs_body_throw(scope, abs, drain_mocks, prefer_metadata, body_exc);
+        return handle_cjs_body_throw(
+            scope,
+            abs,
+            drain_mocks,
+            prefer_metadata,
+            propagated,
+            body_exc,
+        );
     }
     settle_module_mocks(scope, abs, drain_mocks);
     let final_exports = module_obj.get(scope, exports_key.into())?;
     register_cjs_exports(scope, ctx.global, abs, final_exports)
+}
+
+// A child failure cannot be repaired by re-emitting its importing decorator class.
+// Keep provenance only for the active importer body, never cache a failed module.
+fn take_propagated_cjs_error(
+    scope: &mut v8::PinScope,
+    abs: &Path,
+    error: Option<&v8::Global<v8::Value>>,
+) -> bool {
+    let child = REGISTRY.with(|r| r.borrow_mut().propagated_cjs_errors.remove(abs));
+    match (child, error) {
+        (Some(children), Some(error)) => children
+            .iter()
+            .any(|child| v8::Local::new(scope, child).strict_equals(v8::Local::new(scope, error))),
+        _ => false,
+    }
+}
+
+fn mark_propagated_cjs_error(scope: &mut v8::PinScope, error: v8::Local<v8::Value>) {
+    // Equal primitive values do not establish exception provenance.
+    if !error.is_object() {
+        return;
+    }
+    let importer = REQUIRE_STACK.with(|stack| stack.borrow().last().cloned());
+    if let Some(importer) = importer {
+        let error = v8::Global::new(scope, error);
+        REGISTRY.with(|r| {
+            r.borrow_mut()
+                .propagated_cjs_errors
+                .entry(importer)
+                .or_default()
+                .push(error);
+        });
+    }
 }
 
 /// Locals a CJS call needs (global, dir, filename, require).
@@ -5966,8 +6381,8 @@ fn compile_cjs_wrapper<'s>(
         return None;
     };
     let code = source_string(scope, &module)?;
-    // Under --coverage, give the script an origin named after the file so V8's precise-coverage
-    // report carries a URL we can map back to source. Off by default (origin None) — zero change.
+    // Backend dependency discovery reads V8 CallSite filenames; coverage and
+    // locations also need the real module origin.
     // (compiled script, the compile error when neither the native output nor the esbuild retry
     // compiles: re-thrown below, outside this TryCatch, as the load's cause)
     let (script, compile_exc) = compile_cjs_module(scope, abs, &module, code, prefer_metadata);
@@ -6040,9 +6455,13 @@ fn handle_cjs_body_throw<'s>(
     abs: &Path,
     drain_mocks: bool,
     prefer_metadata: bool,
+    propagated: bool,
     body_exc: Option<v8::Global<v8::Value>>,
 ) -> Option<()> {
-    if !prefer_metadata && wants_metadata_retry(abs) {
+    if std::env::var("TURBO_CJS_LOAD_DIAGNOSTIC").as_deref() == Ok("1") {
+        cjs_load_diagnostic("body-failed", abs, prefer_metadata, 0);
+    }
+    if !prefer_metadata && !propagated && wants_metadata_retry(abs) {
         return load_cjs_inner(scope, abs, drain_mocks, true);
     }
     if let Some(e) = body_exc {
@@ -6100,7 +6519,7 @@ fn compile_cjs_module<'s>(
 }
 
 /// Resolve the script origin for `abs`: a named origin when coverage, locations or failure
-/// frames need it — `None` otherwise.
+/// frames or backend package discovery need it — `None` otherwise.
 fn cjs_script_origin<'s>(
     tc: &mut v8::PinScope<'s, '_>,
     abs: &Path,
@@ -6113,7 +6532,11 @@ fn cjs_script_origin<'s>(
     // (failure frames name an app module's file too: junit, turbo-test#81)
     let framed = crate::location::frames_enabled()
         && !abs.components().any(|c| c.as_os_str() == "node_modules");
-    if !crate::coverage::enabled() && !located && !framed {
+    let backend = CJS_FIRST_RESOLUTION.with(|value| value.get());
+    // Per-file hook ownership examines caller paths under reuse. Name dependency
+    // scripts too, so their hooks remain distinguishable from project hooks.
+    let reused = on_reuse_path();
+    if ![crate::coverage::enabled(), located, framed, backend, reused].contains(&true) {
         return None;
     }
     v8::String::new(tc, &abs.to_string_lossy()).map(|name| script_origin(tc, name))
@@ -6129,12 +6552,13 @@ fn esbuild_fallback_script(
     prefer_metadata: bool,
 ) -> Option<v8::Global<v8::Script>> {
     let src = esbuild_cjs_fallback(abs, prefer_metadata)?;
-    let wrapped_fb = format!("{}{src}\n}})", cjs_wrapper_open(abs));
+    let wrapped_fb = wrap_cjs_source(abs, &src);
     if wrapped_fb == module.wrapped {
         return None; // native wasn't the source (output identical) — no point retrying
     }
     let code_fb = v8::String::new(tc, &wrapped_fb)?;
-    v8::Script::compile(tc, code_fb, None).map(|s| v8::Global::new(tc, s))
+    let origin = cjs_script_origin(tc, abs);
+    v8::Script::compile(tc, code_fb, origin.as_ref()).map(|s| v8::Global::new(tc, s))
 }
 
 /// Log the native compile failure's exception text when the loader-debug env is on.
@@ -6732,7 +7156,74 @@ fn stub_failed_deps() -> bool {
     ENTRY_LENIENT.with(|c| c.get()) && std::env::var("TURBO_NO_STUB_FAIL").is_err()
 }
 
+/// Scope resolver configuration to the calling JS context. Never export these
+/// mutable process.env values into Rust's process-wide environment across workers.
+type RuntimeResolverFlags = (
+    crate::pnpm_ancestor::RuntimeFlagGuard,
+    crate::vue::RuntimeFlagGuard,
+);
+
+fn resolver_property<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    name: &str,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let key = v8::String::new(scope, name)?;
+    object.get(scope, key.into())
+}
+
+fn resolver_environment<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> Option<Option<v8::Local<'s, v8::Object>>> {
+    let global = scope.get_current_context().global(scope);
+    let process = resolver_property(scope, global, "process")?;
+    let Ok(process) = v8::Local::<v8::Object>::try_from(process) else {
+        return Some(None);
+    };
+    let env = resolver_property(scope, process, "env")?;
+    Some(v8::Local::<v8::Object>::try_from(env).ok())
+}
+
+fn resolver_env_string<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    env: v8::Local<'s, v8::Object>,
+    name: &str,
+) -> Option<Option<String>> {
+    let value = resolver_property(scope, env, name)?;
+    if value.is_undefined() {
+        return Some(None);
+    }
+    value
+        .to_string(scope)
+        .map(|value| Some(value.to_rust_string_lossy(scope)))
+}
+
+fn resolver_runtime_flags(scope: &mut v8::PinScope) -> Option<RuntimeResolverFlags> {
+    let (pnpm, vue) = match resolver_environment(scope)? {
+        Some(env) => (
+            resolver_env_string(scope, env, "TURBO_PNPM_ANCESTOR")?,
+            resolver_env_string(scope, env, "TURBO_VUE")?,
+        ),
+        None => (None, None),
+    };
+    Some((
+        crate::pnpm_ancestor::runtime_flag(pnpm.as_deref()),
+        crate::vue::runtime_flag(vue.as_deref()),
+    ))
+}
+
 fn native_require(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let Some(_flags) = resolver_runtime_flags(scope) else {
+        return;
+    };
+    native_require_scoped(scope, args, rv);
+}
+
+fn native_require_scoped(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
@@ -7052,6 +7543,7 @@ fn require_load_cjs(
         Some(e) => {
             let e = v8::Local::new(scope, &e);
             let e = as_import_compile_error(scope, args, abs, spec, e);
+            mark_propagated_cjs_error(scope, e);
             scope.throw_exception(e);
         }
         None => throw(scope, &format!("failed to load {spec}")),
@@ -7144,6 +7636,17 @@ fn query_mock_variant(spec: &str, abs: PathBuf) -> PathBuf {
 }
 
 fn native_register_mock(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let Some(_flags) = resolver_runtime_flags(scope) else {
+        return;
+    };
+    native_register_mock_scoped(scope, args, rv);
+}
+
+fn native_register_mock_scoped(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
@@ -7259,6 +7762,17 @@ fn actual_exports(scope: &mut v8::PinScope, abs: &Path) -> Option<v8::Global<v8:
 fn native_import_actual(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let Some(_flags) = resolver_runtime_flags(scope) else {
+        return;
+    };
+    native_import_actual_scoped(scope, args, rv);
+}
+
+fn native_import_actual_scoped(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
     let dir = args.get(0).to_rust_string_lossy(scope);
@@ -7286,6 +7800,17 @@ fn native_import_actual(
 fn native_resolve_spec(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let Some(_flags) = resolver_runtime_flags(scope) else {
+        return;
+    };
+    native_resolve_spec_scoped(scope, args, rv);
+}
+
+fn native_resolve_spec_scoped(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
     let dir = args.get(0).to_rust_string_lossy(scope);
@@ -7300,6 +7825,17 @@ fn native_resolve_spec(
 /// __ttUnmock(dir, spec): vi.unmock()/doUnmock() — remove a registered mock + its loaded module
 /// so the next import loads the REAL module.
 fn native_unmock(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let Some(_flags) = resolver_runtime_flags(scope) else {
+        return;
+    };
+    native_unmock_scoped(scope, args, rv);
+}
+
+fn native_unmock_scoped(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
@@ -7484,6 +8020,17 @@ fn native_require_stack(
 /// __ttRequireResolve(dir, spec, esm) -> require.resolve(spec) from `dir`: the resolved path
 /// (a builtin or a test API module is its own name), undefined when nothing resolves.
 fn native_require_resolve(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let Some(_flags) = resolver_runtime_flags(scope) else {
+        return;
+    };
+    native_require_resolve_scoped(scope, args, rv);
+}
+
+fn native_require_resolve_scoped(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
@@ -8000,19 +8547,17 @@ fn variant_names<'s>(
     exports: v8::Local<'s, v8::Value>,
     kind: Variant,
 ) -> Option<Vec<String>> {
-    Some(match kind {
-        Variant::Ns => vec!["default".to_string()],
-        Variant::Star | Variant::Node => {
-            let view = variant_view(scope, exports, kind)?;
-            let global = scope.get_current_context().global(scope);
-            let mut names = object_keys(scope, global, view);
-            // (Node's view names `default` for every CommonJS module, turbo-test#193)
-            if kind == Variant::Star {
-                names.retain(|n| n != "default");
-            }
-            names
-        }
-    })
+    if kind == Variant::Ns {
+        return Some(vec!["default".to_string()]);
+    }
+    let view = variant_view(scope, exports, kind)?;
+    let global = scope.get_current_context().global(scope);
+    let mut names = object_keys(scope, global, view);
+    // Node's CommonJS view always keeps its default export (#193).
+    if kind == Variant::Star {
+        names.retain(|name| name != "default");
+    }
+    Some(names)
 }
 
 fn variant_eval<'s>(
@@ -8276,6 +8821,7 @@ fn resolve_callback<'s>(
     referrer: v8::Local<'s, v8::Module>,
 ) -> Option<v8::Local<'s, v8::Module>> {
     v8::callback_scope!(unsafe scope, context);
+    let _flags = resolver_runtime_flags(scope)?;
     let spec = specifier.to_rust_string_lossy(scope);
     let lookup = resolve_spec_lookup(scope, referrer, &spec);
     let abs = query_mock_variant(&spec, lookup?);
@@ -8491,6 +9037,7 @@ fn dynamic_import_callback<'s>(
     specifier: v8::Local<'s, v8::String>,
     _import_attributes: v8::Local<'s, v8::FixedArray>,
 ) -> Option<v8::Local<'s, v8::Promise>> {
+    let _flags = resolver_runtime_flags(scope)?;
     // vitest awaits a vi.doMock's async factory before an import() of its module resolves
     // (turbo-test#42 item 6): while one is pending (runtime.js __ttImportWait), the import runs
     // once it is registered
@@ -8724,11 +9271,16 @@ fn dynamic_import<'s>(
     resource_name: v8::Local<'s, v8::Value>,
     specifier: v8::Local<'s, v8::String>,
 ) -> Option<v8::Local<'s, v8::Promise>> {
+    let _flags = resolver_runtime_flags(scope)?;
     let resolver = v8::PromiseResolver::new(scope)?;
     let promise = resolver.get_promise(scope);
 
     let referrer = resource_name.to_rust_string_lossy(scope);
-    let from_dir = Path::new(&referrer).parent().map(|p| p.to_path_buf());
+    // Setup bundles live in the cache; dynamic imports need the same source directory
+    // as their static imports, including on a warm bundle-cache hit (#410).
+    let from_dir = REGISTRY
+        .with(|r| r.borrow().bundle_src_dir.get(Path::new(&referrer)).cloned())
+        .or_else(|| Path::new(&referrer).parent().map(|p| p.to_path_buf()));
     let spec = specifier.to_rust_string_lossy(scope);
 
     // Layer B: configured barrel -> lazy Proxy namespace (await import('@mui/icons-material')).
@@ -8904,11 +9456,10 @@ fn bind_fn(
     target.set(scope, key.into(), func.into());
 }
 
-/// The test runtime + helpers (the "framework layer"). Baked into a V8 startup snapshot
-/// once (M3 §4) so each test file gets a context *from* the snapshot instead of
-/// re-evaluating this per file. (Minimal runtime now; real @vitest/* bundle swaps in here
-/// behind the same snapshot mechanism.)
-const RUNTIME_JS: &str = include_str!("runtime.js");
+/// Pristine VM context index zero is reserved only in the runner-owned Node snapshot.
+pub(crate) fn vm_context_snapshot_available() -> bool {
+    framework_snapshot().references.is_none()
+}
 
 /// Build the framework snapshot once: a context with RUNTIME_JS evaluated, set as the
 /// default context, serialized. Native callbacks (log/__nativeRequire) are NOT in the
@@ -8936,6 +9487,7 @@ pub(crate) fn framework_snapshot() -> &'static FrameworkSnapshot {
         let mut creator = v8::Isolate::snapshot_creator(None, None);
         {
             v8::scope!(let scope, &mut creator);
+            crate::vm_compat::register_pristine_context(scope);
             let context = v8::Context::new(scope, Default::default());
             let scope = &mut v8::ContextScope::new(scope, context);
             framework_prelude(scope);
@@ -8973,7 +9525,7 @@ fn window_snapshot(chai: &str, flags: &str) -> Option<FrameworkSnapshot> {
             references: Some(references),
         });
     }
-    let blob = turbo_dom_browser_env::browser_env::snapshot_blob_with(framework_prelude)?;
+    let blob = turbo_dom_browser_env::browser_env::snapshot_blob_with(window_framework_prelude)?;
     // saved only when built with the recorded table (the key's fingerprint)
     let same = blob.references.len() == references.len()
         && blob
@@ -8990,6 +9542,21 @@ fn window_snapshot(chai: &str, flags: &str) -> Option<FrameworkSnapshot> {
     })
 }
 
+// snapshot_blob_with calls this once for its plain default context and once for
+// its window context, before the DOM engine bootstrap. Only the latter gets DOM fallbacks.
+fn window_framework_prelude(scope: &mut v8::PinScope) {
+    thread_local! { static PHASE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+    framework_prelude(scope);
+    let phase = PHASE.with(|phase| {
+        let previous = phase.get();
+        phase.set(previous + 1);
+        previous
+    });
+    if phase == 1 {
+        crate::runtime_profile::install_dom(scope);
+    }
+}
+
 /// Where a startup blob of `kind` with `key` is kept: the build's cache dir (its name carries
 /// the build id, so another binary never reads it).
 fn saved_blob_path(kind: &str, key: u64) -> PathBuf {
@@ -9001,7 +9568,7 @@ fn saved_blob_path(kind: &str, key: u64) -> PathBuf {
 fn blob_key_from(kind: &str, fingerprint: u64, chai: &str, flags: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (kind, fingerprint, chai, flags).hash(&mut h);
+    ("runtime-profiles-v1", kind, fingerprint, chai, flags).hash(&mut h);
     h.finish()
 }
 
@@ -9157,7 +9724,8 @@ fn framework_prelude(scope: &mut v8::PinScope) {
             .and_then(|s| s.run(tc))
             .unwrap_or_else(|| chai_missing("chai failed to load"));
     }
-    let code = v8::String::new(scope, RUNTIME_JS).unwrap();
+    let runtime = crate::runtime_sources::shared_runtime_source();
+    let code = v8::String::new(scope, &runtime).unwrap();
     let s = v8::Script::compile(scope, code, None).unwrap();
     s.run(scope).unwrap();
 }
@@ -9395,6 +9963,25 @@ fn load_lazy_bundled(scope: &mut v8::PinScope, abs: &Path) -> Option<Option<()>>
 }
 
 fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+    bind_fn(
+        scope,
+        global,
+        "__ttPortCreate",
+        crate::message_port::native_create,
+    );
+    bind_fn(scope, global, "__ttPortId", crate::message_port::native_id);
+    bind_fn(
+        scope,
+        global,
+        "__ttPortDetached",
+        crate::message_port::native_detached,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttPortDetach",
+        crate::message_port::native_detach,
+    );
     bind_fn(scope, global, "log", native_log);
     bind_fn(scope, global, "__ttWrite", native_write);
     bind_fn(scope, global, "__ttCallSite", native_call_site);
@@ -9419,9 +10006,12 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__fs_existsSync", fs_exists_sync);
     bind_fn(scope, global, "__fs_readdir", fs_readdir);
     bind_fn(scope, global, "__fs_stat", fs_stat);
+    bind_fn(scope, global, "__fs_realpath", fs_realpath);
     bind_fn(scope, global, "__fs_readFile", fs_read_file);
     bind_fn(scope, global, "__fs_writeFile", fs_write_file);
     bind_fn(scope, global, "__fs_mkdir", fs_mkdir);
+    bind_fn(scope, global, "__fs_mkdtemp", fs_mkdtemp);
+    bind_fn(scope, global, "__fs_copyFile", fs_copy_file);
     bind_fn(scope, global, "__fs_remove", fs_remove);
     bind_fn(scope, global, "__fs_symlinkSync", fs_symlink_sync);
     // process.cwd(): the process's working directory, as vitest's workers report it; os.tmpdir()
@@ -9429,6 +10019,10 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let cwd = std::env::current_dir().map(|d| d.to_string_lossy().into_owned());
     for (name, value) in [
         ("__ttProcessCwd", cwd.ok()),
+        (
+            "__ttNodeExecutable",
+            crate::process_compat::node_executable(),
+        ),
         ("__ttTmpdir", Some(node_tmpdir(|k| std::env::var(k).ok()))),
         ("__ttHomedir", std::env::var("HOME").ok()),
     ] {
@@ -9438,6 +10032,39 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
             global.set(scope, key.into(), value.into());
         }
     }
+    bind_fn(scope, global, "__ttSha1", crate::crypto_compat::native_sha1);
+    bind_fn(
+        scope,
+        global,
+        "__ttCryptoHashes",
+        crate::crypto_compat::native_crypto_hashes,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttSha256",
+        crate::crypto_compat::native_sha256,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttRandomBytes",
+        crate::aes_compat::native_random_bytes,
+    );
+    bind_fn(scope, global, "__ttIsIP", crate::node_compat::native_is_ip);
+    bind_fn(scope, global, "__ttGzip", crate::node_compat::native_gzip);
+    bind_fn(
+        scope,
+        global,
+        "__ttV8Serialize",
+        crate::node_compat::native_serialize,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttV8Deserialize",
+        crate::node_compat::native_deserialize,
+    );
     bind_fn(
         scope,
         global,
@@ -9478,6 +10105,99 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         }
     }
     install_host_env(scope, global);
+    if crate::runtime_profile::is_node() {
+        install_backend_natives(scope, global);
+        crate::runtime_profile::install_backend(scope);
+    }
+}
+
+fn reset_backend_transports() {
+    crate::http_compat::reset();
+    crate::async_process::reset();
+    crate::tcp_compat::reset();
+}
+
+fn install_backend_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+    reset_backend_transports();
+    let empty = v8::undefined(scope);
+    scope.set_continuation_preserved_embedder_data(empty.into());
+    bind_fn(
+        scope,
+        global,
+        "__ttAsyncFrameGet",
+        crate::async_context::native_get_frame,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttAsyncFrameSet",
+        crate::async_context::native_set_frame,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttSpawnSync",
+        crate::process_compat::native_spawn_sync,
+    );
+    bind_fn(scope, global, "__ttHttp", crate::http_compat::native_http);
+    bind_fn(
+        scope,
+        global,
+        "__ttAsyncProcess",
+        crate::async_process::native_async_process,
+    );
+    bind_fn(scope, global, "__ttTcp", crate::tcp_compat::native_tcp);
+    bind_fn(
+        scope,
+        global,
+        "__ttDecryptPkcs8",
+        crate::encrypted_pkcs8::native_decrypt_pkcs8,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttBlockList",
+        crate::blocklist::native_blocklist,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttVmCreate",
+        crate::vm_compat::native_create_context,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttVmRun",
+        crate::vm_compat::native_run_context,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttVmCompile",
+        crate::vm_compat::native_compile_script,
+    );
+    bind_fn(scope, global, "__ttEc", crate::key_compat::native_ec);
+    bind_fn(
+        scope,
+        global,
+        "__ttDrainAsyncHookTasks",
+        crate::async_hooks::native_drain_hook_tasks,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttSetPromiseHooks",
+        crate::async_hooks::native_set_promise_hooks,
+    );
+    bind_fn(scope, global, "__ttRsa", crate::rsa_compat::native_rsa);
+    bind_fn(scope, global, "__ttX509", crate::x509_compat::native_x509);
+    bind_fn(
+        scope,
+        global,
+        "__ttAesGcm",
+        crate::aes_compat::native_aes_gcm,
+    );
 }
 
 /// Stack / CI / snapshot-update / name-pattern globals for the runtime, from the CLI's env.
@@ -9632,13 +10352,16 @@ fn fs_exists_sync(
 /// The Node error code and description of an OS error (`EEXIST`, "file already exists"), as
 /// libuv names them; None for an error that is not one of these.
 fn errno_name(e: &std::io::Error) -> Option<(&'static str, &'static str)> {
-    const NAMES: [(i32, &str, &str); 6] = [
+    const NAMES: [(i32, &str, &str); 9] = [
         (2, "ENOENT", "no such file or directory"),
         (13, "EACCES", "permission denied"),
         (17, "EEXIST", "file already exists"),
         (20, "ENOTDIR", "not a directory"),
         (1, "EPERM", "operation not permitted"),
         (21, "EISDIR", "illegal operation on a directory"),
+        (libc::ENOSYS, "ENOSYS", "function not implemented"),
+        (libc::ENOTSUP, "ENOTSUP", "operation not supported"),
+        (libc::ENAMETOOLONG, "ENAMETOOLONG", "name too long"),
     ];
     // ENOTEMPTY's number differs by OS (66 on macOS, 39 on Linux)
     if e.kind() == std::io::ErrorKind::DirectoryNotEmpty {
@@ -9649,6 +10372,181 @@ fn errno_name(e: &std::io::Error) -> Option<(&'static str, &'static str)> {
         .iter()
         .find(|(n, _, _)| *n == errno)
         .map(|&(_, c, d)| (c, d))
+}
+
+fn fs_temp_suffix() -> std::io::Result<String> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut suffix = String::with_capacity(6);
+    while suffix.len() < 6 {
+        let mut bytes = [0u8; 16];
+        getrandom::getrandom(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
+        for byte in bytes.into_iter().filter(|byte| *byte < 248) {
+            suffix.push(ALPHABET[usize::from(byte) % 62] as char);
+            if suffix.len() == 6 {
+                break;
+            }
+        }
+    }
+    Ok(suffix)
+}
+
+fn fs_private_directory(path: &str) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+fn fs_temp_directory(prefix: &str) -> Result<String, (std::io::Error, String)> {
+    fs_temp_directory_with(prefix, fs_temp_suffix)
+}
+
+fn fs_temp_directory_with(
+    prefix: &str,
+    mut suffix: impl FnMut() -> std::io::Result<String>,
+) -> Result<String, (std::io::Error, String)> {
+    for _ in 0..128 {
+        let suffix = suffix().map_err(|e| (e, prefix.to_owned()))?;
+        let path = format!("{prefix}{suffix}");
+        match fs_private_directory(&path) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err((e, path)),
+        }
+    }
+    Err((
+        std::io::Error::from(std::io::ErrorKind::AlreadyExists),
+        prefix.to_owned(),
+    ))
+}
+
+fn fs_mkdtemp(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let prefix = args.get(0).to_rust_string_lossy(scope);
+    match fs_temp_directory(&prefix) {
+        Ok(path) => rv.set(v8::String::new(scope, &path).unwrap().into()),
+        Err((error, path)) => {
+            let path = if args.get(1).boolean_value(scope) {
+                format!("{prefix}XXXXXX")
+            } else {
+                path
+            };
+            throw_fs_error(scope, &error, "mkdtemp", &path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn fs_same_file(source: &std::fs::File, destination: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let src = source.metadata()?;
+    let dest = destination.metadata()?;
+    Ok(src.dev() == dest.dev() && src.ino() == dest.ino())
+}
+
+#[cfg(not(unix))]
+fn fs_same_file(_source: &std::fs::File, _destination: &std::fs::File) -> std::io::Result<bool> {
+    // The default Windows copy uses the platform copy operation instead of this streaming path.
+    Ok(false)
+}
+
+fn fs_copy_source(path: &str) -> std::io::Result<std::fs::File> {
+    let file = std::fs::File::open(path)?;
+    if file.metadata()?.is_dir() {
+        #[cfg(target_os = "macos")]
+        let errno = libc::ENOTSUP;
+        #[cfg(not(target_os = "macos"))]
+        let errno = libc::EISDIR;
+        return Err(std::io::Error::from_raw_os_error(errno));
+    }
+    Ok(file)
+}
+
+fn fs_copy_output(destination: &str, flags: i32) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .create_new(flags & 1 != 0)
+        .open(destination)
+}
+
+fn fs_copy_stream(mut input: std::fs::File, mut output: std::fs::File) -> std::io::Result<()> {
+    if fs_same_file(&input, &output)? {
+        return Ok(());
+    }
+    output.set_len(0)?;
+    std::io::copy(&mut input, &mut output)?;
+    output.set_permissions(input.metadata()?.permissions())
+}
+
+#[cfg(windows)]
+fn fs_copy_windows(source: &str, destination: &str) -> std::io::Result<()> {
+    if crate::canon::canonicalize(source)?
+        == crate::canon::canonicalize(destination).unwrap_or_default()
+    {
+        return Ok(());
+    }
+    std::fs::copy(source, destination).map(|_| ())
+}
+
+fn fs_copy_bytes(source: &str, destination: &str, flags: i32) -> std::io::Result<()> {
+    let input = fs_copy_source(source)?;
+    if flags & 4 != 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+    }
+    #[cfg(windows)]
+    if flags & 1 == 0 {
+        return fs_copy_windows(source, destination);
+    }
+    let output = fs_copy_output(destination, flags)?;
+    fs_copy_stream(input, output)
+}
+
+fn throw_fs_copy_error(
+    scope: &mut v8::PinScope,
+    error: &std::io::Error,
+    source: &str,
+    destination: &str,
+) {
+    let (code, description) = errno_name(error).unwrap_or(("EIO", "i/o error"));
+    let message = format!("{code}: {description}, copyfile '{source}' -> '{destination}'");
+    let message = v8::String::new(scope, &message).unwrap();
+    let exception = v8::Exception::error(scope, message);
+    let object = exception.cast::<v8::Object>();
+    for (key, value) in [
+        ("code", code),
+        ("syscall", "copyfile"),
+        ("path", source),
+        ("dest", destination),
+    ] {
+        let key = v8::String::new(scope, key).unwrap();
+        let value = v8::String::new(scope, value).unwrap();
+        object.set(scope, key.into(), value.into());
+    }
+    let key = v8::String::new(scope, "errno").unwrap();
+    let value = v8::Integer::new(scope, -error.raw_os_error().unwrap_or(5));
+    object.set(scope, key.into(), value.into());
+    scope.throw_exception(exception);
+}
+
+fn fs_copy_file(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let source = args.get(0).to_rust_string_lossy(scope);
+    let destination = args.get(1).to_rust_string_lossy(scope);
+    let flags = args.get(2).int32_value(scope).unwrap_or(0);
+    if let Err(error) = fs_copy_bytes(&source, &destination, flags) {
+        throw_fs_copy_error(scope, &error, &source, &destination);
+    }
 }
 
 /// native fs.symlinkSync(target, path): a symbolic link at `path` to `target`; a failure throws
@@ -9720,6 +10618,21 @@ fn throw_fs_error_at(
         obj.set(scope, k.into(), v.into());
     }
     scope.throw_exception(err);
+}
+
+fn fs_realpath(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let path = args.get(0).to_rust_string_lossy(scope);
+    match crate::canon::canonicalize(&path) {
+        Ok(real) => {
+            let value = v8_str!(scope, &real.to_string_lossy());
+            rv.set(value.into());
+        }
+        Err(error) => throw_fs_error(scope, &error, "realpath", &path),
+    }
 }
 
 /// native fs.readFile(path, text): the file's contents (a string, else a Uint8Array); Node's
@@ -9951,8 +10864,8 @@ fn fs_stat(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv
 /// test checks that), served to `import` and `require` alike by `ensure_node_builtin`.
 #[rustfmt::skip]
 const NODE_BUILTINS: &[&str] = &[
-    "fs", "fs/promises", "path", "module", "os", "child_process", "url", "util", "events",
-    "stream", "assert", "assert/strict", "perf_hooks", "crypto", "buffer", "querystring",
+    "fs", "fs/promises", "path", "module", "os", "child_process", "url", "util", "util/types", "events",
+    "stream", "stream/promises", "assert", "assert/strict", "perf_hooks", "crypto", "buffer", "querystring",
     "string_decoder", "timers", "timers/promises", "http", "http2", "https", "net", "tls", "zlib",
     "dns", "dns/promises", "tty", "constants", "dgram", "readline", "v8", "diagnostics_channel",
     "process", "async_hooks", "worker_threads", "vm", "inspector",
@@ -10127,7 +11040,7 @@ fn coverage_accumulate(json: &str) {
         // test file that covers it — rebuild the exact wrapper V8 compiled only on first encounter.
         if !crate::coverage::has_meta(abs) {
             if let Some(raw) = read_transformed(abs, true, false) {
-                let wrapped = format!("{}{raw}\n}})", cjs_wrapper_open(abs));
+                let wrapped = wrap_cjs_source(abs, &raw);
                 let orig = std::fs::read_to_string(abs).unwrap_or_default();
                 crate::coverage::register_meta(abs, &wrapped, &orig);
             } else {
@@ -10688,8 +11601,18 @@ fn persist_entry_dir(scope: &mut v8::PinScope, entry_abs: &Path) {
     }
 }
 
+struct FreshBackendCleanup(bool);
+impl Drop for FreshBackendCleanup {
+    fn drop(&mut self) {
+        if self.0 {
+            reset_backend_transports();
+        }
+    }
+}
+
 /// Fresh path: run one file in its own isolate booted from the framework snapshot.
 fn run_test_file_isolated(entry_abs: &Path, plan: &EntryPlan) -> Result<TestReport, String> {
+    let _profile = runtime_profile(entry_abs).enter();
     // All Global handles live in the thread-local REGISTRY; they MUST be dropped while
     // this isolate is still alive. So every exit path runs through clear_registry()
     // before the isolate is torn down.
@@ -10698,6 +11621,7 @@ fn run_test_file_isolated(entry_abs: &Path, plan: &EntryPlan) -> Result<TestRepo
     // present). We time setup (isolate+context+natives) — the M3/M0 guardrail.
     let setup_start = std::time::Instant::now();
     let isolate = &mut v8::Isolate::new(isolate_params());
+    let _backend_cleanup = FreshBackendCleanup(crate::runtime_profile::is_node());
     isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
     isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
     crate::heap_guard::install(isolate);
@@ -10966,9 +11890,23 @@ fn log_heap(scope: &mut v8::PinScope, entry: &Path, recycled: bool) {
     );
 }
 
+thread_local! {
+    static REUSE_PROFILE: std::cell::Cell<Option<crate::runtime_profile::RuntimeProfile>> = const { std::cell::Cell::new(None) };
+}
+fn select_reuse_profile(profile: crate::runtime_profile::RuntimeProfile) {
+    let previous = REUSE_PROFILE.with(|previous| previous.get());
+    if previous.is_some_and(|previous| previous != profile) {
+        end_worker_reuse();
+    }
+    REUSE_PROFILE.with(|previous| previous.set(Some(profile)));
+}
+
 /// Reuse path: run one file on this worker's persistent isolate+context. node_modules modules
 /// stay evaluated across files; per-file framework + app state is reset between files.
 fn run_test_file_reused(entry_abs: &Path, plan: &EntryPlan) -> Result<TestReport, String> {
+    let profile = runtime_profile(entry_abs);
+    select_reuse_profile(profile);
+    let _profile = profile.enter();
     let setup_start = std::time::Instant::now();
     // init the persistent isolate once per worker
     REUSE_ISO.with(|iso_cell| {
@@ -11050,6 +11988,10 @@ fn run_test_file_reused(entry_abs: &Path, plan: &EntryPlan) -> Result<TestReport
 /// isolate is still alive, then drop the isolate. Avoids a shutdown assert from handles
 /// outliving the isolate. No-op when reuse was never used.
 pub fn end_worker_reuse() {
+    let previous = REUSE_PROFILE.with(|previous| previous.take());
+    if previous == Some(crate::runtime_profile::RuntimeProfile::Node) {
+        reset_backend_transports();
+    }
     if REUSE_ISO.with(|i| i.borrow().is_none()) {
         return;
     }
@@ -11125,6 +12067,7 @@ pub struct JestGlobalRealm {
 
 impl Default for JestGlobalRealm {
     fn default() -> Self {
+        let _profile = crate::runtime_profile::RuntimeProfile::Node.enter();
         let mut isolate = v8::Isolate::new(isolate_params());
         let context = {
             let isolate = &mut isolate;
@@ -11145,6 +12088,7 @@ impl JestGlobalRealm {
     /// it makes are applied to this process's environment, which the test workers inherit (jest
     /// runs globalSetup in the parent before forking them).
     pub fn run(&mut self, path: &Path, root_dir: &Path) -> Result<(), String> {
+        let _profile = crate::runtime_profile::RuntimeProfile::Node.enter();
         let abs = crate::canon::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let isolate = &mut self.isolate;
         v8::scope!(let scope, isolate);
@@ -11351,7 +12295,7 @@ fn run_event_loop(
         if promise.state() != v8::PromiseState::Pending {
             break;
         }
-        if step_macrotask(scope, global) {
+        if step_macrotask(scope, global, promise) {
             continue;
         }
         break;
@@ -11377,7 +12321,11 @@ fn drain_microtasks(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
 /// in flight it keeps the loop alive, as libuv's handles do, waiting up to the next timer's
 /// delay), then the runtime's `__stepMacro`. Returns `true` when something ran and the outer
 /// loop should spin again, `false` when nothing was pending.
-fn step_macrotask(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bool {
+fn step_macrotask(
+    scope: &mut v8::PinScope,
+    global: v8::Local<v8::Object>,
+    promise: v8::Local<v8::Promise>,
+) -> bool {
     if crate::napi_host::run_native_task(scope) {
         return true;
     }
@@ -11388,7 +12336,85 @@ fn step_macrotask(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bo
             return true;
         }
     }
-    call_global_bool(scope, global, "__stepMacro")
+    let (child_progress, tcp_progress) = pace_backend_io(scope, global);
+    let progressed = child_progress || tcp_progress;
+    finish_io_turn(scope, global, promise, progressed)
+}
+
+fn pace_backend_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> (bool, bool) {
+    if !crate::runtime_profile::is_node() {
+        return (false, false);
+    }
+    pace_http_io(scope, global);
+    (
+        pace_async_process_io(scope, global),
+        pace_tcp_io(scope, global),
+    )
+}
+
+// Every active provider gets a poll phase, then timers get a bounded turn. Drain the
+// callbacks first: an IO completion may finish the run, making its next deadline stale.
+fn finish_io_turn(
+    scope: &mut v8::PinScope,
+    global: v8::Local<v8::Object>,
+    promise: v8::Local<v8::Promise>,
+    progressed: bool,
+) -> bool {
+    if progressed {
+        drain_microtasks(scope, global);
+        if promise.state() != v8::PromiseState::Pending {
+            return true;
+        }
+    }
+    call_global_bool(scope, global, "__stepMacro") || progressed
+}
+
+/// Pace real HTTP handles against kernel readiness before the virtual timer step. This
+/// prevents a listening test's timeout from elapsing before another process can connect.
+fn pace_http_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+    if !crate::http_compat::has_pending_io() {
+        return;
+    }
+    let delay = call_global_number(scope, global, "__ttNextMacroDelay");
+    let millis = if delay.is_finite() && delay > 0.0 {
+        delay.min(10.0)
+    } else {
+        0.0
+    };
+    crate::http_compat::wait_for_io(std::time::Duration::from_secs_f64(millis / 1000.0));
+}
+
+/// Child pipes keep virtual time paced only while this context owns active children.
+fn pace_async_process_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bool {
+    if !crate::async_process::has_pending_io() {
+        return false;
+    }
+    let delay = call_global_number(scope, global, "__ttNextMacroDelay");
+    let millis = if delay.is_finite() && delay > 0.0 {
+        delay.min(10.0)
+    } else {
+        0.0
+    };
+    crate::async_process::wait_for_io(std::time::Duration::from_secs_f64(millis / 1000.0));
+    call_global_bool(scope, global, "__ttAsyncProcessPump")
+}
+
+/// Poll only live TCP handles; idle browser tests never enter the transport or timer hooks.
+fn pace_tcp_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bool {
+    if !crate::tcp_compat::has_pending_io() {
+        return false;
+    }
+    if !call_global_bool(scope, global, "__ttTcpPreparePoll") {
+        return false;
+    }
+    let delay = call_global_number(scope, global, "__ttNextMacroDelay");
+    let millis = if delay.is_finite() && delay > 0.0 {
+        delay.min(10.0)
+    } else {
+        1.0
+    };
+    crate::tcp_compat::wait_for_io(std::time::Duration::from_secs_f64(millis / 1000.0));
+    call_global_bool(scope, global, "__ttTcpPump")
 }
 
 /// Convert the final promise state into the `run_event_loop` result: `Ok(())` on fulfilled, a
@@ -11920,6 +12946,7 @@ fn clear_registry() {
         reg.mocks.clear();
         reg.extra_exports.clear();
         reg.loading.clear();
+        reg.propagated_cjs_errors.clear();
         reg.lazy_stub_ns.clear();
         reg.import_edges.clear();
     });

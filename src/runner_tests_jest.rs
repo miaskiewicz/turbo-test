@@ -122,3 +122,51 @@ fn jest_config_clear_reset_restore_mocks() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn nearest_config_environment_stops_before_parent_framework_configs() {
+    let root = dir("nearest-profile-environment");
+    let child = root.join("api");
+    std::fs::create_dir_all(&child).unwrap();
+    let entry = child.join("check.test.ts");
+    std::fs::write(&entry, "test('profile',()=>{});").unwrap();
+    std::fs::write(
+        root.join("vitest.config.js"),
+        "export default {test:{environment:'jsdom'}};",
+    )
+    .unwrap();
+    std::fs::write(
+        child.join("jest.config.js"),
+        "module.exports={testEnvironment:'node'};",
+    )
+    .unwrap();
+    assert_eq!(configured_environment(&entry).as_deref(), Some("node"));
+    std::fs::write(
+        root.join("vitest.config.js"),
+        "export default {test:{environment:'node'}};",
+    )
+    .unwrap();
+    std::fs::write(
+        child.join("jest.config.js"),
+        "module.exports={testEnvironment:'happy-dom'};",
+    )
+    .unwrap();
+    assert_eq!(configured_environment(&entry).as_deref(), Some("happy-dom"));
+    std::fs::write(child.join("jest.config.js"), "module.exports={};").unwrap();
+    assert_eq!(configured_environment(&entry).as_deref(), Some("node"));
+    std::fs::write(
+        child.join("jest.config.js"),
+        "module.exports={testEnvironment:'jest-environment-node'};",
+    )
+    .unwrap();
+    assert_eq!(configured_environment(&entry).as_deref(), Some("node"));
+    std::fs::write(
+        child.join("vitest.config.js"),
+        "export default {test:{environment:'jsdom'}};",
+    )
+    .unwrap();
+    assert_eq!(configured_environment(&entry).as_deref(), Some("jsdom"));
+    std::fs::write(child.join("vitest.config.js"), "export default {test:{}};").unwrap();
+    assert_eq!(configured_environment(&entry), None);
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -1202,7 +1202,8 @@ fn plan_isolate_environment_and_root_flags() {
         vec![
             ("TURBO_ROOT", t.p("proj")),
             ("TURBO_REUSE_ISOLATE", "1".to_string()),
-            ("TURBO_ENV", "jsdom".to_string())
+            ("TURBO_ENV", "jsdom".to_string()),
+            ("TURBO_ENV_FROM_CONFIG", "1".to_string())
         ]
     );
     assert_eq!(argv(&p), args(&["--testTimeout", "1234", a]));
@@ -1222,7 +1223,8 @@ fn plan_isolate_environment_and_root_flags() {
         p.env,
         vec![
             ("TURBO_NO_REUSE", "1".to_string()),
-            ("TURBO_ENV", "happy-dom".to_string())
+            ("TURBO_ENV", "happy-dom".to_string()),
+            ("TURBO_ENV_FROM_CONFIG", "0".to_string())
         ]
     );
     assert_eq!(argv(&p), args(&["--testTimeout", "9", a]));
@@ -1426,4 +1428,139 @@ fn deps_inline_is_read_from_the_deps_block() {
     );
     assert!(config_deps_inline("deps: { external: ['x'] }").is_empty());
     assert!(config_deps_inline("inline: ['a']").is_empty());
+}
+
+#[test]
+fn jest_node_environment_overrides_dom_content_heuristics() {
+    let t = Tmp::new("jest-node-env");
+    t.file("package.json", "{}");
+    t.file(
+        "src/a.spec.ts",
+        "test('node',()=>expect(typeof document).toBe('undefined'));",
+    );
+    t.file("jest.config.js", "module.exports={testEnvironment:'node'}");
+    assert_eq!(
+        env_of(&run_plan(&t, &["src/a.spec.ts"]), "TURBO_ENV"),
+        Some("node")
+    );
+    assert_eq!(
+        env_of(
+            &run_plan(&t, &["--environment=jsdom", "src/a.spec.ts"]),
+            "TURBO_ENV"
+        ),
+        Some("jsdom")
+    );
+    t.file(
+        "jest.config.js",
+        "module.exports={testEnvironment:'jest-environment-jsdom'}",
+    );
+    assert_eq!(
+        env_of(&run_plan(&t, &["src/a.spec.ts"]), "TURBO_ENV"),
+        Some("jsdom")
+    );
+    t.file("jest.config.js", "module.exports={}");
+    assert_eq!(
+        env_of(&run_plan(&t, &["src/a.spec.ts"]), "TURBO_ENV"),
+        Some("node")
+    );
+    t.file(
+        "vitest.config.js",
+        "export default {test:{environment:'happy-dom'}}",
+    );
+    assert_eq!(
+        env_of(&run_plan(&t, &["src/a.spec.ts"]), "TURBO_ENV"),
+        Some("happy-dom")
+    );
+}
+
+#[test]
+fn jest_environment_supports_json_and_forced_config_without_ancestor_fallback() {
+    let t = Tmp::new("jest-json-env");
+    t.file(
+        "package.json",
+        r#"{"jest":{"testEnvironment":"jest-environment-node"}}"#,
+    );
+    t.file("a.spec.ts", T);
+    assert_eq!(
+        env_of(&run_plan(&t, &["a.spec.ts"]), "TURBO_ENV"),
+        Some("node")
+    );
+    let forced = t.file(
+        "custom.config.cjs",
+        "module.exports={testEnvironment:'jsdom'}",
+    );
+    assert_eq!(
+        env_of(
+            &run_plan(&t, &["--config", forced.to_str().unwrap(), "a.spec.ts"]),
+            "TURBO_ENV"
+        ),
+        Some("jsdom")
+    );
+    t.file("custom.config.cjs", "module.exports={}");
+    assert_eq!(
+        env_of(
+            &run_plan(&t, &["--config", forced.to_str().unwrap(), "a.spec.ts"]),
+            "TURBO_ENV"
+        ),
+        None
+    );
+}
+
+#[test]
+fn explicit_known_jest_configs_preserve_the_default_node_environment() {
+    let t = Tmp::new("forced-jest-default-node");
+    t.file("a.spec.ts", T);
+    for name in JEST_CONFIG_NAMES {
+        let config = t.file(name, "{}");
+        let plan = run_plan(&t, &["--config", config.to_str().unwrap(), "a.spec.ts"]);
+        assert_eq!(env_of(&plan, "TURBO_ENV"), Some("node"), "{name}");
+    }
+    let package = t.file("package.json", r#"{"jest":{}}"#);
+    assert_eq!(
+        env_of(
+            &run_plan(&t, &["--config", package.to_str().unwrap(), "a.spec.ts"]),
+            "TURBO_ENV"
+        ),
+        Some("node")
+    );
+    t.file("package.json", "{}");
+    assert_eq!(
+        env_of(
+            &run_plan(&t, &["--config", package.to_str().unwrap(), "a.spec.ts"]),
+            "TURBO_ENV"
+        ),
+        None
+    );
+    let vitest = t.file("vitest.config.js", "export default {test:{}};");
+    assert_eq!(
+        env_of(
+            &run_plan(&t, &["--config", vitest.to_str().unwrap(), "a.spec.ts"]),
+            "TURBO_ENV"
+        ),
+        None
+    );
+}
+
+#[test]
+fn auto_environment_is_file_scoped_but_cli_and_forced_config_are_authoritative() {
+    let t = Tmp::new("environment-origin");
+    t.file(
+        "vitest.config.js",
+        "export default {test:{environment:'jsdom'}};",
+    );
+    t.file(
+        "api/jest.config.js",
+        "module.exports={testEnvironment:'node'};",
+    );
+    t.file("api/check.test.ts", T);
+    let implicit = run_plan(&t, &["api/check.test.ts"]);
+    assert_eq!(env_of(&implicit, "TURBO_ENV_FROM_CONFIG"), Some("1"));
+    let explicit = run_plan(&t, &["--environment=happy-dom", "api/check.test.ts"]);
+    assert_eq!(env_of(&explicit, "TURBO_ENV_FROM_CONFIG"), Some("0"));
+    let forced = run_plan(&t, &["--config=vitest.config.js", "api/check.test.ts"]);
+    assert_eq!(env_of(&forced, "TURBO_ENV_FROM_CONFIG"), Some("0"));
+    assert_eq!(
+        project_environment(&t.0.join("api"), None).as_deref(),
+        Some("node")
+    );
 }

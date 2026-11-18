@@ -58,6 +58,7 @@ globalThis.console = {
 // loader switches on process.platform/arch to require the matching prebuilt .node, and
 // its isMusl() reads process.report().header.glibcVersionRuntime to pick gnu vs musl.
 // Hardcoding 'darwin'/'arm64' made every non-mac host load the macOS .node -> dlopen fails.
+/* __TT_RUNTIME_SHARED_SLOTS__ */
 globalThis.process = {
   // vitest's own variables, in its order: TEST, VITEST, NODE_ENV (when the host has none), vite's
   // PROD / DEV / BASE_URL / MODE, VITEST_MODE, FORCE_TTY, VITEST_POOL_ID / VITEST_WORKER_ID and
@@ -74,8 +75,9 @@ globalThis.process = {
   // napi: the Node-API version the native host implements (src/napi_host.rs NAPI_VERSION)
   versions: { node: '24.0.0', v8: '12.0.0', modules: '127', napi: '10' },
   argv: ['node', 'turbo-test'],
+  get execPath() { return globalThis.__ttNodeExecutable; },
   cwd: () => globalThis.__ttProcessCwd || globalThis.__cwd || '/',
-  nextTick: (fn, ...a) => __loop.nextTicks.push(() => fn(...a)),
+  nextTick: (fn, ...a) => __loop.nextTicks.push(__captureAsyncContext(() => fn(...a))),
   // the real clock (real time plus the drive loop's jumps) since the runtime started
   // (turbo-test#178; it was a constant [0, 0])
   hrtime: __realHrtime,
@@ -166,6 +168,7 @@ function __hrtimeOf(ms, prev) {
 function __realHrtime(prev) { return __hrtimeOf(__loop.elapsed() - __perfOrigin, prev); }
 __realHrtime.bigint = () => { const [s, n] = __realHrtime(); return BigInt(s) * 1000000000n + BigInt(n); };
 function __schedule(cb, delay, interval, fake, immediate, clamped) {
+  cb = __captureAsyncContext(cb);
   const id = __loop.seq++;
   // `immediate`: a setImmediate (jest's legacy runAllImmediates)
   if (fake) __loop.fmacro.push({ id, due: __loop.fnow + Math.max(0, delay | 0), cb, interval, gen: __loop.gen, immediate });
@@ -576,6 +579,7 @@ function __installFakeDate() {
     if (args.length === 0) return new Real(__loop.systemTime + __loop.fnow);
     return new Real(...args);
   }
+  Object.defineProperty(FakeDate, 'name', { value: 'Date', configurable: true });
   FakeDate.prototype = Real.prototype;
   FakeDate.now = () => __loop.systemTime + __loop.fnow;
   FakeDate.UTC = Real.UTC;
@@ -599,6 +603,7 @@ function __installVirtualDate() {
     if (args.length === 0) return new Real(__virtualBase + __loop.now);
     return new Real(...args);
   }
+  Object.defineProperty(VDate, 'name', { value: 'Date', configurable: true });
   VDate.prototype = Real.prototype;
   VDate.now = () => __virtualBase + __loop.now;
   VDate.UTC = Real.UTC;
@@ -692,22 +697,6 @@ globalThis.__ttNextMacroDelay = () => {
   for (const t of __loop.internal) due = Math.min(due, t.due);
   return due === Infinity ? -1 : Math.max(0, due - __loop.now);
 };
-
-// ---- minimal Web Storage. A real `Storage` class (not an object literal) so the methods live on
-// `Storage.prototype` — tests do `vi.spyOn(Storage.prototype, 'setItem')`, which only intercepts
-// localStorage/sessionStorage calls when those are genuine Storage instances. ----
-class __Storage {
-  constructor() { this._m = new Map(); }
-  getItem(k) { return this._m.has(String(k)) ? this._m.get(String(k)) : null; }
-  setItem(k, v) { this._m.set(String(k), String(v)); }
-  removeItem(k) { this._m.delete(String(k)); }
-  clear() { this._m.clear(); }
-  key(i) { return Array.from(this._m.keys())[i] ?? null; }
-  get length() { return this._m.size; }
-}
-globalThis.Storage = __Storage;
-globalThis.localStorage = new __Storage();
-globalThis.sessionStorage = new __Storage();
 
 // ---- TextEncoder/TextDecoder (host globals; bare V8 has none) ----
 // WHATWG Encoding, checked row by row against Node 26 (turbo-test#118): lone surrogates encode
@@ -1317,7 +1306,7 @@ if (globalThis.URL && typeof globalThis.URL.parse !== 'function') {
 }
 if (typeof globalThis.DOMException === 'undefined') {
   globalThis.DOMException = class DOMException extends Error {
-    constructor(message, name) { super(message); this.name = name || 'Error'; this.code = 0; }
+    constructor(message, name) { super(message); this.name = name || 'Error'; this.code = this.name === 'TimeoutError' ? 23 : 0; }
   };
 }
 globalThis.__STATUS_TEXT = globalThis.__STATUS_TEXT || {
@@ -1336,7 +1325,17 @@ if (typeof globalThis.AbortController === 'undefined') {
     _fire() { const ev = { type: 'abort', target: this }; if (typeof this.onabort === 'function') this.onabort(ev); this._listeners.slice().forEach((f) => { try { f(ev); } catch (e) {} }); }
     throwIfAborted() { if (this.aborted) throw this.reason; }
     static abort(reason) { const s = new globalThis.AbortSignal(); s.aborted = true; s.reason = reason || new DOMException('Aborted', 'AbortError'); return s; }
-    static timeout() { return new globalThis.AbortSignal(); }
+    static timeout(delay) {
+      if (typeof delay !== 'number') throw Object.assign(new TypeError('The delay argument must be a number'), { code: 'ERR_INVALID_ARG_TYPE' });
+      if (!Number.isInteger(delay) || delay < 0 || delay > 4294967295) throw Object.assign(new RangeError('The delay argument must be an integer between 0 and 4294967295'), { code: 'ERR_OUT_OF_RANGE' });
+      const signal = new globalThis.AbortSignal();
+      __realTimers.setTimeout(() => {
+        signal.aborted = true;
+        signal.reason = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+        signal._fire();
+      }, delay);
+      return signal;
+    }
   };
   globalThis.AbortController = class AbortController {
     constructor() { this.signal = new globalThis.AbortSignal(); }
@@ -1529,144 +1528,7 @@ if (typeof globalThis.btoa === 'undefined') {
   globalThis.btoa = (s) => { const str = String(s); const b = new Array(str.length); for (let i = 0; i < str.length; i++) b[i] = str.charCodeAt(i) & 255; return globalThis.__b64encodeBytes(b); };
   globalThis.atob = (s) => String.fromCharCode.apply(null, globalThis.__b64decodeToBytes(s));
 }
-// FileReader as jsdom's (turbo-test#132, #139): a read reads the Blob's bytes, sets readyState
-// LOADING at once, then (asynchronously) fires loadstart, progress (a non-empty Blob), load and
-// loadend; abort() while LOADING fires abort and loadend instead. Listeners are kept in order
-// (addEventListener deduplicated, on<type> handlers holding the slot of their first set).
-if (typeof globalThis.FileReader === 'undefined') {
-  const EVENTS = ['loadstart', 'progress', 'load', 'abort', 'error', 'loadend'];
-  const invalidState = () => {
-    const e = new globalThis.DOMException('The object is in an invalid state.', 'InvalidStateError');
-    Object.defineProperty(e, 'code', { value: 11, configurable: true });
-    return e;
-  };
-  const BOMS = [
-    [[0xef, 0xbb, 0xbf], 'utf-8'],
-    [[0xff, 0xfe], 'utf-16le'],
-    [[0xfe, 0xff], 'utf-16be'],
-  ];
-  const bomMatches = (b, bytes) => bytes.every((v, i) => b[i] === v);
-  const bomEncoding = (b) => {
-    for (const [bytes, enc] of BOMS) if (bomMatches(b, bytes)) return enc;
-    return null;
-  };
-  const labelEncoding = (label) => {
-    if (label === undefined) return 'utf-8';
-    try { return new globalThis.TextDecoder(String(label)).encoding; } catch { return 'utf-8'; }
-  };
-  // the encoding readAsText decodes with: a UTF-8 / UTF-16 BOM wins, then the label, then UTF-8
-  const textOf = (b, label) => {
-    const enc = bomEncoding(b) || labelEncoding(label);
-    return new globalThis.TextDecoder(enc).decode(b);
-  };
-  // bytes[] -> FileReader#result for the four read kinds
-  const binaryString = (bytes) => {
-    let s = '';
-    for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
-    return s;
-  };
-  const decodeReadResult = (bytes, blob, kind, label) => {
-    if (kind === 'readAsDataURL') return 'data:' + (blob.type || 'application/octet-stream') + ';base64,' + globalThis.__b64encodeBytes(bytes);
-    if (kind === 'readAsArrayBuffer') return bytes.slice().buffer;
-    if (kind === 'readAsBinaryString') return binaryString(bytes);
-    return textOf(bytes, label);
-  };
-  globalThis.FileReader = class FileReader {
-    #listeners = Object.create(null); // type -> [{ fn }] (an on<type> handler's entry has `on: true`)
-    #gen = 0;                          // bumped by every read and abort; a stale read stops
-    constructor() { this.result = null; this.error = null; this.readyState = 0; }
-    addEventListener(type, fn) {
-      if (fn == null) return;
-      const list = this.#listeners[type] || (this.#listeners[type] = []);
-      if (!list.some((l) => !l.on && l.fn === fn)) list.push({ fn });
-    }
-    removeEventListener(type, fn) {
-      const list = this.#listeners[type];
-      if (list) this.#listeners[type] = list.filter((l) => l.on || l.fn !== fn);
-    }
-    dispatchEvent(ev) {
-      for (const l of (this.#listeners[ev.type] || []).slice()) {
-        try {
-          if (typeof l.fn === 'function') l.fn.call(this, ev);
-          else if (l.fn && typeof l.fn.handleEvent === 'function') l.fn.handleEvent(ev);
-        } catch (e) { console.error(e); } // reported, as jsdom's virtual console does
-      }
-      return !ev.defaultPrevented;
-    }
-    #handler(type) { const l = (this.#listeners[type] || []).find((x) => x.on); return l ? l.fn : null; }
-    #setHandler(type, fn) {
-      const list = this.#listeners[type] || (this.#listeners[type] = []);
-      const at = list.findIndex((x) => x.on);
-      if (typeof fn !== 'function' && (fn === null || typeof fn !== 'object')) { if (at >= 0) list.splice(at, 1); return; }
-      if (at >= 0) list[at].fn = fn; else list.push({ fn, on: true });
-    }
-    #fire(type, loaded = 0, total = 0, lengthComputable = false) {
-      const ev = new globalThis.Event(type);
-      for (const [k, v] of [['target', this], ['currentTarget', this], ['loaded', loaded], ['total', total], ['lengthComputable', lengthComputable]])
-        Object.defineProperty(ev, k, { value: v, configurable: true, enumerable: true });
-      this.dispatchEvent(ev);
-    }
-    async #readBytes(blob) {
-      // the Blob's bytes, not char codes of its decoded text (turbo-test#132)
-      return typeof blob.bytes === 'function' ? await blob.bytes() : new Uint8Array(await blob.arrayBuffer());
-    }
-    #onReadError(gen, e) {
-      if (gen !== this.#gen) return;
-      this.readyState = 2; this.error = e;
-      this.#fire('loadstart'); this.#fire('error'); this.#fire('loadend');
-    }
-    #onReadSuccess(gen, bytes, blob, kind, label) {
-      if (gen !== this.#gen) return;
-      this.#fire('loadstart');
-      if (gen !== this.#gen) return;
-      if (bytes.length) { this.#fire('progress', bytes.length, bytes.length, true); if (gen !== this.#gen) return; }
-      this.result = decodeReadResult(bytes, blob, kind, label);
-      this.readyState = 2;
-      this.#fire('load');
-      this.#fire('loadend');
-    }
-    #read(blob, kind, label) {
-      if (blob === null || typeof blob !== 'object' || typeof blob.arrayBuffer !== 'function')
-        throw new TypeError(`Failed to execute '${kind}' on 'FileReader': parameter 1 is not of type 'Blob'.`);
-      if (this.readyState === 1) throw invalidState();
-      const gen = ++this.#gen;
-      this.readyState = 1;
-      this.result = null;
-      this.error = null;
-      Promise.resolve().then(async () => {
-        let bytes;
-        try { bytes = await this.#readBytes(blob); }
-        catch (e) { this.#onReadError(gen, e); return; }
-        this.#onReadSuccess(gen, bytes, blob, kind, label);
-      });
-    }
-    readAsArrayBuffer(blob) { this.#read(blob, 'readAsArrayBuffer'); }
-    readAsBinaryString(blob) { this.#read(blob, 'readAsBinaryString'); }
-    readAsDataURL(blob) { this.#read(blob, 'readAsDataURL'); }
-    readAsText(blob, encoding = undefined) { this.#read(blob, 'readAsText', encoding); }
-    abort() {
-      if (this.readyState === 0 || this.readyState === 2) { this.result = null; return; }
-      this.#gen++;
-      this.readyState = 2;
-      this.result = null;
-      this.#fire('abort');
-      this.#fire('loadend');
-    }
-    static #accessors = (() => {
-      for (const type of EVENTS) Object.defineProperty(FileReader.prototype, 'on' + type, {
-        get() { return this.#handler(type); },
-        set(fn) { this.#setHandler(type, fn); },
-        configurable: true, enumerable: true,
-      });
-    })();
-  };
-  ['EMPTY', 'LOADING', 'DONE'].forEach((k, i) => {
-    Object.defineProperty(globalThis.FileReader, k, { value: i, enumerable: true });
-    Object.defineProperty(globalThis.FileReader.prototype, k, { value: i, enumerable: true });
-  });
-}
 if (typeof globalThis.fetch === 'undefined') {
-  globalThis.fetch = () => Promise.reject(new Error('fetch is not supported in turbo-test env'));
   globalThis.Headers = class Headers {
     constructor(init) {
       this._ = new Map();
@@ -1736,9 +1598,104 @@ if (typeof globalThis.fetch === 'undefined') {
     static error() { return new globalThis.Response(null, { status: 500 }); }
     static redirect(url, status) { const r = new globalThis.Response(null, { status: status || 302 }); r.headers.set('location', String(url)); return r; }
   };
+  function __dataUrlBytes(payload) {
+    const bytes = [];
+    payload = Array.from(payload);
+    for (let i = 0; i < payload.length; i++) {
+      if (payload[i] === '%' && /^[0-9a-f]{2}$/i.test(payload.slice(i + 1, i + 3).join(''))) {
+        bytes.push(parseInt(payload.slice(i + 1, i + 3).join(''), 16)); i += 2;
+      } else bytes.push(...new TextEncoder().encode(payload[i]));
+    }
+    return new Uint8Array(bytes);
+  }
+  function __dataUrlBase64(bytes) {
+    const text = new TextDecoder().decode(bytes).replace(/[\t\n\f\r ]/g, '');
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text) || text.length % 4 === 1) throw new TypeError('fetch failed');
+    if (text.includes('=') && text.length % 4 !== 0) throw new TypeError('fetch failed');
+    return new Uint8Array(globalThis.__b64decodeToBytes(text));
+  }
+  function __dataUrlDecode(url) {
+    const raw = url.slice(5).split('#')[0];
+    const comma = raw.indexOf(',');
+    if (comma < 0) throw new TypeError('fetch failed');
+    let type = raw.slice(0, comma).trim();
+    const base64 = /;base64$/i.test(type);
+    if (base64) type = type.slice(0, -7);
+    if (type.startsWith(';')) type = 'text/plain' + type;
+    if (!/^[^;/]+\/[^;]+/.test(type)) type = 'text/plain;charset=US-ASCII';
+    let bytes = __dataUrlBytes(raw.slice(comma + 1));
+    if (base64) bytes = __dataUrlBase64(bytes);
+    return [type, bytes];
+  }
+  class __DataResponse extends globalThis.Response {
+    constructor(bytes, type, url) {
+      super(null, { headers: { 'content-type': type } });
+      this._bytes = bytes;
+      this.url = url;
+      this.bodyUsed = false;
+      const self = this;
+      this.body = new ReadableStream({ start(controller) { controller.enqueue(bytes.slice()); controller.close(); } });
+      const cancel = this.body.cancel.bind(this.body);
+      this.body.cancel = (...args) => {
+        if (!this.body.locked) this.bodyUsed = true;
+        return cancel(...args);
+      };
+      const reader = this.body.getReader.bind(this.body);
+      this.body.getReader = (...args) => {
+        const result = reader(...args);
+        const read = result.read.bind(result);
+        result.read = (...values) => { self.bodyUsed = true; return read(...values); };
+        const cancel = result.cancel.bind(result);
+        result.cancel = (...values) => { self.bodyUsed = true; return cancel(...values); };
+        return result;
+      };
+    }
+    async arrayBuffer() {
+      if (this.bodyUsed || this.body.locked) throw new TypeError('Body is unusable');
+      const reader = this.body.getReader();
+      while (!(await reader.read()).done) {}
+      return this._bytes.slice().buffer;
+    }
+    async text() { return new TextDecoder().decode(await this.arrayBuffer()); }
+    async json() { return JSON.parse(await this.text()); }
+    async blob() { return new Blob([await this.arrayBuffer()], { type: this.headers.get('content-type') }); }
+    clone() {
+      if (this.bodyUsed || this.body.locked) throw new TypeError('Body is unusable');
+      return new __DataResponse(this._bytes.slice(), this.headers.get('content-type'), this.url);
+    }
+  }
+  globalThis.fetch = async (input, init = {}) => {
+    const signal = init.signal || (input && input.signal);
+    if (signal && signal.aborted) throw signal.reason;
+    const url = new URL(__requestUrl(input)).href;
+    if (!url.startsWith('data:')) throw new TypeError('fetch is not supported for this URL in turbo-test env');
+    const [type, bytes] = __dataUrlDecode(url);
+    return new __DataResponse(bytes, type, url);
+  };
 }
 if (typeof globalThis.FormData === 'undefined') {
-  globalThis.FormData = class FormData { constructor() { this._ = []; } append(k, v) { this._.push([k, v]); } get(k) { const e = this._.find((x) => x[0] === k); return e ? e[1] : null; } getAll(k) { return this._.filter((x) => x[0] === k).map((x) => x[1]); } has(k) { return this._.some((x) => x[0] === k); } forEach(f) { this._.forEach(([k, v]) => f(v, k)); } };
+  globalThis.FormData = class FormData {
+    constructor() { this._ = []; }
+    append(k, v) { this._.push([String(k), this._value(v)]); }
+    _value(v) { return v instanceof Blob ? v : String(v); }
+    get(k) { const e = this._.find((x) => x[0] === String(k)); return e ? e[1] : null; }
+    getAll(k) { return this._.filter((x) => x[0] === String(k)).map((x) => x[1]); }
+    has(k) { return this._.some((x) => x[0] === String(k)); }
+    delete(k) { this._ = this._.filter((x) => x[0] !== String(k)); }
+    set(k, v) {
+      k = String(k);
+      const index = this._.findIndex((x) => x[0] === k);
+      const entry = [k, this._value(v)];
+      if (index < 0) { this._.push(entry); return; }
+      this._[index] = entry;
+      this._ = this._.filter((x, i) => x[0] !== k || i === index);
+    }
+    *entries() { for (const [k, v] of this._) yield [k, v]; }
+    *keys() { for (const [k] of this._) yield k; }
+    *values() { for (const [, v] of this._) yield v; }
+    forEach(f, thisArg) { for (const [k, v] of this._) f.call(thisArg, v, k, this); }
+    [Symbol.iterator]() { return this.entries(); }
+  };
 }
 if (typeof globalThis.structuredClone === 'undefined') {
   // V8's structured clone (src/structured_clone.rs), with Node's argument checks: the ArrayBuffers
@@ -1763,55 +1720,6 @@ if (typeof globalThis.global === 'undefined') globalThis.global = globalThis;
 // Tell React it's in a test act() environment: concurrent work defers to the act queue instead
 // of the real (MessageChannel) scheduler, so act() flushing doesn't re-enter React's work loop
 // ("Should not already be working"). @testing-library/react sets this; our env must too.
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-// Minimal DOMMatrix/DOMPoint (SVG transform math used by charting libs at module load).
-if (typeof globalThis.DOMMatrix === 'undefined') {
-  class DOMMatrix {
-    constructor(init) {
-      this.a = 1; this.b = 0; this.c = 0; this.d = 1; this.e = 0; this.f = 0;
-      this.m11 = 1; this.m12 = 0; this.m13 = 0; this.m14 = 0;
-      this.m21 = 0; this.m22 = 1; this.m23 = 0; this.m24 = 0;
-      this.m31 = 0; this.m32 = 0; this.m33 = 1; this.m34 = 0;
-      this.m41 = 0; this.m42 = 0; this.m43 = 0; this.m44 = 1;
-      this.is2D = true; this.isIdentity = true;
-      if (Array.isArray(init) && init.length >= 6) { [this.a, this.b, this.c, this.d, this.e, this.f] = init; this.m11 = this.a; this.m12 = this.b; this.m21 = this.c; this.m22 = this.d; this.m41 = this.e; this.m42 = this.f; }
-    }
-    multiply() { return new DOMMatrix(); }
-    multiplySelf() { return this; }
-    preMultiplySelf() { return this; }
-    translate() { return new DOMMatrix(); }
-    translateSelf() { return this; }
-    scale() { return new DOMMatrix(); }
-    scaleSelf() { return this; }
-    scale3d() { return new DOMMatrix(); }
-    rotate() { return new DOMMatrix(); }
-    rotateSelf() { return this; }
-    rotateFromVector() { return new DOMMatrix(); }
-    skewX() { return new DOMMatrix(); }
-    skewY() { return new DOMMatrix(); }
-    inverse() { return new DOMMatrix(); }
-    invertSelf() { return this; }
-    flipX() { return new DOMMatrix(); }
-    flipY() { return new DOMMatrix(); }
-    transformPoint(p) { return new globalThis.DOMPoint(p && p.x, p && p.y, p && p.z, p && p.w); }
-    toFloat32Array() { return new Float32Array(16); }
-    toFloat64Array() { return new Float64Array(16); }
-    toString() { return 'matrix(1, 0, 0, 1, 0, 0)'; }
-    static fromMatrix() { return new DOMMatrix(); }
-    static fromFloat32Array() { return new DOMMatrix(); }
-    static fromFloat64Array() { return new DOMMatrix(); }
-  }
-  globalThis.DOMMatrix = DOMMatrix;
-  globalThis.DOMMatrixReadOnly = DOMMatrix;
-  globalThis.WebKitCSSMatrix = DOMMatrix;
-  globalThis.SVGMatrix = DOMMatrix;
-}
-// Web Streams. This used to be a stub whose reader always resolved `{ done: true }` — the globals
-// existed (so `class X extends TransformStream` loaded) but any code that actually CONSUMED a
-// stream (fetch body / SSE parsing) silently saw an empty stream. This is a working implementation:
-// chunk queue + pull backpressure, reader/writer locking, cancel/abort propagation, tee, async
-// iteration, pipeTo/pipeThrough. Not spec-exhaustive (no BYOB readers, no queuing strategy `size`).
-// A host that already provides native streams (napi/Node) still wins via the guard.
 if (typeof globalThis.TransformStream === 'undefined') {
   // `silent` pre-attaches a no-op catch: `reader.closed` / `writer.closed` reject when the stream
   // errors, and a test that never touches them must not trip an unhandled-rejection report.
@@ -2119,16 +2027,9 @@ if (typeof globalThis.TransformStream === 'undefined') {
   globalThis.TransformStream = TransformStream;
   globalThis.TransformStreamDefaultController = TransformStreamDefaultController;
 }
-if (typeof globalThis.DOMPoint === 'undefined') {
-  class DOMPoint {
-    constructor(x, y, z, w) { this.x = x || 0; this.y = y || 0; this.z = z || 0; this.w = w == null ? 1 : w; }
-    matrixTransform() { return this; }
-    static fromPoint(p) { return new DOMPoint(p && p.x, p && p.y, p && p.z, p && p.w); }
-  }
-  globalThis.DOMPoint = DOMPoint;
-  globalThis.DOMPointReadOnly = DOMPoint;
-}
+/* __TT_NODE_BUFFER_BYTE_LENGTH__ */
 if (typeof globalThis.Buffer === 'undefined') {
+  const byteArrayTag = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get;
   class Buffer extends Uint8Array {
     static #fromHex(d) {
       const b = new Buffer(d.length / 2);
@@ -2151,8 +2052,39 @@ if (typeof globalThis.Buffer === 'undefined') {
     }
     static alloc(n, fill) { const b = new Buffer(n); if (fill != null) b.fill(typeof fill === 'string' ? fill.charCodeAt(0) : fill); return b; }
     static allocUnsafe(n) { return new Buffer(n); }
+    static #validateByteArray(value) {
+      if (byteArrayTag.call(value) !== 'Uint8Array') throw Object.assign(new TypeError('The argument must be a Buffer or Uint8Array'), { code: 'ERR_INVALID_ARG_TYPE' });
+    }
+    static compare(a, b) {
+      Buffer.#validateByteArray(a);
+      Buffer.#validateByteArray(b);
+      for (let i = 0; i < Math.min(a.length, b.length); i++) {
+        if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+      }
+      return Math.sign(a.length - b.length);
+    }
+    static byteLength(value, encoding) { return __bufferByteLength(value, encoding); }
     static isBuffer(x) { return x instanceof Buffer; }
     static concat(list) { const len = list.reduce((n, b) => n + b.length, 0); const out = new Buffer(len); let o = 0; for (const b of list) { out.set(b, o); o += b.length; } return out; }
+    static #readUInt32Offset(bytes, offset) {
+      if (typeof offset !== 'number') throw Object.assign(new TypeError('The offset argument must be a number'), { code: 'ERR_INVALID_ARG_TYPE' });
+      if (Math.floor(offset) !== offset) throw Object.assign(new RangeError('The offset must be an integer'), { code: 'ERR_OUT_OF_RANGE' });
+      if (bytes.length < 4) throw Object.assign(new RangeError('Attempt to access memory outside buffer bounds'), { code: 'ERR_BUFFER_OUT_OF_BOUNDS' });
+      if (offset < 0 || offset > bytes.length - 4) throw Object.assign(new RangeError('The offset is outside the buffer bounds'), { code: 'ERR_OUT_OF_RANGE' });
+    }
+    equals(other) { return Buffer.compare(this, other) === 0; }
+    writeUInt32LE(value, offset = 0) {
+      const number = +value;
+      if (number < 0 || number > 0xffffffff) throw Object.assign(new RangeError('The value is outside the unsigned 32-bit range'), { code: 'ERR_OUT_OF_RANGE' });
+      Buffer.#readUInt32Offset(this, offset);
+      const bits = number >>> 0;
+      for (let i = 0; i < 4; i++) this[offset + i] = bits >>> (8 * i);
+      return offset + 4;
+    }
+    readUInt32BE(offset = 0) {
+      Buffer.#readUInt32Offset(this, offset);
+      return this[offset] * 16777216 + this[offset + 1] * 65536 + this[offset + 2] * 256 + this[offset + 3];
+    }
     toString(enc) {
       if (enc === 'hex') return Array.from(this).map((b) => b.toString(16).padStart(2, '0')).join('');
       if (enc === 'base64') return globalThis.__b64encodeBytes(Array.from(this));
@@ -2162,37 +2094,13 @@ if (typeof globalThis.Buffer === 'undefined') {
     }
     toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
   }
+  // Node's public static methods are enumerable; safer-buffer copies them with for-in.
+  for (const name of ['from', 'alloc', 'allocUnsafe', 'byteLength', 'isBuffer', 'concat', 'compare']) {
+    Object.defineProperty(Buffer, name, { enumerable: true });
+  }
   globalThis.Buffer = Buffer;
 }
-if (typeof globalThis.MessageChannel === 'undefined') {
-  // React's scheduler posts work via MessageChannel; postMessage MUST deliver to the other
-  // port's onmessage asynchronously (as a macrotask) or async React updates never flush.
-  globalThis.MessageChannel = class MessageChannel {
-    constructor() {
-      const mk = () => ({
-        onmessage: null,
-        onmessageerror: null,
-        _other: null,
-        postMessage(data) {
-          const o = this._other;
-          // a real-clock task: Node's MessagePort is not a faked timer
-          if (o) __realTimers.setImmediate(() => {
-            const ev = { data };
-            if (typeof o.onmessage === 'function') o.onmessage(ev);
-            (o._listeners || []).forEach((f) => f(ev));
-          }, 0);
-        },
-        close() {},
-        start() {},
-        addEventListener(t, f) { if (t === 'message') (this._listeners || (this._listeners = [])).push(f); },
-        removeEventListener(t, f) { if (this._listeners) this._listeners = this._listeners.filter((x) => x !== f); },
-      });
-      this.port1 = mk(); this.port2 = mk();
-      this.port1._other = this.port2; this.port2._other = this.port1;
-    }
-  };
-  globalThis.MessagePort = class MessagePort { postMessage() {} close() {} start() {} addEventListener() {} removeEventListener() {} };
-}
+/* __TT_NODE_PORTS__ */
 if (typeof globalThis.performance === 'undefined') {
   // now(): ms on the real clock since timeOrigin, the runtime's start (turbo-test#178; it was a
   // constant 0)
@@ -2218,11 +2126,6 @@ const __hostEventTarget = () => class EventTarget {
   }
 };
 if (typeof globalThis.EventTarget === 'undefined') globalThis.EventTarget = __hostEventTarget();
-// FileReader is defined above EventTarget; make it one (turbo-test#139)
-if (globalThis.FileReader && !(globalThis.FileReader.prototype instanceof globalThis.EventTarget)) {
-  Object.setPrototypeOf(globalThis.FileReader.prototype, globalThis.EventTarget.prototype);
-  Object.setPrototypeOf(globalThis.FileReader, globalThis.EventTarget);
-}
 const __hostEvent = () => class Event {
   constructor(type, init) { init = init || {}; this.type = type; this.bubbles = !!init.bubbles; this.cancelable = !!init.cancelable; this.composed = !!init.composed; this.defaultPrevented = false; this.target = null; this.currentTarget = null; this.timeStamp = 0; }
   preventDefault() { this.defaultPrevented = true; }
@@ -2238,14 +2141,6 @@ if (typeof globalThis.MessageEvent === 'undefined') {
     constructor(type, init) { super(type, init); init = init || {}; this.data = init.data == null ? null : init.data; this.origin = init.origin || ''; this.lastEventId = init.lastEventId || ''; this.source = init.source || null; this.ports = init.ports || []; }
   };
 }
-if (typeof globalThis.MutationObserver === 'undefined') {
-  globalThis.MutationObserver = class MutationObserver { constructor(cb) { this._cb = cb; } observe() {} disconnect() {} takeRecords() { return []; } };
-}
-if (typeof globalThis.requestAnimationFrame === 'undefined') {
-  globalThis.requestAnimationFrame = (cb) => globalThis.setTimeout(() => cb(0), 0);
-  globalThis.cancelAnimationFrame = (id) => globalThis.clearTimeout(id);
-}
-
 // ---- node builtin shims (so turbo-dom's loader reaches its native .node) ----
 // node:url's fileURLToPath / pathToFileURL (Node 26, posix; turbo-test#84)
 const __urlError = (code, message) => { const e = new TypeError(message); e.code = code; return e; };
@@ -2568,16 +2463,87 @@ const __rm = (p, options) => {
   globalThis.__fs_remove(path, 'rm');
 };
 const __promised = (f) => (...a) => { try { return Promise.resolve(f(...a)); } catch (e) { return Promise.reject(e); } };
+const __fsArgumentError = (code, message, Type = TypeError) => Object.assign(new Type(message), { code });
+const __fsCheckedPath = (value, name) => {
+  const valid = typeof value === 'string' || Buffer.isBuffer(value) || value instanceof URL;
+  if (!valid) throw __fsArgumentError('ERR_INVALID_ARG_TYPE', `The "${name}" argument must be a string, Buffer, or URL`);
+  const path = __fsPath(value);
+  if (path.includes('\0')) throw __fsArgumentError('ERR_INVALID_ARG_VALUE', `The "${name}" argument must not contain null bytes`);
+  return path;
+};
+const __fsDeferred = (operation, callback) => {
+  if (typeof callback !== 'function') throw __fsArgumentError('ERR_INVALID_ARG_TYPE', 'The callback argument must be a function');
+  queueMicrotask(() => {
+    let error = null, value;
+    try { value = operation(); } catch (e) { error = e; }
+    callback(error, value);
+  });
+};
+const __tempOptions = (options) => {
+  if (options != null && typeof options !== 'string' && typeof options !== 'object') throw __fsArgumentError('ERR_INVALID_ARG_TYPE', 'The options argument must be a string or object');
+};
+const __tempEncoding = (options) => {
+  __tempOptions(options);
+  const encoding = __encodingOf(options) || 'utf8';
+  if (encoding !== 'buffer' && (typeof encoding !== 'string' || !__hashEncoding(encoding))) throw __fsArgumentError('ERR_INVALID_ARG_VALUE', `Invalid encoding: ${encoding}`);
+  return encoding;
+};
+const __tempOperation = (prefix, options, sync) => {
+  const path = __fsCheckedPath(prefix, 'prefix'), encoding = __tempEncoding(options);
+  return () => {
+    const result = globalThis.__fs_mkdtemp(path, sync);
+    if (encoding === 'utf8' || encoding === 'utf-8') return result;
+    const bytes = Buffer.from(result);
+    return encoding === 'buffer' ? bytes : __hashOutput(bytes, encoding);
+  };
+};
+const __mkdtempSync = (prefix, options) => __tempOperation(prefix, options, true)();
+const __mkdtemp = (prefix, options, callback) => {
+  if (typeof options === 'function') { callback = options; options = undefined; }
+  return __fsDeferred(__tempOperation(prefix, options, false), callback);
+};
+const __copyMode = (mode) => {
+  if (mode == null) return 0;
+  if (typeof mode !== 'number') throw __fsArgumentError('ERR_INVALID_ARG_TYPE', 'The mode argument must be a number');
+  if (!Number.isFinite(mode) || mode < 0 || mode > 7) throw __fsArgumentError('ERR_OUT_OF_RANGE', 'The mode argument must be between 0 and 7', RangeError);
+  return mode | 0;
+};
+const __copyOperation = (source, destination, mode) => {
+  const src = __fsCheckedPath(source, 'src'), dest = __fsCheckedPath(destination, 'dest'), flags = __copyMode(mode);
+  return () => globalThis.__fs_copyFile(src, dest, flags);
+};
+const __realpathNative = (value, options) => {
+  const path = __fsCheckedPath(value, 'path'), encoding = __tempEncoding(options);
+  const result = globalThis.__fs_realpath(path);
+  if (encoding === 'utf8' || encoding === 'utf-8') return result;
+  const bytes = Buffer.from(result);
+  return encoding === 'buffer' ? bytes : __hashOutput(bytes, encoding);
+};
+const __realpathSync = (value, options) => {
+  const path = Buffer.isBuffer(value) || value instanceof URL ? value : String(value);
+  return __realpathNative(path, options);
+};
+__realpathSync.native = __realpathNative;
+const __copyFileSync = (source, destination, mode) => __copyOperation(source, destination, mode)();
+const __copyFile = (source, destination, mode, callback) => {
+  if (typeof mode === 'function') { callback = mode; mode = undefined; }
+  return __fsDeferred(__copyOperation(source, destination, mode), callback);
+};
 const __fs = {
   Dirent,
   Stats,
   existsSync: (p) => globalThis.__fs_existsSync(__fsPath(p)),
+  realpathSync: __realpathSync,
   readFileSync: __readFile,
   writeFileSync: (p, data) => __writeFile(p, data, false),
   // a real append (O_APPEND on the Rust side), not read + rewrite: parallel workers appending to
   // one file would otherwise overwrite each other's lines.
   appendFileSync: (p, data) => __writeFile(p, data, true),
   mkdirSync: __mkdir,
+  mkdtempSync: __mkdtempSync,
+  mkdtemp: __mkdtemp,
+  copyFileSync: __copyFileSync,
+  copyFile: __copyFile,
   rmSync: __rm,
   rmdirSync: (p) => globalThis.__fs_remove(__fsPath(p), 'rmdir'),
   unlinkSync: (p) => globalThis.__fs_remove(__fsPath(p), 'unlink'),
@@ -2591,6 +2557,8 @@ const __fs = {
     writeFile: __promised((p, data) => __writeFile(p, data, false)),
     appendFile: __promised((p, data) => __writeFile(p, data, true)),
     mkdir: __promised(__mkdir),
+    mkdtemp: __promised((prefix, options) => __tempOperation(prefix, options, false)()),
+    copyFile: __promised(__copyFileSync),
     rm: __promised(__rm),
     rmdir: __promised((p) => globalThis.__fs_remove(__fsPath(p), 'rmdir')),
     unlink: __promised((p) => globalThis.__fs_remove(__fsPath(p), 'unlink')),
@@ -2611,6 +2579,102 @@ function __pseudoRandomBytes(n) {
   for (let i = 0; i < n; i++) { __seedCtr = (__seedCtr * 1103515245 + 12345) & 0x7fffffff; b[i] = (__seedCtr >> 16) & 255; }
   return b;
 }
+function __hashError(message, code) { return Object.assign(new Error(message), { code }); }
+function __hashEncoding(enc) {
+  const name = String(enc || 'utf8').toLowerCase().replace(/-/g, '');
+  const aliases = { binary: 'latin1', 'ucs2': 'utf16le' };
+  const normalized = aliases[name] || name;
+  if (!['utf8', 'hex', 'base64', 'base64url', 'ascii', 'latin1', 'utf16le'].includes(normalized)) return undefined;
+  return normalized;
+}
+function __hashHexBytes(data) {
+  if (data.length % 2) throw Object.assign(new TypeError('The hex encoding is invalid for data of odd length'), { code: 'ERR_INVALID_ARG_VALUE' });
+  const bytes = [];
+  for (let i = 0; i < data.length; i += 2) {
+    const pair = data.slice(i, i + 2);
+    if (!/^[0-9a-f]{2}$/i.test(pair)) break;
+    bytes.push(parseInt(pair, 16));
+  }
+  return new Uint8Array(bytes);
+}
+function __hashUtf16Output(bytes) {
+  let output = '';
+  for (let i = 0; i + 1 < bytes.length; i += 2) output += String.fromCharCode(bytes[i] | (bytes[i + 1] << 8));
+  return output;
+}
+function __hashLatinBytes(data) {
+  const bytes = new Uint8Array(data.length);
+  for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 255;
+  return bytes;
+}
+function __hashStringBytes(data, encoding) {
+  const enc = __hashEncoding(encoding) || 'utf8';
+  if (enc === 'hex') return __hashHexBytes(data);
+  if (enc === 'ascii' || enc === 'latin1') return __hashLatinBytes(data);
+  if (enc !== 'utf16le') return globalThis.Buffer.from(data, enc);
+  const bytes = new Uint8Array(data.length * 2);
+  for (let i = 0; i < data.length; i++) { const c = data.charCodeAt(i); bytes[i * 2] = c & 255; bytes[i * 2 + 1] = c >>> 8; }
+  return bytes;
+}
+function __hashBytes(data, encoding) {
+  if (typeof data === 'string') return __hashStringBytes(data, encoding);
+  if (!ArrayBuffer.isView(data)) throw Object.assign(new TypeError('The data argument must be a string, Buffer, TypedArray, or DataView'), { code: 'ERR_INVALID_ARG_TYPE' });
+  return new Uint8Array(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+}
+function __hashOutput(bytes, encoding) {
+  const enc = encoding && __hashEncoding(encoding);
+  if (!enc) return globalThis.Buffer.from(bytes);
+  if (enc === 'latin1') return Array.from(bytes, (b) => String.fromCharCode(b)).join('');
+  if (enc === 'ascii') return Array.from(bytes, (b) => String.fromCharCode(b & 127)).join('');
+  if (enc === 'utf16le') return __hashUtf16Output(bytes);
+  return globalThis.Buffer.from(bytes).toString(enc);
+}
+function __createHash(algorithm) {
+  if (typeof algorithm !== 'string') throw Object.assign(new TypeError('The algorithm argument must be a string'), { code: 'ERR_INVALID_ARG_TYPE' });
+  const name = algorithm.toLowerCase();
+  const hash = name === 'sha1' ? globalThis.__ttSha1 : name === 'sha256' ? globalThis.__ttSha256 : null;
+  if (!hash) throw new Error(`Digest method not supported: ${algorithm}`);
+  const chunks = [];
+  let finalized = false;
+  const check = () => { if (finalized) throw __hashError('Digest already called', 'ERR_CRYPTO_HASH_FINALIZED'); };
+  return {
+    update(data, encoding) { check(); chunks.push(__hashBytes(data, encoding)); return this; },
+    digest(encoding) {
+      check();
+      const output = new Uint8Array(hash(globalThis.Buffer.concat(chunks)));
+      finalized = true;
+      chunks.length = 0;
+      return __hashOutput(output, encoding);
+    },
+  };
+}
+const __subtleCrypto = {
+  async digest(algorithm, data) {
+    const name = typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name;
+    if (typeof name !== 'string') throw new TypeError('Algorithm name must be a string');
+    if (name.toUpperCase() !== 'SHA-256') throw new DOMException(`Unrecognized algorithm name: ${name}`, 'NotSupportedError');
+    let bytes;
+    if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
+    else if (ArrayBuffer.isView(data)) bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    else throw new TypeError('The data argument must be an ArrayBuffer or ArrayBufferView');
+    return globalThis.__ttSha256(bytes);
+  },
+};
+
+/* __TT_NODE_CRYPTO_HASHES__ */
+/* __TT_NODE_RANDOM__ */
+const __randomArrayFields = Object.getOwnPropertyDescriptors(Object.getPrototypeOf(Uint8Array.prototype));
+const __randomIntegerArrayNames = new Set(['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'BigInt64Array', 'BigUint64Array']);
+function __getRandomValues(array) {
+  if (!ArrayBuffer.isView(array)) throw new TypeError('The data argument must be an ArrayBufferView');
+  const name = __randomArrayFields[Symbol.toStringTag].get.call(array);
+  if (!__randomIntegerArrayNames.has(name)) throw new DOMException('The data argument must be an integer-type TypedArray', 'TypeMismatchError');
+  const length = __randomArrayFields.byteLength.get.call(array);
+  if (length > 65536) throw new DOMException('The requested length exceeds 65536 bytes', 'QuotaExceededError');
+  const bytes = new Uint8Array(__randomArrayFields.buffer.get.call(array), __randomArrayFields.byteOffset.get.call(array), length);
+  bytes.set(globalThis.__ttRandomBytes(length));
+  return array;
+}
 const __crypto = {
   randomUUID: () => {
     const b = __pseudoRandomBytes(16);
@@ -2618,79 +2682,96 @@ const __crypto = {
     const h = Array.from(b, (x) => x.toString(16).padStart(2, '0'));
     return `${h[0]}${h[1]}${h[2]}${h[3]}-${h[4]}${h[5]}-${h[6]}${h[7]}-${h[8]}${h[9]}-${h[10]}${h[11]}${h[12]}${h[13]}${h[14]}${h[15]}`;
   },
-  randomBytes: (n) => globalThis.Buffer ? globalThis.Buffer.from(__pseudoRandomBytes(n)) : __pseudoRandomBytes(n),
-  getRandomValues: (arr) => { const b = __pseudoRandomBytes(arr.length); for (let i = 0; i < arr.length; i++) arr[i] = b[i]; return arr; },
+  randomBytes: __secureRandomBytes,
+  getRandomValues: __getRandomValues,
   randomInt: (min, max) => { if (max === undefined) { max = min; min = 0; } return min + (__pseudoRandomBytes(4).reduce((a, x) => a * 256 + x, 0) % (max - min)); },
-  createHash: () => { let data = ''; const h = { update: (d) => { data += String(d); return h; }, digest: (enc) => { let n = 0; for (let i = 0; i < data.length; i++) { n = (n * 31 + data.charCodeAt(i)) & 0x7fffffff; } const hex = n.toString(16).padStart(8, '0'); return enc === 'hex' || !enc ? hex.repeat(8).slice(0, 64) : hex; } }; return h; },
-  createHmac: () => { let data = ''; const h = { update: (d) => { data += String(d); return h; }, digest: () => 'hmac' }; return h; },
-  // Node crypto constants — many packages (e.g. @propelauth/node) read these at module load to
-  // pick a padding/algorithm. turbo-test runs in bare V8 (no real OpenSSL), so the values just
-  // need to EXIST so modules load; tests that exercise actual crypto mock it or are out of scope.
-  constants: {
-    RSA_PKCS1_PADDING: 1, RSA_NO_PADDING: 3, RSA_PKCS1_OAEP_PADDING: 4, RSA_X931_PADDING: 5,
-    RSA_PKCS1_PSS_PADDING: 6, RSA_PSS_SALTLEN_DIGEST: -1, RSA_PSS_SALTLEN_MAX_SIGN: -2,
-    RSA_PSS_SALTLEN_AUTO: -2, RSA_SSLV23_PADDING: 2,
-    SSL_OP_ALL: 0x80000bff, ENGINE_METHOD_ALL: 0xffff,
-    DH_CHECK_P_NOT_SAFE_PRIME: 2, DH_NOT_SUITABLE_GENERATOR: 8,
-    POINT_CONVERSION_COMPRESSED: 2, POINT_CONVERSION_UNCOMPRESSED: 4, POINT_CONVERSION_HYBRID: 6,
-    defaultCoreCipherList: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256',
-  },
-  // Cipher/sign stubs: bare V8 has no OpenSSL, so these can't do real AES/RSA. They exist so a
-  // module that merely references them at load doesn't crash; actually invoking them throws a
-  // clear, catchable error rather than producing wrong ciphertext.
-  createCipheriv: () => { throw new Error('turbo-test: crypto.createCipheriv is not available in the V8 runtime (no OpenSSL) — mock it in the test'); },
-  createDecipheriv: () => { throw new Error('turbo-test: crypto.createDecipheriv is not available in the V8 runtime (no OpenSSL) — mock it in the test'); },
-  createSign: () => { throw new Error('turbo-test: crypto.createSign is not available in the V8 runtime'); },
-  createVerify: () => { throw new Error('turbo-test: crypto.createVerify is not available in the V8 runtime'); },
-  pbkdf2Sync: () => { throw new Error('turbo-test: crypto.pbkdf2Sync is not available in the V8 runtime'); },
-  scryptSync: () => { throw new Error('turbo-test: crypto.scryptSync is not available in the V8 runtime'); },
+  createHash: __createHash,
+  createHmac: __cryptoCreateHmac,
+  // Backend-only capabilities stay explicit errors in the lean DOM profile.
+  createCipheriv: __runtimeBackendUnavailable('crypto.createCipheriv'),
+  createDecipheriv: __runtimeBackendUnavailable('crypto.createDecipheriv'),
+  createSign: __runtimeBackendUnavailable('crypto.createSign'),
+  createVerify: __runtimeBackendUnavailable('crypto.createVerify'),
+  pbkdf2Sync: __runtimeBackendUnavailable('crypto.pbkdf2Sync'),
+  scryptSync: __runtimeBackendUnavailable('crypto.scryptSync'),
   timingSafeEqual: (a, b) => { if (a.length !== b.length) return false; let r = 0; for (let i = 0; i < a.length; i++) r |= a[i] ^ b[i]; return r === 0; },
 };
+Object.assign(__crypto, __nodeCryptoHashes);
+for (const name of ['generateKeyPairSync', 'createPrivateKey', 'createPublicKey', 'X509Certificate']) {
+  __crypto[name] = __runtimeBackendUnavailable('crypto.' + name);
+}
+// Empty metadata is safe to enumerate for shared HMAC imports; RSA constants are backend-only.
+__crypto.constants = Object.freeze(Object.create(null));
 if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.randomUUID) {
   globalThis.crypto = Object.assign(globalThis.crypto || {}, { randomUUID: __crypto.randomUUID, getRandomValues: __crypto.getRandomValues });
 }
-class __EventEmitter {
-  constructor() { this._ev = {}; }
-  on(e, f) { (this._ev[e] || (this._ev[e] = [])).push(f); return this; }
-  addListener(e, f) { return this.on(e, f); }
-  once(e, f) { const g = (...a) => { this.off(e, g); f(...a); }; return this.on(e, g); }
-  off(e, f) { if (this._ev[e]) this._ev[e] = this._ev[e].filter((x) => x !== f); return this; }
-  removeListener(e, f) { return this.off(e, f); }
-  removeAllListeners(e) { if (e) delete this._ev[e]; else this._ev = {}; return this; }
-  emit(e, ...a) { (this._ev[e] || []).slice().forEach((f) => f(...a)); return (this._ev[e] || []).length > 0; }
-  listeners(e) { return (this._ev[e] || []).slice(); }
-  listenerCount(e) { return (this._ev[e] || []).length; }
-  setMaxListeners() { return this; }
-  prependListener(e, f) { (this._ev[e] || (this._ev[e] = [])).unshift(f); return this; }
+if (!globalThis.crypto.subtle) globalThis.crypto.subtle = __subtleCrypto;
+__crypto.webcrypto = globalThis.crypto;
+__crypto.subtle = globalThis.crypto.subtle;
+function __unhandledEventError(value) {
+  if (value instanceof Error) throw value;
+  const error = new Error('Unhandled error.' + (value === undefined ? '' : ' (' + String(value) + ')'));
+  error.code = 'ERR_UNHANDLED_ERROR';
+  error.context = value;
+  throw error;
 }
+const __eventState = (emitter) => emitter._ev || (emitter._ev = Object.create(null));
+const __eventListeners = (emitter, event) => (emitter._ev && emitter._ev[event]) || [];
+class __EventEmitter {
+  constructor() { this._ev = Object.create(null); }
+  on(e, f) { const state = __eventState(this); (state[e] || (state[e] = [])).push(f); return this; }
+  addListener(e, f) { return this.on(e, f); }
+  once(e, f) { const self = this; function g(...a) { self.off(e, g); return f.apply(this, a); } g.listener = f; return this.on(e, g); }
+  off(e, f) { if (this._ev && this._ev[e]) this._ev[e] = this._ev[e].filter((x) => x !== f && x.listener !== f); return this; }
+  removeListener(e, f) { return this.off(e, f); }
+  removeAllListeners(e) { if (!this._ev) return this; if (e !== undefined) delete this._ev[e]; else this._ev = Object.create(null); return this; }
+  emit(e, ...a) {
+    const listeners = __eventListeners(this, e).slice();
+    if (e === 'error' && listeners.length === 0) __unhandledEventError(a[0]);
+    listeners.forEach((f) => f.apply(this, a));
+    return listeners.length > 0;
+  }
+  listeners(e) { return __eventListeners(this, e).map((f) => f.listener || f); }
+  listenerCount(e) { return __eventListeners(this, e).length; }
+  setMaxListeners() { return this; }
+  prependListener(e, f) { const state = __eventState(this); (state[e] || (state[e] = [])).unshift(f); return this; }
+}
+// Node exposes enumerable prototype methods; libraries such as Mongoose copy them with for-in.
+for (const name of Object.getOwnPropertyNames(__EventEmitter.prototype).filter((name) => name !== 'constructor')) {
+  Object.defineProperty(__EventEmitter.prototype, name, { enumerable: true });
+}
+/* __TT_NODE_WARNINGS__ */
 const __events = Object.assign(__EventEmitter, { EventEmitter: __EventEmitter, default: __EventEmitter, once: (em, e) => new Promise((res) => em.once(e, (...a) => res(a))) });
-class __Readable extends __EventEmitter { pipe(d) { return d; } read() { return null; } push() { return true; } destroy() { return this; } setEncoding() { return this; } resume() { return this; } pause() { return this; } }
-class __Writable extends __EventEmitter { write() { return true; } end() { return this; } destroy() { return this; } }
-class __Duplex extends __Readable { write() { return true; } end() { return this; } }
-const __stream = { Readable: __Readable, Writable: __Writable, Duplex: __Duplex, Transform: __Duplex, PassThrough: __Readable, Stream: __EventEmitter, pipeline: (...a) => { const cb = a[a.length - 1]; if (typeof cb === 'function') cb(); }, finished: (_s, cb) => { if (typeof cb === 'function') cb(); } };
-// http/https/net/tls: enough surface that connection-agent libs (agent-base, https-proxy-agent —
-// pulled in transitively by e.g. @playwright/test) load. agent-base does `class X extends
-// http.Agent`, so http.Agent MUST be a real (extendable) class. No real networking happens in
-// unit tests (request contexts are mocked); these just need to construct + be subclassed.
-class __Agent extends __EventEmitter { constructor(opts) { super(); this.options = opts || {}; this.maxSockets = Infinity; this.sockets = {}; this.requests = {}; } destroy() {} getName() { return 'localhost::'; } addRequest() {} createConnection() { return new __EventEmitter(); } }
-class __ClientRequest extends __EventEmitter { setHeader() {} getHeader() {} end() { return this; } write() { return true; } abort() {} destroy() { return this; } setTimeout() { return this; } }
-class __IncomingMessage extends __Readable { constructor() { super(); this.headers = {}; this.statusCode = 200; } }
-const __mkServer = () => { const s = new __EventEmitter(); s.listen = (..._a) => { const cb = _a[_a.length - 1]; if (typeof cb === 'function') cb(); return s; }; s.close = (cb) => { if (typeof cb === 'function') cb(); return s; }; s.address = () => ({ port: 0, address: '127.0.0.1' }); return s; };
-const __http = { Agent: __Agent, globalAgent: new __Agent(), ClientRequest: __ClientRequest, IncomingMessage: __IncomingMessage, ServerResponse: class extends __EventEmitter { setHeader() {} end() { return this; } write() { return true; } writeHead() { return this; } }, Server: class extends __EventEmitter {}, METHODS: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'], STATUS_CODES: {}, createServer: __mkServer, request: () => new __ClientRequest(), get: () => new __ClientRequest() };
-__http.default = __http;
-const __https = Object.assign({}, __http, { Agent: __Agent, globalAgent: new __Agent() }); __https.default = __https;
-const __net = { Socket: class extends __EventEmitter { connect() { return this; } write() { return true; } end() { return this; } destroy() { return this; } setTimeout() { return this; } setNoDelay() { return this; } setKeepAlive() { return this; } ref() { return this; } unref() { return this; } }, Server: class extends __EventEmitter { listen(..._a) { const cb = _a[_a.length - 1]; if (typeof cb === 'function') cb(); return this; } close() { return this; } address() { return { port: 0 }; } }, createConnection: () => new __EventEmitter(), connect: () => new __EventEmitter(), createServer: __mkServer, isIP: () => 0, isIPv4: () => false, isIPv6: () => false }; __net.default = __net;
-const __tls = { TLSSocket: class extends __EventEmitter { connect() { return this; } }, connect: () => new __EventEmitter(), createSecureContext: () => ({}), createServer: __mkServer, checkServerIdentity: () => undefined, rootCertificates: [] }; __tls.default = __tls;
-const __zlib = { createGzip: () => new __Duplex(), createGunzip: () => new __Duplex(), createDeflate: () => new __Duplex(), createInflate: () => new __Duplex(), createBrotliCompress: () => new __Duplex(), createBrotliDecompress: () => new __Duplex(), gzip: (_b, cb) => cb && cb(null, _b), gunzip: (_b, cb) => cb && cb(null, _b), gzipSync: (b) => b, gunzipSync: (b) => b, deflateSync: (b) => b, inflateSync: (b) => b }; __zlib.default = __zlib;
-const __tty = { isatty: () => false, ReadStream: __EventEmitter, WriteStream: __EventEmitter }; __tty.default = __tty;
-const __dns = { lookup: (_h, _o, cb) => { const c = typeof _o === 'function' ? _o : cb; if (c) c(null, '127.0.0.1', 4); }, resolve: (_h, cb) => cb && cb(null, []), promises: { lookup: () => Promise.resolve({ address: '127.0.0.1', family: 4 }), resolve: () => Promise.resolve([]) } }; __dns.default = __dns;
-const __http2 = { connect: () => new __EventEmitter(), createServer: __mkServer, createSecureServer: __mkServer, constants: {}, getDefaultSettings: () => ({}), Http2ServerRequest: __EventEmitter, Http2ServerResponse: __EventEmitter }; __http2.default = __http2;
-const __dgram = { createSocket: () => Object.assign(new __EventEmitter(), { bind() { return this; }, send() {}, close() {}, address: () => ({ port: 0 }) }) }; __dgram.default = __dgram;
-const __readline = { createInterface: () => Object.assign(new __EventEmitter(), { question: (_q, cb) => cb && cb(''), close() {}, prompt() {}, write() {} }), clearLine: () => {}, cursorTo: () => {}, moveCursor: () => {} }; __readline.default = __readline;
-const __v8 = { serialize: (x) => { try { return JSON.stringify(x); } catch (e) { return '{}'; } }, deserialize: () => ({}), getHeapStatistics: () => ({ total_heap_size: 0, used_heap_size: 0 }), setFlagsFromString: () => {} }; __v8.default = __v8;
-const __dc = { channel: () => ({ publish: () => {}, subscribe: () => {}, unsubscribe: () => {}, hasSubscribers: false }), hasSubscribers: () => false, subscribe: () => {}, unsubscribe: () => {} }; __dc.default = __dc;
-class __AsyncLocalStorage { constructor() { this._store = undefined; } run(store, cb, ...a) { const p = this._store; this._store = store; try { return cb(...a); } finally { this._store = p; } } getStore() { return this._store; } enterWith(s) { this._store = s; } disable() {} exit(cb, ...a) { return cb(...a); } }
-const __async_hooks = { AsyncLocalStorage: __AsyncLocalStorage, AsyncResource: class { runInAsyncScope(fn, thisArg, ...a) { return fn.apply(thisArg, a); } emitDestroy() { return this; } bind(fn) { return fn; } }, createHook: () => ({ enable() { return this; }, disable() { return this; } }), executionAsyncId: () => 0, triggerAsyncId: () => 0 }; __async_hooks.default = __async_hooks;
+/* __TT_NODE_STREAMS__ */
+const __dcChannels = new Map();
+class __DiagnosticChannel {
+  constructor(name) { this.name = name; this._subscribers = []; }
+  get hasSubscribers() { return this._subscribers.length > 0; }
+  subscribe(fn) {
+    if (typeof fn !== 'function') throw new TypeError('subscriber must be a function');
+    this._subscribers.push(fn);
+  }
+  unsubscribe(fn) {
+    const index = this._subscribers.indexOf(fn);
+    if (index < 0) return false;
+    this._subscribers.splice(index, 1);
+    return true;
+  }
+  publish(message) { this._subscribers.slice().forEach((fn) => fn(message, this.name)); }
+}
+function __diagnosticChannel(name) {
+  if (typeof name !== 'string' && typeof name !== 'symbol') throw new TypeError('channel name must be a string or symbol');
+  if (!__dcChannels.has(name)) __dcChannels.set(name, new __DiagnosticChannel(name));
+  return __dcChannels.get(name);
+}
+const __dc = {
+  Channel: __DiagnosticChannel,
+  channel: __diagnosticChannel,
+  hasSubscribers: (name) => __diagnosticChannel(name).hasSubscribers,
+  subscribe: (name, fn) => __diagnosticChannel(name).subscribe(fn),
+  unsubscribe: (name, fn) => __diagnosticChannel(name).unsubscribe(fn),
+};
+__dc.default = __dc;
 // ---- Node's util.inspect / util.format (Node 26; turbo-test#93) ----
 // The shape of Node's formatValue / formatRaw / reduceToSingleString / groupArrayElements:
 // depth 2, breakLength 80, compact 3, maxArrayLength 100; console.log formats through it.
@@ -3356,6 +3437,10 @@ function __nodeFormatWith(o, ...args) {
   for (; i < args.length; i++) out += ' ' + insp(args[i]);
   return out;
 }
+const __utilDateGetTime = Date.prototype.getTime;
+const __utilIsDate = (value) => {
+  try { __utilDateGetTime.call(value); return true; } catch { return false; }
+};
 const __util = {
   inherits(ctor, superCtor) { if (ctor && ctor.prototype && superCtor && superCtor.prototype) { ctor.super_ = superCtor; Object.setPrototypeOf(ctor.prototype, superCtor.prototype); } },
   promisify: (f) => (...args) => new Promise((res, rej) => { try { f(...args, (e, v) => e ? rej(e) : res(v)); } catch (e) { rej(e); } }),
@@ -3366,7 +3451,7 @@ const __util = {
   deprecate: (fn, _msg) => fn,
   debuglog: () => (() => {}),
   isDeepStrictEqual: (a, b) => { try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return a === b; } },
-  types: { isPromise: (x) => x && typeof x.then === 'function', isDate: (x) => x instanceof Date, isRegExp: (x) => x instanceof RegExp, isNativeError: (x) => x instanceof Error, isArrayBuffer: (x) => x instanceof ArrayBuffer, isTypedArray: (x) => ArrayBuffer.isView(x) },
+  types: { isPromise: (x) => x && typeof x.then === 'function', isDate: __utilIsDate, isRegExp: (x) => x instanceof RegExp, isNativeError: (x) => x instanceof Error, isArrayBuffer: (x) => x instanceof ArrayBuffer, isTypedArray: (x) => ArrayBuffer.isView(x) },
   TextEncoder: globalThis.TextEncoder,
   TextDecoder: globalThis.TextDecoder,
 };
@@ -3722,13 +3807,24 @@ const __assertStrict = __mkAssert(true);
 __assert.strict = __assertStrict;
 __assertStrict.strict = __assertStrict;
 // ---- buffer / fs/promises / process / timers ----
+// Buffer subclasses Uint8Array; limits come from this binary's linked V8, not host Node.
+const __bufferEngineLimits = { /* __TT_NODE_BUFFER_LIMITS__ */ };
 const __buffer = {
   Buffer: globalThis.Buffer,
+  kMaxLength: __bufferEngineLimits.MAX_LENGTH,
+  kStringMaxLength: __bufferEngineLimits.MAX_STRING_LENGTH,
   atob: (s) => globalThis.atob(s),
   btoa: (s) => globalThis.btoa(s),
   get Blob() { return globalThis.Blob; },
   get File() { return globalThis.File; },
 };
+Object.defineProperty(__buffer, 'constants', {
+  value: Object.defineProperties({}, {
+    MAX_LENGTH: { value: __bufferEngineLimits.MAX_LENGTH, enumerable: true },
+    MAX_STRING_LENGTH: { value: __bufferEngineLimits.MAX_STRING_LENGTH, enumerable: true },
+  }),
+  enumerable: true,
+});
 // fs.constants: the values that are the same on every platform turbo-test ships for (no O_CREAT
 // etc., which differ between Linux and macOS)
 const __fsConstants = {
@@ -3750,7 +3846,7 @@ if ((globalThis.__ttPlatform || 'darwin') !== 'win32') {
   const names = ['EPERM', 'ENOENT', 'ESRCH', 'EINTR', 'EIO', 'ENXIO', 'E2BIG', 'ENOEXEC', 'EBADF', 'ECHILD', null, 'ENOMEM', 'EACCES', 'EFAULT', 'ENOTBLK', 'EBUSY', 'EEXIST', 'EXDEV', 'ENODEV', 'ENOTDIR', 'EISDIR', 'EINVAL', 'ENFILE', 'EMFILE', 'ENOTTY', 'ETXTBSY', 'EFBIG', 'ENOSPC', 'ESPIPE', 'EROFS', 'EMLINK', 'EPIPE', 'EDOM', 'ERANGE'];
   names.forEach((n, i) => { if (n) __os.constants.errno[n] = i + 1; });
 }
-const __constants = Object.assign({}, __os.constants.errno, __os.constants.priority, __os.constants.signals, __fsConstants, __crypto.constants);
+const __constants = Object.assign({}, __os.constants.errno, __os.constants.priority, __os.constants.signals, __fsConstants);
 // the global timers (vi.useFakeTimers drives these same functions)
 const __abortError = (signal) => { const e = new Error('The operation was aborted'); e.name = 'AbortError'; e.code = 'ABORT_ERR'; if (signal && signal.reason !== undefined) e.cause = signal.reason; return e; };
 const __timerPromise = (schedule, clear, value, options) => new Promise((resolve, reject) => {
@@ -3795,28 +3891,8 @@ const __timers = {
   ...__realTimers,
   promises: __timersPromises,
 };
-// ---- vm / worker_threads / inspector: what one V8 context in one thread can truthfully offer;
-// the rest throws a clear error instead of pretending ----
+// ---- vm / worker_threads / inspector: owned host capabilities; unsupported operations throw ----
 const __unavailable = (what, why) => () => { throw new Error('turbo-test: ' + what + ' is not available (' + why + ')'); };
-const __oneContext = 'tests run in a single V8 context';
-class __VmScript {
-  constructor(code) { this._code = String(code); }
-  runInThisContext() { return (0, eval)(this._code); }
-}
-__VmScript.prototype.runInContext = __unavailable('vm.Script.runInContext', __oneContext);
-__VmScript.prototype.runInNewContext = __unavailable('vm.Script.runInNewContext', __oneContext);
-const __vm = {
-  Script: __VmScript,
-  runInThisContext: (code) => (0, eval)(String(code)),
-  compileFunction: (code, params) => new Function(...(params || []), String(code)),
-  isContext: (o) => {
-    if (o === null || typeof o !== 'object') { const e = new TypeError('The "object" argument must be of type object'); e.code = 'ERR_INVALID_ARG_TYPE'; throw e; }
-    return false; // no other contexts can exist here
-  },
-  createContext: __unavailable('vm.createContext', __oneContext),
-  runInContext: __unavailable('vm.runInContext', __oneContext),
-  runInNewContext: __unavailable('vm.runInNewContext', __oneContext),
-};
 const __envData = new Map();
 const __untransferable = new WeakSet();
 const __worker_threads = {
@@ -3834,20 +3910,6 @@ const __worker_threads = {
   markAsUntransferable: (o) => { if (o !== null && (typeof o === 'object' || typeof o === 'function')) __untransferable.add(o); },
   isMarkedAsUntransferable: (o) => o !== null && (typeof o === 'object' || typeof o === 'function') && __untransferable.has(o),
 };
-const __inspectorError = (code, message) => { const e = new Error(message); e.code = code; return e; };
-const __inspector = {
-  url: () => undefined, // no inspector is active
-  open: __unavailable('inspector.open', 'the test isolate exposes no inspector'),
-  close: () => {},
-  waitForDebugger: () => { throw __inspectorError('ERR_INSPECTOR_NOT_ACTIVE', 'Inspector is not active'); },
-  get console() { return globalThis.console; },
-  Session: class Session extends __EventEmitter {
-    connect() { __unavailable('inspector.Session.connect', 'the test isolate exposes no inspector')(); }
-    connectToMainThread() { __unavailable('inspector.Session.connectToMainThread', 'the test isolate exposes no inspector')(); }
-    post() { throw __inspectorError('ERR_INSPECTOR_NOT_CONNECTED', 'Session is not connected'); }
-    disconnect() {}
-  },
-};
 globalThis.__nodeBuiltins = {
   fs: __fs,
   'node:fs': __fs,
@@ -3857,45 +3919,21 @@ globalThis.__nodeBuiltins = {
   'node:module': __module,
   os: __os,
   'node:os': __os,
-  child_process: { execSync: () => '', exec: () => {}, spawnSync: () => ({ status: 0 }) },
-  'node:child_process': { execSync: () => '' },
   url: { fileURLToPath: globalThis.__fileURLToPath, pathToFileURL: globalThis.__pathToFileURL, URL: globalThis.URL },
   util: __util,
   'node:util': __util,
+  'util/types': __util.types,
+  'node:util/types': __util.types,
   crypto: __crypto,
   'node:crypto': __crypto,
   events: __events,
   'node:events': __events,
   stream: __stream,
   'node:stream': __stream,
-  http: __http,
-  'node:http': __http,
-  https: __https,
-  'node:https': __https,
-  net: __net,
-  'node:net': __net,
-  tls: __tls,
-  'node:tls': __tls,
-  zlib: __zlib,
-  'node:zlib': __zlib,
-  tty: __tty,
-  'node:tty': __tty,
-  dns: __dns,
-  'node:dns': __dns,
-  'dns/promises': __dns.promises,
-  'node:dns/promises': __dns.promises,
-  http2: __http2,
-  'node:http2': __http2,
-  dgram: __dgram,
-  'node:dgram': __dgram,
-  readline: __readline,
-  'node:readline': __readline,
-  v8: __v8,
-  'node:v8': __v8,
+  'stream/promises': __streamPromises,
+  'node:stream/promises': __streamPromises,
   diagnostics_channel: __dc,
   'node:diagnostics_channel': __dc,
-  async_hooks: __async_hooks,
-  'node:async_hooks': __async_hooks,
   assert: __assert,
   'assert/strict': __assertStrict,
   perf_hooks: { performance: globalThis.performance || { now: () => 0 } },
@@ -3904,13 +3942,19 @@ globalThis.__nodeBuiltins = {
   get process() { return globalThis.process; },
   timers: __timers,
   'timers/promises': __timersPromises,
-  vm: __vm,
   worker_threads: __worker_threads,
   querystring: __querystring,
   string_decoder: { StringDecoder: __StringDecoder },
   constants: __constants,
-  inspector: __inspector,
 };
+
+// Module imports fail explicitly instead of initializing backend code in a DOM context.
+for (const name of ['child_process', 'http', 'https', 'net', 'tls', 'zlib', 'tty', 'dns', 'http2', 'dgram', 'readline', 'v8', 'async_hooks', 'vm', 'inspector']) {
+  __runtimeBackendSlot(globalThis.__nodeBuiltins, name);
+  __runtimeBackendSlot(globalThis.__nodeBuiltins, 'node:' + name);
+}
+__runtimeBackendSlot(globalThis.__nodeBuiltins, 'dns/promises');
+__runtimeBackendSlot(globalThis.__nodeBuiltins, 'node:dns/promises');
 
 // ---- loader helpers (used by the CJS wrapper) ----
 globalThis.__keys = (o) =>
@@ -4090,12 +4134,30 @@ globalThis.__ttAutomockMark = __ttAutomockMark;
 // resolved key: jest.requireMock returns that mock, else the colocated __mocks__/<name> manual
 // mock, else an automock of the real module (jest's moduleRegistry.requireMock).
 const __ttMockedKeys = new Set();
+const __ttGeneratedMockKeys = new Set();
+function __ttMarkMockKind(dir, spec, factory) {
+  const key = __ttSpecKey(dir, spec);
+  __ttMockedKeys.add(key);
+  if (factory === undefined) __ttGeneratedMockKeys.add(key);
+  else __ttGeneratedMockKeys.delete(key);
+}
 function __ttRequireMock(p) {
   const dir = globalThis.__ttDir || globalThis.__ttEntryDir;
   if (__ttMockedKeys.has(__ttSpecKey(dir, p))) return globalThis.__nativeRequire(dir, String(p));
   const manual = __ttManualMockPath(dir, p);
   if (manual) return globalThis.__ttImportActual(globalThis.__dirnameOf(manual), './' + __basename(manual));
   return __automock(globalThis.jest.requireActual(p));
+}
+// importMock shares the mock registry, but an unregistered module is explicitly automocked.
+// Load errors remain rejected promises; a fabricated empty namespace would hide broken imports.
+async function __viImportMock(p) {
+  const dir = __ttMockDir(), spec = String(p);
+  await globalThis.__ttImportReady(dir, spec);
+  const key = __ttSpecKey(dir, spec);
+  if (__ttMockedKeys.has(key) && !__ttGeneratedMockKeys.has(key)) return globalThis.__ttToESM(globalThis.__nativeRequire(dir, spec));
+  const manual = __ttManualMockPath(dir, spec);
+  if (manual) return globalThis.__ttToESM(globalThis.__ttImportActual(globalThis.__dirnameOf(manual), './' + __basename(manual)));
+  return __automock(globalThis.__ttToESM(globalThis.__ttImportActual(dir, spec)));
 }
 // A specifier that automock may touch: relative ('./x', '../x') or absolute ('/x') only —
 // never a bare package ('react') or node: builtin. Bare specifiers always fall through.
@@ -4134,6 +4196,7 @@ function __ttAutomockResetForNextFile() {
   __ttAutomockGenerator = __ttAutomockDefaultGen;
   __ttAutomockExplicit.clear();
   __ttMockedKeys.clear();
+  __ttGeneratedMockKeys.clear();
   __ttAutomockResolveCache.clear();
 }
 globalThis.__mkRequire = (dir, isEsm, importer) => {
@@ -5762,17 +5825,17 @@ function __mockRecordCall(state, args, ctx, newTarget) {
 }
 function __mockApplyImpl(config, original, args, newTarget, ctx) {
   const implementation = config.once.shift() || config.impl || original || function () {};
-  if (newTarget) return Reflect.construct(implementation, args, newTarget);
+  if (newTarget && !config.jestConstructor) return Reflect.construct(implementation, args, newTarget);
   return implementation.apply(ctx, args);
 }
 function __mockInvoke(fn, state, config, original, args, newTarget, ctx) {
-  const { result, settled, at } = __mockRecordCall(state, args, ctx, newTarget);
+  const { result, settled, at } = __mockRecordCall(state, args, ctx, newTarget && !config.jestConstructor);
   let ret;
   try { ret = __mockApplyImpl(config, original, args, newTarget, ctx); }
   catch (e) { __handleMockError(e, result, settled, fn); throw e; }
   result.type = 'return';
   result.value = ret;
-  if (newTarget) { state.contexts[at - 1] = ret; state.instances[at - 1] = ret; }
+  if (newTarget && !config.jestConstructor) { state.contexts[at - 1] = ret; state.instances[at - 1] = ret; }
   __mockSettleResult(settled, ret);
   return ret;
 }
@@ -6321,7 +6384,7 @@ function __ttMock(spec, factory, vitest, isDoMock, options) {
   // bypass does NOT re-mock it on require. Resolution may fail (non-existent spec from a
   // prepass): we still fall through to normal mock logic.
   __ttAutomockMark(dir, spec);
-  __ttMockedKeys.add(__ttSpecKey(dir, spec));
+  __ttMarkMockKind(dir, spec, factory);
   if (__ttPrepassDone(spec, factory, vitest, isDoMock, key, dir)) return;
   // jest 30: `jest.mock(spec, factory)` defers the factory to the module's first require
   // (turbo-test#275). `vi.mock` keeps its eager hoist-time semantics.
@@ -6598,6 +6661,7 @@ function __viUnmock(spec) {
   // jest automock (turbo-test#184): a `jest.unmock(spec)` opts the module out of automock.
   if (globalThis.__ttAutomockMark) globalThis.__ttAutomockMark(dir, spec);
   __ttMockedKeys.delete(__ttSpecKey(dir, spec));
+  __ttGeneratedMockKeys.delete(__ttSpecKey(dir, spec));
 }
 function __viSpyLookup(obj, key, accessor) {
   __spyCheckTarget(obj);
@@ -6762,7 +6826,7 @@ globalThis.vi = {
     return v;
   },
   importActual: (p) => { try { return Promise.resolve(globalThis.__ttToESM(globalThis.__ttImportActual(globalThis.__ttDir || globalThis.__ttEntryDir, String(p)))); } catch (e) { return Promise.resolve(undefined); } },
-  importMock: (p) => { try { return Promise.resolve(globalThis.__nativeRequire(globalThis.__ttDir || globalThis.__ttEntryDir, String(p))); } catch (e) { return Promise.resolve({}); } },
+  importMock: __viImportMock,
   unstubAllEnvs: () => {
     const m = globalThis.__stubbedEnvs;
     if (m) { m.forEach((val, k) => { if (val === undefined) delete globalThis.process.env[k]; else globalThis.process.env[k] = val; }); m.clear(); }
@@ -6877,6 +6941,8 @@ function __jestWhenPick(branches, args) {
   return undefined;
 }
 function __jestWhen(fn) {
+  // Jest invokes constructor implementations on the mock receiver, including arrows.
+  fn[__mockConfigKey].jestConstructor = true;
   if (fn.whenCalledWith) return fn; // a spyOn of an already-spied method returns the same mock
   const config = fn[__mockConfigKey];
   const branches = [];
@@ -10010,6 +10076,9 @@ globalThis.__ttResetForNextFile = () => {
   // file's own pending one-shots. Do NOT clear macro/nextTicks or reset the clock here (that
   // broke ~40 async tests).
   __loop.gen++;
+  __resetProcessWarnings();
+  __runtimeResetBackend();
+  __portReset();
   // jest.setTimeout / jest.retryTimes are per-file overrides (turbo-test#273)
   globalThis.__TT_JEST_TIMEOUT = undefined;
   globalThis.__TT_JEST_RETRY = undefined;

@@ -2073,7 +2073,7 @@ fn shared_app_sources_are_capped_lru() {
         last_use,
         app,
     };
-    let k = |n: &str| (PathBuf::from(n), false);
+    let k = |n: &str| (PathBuf::from(n), false, false);
     m.insert(k("/nm/a"), entry(false, 0));
     m.insert(k("/app/old"), entry(true, 1));
     m.insert(k("/app/mid"), entry(true, 5));
@@ -2162,4 +2162,141 @@ fn module_maps_for_failure_frames_are_built_on_demand() {
         Some(3),
         "the frame maps to the source line of the throw"
     );
+}
+
+#[test]
+fn mock_import_rhs_requires_a_complete_static_import_expression() {
+    for rhs in [
+        "require(\"./dep\");",
+        "__importDefault(require('./dep'));",
+        "__importStar(require('./dep'));",
+        "__toESM(require('./dep'));",
+        "__toESM(require('./dep'), 1);",
+    ] {
+        assert!(mock_require_rhs(rhs), "{rhs}");
+    }
+    for rhs in [
+        "require('./dep').value;",
+        "require('./dep') + sideEffect();",
+        "require('./dep'); sideEffect();",
+        "require('./dep'), sideEffect();",
+        "__importDefault(require('./dep')).value;",
+        "__importDefault(require('./dep') + sideEffect());",
+        "__toESM(require('./dep'), sideEffect());",
+        "require(variable);",
+    ] {
+        assert!(!mock_require_rhs(rhs), "{rhs}");
+    }
+    let user =
+        "const value = require('./dep').value;\nconst count = require('./dep') + sideEffect();";
+    assert_eq!(normalize_mock_require_declarations(user), user);
+}
+
+#[test]
+fn mock_normalization_borrows_existing_var_imports_and_preserves_line_endings() {
+    let code = "var import_dep = require('dep');\r\nvi.mock('dep', () => ({}));\r\n";
+    let borrowed = normalize_mock_require_declarations(code);
+    assert_eq!(
+        borrowed.as_ptr(),
+        code.as_ptr(),
+        "unchanged imports should borrow the input"
+    );
+    assert_eq!(borrowed, code);
+    let source = "const dep_1 = require('dep');\r\nlet other_1 = __importDefault(require('other'));\nconst user = require('user');\nvi.mock('dep', () => ({}));\n";
+    let expected = "var dep_1 = require('dep');\r\nvar other_1 = __importDefault(require('other'));\nconst user = require('user');\nvi.mock('dep', () => ({}));\n";
+    let owned = normalize_mock_require_declarations(source);
+    assert_ne!(owned.as_ptr(), source.as_ptr());
+    assert_eq!(owned, expected);
+}
+
+#[test]
+fn concurrent_native_dependency_cache_misses_bundle_only_once() {
+    let dir = tmp("native-dep-singleflight");
+    let path = dir.join("entry.js");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::fs::write(&path, format!("exports.value = '{nonce}';\n")).unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    native_dep_race_hooks().lock().unwrap().insert(
+        path.clone(),
+        (Arc::new(std::sync::Barrier::new(8)), count.clone()),
+    );
+    let jobs: Vec<_> = (0..8)
+        .map(|_| {
+            let path = path.clone();
+            std::thread::spawn(move || native_dep_cjs(&path).unwrap())
+        })
+        .collect();
+    let outputs: Vec<_> = jobs.into_iter().map(|job| job.join().unwrap()).collect();
+    native_dep_race_hooks().lock().unwrap().remove(&path);
+    assert!(outputs.iter().all(|output| output == &outputs[0]));
+    assert_eq!(native_dep_cjs(&path), Some(outputs[0].clone()));
+    assert_eq!(
+        count.load(Ordering::Relaxed),
+        1,
+        "same-key cold workers must not repeat bundling"
+    );
+}
+
+#[test]
+fn dependency_transform_flights_allow_other_keys_and_prune_finished_keys() {
+    let dir = tmp("dependency-flight-lifetime");
+    let first = dir.join("first");
+    let next = dir.join("next");
+    let one = dependency_transform_flight(&first);
+    let same = dependency_transform_flight(&first);
+    assert!(Arc::ptr_eq(&one, &same));
+    let held = one.lock().unwrap();
+    let other = dependency_transform_flight(&next);
+    assert!(
+        other.try_lock().is_ok(),
+        "another cache key must not wait on the first"
+    );
+    let weak = Arc::downgrade(&one);
+    drop(held);
+    drop(one);
+    drop(same);
+    assert!(
+        weak.upgrade().is_none(),
+        "registry must not retain completed lock owners"
+    );
+    let _sweep = dependency_transform_flight(&next);
+    assert!(!dependency_transform_flights()
+        .lock()
+        .unwrap()
+        .contains_key(&first));
+}
+
+#[test]
+fn failed_native_dependency_transform_can_retry_the_same_key() {
+    let dir = tmp("dependency-flight-failure");
+    let path = dir.join("entry.js");
+    std::fs::write(&path, "module.exports = require('./missing.js');\n").unwrap();
+    // Missing relative imports remain external; a malformed resolved child is a true transform failure.
+    std::fs::write(dir.join("missing.js"), "const = ;\n").unwrap();
+    assert!(native_dep_cjs(&path).is_none());
+    std::fs::write(dir.join("missing.js"), "module.exports = 42;\n").unwrap();
+    assert!(
+        native_dep_cjs(&path).is_some(),
+        "a failed transform cannot become a negative cache entry"
+    );
+}
+
+#[test]
+fn setup_without_mocks_does_not_rebind_requires() {
+    assert!(
+        mocked_require_rebinds(&["const value = 1;"], &["var dep = require('./dep');"]).is_empty()
+    );
+}
+
+#[test]
+fn tsconfig_lookup_stops_at_a_dependency_package_boundary() {
+    let dir = tmp("tsconfig-boundary");
+    put(&dir, "tsconfig.json", "{}");
+    let boundary = dir.join("node_modules");
+    put(&boundary, "package.json", r#"{"name":"boundary"}"#);
+    assert_eq!(nearest_tsconfig_uncached(&boundary), None);
+    std::fs::remove_dir_all(dir).unwrap();
 }

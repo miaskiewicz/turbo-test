@@ -155,9 +155,11 @@ test('vm', () => {
   expect(vm.runInThisContext).toBe(runInThisContext);
   expect(isContext({})).toBe(false);
   expect(() => isContext(1)).toThrow(TypeError);
-  expect(() => createContext({})).toThrow('vm.createContext is not available');
-  expect(() => vm.runInNewContext('1')).toThrow('vm.runInNewContext is not available');
-  expect(() => new Script('1').runInContext({})).toThrow('vm.Script.runInContext is not available');
+  const sandbox = createContext({ answer: 40 });
+  expect(isContext(sandbox)).toBe(true);
+  expect(vm.runInNewContext('answer + 2', sandbox)).toBe(42);
+  expect(new Script('answer += 1; answer').runInContext(sandbox)).toBe(41);
+  expect(() => new Script('1').runInContext({})).toThrow(TypeError);
 });
 test('worker_threads', () => {
   expect([isMainThread, parentPort, threadId, workerData]).toEqual([true, null, 0, null]);

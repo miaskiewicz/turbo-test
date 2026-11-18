@@ -81,7 +81,6 @@ jobs:
       # Before the smoke test (it runs the binary on the repo's chai) and the Rust tests (the CLI
       # integration tests link the repo's esbuild/typescript/chai into their fixture projects).
       - name: Install test dependencies
-        if: runner.os != 'Windows'
         run: npm ci
 
       # Execute the freshly-built binary on natively-runnable legs so a binary that
@@ -119,16 +118,22 @@ jobs:
       # stops at the first, hiding the failures of the suites after it).
       - name: Rust tests
         run: cargo test --locked --no-fail-fast --target ${{ matrix.target }}
+        env:
+          TURBO_CHAI: ${{ github.workspace }}/node_modules/chai/index.js
 
       # Not on Windows (turbo-test#199): these suites spawn cli.js against fixture projects and
       # compare posix-path output (paths, `/`-joined file names, shell-style env) byte-for-byte with
-      # real vitest, and the leg skips `npm ci`; porting them is a separate effort. Windows path
+      # real vitest; porting them is a separate effort. Windows path
       # handling is covered on every leg by the runtime's win32 branch tests in
       # tests/runner_c_runtime.rs (file_url_helpers_handle_windows_paths), which flip
       # process.platform at run time.
       - name: CLI compatibility and type tests
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
         run: npm test
+
+      - name: Vue SFC plugin oracle
+        if: runner.os != 'Windows'
+        run: npm run test:vue-oracle
 
       - name: Native DOM compatibility fixtures
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
@@ -211,7 +216,7 @@ jobs:
   # to turn it green; split the function instead. Rust: turbo-html2pdf's tools/cc-check
   # installed from its home at a pinned rev (not copied here) over every tracked .rs file; JS:
   # oxlint's `complexity` rule (.oxlintrc.complexity.json) over cli.js, index.js and
-  # src/runtime.js. On failure the step summary lists every function over the limit.
+  # src/runtime.js and src/node_*.js. On failure the step summary lists every function over the limit.
   complexity-rust:
     name: complexity / rust (cc <= 7)
     runs-on: ubuntu-latest
@@ -247,7 +252,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: oxlint complexity max 7 (cli.js, index.js, src/runtime.js)
+      - name: oxlint complexity max 7 (cli.js, index.js, runtime modules)
         shell: bash  # -eo pipefail: tee must not mask the gate's exit code
         run: npm run -s complexity:js 2>&1 | tee complexity.txt
       - name: List the functions over the limit

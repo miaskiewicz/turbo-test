@@ -130,6 +130,7 @@ pub(crate) enum SourceRef {
 pub(crate) struct LowerCtx<'r> {
     /// the exports-registry object name (`__tt_exports` app; `<id>_exports` per bundled module)
     pub exports_obj: String,
+    pub ts_commonjs_no_interop: bool,
     /// resolve a specifier → `SourceRef`. `None` = app mode (always `External`).
     pub resolve: Option<&'r dyn Fn(&str) -> SourceRef>,
     /// the module's path for `import.meta` (bundler: each bundled module's own); `None` = the CJS
@@ -597,6 +598,7 @@ fn emit_inner(path: &Path, src: &str, legacy_decorators: bool, with_map: bool) -
 
     let ctx = LowerCtx {
         exports_obj: "__tt_exports".to_string(),
+        ts_commonjs_no_interop: crate::runner::ts_commonjs_no_interop(path),
         resolve: None,
         module_path: None,
     };
@@ -1101,13 +1103,14 @@ fn collect_import(
         return;
     };
 
-    let has_default_or_ns = specifiers.iter().any(|s| {
-        matches!(
-            s,
-            ImportDeclarationSpecifier::ImportDefaultSpecifier(_)
-                | ImportDeclarationSpecifier::ImportNamespaceSpecifier(_)
-        )
-    });
+    let has_default_or_ns = !ctx.ts_commonjs_no_interop
+        && specifiers.iter().any(|s| {
+            matches!(
+                s,
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(_)
+                    | ImportDeclarationSpecifier::ImportNamespaceSpecifier(_)
+            )
+        });
     let ns_local = specifiers.iter().find_map(|s| match s {
         ImportDeclarationSpecifier::ImportNamespaceSpecifier(n) => Some(n.local.name.to_string()),
         _ => None,

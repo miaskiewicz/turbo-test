@@ -39,6 +39,11 @@ A release where these disagree is a bug. Bump both in the same commit.
   is the CI `coverage` gate. New code needs behaviour-asserting tests (happy path + edge
   cases) that keep every line covered; never add coverage-only no-op tests. The two
   remaining uncovered lines (each with its reason or open issue) are explained in tarpaulin.toml.
+- Dependency-only DOM/V8 repins do not require another full coverage run when runner
+  code is unchanged. Validate the fresh build, single-V8 graph, relevant runtime
+  regressions and app correctness instead. Keep earlier coverage/timing evidence tied
+  to its actual source revision. Rerun coverage for runner code changes or a specific
+  coverage-related concern; the 99.9% floor and CI/release requirements stay unchanged.
 - CI detection (snapshot update mode `none` on CI) is std-env's `isCI`: `src/ci.rs` over the
   provider table `src/ci_providers.json`. When vitest's std-env changes, re-check the table with
   `node scripts/check-ci-detection.mjs <dir with vitest installed>` (0 mismatches). The test
@@ -51,21 +56,26 @@ A release where these disagree is a bug. Bump both in the same commit.
 - CI jobs `complexity / rust (cc <= 7)` (`npm run complexity:rust`: turbo-html2pdf's `cc-check`,
   installed from its home at the pinned rev in ci.yml, over every tracked `.rs` file) and
   `complexity / js (cc <= 7)` (`npm run complexity:js`: oxlint `complexity` over cli.js,
-  index.js, src/runtime.js). One limit, no allow-list, no baseline.
+  index.js, src/runtime.js, src/node_*.js and scripts/vue-transform.cjs). One limit, no allow-list, no baseline.
 - Both are blocking since 0.8.0 (turbo-test#240 cleared the backlog; lowered to <= 10 in 0.8.0
   and to <= 7 in 0.8.1 per turbo-test#263; on failure the step summary lists the functions over
   the limit). Every new or changed function stays <= 7: split it, never raise the limit, never
   add an allow-list or a lint-disable comment.
 
 ## Where the DOM and V8 live
+
+- The in-memory Node stream implementation is `src/node_streams.js`, expanded into the
+  runtime at its marker before creating the framework snapshot. It is runner-owned.
 - The DOM binding (window/document/CSSOM/forms/events, its probes, Chrome controls and
   tests) is the `turbo-dom-browser-env` crate in miaskiewicz/turbo-dom
   (`crates/turbo-dom-browser-env`); the runner only calls
   `turbo_dom_browser_env::browser_env::{install, enabled, reset, flush_ownership}`. Fix DOM behaviour there.
 - V8 is turbo-dom's rusty_v8 fork `turbo-dom-v8` (aliased `v8`). No V8 source is vendored
   here. `bash scripts/check-single-v8.sh` must pass (one turbo-dom-v8, no v8/v8x/turbo-surf-v8).
-- turbo-dom-v8 150.4.1 and turbo-dom / -layout / -browser-env 0.8.3 all come from crates.io
-  (no `[patch.crates-io]`); `release-guard` fails a tag if a git pin comes back.
+- The release consumes published turbo-dom / -layout / -browser-env 0.8.4 and
+  turbo-dom-v8 150.4.2 through the registry lockfile. `release-guard` requires no
+  temporary `[patch]` sections or Git sources before tagging. Future development
+  pins must be removed and the registry graph validated before publication.
 
 ## Coverage CLI (v0.2.3+)
 `--coverage` `--coverage-dir DIR` `--coverage-thresholds lines=,functions=,branches=,statements=`

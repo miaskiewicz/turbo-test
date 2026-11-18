@@ -5,6 +5,187 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.8.4] — 2026-11-18 — Node compatibility and shared DOM performance
+
+### Added
+- Select separate Node-backend and DOM runtime payloads before context initialization
+  (#390). DOM runs omit backend cryptography, TCP/process and async-hook implementations
+  and their native callbacks; Node runs omit browser installation. Mixed-environment
+  reuse creates a clean isolate at profile changes while preserving same-profile reuse.
+- Exchange real loopback bytes through `net.Socket` / `net.Server` (#363), including
+  ephemeral ports, Duplex backpressure, half-close, idle timeouts and ref/unref.
+  Native TCP handles are separate from HTTP; Unix uses nonblocking readiness polling.
+  Writes are limited to 32 MiB. Hostname resolution, Unix socket paths and custom
+  lookup/local-bind options report explicit errors; full MongoDB compatibility is not implied.
+- Observe actual V8 Promise init/before/after/resolve events through enabled
+  `async_hooks` (#372), with real resource/trigger identifiers for runner timers,
+  nextTicks and manual AsyncResources. Hook dispatch is recursion-guarded and
+  Promise destruction is GC-driven, not fabricated at resolution. Native hooks and
+  scheduler wrappers are absent by default and removed on last disable/file reset;
+  AsyncLocalStorage continues to use V8 continuation frames independently.
+- Run real asynchronous Unix child processes and Node `fork` JSON IPC, with native
+  pipe backpressure, owned process-group cleanup and active-only polling (#371).
+  Unsupported platforms, handle transfer and advanced serialization fail explicitly.
+- Parse DER/PEM X.509 certificates into real serial, validity, subject/issuer and
+  SPKI public-key facts, with owned raw bytes and existing RSA/P-256 KeyObjects
+  (#367). Parsing does not perform signature or trust-chain verification.
+- An informational Windows CI lane installs the real test dependencies, builds the
+  native runner and runs locked Rust tests, including Windows path fixtures. It
+  records actual outcomes without changing the existing release binary gates (#278).
+- Opt-in Vue 3 SFC loading through the project's real Vue compiler (#279), including
+  script-setup TypeScript, templates, scoped CSS and import/require module graphs.
+  Other projects keep their existing extension resolution. Unsupported preprocessors,
+  external blocks and unmapped SFC coverage report explicit errors.
+
+### Fixed
+- Consume the shared DOM fixes for borrowed Window getter receivers, retired window
+  names and quirks-mode viewport box sizing from turbo-dom.
+- Resolve dynamic imports in awaited setup bundles from their authored source directory,
+  and keep absolute local/ancestor dependency paths external so matcher packages use
+  the same runtime module instances (#410).
+- Return deep automocks from `vi.importMock`, honor manual mocks and explicit async
+  factories, reject real import errors, and keep generated mock calls independent (#411).
+- Make the real Node TCP backpressure control queue its write during connection setup,
+  avoiding platform-dependent OS send-buffer assumptions without relaxing assertions (#412).
+- Preserve CommonJS shebangs through metadata/fallback wrapping (#393), resolve real
+  filesystem paths with the native entry point and legacy argument behavior (#395),
+  and expose `util/types` with genuine Date brand checks for PostgreSQL loading (#399).
+- Match Jest constructor mocks with arrow implementations while preserving Vitest
+  construction semantics (#394). Compare actual Buffer bytes, write validated UInt32LE
+  headers and expose immutable limits from the linked V8 engine (#396–#398, #400).
+- Preserve the standard Date constructor name for real Mongoose schema types (#383).
+- Honor explicit CommonJS `esModuleInterop: false`, including JSONC and package-provided
+  tsconfig inheritance, while preserving dynamic imports and authored helpers (#384).
+- Match Buffer byte lengths and static-method enumerability used by real HTTP request
+  bodies, including encoding and binary-view controls (#385, #388).
+- Normalize Jest environments and keep the nearest framework config authoritative
+  unless an explicit CLI/config selection or per-file pragma overrides it (#386, #390).
+- Expose actual zlib constants required by SaxonJS dependency loading (#387).
+- Retain real CommonJS caller filenames for native dependency discovery and file-owned
+  hook cleanup under reuse; dependency-owned hooks remain registered (#389, #390).
+- Capture private async-resource constructors for MessageChannel and TCP tasks so
+  replacing a public `async_hooks.AsyncResource` export cannot break internal resources.
+- Avoid repeated decorator-transform retries for propagated CommonJS dependency errors,
+  preserving local metadata fallback and cyclic partial exports (#357).
+- Cancel or replace HTTP request idle deadlines, disable them with zero, refresh
+  them on actual I/O and clear them on completion/destruction (#377).
+- Remove pipe-owned listeners after completion, `end:false` and destination errors,
+  preserving application listeners and error-handler ordering (#378).
+- Give simultaneous child-process, TCP and HTTP work fair event-loop turns without
+  starving deadline timers or running stale deadlines after completion (#379).
+- Release undeliverable MessagePort task ownership at reused-file reset without
+  firing old listeners (#380), while retaining deliverable queued receivers (#374).
+- Bound synchronous PBKDF2-SHA1 to 1,000,000 block-rounds
+  (`iterations × ceil(keyLength / 20)`) and reject excessive work before derivation (#381).
+- Let synchronous native child waits observe host-owned VM-watchdog and heap-guard
+  cancellation, terminate/reap their owned process groups and avoid ordinary spawn
+  results after cancellation (#382). This does not make arbitrary external V8
+  termination requests independently observable inside native callbacks.
+- Import real password-protected PKCS#8 with PBES2/PBKDF2 and historical PKCS12
+  SHA-1/3DES, with bounded KDF work, Unicode controls and plaintext-key preservation (#368).
+- Initialize EventEmitter receiver state lazily and preserve enumerable prototype
+  mixins required by real offline Mongoose schema/document validation (#376).
+- Implement real SHA-1/SHA-256 HMAC and bounded PBKDF2-SHA1 with independent RFC
+  known-answer tests, replacing the constant HMAC result (#359, #365).
+- Create real private temporary directories and copy actual file bytes through sync,
+  callback and promise APIs, with exclusive-copy and same-file safeguards (#360, #361).
+- Support legacy `Transform.call` inheritance while retaining transformed bytes,
+  flush callbacks and error/close behavior (#362).
+- Compile `vm.Script` syntax eagerly without execution and preserve compile origins (#364).
+- Match real IPv4/IPv6 address, range and subnet boundaries in `net.BlockList` (#366).
+- Produce and validate real zlib deflate/inflate bytes; reject unsupported stream and
+  tuning capabilities explicitly instead of passing bytes through (#369).
+- Validate WebCrypto integer-array brands and byte quotas and fill them with OS
+  entropy; read unsigned big-endian Buffer words within the supplied view (#370, #373).
+- Hash HTTP etags with native SHA-1 through `crypto.createHash`, preserving SHA-256.
+- Preserve CommonJS partial exports for cyclic decorated TypeScript classes, isolate
+  metadata transform cache modes, and hoist static TypeScript imports around mocks (#351).
+- Export a callable `stream.Stream` with named/default identity and legacy inheritance;
+  legacy pipes clean up listeners and complete once (#352).
+- Expose shared HTTP request/response socket identity, connection state and close events,
+  and apply TCP_NODELAY to real native connections. HTTP keeps its one-request-per-connection
+  transport; raw TCP is provided separately through `net.Socket` / `net.Server`.
+- Expose a distinct `tls.Server` constructor so plain-HTTP clients can check server
+  types without failing during module loading. TLS server construction and
+  `tls.createServer` report `ERR_TLS_UNSUPPORTED_SERVER`; no TLS transport is implied.
+- Support the Flux Assistant's real RSA-2048 / RS256 path with OS-seeded key
+  generation, blinded SHA-256 PKCS#1 v1.5 signatures, PKCS#8/SPKI imports/exports,
+  and synchronous signer/verifier `end()`, while preserving P-256 support (#349).
+- Add the explicit `TURBO_PNPM_ANCESTOR=1` fallback for actual ancestor pnpm hoist
+  links after ordinary package resolution fails. Preserve selected versions,
+  package exports and default resolution; require real `tslib`/`hey-listen`
+  installations rather than returning shadow modules (#278).
+- Apply verbatim DOS/UNC canonical-path normalization only on Windows and discover
+  local npm esbuild entry points there in `.cmd`, `.exe`, extensionless order, while
+  preserving Unix lookup and literal path names (#278).
+- Classify IPv4 and IPv6 literals through the native IP parser (#329), propagate
+  unhandled EventEmitter errors and report successful once-listener delivery (#330),
+  and deliver diagnostics-channel publications through a named subscriber registry (#331).
+- Convert scalar FormData values to strings and expose ordered entries in the Node
+  environment (#333). Fetch offline data URLs with percent/base64 byte decoding,
+  Response consumption and clone checks (#326); this remains an offline fetch path.
+- Replace placeholder hashes with native SHA-256 for `crypto.createHash` (#323) and
+  `crypto.subtle.digest` (#328), including byte views, real encodings and explicit
+  rejection of unsupported algorithms. Replace pass-through gzipSync/gunzipSync with
+  real gzip bytes and decompression errors (#324).
+- Return Buffer-backed V8 serialization and deserialize Maps, cycles and typed arrays
+  using V8's native serializer (#348).
+- Implement Node-mode `AbortSignal.timeout` on the real timer clock (#325), with
+  validated delays, asynchronous ordering and a `TimeoutError` reason even while test
+  timers are faked.
+- Forward bytes through in-memory Node streams and wait for write/final callbacks
+  before callback or promise pipeline completion (#319, #334). Expose both
+  `stream/promises` aliases, propagate failures and observe `finished` lifecycle.
+  This does not imply support for every Node operating-system stream API.
+
+- Generate real P-256 signing keys from OS entropy, export/import PKCS#8/SPKI PEM or
+  DER, and sign/verify SHA-256 ECDSA with usable KeyObjects (#318).
+- Evaluate scripts in fresh Node VM contexts with sandbox bindings, isolation,
+  real V8 results/errors and cancellable timeouts (#332). Framework-only snapshots
+  are required; unsupported immutable-global shadows report a capability error.
+- Preserve concurrent AsyncLocalStorage stores across native await and scheduled
+  resources, including reused-file cleanup (#322), using V8 continuation frames.
+- Transfer native MessagePort ownership transactionally, retaining queued delivery,
+  peer relationships and receiver async context while detaching the old handle (#327).
+- Exchange real loopback HTTP/1 bytes and run synchronous child processes with actual
+  output, status, errors and bounded cleanup (#321). Socket readiness keeps the event
+  loop alive for external peers. HTTPS, persistent/custom-agent HTTP and callback
+  `exec`/`execFile` remain unsupported; Unix async child pipes and fork IPC are described above.
+
+- Implement real AES-256-GCM encryption/decryption for 12-byte IVs and 12–16 byte
+  authentication tags (#350), including incremental updates, AAD, output encodings,
+  tag verification and state validation. Flux secret and cursor encryption no longer
+  needs a cipher stub; tampered data and incorrect keys fail authentication.
+- Back `crypto.randomBytes` with OS entropy so generated encryption IVs are independent
+  of test clocks and the runtime's deterministic PRNG. Preserve asynchronous callback delivery.
+
+- Emit real asynchronous process warnings (#375), including string/Error/options
+  metadata, warning listeners bound to the existing process object and default stderr
+  output. Mongoose can issue its unmodified Jest warning without an unsupported API;
+  reused files do not inherit previous files' warning listeners.
+
+### Tests
+- Exercise 28 Vitest/Jest settings combinations (40 JS tests), both profile-transition
+  directions, snapshot on/off, same-profile state ownership and failed-load child cleanup.
+- Validate 595 tests in the unchanged representative Flux backend selection; additional
+  load errors and native-addon limits remain documented in the validation report.
+- Add Node controls and native runner regressions for the compatibility fixes,
+  including known hashes, independent gzip/V8 fixtures and malformed-input errors.
+
+### Performance
+- Consume turbo-dom v0.8.4, including bounded font shaping-plan reuse and
+  reuse of intrinsic table measurements during final layout. These shared-engine
+  changes avoid repeated shaping setup and table work without changing DOM behavior.
+  Full four-app consumer validation passes 36,200 tests with five existing skips.
+  Matched eight-worker cold/warm ABBA timings, CPU usage and background-load limits are
+  preserved in `docs/validation/v0.8.4-app-benchmarks-2026-11-15.md`.
+
+### Release preparation
+- Align the Rust and npm packages at 0.8.4 and resolve turbo-dom, turbo-dom-layout
+  and turbo-dom-browser-env 0.8.4 from crates.io. The lockfile uses the published
+  turbo-dom-v8 150.4.2 wrapper over the official V8 150.4.0 engine/archive.
+  All temporary Git patches are removed before registry publication.
+
 ## [0.8.3] — 2026-11-13 — jest compat: full config surface, module resolution, jsdom parity, faster GC
 
 ### Added

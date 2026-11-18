@@ -1,6 +1,6 @@
 [package]
 name = "turbo-test"
-version = "0.8.3"
+version = "0.8.4"
 edition = "2021"
 license = "MIT"
 description = "A blazing-fast native test runner — drop-in replacement for Vitest"
@@ -31,13 +31,13 @@ path = "src/bin/m5_affected.rs"
 
 [dependencies]
 # V8 bindings for the runner, the Node-API host and the module loader: turbo-dom's
-# rusty_v8 fork (the interceptor ShouldThrowOnError fix). `~150.4` admits fork patch
+# rusty_v8 fork (the interceptor ShouldThrowOnError fix). `~150.4.2` admits fork patch
 # releases only and must resolve to the same single turbo-dom-v8 that
 # turbo-dom-browser-env links (scripts/check-single-v8.sh).
-v8 = { package = "turbo-dom-v8", version = "~150.4" }
+v8 = { package = "turbo-dom-v8", version = "~150.4.2" }
 # The browser environment (window, document, CSSOM, forms, events) the runner
 # installs into each test context.
-turbo-dom-browser-env = "0.8.3"
+turbo-dom-browser-env = "=0.8.4"
 oxc_allocator = "0.134"
 oxc_parser = "0.134"
 oxc_span = "0.134"
@@ -49,12 +49,27 @@ oxc_transformer = "0.134"
 oxc_semantic = "0.134"
 oxc_resolver = "11.21.0"
 libloading = "0.9.0"
+json-strip-comments = "3.1.2"
 serde_json = "1"
 # local time for the human reporters' `Start at` (vitest's toTimeString)
 libc = "0.2"
 # js-tokens' identifier classes, for vitest's code-frame highlighting
 unicode-id-start = "1.4"
 base64 = "0.22"
+sha2 = "0.10.9"
+sha1 = "0.11.0"
+sha1-legacy = { package = "sha1", version = "0.10.6" }
+pkcs8 = { version = "0.10.2", features = ["encryption", "sha1-insecure", "3des"] }
+pkcs12 = { version = "0.1.0", features = ["kdf"] }
+cbc = { version = "0.1.2", features = ["alloc"] }
+des = "0.8.1"
+p256 = { version = "0.13.2", features = ["ecdsa", "pkcs8", "pem"] }
+getrandom = "0.2.17"
+rsa = { version = "0.9.10", features = ["sha2"] }
+rand_chacha = "0.3.1"
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc", "zeroize"] }
+zeroize = { version = "1", features = ["alloc"] }
+flate2 = "1"
 # TextDecoder's legacy encodings (Shift_JIS, UTF-16, windows-125x, ...): the WHATWG Encoding
 # Standard implementation (turbo-test#119)
 encoding_rs = "0.8"
@@ -68,6 +83,7 @@ idna = "1"
 # jest `moduleNameMapper` keys are ECMAScript regexes, lookaround and backreferences included
 # (turbo-test#335)
 fancy-regex = "0.20"
+x509-parser = { version = "=0.18.1", default-features = false }
 
 # `cargo tarpaulin` builds with `--cfg tarpaulin` (napi_host's coverage flush before an abort).
 [lints.rust]

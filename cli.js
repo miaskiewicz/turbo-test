@@ -78,6 +78,7 @@ function buildChildEnv() {
   const env = { ...process.env };
   setIfAbsent(env, 'TURBO_ESBUILD', bundledEsbuild);
   setIfAbsent(env, 'TURBO_CHAI', chaiPath);
+  setIfAbsent(env, 'TURBO_NODE_EXECUTABLE', () => process.execPath);
   return env;
 }
 

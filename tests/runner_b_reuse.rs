@@ -57,7 +57,8 @@ fn module_runner_reuse_with_setup_mocks_remocks_dom_and_fresh_retry() {
         "a1.test.ts",
         &format!(
             "import {{ useTrack }} from './src/hook';\n{SEEN}\
-             test('a1 setup mock', () => {{ expect(useTrack()).toBe('setup-track'); expect(globalThis.__setupRuns).toBe(1); }});\n"
+             globalThis.__nodeProfileSentinel = true;\n\
+             test('a1 setup mock', () => {{ expect(useTrack()).toBe('setup-track'); expect(globalThis.__setupRuns).toBe(1); expect(globalThis.__ttRuntimeBackendInstalled).toBe(true); }});\n"
         ),
     );
     p.file(
@@ -82,13 +83,13 @@ fn module_runner_reuse_with_setup_mocks_remocks_dom_and_fresh_retry() {
     p.file(
         "a5.test.tsx",
         &format!(
-            "{SEEN}test('a5 dom', () => {{ document.body.innerHTML = '<b>x</b>'; expect(document.body.textContent).toBe('x'); }});\n"
+            "{SEEN}test('a5 dom', () => {{ expect(globalThis.__nodeProfileSentinel).toBeUndefined(); expect(globalThis.__ttRuntimeBackendInstalled).toBe(false); expect(typeof globalThis.__ttTcp).toBe('undefined'); expect(globalThis.__setupRuns).toBe(1); expect(globalThis.__seen.length).toBe(1); document.body.innerHTML = '<b>x</b>'; expect(document.body.textContent).toBe('x'); globalThis.__profileDocument = document; }});\n"
         ),
     );
     p.file(
         "a6.test.tsx",
         &format!(
-            "{SEEN}test('a6 dom again', () => {{ document.body.innerHTML = '<i>y</i>'; expect(document.body.textContent).toBe('y'); }});\n"
+            "{SEEN}test('a6 dom again', () => {{ expect(globalThis.__profileDocument).toBe(document); expect(document.body.textContent).toBe('x'); expect(globalThis.__seen.length).toBe(2); expect(globalThis.__setupRuns).toBe(1); document.body.innerHTML = '<i>y</i>'; expect(document.body.textContent).toBe('y'); }});\n"
         ),
     );
     p.file(
@@ -118,11 +119,11 @@ fn module_runner_reuse_with_setup_mocks_remocks_dom_and_fresh_retry() {
         "{}",
         r.all()
     );
-    // every file ran once in the one shared context (logging 1..=6): a4's assertion failure is
-    // final under reuse (turbo-test#126) and a6 reuses the worker's document (turbo-test#150);
-    // only a7's load error gets a fresh-isolate run (which logs nothing)
+    // Node files share one context (1..=4); changing to DOM creates a clean
+    // profile context (1..=2), whose document the second DOM file retains.
+    // Assertion failure stays final; only a7's load error gets a fresh retry.
     let s = seen(&r.stdout);
-    assert_eq!(s, [1, 2, 3, 4, 5, 6], "{}", r.all());
+    assert_eq!(s, [1, 1, 2, 2, 3, 4], "{}", r.all());
 }
 
 /// turbo-test#150: under reuse the worker's DOM was installed once but dropped after every file,

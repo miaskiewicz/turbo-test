@@ -1803,3 +1803,21 @@ fn zero_delay_timer_flags_set_the_env_switch() {
         ]
     );
 }
+
+#[test]
+fn flattened_tap_tasks_keep_empty_suites_but_not_file_load_failures() {
+    let nodes = vec![
+        TapNode::Failed("broken file".into(), Box::default()),
+        TapNode::Empty(
+            "pending suite".into(),
+            "todo".into(),
+            "pending suite".into(),
+        ),
+    ];
+    let mut tasks = Vec::new();
+    tap_flatten(&nodes, "project", &mut tasks);
+    assert_eq!(tasks.len(), 1);
+    assert!(
+        matches!(&tasks[0], TapNode::Empty(name, mode, _) if name == "project > pending suite" && mode == "todo")
+    );
+}
