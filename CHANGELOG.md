@@ -38,6 +38,8 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   external blocks and unmapped SFC coverage report explicit errors.
 
 ### Fixed
+- Consume the shared DOM fixes for borrowed Window getter receivers, retired window
+  names and quirks-mode viewport box sizing from turbo-dom.
 - Resolve dynamic imports in awaited setup bundles from their authored source directory,
   and keep absolute local/ancestor dependency paths external so matcher packages use
   the same runtime module instances (#410).
