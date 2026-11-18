@@ -93,11 +93,3 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tarpaulin)"] }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-
-[patch.crates-io]
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "688a1e3f4197c4fdf5ec55f3ab1c98da642e4948" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "688a1e3f4197c4fdf5ec55f3ab1c98da642e4948" }
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "688a1e3f4197c4fdf5ec55f3ab1c98da642e4948" }
-
-# Matching unpublished V8 candidate required by turbo-dom-browser-env at this pin.
-turbo-dom-v8 = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "03839d09726f6e184d72ef83e7e73a1c2ef8d7f9" }

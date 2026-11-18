@@ -5,7 +5,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
-## [0.8.4] — Unreleased candidate — Node compatibility and shared DOM performance
+## [0.8.4] — 2026-11-18 — Node compatibility and shared DOM performance
 
 ### Added
 - Select separate Node-backend and DOM runtime payloads before context initialization
@@ -173,7 +173,7 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   including known hashes, independent gzip/V8 fixtures and malformed-input errors.
 
 ### Performance
-- Consume turbo-dom's v0.8.4 candidate, including bounded font shaping-plan reuse and
+- Consume turbo-dom v0.8.4, including bounded font shaping-plan reuse and
   reuse of intrinsic table measurements during final layout. These shared-engine
   changes avoid repeated shaping setup and table work without changing DOM behavior.
   Full four-app consumer validation passes 36,200 tests with five existing skips.
@@ -181,12 +181,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
   preserved in `docs/validation/v0.8.4-app-benchmarks-2026-11-15.md`.
 
 ### Release preparation
-- Align the Rust and npm package versions at 0.8.4. The release branch uses an exact
-  pre-publication turbo-dom source pin (`af946ea0f8f8e0fe8d50b6470b33dbe2068393f6`)
-  for reproducible validation; remove it only
-  after compatible 0.8.4 crates are published, before tagging this runner release.
-  The generated `turbo-dom-v8` pin is `03839d09726f6e184d72ef83e7e73a1c2ef8d7f9`
-  (unpublished 150.4.2), retaining the official V8 150.4.0 engine/archive.
+- Align the Rust and npm packages at 0.8.4 and resolve turbo-dom, turbo-dom-layout
+  and turbo-dom-browser-env 0.8.4 from crates.io. The lockfile uses the published
+  turbo-dom-v8 150.4.2 wrapper over the official V8 150.4.0 engine/archive.
+  All temporary Git patches are removed before registry publication.
 
 ## [0.8.3] — 2026-11-13 — jest compat: full config surface, module resolution, jsdom parity, faster GC
 
