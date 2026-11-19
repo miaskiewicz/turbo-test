@@ -6,7 +6,7 @@ zip-404 stream zip-404 stream zip-404 stream zip-404 stream zip-404 stream zip-4
 
 /// Feeds `input` through a fresh handle of `mode` in `size`-byte writes, then finishes.
 fn run(mode: u32, input: &[u8], size: usize) -> Result<Vec<u8>> {
-    let id = open(mode, 6).unwrap();
+    let id = open(mode, 6, &[]).unwrap();
     let mut out = Vec::new();
     for chunk in input.chunks(size.max(1)) {
         out.extend(write(id, chunk, NO_FLUSH)?);
@@ -75,7 +75,7 @@ fn output_is_readable_by_independent_decoders() {
 #[test]
 fn gzip_header_matches_nodes_level_and_os_bytes() {
     for (level, xfl) in [(6, 0), (9, 2), (1, 4), (0, 4)] {
-        let id = open(GZIP, level).unwrap();
+        let id = open(GZIP, level, &[]).unwrap();
         let out = write(id, b"a", FINISH).unwrap();
         assert_eq!(out[..10], [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, xfl, GZIP_OS]);
         assert_eq!(out[out.len() - 4..], 1u32.to_le_bytes());
@@ -85,8 +85,8 @@ fn gzip_header_matches_nodes_level_and_os_bytes() {
 #[test]
 fn sync_and_full_flush_emit_a_decodable_prefix() {
     for flush in [SYNC_FLUSH, FULL_FLUSH] {
-        let enc = open(DEFLATERAW, 6).unwrap();
-        let dec = open(INFLATERAW, 6).unwrap();
+        let enc = open(DEFLATERAW, 6, &[]).unwrap();
+        let dec = open(INFLATERAW, 6, &[]).unwrap();
         let prefix = write(enc, b"first;", flush).unwrap();
         assert_eq!(write(dec, &prefix, NO_FLUSH).unwrap(), b"first;");
         let tail = write(enc, b"second", FINISH).unwrap();
@@ -193,37 +193,69 @@ fn large_input_grows_the_output_through_many_rounds() {
 
 #[test]
 fn handles_close_on_finish_error_close_and_reset() {
-    assert_eq!(open(99, 6), None);
+    assert_eq!(open(99, 6, &[]), Err(ZlibError::Mode));
     let before = open_count();
-    let id = open(DEFLATE, 6).unwrap();
+    let id = open(DEFLATE, 6, &[]).unwrap();
     assert_eq!(open_count(), before + 1);
     write(id, b"x", FINISH).unwrap();
     assert_eq!(write(id, b"x", NO_FLUSH), Err(ZlibError::Closed));
-    let failed = open(INFLATE, 6).unwrap();
+    let failed = open(INFLATE, 6, &[]).unwrap();
     assert!(write(failed, b"garbage!", NO_FLUSH).is_err());
     assert_eq!(write(failed, b"", FINISH), Err(ZlibError::Closed));
-    let closed = open(GZIP, 6).unwrap();
+    let closed = open(GZIP, 6, &[]).unwrap();
     close(closed);
     close(closed);
     assert_eq!(write(closed, b"", NO_FLUSH), Err(ZlibError::Closed));
     assert_eq!(open_count(), before);
-    open(UNZIP, 20).unwrap();
+    open(UNZIP, 20, &[]).unwrap();
     reset();
     assert_eq!(open_count(), 0);
 }
 
 #[test]
 fn errors_map_to_nodes_message_code_and_errno() {
-    assert_eq!(
-        ZlibError::Data("incorrect header check").node(),
-        ("incorrect header check", "Z_DATA_ERROR", Some(-3))
-    );
-    assert_eq!(
-        ZlibError::Truncated.node(),
-        ("unexpected end of file", "Z_BUF_ERROR", Some(-5))
-    );
-    assert_eq!(
-        ZlibError::Closed.node(),
-        ("zlib binding closed", "ERR_ZLIB_BINDING_CLOSED", None)
-    );
+    let node = |error: ZlibError| {
+        let (message, code, errno) = error.node();
+        (message, code, errno)
+    };
+    let cases = [
+        (
+            ZlibError::Data("incorrect header check"),
+            ("incorrect header check", "Z_DATA_ERROR", Some(-3)),
+        ),
+        (
+            ZlibError::Truncated,
+            ("unexpected end of file", "Z_BUF_ERROR", Some(-5)),
+        ),
+        (
+            ZlibError::Closed,
+            ("zlib binding closed", "ERR_ZLIB_BINDING_CLOSED", None),
+        ),
+        (
+            ZlibError::Brotli {
+                errno: -15,
+                code: "ERR__ERROR_FORMAT_PADDING_2".into(),
+            },
+            (
+                "Decompression failed",
+                "ERR__ERROR_FORMAT_PADDING_2",
+                Some(-15),
+            ),
+        ),
+        (
+            ZlibError::Init,
+            (
+                "Initialization failed",
+                "ERR_ZLIB_INITIALIZATION_FAILED",
+                None,
+            ),
+        ),
+        (
+            ZlibError::Mode,
+            ("invalid zlib mode", "ERR_INVALID_ARG_VALUE", None),
+        ),
+    ];
+    for (error, (message, code, errno)) in cases {
+        assert_eq!(node(error), (message, code.to_string(), errno));
+    }
 }

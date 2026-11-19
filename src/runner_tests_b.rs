@@ -1027,6 +1027,9 @@ fn native_zlib_handles_return_bytes_and_throw_node_errors() {
                   const bad = __ttZlibOpen(2, 6), one = __ttZlibOpen(1, 6), all = __ttZlibOpen(3, 6);
                   const seen = [packed instanceof Uint8Array, text,
                     fail(() => __ttZlibOpen(42, 6)),
+                    fail(() => __ttZlibOpen(9, 6, new Uint32Array([7, 0]))),
+                    new TextDecoder().decode(__ttZlibWrite(__ttZlibOpen(8, 6), __ttZlibWrite(__ttZlibOpen(9, 6, new Uint32Array([1, 5, 2, 18])), new TextEncoder().encode('brotli'), 4), 4)),
+                    fail(() => __ttZlibWrite(__ttZlibOpen(8, 6), new TextEncoder().encode('nope nope nope'), 0)),
                     fail(() => __ttZlibWrite(enc, {}, 0)),
                     fail(() => __ttZlibWrite(enc, new Uint8Array(1), 0)),
                     fail(() => __ttZlibWrite(bad, new Uint8Array([255, 255, 255, 255]), 0)),
@@ -1037,7 +1040,7 @@ fn native_zlib_handles_return_bytes_and_throw_node_errors() {
                   return JSON.stringify(seen);
                 })()"#
             ),
-            r#"[true,"native zlib","TypeError|invalid zlib mode||","Error|Expected a byte view||","Error|zlib binding closed|ERR_ZLIB_BINDING_CLOSED|","Error|invalid compressed data|Z_DATA_ERROR|-3","Error|unexpected end of file|Z_BUF_ERROR|-5","Error|zlib binding closed|ERR_ZLIB_BINDING_CLOSED|"]"#
+            r#"[true,"native zlib","Error|invalid zlib mode|ERR_INVALID_ARG_VALUE|","Error|Initialization failed|ERR_ZLIB_INITIALIZATION_FAILED|","brotli","Error|Decompression failed|ERR__ERROR_FORMAT_PADDING_2|-15","Error|Expected a byte view||","Error|zlib binding closed|ERR_ZLIB_BINDING_CLOSED|","Error|invalid compressed data|Z_DATA_ERROR|-3","Error|unexpected end of file|Z_BUF_ERROR|-5","Error|zlib binding closed|ERR_ZLIB_BINDING_CLOSED|"]"#
         );
     });
 }

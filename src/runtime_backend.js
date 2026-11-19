@@ -67,8 +67,8 @@ function __deflateSync(input, options, decompress = false) {
 }
 /* __TT_NODE_ZLIB__ */
 // The streaming classes and one-shot helpers come from node_zlib.js; the established sync
-// gzip / deflate helpers keep their own path. Brotli streams remain inert placeholders.
-const __zlib = Object.assign({}, __nodeZlib, { createBrotliCompress: () => new __Duplex(), createBrotliDecompress: () => new __Duplex(), gzipSync: (b, opts) => __gzipSync(b, opts), gunzipSync: (b, opts) => __gzipSync(b, opts, true), deflateSync: (b, opts) => __deflateSync(b, opts), inflateSync: (b, opts) => __deflateSync(b, opts, true) }); __zlib.default = __zlib;
+// gzip / deflate helpers keep their own path.
+const __zlib = Object.assign({}, __nodeZlib, { gzipSync: (b, opts) => __gzipSync(b, opts), gunzipSync: (b, opts) => __gzipSync(b, opts, true), deflateSync: (b, opts) => __deflateSync(b, opts), inflateSync: (b, opts) => __deflateSync(b, opts, true) }); __zlib.default = __zlib;
 /* __TT_NODE_ZLIB_CONSTANTS__ */
 const __tty = { isatty: () => false, ReadStream: __EventEmitter, WriteStream: __EventEmitter }; __tty.default = __tty;
 const __dns = { lookup: (_h, _o, cb) => { const c = typeof _o === 'function' ? _o : cb; if (c) c(null, '127.0.0.1', 4); }, resolve: (_h, cb) => cb && cb(null, []), promises: { lookup: () => Promise.resolve({ address: '127.0.0.1', family: 4 }), resolve: () => Promise.resolve([]) } }; __dns.default = __dns;

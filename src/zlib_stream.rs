@@ -13,7 +13,11 @@
 //! bytes after a member that do not start another one. Unzip picks gzip or zlib from the
 //! first two bytes. Errors carry Node's codes: malformed input is Z_DATA_ERROR (-3), input
 //! that ends early is Z_BUF_ERROR (-5) "unexpected end of file".
+//!
+//! The Brotli modes (BROTLI_DECODE = 8, BROTLI_ENCODE = 9) are handles of the same table,
+//! opened with Node's init params; their codecs live in `src/brotli_stream.rs`.
 
+use crate::brotli_stream::{BrotliCodec, BROTLI_DECODE, BROTLI_ENCODE};
 use flate2::{Compress, Compression, Crc, Decompress, FlushCompress, FlushDecompress, Status};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -38,20 +42,36 @@ pub enum ZlibError {
     Truncated,
     /// A write to a handle that was finished, failed or closed.
     Closed,
+    /// A Brotli decoder error: libbrotli's errno and Node's code for it.
+    Brotli { errno: i32, code: String },
+    /// Params the codec does not take (Node's failed handle init).
+    Init,
+    /// A mode that is not one of Node's zlib / Brotli modes.
+    Mode,
 }
 
 impl ZlibError {
     /// Node's message, `code` and `errno` for this error.
-    pub fn node(&self) -> (&'static str, &'static str, Option<i32>) {
-        match self {
-            ZlibError::Data(message) => (message, "Z_DATA_ERROR", Some(-3)),
+    pub fn node(&self) -> (&'static str, String, Option<i32>) {
+        let (message, code, errno) = match self {
+            ZlibError::Data(message) => (*message, "Z_DATA_ERROR", Some(-3)),
             ZlibError::Truncated => ("unexpected end of file", "Z_BUF_ERROR", Some(-5)),
             ZlibError::Closed => ("zlib binding closed", "ERR_ZLIB_BINDING_CLOSED", None),
-        }
+            ZlibError::Brotli { errno, code } => {
+                return ("Decompression failed", code.clone(), Some(*errno))
+            }
+            ZlibError::Init => (
+                "Initialization failed",
+                "ERR_ZLIB_INITIALIZATION_FAILED",
+                None,
+            ),
+            ZlibError::Mode => ("invalid zlib mode", "ERR_INVALID_ARG_VALUE", None),
+        };
+        (message, code.to_string(), errno)
     }
 }
 
-type Result<T> = std::result::Result<T, ZlibError>;
+pub(crate) type Result<T> = std::result::Result<T, ZlibError>;
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 #[cfg(target_os = "macos")]
@@ -92,6 +112,7 @@ enum Codec {
     Gzip(GzipOut),
     Gunzip(GzipIn),
     Unzip(Vec<u8>),
+    Brotli(Box<BrotliCodec>),
 }
 
 fn data_error(_: impl std::error::Error) -> ZlibError {
@@ -341,15 +362,18 @@ fn unzip_choice(pending: &[u8]) -> Option<Codec> {
 }
 
 impl Codec {
-    fn new(mode: u32, level: u32) -> Option<Codec> {
+    fn new(mode: u32, level: u32, params: &[(u32, u32)]) -> Result<Codec> {
         let compression = Compression::new(level);
-        Some(match mode {
+        Ok(match mode {
             DEFLATE | DEFLATERAW => Codec::Deflate(Compress::new(compression, mode == DEFLATE)),
             INFLATE | INFLATERAW => Codec::Inflate(Inflater::new(mode == INFLATE)),
             GZIP => Codec::Gzip(GzipOut::new(level)),
             GUNZIP => Codec::Gunzip(GzipIn::new()),
             UNZIP => Codec::Unzip(Vec::new()),
-            _ => return None,
+            BROTLI_DECODE | BROTLI_ENCODE => {
+                Codec::Brotli(Box::new(crate::brotli_stream::open(mode, params)?))
+            }
+            _ => return Err(ZlibError::Mode),
         })
     }
 
@@ -375,6 +399,7 @@ impl Codec {
             Codec::Inflate(i) => i.write(input, finish, &mut out)?,
             Codec::Gzip(g) => g.write(input, flush, &mut out)?,
             Codec::Gunzip(g) => g.write(input, finish, &mut out)?,
+            Codec::Brotli(b) => b.write(input, flush, &mut out)?,
             Codec::Unzip(pending) => {
                 let pending = std::mem::take(pending);
                 return self.unzip(pending, input, flush);
@@ -389,16 +414,16 @@ thread_local! {
     static NEXT_ID: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Opens a handle for Node zlib `mode` at compression `level` (0-9), or `None` for an
-/// unknown mode.
-pub fn open(mode: u32, level: u32) -> Option<u64> {
-    let codec = Codec::new(mode, level.min(9))?;
+/// Opens a handle for Node zlib `mode` at compression `level` (0-9); Brotli modes take
+/// Node's (key, value) init `params` instead.
+pub fn open(mode: u32, level: u32, params: &[(u32, u32)]) -> Result<u64> {
+    let codec = Codec::new(mode, level.min(9), params)?;
     let id = NEXT_ID.with(|n| {
         n.set(n.get() + 1);
         n.get()
     });
     OPEN.with(|open| open.borrow_mut().insert(id, codec));
-    Some(id)
+    Ok(id)
 }
 
 /// Feeds `input` with `flush` through handle `id`, returning the bytes it produced. A
@@ -435,7 +460,7 @@ fn throw_zlib_error(scope: &mut v8::PinScope, error: ZlibError) {
     let exception = v8::Exception::error(scope, text);
     let object = exception.to_object(scope).unwrap();
     let key = v8::String::new(scope, "code").unwrap();
-    let value = v8::String::new(scope, code).unwrap();
+    let value = v8::String::new(scope, &code).unwrap();
     object.set(scope, key.into(), value.into());
     if let Some(errno) = errno {
         let key = v8::String::new(scope, "errno").unwrap();
@@ -449,7 +474,25 @@ fn handle_id(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> u64 {
     value.integer_value(scope).unwrap_or(0).max(0) as u64
 }
 
-/// `__ttZlibOpen(mode, level)`: a handle id; a TypeError for an unknown mode.
+/// Brotli init params from a Uint32Array of (key, value) pairs (none for anything else).
+fn param_pairs(value: v8::Local<v8::Value>) -> Vec<(u32, u32)> {
+    let bytes = crate::node_compat::bytes(value).unwrap_or_default();
+    let words: Vec<u32> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|w| u32::from_le_bytes(*w))
+        .collect();
+    words
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|p| (p[0], p[1]))
+        .collect()
+}
+
+/// `__ttZlibOpen(mode, level, params)`: a handle id, or a thrown Error with Node's code for
+/// an unknown mode or rejected Brotli params.
 pub fn native_zlib_open(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -457,13 +500,10 @@ pub fn native_zlib_open(
 ) {
     let mode = args.get(0).uint32_value(scope).unwrap_or(0);
     let level = args.get(1).uint32_value(scope).unwrap_or(6);
-    let Some(id) = open(mode, level) else {
-        let text = v8::String::new(scope, "invalid zlib mode").unwrap();
-        let error = v8::Exception::type_error(scope, text);
-        scope.throw_exception(error);
-        return;
-    };
-    rv.set_double(id as f64);
+    match open(mode, level, &param_pairs(args.get(2))) {
+        Ok(id) => rv.set_double(id as f64),
+        Err(error) => throw_zlib_error(scope, error),
+    }
 }
 
 /// `__ttZlibWrite(id, bytes, flush)`: the produced bytes as a Uint8Array, or a thrown Error

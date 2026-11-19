@@ -36,7 +36,12 @@ function __bufferSeparated(text) {
   for (; end >= start + 4; end -= 3) groups = `_${text.slice(end - 3, end)}${groups}`;
   return text.slice(0, end) + groups;
 }
-const __bufferRangeReceived = (value) => (Number.isInteger(value) && Math.abs(value) > 2 ** 32 ? __bufferSeparated(String(value)) : String(value));
+// BigInts get the n suffix, separated beyond 2n ** 32n.
+const __bufferBigReceived = (value) => `${value > 2n ** 32n || value < -(2n ** 32n) ? __bufferSeparated(String(value)) : value}n`;
+const __bufferRangeReceived = (value) => {
+  if (typeof value === 'bigint') return __bufferBigReceived(value);
+  return Number.isInteger(value) && Math.abs(value) > 2 ** 32 ? __bufferSeparated(String(value)) : String(value);
+};
 
 // Node's validateOffset (validateInteger with a 0 floor).
 function __bufferOffset(value, name, max) {
@@ -133,6 +138,8 @@ const __bufferWriteEncoders = Object.assign(Object.create(null), {
   ucs2: __bufferUtf16Bytes, 'ucs-2': __bufferUtf16Bytes, utf16le: __bufferUtf16Bytes, 'utf-16le': __bufferUtf16Bytes,
   hex: __bufferHexBytes, base64: __bufferBase64Bytes, base64url: __bufferBase64Bytes,
 });
+// Buffer.isEncoding (#434): the encoder table holds exactly Node's normalizeEncoding names.
+const __bufferIsEncoding = (encoding) => typeof encoding === 'string' && encoding.toLowerCase() in __bufferWriteEncoders;
 function __bufferWriteEncoder(encoding) {
   if (!encoding) return __bufferUtf8Bytes;
   const encoder = __bufferWriteEncoders[`${encoding}`.toLowerCase()];
@@ -225,29 +232,49 @@ function __bufferCopy(sourceValue, targetValue, targetStart, sourceStart, source
   return to - from;
 }
 
-// Integer reads and writes: Node's checkInt / checkBounds / boundsError.
-function __bufferBoundsError(offset, last) {
-  if (Math.floor(offset) !== offset) throw __bufferError(RangeError, 'ERR_OUT_OF_RANGE', `The value of "offset" is out of range. It must be an integer. Received ${offset}`);
+// Numeric reads and writes: Node's checkInt / checkBounds / boundsError (lib/internal/buffer.js).
+function __bufferNumberArg(value, name) {
+  if (typeof value !== 'number') throw __bufferError(TypeError, 'ERR_INVALID_ARG_TYPE', `The "${name}" argument must be of type number. Received ${__bufferReceived(value)}`);
+}
+// boundsError: `name` is "offset" (floor 0) or "byteLength" (floor 1).
+function __bufferBoundsError(value, last, name = 'offset') {
+  if (Math.floor(value) !== value) {
+    __bufferNumberArg(value, name);
+    throw __bufferError(RangeError, 'ERR_OUT_OF_RANGE', `The value of "${name}" is out of range. It must be an integer. Received ${value}`);
+  }
   if (last < 0) throw __bufferError(RangeError, 'ERR_BUFFER_OUT_OF_BOUNDS', 'Attempt to access memory outside buffer bounds');
-  throw __bufferError(RangeError, 'ERR_OUT_OF_RANGE', `The value of "offset" is out of range. It must be >= 0 and <= ${last}. Received ${__bufferRangeReceived(offset)}`);
+  throw __bufferError(RangeError, 'ERR_OUT_OF_RANGE', `The value of "${name}" is out of range. It must be >= ${name === 'offset' ? 0 : 1} and <= ${last}. Received ${__bufferRangeReceived(value)}`);
 }
 function __bufferIntBounds(buffer, offset, size) {
-  if (typeof offset !== 'number') throw __bufferError(TypeError, 'ERR_INVALID_ARG_TYPE', `The "offset" argument must be of type number. Received ${__bufferReceived(offset)}`);
+  __bufferNumberArg(offset, 'offset');
   if (buffer[offset] === undefined || buffer[offset + size - 1] === undefined) __bufferBoundsError(offset, buffer.length - size);
   return offset;
 }
-const __bufferInt8 = { size: 1, min: -128, max: 127, signed: true };
-const __bufferUInt8 = { size: 1, min: 0, max: 255, signed: false };
-const __bufferInt16 = { size: 2, min: -32768, max: 32767, signed: true };
-const __bufferUInt16 = { size: 2, min: 0, max: 65535, signed: false };
-const __bufferInt32 = { size: 4, min: -2147483648, max: 2147483647, signed: true };
-const __bufferUInt32 = { size: 4, min: 0, max: 4294967295, signed: false };
+const __bufferIntSpec = (size, signed) => {
+  const span = 2 ** (8 * size);
+  return signed ? { size, min: -span / 2, max: span / 2 - 1, signed } : { size, min: 0, max: span - 1, signed };
+};
+const __bufferBigSpec = (signed) => (signed
+  ? { size: 8, min: -(2n ** 63n), max: 2n ** 63n - 1n, signed, big: true }
+  : { size: 8, min: 0n, max: 2n ** 64n - 1n, signed, big: true });
+// checkInt's rule: the bounds up to 4 bytes, powers of two beyond (BigInts with an n suffix).
+function __bufferRangeRule(spec) {
+  if (spec.size <= 4) return `>= ${spec.min} and <= ${spec.max}`;
+  const n = spec.big ? 'n' : '', bits = 8 * spec.size;
+  if (!spec.signed) return `>= 0${n} and < 2${n} ** ${bits}${n}`;
+  return `>= -(2${n} ** ${bits - 1}${n}) and < 2${n} ** ${bits - 1}${n}`;
+}
+function __bufferCheckInt(buffer, value, offset, spec) {
+  if (value > spec.max || value < spec.min) throw __bufferError(RangeError, 'ERR_OUT_OF_RANGE', `The value of "value" is out of range. It must be ${__bufferRangeRule(spec)}. Received ${__bufferRangeReceived(value)}`);
+  __bufferIntBounds(buffer, offset, spec.size);
+}
 function __bufferWriteInt(buffer, value, offset, spec, little) {
   const number = +value;
-  if (number > spec.max || number < spec.min) throw __bufferError(RangeError, 'ERR_OUT_OF_RANGE', `The value of "value" is out of range. It must be >= ${spec.min} and <= ${spec.max}. Received ${__bufferRangeReceived(number)}`);
-  __bufferIntBounds(buffer, offset, spec.size);
-  const bits = number >>> 0;
-  for (let index = 0; index < spec.size; index++) buffer[offset + (little ? index : spec.size - 1 - index)] = bits >>> (8 * index);
+  __bufferCheckInt(buffer, number, offset, spec);
+  // Integer part in two's complement (NaN writes zeros, as a typed-array store does).
+  let bits = Math.trunc(number) || 0;
+  if (bits < 0) bits += 2 ** (8 * spec.size);
+  for (let index = 0; index < spec.size; index++) buffer[offset + (little ? index : spec.size - 1 - index)] = Math.floor(bits / 2 ** (8 * index)) % 256;
   return offset + spec.size;
 }
 function __bufferReadInt(buffer, offset, spec, little) {
@@ -256,25 +283,75 @@ function __bufferReadInt(buffer, offset, spec, little) {
   for (let index = 0; index < spec.size; index++) value = value * 256 + buffer[start + (little ? spec.size - 1 - index : index)];
   return spec.signed && value > spec.max ? value - 2 * (spec.max + 1) : value;
 }
-// Node's 8/16/32-bit integer methods, enumerable as Node assigns them, with the lower-case Uint
+const __bufferDataView = (buffer) => new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+// BigInt writes mask the value, which throws V8's mixing TypeError for a Number, as Node's do.
+function __bufferWriteBig(buffer, value, offset, spec, little) {
+  __bufferCheckInt(buffer, value, offset, spec);
+  __bufferDataView(buffer).setBigUint64(offset, value & 0xffffffffffffffffn, little);
+  return offset + 8;
+}
+function __bufferReadBig(buffer, offset, spec, little) {
+  const start = __bufferIntBounds(buffer, offset === undefined ? 0 : offset, 8);
+  return spec.signed ? __bufferDataView(buffer).getBigInt64(start, little) : __bufferDataView(buffer).getBigUint64(start, little);
+}
+const __bufferFloat = { size: 4, get: 'getFloat32', set: 'setFloat32' };
+const __bufferDouble = { size: 8, get: 'getFloat64', set: 'setFloat64' };
+function __bufferWriteFloat(buffer, value, offset, spec, little) {
+  const number = +value;
+  __bufferIntBounds(buffer, offset, spec.size);
+  __bufferDataView(buffer)[spec.set](offset, number, little);
+  return offset + spec.size;
+}
+function __bufferReadFloat(buffer, offset, spec, little) {
+  const start = __bufferIntBounds(buffer, offset === undefined ? 0 : offset, spec.size);
+  return __bufferDataView(buffer)[spec.get](start, little);
+}
+// Node's fixed-width numeric methods, enumerable as Node assigns them, with the lower-case Uint
 // aliases as the same functions. compress-commons writes zip headers with them (#404).
-const __bufferIntMethods = [
-  ['Int8', __bufferInt8, false], ['UInt8', __bufferUInt8, false],
-  ['Int16LE', __bufferInt16, true], ['Int16BE', __bufferInt16, false],
-  ['UInt16LE', __bufferUInt16, true], ['UInt16BE', __bufferUInt16, false],
-  ['Int32LE', __bufferInt32, true], ['Int32BE', __bufferInt32, false],
-  ['UInt32LE', __bufferUInt32, true], ['UInt32BE', __bufferUInt32, false],
-];
+const __bufferNumericMethods = [];
+for (const [bits, size] of [['8', 1], ['16', 2], ['32', 4]]) {
+  for (const signed of [true, false]) {
+    for (const end of size === 1 ? [''] : ['LE', 'BE']) __bufferNumericMethods.push([(signed ? 'Int' : 'UInt') + bits + end, __bufferIntSpec(size, signed), end === 'LE', __bufferReadInt, __bufferWriteInt]);
+  }
+}
+for (const end of ['LE', 'BE']) {
+  __bufferNumericMethods.push(['Float' + end, __bufferFloat, end === 'LE', __bufferReadFloat, __bufferWriteFloat],
+    ['Double' + end, __bufferDouble, end === 'LE', __bufferReadFloat, __bufferWriteFloat],
+    ['BigInt64' + end, __bufferBigSpec(true), end === 'LE', __bufferReadBig, __bufferWriteBig],
+    ['BigUInt64' + end, __bufferBigSpec(false), end === 'LE', __bufferReadBig, __bufferWriteBig]);
+}
+// read/write{Int,UInt}{LE,BE}(…, byteLength): byteLength 1..6 picks the width.
+const __bufferVarSpecs = { true: [], false: [] };
+for (let size = 1; size <= 6; size++) for (const signed of [true, false]) __bufferVarSpecs[signed][size] = __bufferIntSpec(size, signed);
+function __bufferVarSpec(byteLength, signed) {
+  if (typeof byteLength === 'number' && __bufferVarSpecs[signed][byteLength]) return __bufferVarSpecs[signed][byteLength];
+  return __bufferBoundsError(byteLength, 6, 'byteLength');
+}
+function __bufferVarMethods(name, signed, little) {
+  return {
+    ['read' + name](offset, byteLength) {
+      if (offset === undefined) __bufferNumberArg(offset, 'offset');
+      return __bufferReadInt(this, offset, __bufferVarSpec(byteLength, signed), little);
+    },
+    ['write' + name](value, offset, byteLength) { return __bufferWriteInt(this, value, offset, __bufferVarSpec(byteLength, signed), little); },
+  };
+}
+function __bufferInstall(proto, methods) {
+  for (const [key, method] of Object.entries(methods)) {
+    proto[key] = method;
+    if (key.includes('UInt')) proto[key.replace('UInt', 'Uint')] = method;
+  }
+}
 function __bufferInstallIntOps(proto) {
-  for (const [name, spec, little] of __bufferIntMethods) {
-    const methods = {
-      ['write' + name](value, offset = 0) { return __bufferWriteInt(this, value, offset, spec, little); },
-      ['read' + name](offset) { return __bufferReadInt(this, offset, spec, little); },
-    };
-    for (const [key, method] of Object.entries(methods)) {
-      proto[key] = method;
-      if (!spec.signed) proto[key.replace('UInt', 'Uint')] = method;
-    }
+  for (const [name, spec, little, read, write] of __bufferNumericMethods) {
+    __bufferInstall(proto, {
+      ['write' + name](value, offset = 0) { return write(this, value, offset, spec, little); },
+      ['read' + name](offset) { return read(this, offset, spec, little); },
+    });
+  }
+  for (const end of ['LE', 'BE']) {
+    __bufferInstall(proto, __bufferVarMethods('Int' + end, true, end === 'LE'));
+    __bufferInstall(proto, __bufferVarMethods('UInt' + end, false, end === 'LE'));
   }
 }
 
@@ -374,4 +451,66 @@ function __bufferFrom(Ctor, value, encodingOrOffset, length) {
   const out = typeof value === 'object' && value !== null ? __bufferFromValue(Ctor, value, encodingOrOffset, length) : null;
   if (out) return out;
   throw __bufferFromInvalid(value);
+}
+
+// Node's internal per-encoding methods (latin1Slice, utf8Write, ...; #418), which busboy calls.
+// They are bindings in Node: the receiver may be any ArrayBufferView, indices go through
+// ParseArrayIndex (ToInteger, negative = "Index out of range") except the latin1 / ascii / utf8
+// writes, which compare Number(offset) / Number(length) with the buffer first.
+const __bufferIndexError = () => __bufferError(RangeError, 'ERR_OUT_OF_RANGE', 'Index out of range');
+function __bufferArrayIndex(value, fallback) {
+  if (value === undefined) return fallback;
+  const index = Math.trunc(+value) || 0;
+  if (index < 0) throw __bufferIndexError();
+  return index;
+}
+function __bufferReceiverBytes(view) {
+  if (!ArrayBuffer.isView(view)) throw __bufferError(TypeError, 'ERR_INVALID_ARG_TYPE', 'argument must be a buffer');
+  return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+}
+// StringSlice: an empty buffer is '' whatever the indices; the end bound is checked before
+// an end below the start empties the range.
+function __bufferInternalSlice(view, start, end, encoding) {
+  const bytes = __bufferReceiverBytes(view);
+  if (bytes.length === 0) return '';
+  const from = __bufferArrayIndex(start, 0), to = __bufferArrayIndex(end, bytes.length);
+  if (to > bytes.length) throw __bufferIndexError();
+  return to <= from ? '' : __bufferStringDecoder(encoding)(bytes.subarray(from, to));
+}
+function __bufferWriteReceiver(view, string) {
+  const bytes = __bufferReceiverBytes(view);
+  if (typeof string !== 'string') throw __bufferError(TypeError, 'ERR_INVALID_ARG_TYPE', 'argument must be a string');
+  return bytes;
+}
+function __bufferEncodeInto(bytes, string, at, limit, encoding) {
+  const encoded = __bufferWriteEncoder(encoding)(string, limit);
+  bytes.set(encoded, at);
+  return encoded.length;
+}
+// StringWrite (base64, base64url, hex, ucs2): the length is clamped to the room left.
+function __bufferInternalWrite(view, string, offset, length, encoding) {
+  const bytes = __bufferWriteReceiver(view, string);
+  const at = __bufferArrayIndex(offset, 0);
+  if (at > bytes.length) throw __bufferOutOfBounds('offset');
+  const limit = Math.min(bytes.length - at, __bufferArrayIndex(length, bytes.length - at));
+  return __bufferEncodeInto(bytes, string, at, limit, encoding);
+}
+// The latin1 / ascii / utf8 writes: offset and length outside the buffer throw.
+function __bufferChecked(value, fallback, room, name) {
+  const number = value === undefined ? fallback : Number(value);
+  if (number < 0 || number > room) throw __bufferOutOfBounds(name);
+  return number;
+}
+function __bufferCheckedWrite(view, string, offset, length, encoding) {
+  const bytes = __bufferWriteReceiver(view, string);
+  const at = __bufferChecked(offset, 0, bytes.length, 'offset');
+  const limit = __bufferChecked(length, bytes.length - at, bytes.length - at, 'length');
+  return __bufferEncodeInto(bytes, string, Math.trunc(at) || 0, Math.trunc(limit) || 0, encoding);
+}
+function __bufferInstallInternalOps(proto) {
+  for (const encoding of ['latin1', 'ascii', 'utf8', 'base64', 'base64url', 'hex', 'ucs2']) {
+    const write = ['latin1', 'ascii', 'utf8'].includes(encoding) ? __bufferCheckedWrite : __bufferInternalWrite;
+    proto[encoding + 'Slice'] = function(start, end) { return __bufferInternalSlice(this, start, end, encoding); };
+    proto[encoding + 'Write'] = function(string, offset, length) { return write(this, string, offset, length, encoding); };
+  }
 }

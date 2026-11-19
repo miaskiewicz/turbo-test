@@ -2061,6 +2061,7 @@ if (typeof globalThis.Buffer === 'undefined') {
       return Math.sign(a.length - b.length);
     }
     static byteLength(value, encoding) { return __bufferByteLength(value, encoding); }
+    static isEncoding(encoding) { return __bufferIsEncoding(encoding); }
     static isBuffer(x) { return x instanceof Buffer; }
     static concat(list) { const len = list.reduce((n, b) => n + b.length, 0); const out = new Buffer(len); let o = 0; for (const b of list) { out.set(b, o); o += b.length; } return out; }
     // Instance byte operations live in node_buffer_ops.js (turbo-test#408, #409).
@@ -2075,8 +2076,9 @@ if (typeof globalThis.Buffer === 'undefined') {
     toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
   }
   __bufferInstallIntOps(Buffer.prototype);
+  __bufferInstallInternalOps(Buffer.prototype);
   // Node's public static methods are enumerable; safer-buffer copies them with for-in.
-  for (const name of ['from', 'alloc', 'allocUnsafe', 'byteLength', 'isBuffer', 'concat', 'compare']) {
+  for (const name of ['from', 'alloc', 'allocUnsafe', 'byteLength', 'isBuffer', 'isEncoding', 'concat', 'compare']) {
     Object.defineProperty(Buffer, name, { enumerable: true });
   }
   globalThis.Buffer = Buffer;
