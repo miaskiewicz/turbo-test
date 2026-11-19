@@ -34,6 +34,8 @@ function commonContext() {
  const context=vm.createContext({TextEncoder,TextDecoder,__ttLoadChai:()=>chai,log(){},__ttWrite(){},
   __ttRandomBytes:(length)=>new Uint8Array(crypto.randomBytes(length)),
   __ttCryptoHashes:(operation,key,data)=>new Uint8Array(crypto.createHmac(operation.slice(5),key).update(data).digest()).buffer,
+  // The native drains V8's microtask queue; under node:vm, Node drains it itself after each call.
+  __ttRunMicrotasks(){},
  });
  vm.runInContext(assembled('runtime.js'),context,{timeout:3000});
  return context;
