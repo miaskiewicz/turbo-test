@@ -627,10 +627,23 @@ npm run complexity:js        # CI job `complexity / js (cc <= 7)`
 
 ### Gates and CI
 
+Branch CI runs automatically when a PR is opened, reopened, or updated, regardless
+of its target branch. Branch pushes without an open PR do not start CI. To run CI
+without a PR, use **Actions → CI → Run workflow** and select the branch, or run:
+
+```sh
+gh workflow run ci.yml --repo miaskiewicz/turbo-test --ref main
+gh run list --repo miaskiewicz/turbo-test --workflow ci.yml --branch main --event workflow_dispatch
+```
+
+Replace `main` with your branch. It must contain the `workflow_dispatch` trigger;
+merge the latest `main` into older branches first. Manual CI on a branch does not
+publish packages; `v*` tag publishing remains enabled.
+
 - **Pull requests** (`.github/workflows/ci.yml`): the `build` job builds and runs the Rust tests on
   ubuntu (x64, arm64) and Windows x64, plus the smoke test, the CLI compatibility/type tests and
   the native DOM compatibility fixtures on linux x64. The aarch64-apple-darwin build runs only on
-  `main` and `v*` tag pushes, i.e. in the release.
+  manual CI runs and `v*` tag pushes.
 - **Windows experimental — nonblocking.** The separate `windows-experimental.yml`
   workflow installs dependencies, builds the runner and runs locked Rust tests on
   Windows, including platform path fixtures. Its actual results are informational;

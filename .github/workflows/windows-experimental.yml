@@ -1,10 +1,7 @@
 name: Windows experimental
 
 on:
-  push:
-    branches: [main, release/0.8.4]
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
