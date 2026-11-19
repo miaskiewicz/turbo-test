@@ -5015,8 +5015,65 @@ function __toThrowFn(c, expected, threw, err) {
   const name = expected.name || expected.prototype.constructor.name;
   return c(threw && err instanceof expected, `expected error to be instance of ${name}`, `expected error not to be instance of ${name}`, expected, err);
 }
+// Jest 30's createMessageAndCause: the message, or with a truthy cause the JSON of the error's
+// own props but stack / fileName / lineNumber (sorted, causes nested, cycles cut, bigint and
+// undefined as strings)
+const __JEST_UNSERIALIZED = new Set(['stack', 'fileName', 'lineNumber']);
+function __jestSerializeError(e) {
+  if (e === null || typeof e !== 'object') return e;
+  const out = {};
+  for (const name of Object.getOwnPropertyNames(e).sort()) {
+    if (!__JEST_UNSERIALIZED.has(name)) out[name] = name === 'cause' ? __jestSerializeError(e.cause) : e[name];
+  }
+  return out;
+}
+function __jestMessageAndCause(e) {
+  if (!e.cause) return e.message;
+  const seen = new WeakSet();
+  return JSON.stringify(__jestSerializeError(e), (_, v) => {
+    if (v !== null && typeof v === 'object') {
+      if (seen.has(v)) return undefined;
+      seen.add(v);
+    }
+    return typeof v === 'bigint' || v === undefined ? String(v) : v;
+  });
+}
+// Jest's getThrown: the thrown value's message (a string `message`, else String(value)) and
+// whether it is an Error by shape (string message, name and stack)
+function __jestThrown(err) {
+  const hasMessage = err !== null && err !== undefined && typeof err.message === 'string';
+  const isError = hasMessage && typeof err.name === 'string' && typeof err.stack === 'string';
+  return { isError, message: hasMessage ? err.message : String(err) };
+}
+// toThrow(object) in a jest project (turbo-test#403): Jest 30's toThrowExpectedObject — the same
+// message, the same message-and-cause, and for an expected custom error class an instance of it.
+// Own props beyond those (a Nest exception's response body) are not compared, unlike vitest.
+// whether a thrown error must be an instance of the expected one's class: an Error compared with
+// an expected Error of a custom class
+function __jestClassMatters(thrown, expected) {
+  return thrown.isError && expected instanceof Error && expected.constructor.name !== 'Error';
+}
+function __jestObjectPass(expected, err, want) {
+  const thrown = __jestThrown(err);
+  if (thrown.message !== expected.message || __jestMessageAndCause(err) !== want) return false;
+  return !__jestClassMatters(thrown, expected) || err instanceof expected.constructor;
+}
+function __toThrowJestObject(c, expected, threw, err) {
+  const want = __jestMessageAndCause(expected);
+  const pass = threw && __jestObjectPass(expected, err, want);
+  const got = threw ? __jestMessageAndCause(err) : undefined;
+  return c(pass, 'expected a thrown error to have message #{exp}', 'expected a thrown error not to have message #{exp}', want, got);
+}
+// toThrow(value) compared the Jest way: any object but an asymmetric matcher, in a jest project
+function __jestObjectExpected(expected) {
+  return !!globalThis.__ttJestProject && expected !== null && typeof expected === 'object' && !__isAsym(expected);
+}
 function __toThrowValue(c, testers, expected, threw, err) {
   if (typeof expected === 'function') return __toThrowFn(c, expected, threw, err);
+  if (__jestObjectExpected(expected)) return __toThrowJestObject(c, expected, threw, err);
+  return __toThrowVitestValue(c, testers, expected, threw, err);
+}
+function __toThrowVitestValue(c, testers, expected, threw, err) {
   // an Error or any other value: vitest's `equals(thrown, expected, [iterableEquality])`
   // (Errors by name / message / cause / own props; a plain object never equals an Error)
   if (__isError(expected)) {
