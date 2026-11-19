@@ -3450,7 +3450,8 @@ const __util = {
   formatWithOptions: (o, ...a) => __nodeFormatWith(o, ...a),
   deprecate: (fn, _msg) => fn,
   debuglog: () => (() => {}),
-  isDeepStrictEqual: (a, b) => { try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return a === b; } },
+  // assert.deepStrictEqual's comparison (turbo-test#422): key order never matters
+  isDeepStrictEqual: (a, b) => __deepEq(a, b, true),
   types: { isPromise: (x) => x && typeof x.then === 'function', isDate: __utilIsDate, isRegExp: (x) => x instanceof RegExp, isNativeError: (x) => x instanceof Error, isArrayBuffer: (x) => x instanceof ArrayBuffer, isTypedArray: (x) => ArrayBuffer.isView(x) },
   TextEncoder: globalThis.TextEncoder,
   TextDecoder: globalThis.TextDecoder,
