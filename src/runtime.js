@@ -5942,11 +5942,20 @@ globalThis.__ttMockNames = (m) => (m && (typeof m === 'object' || typeof m === '
 // arrays are kept.
 // Own static keys that an automocked function must not copy (function built-ins and shape).
 const __AUTOMOCK_FN_SKIP = new Set(['length', 'name', 'prototype', 'caller', 'arguments']);
-// __automockFn's own-static pass: copy each non-skipped key through the recursive automocker.
+// __automockFn's static pass: copy each non-skipped key through the recursive automocker. A
+// class's inherited statics count too (`static async create` on a base class; turbo-test#406):
+// jest's moduleMocker and vitest's automocker both walk the constructor chain up to
+// Function.prototype, the nearest definition winning.
+function __automockFnStatic(m, mod, k, seen, depth, spy) {
+  if (__AUTOMOCK_FN_SKIP.has(k) || seen.has(k)) return;
+  seen.add(k);
+  try { m[k] = __automock(mod[k], depth + 1, spy); } catch (e) {}
+}
 function __automockFnStatics(m, mod, depth, spy) {
-  for (const k of Object.getOwnPropertyNames(mod)) {
-    if (__AUTOMOCK_FN_SKIP.has(k)) continue;
-    try { m[k] = __automock(mod[k], depth + 1, spy); } catch (e) {}
+  const seen = new Set();
+  // (an async / generator function's prototype is an object, not a constructor: not walked)
+  for (let c = mod; typeof c === 'function' && c !== Function.prototype; c = Object.getPrototypeOf(c)) {
+    for (const k of Object.getOwnPropertyNames(c)) __automockFnStatic(m, mod, k, seen, depth, spy);
   }
 }
 function __automockFn(mod, depth, spy) {
