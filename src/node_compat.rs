@@ -37,20 +37,20 @@ pub fn native_is_ip(
     rv.set_int32(ip_version(&input.to_rust_string_lossy(scope)));
 }
 
-fn bytes(value: v8::Local<v8::Value>) -> Option<Vec<u8>> {
+pub(crate) fn bytes(value: v8::Local<v8::Value>) -> Option<Vec<u8>> {
     let view = v8::Local::<v8::ArrayBufferView>::try_from(value).ok()?;
     let mut data = vec![0; view.byte_length()];
     view.copy_contents(&mut data);
     Some(data)
 }
 
-fn throw_error(scope: &mut v8::PinScope, message: &str) {
+pub(crate) fn throw_error(scope: &mut v8::PinScope, message: &str) {
     let text = v8::String::new(scope, message).unwrap();
     let error = v8::Exception::error(scope, text);
     scope.throw_exception(error);
 }
 
-fn return_bytes(scope: &mut v8::PinScope, rv: &mut v8::ReturnValue, data: Vec<u8>) {
+pub(crate) fn return_bytes(scope: &mut v8::PinScope, rv: &mut v8::ReturnValue, data: Vec<u8>) {
     let len = data.len();
     let store = v8::ArrayBuffer::new_backing_store_from_vec(data).make_shared();
     let buffer = v8::ArrayBuffer::with_backing_store(scope, &store);

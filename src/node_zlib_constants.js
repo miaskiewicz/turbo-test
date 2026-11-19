@@ -1,4 +1,4 @@
-// Standard zlib metadata only; exported flush flags do not implement streaming flush.
+// Standard zlib metadata; the streams of node_zlib.js honour the flush flags.
 const __zlibStandardValues={
   "Z_NO_FLUSH": 0,
   "Z_PARTIAL_FLUSH": 1,
