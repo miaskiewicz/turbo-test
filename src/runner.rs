@@ -10356,7 +10356,27 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     if crate::runtime_profile::is_node() {
         install_backend_natives(scope, global);
         crate::runtime_profile::install_backend(scope);
+    } else {
+        bind_fn(scope, global, "__ttActivateBackend", activate_backend);
     }
+}
+
+// A DOM context's first use of a backend capability (tty, zlib, child_process, crypto
+// ciphers, ...) installs the backend natives and payload into it, as vitest's jsdom has all of
+// Node. A reused context then counts as Node, so the next DOM file gets a fresh isolate.
+fn activate_backend(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    if crate::runtime_profile::is_node() {
+        return;
+    }
+    crate::runtime_profile::activate_node();
+    mark_reuse_backend();
+    let global = scope.get_current_context().global(scope);
+    install_backend_natives(scope, global);
+    crate::runtime_profile::install_backend(scope);
 }
 
 fn reset_backend_transports() {
@@ -11906,10 +11926,11 @@ fn persist_entry_dir(scope: &mut v8::PinScope, entry_abs: &Path) {
     }
 }
 
-struct FreshBackendCleanup(bool);
+// Read when the file ends: a DOM file may have activated the backend on first use.
+struct FreshBackendCleanup;
 impl Drop for FreshBackendCleanup {
     fn drop(&mut self) {
-        if self.0 {
+        if crate::runtime_profile::is_node() {
             reset_backend_transports();
         }
     }
@@ -11926,7 +11947,7 @@ fn run_test_file_isolated(entry_abs: &Path, plan: &EntryPlan) -> Result<TestRepo
     // present). We time setup (isolate+context+natives) — the M3/M0 guardrail.
     let setup_start = std::time::Instant::now();
     let isolate = &mut v8::Isolate::new(isolate_params());
-    let _backend_cleanup = FreshBackendCleanup(crate::runtime_profile::is_node());
+    let _backend_cleanup = FreshBackendCleanup;
     isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
     isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
     crate::heap_guard::install(isolate);
@@ -12199,9 +12220,18 @@ fn log_heap(scope: &mut v8::PinScope, entry: &Path, recycled: bool) {
 thread_local! {
     static REUSE_PROFILE: std::cell::Cell<Option<crate::runtime_profile::RuntimeProfile>> = const { std::cell::Cell::new(None) };
 }
+thread_local! {
+    // a reused DOM context activated the backend: neither profile may reuse it
+    static REUSE_MIXED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn mark_reuse_backend() {
+    REUSE_MIXED.with(|mixed| mixed.set(true));
+}
 fn select_reuse_profile(profile: crate::runtime_profile::RuntimeProfile) {
     let previous = REUSE_PROFILE.with(|previous| previous.get());
-    if previous.is_some_and(|previous| previous != profile) {
+    if REUSE_MIXED.with(|mixed| mixed.replace(false))
+        || previous.is_some_and(|previous| previous != profile)
+    {
         end_worker_reuse();
     }
     REUSE_PROFILE.with(|previous| previous.set(Some(profile)));
@@ -12296,7 +12326,8 @@ fn run_test_file_reused(entry_abs: &Path, plan: &EntryPlan) -> Result<TestReport
 /// outliving the isolate. No-op when reuse was never used.
 pub fn end_worker_reuse() {
     let previous = REUSE_PROFILE.with(|previous| previous.take());
-    if previous == Some(crate::runtime_profile::RuntimeProfile::Node) {
+    let mixed = REUSE_MIXED.with(|mixed| mixed.replace(false));
+    if mixed || previous == Some(crate::runtime_profile::RuntimeProfile::Node) {
         reset_backend_transports();
     }
     if REUSE_ISO.with(|i| i.borrow().is_none()) {

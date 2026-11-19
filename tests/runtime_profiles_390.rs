@@ -25,7 +25,9 @@ test('DOM initializes browser without backend payload or callbacks',async()=>{
  assert.equal(eval('typeof __nodeKeys'),'undefined');assert.equal(eval('typeof __nodeAes'),'undefined');assert.equal(eval('typeof __tcpSockets'),'undefined');
  assert.equal(typeof globalThis.__otherProfileSentinel,'undefined');globalThis.__otherProfileSentinel='DOM';
  assert.equal(require('node:crypto').createHmac('sha256',Buffer.alloc(20,11)).update('Hi There').digest('hex'),'b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7');
- assert.throws(()=>require('node:crypto').createCipheriv(),{code:'ERR_TURBO_BACKEND_CAPABILITY'});
+ // first use of a backend capability activates the backend, as vitest's jsdom has all of Node
+ const domCipher=require('node:crypto').createCipheriv('aes-256-gcm',Buffer.alloc(32),Buffer.alloc(12));
+ assert.equal(Buffer.concat([domCipher.update(Buffer.alloc(16)),domCipher.final()]).toString('hex'),'cea7403d4d606b6e074ec5d3baf39d18');assert.equal(globalThis.__ttRuntimeBackendInstalled,true);
  const element=document.createElement('p');element.textContent='profile DOM';document.body.appendChild(element);
  const channel=new MessageChannel();
  await new Promise((resolve,reject)=>{channel.port2.onmessage=event=>{try{assert.equal(event.data,'profile task');resolve();}catch(error){reject(error);}finally{channel.port1.close();channel.port2.close();}};channel.port1.postMessage('profile task');});
