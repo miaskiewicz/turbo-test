@@ -2743,35 +2743,7 @@ for (const name of Object.getOwnPropertyNames(__EventEmitter.prototype).filter((
 /* __TT_NODE_WARNINGS__ */
 const __events = Object.assign(__EventEmitter, { EventEmitter: __EventEmitter, default: __EventEmitter, once: (em, e) => new Promise((res) => em.once(e, (...a) => res(a))) });
 /* __TT_NODE_STREAMS__ */
-const __dcChannels = new Map();
-class __DiagnosticChannel {
-  constructor(name) { this.name = name; this._subscribers = []; }
-  get hasSubscribers() { return this._subscribers.length > 0; }
-  subscribe(fn) {
-    if (typeof fn !== 'function') throw new TypeError('subscriber must be a function');
-    this._subscribers.push(fn);
-  }
-  unsubscribe(fn) {
-    const index = this._subscribers.indexOf(fn);
-    if (index < 0) return false;
-    this._subscribers.splice(index, 1);
-    return true;
-  }
-  publish(message) { this._subscribers.slice().forEach((fn) => fn(message, this.name)); }
-}
-function __diagnosticChannel(name) {
-  if (typeof name !== 'string' && typeof name !== 'symbol') throw new TypeError('channel name must be a string or symbol');
-  if (!__dcChannels.has(name)) __dcChannels.set(name, new __DiagnosticChannel(name));
-  return __dcChannels.get(name);
-}
-const __dc = {
-  Channel: __DiagnosticChannel,
-  channel: __diagnosticChannel,
-  hasSubscribers: (name) => __diagnosticChannel(name).hasSubscribers,
-  subscribe: (name, fn) => __diagnosticChannel(name).subscribe(fn),
-  unsubscribe: (name, fn) => __diagnosticChannel(name).unsubscribe(fn),
-};
-__dc.default = __dc;
+/* __TT_NODE_DIAGNOSTICS_CHANNEL__ */
 // ---- Node's util.inspect / util.format (Node 26; turbo-test#93) ----
 // The shape of Node's formatValue / formatRaw / reduceToSingleString / groupArrayElements:
 // depth 2, breakLength 80, compact 3, maxArrayLength 100; console.log formats through it.
