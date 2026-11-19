@@ -803,6 +803,32 @@ fn the_default_cache_dir_is_per_build() {
     assert_eq!(env!("TT_BUILD_ID").len(), 16);
 }
 
+/// A TURBO_CACHE_DIR is a root shared across builds (a persisted CI cache, an upgrade): this
+/// build's artifacts, startup snapshots included, live in its own `<version>-<build id>` folder.
+#[test]
+fn a_custom_cache_root_is_per_build_too() {
+    let d = build_cache_dir(Path::new("/ci/cache"));
+    assert_eq!(d, Path::new("/ci/cache").join(BUILD_TAG));
+    assert_eq!(
+        BUILD_TAG,
+        format!("{}-{}", env!("CARGO_PKG_VERSION"), env!("TT_BUILD_ID"))
+    );
+    assert_eq!(
+        default_cache_dir(Path::new("/t")),
+        build_cache_dir(Path::new("/t/turbo-test-cache"))
+    );
+    // every artifact path (here a startup snapshot's) is under the build's folder
+    let blob = saved_blob_path("framework", 1);
+    assert_eq!(
+        blob.parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy(),
+        BUILD_TAG
+    );
+}
+
 /// turbo-test#209: a quote or backtick inside a comment does not open a string for the
 /// shared-let rewrite. payroll-app's RegistrationFields.test.tsx has a JSX comment with
 /// `undefined` in backticks above its `useCurrentEntity: () => currentEntity` factory; the

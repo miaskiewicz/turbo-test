@@ -1157,20 +1157,28 @@ const TRANSFORM_VERSION: &str = "oxc-0.134-v1";
 /// The default transform cache under `tmp`: one directory per turbo-test build
 /// (`turbo-test-cache/<version>-<build id>`, build.rs), so an entry another build wrote (an older
 /// release, a pre-release, another worktree) is never served as a hit (turbo-test#207).
+/// This build's name: `<version>-<build id>`, the build id hashing every source the binary embeds
+/// (the runtime included) and Cargo.lock (build.rs).
+const BUILD_TAG: &str = concat!(env!("CARGO_PKG_VERSION"), "-", env!("TT_BUILD_ID"));
+
 fn default_cache_dir(tmp: &Path) -> PathBuf {
-    tmp.join("turbo-test-cache").join(format!(
-        "{}-{}",
-        env!("CARGO_PKG_VERSION"),
-        env!("TT_BUILD_ID")
-    ))
+    build_cache_dir(&tmp.join("turbo-test-cache"))
+}
+
+/// The folder under a cache root (the shared temp one, or the user's TURBO_CACHE_DIR) that holds
+/// this build's artifacts: every cached transform, bundle, bytecode cache and startup snapshot is
+/// keyed by its own inputs, not by the build, so a root shared across builds (a persisted CI
+/// cache, an upgrade) must never let one build read another's (turbo-test#207).
+fn build_cache_dir(root: &Path) -> PathBuf {
+    root.join(BUILD_TAG)
 }
 
 fn cache_dir() -> PathBuf {
-    // TURBO_CACHE_DIR overrides the shared temp cache — lets a test run against an isolated,
+    // TURBO_CACHE_DIR overrides the shared temp cache root — lets a test run against an isolated,
     // freshly-cleared cache without disturbing other concurrent turbo-test processes that share
     // the default location.
     let d = std::env::var_os("TURBO_CACHE_DIR")
-        .map(PathBuf::from)
+        .map(|root| build_cache_dir(Path::new(&root)))
         .unwrap_or_else(|| default_cache_dir(&std::env::temp_dir()));
     // create_dir_all runs on every call (9 call sites per module load) though the dir only needs
     // creating once. Memoize the (dir -> created) fact in a OnceLock keyed by the resolved path so

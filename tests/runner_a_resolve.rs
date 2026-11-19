@@ -46,7 +46,7 @@ fn dual_pkg(p: &Project) {
 }
 
 fn svgr_stubs(p: &Project) -> Vec<String> {
-    std::fs::read_dir(p.path(".tt-cache"))
+    std::fs::read_dir(p.build_cache())
         .unwrap()
         .filter_map(|e| {
             let n = e.unwrap().file_name().to_string_lossy().into_owned();
@@ -112,7 +112,7 @@ test('?raw resolves the base file', () => expect(typeof raw).toBe('string'));
     // the stub imports react by the concrete path this importer resolves
     let stubs = svgr_stubs(&p);
     assert_eq!(stubs.len(), 1, "{stubs:?}");
-    let stub = std::fs::read_to_string(p.path(".tt-cache").join(&stubs[0])).unwrap();
+    let stub = std::fs::read_to_string(p.build_cache().join(&stubs[0])).unwrap();
     let react = p.path("node_modules/react/index.js");
     assert!(
         stub.contains(&format!("from '{}';", react.display())),
@@ -141,7 +141,7 @@ fn svgr_stub_falls_back_to_bare_react_when_unresolvable() {
     assert_eq!(counts(&r), (1, 0, vec!["passed".into()]), "{}", r.all());
     let stubs = svgr_stubs(&p);
     assert_eq!(stubs.len(), 1, "{stubs:?}");
-    let stub = std::fs::read_to_string(p.path(".tt-cache").join(&stubs[0])).unwrap();
+    let stub = std::fs::read_to_string(p.build_cache().join(&stubs[0])).unwrap();
     assert!(
         stub.contains("import { createElement, forwardRef } from 'react';"),
         "{stub}"

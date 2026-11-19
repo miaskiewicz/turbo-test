@@ -287,7 +287,7 @@ fn a_setup_file_that_fails_to_bundle_fails_the_test_file() {
         text.all()
     );
     // no half-written temp bundle is left behind in the cache
-    let leftovers: Vec<_> = std::fs::read_dir(p.path(".tt-cache"))
+    let leftovers: Vec<_> = std::fs::read_dir(p.build_cache())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|n| n.contains(".tmp"))
