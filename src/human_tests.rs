@@ -14,6 +14,7 @@ fn file(idx: usize, tests: Vec<TestCase>) -> FileResult {
         load_error: false,
         failed_file,
         error_msg: String::new(),
+        file_message: String::new(),
         tests,
         suites: Vec::new(),
         snapshot: None,

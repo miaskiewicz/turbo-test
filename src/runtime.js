@@ -585,12 +585,18 @@ if (typeof globalThis.queueMicrotask !== 'function') {
 }
 
 // Date faking
+// The body of the runner's Date constructors (the virtual and the fake one): called, the clock's
+// time as a string; under `new`, a real Date built for new.target (Reflect.construct), so a
+// `class X extends Date` instance keeps X's prototype and methods (@date-fns/tz's TZDate:
+// turbo-test#416); without arguments it holds the clock's time.
+function __dateConstruct(Real, target, args, now) {
+  if (!target) return new Real(now()).toString();
+  return Reflect.construct(Real, args.length ? args : [now()], target);
+}
 function __installFakeDate() {
   const Real = __loop.RealDate;
   function FakeDate(...args) {
-    if (!(this instanceof FakeDate)) return new Real(__loop.systemTime + __loop.fnow).toString();
-    if (args.length === 0) return new Real(__loop.systemTime + __loop.fnow);
-    return new Real(...args);
+    return __dateConstruct(Real, new.target, args, () => __loop.systemTime + __loop.fnow);
   }
   Object.defineProperty(FakeDate, 'name', { value: 'Date', configurable: true });
   FakeDate.prototype = Real.prototype;
@@ -612,9 +618,7 @@ function __installVirtualDate() {
   const Real = __loop.RealDate;
   if (!__virtualBase) __virtualBase = __loop.realNow();
   function VDate(...args) {
-    if (!(this instanceof VDate)) return new Real(__virtualBase + __loop.now).toString();
-    if (args.length === 0) return new Real(__virtualBase + __loop.now);
-    return new Real(...args);
+    return __dateConstruct(Real, new.target, args, () => __virtualBase + __loop.now);
   }
   Object.defineProperty(VDate, 'name', { value: 'Date', configurable: true });
   VDate.prototype = Real.prototype;
@@ -4521,10 +4525,14 @@ function __eqFast(a, b, aStack, bStack, cls) {
   if (typeof a !== 'object' || typeof b !== 'object') return false;
   return __eqFastObject(a, b, aStack, bStack);
 }
+// Whether two arrays of different lengths are unequal: always in vitest's `equals`; in Jest's only
+// under strictCheck (toStrictEqual), otherwise the extra items are compared as keys, so an
+// undefined one is ignored like an undefined property (turbo-test#423).
+const __arrayLengthChecked = (hasKey) => hasKey === __hasKey || !globalThis.__ttJestProject;
 function __eqWalk(a, b, aStack, bStack, testers, hasKey, cls) {
   aStack.push(a);
   bStack.push(b);
-  if (cls === '[object Array]' && a.length !== b.length) return false;
+  if (cls === '[object Array]' && a.length !== b.length && __arrayLengthChecked(hasKey)) return false;
   if (__isError(a) && __isError(b)) return __eqError(a, b, aStack, bStack, testers, hasKey);
   if (!__eqOwnKeys(a, b, aStack, bStack, testers, hasKey)) return false;
   aStack.pop();
@@ -5980,10 +5988,15 @@ function __automockFnStatics(m, mod, depth, spy) {
     for (const k of Object.getOwnPropertyNames(c)) __automockFnStatic(m, mod, k, seen, depth, spy);
   }
 }
+// a jest project's automock is a jest-mock constructor: under `new` its implementation (an arrow
+// included) is applied to the allocated receiver, as jest.fn()'s (turbo-test#421). A spy keeps
+// its original (a class can't be applied), as vitest's.
+const __automockJestConstructor = (spy) => !!globalThis.__ttJestProject && !spy;
 function __automockFn(mod, depth, spy) {
   const m = __trackSpy(makeSpy(undefined, { original: spy ? mod : undefined }));
   // vitest's automocker keeps the function's own name (`Comp.name`, not the spy's) (turbo-test#136)
   try { Object.defineProperty(m, 'name', { value: mod.name, configurable: true }); } catch (e) {}
+  m[__mockConfigKey].jestConstructor = __automockJestConstructor(spy);
   if (depth < 3) {
     __automockFnStatics(m, mod, depth, spy);
     // class / constructor function: `new m()` returns an instance of m.prototype, whose
@@ -9629,9 +9642,16 @@ async function __vtRunHook(h, args, name) {
     // called as a plain function, as vitest calls it (its frame has no method name)
     const fn = h.fn;
     const r = await __vtSettle(async () => fn(...args), __hookArm(h, args[0]));
-    // a cleanup runs under its hook's timeout (vitest's getBeforeHookCleanupCallback)
-    return typeof r === 'function' ? { fn: r, hook: h, ctx: args[0] } : undefined;
+    return __hookCleanup(r, h, args[0]);
   });
+}
+// A function a beforeEach / beforeAll hook returned is its cleanup (vitest's
+// getBeforeHookCleanupCallback), run under the hook's timeout. Jest ignores a hook's return value
+// (it only awaits a promise): in a jest project `beforeEach(() => mock.mockClear())` returns the
+// mock, which must not be called afterwards (turbo-test#417).
+function __hookCleanup(r, h, ctx) {
+  if (typeof r !== 'function' || globalThis.__ttJestProject) return undefined;
+  return { fn: r, hook: h, ctx };
 }
 // callSuiteHook: a suite's hooks (afterEach / afterAll last registered first); beforeEach runs
 // the enclosing suites' first, afterEach after. `chain[i]` is the suite. A throw stops them.
@@ -9740,7 +9760,8 @@ function __runTestBody(t, ctx, timeoutMs) {
       // describe( call returned: no enclosing describe( frames)
       const frames = String(t.stackTrace.stack).split('\n');
       const own = frames.findIndex((l, i) => i > 0 && !!globalThis.__ttFile && l.includes(globalThis.__ttFile));
-      err.stack = (own < 0 ? frames : frames.slice(0, own + 1)).join('\n');
+      // headed by the timeout's message (vitest 5's makeTimeoutError: turbo-test#426)
+      err.stack = (own < 0 ? frames : frames.slice(0, own + 1)).join('\n').replace('STACK_TRACE_ERROR', err.message);
       // the context's signal aborts with the timeout error (vitest's `withTimeout`)
       t.abort.abort(err);
       reject(err);
@@ -10076,7 +10097,7 @@ function __suiteOpen(suite, ancestors, summary, mode) {
   return st;
 }
 function __suiteClose(st) {
-  if (st.suiteErrors.length && st.ancestors.length) __recordSuiteErrors(st.suite, st.summary, st.suiteSlot, st.suiteStart, st.suiteErrors);
+  __recordHookErrors(st);
   __ttLogTask = st.outerTask;
   st.record(__suiteState(st.failed, st.skipAll, st.idle));
   return st.failed;
@@ -10163,6 +10184,13 @@ function __suitePlan(suite, ancestors, summary, skipAll) {
   return { idle, forbidden, hooks: !skipAll && !idle && !forbidden };
 }
 const __suiteTaskName = (suite, ancestors) => (ancestors.length ? [...ancestors.slice(1), suite].map((x) => x.name).join(' > ') : '');
+// A suite's hook errors: a describe's are its suite's (turbo-test#81); the root suite's are the
+// file task's errors, whose first message is vitest's JSON `message` for the file (turbo-test#426).
+function __recordHookErrors(st) {
+  if (!st.suiteErrors.length) return;
+  if (st.ancestors.length) __recordSuiteErrors(st.suite, st.summary, st.suiteSlot, st.suiteStart, st.suiteErrors);
+  else st.summary.file_errors = st.suiteErrors.map((e) => e.message);
+}
 function __recordSuiteErrors(suite, summary, suiteSlot, suiteStart, suiteErrors) {
   summary.suite_errors[suiteSlot] = { name: suite.name, duration_ms: __loop.elapsed() - suiteStart, errors: suiteErrors };
 }
@@ -10214,7 +10242,7 @@ globalThis.__tt = {
     if (globalThis.__ttInstallJsdomComputedStyle) globalThis.__ttInstallJsdomComputedStyle();
     // `suites`: one state per describe block ('pass' / 'fail' / 'skip' / 'todo'), for the JSON
     // reporter's suite counts.
-    const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [], suites: [], skippedNames: [], suite_errors: [], empty_suites: [] };
+    const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [], suites: [], skippedNames: [], suite_errors: [], empty_suites: [], file_errors: [] };
     // vitest (runner `runFiles`): a file that collected NO task at all — no test or suite, skipped
     // and todo ones included — fails with "No test suite found in file <path>" unless
     // passWithNoTests. Reported as the file's only failure entry with no failed test; the CLI

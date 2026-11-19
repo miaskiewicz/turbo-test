@@ -43,6 +43,9 @@ pub struct FileResult {
     pub failed_file: bool,
     /// Load-error message (for the synthetic JUnit/TAP failing case); empty otherwise.
     pub error_msg: String,
+    /// The JSON `message` of a file that loaded: its first file-level (top-level hook) error's
+    /// message, else empty (turbo-test#426).
+    pub file_message: String,
     /// Per-test cases (name/status/duration/message) for the per-testcase reporters.
     pub tests: Vec<TestCase>,
     /// One state per `describe` block ("pass" / "fail" / "skip" / "todo"), for the JSON counts.
@@ -634,6 +637,7 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
                 load_error: false,
                 failed_file: !rep.ok(),
                 error_msg: String::new(),
+                file_message: rep.file_errors.into_iter().next().unwrap_or_default(),
                 tests: rep.tests,
                 suites: rep.suites,
                 snapshot: rep.snapshot,
@@ -654,6 +658,7 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
             load_error: true,
             failed_file: true,
             error_msg: e,
+            file_message: String::new(),
             tests: Vec::new(),
             suites: Vec::new(),
             snapshot: None,
@@ -1010,7 +1015,7 @@ pub fn render_json(
                 json_str(&if r.load_error {
                     file_message(&r.error_msg)
                 } else {
-                    String::new()
+                    r.file_message.clone()
                 }),
                 json_str(&history_key(&files[r.idx])),
             )
@@ -1872,8 +1877,22 @@ pub fn exit_code(t: &Totals, gates_ok: bool) -> i32 {
 /// The whole CLI: launcher front-end (subcommand stripping, config/discovery, `--changed`, …;
 /// may exit for terminal cases), then [`parse_args`] + [`run`]. Returns the exit code.
 pub fn main_with_args(raw: Vec<String>) -> i32 {
+    if let Some((text, code)) = crate::launcher::meta_command(&raw) {
+        return print_meta(&text, code);
+    }
     let jobs = default_jobs(std::env::var("TURBO_JOBS").ok().as_deref());
     run(parse_args(crate::launcher::prepare(raw), jobs))
+}
+
+/// Print a [`crate::launcher::meta_command`] text (stdout when it succeeded, else stderr) and
+/// return its exit code.
+fn print_meta(text: &str, code: i32) -> i32 {
+    if code == 0 {
+        print!("{text}");
+    } else {
+        eprint!("{text}");
+    }
+    code
 }
 
 /// Apply `opts` (env, coverage config), run every file and print the reports. Returns the exit

@@ -611,6 +611,7 @@ fn clone_outcome(r: &FileOutcome) -> FileOutcome {
             empty_suites: rep.empty_suites.clone(),
             logs: rep.logs.clone(),
             waited_ms: rep.waited_ms,
+            file_errors: rep.file_errors.clone(),
         }),
         Err(e) => Err(e.clone()),
     }

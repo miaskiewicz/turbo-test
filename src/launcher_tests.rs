@@ -1564,3 +1564,43 @@ fn auto_environment_is_file_scoped_but_cli_and_forced_config_are_authoritative()
         Some("node")
     );
 }
+
+#[test]
+fn meta_command_help_version_and_unsupported_commands() {
+    let version = format!("turbo-test/{}\n", env!("CARGO_PKG_VERSION"));
+    for a in [
+        &["--help"][..],
+        &["-h"],
+        &["run", "x", "--help"],
+        &["-v", "-h"],
+    ] {
+        let (text, code) = meta_command(&args(a)).unwrap();
+        assert_eq!(code, 0, "{a:?}");
+        assert!(
+            text.starts_with(&format!("{version}\nUsage:\n")),
+            "{a:?}: {text}"
+        );
+        assert!(text.contains("\nOptions:\n"), "{text}");
+    }
+    for a in [&["--version"][..], &["run", "-v"]] {
+        assert_eq!(meta_command(&args(a)), Some((version.clone(), 0)), "{a:?}");
+    }
+    let (text, code) = meta_command(&args(&["bench", "--run"])).unwrap();
+    assert_eq!(code, 1);
+    assert!(
+        text.starts_with("turbo-test: `bench` is not supported"),
+        "{text}"
+    );
+    // a run: no command, a supported one, an unknown word (a filter), options after `--`, an
+    // unsupported command's name as a later filter
+    for a in [
+        &[][..],
+        &["run"],
+        &["watch", "src"],
+        &["benchmarks"],
+        &["x", "--", "--help", "-v"],
+        &["run", "list"],
+    ] {
+        assert_eq!(meta_command(&args(a)), None, "{a:?}");
+    }
+}
