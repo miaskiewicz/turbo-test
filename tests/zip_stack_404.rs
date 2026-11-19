@@ -43,6 +43,15 @@ fn event_emitter_is_callable_like_node() {
 }
 
 #[test]
+fn event_emitter_aliases_do_not_dispatch_through_overrides() {
+    node_and_turbo(
+        "events-aliases-404",
+        include_str!("data/zip-404/events-aliases.cjs"),
+        3,
+    );
+}
+
+#[test]
 fn zlib_streams_compress_incrementally_like_node() {
     node_and_turbo(
         "zlib-streams-404",
