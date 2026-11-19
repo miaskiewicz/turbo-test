@@ -215,6 +215,11 @@ class __HttpOutgoing extends __Writable {
   constructor(connection) {
     super({ autoDestroy: false }); this._connection = connection;
     this._headers = new Map(); this.headersSent = false; this._chunked = false; this._bodySize = 0;
+    this.useChunkedEncodingByDefault = true; this._contentLength = undefined;
+  }
+  end(chunk, encoding, callback) {
+    if (!this.headersSent) this._contentLength = __httpBodyLength(typeof chunk === 'function' ? null : chunk, encoding);
+    return super.end(chunk, encoding, callback);
   }
   setHeader(name, value) {
     if (this.headersSent) throw __streamError('ERR_HTTP_HEADERS_SENT', 'Headers already sent');
@@ -253,11 +258,24 @@ class __HttpOutgoing extends __Writable {
   setFraming() {
     __httpConnectionFraming(this);
     if (this._noBody()) return;
-    if (!this._headers.has('content-length') && !this._headers.has('transfer-encoding')) this._headers.set('transfer-encoding', { name: 'Transfer-Encoding', value: 'chunked' });
+    if (!this._headers.has('content-length') && !this._headers.has('transfer-encoding')) __httpDefaultFraming(this);
     this._chunked = __httpTransferFraming(this);
   }
   _destroy(error, callback) { __httpClose(this._connection, error, this); callback(error); }
 }
+// Node's _storeHeader without explicit framing headers: GET/HEAD/DELETE/OPTIONS/TRACE/CONNECT
+// requests (useChunkedEncodingByDefault false) send their body bare; other messages use
+// Content-Length for a body handed whole to end() before the headers went out, else chunked.
+function __httpDefaultFraming(message) {
+  if (!message.useChunkedEncodingByDefault) return;
+  if (typeof message._contentLength === 'number') message._headers.set('content-length', { name: 'Content-Length', value: String(message._contentLength) });
+  else message._headers.set('transfer-encoding', { name: 'Transfer-Encoding', value: 'chunked' });
+}
+function __httpBodyLength(chunk, encoding) {
+  if (chunk == null) return 0;
+  return Buffer.byteLength(chunk, typeof encoding === 'string' ? encoding : undefined);
+}
+const __httpBodilessMethods = new Set(['GET', 'HEAD', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT']);
 function __httpConnectionFraming(message) {
   const connection = String(message.getHeader('connection') || 'close').toLowerCase();
   if (connection !== 'close') throw __streamError('ERR_HTTP_UNSUPPORTED_KEEP_ALIVE', 'Persistent HTTP connections are not supported');
@@ -288,19 +306,6 @@ class __HttpResponse extends __HttpOutgoing {
     if (headers) for (const [key, value] of Object.entries(headers)) this.setHeader(key, value);
     return this;
   }
-  end(chunk, encoding, callback) {
-    __httpImplicitLength(this, typeof chunk === 'function' ? null : chunk, encoding);
-    return super.end(chunk, encoding, callback);
-  }
-}
-// As Node's ServerResponse.end(): a body handed whole to end() before the headers went out is
-// framed by Content-Length (chunked only when it was streamed), so head and body leave in one
-// write and the client's parser completes the message in one read.
-function __httpImplicitLength(response, chunk, encoding) {
-  if (response.headersSent || response._noBody()) return;
-  if (response.hasHeader('content-length') || response.hasHeader('transfer-encoding')) return;
-  const length = chunk == null ? 0 : Buffer.byteLength(chunk, typeof encoding === 'string' ? encoding : undefined);
-  response.setHeader('content-length', length);
 }
 function __httpInput(input) {
   if (typeof input !== 'string' && !(input instanceof URL)) return { ...input };
@@ -333,6 +338,7 @@ class __HttpRequest extends __HttpOutgoing {
     const connection = { id: 0, callbacks: [], incoming: null, outgoing: null };
     super(connection); this._timeoutDelay = 0; this._timeoutId = null;
     connection.outgoing = this; this.method = options.method; this.path = options.path;
+    this.useChunkedEncodingByDefault = !__httpBodilessMethods.has(options.method);
     if (callback) this.once('response', callback);
     this.setHeader('Host', options.hostname + ':' + options.port);
     for (const [name, value] of Object.entries(options.headers || {})) this.setHeader(name, value);
