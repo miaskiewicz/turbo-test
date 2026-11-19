@@ -2585,6 +2585,7 @@ const __fs = {
     lstat: __promised((p, options) => __stat(p, options, true)),
   },
 };
+/* __TT_NODE_FS_HANDLES__ */
 const __module = {
   // a require(): the `require` export condition (turbo-test#134)
   createRequire: (url) => globalThis.__mkRequire(globalThis.__dirnameOf(String(url).startsWith('file:') ? globalThis.__fileURLToPath(url) : String(url)), false),
