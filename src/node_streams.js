@@ -103,7 +103,8 @@ function __streamChunk(chunk, state, encoding) {
   if (chunk === null) throw new TypeError('May not write null values to stream');
   if (state.objectMode) return chunk;
   if (typeof chunk === 'string') return Buffer.from(chunk, encoding);
-  if (chunk instanceof Uint8Array) return Buffer.from(chunk);
+  if (Buffer.isBuffer(chunk)) return chunk;
+  if (chunk instanceof Uint8Array) return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
   throw new TypeError('The chunk must be a string, Buffer or Uint8Array');
 }
 function __streamSize(chunk, state) { return state.objectMode ? 1 : chunk.byteLength; }
