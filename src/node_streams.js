@@ -171,30 +171,53 @@ function __readableFrom(iterable, options) {
   };
   return stream;
 }
+// As Node's pipe: a destination that finishes, closes or fails is unpiped (emitting 'unpipe'
+// on it); the source's end ends it, or unpipes it with { end: false }.
 function __readablePipe(source, destination, options = {}) {
   const data = (chunk) => { if (destination.write(chunk) === false && source.pause) source.pause(); };
   const drain = () => { if (source.resume) source.resume(); };
-  let detached = false;
+  const unpipe = () => source.unpipe(destination);
   const cleanup = () => {
-    if (detached) return;
-    detached = true;
     source.off('data', data); source.off('end', end);
-    destination.off('drain', drain); destination.off('close', cleanup);
-    destination.off('finish', cleanup); destination.off('error', error);
+    destination.off('drain', drain); destination.off('close', unpipe);
+    destination.off('finish', unpipe); destination.off('error', error);
   };
-  const end = () => { cleanup(); if (options.end !== false) destination.end(); };
+  const end = () => {
+    source.off('data', data);
+    if (options.end !== false) destination.end();
+    else unpipe();
+  };
   const error = (failure) => {
-    cleanup();
+    unpipe();
     if (destination.listenerCount('error') === 0) destination.emit('error', failure);
   };
   destination.on('drain', drain);
-  destination.on('close', cleanup);
-  destination.on('finish', cleanup);
+  destination.on('close', unpipe);
+  destination.on('finish', unpipe);
   destination.prependListener('error', error);
   source.on('end', end);
   source.on('data', data);
+  (source._pipes || (source._pipes = [])).push({ destination, cleanup });
   destination.emit('pipe', source);
   return destination;
+}
+// Readable#unpipe(dest): detach dest (every destination without one), pause the source once
+// none is left, and emit 'unpipe' on each detached destination.
+function __readableUnpiped(pipes, destination) {
+  if (destination === undefined) return pipes.splice(0);
+  const index = pipes.findIndex((pipe) => pipe.destination === destination);
+  return index < 0 ? [] : pipes.splice(index, 1);
+}
+function __readableUnpipe(source, destination) {
+  const pipes = source._pipes || [];
+  const removed = __readableUnpiped(pipes, destination);
+  if (removed.length === 0) return source;
+  if (pipes.length === 0) source.pause();
+  for (const pipe of removed) {
+    pipe.cleanup();
+    pipe.destination.emit('unpipe', source);
+  }
+  return source;
 }
 
 class __Readable extends __Stream {
@@ -212,6 +235,7 @@ class __Readable extends __Stream {
   }
   on(event, listener) { super.on(event, listener); if (event === 'data') this.resume(); return this; }
   pipe(destination, options) { return __readablePipe(this, destination, options); }
+  unpipe(destination) { return __readableUnpipe(this, destination); }
   pause() { this._rs.flowing = false; return this; }
   resume() { this._rs.flowing = true; __readableSchedule(this); return this; }
   isPaused() { return !this._rs.flowing; }
