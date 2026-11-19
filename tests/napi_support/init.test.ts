@@ -25,6 +25,14 @@ test('host-only: an addon importing a Node-API function the host does not provid
   expect(require('./second.node').who()).toBe('second');
 });
 
+// host-only: Node itself exports V8's C++ API, which this addon is built against (turbo-test#391)
+test('host-only: an addon importing V8 C++ API symbols (NAN / node-gyp) is named as one turbo-test cannot load', () => {
+  expect(() => require('./v8api.node')).toThrow(
+    /^native addon \/.*\/v8api\.node: it imports _ZN2v811HandleScope16DeleteExtensionsEPNS_7IsolateE, V8's or Node's C\+\+ API: it is a NAN \/ node-gyp addon built against Node's own V8, and turbo-test, which embeds its own V8, loads only Node-API addons \(dlopen .*DeleteExtensions/,
+  );
+  expect(require('./second.node').who()).toBe('second');
+});
+
 test('a shared library without napi_register_module_v1 is rejected', () => {
   expect(() => require('./noreg.node')).toThrow(
     /^native addon \/.*\/noreg\.node: no napi_register_module_v1: /,

@@ -15,6 +15,11 @@ Loading:
   not provide (an experimental one, a `uv_*` function, a typo) fails its `require()` with an
   error naming the import (`it imports napi_x, which turbo-test's Node-API host does not
   provide`); the run goes on.
+- Only Node-API addons load. A NAN / node-gyp addon (libxmljs2, for one) is built against
+  Node's own V8 and imports V8's or Node's C++ API (`v8::…`, `node::…`), which turbo-test, embedding
+  its own V8 build, does not export: its `require()` fails with an error naming the first such
+  import as V8's or Node's C++ API (`it is a NAN / node-gyp addon …, loads only Node-API addons`).
+  No single symbol is shimmed: the addon's whole V8 ABI is Node's, not turbo-test's.
 - The init is the addon's `napi_register_module_v1`, or the module it registered with
   `napi_module_register` from a static constructor. Its `node_api_module_get_api_version_v1`
   sets the module API version as in Node: none or below 8 is 8, above 10 fails the

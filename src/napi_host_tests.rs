@@ -260,6 +260,33 @@ fn dlopen_errors_name_the_missing_import() {
     );
 }
 
+/// An import of V8's or Node's C++ API (Itanium-mangled `v8::` / `node::` names, as a NAN /
+/// node-gyp addon such as libxmljs2 has) names the addon as one turbo-test cannot load, in each
+/// loader's form; other C++ imports keep the generic message (turbo-test#391).
+#[test]
+fn dlopen_errors_name_v8_cpp_api_addons() {
+    let nan = |sym: &str, err: &str| {
+        format!("it imports {sym}, V8's or Node's C++ API: it is a NAN / node-gyp addon built against Node's own V8, and turbo-test, which embeds its own V8, loads only Node-API addons (dlopen {err})")
+    };
+    let sym = "_ZN2v811HandleScope16DeleteExtensionsEPNS_7IsolateE";
+    let mac = format!("dlopen(/p/xmljs.node, 0x0006): symbol not found in flat namespace '_{sym}'");
+    assert_eq!(dlopen_error(&mac), nan(sym, &mac));
+    for sym in [
+        "_ZNK2v85Value8IsObjectEv",
+        "_ZN4node6Buffer4DataEN2v85LocalINS1_6ObjectEEE",
+        "_ZNK4node11AsyncResource12get_resourceEv",
+    ] {
+        let glibc = format!("/p/xmljs.node: undefined symbol: {sym}");
+        assert_eq!(dlopen_error(&glibc), nan(sym, &glibc));
+    }
+    // a C++ import outside v8:: / node:: (the addon's own library) is not a V8 API one
+    let other = "/p/a.node: undefined symbol: _ZN6libxml5parseEv";
+    assert_eq!(
+        dlopen_error(other),
+        format!("it imports _ZN6libxml5parseEv, which nothing loaded provides (dlopen {other})")
+    );
+}
+
 /// node_api_get_module_file_name's file: URL escapes `%` and the URL path percent-encode set
 /// (as Node's url::FromFilePath).
 #[test]
