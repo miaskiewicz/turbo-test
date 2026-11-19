@@ -8658,8 +8658,10 @@ function __eachCases(cases, targs) {
   }
   return rows;
 }
-// `.each`: one task per row, the row spread into the handler when every row is an array.
+// `.each`: one task per row, the row spread into the handler when every row is an array. A file
+// with Jest's behaviour (a Jest project, or `--compat jest`) gets jest-each's instead.
 function __each(register, cases, targs) {
+  if (globalThis.__ttJestProject) return __jestEach(register, cases, targs);
   cases = __eachCases(cases, targs);
   return (name, a, b) => {
     const title = __formatName(name);
@@ -8695,6 +8697,122 @@ function __for(register, cases, targs, isSuite) {
       const fn = (ctx) => (typeof handler !== 'function' ? undefined : isSuite ? handler(item) : handler(item, ctx));
       register(__formatTitle(title, item == null ? [] : Array.isArray(item) ? item : [item], idx), fn, opts);
     });
+  };
+}
+
+// ---- jest-each (Jest 30's `.each`, for files with Jest's behaviour) ----
+// An array table: a title with no placeholder over object rows interpolates `$key.path` (each
+// row one argument); otherwise every row is spread when all are arrays, else passed as ONE
+// argument, and the placeholders take the row's values in turn (%p pretty-format, %j JSON, the
+// rest node's util.format; %# / %$ the index / 1-based index, %% a literal %). A tagged template
+// is one object per line, interpolated as `$key.path`. A malformed table registers one test
+// under the bare title that throws jest-each's error.
+const __JE_ESC = '@@__JEST_EACH_PLACEHOLDER_ESCAPE__@@';
+const __JE_PLACEHOLDER = /%[#Odfijops]/;
+const __JE_HEADINGS = /^\n\s*[^\s]+\s*(\|\s*[^\s]+\s*)*\n/g;
+const __jePretty = (v) => __pf(v, { maxDepth: 1, min: true });
+const __jeEscape = (title) => title.replaceAll('%%', __JE_ESC);
+// jest-util convertDescriptorToString
+function __jeDescriptor(d) {
+  if (typeof d === 'string') return d;
+  if (typeof d === 'number' || d === undefined) return `${d}`;
+  if (typeof d === 'function' && d.name) return d.name;
+  throw new Error(`Invalid first argument, ${d}. It must be a named class, named function, number, or string.`);
+}
+// %j: `[Circular]` for a cyclic value, a bigint as its literal
+function __jeIsCyclic(v, ancestors) {
+  if (v === null || typeof v !== 'object') return false;
+  if (ancestors.includes(v)) return true;
+  const nested = [...ancestors, v];
+  return Object.values(v).some((e) => __jeIsCyclic(e, nested));
+}
+const __jeJson = (v) => (__jeIsCyclic(v, []) ? '[Circular]' : `${JSON.stringify(v, (_, e) => (typeof e === 'bigint' ? `${e}n` : e))}`);
+// one row value into the title's first placeholder (a `%` in a string value is kept literal)
+function __jeFormatOne(title, value) {
+  const m = title.match(__JE_PLACEHOLDER);
+  if (!m) return title;
+  const v = typeof value === 'string' ? value.replaceAll('%', __JE_ESC) : value;
+  if (m[0] === '%p') return title.replace('%p', () => __jePretty(v));
+  if (m[0] === '%j') return title.replace('%j', () => __jeJson(v));
+  return __nodeFormat(title, v);
+}
+function __jeFormatTitle(title, row, idx) {
+  const start = __jeEscape(title).replace('%#', String(idx)).replace('%$', String(idx + 1));
+  return row.reduce((t, v) => __jeFormatOne(t, v), start).replaceAll(__JE_ESC, '%');
+}
+// `$key.path`: the value at the path (stopping where it ends), a primitive as a string, else
+// pretty-formatted; `$#` the row index
+function __jeGetPath(t, [head, ...tail]) {
+  if (t === null) return 'null';
+  if (t === undefined) return 'undefined';
+  if (!head || !Object.prototype.hasOwnProperty.call(t, head)) return t;
+  return __jeGetPath(t[head], tail);
+}
+const __jeVarValue = (v) => (Object(v) !== v ? String(v) : __jePretty(v));
+const __jeRegexEscape = (s) => s.replaceAll(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+function __jeInterpolate(title, template, idx) {
+  const keys = Object.keys(template).filter((k) => k.length > 0).sort((a, b) => b.length - a.length);
+  if (keys.length === 0) return title.replace('$#', `${idx}`);
+  const re = new RegExp(`\\$(${keys.map(__jeRegexEscape).join('|')})[.\\w]*`, 'g');
+  return title.replaceAll(re, (m) => __jeVarValue(__jeGetPath(template, m.slice(1).split('.')))).replace('$#', `${idx}`);
+}
+const __jeTaggedNoData = (t) => (typeof t[0] === 'string' && t[0].trim() === ''
+  ? 'Error: `.each` called with an empty Tagged Template Literal of table data.\n'
+  : 'Error: `.each` called with a Tagged Template Literal with no data, remember to interpolate with ${expression} syntax.\n');
+function __jeValidateArray(table) {
+  if (!Array.isArray(table)) throw new TypeError(`\`.each\` must be called with an Array or Tagged Template Literal.\n\nInstead was called with: ${__jePretty(table)}\n`);
+  if (table.raw !== undefined) throw new Error(__jeTaggedNoData(table));
+  if (table.length === 0) throw new Error('Error: `.each` called with an empty Array of table data.\n');
+}
+const __jeIsTemplates = (title, table) => !__JE_PLACEHOLDER.test(__jeEscape(title))
+  && !table.every(Array.isArray) && table.every((c) => c != null && typeof c === 'object');
+function __jeArrayRows(title, table) {
+  __jeValidateArray(table);
+  if (__jeIsTemplates(title, table)) {
+    return table.map((t, i) => ({ args: [t], title: __jeInterpolate(title, t, i).replaceAll('%%', '%') }));
+  }
+  const rows = table.every(Array.isArray) ? table : table.map((c) => [c]);
+  return rows.map((row, i) => ({ args: row, title: __jeFormatTitle(title, row, i) }));
+}
+function __jeHeadings(first) {
+  const m = String(first).match(__JE_HEADINGS);
+  if (m === null) throw new Error(`Table headings do not conform to expected format:\n\nheading1 | headingN\n\nReceived:\n\n${__pf(first, {})}`);
+  return m[0].replaceAll(/\s/g, '').split('|');
+}
+function __jeMissing(headings, data) {
+  const n = headings.length - (data.length % headings.length);
+  return `Not enough arguments supplied for given headings:\n${headings.join(' | ')}\n\nReceived:\n${__pf(data, {})}\n\nMissing ${n} argument${n === 1 ? '' : 's'}`;
+}
+function __jeTemplateRows(title, strings, data) {
+  const headings = __jeHeadings(strings[0]);
+  if (data.length % headings.length > 0) throw new Error(__jeMissing(headings, data));
+  const rows = [];
+  for (let i = 0; i < data.length / headings.length; i++) {
+    const t = Object.fromEntries(headings.map((h, c) => [h, data[i * headings.length + c]]));
+    rows.push({ args: [t], title: __jeInterpolate(title, t, i) });
+  }
+  return rows;
+}
+// its tests are `each` tasks (vitest's `task.each`); the body gets the row's arguments only
+function __jeRegister(register, rows, test, timeout) {
+  const outer = __inEach;
+  __inEach = true;
+  try {
+    for (const r of rows) register(r.title, () => test(...r.args), timeout);
+  } finally { __inEach = outer; }
+}
+// jest-each `bind`: `.each(table)(title, fn, timeout)` / `.each\`…\`(title, fn, timeout)`
+function __jestEach(register, table, data) {
+  return (name, test, timeout) => {
+    const title = __jeDescriptor(name);
+    let rows;
+    try {
+      rows = data.length === 0 ? __jeArrayRows(title, table) : __jeTemplateRows(title, table, data);
+    } catch (e) {
+      const err = new Error(e.message);
+      return register(title, () => { throw err; });
+    }
+    __jeRegister(register, rows, test, timeout);
   };
 }
 
@@ -8805,6 +8923,8 @@ describe.todo = (name, a, b) => { describe(name, a, b).mode = 'todo'; };
 describe.skipIf = (cond) => (cond ? describe.skip : describe);
 describe.runIf = (cond) => (cond ? describe : describe.skip);
 describe.each = (cases, ...targs) => __each(describe, cases, targs);
+describe.only.each = (cases, ...targs) => __each(describe.only, cases, targs);
+describe.skip.each = (cases, ...targs) => __each(describe.skip, cases, targs);
 describe.for = (cases, ...targs) => __for(describe, cases, targs, true);
 // Supports both vitest signatures: it(name, fn, opts) and it(name, opts, fn).
 function __normTestOptsForFn(b) {
@@ -8861,6 +8981,8 @@ it.skip = (name, a, b) => __addTest({ name, fn: __normTest(a, b).fn, skip: true 
 it.todo = (name) => __addTest({ name, fn: () => {}, skip: true, todo: true });
 it.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: true, retry: o.retry || 0, repeats: o.repeats, own: o, timeout: o.timeout }); };
 it.each = (cases, ...targs) => __each(it, cases, targs);
+it.only.each = (cases, ...targs) => __each(it.only, cases, targs);
+it.skip.each = (cases, ...targs) => __each(it.skip, cases, targs);
 it.for = (cases, ...targs) => __for(it, cases, targs);
 it.skipIf = (cond) => (name, fn) => __addTest({ name, fn, skip: !!cond, only: false, retry: 0 });
 it.runIf = (cond) => (name, fn) => __addTest({ name, fn, skip: !cond, only: false, retry: 0 });

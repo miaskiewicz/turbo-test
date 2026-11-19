@@ -62,7 +62,11 @@ or jsdom's media (default): no `matchMedia`, only `screen` media lists apply; al
 `--no-css-transitions` (Chrome's CSS transitions, `@keyframes` animations and Web Animations, or
 jsdom's (default): none run, `getComputedStyle` reports the end value at once, no `animate` /
 `getAnimations`; also `TURBO_CSS_TRANSITIONS=0|1` and `test.cssTransitions`; independent of the
-media switch; README "Switches"). Leading
+media switch; README "Switches"); `--compat jest|vitest|auto` (jest's or vitest's behaviour where
+they differ — `.each` titles via jest-each or vitest, `toThrow(errorInstance)`, `JEST_WORKER_ID`, … —
+for every file instead of detecting it per file from the nearest jest / vitest config (`auto`,
+the default); also `TURBO_TEST_COMPAT=jest|vitest|auto`, the flag wins; README "Jest or vitest
+behaviour"). Leading
 `run`/`watch`/`dev` accepted-and-stripped. Unknown flags warned + ignored (never treated as files).
 
 **Test / `vi` / `expect` API** ✅

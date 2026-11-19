@@ -224,7 +224,22 @@ Mocks from `jest.fn()` / `jest.spyOn()` have jest-mock's `whenCalledWith(...matc
 Assigning a namespace import's member (`import * as api from './api'; api.fetch = jest.fn()`) takes
 effect for the namespace and its other importers, as under babel-jest / ts-jest (0.8.3+); vitest's
 namespaces stay read-only. Test files get `process.env.JEST_WORKER_ID`. When a vitest config
-applies, the jest config's `fakeTimers` is ignored.
+applies, the jest config's `fakeTimers` is ignored. `test.each` / `describe.each` (and their
+`.only` / `.skip` / `.concurrent` / `.failing` forms) follow jest-each 30 (0.8.5+): `%p`
+pretty-format, `%s` / `%d` / `%i` / `%f` / `%o` / `%O` via `util.format`, `%j`, `%#`, `%$`, `%%`,
+`$key.path` interpolation for object rows and tagged templates, a row passed as one argument
+unless every row is an array, and jest-each's table errors. A vitest project keeps vitest's titles.
+
+**Jest or vitest behaviour.** Where jest and vitest differ (`.each` titles, `toThrow(errorInstance)`,
+`JEST_WORKER_ID`, namespace assignment, …) a file follows jest when the nearest config
+walking up is a jest config, else vitest. Force one for the whole run:
+
+| source | jest | vitest | detect (default) |
+|---|---|---|---|
+| CLI flag (wins) | `--compat jest` | `--compat vitest` | `--compat auto` |
+| env var | `TURBO_TEST_COMPAT=jest` | `TURBO_TEST_COMPAT=vitest` | unset / `auto` |
+
+Config discovery (`setupFiles`, `moduleNameMapper`, the test environment, …) is unchanged by it.
 
 Both the injected globals **and** the explicit-import form work — a suite with `injectGlobals: false`
 that does `import { describe, it, expect, jest } from '@jest/globals'` resolves that specifier from
