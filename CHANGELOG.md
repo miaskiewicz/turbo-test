@@ -40,6 +40,11 @@ Node 26.11, Jest 30 or vitest 5.1 first.
   `setDefaultEncoding`, `_construct`; Readable `unpipe`.
 
 ### Fixed
+- A DOM-environment file can use Node's backend built-ins (tty, zlib, child_process, http, net,
+  vm, async_hooks, crypto ciphers) again, as under vitest's jsdom: the backend is activated on
+  their first use. Since 0.8.4's payload split (#390) they threw "requires the Node backend
+  runtime", so suites importing @playwright/test (which requires tty) failed to load. DOM files
+  that never touch them keep the lighter startup.
 - In Jest projects: `test.each`/`describe.each` titles and arguments follow jest-each 30 (#432;
   199 Flux suites had different test names); `toThrow(errorInstance)` follows Jest's message
   rule (#403); a hook's non-promise return value is not run as a vitest teardown (#417); an
@@ -75,7 +80,10 @@ Node 26.11, Jest 30 or vitest 5.1 first.
   (e.g. a CI cache) served the previous build's transforms and startup snapshot.
 - `--help` / `--version` print usage / the version instead of running the suite (which could
   rewrite snapshots); unimplemented vitest commands exit 1 (#427). The JSON reporter keeps a
-  timeout's message and a top-level hook failure's message (#426).
+  top-level hook failure's message and, in jest projects, a timeout's message (#426); vitest
+  projects keep vitest 4.1.12's timeout output.
+- `crypto.createCipheriv` / `createDecipheriv` validate their arguments with Node's error codes,
+  messages and order (#450).
 
 ### Release preparation
 - Consume turbo-dom / turbo-dom-layout / turbo-dom-browser-env 0.8.5 from crates.io (only
