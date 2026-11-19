@@ -6364,8 +6364,20 @@ function __ttVirtualLazyEligible(factory, isDoMock) {
   if (isDoMock || typeof factory !== 'function') return false;
   return !(globalThis.__ttMockPrepass || globalThis.__ttNoLazyJestMock);
 }
+// A virtual mock's key, as jest-resolve's getModulePath makes it (turbo-test#405): a spec starting
+// with `.` is the path it names from `dir` (lexically, extension as written), any other (absolute
+// or bare) is itself. runner.rs's virtual_mock_key is the same.
+function __ttVirtualPath(dir, spec) {
+  if (spec[0] !== '.') return spec;
+  const out = [];
+  for (const seg of ((dir || '') + '/' + spec).split('/')) {
+    if (seg === '..') out.pop();
+    else if (seg && seg !== '.') out.push(seg);
+  }
+  return '/' + out.join('/');
+}
 function __ttVirtualKey(dir, spec) {
-  return (dir || '') + '\0virtual:' + String(spec);
+  return '\0virtual:' + __ttVirtualPath(dir, String(spec));
 }
 function __ttIsVirtualMock(vitest, options) {
   return !vitest && !!options && options.virtual === true;
