@@ -2060,6 +2060,9 @@ if (typeof globalThis.Buffer === 'undefined') {
     compare(target, targetStart, targetEnd, sourceStart, sourceEnd) { return __bufferCompare(this, target, targetStart, targetEnd, sourceStart, sourceEnd); }
     copy(target, targetStart, sourceStart, sourceEnd) { return __bufferCopy(this, target, targetStart, sourceStart, sourceEnd); }
     write(string, offset, length, encoding) { return __bufferWrite(this, string, offset, length, encoding); }
+    indexOf(value, byteOffset, encoding) { return __bufferIndexOf(this, value, byteOffset, encoding, true); }
+    lastIndexOf(value, byteOffset, encoding) { return __bufferIndexOf(this, value, byteOffset, encoding, false); }
+    includes(value, byteOffset, encoding) { return this.indexOf(value, byteOffset, encoding) !== -1; }
     toString(encoding, start, end) { return __bufferToString(this, encoding, start, end); }
     toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
   }

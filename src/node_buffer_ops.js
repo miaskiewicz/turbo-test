@@ -277,3 +277,43 @@ function __bufferInstallIntOps(proto) {
     }
   }
 }
+
+// indexOf / lastIndexOf / includes: Node's bidirectionalIndexOf over byte needles (#404).
+// Where a search starts, as Node's IndexOfOffset: negative offsets count from the end; an
+// empty needle points at the clamped offset.
+function __bufferSearchStartBeforeEnd(length, offset, needle, forward) {
+  if (offset + length >= 0) return length + offset;
+  return forward || needle === 0 ? 0 : -1;
+}
+function __bufferSearchStart(length, offset, needle, forward) {
+  if (offset < 0) return __bufferSearchStartBeforeEnd(length, offset, needle, forward);
+  if (offset + needle <= length) return offset;
+  if (needle === 0) return length;
+  return forward ? -1 : length - 1;
+}
+function __bufferMatchAt(buffer, needle, at) {
+  for (let index = 0; index < needle.length; index++) if (buffer[at + index] !== needle[index]) return false;
+  return true;
+}
+function __bufferFindForward(buffer, needle, start) {
+  for (let at = start; at + needle.length <= buffer.length; at++) if (__bufferMatchAt(buffer, needle, at)) return at;
+  return -1;
+}
+function __bufferFindBackward(buffer, needle, start) {
+  for (let at = Math.min(start, buffer.length - needle.length); at >= 0; at--) if (__bufferMatchAt(buffer, needle, at)) return at;
+  return -1;
+}
+function __bufferNeedle(value, encoding) {
+  if (typeof value === 'number') return [(value >>> 0) & 255];
+  if (typeof value === 'string') return __bufferFromString(value, encoding === undefined ? 'utf8' : `${encoding}`);
+  if (value instanceof Uint8Array) return value;
+  throw __bufferError(TypeError, 'ERR_INVALID_ARG_TYPE', `The "value" argument must be one of type number or string or an instance of Buffer or Uint8Array. Received ${__bufferReceived(value)}`);
+}
+function __bufferIndexOf(buffer, value, byteOffset, encoding, forward) {
+  if (typeof byteOffset === 'string') { encoding = byteOffset; byteOffset = undefined; }
+  const offset = +byteOffset;
+  const needle = __bufferNeedle(value, encoding);
+  const start = __bufferSearchStart(buffer.length, Number.isNaN(offset) ? (forward ? 0 : buffer.length) : Math.trunc(offset), needle.length, forward);
+  if (needle.length === 0 || start < 0) return start;
+  return forward ? __bufferFindForward(buffer, needle, start) : __bufferFindBackward(buffer, needle, start);
+}
