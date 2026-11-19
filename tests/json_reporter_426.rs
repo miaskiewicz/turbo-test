@@ -1,9 +1,9 @@
-//! The JSON reporter keeps a timed-out test's message and a file-level hook error
-//! (turbo-test#426). Oracle: vitest 5.1.0's JSON reporter on these files: a timeout's
-//! failureMessages entry is the error's stack headed by `Error: Test timed out in 50ms.` (vitest 5's
-//! makeTimeoutError puts its message into the registration stack); a file's `message` is the first
-//! error of the file task (its top-level beforeAll / afterAll hooks), and a nested suite's hook
-//! error stays on that suite (the file message is empty).
+//! The JSON reporter keeps a file-level hook error and, in jest projects, a timed-out test's
+//! message (turbo-test#426). Oracle: vitest 4.1.12's JSON reporter (turbo-test's vitest target) on
+//! these files: a timeout's failureMessages entry is the registration stack headed by
+//! `Error: STACK_TRACE_ERROR`; a file's `message` is the first error of the file task (its
+//! top-level beforeAll / afterAll hooks), and a nested suite's hook error stays on that suite (the
+//! file message is empty). A jest project heads the stack with the timeout message instead.
 #![cfg(unix)]
 mod common;
 use common::{json_report, turbo_test, Project};
@@ -69,9 +69,7 @@ describe('d', () => { it('never runs', () => {}); });
         .as_str()
         .unwrap();
     assert!(
-        timeout.starts_with(&format!(
-            "Error: Test timed out in 50ms.\n{TIMEOUT_HINT}\n    at "
-        )),
+        timeout.starts_with("Error: STACK_TRACE_ERROR\n    at "),
         "{timeout}"
     );
     assert_eq!(t["status"], "failed");
@@ -99,4 +97,31 @@ describe('d', () => { it('never runs', () => {}); });
     );
     assert_eq!(report["numFailedTests"], 1, "{}", run.all());
     assert_eq!(report["numPendingTests"], 2, "{}", run.all());
+}
+
+#[test]
+fn json_reporter_heads_a_timeout_with_its_message_in_a_jest_project() {
+    let p = Project::new("json-reporter-426-jest");
+    p.with_esbuild();
+    p.file("package.json", r#"{"name":"json-reporter-426-jest"}"#);
+    p.file(
+        "jest.config.js",
+        "module.exports = { testEnvironment: 'node' };",
+    );
+    p.file(
+        "t.test.js",
+        "it('times out', async () => { await new Promise(() => {}); }, 50);\n",
+    );
+    let run = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+    let report = json_report(&run);
+    let timeout = file_result(&report, "t.test.js")["assertionResults"][0]["failureMessages"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        timeout.starts_with(&format!(
+            "Error: Test timed out in 50ms.\n{TIMEOUT_HINT}\n    at "
+        )),
+        "{timeout}"
+    );
 }
