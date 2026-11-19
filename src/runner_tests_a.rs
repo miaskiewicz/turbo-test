@@ -2193,6 +2193,38 @@ fn mock_import_rhs_requires_a_complete_static_import_expression() {
 }
 
 #[test]
+fn hoist_mock_setup_rebinds_namespace_imports_of_a_mocked_module() {
+    // esbuild names a namespace import after its local name (`var fs = __toESM(..)`), the
+    // TS-CJS interop policy blanks that wrapper (`var fs =         require("fs") ;`) and the
+    // native emitter writes TypeScript's `var fs = require("fs")` without esModuleInterop: each
+    // is kept before the mocks when the setup reads it and re-bound after (turbo-test#405).
+    for decl in [
+        "var fs = __toESM(require(\"fs\"));",
+        "var fs =         require(\"fs\") ;",
+        "var fs = require(\"fs\");",
+    ] {
+        let src = format!(
+            "{decl}\nvar import_a = require(\"./a\");\njest.mock(\"fs\");\nconst mockedFs = fs;"
+        );
+        let rebind = decl.replacen("var ", "", 1);
+        assert_eq!(
+            hoist_mock_setup(&src),
+            format!("{decl}\njest.mock(\"fs\");\n{rebind}\nvar import_a = require(\"./a\");\nconst mockedFs = fs;"),
+        );
+    }
+    // A user-named require of an unmocked module is no generated binding: inside the block it
+    // stays before the mocks and is never re-bound; it does not start a block either.
+    assert_eq!(mock_require_declaration("var fs = require(\"fs\");"), None);
+    let src = "var fs = require(\"fs\");\nconst path = require(\"path\");\nvar import_a = require(\"./a\");\njest.mock(\"fs\");\nconst mockedFs = fs;";
+    assert_eq!(
+        hoist_mock_setup(src),
+        "var fs = require(\"fs\");\nconst path = require(\"path\");\njest.mock(\"fs\");\nfs = require(\"fs\");\nvar import_a = require(\"./a\");\nconst mockedFs = fs;",
+    );
+    let user_only = "const path = require(\"path\");\njest.mock(\"fs\");\nconst x = 1;";
+    assert_eq!(hoist_mock_setup(user_only), user_only);
+}
+
+#[test]
 fn mock_normalization_borrows_existing_var_imports_and_preserves_line_endings() {
     let code = "var import_dep = require('dep');\r\nvi.mock('dep', () => ({}));\r\n";
     let borrowed = normalize_mock_require_declarations(code);
