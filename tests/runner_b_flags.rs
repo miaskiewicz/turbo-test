@@ -180,7 +180,7 @@ fn dom_is_installed_only_for_files_that_need_it() {
 }
 
 fn code_cache_files(p: &Project) -> Vec<std::path::PathBuf> {
-    let mut v: Vec<_> = std::fs::read_dir(p.path(".tt-cache"))
+    let mut v: Vec<_> = std::fs::read_dir(p.build_cache())
         .map(|rd| {
             rd.flatten()
                 .map(|e| e.path())
@@ -566,7 +566,7 @@ fn a_saved_window_blob_is_reused_by_the_next_run() {
         );
     }
     let blobs = || {
-        let mut found: Vec<_> = std::fs::read_dir(p.dir.join(".tt-cache"))
+        let mut found: Vec<_> = std::fs::read_dir(p.build_cache())
             .map(|entries| {
                 entries
                     .flatten()

@@ -30,7 +30,7 @@ fn passed(n: u64, files: usize) -> (u64, u64, Vec<String>) {
 
 /// Cache entries whose file name starts with `prefix`.
 fn cached(p: &Project, prefix: &str) -> usize {
-    std::fs::read_dir(p.path(".tt-cache"))
+    std::fs::read_dir(p.build_cache())
         .map(|d| {
             d.filter(|e| {
                 e.as_ref()

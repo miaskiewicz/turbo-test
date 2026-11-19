@@ -91,7 +91,7 @@ fn native_emit_keeps_bindings_live_and_bundles_cyclic_deps() {
 /// Names of the `.tt-cache` files starting with `prefix` (`ntv-` = native app transform,
 /// `mr-` = esbuild app transform, which the compile-failure retry also writes).
 fn cached(p: &Project, prefix: &str) -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(p.path(".tt-cache"))
+    let mut v: Vec<String> = std::fs::read_dir(p.build_cache())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|n| n.starts_with(prefix))

@@ -228,6 +228,7 @@ fn a_file_past_the_heap_limit_writes_no_bytecode_cache() {
              test('grows', () => { dep(); const keep = []; for (;;) keep.push(new Array(100000).fill(keep.length)); });\n",
         );
         let cache = p.dir.join(".cache");
+        let entries = common::build_cache_dir(&cache);
         let r = turbo_test(
             &p.dir,
             &["a-oom.test.js"],
@@ -239,7 +240,7 @@ fn a_file_past_the_heap_limit_writes_no_bytecode_cache() {
             ],
         );
         assert_eq!(r.code, Some(1), "{name}\n{}", r.all());
-        let cc: Vec<_> = std::fs::read_dir(&cache)
+        let cc: Vec<_> = std::fs::read_dir(&entries)
             .map(|d| {
                 d.filter_map(Result::ok)
                     .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -259,7 +260,7 @@ fn a_file_past_the_heap_limit_writes_no_bytecode_cache() {
             &[(mode, "1"), ("TURBO_CACHE_DIR", cache.to_str().unwrap())],
         );
         assert_eq!(r.code, Some(0), "{name}\n{}", r.all());
-        let written = std::fs::read_dir(&cache)
+        let written = std::fs::read_dir(&entries)
             .unwrap()
             .filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().starts_with("cc-"))
