@@ -40,7 +40,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # Node 26: the oracle tests run fixtures under `node --test` and assert the Node 26
+          # behaviour turbo-test implements (Buffer internals etc. differ in Node 22).
+          node-version: 26
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -163,7 +165,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # Node 26: the oracle tests run fixtures under `node --test` and assert the Node 26
+          # behaviour turbo-test implements (Buffer internals etc. differ in Node 22).
+          node-version: 26
       # Pinned: each rustc release maps LLVM coverage regions to source lines differently, so
       # `stable` moving (1.99.1 -> 1.100.0 on 2026-11-09) shifted every file's line totals and
       # the gate's percentage with no code change (99.92% -> 99.54%). Bump deliberately, and
