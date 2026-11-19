@@ -10173,6 +10173,74 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__fs_copyFile", fs_copy_file);
     bind_fn(scope, global, "__fs_remove", fs_remove);
     bind_fn(scope, global, "__fs_symlinkSync", fs_symlink_sync);
+    // fs access / chmod / rename / open and FileHandle descriptors (turbo-test#420)
+    #[cfg(unix)]
+    {
+        bind_fn(
+            scope,
+            global,
+            "__fs_access",
+            crate::fs_handles::native_access,
+        );
+        bind_fn(scope, global, "__fs_chmod", crate::fs_handles::native_chmod);
+        bind_fn(
+            scope,
+            global,
+            "__fs_rename",
+            crate::fs_handles::native_rename,
+        );
+        bind_fn(
+            scope,
+            global,
+            "__fs_openFlags",
+            crate::fs_handles::native_open_flags,
+        );
+        bind_fn(scope, global, "__fs_open", crate::fs_handles::native_open);
+        bind_fn(scope, global, "__fs_read", crate::fs_handles::native_read);
+        bind_fn(scope, global, "__fs_write", crate::fs_handles::native_write);
+        bind_fn(scope, global, "__fs_fdOp", crate::fs_handles::native_fd_op);
+    }
+    // process.uptime / memoryUsage / cpuUsage / resourceUsage / umask (turbo-test#419)
+    crate::process_usage::mark_start();
+    bind_fn(
+        scope,
+        global,
+        "__ttUptime",
+        crate::process_usage::native_uptime,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttHeapUsage",
+        crate::process_usage::native_heap_usage,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttResidentSetSize",
+        crate::process_usage::native_resident_set_size,
+    );
+    #[cfg(unix)]
+    {
+        bind_fn(
+            scope,
+            global,
+            "__ttCpuUsage",
+            crate::process_usage::native_cpu_usage,
+        );
+        bind_fn(
+            scope,
+            global,
+            "__ttResourceUsage",
+            crate::process_usage::native_resource_usage,
+        );
+        bind_fn(
+            scope,
+            global,
+            "__ttUmask",
+            crate::process_usage::native_umask,
+        );
+    }
     // process.cwd(): the process's working directory, as vitest's workers report it; os.tmpdir()
     // and os.homedir() as Node computes them
     let cwd = std::env::current_dir().map(|d| d.to_string_lossy().into_owned());
@@ -10568,8 +10636,8 @@ fn fs_exists_sync(
 
 /// The Node error code and description of an OS error (`EEXIST`, "file already exists"), as
 /// libuv names them; None for an error that is not one of these.
-fn errno_name(e: &std::io::Error) -> Option<(&'static str, &'static str)> {
-    const NAMES: [(i32, &str, &str); 9] = [
+pub(crate) fn errno_name(e: &std::io::Error) -> Option<(&'static str, &'static str)> {
+    const NAMES: [(i32, &str, &str); 10] = [
         (2, "ENOENT", "no such file or directory"),
         (13, "EACCES", "permission denied"),
         (17, "EEXIST", "file already exists"),
@@ -10579,6 +10647,7 @@ fn errno_name(e: &std::io::Error) -> Option<(&'static str, &'static str)> {
         (libc::ENOSYS, "ENOSYS", "function not implemented"),
         (libc::ENOTSUP, "ENOTSUP", "operation not supported"),
         (libc::ENAMETOOLONG, "ENAMETOOLONG", "name too long"),
+        (libc::EBADF, "EBADF", "bad file descriptor"),
     ];
     // ENOTEMPTY's number differs by OS (66 on macOS, 39 on Linux)
     if e.kind() == std::io::ErrorKind::DirectoryNotEmpty {
@@ -10726,20 +10795,23 @@ fn fs_copy_bytes(source: &str, destination: &str, flags: i32) -> std::io::Result
     fs_copy_stream(input, output)
 }
 
-fn throw_fs_copy_error(
+/// Node's error for a two-path call (`copyfile`, `rename`): `CODE: description, syscall 'src' ->
+/// 'dest'` with `path` and `dest`.
+pub(crate) fn throw_fs_dest_error(
     scope: &mut v8::PinScope,
     error: &std::io::Error,
+    syscall: &str,
     source: &str,
     destination: &str,
 ) {
     let (code, description) = errno_name(error).unwrap_or(("EIO", "i/o error"));
-    let message = format!("{code}: {description}, copyfile '{source}' -> '{destination}'");
+    let message = format!("{code}: {description}, {syscall} '{source}' -> '{destination}'");
     let message = v8::String::new(scope, &message).unwrap();
     let exception = v8::Exception::error(scope, message);
     let object = exception.cast::<v8::Object>();
     for (key, value) in [
         ("code", code),
-        ("syscall", "copyfile"),
+        ("syscall", syscall),
         ("path", source),
         ("dest", destination),
     ] {
@@ -10762,7 +10834,7 @@ fn fs_copy_file(
     let destination = args.get(1).to_rust_string_lossy(scope);
     let flags = args.get(2).int32_value(scope).unwrap_or(0);
     if let Err(error) = fs_copy_bytes(&source, &destination, flags) {
-        throw_fs_copy_error(scope, &error, &source, &destination);
+        throw_fs_dest_error(scope, &error, "copyfile", &source, &destination);
     }
 }
 
@@ -10802,12 +10874,17 @@ fn fs_symlink_sync(
 
 /// Throw Node's error for a failed fs call: `ENOENT: no such file or directory, scandir '<path>'`
 /// with its `errno` (negative), `code`, `syscall` and `path`.
-fn throw_fs_error(scope: &mut v8::PinScope, e: &std::io::Error, syscall: &str, path: &str) {
+pub(crate) fn throw_fs_error(
+    scope: &mut v8::PinScope,
+    e: &std::io::Error,
+    syscall: &str,
+    path: &str,
+) {
     throw_fs_error_at(scope, e, syscall, Some(path));
 }
 
 /// throw_fs_error for a call Node reports without a path (`EISDIR: …, read`).
-fn throw_fs_error_at(
+pub(crate) fn throw_fs_error_at(
     scope: &mut v8::PinScope,
     e: &std::io::Error,
     syscall: &str,
@@ -11023,13 +11100,23 @@ fn fs_stat(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv
         Ok(m) => m,
         Err(e) => return throw_fs_error(scope, &e, if lstat { "lstat" } else { "stat" }, &p),
     };
+    let fields = stat_fields(&m);
+    let items: Vec<v8::Local<v8::Value>> = fields
+        .iter()
+        .map(|v| v8::Number::new(scope, *v).into())
+        .collect();
+    rv.set(v8::Array::new_with_elements(scope, &items).into());
+}
+
+/// Node's Stats fields of `m`, in fs_stat's order (also fstat's, turbo-test#420).
+pub(crate) fn stat_fields(m: &std::fs::Metadata) -> [f64; 14] {
     let ms = |t: std::io::Result<std::time::SystemTime>| {
         t.ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0.0, |d| d.as_secs_f64() * 1000.0)
     };
     #[cfg(unix)]
-    let fields = {
+    let fields: [f64; 14] = {
         use std::os::unix::fs::MetadataExt;
         let ctime = m.ctime() as f64 * 1000.0 + m.ctime_nsec() as f64 / 1e6;
         [
@@ -11050,7 +11137,7 @@ fn fs_stat(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv
         ]
     };
     #[cfg(not(unix))]
-    let fields = {
+    let fields: [f64; 14] = {
         let mode = if m.is_dir() { 0o040755 } else { 0o100644 };
         let modified = ms(m.modified());
         [
@@ -11070,11 +11157,7 @@ fn fs_stat(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv
             ms(m.created()),
         ]
     };
-    let items: Vec<v8::Local<v8::Value>> = fields
-        .iter()
-        .map(|v| v8::Number::new(scope, *v).into())
-        .collect();
-    rv.set(v8::Array::new_with_elements(scope, &items).into());
+    fields
 }
 
 /// Node builtin module names we shim; each has an entry in runtime.js `__nodeBuiltins` (a unit
@@ -11845,6 +11928,7 @@ fn run_test_file_isolated(entry_abs: &Path, plan: &EntryPlan) -> Result<TestRepo
     isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
     isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
     crate::heap_guard::install(isolate);
+    crate::error_stack::install(isolate);
     crate::heap_guard::arm();
     // Coverage: attach an inspector to this isolate BEFORE entering scopes (needs &mut isolate).
     let mut collector =
@@ -12135,6 +12219,7 @@ fn run_test_file_reused(entry_abs: &Path, plan: &EntryPlan) -> Result<TestReport
             isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
             isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
             crate::heap_guard::install(&mut isolate);
+            crate::error_stack::install(&mut isolate);
             *iso_cell.borrow_mut() = Some(isolate);
         }
     });
@@ -12289,6 +12374,7 @@ impl Default for JestGlobalRealm {
     fn default() -> Self {
         let _profile = crate::runtime_profile::RuntimeProfile::Node.enter();
         let mut isolate = v8::Isolate::new(isolate_params());
+        crate::error_stack::install(&mut isolate);
         let context = {
             let isolate = &mut isolate;
             v8::scope!(let scope, isolate);

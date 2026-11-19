@@ -19,10 +19,13 @@ pub mod coverage;
 pub mod coverage_branch;
 pub mod crypto_compat;
 pub mod encrypted_pkcs8;
+pub(crate) mod error_stack;
 pub mod esbuild_path;
 pub mod esm_cjs;
 pub mod esm_spy;
 pub mod failure;
+#[cfg(unix)]
+pub mod fs_handles;
 pub mod graph;
 pub mod heap_guard;
 pub mod highlight;
@@ -52,6 +55,7 @@ pub mod zlib_stream;
 pub mod message_port;
 
 pub mod process_compat;
+pub mod process_usage;
 
 pub mod http_compat;
 pub mod vue;

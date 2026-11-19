@@ -1068,6 +1068,12 @@ if (typeof globalThis.URL === 'undefined') {
       if (this._special && !this._isFile && URL._badHostPort(hp)) {
         throw new TypeError('Invalid URL: ' + url);
       }
+      if (URL._badIpv6(hp)) throw new TypeError('Invalid URL: ' + url);
+    }
+    // any scheme: a host opening with `[` must be a whole valid IPv6 address (WHATWG host parser)
+    static _badIpv6(hp) {
+      const name = hp ? hp[1] : '';
+      return name.startsWith('[') && URL._ipv6(name) === null;
     }
     _parseAuthority(url, m) {
       this._hierarchical = true;
@@ -1173,14 +1179,15 @@ if (typeof globalThis.URL === 'undefined') {
     }
     _setHostName(name, port, withPort) {
       if (this._rejectHostName(name, port, withPort)) return null;
+      if (name.startsWith('[')) return URL._ipv6(name);
       if (this._special) name = URL._idnAscii(name);
       if (this._isFile && name === 'localhost') return '';
       return name;
     }
     // WHATWG `domain to ASCII` for a special URL's host (turbo-test#259): Node runs an IDN
     // hostname through UTS#46 ToASCII (`new URL('http://ü.com').host === 'xn--tda.com'`); the
-    // lowercase that was here before did the ASCII half of that. IPv6 brackets skip the IDN
-    // pass (the brackets' contents are not a domain); a pure-printable-ASCII name without an
+    // lowercase that was here before did the ASCII half of that. IPv6 brackets never reach the
+    // IDN pass (_setHostName parses them with _ipv6); a pure-printable-ASCII name without an
     // `xn--`-anchored label is lower-cased directly (ToASCII is a no-op on it, and the native
     // call isn't free); otherwise ToASCII runs through `__ttIdnaToAscii`, with a fallback to
     // the lower-cased name if the native is missing or rejects the input — the upstream
@@ -1190,10 +1197,50 @@ if (typeof globalThis.URL === 'undefined') {
     // UTS#46 boundary.
     static _idnAscii(name) {
       const lower = name.toLowerCase();
-      if (lower.startsWith('[')) return lower;
       if (/^[\x21-\x7e]*$/.test(lower) && !/(^|\.)xn--/.test(lower)) return lower;
       const ascii = globalThis.__ttIdnaToAscii ? globalThis.__ttIdnaToAscii(lower) : undefined;
       return ascii === undefined ? lower : ascii;
+    }
+    // WHATWG IPv6 host (turbo-test#425): `[...]` parsed into eight 16-bit pieces (one `::` run of
+    // zeros, an optional dotted IPv4 tail without leading zeros) and serialized as Node does:
+    // lower-case hex without leading zeros, the first longest run of two or more zero pieces as
+    // `::`. Null for an invalid address (the constructor throws, a setter leaves the URL alone).
+    static _ipv6(name) {
+      const pieces = URL._ipv6Pieces(name.slice(1, -1));
+      return name.endsWith(']') && pieces ? '[' + URL._ipv6Text(pieces) + ']' : null;
+    }
+    static _ipv6Pieces(text) {
+      const halves = URL._ipv4Tail(text).split('::');
+      if (halves.length > 2) return null;
+      const part = (s) => (s === '' ? [] : s.split(':'));
+      const head = part(halves[0]), tail = halves.length === 2 ? part(halves[1]) : [];
+      const all = head.concat(tail);
+      if (!URL._ipv6Fits(all, halves.length === 2)) return null;
+      const zeros = new Array(8 - all.length).fill('0');
+      return head.concat(zeros, tail).map((p) => parseInt(p, 16));
+    }
+    // every piece 1-4 hex digits; eight of them, or at most seven around a `::`
+    static _ipv6Fits(all, compressed) {
+      if (!all.every((p) => /^[0-9a-f]{1,4}$/i.test(p))) return false;
+      return compressed ? all.length <= 7 : all.length === 8;
+    }
+    // `a.b.c.d` ending the address becomes two hex pieces; a malformed one leaves a `.` behind,
+    // which then fails the hex-piece check
+    static _ipv4Tail(text) {
+      const m = /^(.*:)((?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3})$/.exec(text);
+      const bytes = m ? m[2].split('.').map(Number) : [];
+      if (!m || bytes.some((b) => b > 255)) return text;
+      return m[1] + ((bytes[0] << 8) | bytes[1]).toString(16) + ':' + ((bytes[2] << 8) | bytes[3]).toString(16);
+    }
+    static _ipv6Text(pieces) {
+      let start = -1, len = 1;
+      for (let i = 0; i < 8; i++) {
+        let n = 0;
+        while (pieces[i + n] === 0) n++;
+        if (n > len) { start = i; len = n; }
+      }
+      const hex = (list) => list.map((p) => p.toString(16)).join(':');
+      return start < 0 ? hex(pieces) : hex(pieces.slice(0, start)) + '::' + hex(pieces.slice(start + len));
     }
     // the leading digits of `v`; a scheme's default port serializes as no port
     _setPort(v) {
@@ -2554,6 +2601,8 @@ const __fs = {
     lstat: __promised((p, options) => __stat(p, options, true)),
   },
 };
+/* __TT_NODE_FS_HANDLES__ */
+/* __TT_NODE_FS_CALLBACKS__ */
 const __module = {
   // a require(): the `require` export condition (turbo-test#134)
   createRequire: (url) => globalThis.__mkRequire(globalThis.__dirnameOf(String(url).startsWith('file:') ? globalThis.__fileURLToPath(url) : String(url)), false),
@@ -2738,6 +2787,7 @@ for (const name of Object.getOwnPropertyNames(__EventEmitterMethods.prototype).f
 __EventEmitter.prototype.addListener = __EventEmitter.prototype.on;
 __EventEmitter.prototype.off = __EventEmitter.prototype.removeListener;
 /* __TT_NODE_WARNINGS__ */
+/* __TT_NODE_PROCESS_USAGE__ */
 const __events = Object.assign(__EventEmitter, { EventEmitter: __EventEmitter, default: __EventEmitter, once: (em, e) => new Promise((res) => em.once(e, (...a) => res(a))) });
 /* __TT_NODE_STREAMS__ */
 /* __TT_NODE_DIAGNOSTICS_CHANNEL__ */
@@ -3419,7 +3469,8 @@ const __util = {
   formatWithOptions: (o, ...a) => __nodeFormatWith(o, ...a),
   deprecate: (fn, _msg) => fn,
   debuglog: () => (() => {}),
-  isDeepStrictEqual: (a, b) => { try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return a === b; } },
+  // assert.deepStrictEqual's comparison (turbo-test#422): key order never matters
+  isDeepStrictEqual: (a, b) => __deepEq(a, b, true),
   types: { isPromise: (x) => x && typeof x.then === 'function', isDate: __utilIsDate, isRegExp: (x) => x instanceof RegExp, isNativeError: (x) => x instanceof Error, isArrayBuffer: (x) => x instanceof ArrayBuffer, isTypedArray: (x) => ArrayBuffer.isView(x) },
   TextEncoder: globalThis.TextEncoder,
   TextDecoder: globalThis.TextDecoder,
