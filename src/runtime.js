@@ -2028,24 +2028,13 @@ if (typeof globalThis.TransformStream === 'undefined') {
   globalThis.TransformStreamDefaultController = TransformStreamDefaultController;
 }
 /* __TT_NODE_BUFFER_BYTE_LENGTH__ */
+/* __TT_NODE_BUFFER_OPS__ */
 if (typeof globalThis.Buffer === 'undefined') {
   const byteArrayTag = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get;
   class Buffer extends Uint8Array {
-    static #fromHex(d) {
-      const b = new Buffer(d.length / 2);
-      for (let i = 0; i < b.length; i++) b[i] = parseInt(d.substr(i * 2, 2), 16);
-      return b;
-    }
-    static #fromString(d, enc) {
-      if (enc === 'base64') return new Buffer(globalThis.__b64decodeToBytes(d));
-      // base64url: RFC 4648 §5 — `-`/`_` instead of `+`/`/`, optional padding. Node's base64
-      // decoder tolerates either, so normalise to standard base64 and reuse the same path.
-      if (enc === 'base64url') return new Buffer(globalThis.__b64decodeToBytes(d.replace(/-/g, '+').replace(/_/g, '/')));
-      if (enc === 'hex') return Buffer.#fromHex(d);
-      return new Buffer(new globalThis.TextEncoder().encode(d));
-    }
     static from(d, enc) {
-      if (typeof d === 'string') return Buffer.#fromString(d, enc);
+      // The string encoders (node_buffer_ops.js) are shared with Buffer#write.
+      if (typeof d === 'string') return new Buffer(__bufferFromString(d, enc));
       if (Array.isArray(d) || d instanceof Uint8Array) return new Buffer(d);
       if (d instanceof ArrayBuffer) return new Buffer(new Uint8Array(d));
       return new Buffer(0);
@@ -2066,32 +2055,19 @@ if (typeof globalThis.Buffer === 'undefined') {
     static byteLength(value, encoding) { return __bufferByteLength(value, encoding); }
     static isBuffer(x) { return x instanceof Buffer; }
     static concat(list) { const len = list.reduce((n, b) => n + b.length, 0); const out = new Buffer(len); let o = 0; for (const b of list) { out.set(b, o); o += b.length; } return out; }
-    static #readUInt32Offset(bytes, offset) {
-      if (typeof offset !== 'number') throw Object.assign(new TypeError('The offset argument must be a number'), { code: 'ERR_INVALID_ARG_TYPE' });
-      if (Math.floor(offset) !== offset) throw Object.assign(new RangeError('The offset must be an integer'), { code: 'ERR_OUT_OF_RANGE' });
-      if (bytes.length < 4) throw Object.assign(new RangeError('Attempt to access memory outside buffer bounds'), { code: 'ERR_BUFFER_OUT_OF_BOUNDS' });
-      if (offset < 0 || offset > bytes.length - 4) throw Object.assign(new RangeError('The offset is outside the buffer bounds'), { code: 'ERR_OUT_OF_RANGE' });
-    }
+    // Instance byte operations live in node_buffer_ops.js (turbo-test#408, #409).
     equals(other) { return Buffer.compare(this, other) === 0; }
-    writeUInt32LE(value, offset = 0) {
-      const number = +value;
-      if (number < 0 || number > 0xffffffff) throw Object.assign(new RangeError('The value is outside the unsigned 32-bit range'), { code: 'ERR_OUT_OF_RANGE' });
-      Buffer.#readUInt32Offset(this, offset);
-      const bits = number >>> 0;
-      for (let i = 0; i < 4; i++) this[offset + i] = bits >>> (8 * i);
-      return offset + 4;
-    }
-    readUInt32BE(offset = 0) {
-      Buffer.#readUInt32Offset(this, offset);
-      return this[offset] * 16777216 + this[offset + 1] * 65536 + this[offset + 2] * 256 + this[offset + 3];
-    }
-    toString(enc) {
-      if (enc === 'hex') return Array.from(this).map((b) => b.toString(16).padStart(2, '0')).join('');
-      if (enc === 'base64') return globalThis.__b64encodeBytes(Array.from(this));
-      // base64url: RFC 4648 §5 — `+` → `-`, `/` → `_`, no `=` padding (Node WHATWG, turbo-test#260).
-      if (enc === 'base64url') return globalThis.__b64encodeBytes(Array.from(this)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-      return new globalThis.TextDecoder('utf-8', { ignoreBOM: true }).decode(this); // Node keeps a BOM
-    }
+    compare(target, targetStart, targetEnd, sourceStart, sourceEnd) { return __bufferCompare(this, target, targetStart, targetEnd, sourceStart, sourceEnd); }
+    copy(target, targetStart, sourceStart, sourceEnd) { return __bufferCopy(this, target, targetStart, sourceStart, sourceEnd); }
+    write(string, offset, length, encoding) { return __bufferWrite(this, string, offset, length, encoding); }
+    writeInt16BE(value, offset = 0) { return __bufferWriteInt(this, value, offset, __bufferInt16, false); }
+    writeInt32BE(value, offset = 0) { return __bufferWriteInt(this, value, offset, __bufferInt32, false); }
+    writeUInt32BE(value, offset = 0) { return __bufferWriteInt(this, value, offset, __bufferUInt32, false); }
+    writeUInt32LE(value, offset = 0) { return __bufferWriteInt(this, value, offset, __bufferUInt32, true); }
+    readInt16BE(offset) { return __bufferReadIntBE(this, offset, __bufferInt16); }
+    readInt32BE(offset) { return __bufferReadIntBE(this, offset, __bufferInt32); }
+    readUInt32BE(offset) { return __bufferReadIntBE(this, offset, __bufferUInt32); }
+    toString(encoding, start, end) { return __bufferToString(this, encoding, start, end); }
     toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
   }
   // Node's public static methods are enumerable; safer-buffer copies them with for-in.

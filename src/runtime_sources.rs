@@ -36,6 +36,10 @@ pub(crate) fn shared_runtime_source() -> String {
                 include_str!("node_buffer_byte_length.js"),
             ),
             (
+                "/* __TT_NODE_BUFFER_OPS__ */",
+                include_str!("node_buffer_ops.js"),
+            ),
+            (
                 "/* __TT_NODE_PORTS__ */",
                 include_str!("node_message_ports.js"),
             ),
