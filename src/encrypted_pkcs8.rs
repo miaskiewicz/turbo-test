@@ -93,6 +93,34 @@ fn decrypt(der: &[u8], password: &[u8]) -> Result<Vec<u8>, String> {
         _ => Err("Unsupported encrypted PKCS8 algorithm".into()),
     }
 }
+/// Node's (OpenSSL 3's) encrypted PKCS#8 export: PBES2 with PBKDF2-HMAC-SHA256 over 2048 rounds
+/// and a 16-byte random salt, then `scheme` (a canonical cipher name) with a random IV.
+fn encrypt(der: &[u8], password: &[u8], scheme: &str) -> Result<Vec<u8>, String> {
+    use pkcs8::pkcs5::pbes2;
+    let mut salt = [0u8; 16];
+    let mut iv = [0u8; 16];
+    getrandom::getrandom(&mut salt).map_err(|_| "No randomness for the PKCS8 salt")?;
+    getrandom::getrandom(&mut iv).map_err(|_| "No randomness for the PKCS8 IV")?;
+    let encryption = match scheme {
+        "aes-128-cbc" => pbes2::EncryptionScheme::Aes128Cbc { iv: &iv },
+        "aes-192-cbc" => pbes2::EncryptionScheme::Aes192Cbc { iv: &iv },
+        "aes-256-cbc" => pbes2::EncryptionScheme::Aes256Cbc { iv: &iv },
+        "des-ede3-cbc" => pbes2::EncryptionScheme::DesEde3Cbc {
+            iv: iv[..8].try_into().unwrap(),
+        },
+        _ => return Err(format!("Unsupported PKCS8 export cipher {scheme}")),
+    };
+    let kdf = pbes2::Pbkdf2Params::hmac_with_sha256(2048, &salt)
+        .map_err(|_| "Invalid PBKDF2 parameters")?;
+    let params = pbes2::Parameters {
+        kdf: kdf.into(),
+        encryption,
+    };
+    let info = pkcs8::PrivateKeyInfo::from_der(der).map_err(|_| "Invalid PKCS8 key")?;
+    info.encrypt_with_params(params, password)
+        .map(|doc| doc.as_bytes().to_vec())
+        .map_err(|_| "Unable to encrypt PKCS8 key".into())
+}
 fn bytes(args: &v8::FunctionCallbackArguments, index: i32) -> Result<Zeroizing<Vec<u8>>, String> {
     let view = v8::Local::<v8::ArrayBufferView>::try_from(args.get(index))
         .map_err(|_| "PKCS8 inputs must be byte views")?;
@@ -107,12 +135,33 @@ fn bytes(args: &v8::FunctionCallbackArguments, index: i32) -> Result<Zeroizing<V
 fn request(args: &v8::FunctionCallbackArguments) -> Result<Vec<u8>, String> {
     decrypt(&bytes(args, 0)?, &bytes(args, 1)?)
 }
+fn encrypt_request(
+    scope: &mut v8::PinScope,
+    args: &v8::FunctionCallbackArguments,
+) -> Result<Vec<u8>, String> {
+    let scheme = args.get(2).to_rust_string_lossy(scope);
+    let der = bytes(args, 0)?;
+    encrypt(&der, &bytes(args, 1)?, &scheme)
+}
+/// `__ttEncryptPkcs8(der, password, cipher)`: the encrypted PKCS#8 DER of an unencrypted one.
+pub fn native_encrypt_pkcs8(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let result = encrypt_request(scope, &args);
+    respond(scope, rv, result);
+}
 pub fn native_decrypt_pkcs8(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
+    rv: v8::ReturnValue,
 ) {
-    match request(&args) {
+    let result = request(&args);
+    respond(scope, rv, result);
+}
+fn respond(scope: &mut v8::PinScope, mut rv: v8::ReturnValue, result: Result<Vec<u8>, String>) {
+    match result {
         Ok(data) => {
             let store = v8::ArrayBuffer::new_backing_store_from_vec(data).make_shared();
             rv.set(v8::ArrayBuffer::with_backing_store(scope, &store).into());
@@ -141,6 +190,24 @@ mod tests {
             pkcs8::ObjectIdentifier::new_unwrap("1.2.840.113549.1.5.14");
         assert!(
             matches!(super::decrypt(&info.to_der().unwrap(), b"password"), Err(message) if message=="Unsupported encrypted PKCS8 algorithm")
+        );
+    }
+    #[test]
+    fn encrypted_export_round_trips_every_cipher_and_rejects_others() {
+        use p256::pkcs8::EncodePrivateKey;
+        let key = p256::SecretKey::from_slice(&[7; 32]).unwrap();
+        let der = key.to_pkcs8_der().unwrap();
+        for scheme in ["aes-128-cbc", "aes-192-cbc", "aes-256-cbc", "des-ede3-cbc"] {
+            let encrypted = super::encrypt(der.as_bytes(), b"pw", scheme).unwrap();
+            assert_ne!(encrypted, der.as_bytes());
+            assert_eq!(super::decrypt(&encrypted, b"pw").unwrap(), der.as_bytes());
+            assert!(super::decrypt(&encrypted, b"wrong").is_err());
+        }
+        assert!(
+            matches!(super::encrypt(der.as_bytes(), b"pw", "aes-256-gcm"), Err(m) if m == "Unsupported PKCS8 export cipher aes-256-gcm")
+        );
+        assert!(
+            matches!(super::encrypt(b"not a key", b"pw", "aes-256-cbc"), Err(m) if m == "Invalid PKCS8 key")
         );
     }
     #[test]

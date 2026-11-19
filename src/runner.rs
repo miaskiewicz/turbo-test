@@ -10255,6 +10255,12 @@ fn install_backend_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Objec
     bind_fn(
         scope,
         global,
+        "__ttEncryptPkcs8",
+        crate::encrypted_pkcs8::native_encrypt_pkcs8,
+    );
+    bind_fn(
+        scope,
+        global,
         "__ttBlockList",
         crate::blocklist::native_blocklist,
     );

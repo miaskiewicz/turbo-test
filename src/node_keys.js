@@ -6,16 +6,51 @@ function __keyOptions(options) {
   if (!options || typeof options !== 'object') throw new TypeError('Key options must be an object');
   return options;
 }
+// Node's ERR_INVALID_ARG_VALUE for an export option
+function __keyInvalidOption(name, value, reason) {
+  const shown = typeof value === 'string' ? "'" + value + "'" : String(value);
+  return Object.assign(new TypeError("The property 'options." + name + "' " + reason + '. Received ' + shown), { code: 'ERR_INVALID_ARG_VALUE' });
+}
+// the ciphers an encrypted PKCS#8 export takes (OpenSSL names and aliases, any case), as the
+// canonical name __ttEncryptPkcs8 knows
+const __KEY_EXPORT_CIPHERS = {
+  'aes-128-cbc': 'aes-128-cbc', aes128: 'aes-128-cbc',
+  'aes-192-cbc': 'aes-192-cbc', aes192: 'aes-192-cbc',
+  'aes-256-cbc': 'aes-256-cbc', aes256: 'aes-256-cbc',
+  'des-ede3-cbc': 'des-ede3-cbc', des3: 'des-ede3-cbc',
+};
+function __keyExportCipher(cipher) {
+  const name = cipher.toLowerCase();
+  if (Object.hasOwn(__KEY_EXPORT_CIPHERS, name)) return __KEY_EXPORT_CIPHERS[name];
+  // another OpenSSL cipher family: real in Node, not offered here
+  if (/^(aes|aria|bf|blowfish|camellia|cast|chacha20|des|idea|rc2|rc4|seed|sm4)/.test(name)) __keyUnsupported('Encrypted key export with cipher ' + cipher);
+  throw Object.assign(new Error('Unknown cipher'), { code: 'ERR_CRYPTO_UNKNOWN_CIPHER' });
+}
+// a private key export's encryption (Node's parseKeyEncoding): none, or the cipher and the
+// passphrase bytes (in `encoding`, utf8 by default)
+function __keyExportEncryption(options) {
+  const { cipher, passphrase } = options;
+  if (cipher == null) {
+    if (passphrase !== undefined) throw __keyInvalidOption('cipher', cipher, 'is required when a passphrase is specified');
+    return null;
+  }
+  if (typeof cipher !== 'string') throw __keyInvalidOption('cipher', cipher, 'is invalid');
+  if (typeof passphrase !== 'string' && !ArrayBuffer.isView(passphrase)) throw __keyInvalidOption('passphrase', passphrase, 'is invalid');
+  return { cipher: __keyExportCipher(cipher), passphrase: __hashBytes(passphrase, options.encoding) };
+}
+// the encryption of an export (null for a plain one), after checking its options
 function __keyExportOptions(type, options) {
   __keyOptions(options);
   const expected = type === 'private' ? 'pkcs8' : 'spki';
   if (options.type !== expected) __keyUnsupported('Key ' + type + ' export type ' + options.type);
   if (options.format !== 'pem' && options.format !== 'der') __keyUnsupported('Key format ' + options.format);
-  if (options.cipher !== undefined || options.passphrase !== undefined) __keyUnsupported('Encrypted key export');
-  return options;
+  return type === 'private' ? __keyExportEncryption(options) : __keyPublicExportPlain(options);
 }
-function __keyPem(bytes, type) {
-  const label = type === 'private' ? 'PRIVATE KEY' : 'PUBLIC KEY';
+function __keyPublicExportPlain(options) {
+  if (options.cipher !== undefined || options.passphrase !== undefined) __keyUnsupported('Encrypted key export');
+  return null;
+}
+function __keyPem(bytes, label) {
   const body = Buffer.from(bytes).toString('base64').match(/.{1,64}/g).join('\n');
   return '-----BEGIN ' + label + '-----\n' + body + '\n-----END ' + label + '-----\n';
 }
@@ -36,8 +71,10 @@ class __KeyObject {
   }
   export(options) {
     const record = __keyRecords.get(this);
-    __keyExportOptions(record.type, options);
-    return options.format === 'der' ? Buffer.from(record.der) : __keyPem(record.der, record.type);
+    const encryption = __keyExportOptions(record.type, options);
+    const der = encryption ? globalThis.__ttEncryptPkcs8(record.der, encryption.passphrase, encryption.cipher) : record.der;
+    if (options.format === 'der') return Buffer.from(der);
+    return __keyPem(der, encryption ? 'ENCRYPTED PRIVATE KEY' : record.type === 'private' ? 'PRIVATE KEY' : 'PUBLIC KEY');
   }
 }
 function __keyDecodePem(input) {
