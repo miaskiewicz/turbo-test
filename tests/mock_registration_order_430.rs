@@ -77,12 +77,21 @@ fn jest_mocks_are_all_registered_before_a_factory_loads_the_actual_module() {
     // aliased specifiers, both orders
     let reader = "jest.mock('@/reader/reader', () => ({ ...jest.requireActual('@/reader/reader'), other: jest.fn(() => 'mocked-other') }));";
     let key = "jest.mock('@/util/key', () => ({ getKey: jest.fn() }));";
-    p.file("src/svc/alias_reader_first.spec.ts", &jest_spec(reader, key, true));
-    p.file("src/svc/alias_key_first.spec.ts", &jest_spec(reader, key, false));
+    p.file(
+        "src/svc/alias_reader_first.spec.ts",
+        &jest_spec(reader, key, true),
+    );
+    p.file(
+        "src/svc/alias_key_first.spec.ts",
+        &jest_spec(reader, key, false),
+    );
     // relative specifiers
     let reader = "jest.mock('../reader/reader', () => ({ ...jest.requireActual('../reader/reader'), other: jest.fn(() => 'mocked-other') }));";
     let key = "jest.mock('../util/key', () => ({ getKey: jest.fn() }));";
-    p.file("src/svc/rel_reader_first.spec.ts", &jest_spec(reader, key, true));
+    p.file(
+        "src/svc/rel_reader_first.spec.ts",
+        &jest_spec(reader, key, true),
+    );
     // CommonJS requires
     p.file(
         "src/svc/cjs_reader_first.spec.js",
@@ -124,8 +133,14 @@ fn vitest_mocks_are_all_registered_before_a_factory_imports_the_original() {
     p.file("package.json", r#"{ "name": "viorder", "type": "module" }"#);
     let original = "vi.mock('../reader/reader', async (importOriginal) => ({ ...(await importOriginal<object>()), other: vi.fn(() => 'mocked-other') }));";
     let actual = "vi.mock('../reader/reader', async () => ({ ...(await vi.importActual<object>('../reader/reader')), other: vi.fn(() => 'mocked-other') }));";
-    p.file("src/svc/original_first.test.ts", &vitest_spec(original, true));
-    p.file("src/svc/original_last.test.ts", &vitest_spec(original, false));
+    p.file(
+        "src/svc/original_first.test.ts",
+        &vitest_spec(original, true),
+    );
+    p.file(
+        "src/svc/original_last.test.ts",
+        &vitest_spec(original, false),
+    );
     p.file("src/svc/actual_first.test.ts", &vitest_spec(actual, true));
     let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
     assert_eq!(counts(&r), (6, 0), "{}", r.all());
