@@ -4310,9 +4310,23 @@ fn dlopen_error(err: &str) -> String {
         Some(sym) if sym.starts_with("napi_") || sym.starts_with("node_api_") => format!(
             "it imports {sym}, which turbo-test's Node-API host does not provide (dlopen {err})"
         ),
+        Some(sym) if is_v8_cpp_api(sym) => format!(
+            "it imports {sym}, V8's or Node's C++ API: it is a NAN / node-gyp addon built against Node's own V8, and turbo-test, which embeds its own V8, loads only Node-API addons (dlopen {err})"
+        ),
         Some(sym) => format!("it imports {sym}, which nothing loaded provides (dlopen {err})"),
         None => format!("dlopen {err}"),
     }
+}
+
+/// Whether an import is an Itanium-mangled `v8::` or `node::` name (a member, const member or
+/// namespace function): the C++ API a NAN / node-gyp addon links against. turbo-test exports
+/// none of it — its V8 is its own build, not Node's ABI — so such an addon can never load here
+/// and providing single symbols would only defer the failure into an ABI mismatch
+/// (turbo-test#391).
+fn is_v8_cpp_api(sym: &str) -> bool {
+    ["_ZN2v8", "_ZNK2v8", "_ZN4node", "_ZNK4node"]
+        .iter()
+        .any(|p| sym.starts_with(p))
 }
 
 /// The symbol a dlopen error says is missing, without the Mach-O leading underscore: macOS
