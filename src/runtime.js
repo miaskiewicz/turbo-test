@@ -2060,16 +2060,10 @@ if (typeof globalThis.Buffer === 'undefined') {
     compare(target, targetStart, targetEnd, sourceStart, sourceEnd) { return __bufferCompare(this, target, targetStart, targetEnd, sourceStart, sourceEnd); }
     copy(target, targetStart, sourceStart, sourceEnd) { return __bufferCopy(this, target, targetStart, sourceStart, sourceEnd); }
     write(string, offset, length, encoding) { return __bufferWrite(this, string, offset, length, encoding); }
-    writeInt16BE(value, offset = 0) { return __bufferWriteInt(this, value, offset, __bufferInt16, false); }
-    writeInt32BE(value, offset = 0) { return __bufferWriteInt(this, value, offset, __bufferInt32, false); }
-    writeUInt32BE(value, offset = 0) { return __bufferWriteInt(this, value, offset, __bufferUInt32, false); }
-    writeUInt32LE(value, offset = 0) { return __bufferWriteInt(this, value, offset, __bufferUInt32, true); }
-    readInt16BE(offset) { return __bufferReadIntBE(this, offset, __bufferInt16); }
-    readInt32BE(offset) { return __bufferReadIntBE(this, offset, __bufferInt32); }
-    readUInt32BE(offset) { return __bufferReadIntBE(this, offset, __bufferUInt32); }
     toString(encoding, start, end) { return __bufferToString(this, encoding, start, end); }
     toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
   }
+  __bufferInstallIntOps(Buffer.prototype);
   // Node's public static methods are enumerable; safer-buffer copies them with for-in.
   for (const name of ['from', 'alloc', 'allocUnsafe', 'byteLength', 'isBuffer', 'concat', 'compare']) {
     Object.defineProperty(Buffer, name, { enumerable: true });

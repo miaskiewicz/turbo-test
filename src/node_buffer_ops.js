@@ -236,7 +236,10 @@ function __bufferIntBounds(buffer, offset, size) {
   if (buffer[offset] === undefined || buffer[offset + size - 1] === undefined) __bufferBoundsError(offset, buffer.length - size);
   return offset;
 }
+const __bufferInt8 = { size: 1, min: -128, max: 127, signed: true };
+const __bufferUInt8 = { size: 1, min: 0, max: 255, signed: false };
 const __bufferInt16 = { size: 2, min: -32768, max: 32767, signed: true };
+const __bufferUInt16 = { size: 2, min: 0, max: 65535, signed: false };
 const __bufferInt32 = { size: 4, min: -2147483648, max: 2147483647, signed: true };
 const __bufferUInt32 = { size: 4, min: 0, max: 4294967295, signed: false };
 function __bufferWriteInt(buffer, value, offset, spec, little) {
@@ -247,9 +250,30 @@ function __bufferWriteInt(buffer, value, offset, spec, little) {
   for (let index = 0; index < spec.size; index++) buffer[offset + (little ? index : spec.size - 1 - index)] = bits >>> (8 * index);
   return offset + spec.size;
 }
-function __bufferReadIntBE(buffer, offset, spec) {
+function __bufferReadInt(buffer, offset, spec, little) {
   const start = __bufferIntBounds(buffer, offset === undefined ? 0 : offset, spec.size);
   let value = 0;
-  for (let index = 0; index < spec.size; index++) value = value * 256 + buffer[start + index];
+  for (let index = 0; index < spec.size; index++) value = value * 256 + buffer[start + (little ? spec.size - 1 - index : index)];
   return spec.signed && value > spec.max ? value - 2 * (spec.max + 1) : value;
+}
+// Node's 8/16/32-bit integer methods, enumerable as Node assigns them, with the lower-case Uint
+// aliases as the same functions. compress-commons writes zip headers with them (#404).
+const __bufferIntMethods = [
+  ['Int8', __bufferInt8, false], ['UInt8', __bufferUInt8, false],
+  ['Int16LE', __bufferInt16, true], ['Int16BE', __bufferInt16, false],
+  ['UInt16LE', __bufferUInt16, true], ['UInt16BE', __bufferUInt16, false],
+  ['Int32LE', __bufferInt32, true], ['Int32BE', __bufferInt32, false],
+  ['UInt32LE', __bufferUInt32, true], ['UInt32BE', __bufferUInt32, false],
+];
+function __bufferInstallIntOps(proto) {
+  for (const [name, spec, little] of __bufferIntMethods) {
+    const methods = {
+      ['write' + name](value, offset = 0) { return __bufferWriteInt(this, value, offset, spec, little); },
+      ['read' + name](offset) { return __bufferReadInt(this, offset, spec, little); },
+    };
+    for (const [key, method] of Object.entries(methods)) {
+      proto[key] = method;
+      if (!spec.signed) proto[key.replace('UInt', 'Uint')] = method;
+    }
+  }
 }
