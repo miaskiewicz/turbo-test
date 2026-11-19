@@ -93,8 +93,9 @@ fn fake_timers_fire_only_when_the_fake_clock_advances() {
                 row(
                     "fake timers do not fire on their own",
                     "failed",
-                    // vitest's json: the timeout error's stack is the test's registration
-                    "Error: STACK_TRACE_ERROR"
+                    // vitest's json: the timeout error's stack is the test's registration,
+                    // headed by the timeout message (vitest 5's makeTimeoutError, turbo-test#426)
+                    "Error: Test timed out in 300ms."
                 ),
                 row(
                     "a real timer set before useFakeTimers still fires",

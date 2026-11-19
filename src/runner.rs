@@ -11089,6 +11089,9 @@ pub struct TestReport {
     pub logs: Vec<(String, String, String)>,
     /// ms the drive loop's clock jumped while the tests ran (turbo-test#95).
     pub waited_ms: f64,
+    /// The messages of the file task's own errors (its top-level hooks'), in order: vitest's JSON
+    /// `message` is the first (turbo-test#426).
+    pub file_errors: Vec<String>,
 }
 
 /// A test file's snapshot outcome, as @vitest/snapshot's `SnapshotResult` (turbo-test#73).
@@ -12707,6 +12710,7 @@ fn drive_tests_bounded(
         })
         .collect();
     let waited_ms = f64::from(get_num(scope, "waited_ms"));
+    let file_errors = string_array(scope, summary, "file_errors");
     Ok(TestReport {
         passed,
         failed,
@@ -12719,6 +12723,7 @@ fn drive_tests_bounded(
         empty_suites,
         logs,
         waited_ms,
+        file_errors,
     })
 }
 

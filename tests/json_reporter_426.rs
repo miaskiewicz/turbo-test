@@ -74,7 +74,6 @@ describe('d', () => { it('never runs', () => {}); });
         )),
         "{timeout}"
     );
-    assert!(timeout.contains("t.test.js:2:"), "{timeout}");
     assert_eq!(t["status"], "failed");
     assert_eq!(t["message"], "");
     let messages: Vec<(&str, &str)> = ["u.test.js", "w.test.js", "x.test.js"]

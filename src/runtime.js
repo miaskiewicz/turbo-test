@@ -9594,7 +9594,8 @@ function __runTestBody(t, ctx, timeoutMs) {
       // describe( call returned: no enclosing describe( frames)
       const frames = String(t.stackTrace.stack).split('\n');
       const own = frames.findIndex((l, i) => i > 0 && !!globalThis.__ttFile && l.includes(globalThis.__ttFile));
-      err.stack = (own < 0 ? frames : frames.slice(0, own + 1)).join('\n');
+      // headed by the timeout's message (vitest 5's makeTimeoutError: turbo-test#426)
+      err.stack = (own < 0 ? frames : frames.slice(0, own + 1)).join('\n').replace('STACK_TRACE_ERROR', err.message);
       // the context's signal aborts with the timeout error (vitest's `withTimeout`)
       t.abort.abort(err);
       reject(err);
@@ -9930,7 +9931,7 @@ function __suiteOpen(suite, ancestors, summary, mode) {
   return st;
 }
 function __suiteClose(st) {
-  if (st.suiteErrors.length && st.ancestors.length) __recordSuiteErrors(st.suite, st.summary, st.suiteSlot, st.suiteStart, st.suiteErrors);
+  __recordHookErrors(st);
   __ttLogTask = st.outerTask;
   st.record(__suiteState(st.failed, st.skipAll, st.idle));
   return st.failed;
@@ -10017,6 +10018,13 @@ function __suitePlan(suite, ancestors, summary, skipAll) {
   return { idle, forbidden, hooks: !skipAll && !idle && !forbidden };
 }
 const __suiteTaskName = (suite, ancestors) => (ancestors.length ? [...ancestors.slice(1), suite].map((x) => x.name).join(' > ') : '');
+// A suite's hook errors: a describe's are its suite's (turbo-test#81); the root suite's are the
+// file task's errors, whose first message is vitest's JSON `message` for the file (turbo-test#426).
+function __recordHookErrors(st) {
+  if (!st.suiteErrors.length) return;
+  if (st.ancestors.length) __recordSuiteErrors(st.suite, st.summary, st.suiteSlot, st.suiteStart, st.suiteErrors);
+  else st.summary.file_errors = st.suiteErrors.map((e) => e.message);
+}
 function __recordSuiteErrors(suite, summary, suiteSlot, suiteStart, suiteErrors) {
   summary.suite_errors[suiteSlot] = { name: suite.name, duration_ms: __loop.elapsed() - suiteStart, errors: suiteErrors };
 }
@@ -10068,7 +10076,7 @@ globalThis.__tt = {
     if (globalThis.__ttInstallJsdomComputedStyle) globalThis.__ttInstallJsdomComputedStyle();
     // `suites`: one state per describe block ('pass' / 'fail' / 'skip' / 'todo'), for the JSON
     // reporter's suite counts.
-    const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [], suites: [], skippedNames: [], suite_errors: [], empty_suites: [] };
+    const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [], suites: [], skippedNames: [], suite_errors: [], empty_suites: [], file_errors: [] };
     // vitest (runner `runFiles`): a file that collected NO task at all — no test or suite, skipped
     // and todo ones included — fails with "No test suite found in file <path>" unless
     // passWithNoTests. Reported as the file's only failure entry with no failed test; the CLI

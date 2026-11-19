@@ -43,6 +43,9 @@ pub struct FileResult {
     pub failed_file: bool,
     /// Load-error message (for the synthetic JUnit/TAP failing case); empty otherwise.
     pub error_msg: String,
+    /// The JSON `message` of a file that loaded: its first file-level (top-level hook) error's
+    /// message, else empty (turbo-test#426).
+    pub file_message: String,
     /// Per-test cases (name/status/duration/message) for the per-testcase reporters.
     pub tests: Vec<TestCase>,
     /// One state per `describe` block ("pass" / "fail" / "skip" / "todo"), for the JSON counts.
@@ -617,6 +620,7 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
                 load_error: false,
                 failed_file: !rep.ok(),
                 error_msg: String::new(),
+                file_message: rep.file_errors.into_iter().next().unwrap_or_default(),
                 tests: rep.tests,
                 suites: rep.suites,
                 snapshot: rep.snapshot,
@@ -637,6 +641,7 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
             load_error: true,
             failed_file: true,
             error_msg: e,
+            file_message: String::new(),
             tests: Vec::new(),
             suites: Vec::new(),
             snapshot: None,
@@ -993,7 +998,7 @@ pub fn render_json(
                 json_str(&if r.load_error {
                     file_message(&r.error_msg)
                 } else {
-                    String::new()
+                    r.file_message.clone()
                 }),
                 json_str(&history_key(&files[r.idx])),
             )
