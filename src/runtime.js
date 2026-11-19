@@ -2702,10 +2702,8 @@ function __EventEmitter() {
 }
 class __EventEmitterMethods {
   on(e, f) { const state = __eventState(this); (state[e] || (state[e] = [])).push(f); return this; }
-  addListener(e, f) { return this.on(e, f); }
-  once(e, f) { const self = this; function g(...a) { self.off(e, g); return f.apply(this, a); } g.listener = f; return this.on(e, g); }
-  off(e, f) { if (this._ev && this._ev[e]) this._ev[e] = this._ev[e].filter((x) => x !== f && x.listener !== f); return this; }
-  removeListener(e, f) { return this.off(e, f); }
+  once(e, f) { const self = this; function g(...a) { self.removeListener(e, g); return f.apply(this, a); } g.listener = f; return this.on(e, g); }
+  removeListener(e, f) { if (this._ev && this._ev[e]) this._ev[e] = this._ev[e].filter((x) => x !== f && x.listener !== f); return this; }
   removeAllListeners(e) { if (!this._ev) return this; if (e !== undefined) delete this._ev[e]; else this._ev = Object.create(null); return this; }
   emit(e, ...a) {
     const listeners = __eventListeners(this, e).slice();
@@ -2723,6 +2721,11 @@ for (const name of Object.getOwnPropertyNames(__EventEmitterMethods.prototype).f
   const method = Object.getOwnPropertyDescriptor(__EventEmitterMethods.prototype, name);
   Object.defineProperty(__EventEmitter.prototype, name, { ...method, enumerable: true });
 }
+// As in Node, the aliases are the same functions: an alias that dispatched through `this` would
+// recurse when a subclass aliases its override and calls the original from it (readable-stream
+// v4's removeListener / off, turbo-test#404).
+__EventEmitter.prototype.addListener = __EventEmitter.prototype.on;
+__EventEmitter.prototype.off = __EventEmitter.prototype.removeListener;
 /* __TT_NODE_WARNINGS__ */
 const __events = Object.assign(__EventEmitter, { EventEmitter: __EventEmitter, default: __EventEmitter, once: (em, e) => new Promise((res) => em.once(e, (...a) => res(a))) });
 /* __TT_NODE_STREAMS__ */
