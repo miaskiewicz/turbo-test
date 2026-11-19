@@ -7751,11 +7751,20 @@ fn native_register_mock_scoped(
     }
 }
 
-/// `jest.mock(spec, factory, { virtual: true })`: register the factory's exports keyed by the
-/// raw spec (plus the caller's dir), skipping module resolution. `require(spec)` in the test
-/// looks the mock up here before resolving, so the spec never needs to point at a real file.
+/// `jest.mock(spec, factory, { virtual: true })`: register the factory's exports without
+/// resolving the spec. `require(spec)` looks the mock up here before resolving, so the spec never
+/// needs to point at a real file. The key is jest-resolve's `getModulePath`: a spec starting with
+/// `.` is the path it names from `dir` (lexically, extension as written), any other (absolute or
+/// bare) is itself, so every module reaching that path gets the mock (turbo-test#405).
 fn virtual_mock_key(dir: &str, spec: &str) -> PathBuf {
-    PathBuf::from(format!("<virtual:{dir}\0{spec}>"))
+    let path = if spec.starts_with('.') {
+        normalize_path(&Path::new(dir).join(spec))
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        spec.to_string()
+    };
+    PathBuf::from(format!("<virtual:{path}>"))
 }
 
 fn native_register_virtual_mock(
