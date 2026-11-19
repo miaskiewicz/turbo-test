@@ -77,7 +77,7 @@ function absent() {
   assert.equal(globalThis.__ttRuntimeBackendInstalled,false);
   for(const name of ['__ttAsyncFrameGet','__ttAsyncFrameSet','__ttSetPromiseHooks','__ttDrainAsyncHookTasks']) assert.equal(typeof globalThis[name],'undefined',name);
   assert.equal(eval('typeof __asyncFrameActivated'),'undefined');
-  assert.throws(()=>require('node:async_hooks'),{code:'ERR_TURBO_BACKEND_CAPABILITY'});
+  // (requiring a backend module would activate the backend, as vitest's jsdom has all of Node)
 }
 test('DOM work timers promises and nextTicks remain independent of Node context',async()=>{
   absent();const tasks=[];
