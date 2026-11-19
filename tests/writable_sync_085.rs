@@ -31,6 +31,19 @@ fn writable_write_cork_writev_drain_and_error_orderings_match_node() {
 }
 
 #[test]
+fn written_buffers_reach_write_by_identity_like_node() {
+    let p = node_project(
+        "writable-chunk-identity-085",
+        "identity.test.cjs",
+        include_str!("data/compat-085/writable-chunk-identity.cjs"),
+    );
+    let run = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+    let report = json_report(&run);
+    assert_eq!(report["numPassedTests"], 3, "{}", run.all());
+    assert_eq!(report["numFailedTests"], 0, "{}", run.all());
+}
+
+#[test]
 fn process_pid_and_ppid_are_the_host_process_ids() {
     let p = node_project(
         "process-ids-085",
