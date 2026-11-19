@@ -81,6 +81,55 @@ fn binder_and_scope_text() {
 }
 
 #[test]
+fn the_binder_goes_after_the_first_line_ending_statement_that_loads_nothing() {
+    let ts = std::path::Path::new("/p/a.test.ts");
+    let at = |src: &str| place_binder(ts, src, "B();");
+    // after the first declaration, ahead of the require / import (#401); the directive prologue
+    // stays first
+    assert_eq!(
+        at("'use strict'\nconst m = 1;\nrequire('./x');\n"),
+        "'use strict'\nconst m = 1;;B();\nrequire('./x');\n"
+    );
+    assert_eq!(
+        at("#!/usr/bin/env node\nconst m: Array<{\n  k: string;\n}> = [];\njest.mock('./x', () => ({ m }));\nimport { y } from './y';\n"),
+        "#!/usr/bin/env node\nconst m: Array<{\n  k: string;\n}> = [];;B();\njest.mock('./x', () => ({ m }));\nimport { y } from './y';\n"
+    );
+    // a statement sharing its line with the next is passed over (no column moves), a trailing
+    // comment is not a statement
+    assert_eq!(
+        at("const a = 1; const b = 2 // c\nf();\n"),
+        "const a = 1; const b = 2;B(); // c\nf();\n"
+    );
+    // the last statement, ending the file's last line
+    assert_eq!(at("const a = 1\n"), "const a = 1;B();\n");
+}
+
+#[test]
+fn the_binder_falls_back_to_the_end_when_the_file_loads_first() {
+    let ts = std::path::Path::new("/p/a.test.ts");
+    let at = |src: &str| place_binder(ts, src, "B();");
+    for src in [
+        "import { y } from './y';\nconst m = 1;\n",
+        "export * from './y';\nconst m = 1;\n",
+        "export { y } from './y';\nconst m = 1;\n",
+        "const { y } = require('./y');\nconst m = 1;\n",
+        "const m = 1; f();",
+        "",
+    ] {
+        assert_eq!(at(src), format!("{src}\nB();"), "{src:?}");
+    }
+    // a local export list loads nothing
+    assert_eq!(
+        at("const m = 1;\nexport { m };\n"),
+        "const m = 1;;B();\nexport { m };\n"
+    );
+    assert_eq!(
+        at("export { m };\nconst m = 1;\n"),
+        "export { m };;B();\nconst m = 1;\n"
+    );
+}
+
+#[test]
 fn mock_calls_are_read_from_the_ast() {
     let calls = |src: &str| mock_calls(src, &["vi.mock", "jest.mock"]);
     let pairs = |v: &[(&str, &str)]| {
