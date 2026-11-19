@@ -256,6 +256,25 @@ fn json_string_escapes_for_a_js_literal() {
 }
 
 #[test]
+fn process_ids_define_pid_and_only_a_known_ppid() {
+    let both = process_ids_js(7, Some(3));
+    assert!(
+        both.contains("pid: { value: 7, writable: false, enumerable: true"),
+        "{both}"
+    );
+    assert!(
+        both.contains("ppid: { value: 3, writable: true, enumerable: true"),
+        "{both}"
+    );
+    let pid_only = process_ids_js(7, None);
+    assert!(
+        pid_only.contains("pid: { value: 7, writable: false"),
+        "{pid_only}"
+    );
+    assert!(!pid_only.contains("ppid"), "{pid_only}");
+}
+
+#[test]
 fn builtin_and_test_api_module_names() {
     for s in [
         "fs",

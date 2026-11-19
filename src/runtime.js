@@ -245,6 +245,9 @@ function __fireMacroTimer(m) {
   if (m.interval == null) __clearTimer(m.id);
   else m.ord = m.due = __loop.now + m.interval;
   try { m.cb(); } catch (e) { __reportUncaught(e); }
+  // Node runs the nextTicks a timer callback queued before its promise jobs. V8's automatic
+  // microtask checkpoint fires as this call returns to the host, so drain them here first.
+  __loop.drainNextTicks();
 }
 function __stepMacroPick(m, it) {
   if (!m && !it) return null;
