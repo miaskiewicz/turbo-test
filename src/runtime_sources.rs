@@ -60,6 +60,10 @@ pub(crate) fn shared_runtime_source() -> String {
                 "/* __TT_NODE_FS_HANDLES__ */",
                 include_str!("node_fs_handles.js"),
             ),
+            (
+                "/* __TT_NODE_FS_CALLBACKS__ */",
+                include_str!("node_fs_callbacks.js"),
+            ),
             ("/* __TT_NODE_STREAMS__ */", include_str!("node_streams.js")),
             (
                 "/* __TT_NODE_DIAGNOSTICS_CHANNEL__ */",
