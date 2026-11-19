@@ -4061,8 +4061,18 @@ fn hoist_mock_setup(code: &str) -> String {
 }
 
 /// `hoist_mock_setup`, also returning for each output line the input line it came from (`None` for
-/// a line it wrote: a mocked require's re-bind).
+/// a line it wrote: a mocked require's re-bind). The test file's scope binder then moves up to
+/// the hoisted setup (`mock_scope::relocate_binder`, turbo-test#429); no line moves.
 fn hoist_mock_setup_tracked(code: &str) -> (String, Vec<Option<usize>>) {
+    let (hoisted, origins) = hoist_mock_lines(code);
+    match crate::mock_scope::relocate_binder(&hoisted) {
+        Some(bound) => (bound, origins),
+        None => (hoisted, origins),
+    }
+}
+
+/// `hoist_mock_setup_tracked`'s hoisting.
+fn hoist_mock_lines(code: &str) -> (String, Vec<Option<usize>>) {
     let unchanged = || {
         (
             code.to_string(),
@@ -7204,6 +7214,12 @@ fn with_binder(abs: &Path, src: String, mr: bool) -> String {
         return src;
     }
     let binder = crate::mock_scope::binder(&bindings, abs);
+    if mr {
+        // the CommonJS transforms move it up to the hoisted mock setup in the code that runs
+        // (`hoist_mock_setup_tracked`, turbo-test#429); appended on a line of its own, it moves
+        // no position of the authored source the code maps back to
+        return format!("{src}\n{binder}");
+    }
     crate::mock_scope::place_binder(abs, &src, &binder)
 }
 

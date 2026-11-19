@@ -185,23 +185,75 @@ pub fn place_binder(path: &Path, src: &str, binder: &str) -> String {
 /// The end of the first top-level statement, before any that loads a module, whose line ends
 /// with it.
 fn bind_at(path: &Path, src: &str) -> Option<usize> {
-    use oxc_span::GetSpan;
     let alloc = Allocator::default();
     let stype = SourceType::from_path(path).unwrap_or_default();
     let parsed = Parser::new(&alloc, src, stype).parse();
     let body = &parsed.program.body;
+    bind_point(body, src, body.len())
+}
+
+/// [`bind_at`] over the first `upto` statements of `body` (the program `src` parses to).
+fn bind_point(body: &[Statement], src: &str, upto: usize) -> Option<usize> {
+    use oxc_span::GetSpan;
     let ends_line = |i: usize, end: usize| {
         let next = body
             .get(i + 1)
             .map_or(usize::MAX, |s| s.span().start as usize);
         src[end..].find('\n').is_some_and(|nl| end + nl < next)
     };
-    body.iter()
+    body[..upto]
+        .iter()
         .enumerate()
         .take_while(|(_, s)| !loads(s, src))
         .map(|(i, s)| (i, s.span().end as usize))
         .find(|&(i, end)| ends_line(i, end))
         .map(|(_, end)| end)
+}
+
+/// The start of every binder statement [`binder`] writes.
+const BINDER: &str = "globalThis.__ttScopeBind(";
+
+/// `code` (the test file's CommonJS, as it runs: transformed, its mocks hoisted) with the binder
+/// statement [`place_binder`] put in the authored source moved up to where [`bind_at`] would put
+/// it in this code (turbo-test#429). A file that opens with an import gets its binder at the end
+/// of the source, but its transform runs the mocks' setup (a `mock…` const, the `jest.mock`
+/// calls) before the imports, so the binder belongs after the first statement there that loads
+/// nothing: then a factory a later import runs (a decorator applied at load) reads the binding.
+/// Its old place is blanked and it is appended to a line's end, so no line or column of the code
+/// moves (source maps, failure locations). `None`: nothing to move.
+pub fn relocate_binder(code: &str) -> Option<String> {
+    use oxc_span::GetSpan;
+    if !code.contains(BINDER) {
+        return None;
+    }
+    let alloc = Allocator::default();
+    let parsed = Parser::new(&alloc, code, SourceType::cjs()).parse();
+    let body = &parsed.program.body;
+    let (at_stmt, span) = body.iter().enumerate().find_map(|(i, s)| {
+        let span = s.span();
+        code[span.start as usize..span.end as usize]
+            .starts_with(BINDER)
+            .then_some((i, span.start as usize..span.end as usize))
+    })?;
+    let at = bind_point(body, code, at_stmt)?;
+    // (nothing runs between there and here: leave it)
+    if code[at..span.start]
+        .trim_matches(|c: char| c.is_whitespace() || c == ';')
+        .is_empty()
+    {
+        return None;
+    }
+    let blank: String = code[span.clone()]
+        .chars()
+        .map(|c| if c == '\n' { c } else { ' ' })
+        .collect();
+    Some(format!(
+        "{};{}{}{blank}{}",
+        &code[..at],
+        &code[span.clone()],
+        &code[at..span.start],
+        &code[span.end..]
+    ))
 }
 
 /// Whether a top-level statement loads a module: an import, a re-export, or one that calls
