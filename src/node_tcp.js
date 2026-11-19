@@ -41,7 +41,7 @@ function __tcpPoll() {
   const events = __tcpNative('poll');
   const previous = __tcpTerminalBatch;
   __tcpTerminalBatch = __tcpTerminalIds(events);
-  try { for (const event of events) __tcpEvent(event); }
+  try { for (const event of events) __hostCallback(__tcpEvent, event); }
   finally { __tcpTerminalBatch = previous; }
   let progressed = events.length > 0;
   for (const socket of __tcpSockets.values()) if (socket._tcpCheckTimeout()) progressed = true;

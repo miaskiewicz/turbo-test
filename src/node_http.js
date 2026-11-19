@@ -47,9 +47,23 @@ function __httpEnsurePoll() {
 function __httpPoll() {
   __httpPollTimer = null;
   const events = __httpNative('poll');
-  for (const event of events) __httpEvent(event);
+  for (const group of __httpEventGroups(events)) __hostCallback(__httpDispatchGroup, group);
   if (__httpConnections.size || __httpServers.size) __httpEnsurePoll();
 }
+// One socket read is one Node callback: its parser emits a message's headers, body and end
+// before the read's nextTicks and promise jobs run. Consecutive parsed events of a connection
+// in a poll come from one read, so they share a host callback scope.
+const __httpParsed = (event) => event.kind === 'headers' || event.kind === 'data' || event.kind === 'end';
+function __httpEventGroups(events) {
+  const groups = [];
+  for (const event of events) {
+    const last = groups[groups.length - 1];
+    if (last && __httpParsed(event) && __httpParsed(last[0]) && last[0].id === event.id) last.push(event);
+    else groups.push([event]);
+  }
+  return groups;
+}
+function __httpDispatchGroup(group) { for (const event of group) __httpEvent(event); }
 function __httpReset() {
   if (__httpPollTimer !== null) __realTimers.clearTimeout(__httpPollTimer);
   __httpPollTimer = null;
@@ -274,6 +288,19 @@ class __HttpResponse extends __HttpOutgoing {
     if (headers) for (const [key, value] of Object.entries(headers)) this.setHeader(key, value);
     return this;
   }
+  end(chunk, encoding, callback) {
+    __httpImplicitLength(this, typeof chunk === 'function' ? null : chunk, encoding);
+    return super.end(chunk, encoding, callback);
+  }
+}
+// As Node's ServerResponse.end(): a body handed whole to end() before the headers went out is
+// framed by Content-Length (chunked only when it was streamed), so head and body leave in one
+// write and the client's parser completes the message in one read.
+function __httpImplicitLength(response, chunk, encoding) {
+  if (response.headersSent || response._noBody()) return;
+  if (response.hasHeader('content-length') || response.hasHeader('transfer-encoding')) return;
+  const length = chunk == null ? 0 : Buffer.byteLength(chunk, typeof encoding === 'string' ? encoding : undefined);
+  response.setHeader('content-length', length);
 }
 function __httpInput(input) {
   if (typeof input !== 'string' && !(input instanceof URL)) return { ...input };
