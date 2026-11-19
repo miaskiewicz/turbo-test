@@ -7892,9 +7892,13 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     }
     const { found, common } = callbacks[transposed ? 1 : 0];
     divide(nChange, aStart, aEnd, bStart, bEnd, common, aIndexesF, aIndexesR, division);
-    const { nChangePreceding, aEndPreceding, bEndPreceding, nChangeFollowing, aStartFollowing, bStartFollowing } = division;
+    // `division` is shared scratch that the recursion below overwrites: read this level's
+    // middle snake before it (as jest's findSubsequences destructures it), or the common runs
+    // emitted after it are the preceding half's, repeated or out of order (turbo-test#403)
+    const own = { ...division };
+    const { nChangePreceding, aEndPreceding, bEndPreceding, nChangeFollowing, aStartFollowing, bStartFollowing } = own;
     if (aStart < aEndPreceding && bStart < bEndPreceding) find(nChangePreceding, aStart, aEndPreceding, bStart, bEndPreceding, transposed, callbacks, aIndexesF, aIndexesR, division);
-    findEmit(division, found);
+    findEmit(own, found);
     if (aStartFollowing < aEnd && bStartFollowing < bEnd) find(nChangeFollowing, aStartFollowing, aEnd, bStartFollowing, bEnd, transposed, callbacks, aIndexesF, aIndexesR, division);
   };
   const nCommonF = countF(0, aLength, 0, bLength, isCommon);
