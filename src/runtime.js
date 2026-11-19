@@ -9467,9 +9467,16 @@ async function __vtRunHook(h, args, name) {
     // called as a plain function, as vitest calls it (its frame has no method name)
     const fn = h.fn;
     const r = await __vtSettle(async () => fn(...args), __hookArm(h, args[0]));
-    // a cleanup runs under its hook's timeout (vitest's getBeforeHookCleanupCallback)
-    return typeof r === 'function' ? { fn: r, hook: h, ctx: args[0] } : undefined;
+    return __hookCleanup(r, h, args[0]);
   });
+}
+// A function a beforeEach / beforeAll hook returned is its cleanup (vitest's
+// getBeforeHookCleanupCallback), run under the hook's timeout. Jest ignores a hook's return value
+// (it only awaits a promise): in a jest project `beforeEach(() => mock.mockClear())` returns the
+// mock, which must not be called afterwards (turbo-test#417).
+function __hookCleanup(r, h, ctx) {
+  if (typeof r !== 'function' || globalThis.__ttJestProject) return undefined;
+  return { fn: r, hook: h, ctx };
 }
 // callSuiteHook: a suite's hooks (afterEach / afterAll last registered first); beforeEach runs
 // the enclosing suites' first, afterEach after. `chain[i]` is the suite. A throw stops them.
