@@ -4513,10 +4513,14 @@ function __eqFast(a, b, aStack, bStack, cls) {
   if (typeof a !== 'object' || typeof b !== 'object') return false;
   return __eqFastObject(a, b, aStack, bStack);
 }
+// Whether two arrays of different lengths are unequal: always in vitest's `equals`; in Jest's only
+// under strictCheck (toStrictEqual), otherwise the extra items are compared as keys, so an
+// undefined one is ignored like an undefined property (turbo-test#423).
+const __arrayLengthChecked = (hasKey) => hasKey === __hasKey || !globalThis.__ttJestProject;
 function __eqWalk(a, b, aStack, bStack, testers, hasKey, cls) {
   aStack.push(a);
   bStack.push(b);
-  if (cls === '[object Array]' && a.length !== b.length) return false;
+  if (cls === '[object Array]' && a.length !== b.length && __arrayLengthChecked(hasKey)) return false;
   if (__isError(a) && __isError(b)) return __eqError(a, b, aStack, bStack, testers, hasKey);
   if (!__eqOwnKeys(a, b, aStack, bStack, testers, hasKey)) return false;
   aStack.pop();
