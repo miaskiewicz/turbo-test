@@ -9845,8 +9845,10 @@ function __runTestBody(t, ctx, timeoutMs) {
       // describe( call returned: no enclosing describe( frames)
       const frames = String(t.stackTrace.stack).split('\n');
       const own = frames.findIndex((l, i) => i > 0 && !!globalThis.__ttFile && l.includes(globalThis.__ttFile));
-      // headed by the timeout's message (vitest 5's makeTimeoutError: turbo-test#426)
-      err.stack = (own < 0 ? frames : frames.slice(0, own + 1)).join('\n').replace('STACK_TRACE_ERROR', err.message);
+      // vitest 4.1.12 keeps the registration stack's STACK_TRACE_ERROR header; a jest project
+      // heads it with the timeout's message (turbo-test#426)
+      const stack = (own < 0 ? frames : frames.slice(0, own + 1)).join('\n');
+      err.stack = globalThis.__ttJestProject ? stack.replace('STACK_TRACE_ERROR', err.message) : stack;
       // the context's signal aborts with the timeout error (vitest's `withTimeout`)
       t.abort.abort(err);
       reject(err);
