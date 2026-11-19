@@ -317,3 +317,61 @@ function __bufferIndexOf(buffer, value, byteOffset, encoding, forward) {
   if (needle.length === 0 || start < 0) return start;
   return forward ? __bufferFindForward(buffer, needle, start) : __bufferFindBackward(buffer, needle, start);
 }
+
+// Buffer.from, as Node 26's lib/buffer.js: an (Shared)ArrayBuffer becomes a view over the same
+// memory honouring byteOffset/length, any other object is copied element-wise (array-likes,
+// typed arrays, {type:'Buffer',data}), valueOf / Symbol.toPrimitive strings convert, and
+// anything else throws ERR_INVALID_ARG_TYPE.
+const __bufferIsAnyArrayBuffer = (value) =>
+  value instanceof ArrayBuffer || (typeof SharedArrayBuffer === 'function' && value instanceof SharedArrayBuffer);
+const __bufferOutOfBounds = (name) =>
+  __bufferError(RangeError, 'ERR_BUFFER_OUT_OF_BOUNDS', `"${name}" is outside of buffer bounds`);
+function __bufferViewLength(length, maxLength) {
+  if (length === undefined) return maxLength;
+  const n = +length;
+  if (!(n > 0)) return 0;
+  if (n > maxLength) throw __bufferOutOfBounds('length');
+  return n;
+}
+function __bufferFromArrayBuffer(Ctor, buffer, byteOffset, length) {
+  const offset = byteOffset === undefined || Number.isNaN(+byteOffset) ? 0 : +byteOffset;
+  const maxLength = buffer.byteLength - offset;
+  if (maxLength < 0) throw __bufferOutOfBounds('offset');
+  return new Ctor(buffer, offset, __bufferViewLength(length, maxLength));
+}
+function __bufferFromArrayLike(Ctor, list) {
+  const out = new Ctor(list.length > 0 ? list.length : 0);
+  for (let i = 0; i < out.length; i++) out[i] = list[i];
+  return out;
+}
+function __bufferFromObject(Ctor, value) {
+  if (value.length !== undefined || __bufferIsAnyArrayBuffer(value.buffer)) {
+    return typeof value.length === 'number' ? __bufferFromArrayLike(Ctor, value) : new Ctor(0);
+  }
+  if (value.type === 'Buffer' && Array.isArray(value.data)) return __bufferFromArrayLike(Ctor, value.data);
+  return null;
+}
+const __bufferFromInvalid = (value) => __bufferError(TypeError, 'ERR_INVALID_ARG_TYPE',
+  'The first argument must be of type string or an instance of Buffer, ArrayBuffer, or Array or an Array-like Object. Received ' + __bufferReceived(value));
+function __bufferValueOf(value) {
+  const primitive = value.valueOf && value.valueOf();
+  const usable = primitive != null && primitive !== value;
+  return usable && (typeof primitive === 'string' || typeof primitive === 'object') ? primitive : undefined;
+}
+function __bufferFromPrimitive(Ctor, value, encoding) {
+  if (typeof value[Symbol.toPrimitive] !== 'function') return null;
+  const primitive = value[Symbol.toPrimitive]('string');
+  return typeof primitive === 'string' ? new Ctor(__bufferFromString(primitive, encoding)) : null;
+}
+function __bufferFromValue(Ctor, value, encodingOrOffset, length) {
+  if (__bufferIsAnyArrayBuffer(value)) return __bufferFromArrayBuffer(Ctor, value, encodingOrOffset, length);
+  const inner = __bufferValueOf(value);
+  if (inner !== undefined) return __bufferFrom(Ctor, inner, encodingOrOffset, length);
+  return __bufferFromObject(Ctor, value) || __bufferFromPrimitive(Ctor, value, encodingOrOffset);
+}
+function __bufferFrom(Ctor, value, encodingOrOffset, length) {
+  if (typeof value === 'string') return new Ctor(__bufferFromString(value, encodingOrOffset));
+  const out = typeof value === 'object' && value !== null ? __bufferFromValue(Ctor, value, encodingOrOffset, length) : null;
+  if (out) return out;
+  throw __bufferFromInvalid(value);
+}

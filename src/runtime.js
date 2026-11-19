@@ -2035,13 +2035,8 @@ if (typeof globalThis.TransformStream === 'undefined') {
 if (typeof globalThis.Buffer === 'undefined') {
   const byteArrayTag = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get;
   class Buffer extends Uint8Array {
-    static from(d, enc) {
-      // The string encoders (node_buffer_ops.js) are shared with Buffer#write.
-      if (typeof d === 'string') return new Buffer(__bufferFromString(d, enc));
-      if (Array.isArray(d) || d instanceof Uint8Array) return new Buffer(d);
-      if (d instanceof ArrayBuffer) return new Buffer(new Uint8Array(d));
-      return new Buffer(0);
-    }
+    // Node's Buffer.from (node_buffer_ops.js), sharing the string encoders with Buffer#write.
+    static from(value, encodingOrOffset, length) { return __bufferFrom(Buffer, value, encodingOrOffset, length); }
     static alloc(n, fill) { const b = new Buffer(n); if (fill != null) b.fill(typeof fill === 'string' ? fill.charCodeAt(0) : fill); return b; }
     static allocUnsafe(n) { return new Buffer(n); }
     static #validateByteArray(value) {
