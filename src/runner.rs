@@ -10154,6 +10154,24 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(
         scope,
         global,
+        "__ttZlibOpen",
+        crate::zlib_stream::native_zlib_open,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttZlibWrite",
+        crate::zlib_stream::native_zlib_write,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttZlibClose",
+        crate::zlib_stream::native_zlib_close,
+    );
+    bind_fn(
+        scope,
+        global,
         "__ttV8Serialize",
         crate::node_compat::native_serialize,
     );

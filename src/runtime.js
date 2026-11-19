@@ -2063,16 +2063,13 @@ if (typeof globalThis.Buffer === 'undefined') {
     compare(target, targetStart, targetEnd, sourceStart, sourceEnd) { return __bufferCompare(this, target, targetStart, targetEnd, sourceStart, sourceEnd); }
     copy(target, targetStart, sourceStart, sourceEnd) { return __bufferCopy(this, target, targetStart, sourceStart, sourceEnd); }
     write(string, offset, length, encoding) { return __bufferWrite(this, string, offset, length, encoding); }
-    writeInt16BE(value, offset = 0) { return __bufferWriteInt(this, value, offset, __bufferInt16, false); }
-    writeInt32BE(value, offset = 0) { return __bufferWriteInt(this, value, offset, __bufferInt32, false); }
-    writeUInt32BE(value, offset = 0) { return __bufferWriteInt(this, value, offset, __bufferUInt32, false); }
-    writeUInt32LE(value, offset = 0) { return __bufferWriteInt(this, value, offset, __bufferUInt32, true); }
-    readInt16BE(offset) { return __bufferReadIntBE(this, offset, __bufferInt16); }
-    readInt32BE(offset) { return __bufferReadIntBE(this, offset, __bufferInt32); }
-    readUInt32BE(offset) { return __bufferReadIntBE(this, offset, __bufferUInt32); }
+    indexOf(value, byteOffset, encoding) { return __bufferIndexOf(this, value, byteOffset, encoding, true); }
+    lastIndexOf(value, byteOffset, encoding) { return __bufferIndexOf(this, value, byteOffset, encoding, false); }
+    includes(value, byteOffset, encoding) { return this.indexOf(value, byteOffset, encoding) !== -1; }
     toString(encoding, start, end) { return __bufferToString(this, encoding, start, end); }
     toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
   }
+  __bufferInstallIntOps(Buffer.prototype);
   // Node's public static methods are enumerable; safer-buffer copies them with for-in.
   for (const name of ['from', 'alloc', 'allocUnsafe', 'byteLength', 'isBuffer', 'concat', 'compare']) {
     Object.defineProperty(Buffer, name, { enumerable: true });
@@ -2696,13 +2693,17 @@ function __unhandledEventError(value) {
 }
 const __eventState = (emitter) => emitter._ev || (emitter._ev = Object.create(null));
 const __eventListeners = (emitter, event) => (emitter._ev && emitter._ev[event]) || [];
-class __EventEmitter {
-  constructor() { this._ev = Object.create(null); }
+// A function constructor, as Node's: legacy subclasses (readable-stream's Stream, turbo-test#404)
+// initialise through EventEmitter.call(this). Like Node's init, a receiver whose listener state
+// is missing or only inherited gets its own.
+function __EventEmitter() {
+  'use strict'; // a call without a receiver throws, as Node's
+  if (this._ev === undefined || this._ev === Object.getPrototypeOf(this)._ev) this._ev = Object.create(null);
+}
+class __EventEmitterMethods {
   on(e, f) { const state = __eventState(this); (state[e] || (state[e] = [])).push(f); return this; }
-  addListener(e, f) { return this.on(e, f); }
-  once(e, f) { const self = this; function g(...a) { self.off(e, g); return f.apply(this, a); } g.listener = f; return this.on(e, g); }
-  off(e, f) { if (this._ev && this._ev[e]) this._ev[e] = this._ev[e].filter((x) => x !== f && x.listener !== f); return this; }
-  removeListener(e, f) { return this.off(e, f); }
+  once(e, f) { const self = this; function g(...a) { self.removeListener(e, g); return f.apply(this, a); } g.listener = f; return this.on(e, g); }
+  removeListener(e, f) { if (this._ev && this._ev[e]) this._ev[e] = this._ev[e].filter((x) => x !== f && x.listener !== f); return this; }
   removeAllListeners(e) { if (!this._ev) return this; if (e !== undefined) delete this._ev[e]; else this._ev = Object.create(null); return this; }
   emit(e, ...a) {
     const listeners = __eventListeners(this, e).slice();
@@ -2716,9 +2717,15 @@ class __EventEmitter {
   prependListener(e, f) { const state = __eventState(this); (state[e] || (state[e] = [])).unshift(f); return this; }
 }
 // Node exposes enumerable prototype methods; libraries such as Mongoose copy them with for-in.
-for (const name of Object.getOwnPropertyNames(__EventEmitter.prototype).filter((name) => name !== 'constructor')) {
-  Object.defineProperty(__EventEmitter.prototype, name, { enumerable: true });
+for (const name of Object.getOwnPropertyNames(__EventEmitterMethods.prototype).filter((name) => name !== 'constructor')) {
+  const method = Object.getOwnPropertyDescriptor(__EventEmitterMethods.prototype, name);
+  Object.defineProperty(__EventEmitter.prototype, name, { ...method, enumerable: true });
 }
+// As in Node, the aliases are the same functions: an alias that dispatched through `this` would
+// recurse when a subclass aliases its override and calls the original from it (readable-stream
+// v4's removeListener / off, turbo-test#404).
+__EventEmitter.prototype.addListener = __EventEmitter.prototype.on;
+__EventEmitter.prototype.off = __EventEmitter.prototype.removeListener;
 /* __TT_NODE_WARNINGS__ */
 const __events = Object.assign(__EventEmitter, { EventEmitter: __EventEmitter, default: __EventEmitter, once: (em, e) => new Promise((res) => em.once(e, (...a) => res(a))) });
 /* __TT_NODE_STREAMS__ */

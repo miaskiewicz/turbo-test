@@ -988,6 +988,35 @@ fn native_binary_boundaries_reject_non_views_and_malformed_clone_frames() {
 }
 
 #[test]
+fn native_zlib_handles_return_bytes_and_throw_node_errors() {
+    with_context(|scope, _| {
+        assert_eq!(
+            eval(
+                scope,
+                r#"(() => {
+                  const fail = (fn) => { try { fn(); return 'none'; } catch (e) { return [e.constructor.name, e.message, e.code, e.errno].join('|'); } };
+                  const enc = __ttZlibOpen(5, 9), dec = __ttZlibOpen(6, 6);
+                  const packed = __ttZlibWrite(enc, new TextEncoder().encode('native zlib'), 4);
+                  const text = new TextDecoder().decode(__ttZlibWrite(dec, packed, 4));
+                  const bad = __ttZlibOpen(2, 6), one = __ttZlibOpen(1, 6), all = __ttZlibOpen(3, 6);
+                  const seen = [packed instanceof Uint8Array, text,
+                    fail(() => __ttZlibOpen(42, 6)),
+                    fail(() => __ttZlibWrite(enc, {}, 0)),
+                    fail(() => __ttZlibWrite(enc, new Uint8Array(1), 0)),
+                    fail(() => __ttZlibWrite(bad, new Uint8Array([255, 255, 255, 255]), 0)),
+                    fail(() => __ttZlibWrite(__ttZlibOpen(4, 6), new Uint8Array(0), 4))];
+                  __ttZlibClose(one);
+                  __ttZlibClose();
+                  seen.push(fail(() => __ttZlibWrite(all, new Uint8Array(0), 0)));
+                  return JSON.stringify(seen);
+                })()"#
+            ),
+            r#"[true,"native zlib","TypeError|invalid zlib mode||","Error|Expected a byte view||","Error|zlib binding closed|ERR_ZLIB_BINDING_CLOSED|","Error|invalid compressed data|Z_DATA_ERROR|-3","Error|unexpected end of file|Z_BUF_ERROR|-5","Error|zlib binding closed|ERR_ZLIB_BINDING_CLOSED|"]"#
+        );
+    });
+}
+
+#[test]
 fn poisoned_resolver_flags_preserve_original_exception_for_every_native_entry() {
     with_context(|scope, _| {
         assert_eq!(

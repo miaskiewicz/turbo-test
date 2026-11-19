@@ -78,6 +78,7 @@ pub(crate) fn backend_runtime_source() -> String {
                 include_str!("node_blocklist.js"),
             ),
             ("/* __TT_NODE_TCP__ */", include_str!("node_tcp.js")),
+            ("/* __TT_NODE_ZLIB__ */", include_str!("node_zlib.js")),
             (
                 "/* __TT_NODE_ZLIB_CONSTANTS__ */",
                 include_str!("node_zlib_constants.js"),
