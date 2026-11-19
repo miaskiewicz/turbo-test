@@ -53,6 +53,30 @@ function __streamInit(stream, options) {
   stream._autoDestroy = options.autoDestroy !== false;
   stream._emitClose = options.emitClose !== false;
   if (options.destroy) stream._destroy = options.destroy;
+  if (options.construct) stream._construct = options.construct;
+  stream._constructed = typeof stream._construct !== 'function';
+  if (!stream._constructed) __streamTick(() => __streamConstruct(stream));
+}
+// As Node's construct(): _construct runs on the next tick. Until its callback (completed on a
+// later tick), writes buffer, finish and _read wait, and destroy() defers _destroy.
+function __streamConstruct(stream) {
+  let called = false;
+  const done = (error) => {
+    if (called) { __streamErrorOrDestroy(stream, error || __streamError('ERR_MULTIPLE_CALLBACK', 'Callback called multiple times')); return; }
+    called = true;
+    __streamTick(() => __streamConstructed(stream, error));
+  };
+  try { stream._construct(done); } catch (error) { done(error); }
+}
+function __streamConstructed(stream, error) {
+  stream._constructed = true;
+  if (stream.destroyed) __streamRunDestroy(stream, stream._pendingDestroy || error);
+  else if (error) __streamErrorOrDestroy(stream, error, true);
+  else __streamResumeConstructed(stream);
+}
+function __streamResumeConstructed(stream) {
+  if (stream._ws) __writableConstructed(stream, stream._ws);
+  if (stream._rs) __readableSchedule(stream);
 }
 function __streamRecordError(stream, error) {
   if (error && !stream.errored) stream.errored = error;
@@ -73,6 +97,11 @@ function __streamDestroy(stream, error) {
   __streamRecordError(stream, error);
   stream.destroyed = true;
   if (stream._rs) stream._rs.queue.length = 0;
+  if (stream._constructed) __streamRunDestroy(stream, error);
+  else stream._pendingDestroy = error;
+  return stream;
+}
+function __streamRunDestroy(stream, error) {
   let called = false;
   const done = (failure) => {
     if (called) return;
@@ -82,7 +111,6 @@ function __streamDestroy(stream, error) {
     __streamTick(() => __streamEmitClose(stream, failure));
   };
   try { stream._destroy(error || null, done); } catch (failure) { done(failure); }
-  return stream;
 }
 // Node's errorOrDestroy: autoDestroy streams are destroyed, others only emit the error.
 function __streamErrorOrDestroy(stream, error, sync) {
@@ -107,7 +135,14 @@ function __streamChunk(chunk, state, encoding) {
   if (chunk instanceof Uint8Array) return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
   throw new TypeError('The chunk must be a string, Buffer or Uint8Array');
 }
-function __streamSize(chunk, state) { return state.objectMode ? 1 : chunk.byteLength; }
+function __streamSize(chunk, state) { return state.objectMode ? 1 : chunk.length; }
+const __streamEncodings = new Set(['utf8', 'utf-8', 'hex', 'base64', 'base64url', 'ascii', 'latin1', 'binary', 'ucs2', 'ucs-2', 'utf16le', 'utf-16le']);
+function __streamIsEncoding(encoding) { return typeof encoding === 'string' && __streamEncodings.has(encoding.toLowerCase()); }
+function __streamUnknownEncoding(encoding) {
+  const error = new TypeError('Unknown encoding: ' + encoding);
+  error.code = 'ERR_UNKNOWN_ENCODING';
+  return error;
+}
 function __streamWatermark(options, mode, side) {
   const value = options[side + 'HighWaterMark'] ?? options.highWaterMark ?? (mode ? 16 : 16384);
   if (!Number.isInteger(value) || value < 0) throw new RangeError('Invalid highWaterMark');
@@ -124,7 +159,7 @@ function __readableInit(stream, options) {
 function __readableSchedule(stream) {
   if (stream._rs.scheduled || stream.destroyed) return;
   stream._rs.scheduled = true;
-  __streamDefer(() => { stream._rs.scheduled = false; __readableFlow(stream); });
+  __streamTick(() => { stream._rs.scheduled = false; __readableFlow(stream); });
 }
 function __readableEnd(stream) {
   if (stream.readableEnded || stream.destroyed) return;
@@ -136,9 +171,11 @@ function __readableEnd(stream) {
 }
 function __readablePull(stream) {
   const state = stream._rs;
-  if (state.reading || state.ended || stream.destroyed) return;
+  if (state.reading || state.ended || stream.destroyed || !stream._constructed) return;
   state.reading = true;
+  state.sync = true;
   try { stream._read(state.highWaterMark); } catch (error) { stream.destroy(error); }
+  state.sync = false;
 }
 function __readableDecode(stream, chunk) {
   const state = stream._rs;
@@ -156,13 +193,22 @@ function __readableFlow(stream) {
   if (!state.flowing || stream.destroyed) return;
   __readableDrain(stream);
   if (!state.flowing || state.queue.length) return;
-  if (state.ended) __readableEnd(stream);
+  if (state.ended) __readableScheduleEnd(stream);
   else __readablePull(stream);
+}
+// As Node's endReadable: 'end' follows on a nextTick, queued as the last chunk is taken (before
+// its 'data' runs), and only if nothing was buffered again meanwhile.
+function __readableScheduleEnd(stream) {
+  const state = stream._rs;
+  if (state.endScheduled) return;
+  state.endScheduled = true;
+  __streamTick(() => { state.endScheduled = false; if (!state.queue.length) __readableEnd(stream); });
 }
 function __readableDrain(stream) {
   const state = stream._rs;
   while (state.flowing && state.queue.length) {
     const chunk = __readableTake(stream);
+    if (state.ended && !state.queue.length) __readableScheduleEnd(stream);
     if (chunk !== '') stream.emit('data', chunk);
   }
 }
@@ -172,12 +218,24 @@ function __readablePush(stream, chunk, encoding) {
   state.reading = false;
   if (chunk === null) { state.ended = true; __readableSchedule(stream); return false; }
   if (state.ended) { stream.destroy(__streamError('ERR_STREAM_PUSH_AFTER_EOF', 'stream.push() after EOF')); return false; }
-  const value = __streamChunk(chunk, state, encoding);
-  state.queue.push(value);
-  state.length += __streamSize(value, state);
-  stream.emit('readable');
-  __readableSchedule(stream);
+  __readableAddChunk(stream, state, __streamChunk(chunk, state, encoding));
   return state.length < state.highWaterMark;
+}
+// As Node's addChunk: a chunk pushed outside _read into a flowing, empty stream with 'data'
+// listeners is emitted at once; otherwise it is buffered for the next flow (a nextTick).
+function __readableEmitsNow(stream, state) {
+  return state.flowing && !state.sync && !state.queue.length && stream.listenerCount('data') > 0;
+}
+function __readableAddChunk(stream, state, value) {
+  if (__readableEmitsNow(stream, state)) {
+    const chunk = __readableDecode(stream, value);
+    if (chunk !== '') stream.emit('data', chunk);
+  } else {
+    state.queue.push(value);
+    state.length += __streamSize(value, state);
+    stream.emit('readable');
+  }
+  __readableSchedule(stream);
 }
 function __readableFrom(iterable, options) {
   const iterator = iterable[Symbol.asyncIterator]?.() || iterable[Symbol.iterator]?.();
@@ -234,7 +292,7 @@ class __Readable extends __Stream {
   read() {
     const state = this._rs;
     if (state.queue.length) { const chunk = __readableTake(this); __readableSchedule(this); return chunk; }
-    if (state.ended) __streamDefer(() => __readableEnd(this));
+    if (state.ended) __streamTick(() => __readableEnd(this));
     else __readablePull(this);
     return null;
   }
@@ -261,13 +319,54 @@ function __writableInit(stream, options) {
   stream._ws = { buffered: [], length: 0, objectMode, highWaterMark: __streamWatermark(options, objectMode, 'writable'),
     writing: false, corked: 0, sync: true, bufferProcessing: false, writelen: 0, writecb: null, expectCallback: false,
     pendingcb: 0, afterWritePending: false, tickInfo: null, needDrain: false, ending: false, finalCalled: false,
-    prefinished: false, onFinished: [], onwrite: (error) => __writableOnwrite(stream, error) };
+    prefinished: false, onFinished: [], onwrite: (error) => __writableOnwrite(stream, error),
+    decodeStrings: options.decodeStrings !== false, defaultEncoding: __writableDefaultEncoding(options.defaultEncoding) };
   stream.writable = options.writable !== false;
   stream.writableFinished = !stream.writable;
   stream.writableEnded = !stream.writable;
   if (options.write) stream._write = options.write;
   if (options.writev) stream._writev = options.writev;
   if (options.final) stream._final = options.final;
+}
+function __writableDefaultEncoding(encoding) {
+  if (encoding == null) return 'utf8';
+  if (!__streamIsEncoding(encoding)) throw __streamUnknownEncoding(encoding);
+  return encoding;
+}
+function __writableSetDefaultEncoding(stream, encoding) {
+  if (typeof encoding === 'string') encoding = encoding.toLowerCase();
+  if (!__streamIsEncoding(encoding)) throw __streamUnknownEncoding(encoding);
+  stream._ws.defaultEncoding = encoding;
+  return stream;
+}
+// As Node's _write(): a string is decoded with its (or the default) encoding unless
+// decodeStrings is false, a Buffer passes as is, and an unknown encoding throws.
+function __writableEncoding(state, encoding) {
+  if (!encoding) return state.defaultEncoding;
+  if (encoding !== 'buffer' && !__streamIsEncoding(encoding)) throw __streamUnknownEncoding(encoding);
+  return encoding;
+}
+function __writableString(state, chunk, encoding) {
+  if (encoding === 'buffer') throw __streamUnknownEncoding(encoding);
+  if (!state.decodeStrings) return { chunk, encoding };
+  return { chunk: Buffer.from(chunk, encoding), encoding: 'buffer' };
+}
+function __writableChunk(state, chunk, encoding) {
+  if (chunk === null) throw Object.assign(new TypeError('May not write null values to stream'), { code: 'ERR_STREAM_NULL_VALUES' });
+  if (state.objectMode) return { chunk, encoding };
+  encoding = __writableEncoding(state, encoding);
+  if (typeof chunk === 'string') return __writableString(state, chunk, encoding);
+  if (Buffer.isBuffer(chunk)) return { chunk, encoding: 'buffer' };
+  if (chunk instanceof Uint8Array) return { chunk: Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength), encoding: 'buffer' };
+  throw Object.assign(new TypeError('The "chunk" argument must be of type string or an instance of Buffer, TypedArray, or DataView'), { code: 'ERR_INVALID_ARG_TYPE' });
+}
+function __writableIsWritable(stream) {
+  const state = stream._ws;
+  return Boolean(state) && state.writable !== false && !state.ending && !stream.destroyed && !stream.errored;
+}
+function __writableConstructed(stream, state) {
+  if (!state.writing) __writableClearBuffer(stream, state);
+  if (state.ending) __writableFinishMaybe(stream, state, false);
 }
 function __writableWrite(stream, chunk, encoding, callback) {
   if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
@@ -276,7 +375,7 @@ function __writableWrite(stream, chunk, encoding, callback) {
 function __writableAccept(stream, chunk, encoding, callback) {
   if (typeof callback !== 'function') callback = __streamNoop;
   const state = stream._ws;
-  const value = __streamChunk(chunk, state, encoding);
+  const value = __writableChunk(state, chunk, encoding);
   const refusal = __writableRefusal(stream, state);
   if (refusal) {
     __streamTick(() => callback(refusal));
@@ -284,15 +383,15 @@ function __writableAccept(stream, chunk, encoding, callback) {
     return refusal;
   }
   state.pendingcb++;
-  return __writableWriteOrBuffer(stream, state, { size: __streamSize(value, state), chunk: value,
-    encoding: state.objectMode ? encoding : 'buffer', callback });
+  return __writableWriteOrBuffer(stream, state, { size: __streamSize(value.chunk, state), chunk: value.chunk,
+    encoding: value.encoding, callback });
 }
 function __writableRefusal(stream, state) {
   if (state.ending) return __streamError('ERR_STREAM_WRITE_AFTER_END', 'write after end');
   if (stream.destroyed) return __streamError('ERR_STREAM_DESTROYED', 'Cannot call write after a stream was destroyed');
   return null;
 }
-function __writableBusy(stream, state) { return state.writing || state.corked > 0 || Boolean(stream.errored); }
+function __writableBusy(stream, state) { return state.writing || state.corked > 0 || Boolean(stream.errored) || !stream._constructed; }
 function __writableWriteOrBuffer(stream, state, job) {
   state.length += job.size;
   if (__writableBusy(stream, state)) state.buffered.push(job);
@@ -384,7 +483,7 @@ function __writableCallFinished(state, error) {
   for (const callback of state.onFinished.splice(0)) callback(error);
 }
 function __writableCanFlush(stream, state) {
-  return !stream.destroyed && !state.bufferProcessing && !state.corked && state.buffered.length > 0;
+  return !stream.destroyed && stream._constructed && !state.bufferProcessing && !state.corked && state.buffered.length > 0;
 }
 function __writableClearBuffer(stream, state) {
   if (!__writableCanFlush(stream, state)) return;
@@ -441,7 +540,7 @@ function __writableEndCallback(stream, state, error, callback) {
 }
 function __writableIdle(state) { return !state.writing && !state.buffered.length && state.length === 0; }
 function __writableNeedFinish(stream, state) {
-  return state.ending && !stream.destroyed && !stream.writableFinished && !stream.errored && __writableIdle(state);
+  return state.ending && stream._constructed && !stream.destroyed && !stream.writableFinished && !stream.errored && __writableIdle(state);
 }
 function __writablePrefinish(stream, state) {
   if (state.prefinished || state.finalCalled) return;
@@ -466,20 +565,20 @@ function __writableOnFinish(stream, state, error) {
   state.pendingcb++;
   __streamTick(() => __writableFinish(stream, state));
 }
-function __writableFinishMaybe(stream, state) {
+function __writableFinishMaybe(stream, state, sync = true) {
   if (!__writableNeedFinish(stream, state)) return;
   __writablePrefinish(stream, state);
   if (state.pendingcb !== 0) return;
-  state.pendingcb++;
-  __streamTick(() => {
-    if (__writableNeedFinish(stream, state)) __writableFinish(stream, state);
-    else state.pendingcb--;
-  });
+  if (sync) { state.pendingcb++; __streamTick(() => __writableFinishTick(stream, state)); }
+  else if (__writableNeedFinish(stream, state)) { state.pendingcb++; __writableFinish(stream, state); }
+}
+function __writableFinishTick(stream, state) {
+  if (__writableNeedFinish(stream, state)) __writableFinish(stream, state);
+  else state.pendingcb--;
 }
 function __writableFinish(stream, state) {
   state.pendingcb--;
   stream.writableFinished = true;
-  stream.writable = false;
   __writableCallFinished(state, null);
   stream.emit('finish');
   __streamAutoDestroy(stream);
@@ -496,7 +595,10 @@ class __Writable extends __Stream {
   end(chunk, encoding, callback) { return __writableEnd(this, chunk, encoding, callback); }
   cork() { this._ws.corked++; }
   uncork() { __writableUncork(this); }
+  setDefaultEncoding(encoding) { return __writableSetDefaultEncoding(this, encoding); }
   destroy(error) { return __streamDestroy(this, error); }
+  get writable() { return __writableIsWritable(this); }
+  set writable(value) { if (this._ws) this._ws.writable = value; }
   get writableLength() { return this._ws.length; }
   get writableHighWaterMark() { return this._ws.highWaterMark; }
   get writableNeedDrain() { return this._ws.needDrain; }
@@ -510,6 +612,9 @@ class __Duplex extends __Readable {
   end(chunk, encoding, callback) { return __writableEnd(this, chunk, encoding, callback); }
   cork() { this._ws.corked++; }
   uncork() { __writableUncork(this); }
+  setDefaultEncoding(encoding) { return __writableSetDefaultEncoding(this, encoding); }
+  get writable() { return __writableIsWritable(this); }
+  set writable(value) { if (this._ws) this._ws.writable = value; }
   get writableLength() { return this._ws.length; }
   get writableHighWaterMark() { return this._ws.highWaterMark; }
   get writableNeedDrain() { return this._ws.needDrain; }

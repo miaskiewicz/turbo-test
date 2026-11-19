@@ -9739,6 +9739,10 @@ impl FrameworkSnapshot {
         scope: &mut v8::PinScope<'s, '_, ()>,
         dom: bool,
     ) -> v8::Local<'s, v8::Context> {
+        // Microtasks run only where the host drains them, as Node's do: after each callback the
+        // host makes into JS, its nextTicks first, then its promise jobs (drain_microtasks).
+        // V8's automatic checkpoint ran the promise jobs first, as the call returned.
+        scope.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
         if dom && self.references.is_some() {
             let index = turbo_dom_browser_env::browser_env::SNAPSHOT_WINDOW_CONTEXT;
             // invariant: a blob with references is a snapshot_blob_with one, which holds it
@@ -10109,6 +10113,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__ttRequireResolve", native_require_resolve);
     bind_fn(scope, global, "__ttRequireStack", native_require_stack);
     bind_fn(scope, global, "__ttCache", native_require_cache);
+    bind_fn(scope, global, "__ttRunMicrotasks", run_microtasks);
     bind_fn(scope, global, "__fs_existsSync", fs_exists_sync);
     bind_fn(scope, global, "__fs_readdir", fs_readdir);
     bind_fn(scope, global, "__fs_stat", fs_stat);
@@ -10494,6 +10499,16 @@ fn json_string(s: &str) -> String {
 }
 
 /// native fs.existsSync(path) -> bool
+/// Node's `runMicrotasks` binding: a host pump's callback scope runs one event's promise jobs
+/// before the next event (`__hostCallback` in runtime.js). A no-op inside a running checkpoint.
+fn run_microtasks(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    scope.perform_microtask_checkpoint();
+}
+
 fn fs_exists_sync(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,

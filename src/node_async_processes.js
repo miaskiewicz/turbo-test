@@ -17,7 +17,7 @@ function __asyncChildDrainEvents() {
   const events = __asyncChildNative('poll');
   for (const event of events) {
     const child = __asyncChildren.get(event.id);
-    if (child) child._dispatch(event);
+    if (child) __hostCallback(() => child._dispatch(event));
   }
   return events.length > 0;
 }
