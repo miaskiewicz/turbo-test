@@ -10351,6 +10351,8 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     }
     install_host_env(scope, global);
     run_js(scope, &process_ids_js(std::process::id(), host_parent_id()));
+    // the clock origins are per run, not the cached snapshot's creation time (#447, #448)
+    run_js(scope, "globalThis.__ttRunStart();");
     if crate::runtime_profile::is_node() {
         install_backend_natives(scope, global);
         crate::runtime_profile::install_backend(scope);

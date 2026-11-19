@@ -150,8 +150,14 @@ const __loop = {
   waited: 0,
   elapsed() { return __loop.realNow() + __loop.waited; },
 };
-// the real clock's origin (performance.timeOrigin): when the runtime started
-const __perfOrigin = __loop.realNow();
+// the real clock's origin (performance.timeOrigin): when the run started. The runtime is
+// evaluated into the cached framework snapshot, so the runner resets it at each run through
+// __ttRunStart (#448); a value captured here alone would be the snapshot's creation time.
+let __perfOrigin = __loop.realNow();
+globalThis.__ttRunStart = () => {
+  __perfOrigin = __loop.realNow();
+  if (globalThis.performance && !__loop.fake) globalThis.performance.timeOrigin = __perfOrigin;
+};
 // process.hrtime on the real clock (Node's [seconds, nanoseconds]; `prev` gives the difference)
 function __hrtimeOf(ms, prev) {
   const secs = Math.floor(ms / 1000);
@@ -605,24 +611,22 @@ function __installFakeDate() {
   FakeDate.parse = Real.parse;
   globalThis.Date = FakeDate;
 }
-// Default clock: a Date whose now() is a REAL wall-clock base + the VIRTUAL elapsed (__loop.now,
-// which advances as the loop fires timers). So `const t=Date.now(); await sleep(100); Date.now()-t`
-// reports ~100 even though no real time passed — elapsed-across-setTimeout assertions work, while
-// timestamps stay ~real (base captured at install). Only `now()` and arg-less `new Date()` are
-// virtualized; `new Date(args)` and the prototype stay real (instanceof works).
-let __virtualBase = 0;
+// Default clock: a Date whose now() is the real wall clock plus the waits the drive loop jumped
+// instead of sleeping (__loop.elapsed(), as performance.now / hrtime). So `const t=Date.now();
+// await sleep(100); Date.now()-t` reports ~100 even though the sleep was skipped, time moves in
+// synchronous code, and the clock is read live rather than from the cached snapshot (#447).
+// Only `now()` and arg-less `new Date()` read it; `new Date(args)` and the prototype stay real.
 // one VDate for the run: restoring the real Date gives back the same function, as Node's
 let __vdate = null;
 function __installVirtualDate() {
   if (__vdate) { globalThis.Date = __vdate; return; }
   const Real = __loop.RealDate;
-  if (!__virtualBase) __virtualBase = __loop.realNow();
   function VDate(...args) {
-    return __dateConstruct(Real, new.target, args, () => __virtualBase + __loop.now);
+    return __dateConstruct(Real, new.target, args, () => __loop.elapsed());
   }
   Object.defineProperty(VDate, 'name', { value: 'Date', configurable: true });
   VDate.prototype = Real.prototype;
-  VDate.now = () => __virtualBase + __loop.now;
+  VDate.now = () => __loop.elapsed();
   VDate.UTC = Real.UTC;
   VDate.parse = Real.parse;
   __vdate = VDate;
