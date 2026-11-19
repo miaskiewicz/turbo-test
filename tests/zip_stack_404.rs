@@ -41,3 +41,12 @@ fn event_emitter_is_callable_like_node() {
         3,
     );
 }
+
+#[test]
+fn zlib_streams_compress_incrementally_like_node() {
+    node_and_turbo(
+        "zlib-streams-404",
+        include_str!("data/zip-404/zlib-streams.cjs"),
+        8,
+    );
+}
