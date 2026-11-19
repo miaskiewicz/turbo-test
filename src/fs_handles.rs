@@ -147,20 +147,26 @@ pub fn native_open(
 
 /// The open descriptor `fd` (>= 0, checked by the JS side) as a File that is not closed on drop.
 fn borrowed(fd: i64) -> ManuallyDrop<File> {
-    ManuallyDrop::new(unsafe { File::from_raw_fd(fd as libc::c_int) })
+    // OwnedFd rejects -1; a negative or out-of-range descriptor fails its syscall with EBADF
+    let fd = libc::c_int::try_from(fd)
+        .ok()
+        .filter(|fd| *fd >= 0)
+        .unwrap_or(libc::c_int::MIN);
+    ManuallyDrop::new(unsafe { File::from_raw_fd(fd) })
 }
 
-/// The bytes `[offset, offset + length)` of a byte view (the JS side checks the range).
-fn view_bytes<'a>(
-    view: v8::Local<'a, v8::ArrayBufferView>,
-    offset: usize,
-    length: usize,
-) -> &'a mut [u8] {
-    let start = view.data().cast::<u8>();
+/// The bytes `[offset, offset + length)` of a byte view, clamped to the view (the JS side
+/// reports Node's range errors first; the clamp keeps a direct native call in bounds). Not a
+/// view: no bytes.
+fn view_bytes<'a>(value: v8::Local<'a, v8::Value>, offset: usize, length: usize) -> &'a mut [u8] {
+    let view = v8::Local::<v8::ArrayBufferView>::try_from(value).ok();
+    let (data, size) = view.map_or((std::ptr::null_mut(), 0), |v| (v.data(), v.byte_length()));
+    let start = offset.min(size);
+    let length = length.min(size - start);
     if length == 0 {
         return &mut [];
     }
-    unsafe { std::slice::from_raw_parts_mut(start.add(offset), length) }
+    unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>().add(start), length) }
 }
 
 struct Transfer<'a> {
@@ -172,15 +178,14 @@ struct Transfer<'a> {
 fn transfer<'a>(
     scope: &mut v8::PinScope,
     args: &v8::FunctionCallbackArguments<'a>,
-) -> Option<Transfer<'a>> {
-    let view = v8::Local::<v8::ArrayBufferView>::try_from(args.get(1)).ok()?;
-    let offset = integer(scope, args, 2) as usize;
-    let length = integer(scope, args, 3) as usize;
-    Some(Transfer {
+) -> Transfer<'a> {
+    let offset = integer(scope, args, 2).max(0) as usize;
+    let length = integer(scope, args, 3).max(0) as usize;
+    Transfer {
         file: borrowed(integer(scope, args, 0)),
-        bytes: view_bytes(view, offset, length),
+        bytes: view_bytes(args.get(1), offset, length),
         position: integer(scope, args, 4),
-    })
+    }
 }
 
 /// native __fs_read(fd, view, offset, length, position) -> bytes read; position < 0 reads at
@@ -190,9 +195,7 @@ pub fn native_read(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let Some(t) = transfer(scope, &args) else {
-        return;
-    };
+    let t = transfer(scope, &args);
     let read = if t.position < 0 {
         (&*t.file).read(t.bytes)
     } else {
@@ -207,9 +210,7 @@ pub fn native_write(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let Some(t) = transfer(scope, &args) else {
-        return;
-    };
+    let t = transfer(scope, &args);
     let written = if t.position < 0 {
         (&*t.file).write(t.bytes)
     } else {
