@@ -7113,7 +7113,7 @@ fn factory_bindings(entry: &Path, src: &str, mr: bool) -> Vec<crate::mock_scope:
 }
 
 /// `src` of the file `abs` as it loads: the test file gets the binder statement that hands its
-/// factories' bindings to the runtime, on a line of its own at the end (so no position moves).
+/// factories' bindings to the runtime, as early as no position moves (`mock_scope::place_binder`).
 /// An app module's source as vite's transform sees it: `import.meta.glob` calls expanded against
 /// the file system (src/import_glob.rs, turbo-test#130, #145), the vitest root (the working
 /// directory) the base of `/` patterns, the config's `resolve.alias` (TURBO_ALIAS) its aliases. node_modules are read as they are (vitest externalizes them).
@@ -7147,7 +7147,8 @@ fn with_binder(abs: &Path, src: String, mr: bool) -> String {
     if bindings.is_empty() {
         return src;
     }
-    format!("{src}\n{}", crate::mock_scope::binder(&bindings, abs))
+    let binder = crate::mock_scope::binder(&bindings, abs);
+    crate::mock_scope::place_binder(abs, &src, &binder)
 }
 
 /// Whether to stub a failed node_modules load for the CURRENT file. e2e entries only;

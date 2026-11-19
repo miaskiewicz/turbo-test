@@ -168,6 +168,54 @@ pub fn binder(bindings: &[Binding], file: &Path) -> String {
     )
 }
 
+/// `src` with the binder statement placed where it registers its getters before anything the file
+/// loads can run a retained factory (turbo-test#401): right after the first top-level statement
+/// that loads nothing and ends its line (the declaration of a `mock…` const, the `jest.mock`
+/// call …; a directive prologue stays in front), with a `;` in front, so no position moves; the getters read the bindings
+/// live, so one read before its declaration still throws the language's own TDZ error. Without
+/// such a statement (the file opens with an import / require, or is one line) it goes on a line
+/// of its own at the end, after which every binding has run.
+pub fn place_binder(path: &Path, src: &str, binder: &str) -> String {
+    match bind_at(path, src) {
+        Some(at) => format!("{};{binder}{}", &src[..at], &src[at..]),
+        None => format!("{src}\n{binder}"),
+    }
+}
+
+/// The end of the first top-level statement, before any that loads a module, whose line ends
+/// with it.
+fn bind_at(path: &Path, src: &str) -> Option<usize> {
+    use oxc_span::GetSpan;
+    let alloc = Allocator::default();
+    let stype = SourceType::from_path(path).unwrap_or_default();
+    let parsed = Parser::new(&alloc, src, stype).parse();
+    let body = &parsed.program.body;
+    let ends_line = |i: usize, end: usize| {
+        let next = body
+            .get(i + 1)
+            .map_or(usize::MAX, |s| s.span().start as usize);
+        src[end..].find('\n').is_some_and(|nl| end + nl < next)
+    };
+    body.iter()
+        .enumerate()
+        .take_while(|(_, s)| !loads(s, src))
+        .map(|(i, s)| (i, s.span().end as usize))
+        .find(|&(i, end)| ends_line(i, end))
+        .map(|(_, end)| end)
+}
+
+/// Whether a top-level statement loads a module: an import, a re-export, or one that calls
+/// `require(`.
+fn loads(stmt: &Statement, src: &str) -> bool {
+    use oxc_span::GetSpan;
+    let span = stmt.span();
+    match stmt {
+        Statement::ImportDeclaration(_) | Statement::ExportAllDeclaration(_) => true,
+        Statement::ExportNamedDeclaration(e) if e.source.is_some() => true,
+        _ => src[span.start as usize..span.end as usize].contains("require("),
+    }
+}
+
 /// `code` (sloppy-mode script text) run with the names of `bindings` resolved through the test
 /// file's scope; the runtime learns the names first. Each file (the test file, every setup file)
 /// has a scope of its own, keyed by its path (turbo-test#205).
