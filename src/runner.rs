@@ -10105,6 +10105,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         }
     }
     install_host_env(scope, global);
+    run_js(scope, &process_ids_js(std::process::id(), host_parent_id()));
     if crate::runtime_profile::is_node() {
         install_backend_natives(scope, global);
         crate::runtime_profile::install_backend(scope);
@@ -10318,6 +10319,29 @@ fn install_host_env(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
          if (h.NODE_ENV !== undefined) delete own.NODE_ENV; Object.assign(e, own); \
          e.PROD = e.NODE_ENV === 'production' ? '1' : ''; e.DEV = e.PROD ? '' : '1'; })();",
     );
+}
+
+/// process.pid / process.ppid as Node defines them: this host process's ids (per run, so not in
+/// the snapshot), pid an own read-only data property and ppid an own writable one. Without a
+/// parent id (non-unix hosts) ppid stays undefined rather than a made-up value.
+fn process_ids_js(pid: u32, ppid: Option<u32>) -> String {
+    let ppid = ppid.map_or(String::new(), |ppid| {
+        format!(", ppid: {{ value: {ppid}, writable: true, enumerable: true, configurable: true }}")
+    });
+    format!(
+        "Object.defineProperties(globalThis.process, {{ \
+         pid: {{ value: {pid}, writable: false, enumerable: true, configurable: true }}{ppid} }});"
+    )
+}
+
+#[cfg(unix)]
+fn host_parent_id() -> Option<u32> {
+    Some(std::os::unix::process::parent_id())
+}
+
+#[cfg(not(unix))]
+fn host_parent_id() -> Option<u32> {
+    None
 }
 
 /// Minimal JSON string encoder for embedding a Rust string as a JS string literal.

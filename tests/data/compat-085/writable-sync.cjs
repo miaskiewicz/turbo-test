@@ -11,7 +11,7 @@ const mark = (log, label) => {
   process.nextTick(() => log.push(label + ':tick'));
   Promise.resolve().then(() => log.push(label + ':micro'));
 };
-const describe = (error) => (error ? error.code || error.message : 'ok');
+const outcome = (error) => (error ? error.code || error.message : 'ok');
 
 function writable(log, options = {}) {
   const held = [];
@@ -30,11 +30,11 @@ function writable(log, options = {}) {
     final(callback) { log.push('_final'); callback(); },
   });
   for (const event of ['drain', 'prefinish', 'finish', 'close']) stream.on(event, () => log.push('event ' + event));
-  stream.on('error', (error) => log.push('event error ' + describe(error)));
+  stream.on('error', (error) => log.push('event error ' + outcome(error)));
   return { stream, held };
 }
 const write = (log, stream, chunk) =>
-  log.push('write ' + chunk + ' -> ' + stream.write(chunk, (error) => log.push('cb ' + chunk + ' ' + describe(error))));
+  log.push('write ' + chunk + ' -> ' + stream.write(chunk, (error) => log.push('cb ' + chunk + ' ' + outcome(error))));
 const inTimer = (fn) => new Promise((resolve) => setTimeout(() => { fn(); resolve(); }));
 
 const scenarios = {
@@ -123,7 +123,7 @@ const scenarios = {
   },
   async 'calling a write callback twice is ERR_MULTIPLE_CALLBACK'(log) {
     const stream = new Writable({ write(chunk, encoding, callback) { callback(); callback(); } });
-    stream.on('error', (error) => log.push('event error ' + describe(error)));
+    stream.on('error', (error) => log.push('event error ' + outcome(error)));
     await inTimer(() => { log.push('write -> ' + stream.write('a')); mark(log, 'm'); });
     await settle();
   },
@@ -142,13 +142,13 @@ const scenarios = {
     const { Readable } = require('node:stream');
     const streams = { writable: new Writable({ write() {} }), readable: new Readable({ read() {} }) };
     for (const [name, stream] of Object.entries(streams)) {
-      stream._destroy = (error, callback) => { log.push(name + ' _destroy ' + describe(error)); callback(error); };
-      stream.on('error', (error) => log.push(name + ' error ' + describe(error)));
+      stream._destroy = (error, callback) => { log.push(name + ' _destroy ' + outcome(error)); callback(error); };
+      stream.on('error', (error) => log.push(name + ' error ' + outcome(error)));
       stream.on('close', () => log.push(name + ' close'));
     }
     await inTimer(() => {
       streams.writable.destroy(new Error('w-boom')); streams.readable.destroy(new Error('r-boom'));
-      log.push('errored ' + describe(streams.writable.errored) + ' ' + describe(streams.readable.errored));
+      log.push('errored ' + outcome(streams.writable.errored) + ' ' + outcome(streams.readable.errored));
       mark(log, 'm');
     });
     await settle();
