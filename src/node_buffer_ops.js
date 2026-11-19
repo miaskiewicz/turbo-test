@@ -138,6 +138,8 @@ const __bufferWriteEncoders = Object.assign(Object.create(null), {
   ucs2: __bufferUtf16Bytes, 'ucs-2': __bufferUtf16Bytes, utf16le: __bufferUtf16Bytes, 'utf-16le': __bufferUtf16Bytes,
   hex: __bufferHexBytes, base64: __bufferBase64Bytes, base64url: __bufferBase64Bytes,
 });
+// Buffer.isEncoding (#434): the encoder table holds exactly Node's normalizeEncoding names.
+const __bufferIsEncoding = (encoding) => typeof encoding === 'string' && encoding.toLowerCase() in __bufferWriteEncoders;
 function __bufferWriteEncoder(encoding) {
   if (!encoding) return __bufferUtf8Bytes;
   const encoder = __bufferWriteEncoders[`${encoding}`.toLowerCase()];
