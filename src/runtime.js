@@ -2693,8 +2693,14 @@ function __unhandledEventError(value) {
 }
 const __eventState = (emitter) => emitter._ev || (emitter._ev = Object.create(null));
 const __eventListeners = (emitter, event) => (emitter._ev && emitter._ev[event]) || [];
-class __EventEmitter {
-  constructor() { this._ev = Object.create(null); }
+// A function constructor, as Node's: legacy subclasses (readable-stream's Stream, turbo-test#404)
+// initialise through EventEmitter.call(this). Like Node's init, a receiver whose listener state
+// is missing or only inherited gets its own.
+function __EventEmitter() {
+  'use strict'; // a call without a receiver throws, as Node's
+  if (this._ev === undefined || this._ev === Object.getPrototypeOf(this)._ev) this._ev = Object.create(null);
+}
+class __EventEmitterMethods {
   on(e, f) { const state = __eventState(this); (state[e] || (state[e] = [])).push(f); return this; }
   addListener(e, f) { return this.on(e, f); }
   once(e, f) { const self = this; function g(...a) { self.off(e, g); return f.apply(this, a); } g.listener = f; return this.on(e, g); }
@@ -2713,8 +2719,9 @@ class __EventEmitter {
   prependListener(e, f) { const state = __eventState(this); (state[e] || (state[e] = [])).unshift(f); return this; }
 }
 // Node exposes enumerable prototype methods; libraries such as Mongoose copy them with for-in.
-for (const name of Object.getOwnPropertyNames(__EventEmitter.prototype).filter((name) => name !== 'constructor')) {
-  Object.defineProperty(__EventEmitter.prototype, name, { enumerable: true });
+for (const name of Object.getOwnPropertyNames(__EventEmitterMethods.prototype).filter((name) => name !== 'constructor')) {
+  const method = Object.getOwnPropertyDescriptor(__EventEmitterMethods.prototype, name);
+  Object.defineProperty(__EventEmitter.prototype, name, { ...method, enumerable: true });
 }
 /* __TT_NODE_WARNINGS__ */
 const __events = Object.assign(__EventEmitter, { EventEmitter: __EventEmitter, default: __EventEmitter, once: (em, e) => new Promise((res) => em.once(e, (...a) => res(a))) });
