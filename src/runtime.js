@@ -575,12 +575,18 @@ if (typeof globalThis.queueMicrotask !== 'function') {
 }
 
 // Date faking
+// The body of the runner's Date constructors (the virtual and the fake one): called, the clock's
+// time as a string; under `new`, a real Date built for new.target (Reflect.construct), so a
+// `class X extends Date` instance keeps X's prototype and methods (@date-fns/tz's TZDate:
+// turbo-test#416); without arguments it holds the clock's time.
+function __dateConstruct(Real, target, args, now) {
+  if (!target) return new Real(now()).toString();
+  return Reflect.construct(Real, args.length ? args : [now()], target);
+}
 function __installFakeDate() {
   const Real = __loop.RealDate;
   function FakeDate(...args) {
-    if (!(this instanceof FakeDate)) return new Real(__loop.systemTime + __loop.fnow).toString();
-    if (args.length === 0) return new Real(__loop.systemTime + __loop.fnow);
-    return new Real(...args);
+    return __dateConstruct(Real, new.target, args, () => __loop.systemTime + __loop.fnow);
   }
   Object.defineProperty(FakeDate, 'name', { value: 'Date', configurable: true });
   FakeDate.prototype = Real.prototype;
@@ -602,9 +608,7 @@ function __installVirtualDate() {
   const Real = __loop.RealDate;
   if (!__virtualBase) __virtualBase = __loop.realNow();
   function VDate(...args) {
-    if (!(this instanceof VDate)) return new Real(__virtualBase + __loop.now).toString();
-    if (args.length === 0) return new Real(__virtualBase + __loop.now);
-    return new Real(...args);
+    return __dateConstruct(Real, new.target, args, () => __virtualBase + __loop.now);
   }
   Object.defineProperty(VDate, 'name', { value: 'Date', configurable: true });
   VDate.prototype = Real.prototype;
