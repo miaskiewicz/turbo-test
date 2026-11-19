@@ -5,9 +5,10 @@
 // is compressed as it is written; flush() and end() flush the compressor like Node's.
 const __zlibModes = { Deflate: 1, Inflate: 2, Gzip: 3, Gunzip: 4, DeflateRaw: 5, InflateRaw: 6, Unzip: 7 };
 const __zlibEmpty = Buffer.alloc(0);
-// flush() writes an empty chunk whose queue entry carries one of these encodings, so the
-// flush runs in order with the writes before it.
-const __zlibFlushKinds = Object.assign(Object.create(null), { '\0zlib-flush-2': 2, '\0zlib-flush-3': 3, '\0zlib-flush-4': 4 });
+// flush() writes one of these distinct empty buffers (Node's kFlushBuffers), so the flush runs
+// in order with the writes before it whether the write runs at once or is buffered.
+const __zlibFlushBuffers = new Map([2, 3, 4].map((kind) => [kind, Buffer.alloc(0)]));
+const __zlibFlushKindOf = (chunk) => { for (const [kind, buf] of __zlibFlushBuffers) if (buf === chunk) return kind; return 0; };
 function __zlibCloseHandle(stream) {
   if (stream._handle) globalThis.__ttZlibClose(stream._handle);
   stream._handle = null;
@@ -44,15 +45,13 @@ function __ZlibBase(options, mode) {
 Object.setPrototypeOf(__ZlibBase, __Transform);
 Object.setPrototypeOf(__ZlibBase.prototype, __Transform.prototype);
 Object.assign(__ZlibBase.prototype, {
-  _transform(chunk, encoding, callback) { __zlibProcess(this, chunk, __zlibFlushKinds[encoding] || 0, callback); },
+  _transform(chunk, encoding, callback) { __zlibProcess(this, chunk, __zlibFlushKindOf(chunk), callback); },
   _flush(callback) { __zlibProcess(this, __zlibEmpty, 4, callback); },
   _destroy(error, callback) { __zlibCloseHandle(this); callback(error); },
   flush(kind, callback) {
     if (typeof kind === 'function' || kind === undefined) { callback = kind; kind = 3; }
     if (this.writableEnded) return __zlibFlushEnded(this, callback);
-    const queue = this._ws.queue, at = queue.length;
-    this.write(__zlibEmpty, callback);
-    if (queue.length > at) queue[at].encoding = '\0zlib-flush-' + __zlibFlushKind(kind);
+    this.write(__zlibFlushBuffers.get(__zlibFlushKind(kind)), callback);
   },
   close(callback) { if (callback) __streamDefer(callback); this.destroy(); },
   reset() { __zlibCloseHandle(this); __zlibOpen(this); },
