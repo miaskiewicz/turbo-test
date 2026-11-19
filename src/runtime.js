@@ -8831,6 +8831,21 @@ it.skipIf = (cond) => (name, fn) => __addTest({ name, fn, skip: !!cond, only: fa
 it.runIf = (cond) => (name, fn) => __addTest({ name, fn, skip: !cond, only: false, retry: 0 });
 // it.fails: the test PASSES iff its body throws (runSuite inverts the outcome via `fails`).
 it.fails = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: false, retry: o.retry || 0, repeats: o.repeats, own: o, fails: true }); };
+// Jest's test.failing / test.only.failing / test.skip.failing and their `.each` (jest-circus
+// bindFailing, turbo-test#402): unlike it.fails, only the BODY is inverted (`failing`, see
+// __runFailingBody) — a throwing beforeEach / afterEach still fails the test, as in Jest.
+function __failing(mode) {
+  const failing = (name, a, b) => {
+    const { fn, o } = __normTest(a, b);
+    if (mode === 'only') __tt.hasOnly = true;
+    __addTest({ name, fn, skip: mode === 'skip', only: mode === 'only', retry: o.retry || 0, repeats: o.repeats, own: o, timeout: o.timeout, failing: true });
+  };
+  failing.each = (cases, ...targs) => __each(failing, cases, targs);
+  return failing;
+}
+it.failing = __failing('');
+it.only.failing = __failing('only');
+it.skip.failing = __failing('skip');
 // it.extend({...}) — test-context fixtures (best-effort). vitest passes a merged context object as
 // the test fn's first arg; fixtures defined as plain values or `async ({}, use) => use(value)`
 // functions are resolved here and provided. Returns a new test fn with these fixtures baked in.
@@ -9571,6 +9586,19 @@ function __attemptState(task, run) {
     task.result.errors = run.attemptErrors;
   }
 }
+// Jest's test.failing body (jest-circus _callCircusTest, turbo-test#402): a body that throws,
+// rejects or times out is the success; one that completes fails with Jest's message. Its hooks
+// and the expect.assertions check after it are not inverted (Jest checks those apart too).
+async function __runFailingBody(t, ctx, timeoutMs) {
+  try {
+    await __runTestBody(t, ctx, timeoutMs);
+  } catch (e) {
+    if (e instanceof __PendingError) throw e;
+    return;
+  }
+  throw new Error('Failing test passed even though it was supposed to fail. Remove `.failing` to remove error.');
+}
+const __runBody = (t, ctx, timeoutMs) => (t.failing ? __runFailingBody(t, ctx, timeoutMs) : __runTestBody(t, ctx, timeoutMs));
 // One attempt of a test: its beforeEach hooks (the enclosing suites' first) and body, then its
 // afterEach hooks (even when it failed, so a failed test's mounted DOM does not leak into the
 // next one: innermost suite first, each suite's last registered first), the functions its
@@ -9584,7 +9612,7 @@ async function __runAttemptInner(t, chain, ctx, timeoutMs, run) {
     __clearModuleMocks();
     await null;
     beCleanups = await __vtSuiteHook(chain, chain.length - 1, 'be', [ctx]);
-    await __runTestBody(t, ctx, timeoutMs);
+    await __runBody(t, ctx, timeoutMs);
     __checkAssertions();
     await null;
     run.ok = true;

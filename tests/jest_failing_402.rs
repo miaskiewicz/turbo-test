@@ -118,6 +118,20 @@ test.concurrent.failing('concurrent', async () => { throw new Error('c'); });
     assert_outcome(&got[2], "concurrent", "passed", "");
 }
 
+// Not a Jest API: turbo-test's test context `skip()` (vitest's) is a skip, never the expected
+// failure a `.failing` body is waiting for.
+#[test]
+fn failing_context_skip_still_skips() {
+    let p = jest_project("jest-failing-402-ctx-skip");
+    p.file(
+        "skip.test.js",
+        "test.failing('ctx skip', (ctx) => { ctx.skip(); throw new Error('unreached'); });\n",
+    );
+    let got = outcomes(&p);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_outcome(&got[0], "ctx skip", "skipped", "");
+}
+
 #[test]
 fn only_and_skip_failing_follow_their_modes() {
     let p = jest_project("jest-failing-402-modes");
