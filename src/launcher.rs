@@ -48,8 +48,9 @@ pub const VITEST_CONFIG_FILES: [&str; 12] = [
 /// Runner flags that take a following value (so a file arg isn't mistaken for the value, and the
 /// value isn't mistaken for a file). Mirrors the value-flag set cli.js forwarded with their arg.
 /// `cli::parse_args` also accepts each `--` one in its inline `--flag=value` form.
-pub(crate) const VALUE_FLAGS: [&str; 23] = [
+pub(crate) const VALUE_FLAGS: [&str; 24] = [
     "-j",
+    "--compat",
     "--jobs",
     "--shard",
     "--reporter",

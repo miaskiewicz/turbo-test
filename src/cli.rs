@@ -234,6 +234,9 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             "--no-chrome-media" => o.env.push(("TURBO_CHROME_MEDIA", "0".to_string())),
             "--css-transitions" => o.env.push(("TURBO_CSS_TRANSITIONS", "1".to_string())),
             "--no-css-transitions" => o.env.push(("TURBO_CSS_TRANSITIONS", "0".to_string())),
+            // `--compat jest|vitest|auto`: which runner's behaviour where they differ (`.each`
+            // titles, …); `auto` (the default) detects it per file from the nearest config.
+            "--compat" => push_compat(&mut o, value()),
             "--zero-delay-timers" => o.env.push(("TURBO_ZERO_DELAY_TIMERS", "1".to_string())),
             "--no-zero-delay-timers" => o.env.push(("TURBO_ZERO_DELAY_TIMERS", "0".to_string())),
             // `--allowOnly` / `--no-allowOnly` → permit or forbid `.only` tests (default: !isCI).
@@ -327,6 +330,20 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
 fn push_optional_env(env: &mut Vec<(&'static str, String)>, key: &'static str, v: Option<String>) {
     if let Some(v) = v {
         env.push((key, v));
+    }
+}
+
+/// `--compat <mode>` → `TURBO_TEST_COMPAT` (jest / vitest / auto, any case); another value is
+/// warned about and ignored.
+fn push_compat(o: &mut Options, v: Option<String>) {
+    let v = v.unwrap_or_default();
+    let mode = v.to_ascii_lowercase();
+    if matches!(mode.as_str(), "jest" | "vitest" | "auto") {
+        o.env.push(("TURBO_TEST_COMPAT", mode));
+    } else {
+        o.warnings.push(format!(
+            "turbo-test: ignoring --compat '{v}' (expected jest, vitest or auto)"
+        ));
     }
 }
 

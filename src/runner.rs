@@ -618,9 +618,29 @@ fn cjs_first_project(entry: &Path) -> bool {
     cjs_first_project_uncached(entry)
 }
 
+/// Whether `entry` runs with Jest's behaviour where Jest and vitest differ (`.each` titles,
+/// `toThrow`, …): `TURBO_TEST_COMPAT=jest|vitest` (`--compat`) when set, else detected.
+fn jest_project(entry: &Path) -> bool {
+    compat_override().unwrap_or_else(|| jest_config_governs(entry))
+}
+
+/// `TURBO_TEST_COMPAT`: `jest` → Some(true), `vitest` → Some(false), unset / `auto` / anything
+/// else → None (detect).
+fn compat_override() -> Option<bool> {
+    match std::env::var("TURBO_TEST_COMPAT")
+        .ok()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jest" => Some(true),
+        "vitest" => Some(false),
+        _ => None,
+    }
+}
+
 /// Whether `entry` is governed by a jest config: walking up, a jest config (file or package.json
 /// block) found before any vitest config (the rule `runtime_config_for` reads configs by).
-fn jest_project(entry: &Path) -> bool {
+fn jest_config_governs(entry: &Path) -> bool {
     for d in entry.ancestors().skip(1) {
         if VITEST_CONFIG_FILES.iter().any(|v| d.join(v).is_file()) {
             return false;
