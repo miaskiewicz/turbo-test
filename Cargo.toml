@@ -70,6 +70,10 @@ rand_chacha = "0.3.1"
 aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc", "zeroize"] }
 zeroize = { version = "1", features = ["alloc"] }
 flate2 = "1"
+# zlib's Brotli streams: Dropbox's pure-Rust port of Google's brotli (BSD-3-Clause AND MIT)
+brotli = "9"
+# its decoder (named for the decoder parameter type)
+brotli-decompressor = "6.3"
 # TextDecoder's legacy encodings (Shift_JIS, UTF-16, windows-125x, ...): the WHATWG Encoding
 # Standard implementation (turbo-test#119)
 encoding_rs = "0.8"

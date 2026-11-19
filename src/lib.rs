@@ -9,6 +9,7 @@ pub mod async_context;
 pub mod async_hooks;
 pub mod async_process;
 pub mod blocklist;
+pub mod brotli_stream;
 pub mod bundler;
 pub mod canon;
 pub mod ci;
