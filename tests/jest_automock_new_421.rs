@@ -1,7 +1,7 @@
 //! An automocked class is a Jest mock constructor (turbo-test#421): under `new`, Jest applies the
 //! implementation to the allocated receiver, so `Writer.mockImplementation(() => ({...}))` makes
 //! `new Writer()` return that object, as a plain `jest.fn()` does (turbo-test#394). vitest's
-//! automock keeps constructing the implementation. Oracle: Jest 30 / vitest 5.1.0.
+//! automock still rejects an arrow implementation under `new`. Oracle: Jest 30 / vitest 5.1.0.
 #![cfg(unix)]
 mod common;
 use common::{json_report, turbo_test, Project};

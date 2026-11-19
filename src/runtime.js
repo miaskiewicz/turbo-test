@@ -5972,10 +5972,15 @@ function __automockFnStatics(m, mod, depth, spy) {
     for (const k of Object.getOwnPropertyNames(c)) __automockFnStatic(m, mod, k, seen, depth, spy);
   }
 }
+// a jest project's automock is a jest-mock constructor: under `new` its implementation (an arrow
+// included) is applied to the allocated receiver, as jest.fn()'s (turbo-test#421). A spy keeps
+// its original (a class can't be applied), as vitest's.
+const __automockJestConstructor = (spy) => !!globalThis.__ttJestProject && !spy;
 function __automockFn(mod, depth, spy) {
   const m = __trackSpy(makeSpy(undefined, { original: spy ? mod : undefined }));
   // vitest's automocker keeps the function's own name (`Comp.name`, not the spy's) (turbo-test#136)
   try { Object.defineProperty(m, 'name', { value: mod.name, configurable: true }); } catch (e) {}
+  m[__mockConfigKey].jestConstructor = __automockJestConstructor(spy);
   if (depth < 3) {
     __automockFnStatics(m, mod, depth, spy);
     // class / constructor function: `new m()` returns an instance of m.prototype, whose
