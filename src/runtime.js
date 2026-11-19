@@ -3290,9 +3290,39 @@ function __rawDate(ctx, value, keys) {
   const base = Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
   return keys.length === 0 ? __sty(ctx, base, 'date') : __rawSpec(keys, ['{', '}'], undefined, base);
 }
-function __rawErr(value, keys) {
-  const base = value.stack ? String(value.stack) : `[${Error.prototype.toString.call(value)}]`;
-  keys = keys.filter((k) => k !== 'stack' && k !== 'message');
+// Node's formatError (#437): the stack (read lazily, so a later name shows in its header),
+// improveStack's `Ctor [name]` for a stack-header name ending in "Error" that differs from the
+// constructor, brackets for an error without frames, and name / message keys hidden only when
+// the stack already shows them.
+function __errStack(value) {
+  let stack;
+  try { stack = value.stack; } catch { stack = undefined; }
+  return stack ? String(stack) : Error.prototype.toString.call(value);
+}
+function __errKeyShown(stack, value, key) {
+  let v;
+  try { v = value[key]; } catch { return true; }
+  return typeof v === 'string' && !stack.includes(v);
+}
+function __errHeaderName(stack, name) {
+  const len = name.length;
+  return name.endsWith('Error') && stack.startsWith(name) && (stack.length === len || stack[len] === ':' || stack[len] === '\n');
+}
+function __improveStack(stack, ctor, name) {
+  if (ctor === null || name === ctor || !__errHeaderName(stack, name)) return stack;
+  if (!ctor.includes(name)) return `${ctor} [${name}]${stack.slice(name.length)}`;
+  return name.length === 0 ? `${ctor}: ${stack}` : ctor + stack.slice(name.length);
+}
+function __bracketStack(stack, message) {
+  let pos = (message && stack.indexOf(message)) || -1;
+  if (pos !== -1) pos += message.length;
+  return stack.indexOf('\n    at', pos) === -1 ? `[${stack}]` : stack;
+}
+function __rawErr(value, keys, ctor) {
+  const stack = __errStack(value);
+  const name = value.name == null ? 'Error' : String(value.name);
+  keys = keys.filter((k) => k !== 'stack' && (k !== 'message' && k !== 'name' || __errKeyShown(stack, value, k)));
+  const base = __bracketStack(__improveStack(stack, ctor, name), value.message);
   return keys.length === 0 ? base : __rawSpec(keys, ['{', '}'], undefined, base);
 }
 // a function, regexp, date or error: its base text, alone when it has no keys to print
@@ -3300,7 +3330,7 @@ function __rawBased(ctx, value, recurseTimes, keys, ctor) {
   if (typeof value === 'function') return __rawFn(ctx, value, keys, ctor);
   if (value instanceof RegExp) return __rawRegExp(ctx, value, keys, recurseTimes);
   if (value instanceof Date) return __rawDate(ctx, value, keys);
-  return __rawErr(value, keys);
+  return __rawErr(value, keys, ctor);
 }
 function __rawIsBased(value) {
   return typeof value === 'function' || value instanceof RegExp || value instanceof Date || value instanceof Error;
