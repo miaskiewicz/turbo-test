@@ -9,7 +9,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const codeOf = (f) => { try { f(); return 'no error'; } catch (e) { return e.name + ' ' + e.code; } };
-const spin = (ms) => { const end = Date.now() + ms; let x = 0; while (Date.now() < end) x++; return x; };
+const spin = (ms) => { const end = performance.now() + ms; let x = 0; while (performance.now() < end) x++; return x; };
 test('process.uptime is the seconds this process has run and advances with time', async () => {
  expect(typeof process.uptime).toBe('function');
  const a = process.uptime();

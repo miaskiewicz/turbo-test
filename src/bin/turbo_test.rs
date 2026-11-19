@@ -11,6 +11,8 @@
 //! argv and exits with the returned code.
 
 fn main() {
+    // process.uptime() counts from here (turbo-test#419)
+    turbo_test::process_usage::mark_start();
     std::process::exit(turbo_test::cli::main_with_args(
         std::env::args().skip(1).collect(),
     ));

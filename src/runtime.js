@@ -2769,6 +2769,7 @@ for (const name of Object.getOwnPropertyNames(__EventEmitterMethods.prototype).f
 __EventEmitter.prototype.addListener = __EventEmitter.prototype.on;
 __EventEmitter.prototype.off = __EventEmitter.prototype.removeListener;
 /* __TT_NODE_WARNINGS__ */
+/* __TT_NODE_PROCESS_USAGE__ */
 const __events = Object.assign(__EventEmitter, { EventEmitter: __EventEmitter, default: __EventEmitter, once: (em, e) => new Promise((res) => em.once(e, (...a) => res(a))) });
 /* __TT_NODE_STREAMS__ */
 /* __TT_NODE_DIAGNOSTICS_CHANNEL__ */

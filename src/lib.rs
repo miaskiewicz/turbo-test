@@ -51,6 +51,7 @@ pub mod zlib_stream;
 pub mod message_port;
 
 pub mod process_compat;
+pub mod process_usage;
 
 pub mod http_compat;
 pub mod vue;

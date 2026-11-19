@@ -10120,6 +10120,47 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__fs_copyFile", fs_copy_file);
     bind_fn(scope, global, "__fs_remove", fs_remove);
     bind_fn(scope, global, "__fs_symlinkSync", fs_symlink_sync);
+    // process.uptime / memoryUsage / cpuUsage / resourceUsage / umask (turbo-test#419)
+    crate::process_usage::mark_start();
+    bind_fn(
+        scope,
+        global,
+        "__ttUptime",
+        crate::process_usage::native_uptime,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttHeapUsage",
+        crate::process_usage::native_heap_usage,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttResidentSetSize",
+        crate::process_usage::native_resident_set_size,
+    );
+    #[cfg(unix)]
+    {
+        bind_fn(
+            scope,
+            global,
+            "__ttCpuUsage",
+            crate::process_usage::native_cpu_usage,
+        );
+        bind_fn(
+            scope,
+            global,
+            "__ttResourceUsage",
+            crate::process_usage::native_resource_usage,
+        );
+        bind_fn(
+            scope,
+            global,
+            "__ttUmask",
+            crate::process_usage::native_umask,
+        );
+    }
     // process.cwd(): the process's working directory, as vitest's workers report it; os.tmpdir()
     // and os.homedir() as Node computes them
     let cwd = std::env::current_dir().map(|d| d.to_string_lossy().into_owned());

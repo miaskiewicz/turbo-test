@@ -52,6 +52,10 @@ pub(crate) fn shared_runtime_source() -> String {
                 "/* __TT_NODE_WARNINGS__ */",
                 include_str!("node_warnings.js"),
             ),
+            (
+                "/* __TT_NODE_PROCESS_USAGE__ */",
+                include_str!("node_process_usage.js"),
+            ),
             ("/* __TT_NODE_STREAMS__ */", include_str!("node_streams.js")),
             (
                 "/* __TT_NODE_DIAGNOSTICS_CHANNEL__ */",
