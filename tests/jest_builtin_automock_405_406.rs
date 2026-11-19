@@ -81,6 +81,53 @@ test('mock state is shared with the node: alias', () => {
 }
 
 #[test]
+fn fs_automock_reaches_isolated_modules_under_commonjs_without_interop() {
+    // tsconfig `module: commonjs` + `esModuleInterop: false` (TypeScript's explicit CommonJS
+    // import policy): the namespace import is a bare require; the module the test reloads in
+    // jest.isolateModules reads the same automock the test configures.
+    let p = jest_project("jest-fs-automock-ts-cjs-405");
+    p.file(
+        "tsconfig.json",
+        r#"{ "compilerOptions": { "module": "commonjs", "esModuleInterop": false } }"#,
+    );
+    p.file(
+        "loader.ts",
+        "import * as fs from 'fs';\n\
+         const cache = new Map<string, unknown>();\n\
+         export function load(p: string): unknown {\n\
+           if (!cache.has(p)) cache.set(p, JSON.parse(fs.readFileSync(p, 'utf-8') as string));\n\
+           return cache.get(p);\n\
+         }\n",
+    );
+    p.file(
+        "loader.test.ts",
+        r#"import * as fs from 'fs';
+
+jest.mock('fs');
+
+const mockedFs = fs as jest.Mocked<typeof fs>;
+
+function freshModule(): typeof import('./loader') {
+  let mod: typeof import('./loader');
+  jest.isolateModules(() => {
+    mod = require('./loader');
+  });
+  return mod!;
+}
+
+test('the reloaded module reads the configured automock', () => {
+  const { load } = freshModule();
+  mockedFs.readFileSync.mockReturnValue(JSON.stringify({ a: 1 }));
+  expect(load('x.json')).toEqual({ a: 1 });
+  expect(mockedFs.readFileSync).toHaveBeenCalledWith('x.json', 'utf-8');
+});
+"#,
+    );
+    let r = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+    assert_eq!(counts(&r), (1, 0), "{}", r.all());
+}
+
+#[test]
 fn builtin_factory_mock_serves_both_spellings_until_unmocked() {
     let p = jest_project("jest-fs-factory-405");
     p.file(
