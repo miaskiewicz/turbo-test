@@ -142,6 +142,22 @@ test('TCP terminal batches keep original errors during public socket reentry',as
  assert.equal(transfer.code,'ECONNRESET');assert.equal(transfer.message,'original native reset');
  assert.equal(transfer.writeCode,'ECONNRESET');assert.equal(transfer.writes,1);assert.equal(transfer.hadError,true);assert.deepEqual(rejected,[]);
 });
+// Node calls every write callback once: a write the closed handle never sent fails with EPIPE
+// (as a real socket's write after the peer closed does) and that error destroys the socket.
+test('TCP clean close fails a write its retired handle never sent with EPIPE',async()=>{
+ const {context,rejected}=terminalTcpContext('closed');
+ const transfer=await vm.runInContext(`(async()=>{
+  const socket=new __nodeBuiltins.net.Socket({readableHighWaterMark:8});const events=[];let failure,writeError,writes=0;
+  socket.once('readable',()=>{events.push('readable');socket.write('late',error=>{writeError=error;writes++;events.push('write');});socket.end();});
+  socket.on('error',error=>{failure=error;events.push('error');});
+  const done=new Promise(resolve=>socket.once('close',hadError=>{events.push('close');resolve(hadError);}));
+  socket.connect({host:'127.0.0.1',port:12346});await Promise.resolve();__ttTcpPump();__ttTcpPump();
+  const hadError=await done;return {events,hadError,code:failure.code,syscall:failure.syscall,writeCode:writeError.code,writes};
+ })()`,context);
+ assert.deepEqual(Array.from(transfer.events),['readable','write','error','close']);
+ assert.equal(transfer.code,'EPIPE');assert.equal(transfer.syscall,'write');
+ assert.equal(transfer.writeCode,'EPIPE');assert.equal(transfer.writes,1);assert.equal(transfer.hadError,true);assert.deepEqual(rejected,[]);
+});
 test('TCP accepts a socket retired in the same native batch without touching its dead handle',async()=>{
  const context=commonContext();vm.runInContext(assembled('runtime_backend.js'),context,{timeout:3000});
  const rejected=[];const owned=new Set([1]);
