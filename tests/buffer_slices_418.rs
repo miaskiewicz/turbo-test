@@ -14,6 +14,15 @@ fn buffer_internal_slices_and_writes_match_node() {
 }
 
 #[test]
+fn buffer_is_encoding_matches_node_434() {
+    node_and_turbo(
+        "buffer-is-encoding-434",
+        include_str!("data/buffer-085/buffer-is-encoding.cjs"),
+        3,
+    );
+}
+
+#[test]
 fn readable_unpipe_detaches_destinations_like_node() {
     node_and_turbo(
         "readable-unpipe-418",
