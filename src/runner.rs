@@ -2865,6 +2865,7 @@ fn run_entry_mocks_untransformed(
         &scoped(format!("(() => {{\n{hoisted}\n{calls}}})();")),
         &scoped(format!("(() => {{\n{calls}}})();")),
     );
+    flush_prepass_mocks(scope);
     run_js(
         scope,
         "globalThis.__ttDir = globalThis.__ttPrevDir; globalThis.__ttNoLazyJestMock = false;",
@@ -2974,6 +2975,7 @@ fn run_entry_mocks_mr(scope: &mut v8::PinScope, entry: &Path, src: &str, p: &Pat
         };
         run_prepass_wrapper(scope, entry, dir, &raw);
     }
+    flush_prepass_mocks(scope);
     set_mock_prepass(scope, false);
     resolve_pending_mocks(scope);
     drain_pending_mocks(scope, entry.parent().unwrap_or(Path::new(".")), false);
@@ -3078,9 +3080,19 @@ fn run_entry_mocks_bundled(scope: &mut v8::PinScope, entry: &Path, p: &Path) {
             }
         }
     }
+    flush_prepass_mocks(scope);
+    scope.perform_microtask_checkpoint();
     set_mock_prepass(scope, false);
     resolve_pending_mocks(scope);
     drain_pending_mocks(scope, entry.parent().unwrap_or(Path::new(".")), false);
+}
+
+/// Run the entry prepass's queued mocks (runtime.js `__ttPrepassFlush`): its calls only queue
+/// them, so every hoisted mock is known before any factory runs and a factory's
+/// requireActual / importOriginal sees the file's later mocks too, as in jest and vitest
+/// (turbo-test#430). Called while the prepass flag is still set.
+fn flush_prepass_mocks(scope: &mut v8::PinScope) {
+    run_js(scope, "globalThis.__ttPrepassFlush();");
 }
 
 /// Mark the entry's mock prepass for runtime.js. The prepass runs the factories outside the

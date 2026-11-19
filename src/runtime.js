@@ -6399,6 +6399,36 @@ function __ttMock(spec, factory, vitest, isDoMock, options) {
   // (turbo-test#308). Jest-only; vi.mock has no such option. Virtual registrations take their
   // own path and don't need the automock mark below.
   if (__ttIsVirtualMock(vitest, options)) return __ttVirtualMockEntry(spec, factory, isDoMock, dir);
+  if (__ttPrepassDefer(spec, factory, vitest, isDoMock, key, dir)) return;
+  __ttMockApply(spec, factory, vitest, isDoMock, key, dir);
+}
+// The entry's mock prepass registers every hoisted mock before any factory runs, as jest and
+// vitest do (turbo-test#430): a factory's requireActual / importActual / importOriginal then
+// loads the real module with the file's other mocks in place, whichever order the calls are
+// in. Each call is queued and listed in the lazy map (so a require of its module runs it
+// first, from __mkRequire); __ttPrepassFlush runs the rest in order once all are queued.
+const __ttPrepassQueue = [];
+function __ttInPrepass() { return !!(globalThis.__ttMockPrepass || globalThis.__ttNoLazyJestMock); }
+function __ttPrepassDefer(spec, factory, vitest, isDoMock, key, dir) {
+  if (isDoMock || !__ttInPrepass()) return false;
+  const lazyKey = __ttJestLazyKey(dir, spec);
+  const entry = { lazyKey, done: false, run: () => __ttMockApply(spec, factory, vitest, false, key, dir) };
+  // a later mock of the same module replaces an earlier one
+  const prev = __ttJestLazy.get(lazyKey);
+  if (prev && prev.run) prev.done = true;
+  __ttJestLazy.set(lazyKey, entry);
+  __ttPrepassQueue.push(entry);
+  return true;
+}
+function __ttPrepassRun(entry) {
+  if (entry.done) return;
+  entry.done = true;
+  if (__ttJestLazy.get(entry.lazyKey) === entry) __ttJestLazy.delete(entry.lazyKey);
+  // (a call that throws leaves its module to the file's own call, as before)
+  try { entry.run(); } catch (e) {}
+}
+globalThis.__ttPrepassFlush = () => { for (const e of __ttPrepassQueue.splice(0)) __ttPrepassRun(e); };
+function __ttMockApply(spec, factory, vitest, isDoMock, key, dir) {
   // jest automock (turbo-test#184): record this spec as explicitly handled so the automock
   // bypass does NOT re-mock it on require. Resolution may fail (non-existent spec from a
   // prepass): we still fall through to normal mock logic.
@@ -6506,6 +6536,8 @@ function __ttJestLazyRun(dir, spec) {
   if (!__ttJestLazy.size) return;
   const [k, entry] = __ttJestLazyFind(dir, spec);
   if (!entry) return;
+  // a prepass mock still queued (turbo-test#430)
+  if (entry.run) return __ttPrepassRun(entry);
   __ttJestLazy.delete(k);
   __ttJestLazyFinalize(entry);
 }
