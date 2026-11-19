@@ -1860,8 +1860,22 @@ pub fn exit_code(t: &Totals, gates_ok: bool) -> i32 {
 /// The whole CLI: launcher front-end (subcommand stripping, config/discovery, `--changed`, …;
 /// may exit for terminal cases), then [`parse_args`] + [`run`]. Returns the exit code.
 pub fn main_with_args(raw: Vec<String>) -> i32 {
+    if let Some((text, code)) = crate::launcher::meta_command(&raw) {
+        return print_meta(&text, code);
+    }
     let jobs = default_jobs(std::env::var("TURBO_JOBS").ok().as_deref());
     run(parse_args(crate::launcher::prepare(raw), jobs))
+}
+
+/// Print a [`crate::launcher::meta_command`] text (stdout when it succeeded, else stderr) and
+/// return its exit code.
+fn print_meta(text: &str, code: i32) -> i32 {
+    if code == 0 {
+        print!("{text}");
+    } else {
+        eprint!("{text}");
+    }
+    code
 }
 
 /// Apply `opts` (env, coverage config), run every file and print the reports. Returns the exit
