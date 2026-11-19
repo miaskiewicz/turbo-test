@@ -9,7 +9,9 @@ const source = readFileSync(new URL('../src/runtime.js', import.meta.url), 'utf8
 function between(start, end) { return source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start))); }
 const context = vm.createContext({ Blob, TextEncoder, TextDecoder, ReadableStream, URL, Uint8Array, Error, TypeError });
 vm.runInContext(between('function __unhandledEventError', 'const __events =') + '\nglobalThis.Emitter = __EventEmitter;', context);
-vm.runInContext(between('const __dcChannels', '__dc.default = __dc;') + '\nglobalThis.dc = __dc;', context);
+// node:diagnostics_channel moved to its own runtime part (src/node_diagnostics_channel.js, #407).
+const dcSource = readFileSync(new URL('../src/node_diagnostics_channel.js', import.meta.url), 'utf8');
+vm.runInContext(dcSource + '\nglobalThis.dc = __dc;', context);
 vm.runInContext(between("if (typeof globalThis.FormData", "if (typeof globalThis.structuredClone"), context);
 
 function emitterChecks(Emitter) {
