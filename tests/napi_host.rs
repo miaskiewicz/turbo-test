@@ -61,12 +61,13 @@ fn module_init_outcomes() {
         "init_nested",
         "second",
         "unknown",
+        "v8api",
     ] {
         compile_addon(&p, stem);
     }
     p.file("garbage.node", "this is not a shared library\n");
     p.file("init.test.ts", spec("init.test.ts"));
-    assert_all_pass(&p, 6);
+    assert_all_pass(&p, 7);
 }
 
 /// Two workers require() the same addon at about the same time: its module init runs under the
