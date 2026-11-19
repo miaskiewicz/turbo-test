@@ -61,6 +61,15 @@ fn buffer_integer_reads_and_writes_cover_zip_headers() {
 }
 
 #[test]
+fn buffer_index_of_searches_bytes_like_node() {
+    node_and_turbo(
+        "buffer-index-of-404",
+        include_str!("data/zip-404/buffer-index-of.cjs"),
+        5,
+    );
+}
+
+#[test]
 fn zlib_streams_compress_incrementally_like_node() {
     node_and_turbo(
         "zlib-streams-404",
