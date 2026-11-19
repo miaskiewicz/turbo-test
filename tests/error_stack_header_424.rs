@@ -43,6 +43,22 @@ test('frames still point at this file', () => {
  expect(frames[0]).toMatch(/^    at /);
  expect(frames[0]).toContain('case.test.js:');
 });
+test('the header follows Error.prototype.toString rules and getter errors propagate', () => {
+ const e = new Error('x'); Object.defineProperty(e, 'message', { get() { throw new Error('boom'); } });
+ let error; try { e.stack; } catch (err) { error = err; }
+ expect(error && error.message).toBe('boom');
+ const n = { name: 5, message: { toString() { return 'obj'; } } }; Error.captureStackTrace(n);
+ expect(n.stack.split('\n')[0]).toBe('5: obj');
+});
+test('a user Error.prepareStackTrace formats the stack lazily', () => {
+ const saved = Error.prepareStackTrace;
+ Error.prepareStackTrace = (err, sites) => 'P:' + err.message + ':' + (sites.length > 0) + ':' + typeof sites[0].getFileName;
+ try {
+  const h = new Error('a'); h.message = 'b';
+  expect(h.stack).toBe('P:b:true:function');
+ } finally { Error.prepareStackTrace = saved; }
+ expect(new Error('c').stack.split('\n')[0]).toBe('Error: c');
+});
 "#;
 #[test]
 fn error_stack_header_is_formatted_on_first_read() {
@@ -52,6 +68,29 @@ fn error_stack_header_is_formatted_on_first_read() {
     p.file("case.test.js", CASES);
     let run = turbo_test(&p.dir, &["--reporter", "json"], &[]);
     let report = json_report(&run);
-    assert_eq!(report["numPassedTests"], 4, "{}", run.all());
+    assert_eq!(report["numPassedTests"], 6, "{}", run.all());
+    assert_eq!(report["numFailedTests"], 0, "{}", run.all());
+}
+
+/// Node's own header rules (checked against `node` 26; Jest's environment formats these two
+/// differently): an empty name leaves the message, an empty or missing message the name.
+const NODE_RULES: &str = r#"
+import { expect, test } from 'vitest';
+test('empty parts of the header are left out as in Node', () => {
+ const f = new Error('m'); f.name = '';
+ expect(f.stack.split('\n')[0]).toBe('m');
+ expect(new Error('').stack.split('\n')[0]).toBe('Error');
+ const o = {}; Error.captureStackTrace(o);
+ expect(o.stack.split('\n')[0]).toBe('Error');
+});
+"#;
+#[test]
+fn error_stack_header_drops_empty_parts_like_node() {
+    let p = Project::new("error-stack-424-node");
+    p.file("package.json", "{}");
+    p.file("header.test.js", NODE_RULES);
+    let run = turbo_test(&p.dir, &["--reporter", "json"], &[]);
+    let report = json_report(&run);
+    assert_eq!(report["numPassedTests"], 1, "{}", run.all());
     assert_eq!(report["numFailedTests"], 0, "{}", run.all());
 }

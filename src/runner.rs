@@ -11862,6 +11862,7 @@ fn run_test_file_isolated(entry_abs: &Path, plan: &EntryPlan) -> Result<TestRepo
     isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
     isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
     crate::heap_guard::install(isolate);
+    crate::error_stack::install(isolate);
     crate::heap_guard::arm();
     // Coverage: attach an inspector to this isolate BEFORE entering scopes (needs &mut isolate).
     let mut collector =
@@ -12152,6 +12153,7 @@ fn run_test_file_reused(entry_abs: &Path, plan: &EntryPlan) -> Result<TestReport
             isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
             isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
             crate::heap_guard::install(&mut isolate);
+            crate::error_stack::install(&mut isolate);
             *iso_cell.borrow_mut() = Some(isolate);
         }
     });
@@ -12306,6 +12308,7 @@ impl Default for JestGlobalRealm {
     fn default() -> Self {
         let _profile = crate::runtime_profile::RuntimeProfile::Node.enter();
         let mut isolate = v8::Isolate::new(isolate_params());
+        crate::error_stack::install(&mut isolate);
         let context = {
             let isolate = &mut isolate;
             v8::scope!(let scope, isolate);
