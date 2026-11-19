@@ -392,3 +392,66 @@ function __bufferIndexOf(buffer, value, byteOffset, encoding, forward) {
   if (needle.length === 0 || start < 0) return start;
   return forward ? __bufferFindForward(buffer, needle, start) : __bufferFindBackward(buffer, needle, start);
 }
+
+// Node's internal per-encoding methods (latin1Slice, utf8Write, ...; #418), which busboy calls.
+// They are bindings in Node: the receiver may be any ArrayBufferView, indices go through
+// ParseArrayIndex (ToInteger, negative = "Index out of range") except the latin1 / ascii / utf8
+// writes, which compare Number(offset) / Number(length) with the buffer first.
+const __bufferIndexError = () => __bufferError(RangeError, 'ERR_OUT_OF_RANGE', 'Index out of range');
+const __bufferOutside = (name) => __bufferError(RangeError, 'ERR_BUFFER_OUT_OF_BOUNDS', `"${name}" is outside of buffer bounds`);
+function __bufferArrayIndex(value, fallback) {
+  if (value === undefined) return fallback;
+  const index = Math.trunc(+value) || 0;
+  if (index < 0) throw __bufferIndexError();
+  return index;
+}
+function __bufferReceiverBytes(view) {
+  if (!ArrayBuffer.isView(view)) throw __bufferError(TypeError, 'ERR_INVALID_ARG_TYPE', 'argument must be a buffer');
+  return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+}
+// StringSlice: an empty buffer is '' whatever the indices; the end bound is checked before
+// an end below the start empties the range.
+function __bufferInternalSlice(view, start, end, encoding) {
+  const bytes = __bufferReceiverBytes(view);
+  if (bytes.length === 0) return '';
+  const from = __bufferArrayIndex(start, 0), to = __bufferArrayIndex(end, bytes.length);
+  if (to > bytes.length) throw __bufferIndexError();
+  return to <= from ? '' : __bufferStringDecoder(encoding)(bytes.subarray(from, to));
+}
+function __bufferWriteReceiver(view, string) {
+  const bytes = __bufferReceiverBytes(view);
+  if (typeof string !== 'string') throw __bufferError(TypeError, 'ERR_INVALID_ARG_TYPE', 'argument must be a string');
+  return bytes;
+}
+function __bufferEncodeInto(bytes, string, at, limit, encoding) {
+  const encoded = __bufferWriteEncoder(encoding)(string, limit);
+  bytes.set(encoded, at);
+  return encoded.length;
+}
+// StringWrite (base64, base64url, hex, ucs2): the length is clamped to the room left.
+function __bufferInternalWrite(view, string, offset, length, encoding) {
+  const bytes = __bufferWriteReceiver(view, string);
+  const at = __bufferArrayIndex(offset, 0);
+  if (at > bytes.length) throw __bufferOutside('offset');
+  const limit = Math.min(bytes.length - at, __bufferArrayIndex(length, bytes.length - at));
+  return __bufferEncodeInto(bytes, string, at, limit, encoding);
+}
+// The latin1 / ascii / utf8 writes: offset and length outside the buffer throw.
+function __bufferChecked(value, fallback, room, name) {
+  const number = value === undefined ? fallback : Number(value);
+  if (number < 0 || number > room) throw __bufferOutside(name);
+  return number;
+}
+function __bufferCheckedWrite(view, string, offset, length, encoding) {
+  const bytes = __bufferWriteReceiver(view, string);
+  const at = __bufferChecked(offset, 0, bytes.length, 'offset');
+  const limit = __bufferChecked(length, bytes.length - at, bytes.length - at, 'length');
+  return __bufferEncodeInto(bytes, string, Math.trunc(at) || 0, Math.trunc(limit) || 0, encoding);
+}
+function __bufferInstallInternalOps(proto) {
+  for (const encoding of ['latin1', 'ascii', 'utf8', 'base64', 'base64url', 'hex', 'ucs2']) {
+    const write = ['latin1', 'ascii', 'utf8'].includes(encoding) ? __bufferCheckedWrite : __bufferInternalWrite;
+    proto[encoding + 'Slice'] = function(start, end) { return __bufferInternalSlice(this, start, end, encoding); };
+    proto[encoding + 'Write'] = function(string, offset, length) { return write(this, string, offset, length, encoding); };
+  }
+}

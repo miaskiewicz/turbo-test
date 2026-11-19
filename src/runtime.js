@@ -2067,6 +2067,7 @@ if (typeof globalThis.Buffer === 'undefined') {
     toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
   }
   __bufferInstallIntOps(Buffer.prototype);
+  __bufferInstallInternalOps(Buffer.prototype);
   // Node's public static methods are enumerable; safer-buffer copies them with for-in.
   for (const name of ['from', 'alloc', 'allocUnsafe', 'byteLength', 'isBuffer', 'concat', 'compare']) {
     Object.defineProperty(Buffer, name, { enumerable: true });
