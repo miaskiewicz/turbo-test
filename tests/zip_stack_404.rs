@@ -52,6 +52,15 @@ fn event_emitter_aliases_do_not_dispatch_through_overrides() {
 }
 
 #[test]
+fn buffer_integer_reads_and_writes_cover_zip_headers() {
+    node_and_turbo(
+        "buffer-int-ops-404",
+        include_str!("data/zip-404/buffer-int-ops.cjs"),
+        4,
+    );
+}
+
+#[test]
 fn zlib_streams_compress_incrementally_like_node() {
     node_and_turbo(
         "zlib-streams-404",
