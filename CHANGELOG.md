@@ -5,6 +5,71 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.8.6] — 2026-11-20 — turbo-dom 0.8.6, Node feature flags + Jest/CJS fixes from the full Flux suite
+
+Consumes the published turbo-dom / turbo-dom-layout / turbo-dom-browser-env 0.8.6 crates and
+turbo-dom-v8 150.4.2 from crates.io, and closes every v0.8.6 milestone issue. Every behaviour
+below was checked against real Node 22/24/26, Jest 30 (ts-jest) or vitest 5.1 first; one
+adversarial code-review pass over the branch landed three stream-port corrections and a
+jest-hook/.skip + .todo fix.
+
+### Added
+- Node version feature flags (`--node-features 22|24|26` / `TURBO_NODE_FEATURES`, Node 22 LTS as
+  the default baseline) gate Node 24- and Node 26-only API behaviour so turbo-test matches the
+  Node version the user actually runs (#453). Documented audit of the 0.8.5 / 0.8.6 additions
+  against all three Node lines lives at `docs/validation/node-features-audit-0.8.6.md`.
+- Node 26 `Readable` state machine ported in full from `lib/internal/streams/readable.js` —
+  push/unshift accounting, needReadable/emittedReadable gating, encoding/decoder paths, resume
+  scheduling, highWaterMark overshoot and `null` as end-of-stream, with an oracle test suite
+  against Node 26 (#436).
+- `child_process` async `ref()` / `unref()` and `detached: true` on `spawn`/`fork` (#446).
+  Previously threw "not implemented"; forked child survives the parent on real Unix fork.
+
+### Fixed
+- Consume turbo-dom 0.8.6's fix for the 0.8.5 grid baseline regression (turbo-dom#537): a
+  baseline-aligned grid item was laid out at its min-content width; baseline offsets now match
+  Chromium.
+- `jest.mock` hoisting preserves source order of imports vs the mock-prefixed const so the
+  flux-apis `partner-legal-policy.service.spec.ts` shape loads: esbuild moves every ES import to
+  the top of the CJS output, but Jest 30 / ts-jest keep imports in authored position, so a
+  decorator the retained factory applies at load reads a const that's declared BEFORE the
+  decorating import (#429) — and a decorating import declared BEFORE the const still TDZs with
+  Jest 30's own error (#445). Non-hoistable requires default to the pre-const position; the
+  jest hoist branch only triggers when the raw file has BOTH a top-level `import` AND a later
+  top-level `const/let/var`.
+- Jest projects read a CJS dep's `.default` the way ts-jest does under `esModuleInterop: true`:
+  a dep marked `__esModule` is kept whole, whatever its `.default` was (#428). Imports from an
+  ESM package transformed by jest were seeing the compiled-ESM default wrapper instead of the
+  top-level members.
+- TypeScript transform follows the project's `tsconfig` `target` + `useDefineForClassFields`
+  (both the esbuild path and the persistent `ts.transpileModule` worker): a decorated class
+  field without an initializer survives the lowering (#438).
+- Jest `beforeAll` / `beforeEach` that throw now fail the tests in the enclosing
+  `describe` with the hook's error — but `.skip` and `.todo` stay pending, matching
+  jest-circus (#440).
+- `expect` under jest: `toEqual(error)` compares errors by message only (#443); `objectContaining` treats
+  `Set` as Jest does (#442); the reporter emits the Jest-shape file-level `message` in the JSON
+  report (#441); `.each` titles follow jest-each 30 (`%s` uses the value's own `toString`) and
+  vitest 5 `.each` keeps a pretty-format class-name prefix under `min` (#439, #449).
+- Coverage: failure frames map through esbuild's inline source map so stack traces point at the
+  authored source lines, not the compiled CJS (#444).
+- Default clock (no fake timers) reads the host wall clock per run — previously a long-running
+  module pinned it (#447, #448).
+- Readable: `__readableOnData` resumes unconditionally. The adversarial-review guard
+  (`flowing !== false`) was right for Node's tri-state but blocks this port's "not yet flowing"
+  state (flowing initialises to false, not null), regressing brotli/zlib/unpipe streams.
+
+### Performance
+- Consume turbo-dom 0.8.6's faster HTML parser (index-arena html5ever tree sink, SIMD
+  `<selectedcontent>` scan) for DOM-environment documents.
+- `ts.transpileModule` runs in one persistent Node worker per `(project root, typescript dir)`
+  instead of per-file `node -e` spawns (#431). Decorator-metadata-heavy suites (flux-apis
+  Mexico HistoryService) go from ~100 spawns to one.
+
+### Release preparation
+- Align the Rust and npm packages at 0.8.6; turbo-dom-v8 stays 150.4.2 (single V8 in the graph).
+- `release-guard` requires no temporary `[patch]` sections or Git sources before tagging.
+
 ## [0.8.5] — 2026-11-19 — turbo-dom 0.8.5, Jest/Node parity from the full Flux backend suite
 
 Validated against the full flux-apis backend unit suite (1,582 files, 36,552 tests, real Jest 30

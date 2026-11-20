@@ -15,7 +15,7 @@ Preserve earlier versions and unrelated dependency versions.
 
 The runner links V8 through turbo-dom's rusty_v8 fork, the registry crate
 `turbo-dom-v8 ~150.4.2` (V8 15.0), under its local `v8` alias, and installs the
-browser environment from the published `turbo-dom-browser-env` 0.8.5. Both are built and
+browser environment from the published `turbo-dom-browser-env` 0.8.6. Both are built and
 published from [miaskiewicz/turbo-dom](https://github.com/miaskiewicz/turbo-dom):
 the fork's patches, pins and generator live in its `crates/turbo-dom-v8`, and the
 binding (formerly this repo's `src/browser_env*`) in `crates/turbo-dom-browser-env`.
@@ -27,8 +27,8 @@ The fork carries the interceptor `ShouldThrowOnError` fix;
 against the resolved fork. `scripts/check-single-v8.sh` (CI build job) requires
 exactly one `turbo-dom-v8` in the graph and no `v8`, `v8x` or `turbo-surf-v8`.
 
-The v0.8.5 release resolves `turbo-dom`, `turbo-dom-layout`,
-`turbo-dom-browser-env` 0.8.5 and `turbo-dom-v8` 150.4.2 from crates.io.
+The v0.8.6 release resolves `turbo-dom`, `turbo-dom-layout`,
+`turbo-dom-browser-env` 0.8.6 and `turbo-dom-v8` 150.4.2 from crates.io.
 Development Git patches must be removed before publication. When preparing a
 future release, verify the required upstream versions are available, then remove
 any temporary pins and validate the actual registry graph:

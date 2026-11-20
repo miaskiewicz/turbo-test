@@ -48,9 +48,10 @@ pub const VITEST_CONFIG_FILES: [&str; 12] = [
 /// Runner flags that take a following value (so a file arg isn't mistaken for the value, and the
 /// value isn't mistaken for a file). Mirrors the value-flag set cli.js forwarded with their arg.
 /// `cli::parse_args` also accepts each `--` one in its inline `--flag=value` form.
-pub(crate) const VALUE_FLAGS: [&str; 24] = [
+pub(crate) const VALUE_FLAGS: [&str; 25] = [
     "-j",
     "--compat",
+    "--node-features",
     "--jobs",
     "--shard",
     "--reporter",
@@ -1994,6 +1995,7 @@ fn config_forward(cwd: &Path, forced: Option<&Path>, forward: &mut Vec<String>) 
         }
     }
     forward_config_numbers(cwd, forced, forward);
+    forward_node_features(cwd, forced, forward);
     // `test.sequence.concurrent: true` (turbo-test#256)
     let seq = find_config(cwd, forced)
         .and_then(|c| scan_braced(&c.text, "sequence"))
@@ -2015,6 +2017,29 @@ fn forward_config_numbers(cwd: &Path, forced: Option<&Path>, forward: &mut Vec<S
             forward.push(flag);
             forward.push(v);
         }
+    }
+}
+
+/// `test.nodeFeatures: 22|24|26` in vitest config → `--node-features N` (turbo-test#453). CLI
+/// (`--node-features`) and env (`TURBO_NODE_FEATURES`) both outrank the config: CLI wins because
+/// `has_flag` short-circuits; env wins because `install_runtime_flags` reads
+/// `TURBO_NODE_FEATURES` directly, and a child process inherits it either from the ambient
+/// environment or from `std::env::set_var` that `cli::parse_args` performs when `--node-features`
+/// is on the command line.
+fn forward_node_features(cwd: &Path, forced: Option<&Path>, forward: &mut Vec<String>) {
+    if has_flag(forward, "--node-features") {
+        return;
+    }
+    if std::env::var("TURBO_NODE_FEATURES").is_ok() {
+        return;
+    }
+    let Some(v) = find_config(cwd, forced).and_then(|c| scan_number(&c.text, "nodeFeatures"))
+    else {
+        return;
+    };
+    if matches!(v.as_str(), "22" | "24" | "26") {
+        forward.push("--node-features".to_string());
+        forward.push(v);
     }
 }
 

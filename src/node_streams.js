@@ -76,7 +76,7 @@ function __streamConstructed(stream, error) {
 }
 function __streamResumeConstructed(stream) {
   if (stream._ws) __writableConstructed(stream, stream._ws);
-  if (stream._rs) __readableSchedule(stream);
+  if (stream._rs) __readableMaybeReadMore(stream, stream._rs);
 }
 function __streamRecordError(stream, error) {
   if (error && !stream.errored) stream.errored = error;
@@ -96,7 +96,7 @@ function __streamDestroy(stream, error) {
   if (stream._ws) __writableDestroyBuffered(stream, stream._ws);
   __streamRecordError(stream, error);
   stream.destroyed = true;
-  if (stream._rs) stream._rs.queue.length = 0;
+  if (stream._rs) { stream._rs.buffer.length = 0; stream._rs.length = 0; }
   if (stream._constructed) __streamRunDestroy(stream, error);
   else stream._pendingDestroy = error;
   return stream;
@@ -148,94 +148,367 @@ function __streamWatermark(options, mode, side) {
   if (!Number.isInteger(value) || value < 0) throw new RangeError('Invalid highWaterMark');
   return value;
 }
+// Readable side, ported from Node v26.11.0 lib/internal/streams/readable.js (#436):
+// byte-accurate read(n) via howMuchToRead / fromList, 'readable' first-HWM-cross latched
+// through emittedReadable + needReadable, _read throttled on state.reading with
+// maybeReadMore, 'end' scheduled on the next tick when the buffer is empty.
+function __readableNewState(objectMode, highWaterMark) {
+  return { buffer: [], length: 0, objectMode, highWaterMark,
+    flowing: false, reading: false, sync: false,
+    needReadable: false, emittedReadable: false, readableListening: false,
+    dataListening: false, readingMore: false, resumeScheduled: false,
+    ended: false, endEmitted: false, endScheduled: false,
+    encoding: null, decoder: null };
+}
 function __readableInit(stream, options) {
   const objectMode = Boolean(options.objectMode || options.readableObjectMode);
-  stream._rs = { queue: [], length: 0, objectMode, highWaterMark: __streamWatermark(options, objectMode, 'readable'),
-    flowing: false, reading: false, ended: false, scheduled: false, encoding: null };
+  stream._rs = __readableNewState(objectMode, __streamWatermark(options, objectMode, 'readable'));
   stream.readable = options.readable !== false;
-  stream.readableEnded = !stream.readable;
+  stream.readableEnded = false;
   if (options.read) stream._read = options.read;
+  if (options.encoding) stream.setEncoding(options.encoding);
 }
-function __readableSchedule(stream) {
-  if (stream._rs.scheduled || stream.destroyed) return;
-  stream._rs.scheduled = true;
-  __streamTick(() => { stream._rs.scheduled = false; __readableFlow(stream); });
+// Node's computeNewHighWaterMark: round up to the next power of two, capped at 1 GiB.
+function __readableNewHWM(n) {
+  if (n > 0x40000000) throw new RangeError('size <= 1GiB');
+  n--; n |= n >>> 1; n |= n >>> 2; n |= n >>> 4; n |= n >>> 8; n |= n >>> 16;
+  return n + 1;
 }
-function __readableEnd(stream) {
-  if (stream.readableEnded || stream.destroyed) return;
-  stream.readableEnded = true;
-  stream.readable = false;
-  if (stream._rs.decoder) { const tail = stream._rs.decoder.decode(); if (tail) stream.emit('data', tail); }
-  stream.emit('end');
-  __streamAutoDestroy(stream);
+function __readableReadEOF(n, state) { return n <= 0 || (state.length === 0 && state.ended); }
+function __readableNanToRead(state) {
+  if (state.length === 0) return 0;
+  if (!state.decoder || state.flowing) return state.buffer[0].length;
+  return state.length;
 }
-function __readablePull(stream) {
-  const state = stream._rs;
-  if (state.reading || state.ended || stream.destroyed || !stream._constructed) return;
-  state.reading = true;
-  state.sync = true;
-  try { stream._read(state.highWaterMark); } catch (error) { stream.destroy(error); }
-  state.sync = false;
+// Node's howMuchToRead: n bytes when buffered, 0 past EOF, NaN = whatever is first.
+function __readableHowMuchToRead(n, state) {
+  if (__readableReadEOF(n, state)) return 0;
+  if (state.objectMode) return 1;
+  if (n !== n) return __readableNanToRead(state);
+  if (n <= state.length) return n;
+  return state.ended ? state.length : 0;
 }
-function __readableDecode(stream, chunk) {
-  const state = stream._rs;
-  if (state.decoder) return state.decoder.decode(chunk, { stream: true });
-  return state.encoding ? chunk.toString(state.encoding) : chunk;
+// Node's fromList: pop n bytes (or one object-mode item) off state.buffer.
+function __readableFromListAll(state) {
+  const buf = state.buffer;
+  if (state.decoder) { const ret = buf.join(''); buf.length = 0; return ret; }
+  if (buf.length === 1) return buf.shift();
+  const ret = Buffer.concat(buf, state.length); buf.length = 0; return ret;
 }
-function __readableTake(stream) {
-  const state = stream._rs;
-  const chunk = state.queue.shift();
-  state.length -= __streamSize(chunk, state);
-  return __readableDecode(stream, chunk);
-}
-function __readableFlow(stream) {
-  const state = stream._rs;
-  if (!state.flowing || stream.destroyed) return;
-  __readableDrain(stream);
-  if (!state.flowing || state.queue.length) return;
-  if (state.ended) __readableScheduleEnd(stream);
-  else __readablePull(stream);
-}
-// As Node's endReadable: 'end' follows on a nextTick, queued as the last chunk is taken (before
-// its 'data' runs), and only if nothing was buffered again meanwhile.
-function __readableScheduleEnd(stream) {
-  const state = stream._rs;
-  if (state.endScheduled) return;
-  state.endScheduled = true;
-  __streamTick(() => { state.endScheduled = false; if (!state.queue.length) __readableEnd(stream); });
-}
-function __readableDrain(stream) {
-  const state = stream._rs;
-  while (state.flowing && state.queue.length) {
-    const chunk = __readableTake(stream);
-    if (state.ended && !state.queue.length) __readableScheduleEnd(stream);
-    if (chunk !== '') stream.emit('data', chunk);
+function __readableFromListBuffer(n, state) {
+  const ret = Buffer.allocUnsafe(n);
+  let have = 0;
+  while (have < n) {
+    const next = state.buffer[0];
+    const take = Math.min(next.length, n - have);
+    ret.set(next.subarray(0, take), have);
+    have += take;
+    if (take === next.length) state.buffer.shift();
+    else state.buffer[0] = next.slice(take);
   }
+  return ret;
+}
+function __readableFromListString(n, state) {
+  let ret = '';
+  while (ret.length < n) {
+    const str = state.buffer[0];
+    const take = n - ret.length;
+    if (take >= str.length) { ret += str; state.buffer.shift(); }
+    else { ret += str.slice(0, take); state.buffer[0] = str.slice(take); }
+  }
+  return ret;
+}
+function __readableFromListFirst(n, state) {
+  const first = state.buffer[0];
+  if (n < first.length) { state.buffer[0] = first.slice(n); return first.slice(0, n); }
+  if (n === first.length) return state.buffer.shift();
+  return state.decoder ? __readableFromListString(n, state) : __readableFromListBuffer(n, state);
+}
+function __readableFromList(n, state) {
+  if (state.length === 0) return null;
+  if (state.objectMode) return state.buffer.shift();
+  if (!n || n >= state.length) return __readableFromListAll(state);
+  return __readableFromListFirst(n, state);
+}
+// Node's push / addChunk: EOF ends the stream; a Buffer/string is coerced (and decoded if
+// setEncoding ran), then either emitted straight through — flowing, non-sync, empty queue —
+// or buffered. A buffered chunk schedules 'readable' when the first HWM-cross is pending.
+function __readableCoerceChunk(stream, state, chunk, encoding) {
+  if (state.objectMode) return chunk;
+  if (Buffer.isBuffer(chunk)) return chunk;
+  if (typeof chunk === 'string') return state.decoder ? chunk : Buffer.from(chunk, encoding || 'utf8');
+  if (chunk instanceof Uint8Array) return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  __streamErrorOrDestroy(stream, new TypeError('chunk must be a string, Buffer or Uint8Array'), false);
+  return undefined;
+}
+function __readableCanPush(state) {
+  return !state.ended && (state.length < state.highWaterMark || state.length === 0);
+}
+function __readableDecoderTail(state) {
+  if (!state.decoder) return;
+  const tail = state.decoder.decode();
+  if (tail && tail.length) { state.buffer.push(tail); state.length += tail.length; }
+}
+function __readablePushEof(stream) {
+  const state = stream._rs;
+  if (state.ended) return false;
+  __readableDecoderTail(state);
+  state.ended = true;
+  // Async EOF skips the next-tick delay of __readableEmitReadable so 'end' fires on the
+  // current tick; __readableEmitReadableNow still runs __readableEmitReadableDeliver which
+  // resets emittedReadable, so no pre-set is needed (the earlier assignment was dead).
+  if (state.sync) __readableEmitReadable(stream);
+  else __readableEmitReadableNow(stream);
+  return false;
+}
+function __readablePushSkipEmpty(stream, state) {
+  __readableMaybeReadMore(stream, state);
+  return __readableCanPush(state);
+}
+function __readableIsEmptyValue(state, value) {
+  return value === undefined || (!state.objectMode && value.length === 0);
+}
+function __readableDecodePush(state, value) {
+  return state.decoder && Buffer.isBuffer(value) ? state.decoder.decode(value, { stream: true }) : value;
+}
+function __readableIsEmptyDecoded(state, chunk) {
+  return !state.objectMode && typeof chunk === 'string' && chunk.length === 0;
+}
+function __readablePushChunk(stream, state, value) {
+  if (__readableIsEmptyValue(state, value)) return __readablePushSkipEmpty(stream, state);
+  const chunk = __readableDecodePush(state, value);
+  if (__readableIsEmptyDecoded(state, chunk)) return __readablePushSkipEmpty(stream, state);
+  __readableAddChunk(stream, state, chunk);
+  return __readableCanPush(state);
 }
 function __readablePush(stream, chunk, encoding) {
   const state = stream._rs;
-  if (stream.destroyed) return false;
+  if (stream.destroyed || state.errored) return false;
   state.reading = false;
-  if (chunk === null) { state.ended = true; __readableSchedule(stream); return false; }
-  if (state.ended) { stream.destroy(__streamError('ERR_STREAM_PUSH_AFTER_EOF', 'stream.push() after EOF')); return false; }
-  __readableAddChunk(stream, state, __streamChunk(chunk, state, encoding));
-  return state.length < state.highWaterMark;
-}
-// As Node's addChunk: a chunk pushed outside _read into a flowing, empty stream with 'data'
-// listeners is emitted at once; otherwise it is buffered for the next flow (a nextTick).
-function __readableEmitsNow(stream, state) {
-  return state.flowing && !state.sync && !state.queue.length && stream.listenerCount('data') > 0;
-}
-function __readableAddChunk(stream, state, value) {
-  if (__readableEmitsNow(stream, state)) {
-    const chunk = __readableDecode(stream, value);
-    if (chunk !== '') stream.emit('data', chunk);
-  } else {
-    state.queue.push(value);
-    state.length += __streamSize(value, state);
-    stream.emit('readable');
+  if (chunk === null) return __readablePushEof(stream);
+  if (state.ended) {
+    __streamErrorOrDestroy(stream, __streamError('ERR_STREAM_PUSH_AFTER_EOF', 'stream.push() after EOF'), false);
+    return false;
   }
-  __readableSchedule(stream);
+  return __readablePushChunk(stream, state, __readableCoerceChunk(stream, state, chunk, encoding));
+}
+function __readableEmitsNow(state) {
+  return state.flowing && !state.sync && state.buffer.length === 0 && state.dataListening;
+}
+function __readableBufferChunk(stream, state, chunk) {
+  state.buffer.push(chunk);
+  state.length += state.objectMode ? 1 : chunk.length;
+  if (state.needReadable) __readableEmitReadable(stream);
+}
+function __readableEmitValue(state, chunk) {
+  if (state.decoder || state.objectMode) return chunk;
+  if (state.encoding && Buffer.isBuffer(chunk)) return chunk.toString(state.encoding);
+  return chunk;
+}
+function __readableAddChunk(stream, state, chunk) {
+  if (__readableEmitsNow(state)) stream.emit('data', __readableEmitValue(state, chunk));
+  else __readableBufferChunk(stream, state, chunk);
+  __readableMaybeReadMore(stream, state);
+}
+// Node's emitReadable / emitReadable_: latch on emittedReadable, schedule to the next tick
+// so it never fires inside push()/_read(); re-arm needReadable below HWM.
+function __readableEmitReadable(stream) {
+  const state = stream._rs;
+  state.needReadable = false;
+  if (state.emittedReadable) return;
+  state.emittedReadable = true;
+  __streamTick(() => __readableEmitReadableNow(stream));
+}
+function __readableEmitReadableDeliver(stream, state) {
+  if (state.length || state.ended) { stream.emit('readable'); state.emittedReadable = false; }
+  if (!state.flowing && !state.ended && state.length <= state.highWaterMark) state.needReadable = true;
+}
+function __readableEmitReadableNow(stream) {
+  const state = stream._rs;
+  if (stream.destroyed || state.errored) return;
+  __readableEmitReadableDeliver(stream, state);
+  __readableFlow(stream);
+}
+function __readableFlow(stream) {
+  const state = stream._rs;
+  while (state.flowing && stream.read() !== null) {}
+}
+// Node's maybeReadMore: after a push, if there is still room in the buffer, drive extra
+// read(0)s on the next tick so _read keeps running until the HWM is reached.
+function __readableWantsMore(state) {
+  if (state.reading || state.ended) return false;
+  return state.length < state.highWaterMark || (state.flowing && state.length === 0);
+}
+function __readableMaybeReadMoreNow(stream, state) {
+  while (__readableWantsMore(state)) {
+    const before = state.length;
+    stream.read(0);
+    if (state.length === before) break;
+  }
+  state.readingMore = false;
+}
+function __readableMaybeReadMore(stream, state) {
+  if (state.readingMore || state.reading || !stream._constructed) return;
+  state.readingMore = true;
+  __streamTick(() => __readableMaybeReadMoreNow(stream, state));
+}
+// Node's _read dispatch: records state.reading and sync for the duration, so addChunk / push
+// can dedup synchronous 'readable' emissions.
+function __readableCallRead(stream, state) {
+  state.reading = true;
+  state.sync = true;
+  if (state.length === 0) state.needReadable = true;
+  try { stream._read(state.highWaterMark); } catch (error) { __streamErrorOrDestroy(stream, error, true); }
+  state.sync = false;
+}
+// Node's read(n): normalise n, bump HWM if n > HWM, handle read(0) as a 'readable' nudge,
+// pull from the buffer, call _read when post-read length would fall under HWM, schedule
+// 'end' as the last chunk is taken.
+function __readableNormaliseN(n) {
+  if (n === undefined) return NaN;
+  if (Number.isInteger(n)) return n;
+  return parseInt(n, 10);
+}
+function __readableRead0Fires(state) {
+  if (!state.needReadable) return false;
+  if (state.ended) return true;
+  return state.highWaterMark !== 0 ? state.length >= state.highWaterMark : state.length > 0;
+}
+function __readableRead0Emit(stream) {
+  const state = stream._rs;
+  if (state.length === 0 && state.ended) __readableEndSchedule(stream);
+  else __readableEmitReadable(stream);
+  return null;
+}
+function __readableReadBlocked(stream, state) {
+  return state.ended || state.reading || state.errored || stream.destroyed || !stream._constructed;
+}
+function __readableShouldCallRead(stream, state, n) {
+  if (__readableReadBlocked(stream, state)) return false;
+  if (state.needReadable) return true;
+  return state.length === 0 || state.length - n < state.highWaterMark;
+}
+function __readablePickRet(state, n) {
+  const ret = n > 0 ? __readableFromList(n, state) : null;
+  if (ret !== null) state.length -= state.objectMode ? 1 : ret.length;
+  return ret;
+}
+function __readableAfterReadEmpty(stream, state, nOrig, n) {
+  if (state.length !== 0) return;
+  if (!state.ended) state.needReadable = true;
+  if (nOrig !== n && state.ended) __readableEndSchedule(stream);
+}
+function __readableAfterReadEmit(stream, state, ret) {
+  if (ret === null || state.errored || state.endEmitted) return;
+  stream.emit('data', __readableEmitValue(state, ret));
+}
+function __readableAfterRead(stream, state, ret, nOrig, n) {
+  if (ret === null && state.length <= state.highWaterMark) state.needReadable = true;
+  __readableAfterReadEmpty(stream, state, nOrig, n);
+  __readableAfterReadEmit(stream, state, ret);
+}
+function __readableReadEnded(stream, state) {
+  if (state.length === 0) __readableEndSchedule(stream);
+  return null;
+}
+function __readableReadConsume(stream, state, nOrig, n) {
+  const ret = __readablePickRet(state, n);
+  const taken = ret === null ? 0 : (state.objectMode ? 1 : ret.length);
+  __readableAfterRead(stream, state, ret, nOrig, taken);
+  return ret;
+}
+function __readableReadBody(stream, state, nOrig) {
+  let n = __readableHowMuchToRead(nOrig, state);
+  if (n === 0 && state.ended) return __readableReadEnded(stream, state);
+  if (__readableShouldCallRead(stream, state, n)) {
+    __readableCallRead(stream, state);
+    if (!state.reading) n = __readableHowMuchToRead(nOrig, state);
+  }
+  return __readableReadConsume(stream, state, nOrig, n);
+}
+function __readableRead(stream, n) {
+  const state = stream._rs;
+  const nOrig = __readableNormaliseN(n);
+  if (nOrig > state.highWaterMark) state.highWaterMark = __readableNewHWM(nOrig);
+  if (nOrig !== 0) state.emittedReadable = false;
+  if (nOrig === 0 && __readableRead0Fires(state)) return __readableRead0Emit(stream);
+  return __readableReadBody(stream, state, nOrig);
+}
+// Node's endReadable: schedule 'end' on the next tick once the buffer is empty.
+function __readableEndNow(stream) {
+  const state = stream._rs;
+  if (state.endEmitted || stream.destroyed || state.length > 0) return;
+  state.endEmitted = true;
+  stream.readableEnded = true;
+  stream.readable = false;
+  stream.emit('end');
+  __streamAutoDestroy(stream);
+}
+function __readableEndSchedule(stream) {
+  const state = stream._rs;
+  if (state.endEmitted || state.endScheduled) return;
+  state.endScheduled = true;
+  __streamTick(() => { state.endScheduled = false; __readableEndNow(stream); });
+}
+// Node's setEncoding: install a StringDecoder (TextDecoder) and re-decode what is already
+// buffered so later fromList calls return strings.
+function __readableSetEncoding(stream, encoding) {
+  const state = stream._rs;
+  state.encoding = encoding;
+  const name = /^utf-?8$/i.test(encoding) ? 'utf-8' : encoding;
+  state.decoder = new TextDecoder(name, { ignoreBOM: true });
+  const pending = state.buffer.splice(0);
+  state.length = 0;
+  let content = '';
+  for (const chunk of pending) content += Buffer.isBuffer(chunk) ? state.decoder.decode(chunk, { stream: true }) : chunk;
+  if (content) { state.buffer.push(content); state.length = content.length; }
+  return stream;
+}
+// Node's resume / pause: resume turns flowing on and schedules a nudging read(0) on the next
+// tick; pause clears flowing and stays passive.
+function __readableResumeNow(stream) {
+  const state = stream._rs;
+  state.resumeScheduled = false;
+  if (!state.reading) stream.read(0);
+  stream.emit('resume');
+  __readableFlow(stream);
+}
+function __readableResume(stream) {
+  const state = stream._rs;
+  if (stream.destroyed) return stream;
+  state.flowing = true;
+  if (state.resumeScheduled) return stream;
+  state.resumeScheduled = true;
+  __streamTick(() => __readableResumeNow(stream));
+  return stream;
+}
+function __readablePause(stream) {
+  const state = stream._rs;
+  if (!stream.destroyed && state.flowing !== false) { state.flowing = false; stream.emit('pause'); }
+  return stream;
+}
+// Node's on(): attaching 'data' turns on flowing; attaching 'readable' queues a read(0) to
+// deliver any buffered chunk and latches needReadable.
+function __readableUpdateListening(stream) {
+  const state = stream._rs;
+  state.dataListening = stream.listenerCount('data') > 0;
+  state.readableListening = stream.listenerCount('readable') > 0;
+}
+function __readableOnData(stream) {
+  __readableUpdateListening(stream);
+  // Node's readable.js `on('data')` handler only resumes when `flowing !== false`, so a
+  // `pause()` followed by `on('data', …)` does NOT re-wake the stream; this port initialises
+  // `flowing` to false (not Node's null tri-state), so the same check would block the first
+  // listener's wake-up too. Resume unconditionally, matching the port's semantics where
+  // flowing=false is also the "not yet flowing" state (the gap to Node is acknowledged).
+  __readableResume(stream);
+}
+function __readableOnReadable(stream) {
+  const state = stream._rs;
+  __readableUpdateListening(stream);
+  state.needReadable = true;
+  state.emittedReadable = false;
+  if (!state.reading) __streamTick(() => { if (!stream.destroyed) stream.read(0); });
 }
 function __readableFrom(iterable, options) {
   const iterator = iterable[Symbol.asyncIterator]?.() || iterable[Symbol.iterator]?.();
@@ -312,27 +585,52 @@ class __Readable extends __Stream {
   _read() { this.destroy(__streamError('ERR_METHOD_NOT_IMPLEMENTED', '_read() is not implemented')); }
   _destroy(error, callback) { callback(error); }
   push(chunk, encoding) { return __readablePush(this, chunk, encoding); }
-  read() {
-    const state = this._rs;
-    if (state.queue.length) { const chunk = __readableTake(this); __readableSchedule(this); return chunk; }
-    if (state.ended) __streamTick(() => __readableEnd(this));
-    else __readablePull(this);
-    return null;
-  }
-  on(event, listener) { super.on(event, listener); if (event === 'data') this.resume(); return this; }
-  pipe(destination, options) { return __readablePipe(this, destination, options); }
-  unpipe(destination) { return __readableUnpipe(this, destination); }
-  pause() { this._rs.flowing = false; return this; }
-  resume() { this._rs.flowing = true; __readableSchedule(this); return this; }
-  isPaused() { return !this._rs.flowing; }
-  setEncoding(encoding) {
-    this._rs.encoding = encoding;
-    if (/^utf-?8$/i.test(encoding)) this._rs.decoder = new TextDecoder('utf-8', { ignoreBOM: true });
+  unshift(chunk, encoding) { return __readableUnshift(this, chunk, encoding); }
+  read(n) { return __readableRead(this, n); }
+  on(event, listener) {
+    super.on(event, listener);
+    if (event === 'data') __readableOnData(this);
+    else if (event === 'readable') __readableOnReadable(this);
     return this;
   }
+  addListener(event, listener) { return this.on(event, listener); }
+  removeListener(event, listener) { super.removeListener(event, listener); __readableUpdateListening(this); return this; }
+  off(event, listener) { return this.removeListener(event, listener); }
+  pipe(destination, options) { return __readablePipe(this, destination, options); }
+  unpipe(destination) { return __readableUnpipe(this, destination); }
+  pause() { return __readablePause(this); }
+  resume() { return __readableResume(this); }
+  isPaused() { return this._rs.flowing === false; }
+  setEncoding(encoding) { return __readableSetEncoding(this, encoding); }
   destroy(error) { return __streamDestroy(this, error); }
   get readableLength() { return this._rs.length; }
   get readableHighWaterMark() { return this._rs.highWaterMark; }
+  get readableFlowing() { return this._rs.flowing; }
+  get readableObjectMode() { return this._rs.objectMode; }
+  get readableEncoding() { return this._rs.encoding; }
+}
+// Node's unshift(): push to the front of the buffer so a consumer can put back what read()
+// returned. Only used from user code; forwards to the buffer tail of push semantics.
+function __readableUnshiftStore(stream, state, value) {
+  const chunk = state.decoder && Buffer.isBuffer(value) ? state.decoder.decode(value, { stream: true }) : value;
+  state.buffer.unshift(chunk);
+  // Count the length of what's actually buffered (the decoded string under a decoder), so
+  // state.length matches __readableBufferChunk / __readableSetEncoding and later read(n)
+  // accounting is consistent whether a chunk entered via push or unshift.
+  state.length += state.objectMode ? 1 : chunk.length;
+  if (state.needReadable) __readableEmitReadable(stream);
+}
+function __readableUnshift(stream, chunk, encoding) {
+  const state = stream._rs;
+  if (chunk === null) return __readablePushEof(stream);
+  if (state.endEmitted) {
+    __streamErrorOrDestroy(stream, __streamError('ERR_STREAM_UNSHIFT_AFTER_END_EVENT', 'stream.unshift() after end event'), false);
+    return false;
+  }
+  const value = __readableCoerceChunk(stream, state, chunk, encoding);
+  if (value === undefined || (!state.objectMode && value.length === 0)) return __readableCanPush(state);
+  __readableUnshiftStore(stream, state, value);
+  return __readableCanPush(state);
 }
 // Writable side, ported from Node v26.11.0 lib/internal/streams/writable.js: _write runs inside
 // write() when nothing is pending or corked; later chunks buffer until its callback (a batch

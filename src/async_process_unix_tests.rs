@@ -615,6 +615,47 @@ fn timeout_escalation_signals_only_the_owned_group_and_runs_once() {
 }
 
 #[test]
+fn ref_toggle_control_updates_the_handle_refed_flag_without_closing_the_child() {
+    reset();
+    let mut args = request();
+    args["file"] = json!("/bin/sleep");
+    args["args"] = json!(["30"]);
+    args["stdio"] = json!(["ignore", "ignore", "ignore"]);
+    let record = operation("spawn", &args);
+    let id = record["value"]["id"].as_u64().unwrap();
+    assert!(operation("ref", &json!({"id":id,"enabled":false}))["value"].is_null());
+    assert!(operation("ref", &json!({"id":id,"enabled":true}))["value"].is_null());
+    // unknown field -> default true (acts as ref)
+    assert!(operation("ref", &json!({"id":id}))["value"].is_null());
+    assert_eq!(
+        operation("ref", &json!({"id": id + 999, "enabled": false}))["error"]["code"],
+        "ERR_CHILD_PROCESS_CLOSED"
+    );
+    reset();
+}
+
+#[test]
+fn detached_and_unrefd_child_is_released_on_drop_without_a_sigkill_to_its_group() {
+    reset();
+    let mut args = request();
+    args["file"] = json!("/bin/sh");
+    args["args"] = json!(["-c", "sleep 2 && exit 0"]);
+    args["stdio"] = json!(["ignore", "ignore", "ignore"]);
+    args["detached"] = json!(true);
+    let record = operation("spawn", &args);
+    let id = record["value"]["id"].as_u64().unwrap();
+    let pid = record["value"]["pid"].as_u64().unwrap() as i32;
+    operation("ref", &json!({"id":id,"enabled":false}));
+    reset();
+    // The child must still be alive — Drop skipped SIGKILL to its group.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+    // Clean up so the test does not leak a surviving process group.
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+}
+
+#[test]
 fn active_child_without_pipes_waits_without_polling_invalid_descriptors() {
     reset();
     let mut args = request();
