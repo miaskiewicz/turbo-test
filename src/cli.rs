@@ -240,6 +240,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I, default_jobs: usize) 
             // `--compat jest|vitest|auto`: which runner's behaviour where they differ (`.each`
             // titles, …); `auto` (the default) detects it per file from the nearest config.
             "--compat" => push_compat(&mut o, value()),
+            // `--node-features 22|24|26` (default 22) — which Node version's behaviour
+            // baseline-vs-opt-in toggles select at runtime (turbo-test#453). The runtime reads
+            // globalThis.__ttNodeFeatures at site-of-use so the flag is live per run.
+            "--node-features" => push_node_features(&mut o, value()),
             "--zero-delay-timers" => o.env.push(("TURBO_ZERO_DELAY_TIMERS", "1".to_string())),
             "--no-zero-delay-timers" => o.env.push(("TURBO_ZERO_DELAY_TIMERS", "0".to_string())),
             // `--allowOnly` / `--no-allowOnly` → permit or forbid `.only` tests (default: !isCI).
@@ -346,6 +350,19 @@ fn push_compat(o: &mut Options, v: Option<String>) {
     } else {
         o.warnings.push(format!(
             "turbo-test: ignoring --compat '{v}' (expected jest, vitest or auto)"
+        ));
+    }
+}
+
+/// `--node-features <n>` → `TURBO_NODE_FEATURES` (`22`, `24`, `26`). Any other value is
+/// warned about and ignored (the runtime then falls back to env/config/default 22).
+fn push_node_features(o: &mut Options, v: Option<String>) {
+    let v = v.unwrap_or_default();
+    if matches!(v.as_str(), "22" | "24" | "26") {
+        o.env.push(("TURBO_NODE_FEATURES", v));
+    } else {
+        o.warnings.push(format!(
+            "turbo-test: ignoring --node-features '{v}' (expected 22, 24 or 26)"
         ));
     }
 }

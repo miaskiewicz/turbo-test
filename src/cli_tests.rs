@@ -1824,6 +1824,34 @@ fn flattened_tap_tasks_keep_empty_suites_but_not_file_load_failures() {
 }
 
 #[test]
+fn node_features_flag_sets_env_variable() {
+    for (args, v) in [
+        (&["--node-features", "22"][..], "22"),
+        (&["--node-features=24"][..], "24"),
+        (&["--node-features", "26"][..], "26"),
+    ] {
+        let o = parse(args);
+        assert_eq!(
+            o.env,
+            vec![("TURBO_NODE_FEATURES", v.to_string())],
+            "{args:?}"
+        );
+        assert!(o.warnings.is_empty(), "{args:?}");
+    }
+    let o = parse(&["--node-features", "20", "a.test.ts"]);
+    assert!(o.env.is_empty());
+    assert_eq!(
+        o.warnings,
+        vec!["turbo-test: ignoring --node-features '20' (expected 22, 24 or 26)".to_string()]
+    );
+    assert_eq!(o.files, vec![PathBuf::from("a.test.ts")]);
+    assert_eq!(
+        parse(&["--node-features"]).warnings,
+        vec!["turbo-test: ignoring --node-features '' (expected 22, 24 or 26)".to_string()]
+    );
+}
+
+#[test]
 fn compat_flag_sets_the_jest_vitest_switch() {
     for (args, v) in [
         (&["--compat", "jest"][..], "jest"),
