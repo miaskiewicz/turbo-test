@@ -127,6 +127,15 @@ test('equal plain Errors still pass', () => {
     p.file("err.test.js", &body);
     let got = statuses(&p);
     assert_eq!(got.len(), 2, "{got:?}");
-    assert_eq!(got[0], ("extras on actual fails under vitest".into(), "failed".into()));
-    assert_eq!(got[1], ("equal plain Errors still pass".into(), "passed".into()));
+    assert_eq!(
+        got[0],
+        (
+            "extras on actual fails under vitest".into(),
+            "failed".into()
+        )
+    );
+    assert_eq!(
+        got[1],
+        ("equal plain Errors still pass".into(), "passed".into())
+    );
 }

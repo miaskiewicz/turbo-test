@@ -30,10 +30,7 @@ fn outcomes(p: &Project) -> Vec<(String, String, String)> {
             (
                 a["fullName"].as_str().unwrap().to_string(),
                 a["status"].as_str().unwrap().to_string(),
-                a["failureMessages"][0]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string(),
+                a["failureMessages"][0].as_str().unwrap_or("").to_string(),
             )
         })
         .collect()

@@ -46,10 +46,7 @@ test('top', () => { expect(1).toBe(1); });
         "wrong indent: {msg:?}"
     );
     // each failure's content follows the title with a blank line and lines indented by 4 spaces
-    assert!(
-        msg.contains("sibling boom"),
-        "no content: {msg:?}"
-    );
+    assert!(msg.contains("sibling boom"), "no content: {msg:?}");
     // multiple failures joined by \n (two bullets present)
     assert!(
         msg.matches("\u{25CF} ").count() >= 2,
@@ -69,7 +66,10 @@ fn jest_project_file_message_empty_when_all_pass() {
     p.file("ok.test.js", "test('ok', () => { expect(1).toBe(1); });\n");
     let run = turbo_test(&p.dir, &["--reporter", "json"], &[]);
     let report = json_report(&run);
-    assert_eq!(report["testResults"][0]["message"].as_str().unwrap_or(""), "");
+    assert_eq!(
+        report["testResults"][0]["message"].as_str().unwrap_or(""),
+        ""
+    );
 }
 
 #[test]
