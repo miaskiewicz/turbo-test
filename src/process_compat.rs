@@ -42,7 +42,7 @@ pub(crate) fn command(request: &Value) -> Command {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    configure_process_group(&mut command);
+    configure_process_group(&mut command, request["detached"].as_bool().unwrap_or(false));
     command
 }
 
@@ -56,12 +56,27 @@ fn configure_environment(command: &mut Command, environment: &Value) {
 }
 
 #[cfg(unix)]
-fn configure_process_group(command: &mut Command) {
+fn configure_process_group(command: &mut Command, detached: bool) {
     use std::os::unix::process::CommandExt;
-    command.process_group(0);
+    if detached {
+        // setsid creates a fresh session + process group AND detaches from the
+        // controlling terminal, matching Node's { detached: true } semantics
+        // (see child_process.spawn / fork). The parent can exit and the child
+        // keeps running — Drop skips cleanup when the handle was also unref'd.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    } else {
+        command.process_group(0);
+    }
 }
 #[cfg(not(unix))]
-fn configure_process_group(_command: &mut Command) {}
+fn configure_process_group(_command: &mut Command, _detached: bool) {}
 
 #[cfg(unix)]
 fn terminate(child: &mut Child, signal: i32) {

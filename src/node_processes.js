@@ -62,7 +62,6 @@ function __processShellOption(shell) {
 }
 function __processExecOptions(options) {
   if (options.stdio !== undefined && options.stdio !== 'pipe') __processUnsupported('stdio ' + options.stdio);
-  if (options.detached) __processUnsupported('detached');
   if (options.uid !== undefined || options.gid !== undefined) __processUnsupported('uid/gid');
   __processShellOption(options.shell);
 }

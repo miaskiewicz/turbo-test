@@ -10,9 +10,25 @@ function __asyncChildNative(operation, args = {}) {
 }
 function __asyncChildCapture(callback) { return typeof __captureAsyncContext === 'function' ? __captureAsyncContext(callback) : callback; }
 function __asyncChildLater(callback) { queueMicrotask(__asyncChildCapture(callback)); }
-function __asyncChildEnsurePoll() {
-  if (__asyncChildTimer === null) __asyncChildTimer = __realTimers.setTimeout(__asyncChildPoll, 1);
+function __asyncChildHasRefed() {
+  for (const child of __asyncChildren.values()) if (child._refed) return true;
+  return false;
 }
+function __asyncChildOtherWork() {
+  // Loop is kept alive by something OTHER than our own poll timer.
+  if (__loop.internal.some((timer) => timer.gen === __loop.gen)) return true;
+  return __loop.macro.some((timer) => timer.gen === __loop.gen && timer.id !== __asyncChildTimer);
+}
+function __asyncChildStopPoll() {
+  if (__asyncChildTimer !== null) { __realTimers.clearTimeout(__asyncChildTimer); __asyncChildTimer = null; }
+}
+function __asyncChildEnsurePoll() {
+  if (!__asyncChildren.size) { __asyncChildStopPoll(); return false; }
+  if (!__asyncChildHasRefed() && !__asyncChildOtherWork()) { __asyncChildStopPoll(); return false; }
+  if (__asyncChildTimer === null) __asyncChildTimer = __realTimers.setTimeout(__asyncChildPoll, 1);
+  return true;
+}
+globalThis.__ttAsyncProcessPreparePoll = __asyncChildEnsurePoll;
 function __asyncChildDrainEvents() {
   const events = __asyncChildNative('poll');
   for (const event of events) {
@@ -24,19 +40,16 @@ function __asyncChildDrainEvents() {
 function __asyncChildPoll() {
   __asyncChildTimer = null;
   __asyncChildDrainEvents();
-  if (__asyncChildren.size) __asyncChildEnsurePoll();
+  __asyncChildEnsurePoll();
 }
 globalThis.__ttAsyncProcessPump = () => {
   if (!__asyncChildren.size) return false;
   const progressed = __asyncChildDrainEvents();
-  if (!__asyncChildren.size && __asyncChildTimer !== null) {
-    __realTimers.clearTimeout(__asyncChildTimer); __asyncChildTimer = null;
-  }
+  __asyncChildEnsurePoll();
   return progressed;
 };
 function __asyncProcessReset() {
-  if (__asyncChildTimer !== null) __realTimers.clearTimeout(__asyncChildTimer);
-  __asyncChildTimer = null;
+  __asyncChildStopPoll();
   __asyncChildren.clear();
   __asyncChildNative('reset');
 }
@@ -135,7 +148,7 @@ class __AsyncChildProcess extends __EventEmitter {
     super(); this._id = record.id; this.pid = record.pid || undefined;
     this.spawnfile = request.file; this.spawnargs = [request.file, ...request.args];
     this.exitCode = null; this.signalCode = null; this.killed = false; this.connected = Boolean(request.ipc && record.pid);
-    this._callbacks = new Map();
+    this._callbacks = new Map(); this._refed = true;
     this._dispatch = __asyncChildCapture((event) => __asyncChildEvents[event.kind](this, event));
     __asyncChildStreams(this, request.stdio);
     if (request.ipc) { __asyncChildIpc(this); this.stdio.push(null); }
@@ -147,8 +160,14 @@ class __AsyncChildProcess extends __EventEmitter {
     if (sent) this.killed = true;
     return sent;
   }
-  ref() { throw __asyncChildUnsupported('ref/unref'); }
-  unref() { throw __asyncChildUnsupported('ref/unref'); }
+  ref() { __asyncChildReference(this, true); }
+  unref() { __asyncChildReference(this, false); }
+}
+function __asyncChildReference(child, enabled) {
+  if (child._refed === enabled) return;
+  child._refed = enabled;
+  __asyncChildControl(child, 'ref', { enabled });
+  __asyncChildEnsurePoll();
 }
 function __asyncChildUnsupported(name) {
   return Object.assign(new Error('turbo-test: asynchronous child_process ' + name + ' is not supported'), { code: 'ERR_ASYNC_PROCESS_UNSUPPORTED' });
@@ -219,6 +238,7 @@ function __spawnAsync(file, args, options) {
   const ipc = Array.isArray(normalized.original.stdio) && normalized.original.stdio[3] === 'ipc';
   const request = __processRequest(normalized.file, normalized.args, normalized.options);
   request.ipc = ipc; request.stdio = __asyncChildStdio(normalized.original, ipc);
+  request.detached = normalized.options.detached === true;
   return new __AsyncChildProcess(__asyncChildNative('spawn', request), request);
 }
 function __forkAsync(module, args, options) {
@@ -227,6 +247,7 @@ function __forkAsync(module, args, options) {
   const execArgs = __asyncChildArguments(normalized.options.execArgv || []);
   const request = __processRequest(__processString(executable, 'execPath'), [...execArgs, normalized.file, ...normalized.args], { ...normalized.options, shell: false });
   request.ipc = true; request.stdio = __asyncChildStdio(normalized.original, true);
+  request.detached = normalized.options.detached === true;
   return new __AsyncChildProcess(__asyncChildNative('spawn', request), request);
 }
 __childProcess.spawn = __spawnAsync;
