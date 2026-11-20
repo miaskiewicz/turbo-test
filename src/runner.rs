@@ -3327,19 +3327,28 @@ function preserveDynamicNamespaces(context) {
   };
   return source => ts.visitNode(source, visit);
 }
+// Follow the project's tsconfig `target` + `useDefineForClassFields` (ts-jest 30 semantics,
+// turbo-test#438). Defaults when unspecified: TypeScript's own rule — `useDefineForClassFields`
+// is true iff target >= ES2022. An uninitialized class field is then preserved as an own
+// undefined property (recovery.spec); for older targets it stays elided, as tsc has always done.
+const projectTarget = projectOptions && projectOptions.target;
+const effectiveTarget = projectTarget !== undefined && projectTarget !== null ? projectTarget : ts.ScriptTarget.ES2021;
+const useDefineForClassFields = projectOptions && projectOptions.useDefineForClassFields !== undefined
+  ? projectOptions.useDefineForClassFields
+  : effectiveTarget >= ts.ScriptTarget.ES2022;
 const out = ts.transpileModule(input, {
   transformers: { before: process.argv[3] === 'commonjs' && commonjsNoInterop ? [preserveDynamicNamespaces] : [] },
   fileName: file,
   compilerOptions: {
     module: process.argv[3] === 'commonjs' ? ts.ModuleKind.CommonJS : ts.ModuleKind.ESNext,
-    target: ts.ScriptTarget.ES2021,
+    target: effectiveTarget,
     experimentalDecorators: true,
     emitDecoratorMetadata: true,
     esModuleInterop: !(process.argv[3] === 'commonjs' && commonjsNoInterop),
     importHelpers: false,
     isolatedModules: true,
     jsx: isTsx ? ts.JsxEmit.ReactJSX : undefined,
-    useDefineForClassFields: false,
+    useDefineForClassFields,
   },
 });
 const dynamicHelper = usesDynamicNamespace ? '\nfunction '+dynamicName+'(spec) { return Promise.resolve().then(() => globalThis.__ttToESM(require(spec))); }\n' : '';
