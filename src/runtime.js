@@ -4591,6 +4591,9 @@ function __eqErrorExtras(a, b, aStack, bStack, testers, hasKey) {
 }
 function __eqError(a, b, aStack, bStack, testers, hasKey) {
   try {
+    // Jest 30 (@jest/expect-utils equals, turbo-test#443): two Error instances compare equal
+    // when their messages do; name, cause, own enumerable props and subclass do not matter.
+    if (globalThis.__ttJestProject) return a.message === b.message;
     return __eqErrorShape(a, b) && __eqErrorExtras(a, b, aStack, bStack, testers, hasKey);
   } finally {
     aStack.pop();
