@@ -112,19 +112,27 @@ function transformOne(file, moduleKind, src) {
     };
     return source => ts.visitNode(source, visit);
   }
+  // Follow the project's tsconfig `target` + `useDefineForClassFields` as the fallback path
+  // does (turbo-test#438). Defaults: target ES2021, useDefineForClassFields true iff target
+  // >= ES2022 (TypeScript's own rule).
+  const projectTarget = projectOptions && projectOptions.target;
+  const effectiveTarget = projectTarget !== undefined && projectTarget !== null ? projectTarget : ts.ScriptTarget.ES2021;
+  const useDefineForClassFields = projectOptions && projectOptions.useDefineForClassFields !== undefined
+    ? projectOptions.useDefineForClassFields
+    : effectiveTarget >= ts.ScriptTarget.ES2022;
   const out = ts.transpileModule(input, {
     transformers: { before: moduleKind === 'commonjs' && commonjsNoInterop ? [preserveDynamicNamespaces] : [] },
     fileName: file,
     compilerOptions: {
       module: moduleKind === 'commonjs' ? ts.ModuleKind.CommonJS : ts.ModuleKind.ESNext,
-      target: ts.ScriptTarget.ES2021,
+      target: effectiveTarget,
       experimentalDecorators: true,
       emitDecoratorMetadata: true,
       esModuleInterop: !(moduleKind === 'commonjs' && commonjsNoInterop),
       importHelpers: false,
       isolatedModules: true,
       jsx: isTsx ? ts.JsxEmit.ReactJSX : undefined,
-      useDefineForClassFields: false,
+      useDefineForClassFields,
     },
   });
   const dynamicHelper = usesDynamicNamespace ? '\nfunction ' + dynamicName + '(spec) { return Promise.resolve().then(() => globalThis.__ttToESM(require(spec))); }\n' : '';
