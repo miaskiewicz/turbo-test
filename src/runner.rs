@@ -10476,6 +10476,20 @@ fn install_backend_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Objec
 
 /// Stack / CI / snapshot-update / name-pattern globals for the runtime, from the CLI's env.
 fn install_runtime_flags(scope: &mut v8::PinScope) {
+    // `--node-features 22|24|26` / `TURBO_NODE_FEATURES` / config `test.nodeFeatures`
+    // (turbo-test#453): which Node version's behaviour baseline-vs-opt-in gates read. 22 (LTS,
+    // what the four Flux apps run on) is the baseline and default. Installed here (not at
+    // snapshot time) so the flag is live per run — a cached snapshot ships no stale value.
+    let node_features = match std::env::var("TURBO_NODE_FEATURES").as_deref() {
+        Ok("22") => 22,
+        Ok("24") => 24,
+        Ok("26") => 26,
+        _ => 22,
+    };
+    compile_and_run(
+        scope,
+        &format!("globalThis.__ttNodeFeatures={node_features};"),
+    );
     if std::env::var("TURBO_STACK").is_ok() {
         compile_and_run(scope, "globalThis.__TT_STACK=true");
     }
