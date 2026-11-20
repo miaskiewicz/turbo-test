@@ -12723,9 +12723,14 @@ fn pace_http_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     crate::http_compat::wait_for_io(std::time::Duration::from_secs_f64(millis / 1000.0));
 }
 
-/// Child pipes keep virtual time paced only while this context owns active children.
+/// Child pipes keep virtual time paced only while this context owns active children; an
+/// unref'd child without other work scheduled stops the poll so the loop can exit (Node's
+/// `subprocess.unref()` semantics, turbo-test#446).
 fn pace_async_process_io(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> bool {
     if !crate::async_process::has_pending_io() {
+        return false;
+    }
+    if !call_global_bool(scope, global, "__ttAsyncProcessPreparePoll") {
         return false;
     }
     let delay = call_global_number(scope, global, "__ttNextMacroDelay");

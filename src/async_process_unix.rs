@@ -268,6 +268,8 @@ struct Process {
     terminating: Option<Instant>,
     forced: bool,
     maximum: usize,
+    refed: bool,
+    detached: bool,
 }
 impl Process {
     fn new(id: u64, child: Child, channel: Option<UnixStream>, args: &Value) -> Result<Self> {
@@ -295,6 +297,8 @@ impl Process {
                 .as_u64()
                 .unwrap_or(MAX_BYTES as u64)
                 .min(MAX_BYTES as u64) as usize,
+            refed: true,
+            detached: args["detached"].as_bool().unwrap_or(false),
         };
         process.outputs = collect_outputs(&mut process.child)?;
         process.input = process.child.stdin.take();
@@ -557,6 +561,10 @@ impl Process {
     }
     fn control(&mut self, name: &str, args: &Value) -> Result<Value> {
         match name {
+            "ref" => {
+                self.refed = args["enabled"].as_bool().unwrap_or(true);
+                Ok(Value::Null)
+            }
             "write" => self.queue_input(args),
             "end" => {
                 self.input_end = Some(args["serial"].as_u64().unwrap_or(0));
@@ -653,6 +661,12 @@ impl Process {
 }
 impl Drop for Process {
     fn drop(&mut self) {
+        // `{ detached: true }` + `unref()` relinquishes ownership: the child keeps
+        // running past the context drop (Node's documented behaviour, mongo_killer).
+        if self.detached && !self.refed {
+            self.owned = false;
+            return;
+        }
         self.cleanup_with(|pid| unsafe {
             libc::kill(-(pid as i32), libc::SIGKILL);
         });

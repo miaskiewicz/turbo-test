@@ -61,7 +61,10 @@ test('fork accepts { detached:true, stdio:"ignore" } + unref (mongo_killer shape
 fn detached_and_unref_child_survives_context_teardown_between_files() {
     let p = Project::new("async-process-ref-unref-survive-446");
     p.with_esbuild();
-    p.file("package.json", r#"{"name":"async-process-ref-unref-survive-446"}"#);
+    p.file(
+        "package.json",
+        r#"{"name":"async-process-ref-unref-survive-446"}"#,
+    );
     p.file(
         "jest.config.js",
         "module.exports = { testEnvironment: 'node', testTimeout: 15000 };\n",
