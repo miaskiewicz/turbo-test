@@ -7568,7 +7568,9 @@ function __pfCfg(o) {
   return {
     indent, outer, inner,
     min: !!o.min,
-    basic: o.basic !== false,
+    // pretty-format's `printBasicPrototype` default is `!options.min`, so a `min: true` call
+    // drops the `Object `/`Array ` prefix for plain-tag values but keeps a real class name.
+    basic: o.basic != null ? o.basic !== false : !o.min,
     maxDepth: o.maxDepth == null ? Infinity : o.maxDepth,
     escape: o.escape !== false,
     toJSON: o.toJSON !== false,
@@ -7770,13 +7772,13 @@ function __pfSimpleTag(v, cfg, tag) {
 function __pfArrayLike(v, cfg, ind, d, refs, hit, pp) {
   const name = v.constructor.name;
   if (hit) return `[${name}]`;
-  const prefix = cfg.min ? '' : !cfg.basic && name === 'Array' ? '' : `${name} `;
+  const prefix = !cfg.basic && name === 'Array' ? '' : `${name} `;
   return `${prefix}[${__pfItems(Array.from({ length: v.length }, (_, i) => v[i]), cfg, ind, d, refs, pp)}]`;
 }
 function __pfObject(v, cfg, ind, d, refs, hit) {
   const name = __pfCtorName(v);
   if (hit) return `[${name}]`;
-  const prefix = cfg.min ? '' : !cfg.basic && name === 'Object' ? '' : `${name} `;
+  const prefix = !cfg.basic && name === 'Object' ? '' : `${name} `;
   return `${prefix}{${__pfProps(v, cfg, ind, d, refs)}}`;
 }
 // arguments, arrays, typed arrays, maps, sets and other objects, one level down (`hit`: past maxDepth)

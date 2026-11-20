@@ -186,8 +186,11 @@ test.each([[1]])('json %j %c%s', () => {})
 
 #[test]
 fn each_titles_are_formatted_like_vitest() {
-    // turbo-test#67: `.each` titles were the template plus ` [i]` (`num %i [0]`) and
-    // `describe.each` kept the template. Expected = vitest 4.1.12's names for the same file.
+    // turbo-test#67 / #439: `.each` titles were the template plus ` [i]` (`num %i [0]`) and
+    // `describe.each` kept the template; the vitest 5 title port (#439) switched the value
+    // formatter to @vitest/utils's pretty-format based `inspect` and prints `$key` strings
+    // unquoted (truncated to taskTitleValueFormatTruncate = 40). Expected = vitest 5.1.0's
+    // names for the same file.
     let p = Project::new("rc-collect-each");
     p.file("e.test.js", EACH_TITLES);
     let r = turbo_test(&p.dir, &["--reporter", "tap-flat", "e.test.js"], &[]);
@@ -201,7 +204,7 @@ fn each_titles_are_formatted_like_vitest() {
         "num 2",
         "pair 1 a",
         "pair 2 b",
-        "obj 1 'x' 0",
+        "obj 1 x 0",
         "str x % undefined 0 1",
         "fmt 1.5 {\"k\":1} [ 1, 2 ]",
         "O { k: 1 } q",
@@ -209,32 +212,32 @@ fn each_titles_are_formatted_like_vitest() {
         "lit null",
         "lit undefined",
         "lit true",
-        "tpl 1 'two'",
+        "tpl 1 two",
         "tpl 3 { x: 1 }",
         "desc 1 > inner",
         "desc 2 > inner",
-        "desc 'z' > inner",
+        "desc z > inner",
         "it 5",
         "nums -0 NaN NaN -10",
         "attr -0",
         "attr NaN",
-        "attr +0",
+        "attr 0",
         "attr 10n",
         "attr Symbol(s)",
         "attr [Function named]",
         "attr [Function v]",
-        "attr2 'it\\'s\\n'",
-        "attr2 Pt{ x: 1 }",
-        "attr2 Map{ 'k' => 1 }",
-        "attr2 Set{ 1 }",
+        "attr2 it's ",
+        "attr2 Pt { x: 1 }",
+        "attr2 Map { 'k' => 1 }",
+        "attr2 Set { 1 }",
         "attr2 /a+/gi",
         "attr2 1970-01-01T00:00:00.000Z",
-        "long { aaaa: 1, bbbb: 2, cccc: 3, …(2) }",
-        "long [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, …(4) ]",
-        "long 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…'",
+        "long [Object]",
+        "long [Array]",
+        "long xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…",
         "misc TS Error: e1 Uint8Array[ 1, 2 ]",
-        "arr 'p' 'q' undefined",
-        "prim 'p' $a",
+        "arr p q undefined",
+        "prim p $a",
         "path 2 [ 1, { b: 2 } ][0] undefined",
         "named",
         "keys { 'a-b': 1, [Symbol(k)]: 2 }",
@@ -275,7 +278,7 @@ test.for([[1, 2]])('opts %i', { timeout: 100 }, ([a]) => { expect(a).toBe(1) })
             "ok 2 - for 3 4",
             "ok 3 - it for 5",
             "ok 4 - tpl 1 2",
-            "ok 5 - d 'x' > t",
+            "ok 5 - d x > t",
             "ok 6 - opts 1",
         ],
         "{}",
