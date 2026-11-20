@@ -5,12 +5,10 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
-## [0.8.6] — unreleased local candidate — turbo-dom 0.8.6
+## [0.8.6] — 2026-11-20 — turbo-dom 0.8.6 (grid baseline fix, faster parser)
 
-Not tagged or published: turbo-dom 0.8.6 is not on crates.io yet, so this branch pins
-turbo-dom / turbo-dom-layout / turbo-dom-browser-env 0.8.6 to turbo-dom `release/0.8.6` @ 2561ff20
-through `[patch.crates-io]`. The pin must be dropped and the registry graph re-validated before
-tagging (release-guard rejects it).
+Consumes the published turbo-dom / turbo-dom-layout / turbo-dom-browser-env 0.8.6 crates and
+turbo-dom-v8 150.4.2 from crates.io. No turbo-test runtime changes beyond the repin.
 
 ### Fixed
 - Consume turbo-dom 0.8.6's fix for the 0.8.5 grid baseline regression (turbo-dom#537): a

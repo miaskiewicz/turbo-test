@@ -1,7 +1,7 @@
 # turbo-test
 
 **A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
-(and, experimentally, jest).** Release candidate **0.8.6** (unreleased; the published release is **0.8.5**).
+(and, experimentally, jest).** Version **0.8.6**.
 
 turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
 work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
@@ -30,8 +30,7 @@ copy of the binding or of V8: the binding, its probes and the Chrome-control col
 record their oracles live in turbo-dom's
 [`crates/turbo-dom-browser-env`](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
 — fix DOM behaviour and recollect controls there. The release resolves turbo-dom-v8
-150.4.2 from crates.io; this unreleased 0.8.6 candidate pins turbo-dom / -layout / -browser-env 0.8.6
-to turbo-dom `release/0.8.6` @ 2561ff20 through `[patch.crates-io]` until they are published. The committed
+150.4.2 and turbo-dom / -layout / -browser-env 0.8.6 from crates.io. The committed
 registry lockfile and `release-guard` keep temporary Git patches out of releases.
 
 ## Install and run
