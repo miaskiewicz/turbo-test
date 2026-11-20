@@ -6376,11 +6376,17 @@ globalThis.__ttToESM = (m) => {
 const __ttNotObject = (m) => m === null || (typeof m !== 'object' && typeof m !== 'function');
 // __ttToESMDep's values taken as they are: primitives, strict mocks and namespaces
 const __ttDepAsIs = (m) => !m || __ttNotObject(m) || __ttStrictMocks.has(m) || __ttIsNs(m) || m[__ttEsmMark];
+// Under jest a `"type":"module"` package's `_interopRequireDefault` / `__importDefault`
+// returns the bundler shape even for an __esModule-marked CJS dep (ts-jest / babel-jest
+// semantics: `default` is the dep's own `.default`, not Node's whole-exports-as-default).
+// Vitest keeps Node's native rule (turbo-test#428).
+const __ttDepJestEsModule = (m) => globalThis.__ttJestProject && m && (m.__esModule || '__esModule' in m);
 globalThis.__ttToESMDep = (m, node) => {
   // Node's namespace of a primitive module.exports: the value as default and 'module.exports'
   // (turbo-test#193)
   if (node && __ttNotObject(m)) return { default: m, 'module.exports': m };
   if (__ttDepAsIs(m)) return m;
+  if (node && __ttDepJestEsModule(m)) return __ttBundlerEsMod(m);
   if (node) return __ttNodeNs(m);
   return __ttBundlerNs(m);
 };

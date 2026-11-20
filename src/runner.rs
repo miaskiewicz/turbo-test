@@ -104,6 +104,12 @@ thread_local! {
     /// The file belongs to a jest project (a jest config, no vitest config nearer or above it):
     /// jest's per-file environment (JEST_WORKER_ID) applies whatever its testEnvironment.
     static JEST_PROJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// This file's raw source has a top-level `import` statement BEFORE every top-level
+    /// `const/let/var` declaration: under jest, `babel-plugin-jest-hoist` moves `jest.mock(...)`
+    /// above that import, so the hoisted factory's require loads the mocked module before the
+    /// mock-prefixed const runs — a TDZ real Jest 30 reports. Guards the jest branch of
+    /// `hoist_mock_lines` (turbo-test#445). Set per-file by `finish_mr_cjs` / `native_transform_cjs`.
+    static JEST_IMPORT_BEFORE_MOCK_CONST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Jest `moduleDirectories`: additional directories to search for bare modules besides
     /// `node_modules` (turbo-test#345). Empty when unconfigured (only `node_modules`).
     static CUSTOM_MODULE_DIRS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -3329,19 +3335,28 @@ function preserveDynamicNamespaces(context) {
   };
   return source => ts.visitNode(source, visit);
 }
+// Follow the project's tsconfig `target` + `useDefineForClassFields` (ts-jest 30 semantics,
+// turbo-test#438). Defaults when unspecified: TypeScript's own rule — `useDefineForClassFields`
+// is true iff target >= ES2022. An uninitialized class field is then preserved as an own
+// undefined property (recovery.spec); for older targets it stays elided, as tsc has always done.
+const projectTarget = projectOptions && projectOptions.target;
+const effectiveTarget = projectTarget !== undefined && projectTarget !== null ? projectTarget : ts.ScriptTarget.ES2021;
+const useDefineForClassFields = projectOptions && projectOptions.useDefineForClassFields !== undefined
+  ? projectOptions.useDefineForClassFields
+  : effectiveTarget >= ts.ScriptTarget.ES2022;
 const out = ts.transpileModule(input, {
   transformers: { before: process.argv[3] === 'commonjs' && commonjsNoInterop ? [preserveDynamicNamespaces] : [] },
   fileName: file,
   compilerOptions: {
     module: process.argv[3] === 'commonjs' ? ts.ModuleKind.CommonJS : ts.ModuleKind.ESNext,
-    target: ts.ScriptTarget.ES2021,
+    target: effectiveTarget,
     experimentalDecorators: true,
     emitDecoratorMetadata: true,
     esModuleInterop: !(process.argv[3] === 'commonjs' && commonjsNoInterop),
     importHelpers: false,
     isolatedModules: true,
     jsx: isTsx ? ts.JsxEmit.ReactJSX : undefined,
-    useDefineForClassFields: false,
+    useDefineForClassFields,
   },
 });
 const dynamicHelper = usesDynamicNamespace ? '\nfunction '+dynamicName+'(spec) { return Promise.resolve().then(() => globalThis.__ttToESM(require(spec))); }\n' : '';
@@ -3509,7 +3524,9 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
     }
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     let emitted = crate::esm_cjs::emit_with(file, &raw, legacy_decorators)?;
+    JEST_IMPORT_BEFORE_MOCK_CONST.with(|c| c.set(jest_import_before_const(&raw)));
     let mut code = hoist_mock_setup(&await_do_mocks_on_import(emitted));
+    JEST_IMPORT_BEFORE_MOCK_CONST.with(|c| c.set(false));
     let shared = shared_mock_lets(&raw);
     if !shared.is_empty() {
         code = rewrite_shared_lets(&code, &shared);
@@ -3547,7 +3564,9 @@ fn native_transform_cjs_mapped(file: &Path) -> Option<(String, crate::location::
     let legacy_decorators = decorator_metadata_enabled(file) && file_has_decorator(&raw);
     let emitted = crate::esm_cjs::emit_mapped(file, &raw, legacy_decorators)?;
     let map = crate::coverage::inline_segments(&emitted)?;
+    JEST_IMPORT_BEFORE_MOCK_CONST.with(|c| c.set(jest_import_before_const(&raw)));
     let (mut code, mut origins) = hoist_mock_setup_tracked(&await_do_mocks_on_import(emitted));
+    JEST_IMPORT_BEFORE_MOCK_CONST.with(|c| c.set(false));
     let shared = shared_mock_lets(&raw);
     if !shared.is_empty() {
         code = rewrite_shared_lets(&code, &shared);
@@ -3773,7 +3792,9 @@ fn finish_mr_cjs(code: String, raw: &str) -> String {
     let mut code = await_do_mocks_on_import(fill_import_meta(code, None));
     // vitest-style vi.mock hoisting: move consumer requires below the vi.mock setup so the mock
     // is registered (immediately, in this module's scope) before the mocked module loads.
+    JEST_IMPORT_BEFORE_MOCK_CONST.with(|c| c.set(jest_import_before_const(raw)));
     code = hoist_mock_setup(&code);
+    JEST_IMPORT_BEFORE_MOCK_CONST.with(|c| c.set(false));
     // Module-`let`s that this file's vi.mock() factory closes over (writes from inside the mock,
     // read by the test) must be SHARED between the mock-prepass scope and this module's scope.
     // vitest shares them via one module scope; we can't (the factory runs in the prepass), so
@@ -4178,6 +4199,62 @@ fn hoist_mock_lines(code: &str) -> (String, Vec<Option<usize>>) {
     let pre_setup: Vec<&str> = setup[..first_mock_rel].to_vec();
     // walk the tail, separating full `.mock(...)` statements from interleaved decls
     let (mock_stmts, post_decls) = split_mock_stmts(&setup[first_mock_rel..]);
+    // Jest preserves the file's source order of requires vs declarations when it hoists mocks:
+    // `babel-plugin-jest-hoist` moves `jest.mock(...)` to the top but leaves everything else in
+    // place. Esbuild's CJS transform reorders every `import` into a `require` at the top of the
+    // file, so when turbo-test's `.mock(` hoist runs under jest AND the raw file opens with an
+    // import ahead of the top-level `const/let/var` the mock factory closes over, we skip the
+    // "move consumer requires below the mocks" workaround so that same shape fails with the
+    // TDZ real Jest 30 reports: `Cannot access 'mockX' before initialization` (turbo-test#445).
+    let reqs = &lines[req_start..=req_end];
+    let region = HoistRegion {
+        lines: &lines,
+        req_start,
+        reqs,
+        setup,
+        pre_setup: &pre_setup,
+        mock_stmts: &mock_stmts,
+        post_decls: &post_decls,
+        region_end,
+    };
+    if jest_hoist_mode() {
+        return hoist_mock_lines_jest(&region);
+    }
+    hoist_mock_lines_vitest(&region, &is_req)
+}
+
+/// The slices `hoist_mock_lines` passes to either reorder path, grouped so the helpers keep a
+/// reasonable arity: the full CJS `lines`, the require block (`reqs`, `req_start`) and the
+/// mock-setup region split into its parts (`setup`, `pre_setup`, `mock_stmts`, `post_decls`).
+struct HoistRegion<'a, 'b> {
+    lines: &'b [&'a str],
+    req_start: usize,
+    reqs: &'b [&'a str],
+    setup: &'b [&'a str],
+    pre_setup: &'b [&'a str],
+    mock_stmts: &'b [&'a str],
+    post_decls: &'b [&'a str],
+    region_end: usize,
+}
+
+/// `hoist_mock_lines`'s vitest-style reorder: a factory can close over its own module scope, so
+/// pre-mock decls move ABOVE the mocks and requires NOT referenced by the setup become consumers
+/// (loaded AFTER the mocks register) — the registration is in place before the mocked module's
+/// consumer require runs, so a test file's own `vi.mock` placed below the tests still intercepts.
+fn hoist_mock_lines_vitest(
+    region: &HoistRegion<'_, '_>,
+    is_req: &dyn Fn(&str) -> bool,
+) -> (String, Vec<Option<usize>>) {
+    let HoistRegion {
+        lines,
+        req_start,
+        reqs,
+        setup,
+        pre_setup,
+        mock_stmts,
+        post_decls,
+        region_end,
+    } = *region;
     // A require stays BEFORE the vi.mocks if its value is needed at LOAD time — by a mock factory
     // or by top-level code (e.g. `class X extends React.Component`). A require used only inside
     // test/hook callbacks runs later, so it can be a consumer that loads AFTER the mocks (this is
@@ -4189,8 +4266,7 @@ fn hoist_mock_lines(code: &str) -> (String, Vec<Option<usize>>) {
         strip_test_blocks(&setup_text_full),
         mock_stmts.join("\n")
     );
-    let reqs = &lines[req_start..=req_end];
-    let (needed, consumers) = partition_requires(reqs, &setup_text, &is_req);
+    let (needed, consumers) = partition_requires(reqs, &setup_text, is_req);
     let hoistable: Vec<&str> = reqs.iter().copied().filter(|l| is_req(l)).collect();
     let rebinds = mocked_require_rebinds(setup, &hoistable);
     let mut out = Vec::with_capacity(lines.len() + rebinds.len());
@@ -4198,17 +4274,21 @@ fn hoist_mock_lines(code: &str) -> (String, Vec<Option<usize>>) {
     out.extend(needed);
     // factory-dep decls, then the vi.mock calls, then re-bind mocked requires, then the capture
     // decls (vi.mocked) which now read the mock, then consumer requires, then the body.
-    out.extend(pre_setup);
-    out.extend(mock_stmts);
+    out.extend_from_slice(pre_setup);
+    out.extend_from_slice(mock_stmts);
     for r in &rebinds {
         out.push(r.as_str());
     }
-    out.extend(post_decls);
+    out.extend_from_slice(post_decls);
     out.extend(consumers);
     if region_end + 1 < lines.len() {
         out.extend_from_slice(&lines[region_end + 1..]);
     }
-    // an output line that is one of the input's slices came from that line
+    hoist_origins(lines, &out)
+}
+
+/// `(output source, origin line indices)` where each origin is the input line a slice is from.
+fn hoist_origins<'a>(lines: &[&'a str], out: &[&'a str]) -> (String, Vec<Option<usize>>) {
     let index: HashMap<usize, usize> = lines
         .iter()
         .enumerate()
@@ -4219,6 +4299,75 @@ fn hoist_mock_lines(code: &str) -> (String, Vec<Option<usize>>) {
         .map(|l| index.get(&(l.as_ptr() as usize)).copied())
         .collect();
     (out.join("\n"), origins)
+}
+
+/// Whether a top-level source line that is NOT a blank or comment: `trim_start`ed line.
+fn is_meaningful_src_line(t: &str) -> bool {
+    !t.is_empty() && !t.starts_with("//") && !t.starts_with("/*") && !t.starts_with('*')
+}
+
+/// A trimmed line that opens a top-level `import` statement (bare `import` or `import*`).
+fn opens_import(t: &str) -> bool {
+    t.starts_with("import ") || t.starts_with("import{") || t.starts_with("import*")
+}
+
+/// A trimmed line that opens a top-level `const`/`let`/`var` declaration.
+fn opens_declaration(t: &str) -> bool {
+    t.starts_with("const ") || t.starts_with("let ") || t.starts_with("var ")
+}
+
+/// Whether the raw source opens with a top-level `import` ahead of any top-level
+/// `const/let/var` declaration: in that shape `babel-plugin-jest-hoist` moves `jest.mock(...)`
+/// above the import, so a factory that closes over a mock-prefixed const reads it in its
+/// temporal dead zone when the hoisted require loads (turbo-test#445). A cheap textual check
+/// over trimmed lines — comments and blank lines are skipped, string literals that happen to
+/// start with `import ` are not top-level statements.
+pub(crate) fn jest_import_before_const(raw: &str) -> bool {
+    raw.lines()
+        .map(|l| l.trim_start())
+        .filter(|t| is_meaningful_src_line(t))
+        .find_map(|t| {
+            if opens_import(t) {
+                Some(true)
+            } else if opens_declaration(t) {
+                Some(false)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(false)
+}
+
+/// Whether to switch `hoist_mock_lines` to its jest branch: a jest-governed file whose raw
+/// source opens with a top-level import (set per-file by the callers).
+fn jest_hoist_mode() -> bool {
+    JEST_PROJECT.with(|c| c.get()) && JEST_IMPORT_BEFORE_MOCK_CONST.with(|c| c.get())
+}
+
+/// `hoist_mock_lines` for a jest project: `jest.mock(...)` goes right before the first
+/// require, the rest (requires, pre-mock decls, post-mock decls, body) keeps its source order.
+/// Matches `babel-plugin-jest-hoist`, which moves `jest.mock` to the top and nothing else.
+fn hoist_mock_lines_jest(region: &HoistRegion<'_, '_>) -> (String, Vec<Option<usize>>) {
+    let HoistRegion {
+        lines,
+        req_start,
+        reqs,
+        pre_setup,
+        mock_stmts,
+        post_decls,
+        region_end,
+        ..
+    } = *region;
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    out.extend_from_slice(&lines[..req_start]);
+    out.extend_from_slice(mock_stmts);
+    out.extend_from_slice(reqs);
+    out.extend_from_slice(pre_setup);
+    out.extend_from_slice(post_decls);
+    if region_end + 1 < lines.len() {
+        out.extend_from_slice(&lines[region_end + 1..]);
+    }
+    hoist_origins(lines, &out)
 }
 
 /// Track `(` / `)` nesting over `line`: `started` once a `(` is seen.
