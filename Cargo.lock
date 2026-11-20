@@ -67,6 +67,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloc-no-stdlib"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2fb6cfd47bf496ff64095c20eaba0c201404ee38714d4142fcfa1dc334fcc7a"
+
+[[package]]
+name = "alloc-stdlib"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5c1865780388bfa186411ab5f247819487fc4864c6e9c3106611fa347586e1"
+dependencies = [
+ "alloc-no-stdlib",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -233,6 +248,27 @@ checksum = "553c5d846a6ba5150c65e3b1b8ec073bcf1abc20f9b7220de384a4443ea4e20a"
 dependencies = [
  "bytes",
  "cfg_aliases",
+]
+
+[[package]]
+name = "brotli"
+version = "9.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9071f285ed78f04f37d675abaaef5de7689e2f30a216c8dc6795465d81910a13"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+ "brotli-decompressor",
+]
+
+[[package]]
+name = "brotli-decompressor"
+version = "6.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc031cd87c6529082b0b65c604e86af0ed7744841b17ccfe60b1e31fa606179e"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
 ]
 
 [[package]]
@@ -3128,9 +3164,9 @@ dependencies = [
 
 [[package]]
 name = "turbo-dom"
-version = "0.8.4"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d61bf3bd1ee7505be5c15e9650dce4a6cf5c806c57241607364d9a2d5fe83d89"
+checksum = "ef6a245f5a1754b082ea8315a324cc3dd0ddb233d5b1a585822b8aad7011092b"
 dependencies = [
  "cssparser",
  "html5ever",
@@ -3144,9 +3180,9 @@ dependencies = [
 
 [[package]]
 name = "turbo-dom-browser-env"
-version = "0.8.4"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95916651d1b2ec804e7196d1a19d20f248f6224ce1cdaac4b0b2b028c1d57946"
+checksum = "139e4eaedad32a93b5172b976d4ca7a1aef739f9e9b9622a5d38c83628c6928f"
 dependencies = [
  "cssparser",
  "lightningcss",
@@ -3163,9 +3199,9 @@ dependencies = [
 
 [[package]]
 name = "turbo-dom-layout"
-version = "0.8.4"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e5e43dec8de414fcc890408d1522a42f96bb3900845e0c62a5a508b71882867"
+checksum = "0fd97e1fa43f50f44b3b7b153431cf28d5bb1517d5dd66a067aeb97864ec670d"
 dependencies = [
  "core-foundation",
  "core-text",
@@ -3200,10 +3236,12 @@ dependencies = [
 
 [[package]]
 name = "turbo-test"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "aes-gcm",
  "base64",
+ "brotli",
+ "brotli-decompressor",
  "cbc",
  "des",
  "encoding_rs",

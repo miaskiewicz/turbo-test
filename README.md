@@ -1,7 +1,7 @@
 # turbo-test
 
 **A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
-(and, experimentally, jest).** Version **0.8.4**.
+(and, experimentally, jest).** Version **0.8.5**.
 
 turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
 work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
@@ -24,13 +24,13 @@ Since 0.6.0 the browser engine lives in one place,
 | `turbo-dom-layout` | HTML/CSS layout | turbo-html2pdf, turbo-surf |
 | `turbo-dom-raster` | synthetic screenshots | turbo-surf |
 
-turbo-test links `turbo-dom-browser-env` 0.8.4 and `turbo-dom-v8 ~150.4.2` (under the local alias
+turbo-test links `turbo-dom-browser-env` 0.8.5 and `turbo-dom-v8 ~150.4.2` (under the local alias
 `v8`; `scripts/check-single-v8.sh` keeps exactly one V8 in the graph). This repository carries no
 copy of the binding or of V8: the binding, its probes and the Chrome-control collectors that
 record their oracles live in turbo-dom's
 [`crates/turbo-dom-browser-env`](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
 — fix DOM behaviour and recollect controls there. The release resolves turbo-dom-v8
-150.4.2 and turbo-dom / -layout / -browser-env 0.8.4 from crates.io. The committed
+150.4.2 and turbo-dom / -layout / -browser-env 0.8.5 from crates.io. The committed
 registry lockfile and `release-guard` keep temporary Git patches out of releases.
 
 ## Install and run
@@ -224,7 +224,22 @@ Mocks from `jest.fn()` / `jest.spyOn()` have jest-mock's `whenCalledWith(...matc
 Assigning a namespace import's member (`import * as api from './api'; api.fetch = jest.fn()`) takes
 effect for the namespace and its other importers, as under babel-jest / ts-jest (0.8.3+); vitest's
 namespaces stay read-only. Test files get `process.env.JEST_WORKER_ID`. When a vitest config
-applies, the jest config's `fakeTimers` is ignored.
+applies, the jest config's `fakeTimers` is ignored. `test.each` / `describe.each` (and their
+`.only` / `.skip` / `.concurrent` / `.failing` forms) follow jest-each 30 (0.8.5+): `%p`
+pretty-format, `%s` / `%d` / `%i` / `%f` / `%o` / `%O` via `util.format`, `%j`, `%#`, `%$`, `%%`,
+`$key.path` interpolation for object rows and tagged templates, a row passed as one argument
+unless every row is an array, and jest-each's table errors. A vitest project keeps vitest's titles.
+
+**Jest or vitest behaviour.** Where jest and vitest differ (`.each` titles, `toThrow(errorInstance)`,
+`JEST_WORKER_ID`, namespace assignment, …) a file follows jest when the nearest config
+walking up is a jest config, else vitest. Force one for the whole run:
+
+| source | jest | vitest | detect (default) |
+|---|---|---|---|
+| CLI flag (wins) | `--compat jest` | `--compat vitest` | `--compat auto` |
+| env var | `TURBO_TEST_COMPAT=jest` | `TURBO_TEST_COMPAT=vitest` | unset / `auto` |
+
+Config discovery (`setupFiles`, `moduleNameMapper`, the test environment, …) is unchanged by it.
 
 Both the injected globals **and** the explicit-import form work — a suite with `injectGlobals: false`
 that does `import { describe, it, expect, jest } from '@jest/globals'` resolves that specifier from
@@ -254,15 +269,17 @@ npx turbo-test            # discovers *.spec.* too; reads jest config when no vi
 > numbers (0.2.11) are in [docs/BENCHMARKS-history.md](docs/BENCHMARKS-history.md).
 
 
-Node-mode support in the 0.8.4 candidate includes native SHA-1/SHA-256 hashing,
+Node-mode support in 0.8.5 includes native SHA-1/SHA-256 hashing,
 P-256 ECDSA and RSA PKCS#1 v1.5 SHA-256 signing with PKCS#8/SPKI PEM/DER KeyObjects,
 and AES-256-GCM with 12-byte IVs, 12–16-byte authentication tags and AAD. Key generation
 and `randomBytes` use OS entropy; unsupported algorithms report errors. Encrypted
 PKCS#8 import supports PBES2/PBKDF2 and PKCS12 SHA-1/3DES, with wrong-password and
 malformed-input rejection. Imports cap DER at 1 MiB, passphrases and salts at 1,024
 bytes, and KDF iterations at 1,000,000. PKCS12 passwords require valid UTF-8 BMP text;
-scrypt-based imports and encrypted exports remain unsupported.
-It also includes gzip, native V8 serialization, transferable MessagePorts,
+scrypt-based imports remain unsupported. Encrypted PKCS#8 export uses PBES2 with
+PBKDF2-HMAC-SHA256 and AES-128/192/256-CBC or DES-EDE3-CBC, as Node/OpenSSL 3 do.
+It also includes streaming zlib (Deflate/Inflate/Gzip/Gunzip/Unzip and raw variants) and
+Brotli, native V8 serialization, transferable MessagePorts,
 and AsyncLocalStorage across native await and scheduled resources.
 
 Keyed hashes support real SHA-1/SHA-256 HMAC and synchronous PBKDF2-SHA1, including

@@ -25,6 +25,11 @@ impl Drop for ProfileGuard {
         CURRENT.with(|current| current.set(self.0));
     }
 }
+// A DOM context that activated the backend payload on first use is a Node context for the rest
+// of the file (backend I/O pacing, transport cleanup); the ProfileGuard restores the outer value.
+pub(crate) fn activate_node() {
+    CURRENT.with(|current| current.set(RuntimeProfile::Node));
+}
 pub(crate) fn is_node() -> bool {
     CURRENT.with(|current| current.get() == RuntimeProfile::Node)
 }

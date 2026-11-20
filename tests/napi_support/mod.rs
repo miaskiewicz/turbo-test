@@ -29,6 +29,7 @@ pub fn c_source(stem: &str) -> &'static str {
         "selfreg" => include_str!("selfreg.c"),
         "typetag" => include_str!("typetag.c"),
         "unknown" => include_str!("unknown.c"),
+        "v8api" => include_str!("v8api.c"),
         "wrap" => include_str!("wrap.c"),
         _ => panic!("unknown napi fixture {stem}"),
     }

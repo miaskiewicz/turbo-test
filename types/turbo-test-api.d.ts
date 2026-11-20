@@ -97,6 +97,13 @@ export interface SuiteForFunction {
   (strings: TemplateStringsArray, ...values: any[]): (name: string | Function, fn: (arg: any) => any) => void;
 }
 
+// Jest's `test.failing` / `test.only.failing` / `test.skip.failing` (turbo-test#402): the test
+// passes iff its body throws; `.each` registers one such test per row.
+export interface FailingAPI {
+  (name: string, fn?: TestFunction, timeout?: number | TestOptions): void;
+  each: TestEachFunction;
+}
+
 export interface TestAPI {
   (name: string, fn?: TestFunction, timeout?: number | TestOptions): void;
   only: TestAPI;
@@ -105,6 +112,7 @@ export interface TestAPI {
   concurrent: TestAPI;
   sequential: TestAPI;
   fails: TestAPI;
+  failing: FailingAPI;
   each: TestEachFunction;
   for: TestForFunction;
   // Conditional variants (vitest 4.1.12): `test.runIf(cond)(name, fn)` runs when `cond` is

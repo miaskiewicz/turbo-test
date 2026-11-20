@@ -1,5 +1,9 @@
-/// A fingerprint of everything that shapes the runner's transforms (the sources and the locked
-/// dependency versions): the default transform cache is per build (turbo-test#207).
+/// The one non-test file outside `src/` the binary embeds.
+const EMBEDDED_OUTSIDE_SRC: &str = "scripts/vue-transform.cjs";
+
+/// A fingerprint of everything that shapes the runner's transforms and runtime (the sources, the
+/// embedded runtime among them, and the locked dependency versions): every cache, the default and
+/// a TURBO_CACHE_DIR one, is per build (turbo-test#207).
 fn build_id() -> String {
     use std::hash::{Hash, Hasher};
     fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -19,6 +23,8 @@ fn build_id() -> String {
     walk(std::path::Path::new("src"), &mut files);
     files.push("Cargo.lock".into());
     files.push("build.rs".into());
+    // embedded by src/vue.rs (include_str!), so its content is part of what the build runs
+    files.push(EMBEDDED_OUTSIDE_SRC.into());
     files.sort();
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for f in &files {
@@ -32,6 +38,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed={EMBEDDED_OUTSIDE_SRC}");
     println!("cargo:rustc-env=TT_BUILD_ID={}", build_id());
     // Export the binary's dynamic symbols so dlopen'd native (.node) addons can resolve
     // their undefined `napi_*` imports against our Node-API host implementations.

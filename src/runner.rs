@@ -618,9 +618,29 @@ fn cjs_first_project(entry: &Path) -> bool {
     cjs_first_project_uncached(entry)
 }
 
+/// Whether `entry` runs with Jest's behaviour where Jest and vitest differ (`.each` titles,
+/// `toThrow`, …): `TURBO_TEST_COMPAT=jest|vitest` (`--compat`) when set, else detected.
+fn jest_project(entry: &Path) -> bool {
+    compat_override().unwrap_or_else(|| jest_config_governs(entry))
+}
+
+/// `TURBO_TEST_COMPAT`: `jest` → Some(true), `vitest` → Some(false), unset / `auto` / anything
+/// else → None (detect).
+fn compat_override() -> Option<bool> {
+    match std::env::var("TURBO_TEST_COMPAT")
+        .ok()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jest" => Some(true),
+        "vitest" => Some(false),
+        _ => None,
+    }
+}
+
 /// Whether `entry` is governed by a jest config: walking up, a jest config (file or package.json
 /// block) found before any vitest config (the rule `runtime_config_for` reads configs by).
-fn jest_project(entry: &Path) -> bool {
+fn jest_config_governs(entry: &Path) -> bool {
     for d in entry.ancestors().skip(1) {
         if VITEST_CONFIG_FILES.iter().any(|v| d.join(v).is_file()) {
             return false;
@@ -1157,20 +1177,28 @@ const TRANSFORM_VERSION: &str = "oxc-0.134-v1";
 /// The default transform cache under `tmp`: one directory per turbo-test build
 /// (`turbo-test-cache/<version>-<build id>`, build.rs), so an entry another build wrote (an older
 /// release, a pre-release, another worktree) is never served as a hit (turbo-test#207).
+/// This build's name: `<version>-<build id>`, the build id hashing every source the binary embeds
+/// (the runtime included) and Cargo.lock (build.rs).
+const BUILD_TAG: &str = concat!(env!("CARGO_PKG_VERSION"), "-", env!("TT_BUILD_ID"));
+
 fn default_cache_dir(tmp: &Path) -> PathBuf {
-    tmp.join("turbo-test-cache").join(format!(
-        "{}-{}",
-        env!("CARGO_PKG_VERSION"),
-        env!("TT_BUILD_ID")
-    ))
+    build_cache_dir(&tmp.join("turbo-test-cache"))
+}
+
+/// The folder under a cache root (the shared temp one, or the user's TURBO_CACHE_DIR) that holds
+/// this build's artifacts: every cached transform, bundle, bytecode cache and startup snapshot is
+/// keyed by its own inputs, not by the build, so a root shared across builds (a persisted CI
+/// cache, an upgrade) must never let one build read another's (turbo-test#207).
+fn build_cache_dir(root: &Path) -> PathBuf {
+    root.join(BUILD_TAG)
 }
 
 fn cache_dir() -> PathBuf {
-    // TURBO_CACHE_DIR overrides the shared temp cache — lets a test run against an isolated,
+    // TURBO_CACHE_DIR overrides the shared temp cache root — lets a test run against an isolated,
     // freshly-cleared cache without disturbing other concurrent turbo-test processes that share
     // the default location.
     let d = std::env::var_os("TURBO_CACHE_DIR")
-        .map(PathBuf::from)
+        .map(|root| build_cache_dir(Path::new(&root)))
         .unwrap_or_else(|| default_cache_dir(&std::env::temp_dir()));
     // create_dir_all runs on every call (9 call sites per module load) though the dir only needs
     // creating once. Memoize the (dir -> created) fact in a OnceLock keyed by the resolved path so
@@ -2857,6 +2885,7 @@ fn run_entry_mocks_untransformed(
         &scoped(format!("(() => {{\n{hoisted}\n{calls}}})();")),
         &scoped(format!("(() => {{\n{calls}}})();")),
     );
+    flush_prepass_mocks(scope);
     run_js(
         scope,
         "globalThis.__ttDir = globalThis.__ttPrevDir; globalThis.__ttNoLazyJestMock = false;",
@@ -2867,7 +2896,7 @@ fn run_entry_mocks_untransformed(
     // These registrations are this file's prepass: the module's own vi.mock call keeps them
     // instead of re-running the factory.
     for (spec, _) in mocks {
-        let Some(abs) = mock_key(spec, dir) else {
+        let Some(abs) = runtime_mock_key(spec, dir) else {
             continue;
         };
         if REGISTRY.with(|r| r.borrow().mocks.contains_key(&abs)) {
@@ -2966,6 +2995,7 @@ fn run_entry_mocks_mr(scope: &mut v8::PinScope, entry: &Path, src: &str, p: &Pat
         };
         run_prepass_wrapper(scope, entry, dir, &raw);
     }
+    flush_prepass_mocks(scope);
     set_mock_prepass(scope, false);
     resolve_pending_mocks(scope);
     drain_pending_mocks(scope, entry.parent().unwrap_or(Path::new(".")), false);
@@ -3070,9 +3100,19 @@ fn run_entry_mocks_bundled(scope: &mut v8::PinScope, entry: &Path, p: &Path) {
             }
         }
     }
+    flush_prepass_mocks(scope);
+    scope.perform_microtask_checkpoint();
     set_mock_prepass(scope, false);
     resolve_pending_mocks(scope);
     drain_pending_mocks(scope, entry.parent().unwrap_or(Path::new(".")), false);
+}
+
+/// Run the entry prepass's queued mocks (runtime.js `__ttPrepassFlush`): its calls only queue
+/// them, so every hoisted mock is known before any factory runs and a factory's
+/// requireActual / importOriginal sees the file's later mocks too, as in jest and vitest
+/// (turbo-test#430). Called while the prepass flag is still set.
+fn flush_prepass_mocks(scope: &mut v8::PinScope) {
+    run_js(scope, "globalThis.__ttPrepassFlush();");
 }
 
 /// Mark the entry's mock prepass for runtime.js. The prepass runs the factories outside the
@@ -3933,28 +3973,54 @@ fn fill_import_meta(code: String, bundle_root: Option<&Path>) -> String {
 /// Static require declarations generated by esbuild or TypeScript. Their binding can be
 /// re-fetched after a mock registration; user expressions with nested requires stay untouched.
 fn mock_require_declaration(line: &str) -> Option<(&str, &str)> {
+    static_require_declaration(line).filter(|(name, rhs)| generated_import_binding(name, rhs))
+}
+
+/// A `var` / `const` / `let` declaration binding one identifier to a static require expression
+/// (`mock_require_rhs`, after any blank padding).
+fn static_require_declaration(line: &str) -> Option<(&str, &str)> {
     let declaration = line
         .strip_prefix("var ")
         .or_else(|| line.strip_prefix("const "))
         .or_else(|| line.strip_prefix("let "))?;
     let (name, rhs) = declaration.split_once(" = ")?;
-    if !mock_require_name(name) || !mock_require_rhs(rhs) {
-        return None;
-    }
-    Some((name, rhs))
+    (js_identifier(name) && mock_require_rhs(rhs.trim_start())).then_some((name, rhs))
 }
 
-fn mock_require_name(name: &str) -> bool {
-    let generated = name.starts_with("import_")
+fn js_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+/// A generated import binding: esbuild's `import_x` / TypeScript's `x_1`, or a namespace import
+/// esbuild names after its local name (`import * as fs from 'fs'`), bound to an interop wrapper
+/// (`var fs = __toESM(require("fs"))`) or to the blank-padded require left where
+/// `ts_cjs_interop::static_requires` stripped that wrapper (`var fs =         require("fs") ;`).
+/// It must be re-bound to the mock like the others (turbo-test#405).
+fn generated_import_binding(name: &str, rhs: &str) -> bool {
+    rhs.starts_with("__") || rhs.starts_with(' ') || generated_import_name(name)
+}
+
+/// A require declaration `hoist_mock_setup` moves or re-binds: a generated import binding, or a
+/// `var x = require("spec")` of a spec this file mocks, whatever its name (the TypeScript CommonJS
+/// emit of `import * as fs from 'fs'` without esModuleInterop is `var fs = require("fs")`). jest
+/// and vitest hoist their mocks above every import, so such a binding is the mock (#405).
+fn hoistable_require(line: &str, mocked: &[String]) -> bool {
+    mock_require_declaration(line).is_some()
+        || (line.starts_with("var ")
+            && static_require_declaration(line).is_some()
+            && extract_require_spec(line).is_some_and(|spec| mocked.contains(&spec)))
+}
+
+/// esbuild's `import_x` or TypeScript's `x_1` binding name.
+fn generated_import_name(name: &str) -> bool {
+    name.starts_with("import_")
         || name.rsplit_once('_').is_some_and(|(_, suffix)| {
             !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-        });
-    let mut chars = name.chars();
-    generated
-        && chars
-            .next()
-            .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
-        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+        })
 }
 
 fn mock_require_rhs(rhs: &str) -> bool {
@@ -4015,8 +4081,18 @@ fn hoist_mock_setup(code: &str) -> String {
 }
 
 /// `hoist_mock_setup`, also returning for each output line the input line it came from (`None` for
-/// a line it wrote: a mocked require's re-bind).
+/// a line it wrote: a mocked require's re-bind). The test file's scope binder then moves up to
+/// the hoisted setup (`mock_scope::relocate_binder`, turbo-test#429); no line moves.
 fn hoist_mock_setup_tracked(code: &str) -> (String, Vec<Option<usize>>) {
+    let (hoisted, origins) = hoist_mock_lines(code);
+    match crate::mock_scope::relocate_binder(&hoisted) {
+        Some(bound) => (bound, origins),
+        None => (hoisted, origins),
+    }
+}
+
+/// `hoist_mock_setup_tracked`'s hoisting.
+fn hoist_mock_lines(code: &str) -> (String, Vec<Option<usize>>) {
     let unchanged = || {
         (
             code.to_string(),
@@ -4028,13 +4104,16 @@ fn hoist_mock_setup_tracked(code: &str) -> (String, Vec<Option<usize>>) {
     }
     let normalized = normalize_mock_require_declarations(code);
     let lines: Vec<&str> = normalized.lines().collect();
-    let is_req = |l: &str| mock_require_declaration(l).is_some();
-    // contiguous require block
+    let mocked = collect_mocked_specs(&lines);
+    let is_req = |l: &str| hoistable_require(l, &mocked);
+    // contiguous require block: from the first hoistable require, over the hoistable ones and the
+    // other static require declarations between them (those stay before the mocks, unbound)
     let Some(req_start) = lines.iter().position(|l| is_req(l)) else {
         return unchanged();
     };
+    let in_block = |l: &str| is_req(l) || static_require_declaration(l).is_some();
     let mut req_end = req_start;
-    while req_end + 1 < lines.len() && is_req(lines[req_end + 1]) {
+    while req_end + 1 < lines.len() && in_block(lines[req_end + 1]) {
         req_end += 1;
     }
     // end of the last top-level `.mock(` statement (balance parens from the call to its close + ;)
@@ -4069,8 +4148,10 @@ fn hoist_mock_setup_tracked(code: &str) -> (String, Vec<Option<usize>>) {
         strip_test_blocks(&setup_text_full),
         mock_stmts.join("\n")
     );
-    let (needed, consumers) = partition_requires(&lines[req_start..=req_end], &setup_text);
-    let rebinds = mocked_require_rebinds(setup, &lines[req_start..=req_end]);
+    let reqs = &lines[req_start..=req_end];
+    let (needed, consumers) = partition_requires(reqs, &setup_text, &is_req);
+    let hoistable: Vec<&str> = reqs.iter().copied().filter(|l| is_req(l)).collect();
+    let rebinds = mocked_require_rebinds(setup, &hoistable);
     let mut out = Vec::with_capacity(lines.len() + rebinds.len());
     out.extend_from_slice(&lines[..req_start]);
     out.extend(needed);
@@ -4152,8 +4233,13 @@ fn split_mock_stmts<'a>(tail: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
     (mock_stmts, post_decls)
 }
 
-/// Requires whose binding the setup text references (needed before the mocks) vs consumers.
-fn partition_requires<'a>(reqs: &[&'a str], setup_text: &str) -> (Vec<&'a str>, Vec<&'a str>) {
+/// Requires whose binding the setup text references (needed before the mocks) vs consumers. A
+/// require `hoistable` rejects is never moved: it stays before the mocks.
+fn partition_requires<'a>(
+    reqs: &[&'a str],
+    setup_text: &str,
+    hoistable: &dyn Fn(&str) -> bool,
+) -> (Vec<&'a str>, Vec<&'a str>) {
     let mut needed = Vec::new();
     let mut consumers = Vec::new();
     for &l in reqs {
@@ -4163,7 +4249,7 @@ fn partition_requires<'a>(reqs: &[&'a str], setup_text: &str) -> (Vec<&'a str>, 
             .chars()
             .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
             .collect();
-        if !name.is_empty() && contains_word(setup_text, &name) {
+        if !hoistable(l) || (!name.is_empty() && contains_word(setup_text, &name)) {
             needed.push(l);
         } else {
             consumers.push(l);
@@ -5738,7 +5824,7 @@ fn drain_one_pending_mock<'s>(
     if exports.is_undefined() {
         return; // a factory that returned nothing (a throwing one left its error stand-in)
     }
-    if let Some(key) = mock_key(&spec, base_dir) {
+    if let Some(key) = runtime_mock_key(&spec, base_dir) {
         register_mock_value(scope, &key, exports);
     }
 }
@@ -7113,7 +7199,7 @@ fn factory_bindings(entry: &Path, src: &str, mr: bool) -> Vec<crate::mock_scope:
 }
 
 /// `src` of the file `abs` as it loads: the test file gets the binder statement that hands its
-/// factories' bindings to the runtime, on a line of its own at the end (so no position moves).
+/// factories' bindings to the runtime, as early as no position moves (`mock_scope::place_binder`).
 /// An app module's source as vite's transform sees it: `import.meta.glob` calls expanded against
 /// the file system (src/import_glob.rs, turbo-test#130, #145), the vitest root (the working
 /// directory) the base of `/` patterns, the config's `resolve.alias` (TURBO_ALIAS) its aliases. node_modules are read as they are (vitest externalizes them).
@@ -7147,7 +7233,14 @@ fn with_binder(abs: &Path, src: String, mr: bool) -> String {
     if bindings.is_empty() {
         return src;
     }
-    format!("{src}\n{}", crate::mock_scope::binder(&bindings, abs))
+    let binder = crate::mock_scope::binder(&bindings, abs);
+    if mr {
+        // the CommonJS transforms move it up to the hoisted mock setup in the code that runs
+        // (`hoist_mock_setup_tracked`, turbo-test#429); appended on a line of its own, it moves
+        // no position of the authored source the code maps back to
+        return format!("{src}\n{binder}");
+    }
+    crate::mock_scope::place_binder(abs, &src, &binder)
 }
 
 /// Whether to stub a failed node_modules load for the CURRENT file. e2e entries only;
@@ -7335,7 +7428,37 @@ fn require_pre_resolve(
     dir: &str,
     spec: &str,
 ) -> bool {
-    require_builtin(scope, rv, spec) || require_virtual(scope, rv, dir, spec)
+    require_builtin(scope, rv, dir, spec) || require_virtual(scope, rv, dir, spec)
+}
+
+/// `native_require` of a node builtin: its registered mock when one applies (an app module's
+/// require; a node_modules package's own require keeps the real builtin, as for any mocked
+/// module: turbo-test#135, #405), else the shimmed module object.
+fn require_node_builtin(scope: &mut v8::PinScope, rv: &mut v8::ReturnValue, dir: &str, spec: &str) {
+    let mock = builtin_mock_key(spec);
+    if builtin_mock_applies(dir, &mock) {
+        // a mock factory that threw: the require fails with its error
+        if let Some(e) = mock_factory_error(scope, &mock) {
+            scope.throw_exception(e);
+            return;
+        }
+        set_cjs_exports(scope, rv, &mock);
+        return;
+    }
+    ensure_node_builtin(scope, spec);
+    let key = PathBuf::from(format!("<node:{spec}>"));
+    set_cjs_exports(scope, rv, &key);
+}
+
+/// Whether the builtin mock `key` serves a require from `dir`: it is registered (with exports)
+/// and the importer is app code or a `server.deps.inline` package.
+fn builtin_mock_applies(dir: &str, key: &Path) -> bool {
+    let external = dir.contains("/node_modules/") && !inlined_dep(Path::new(dir));
+    !external
+        && REGISTRY.with(|r| {
+            let reg = r.borrow();
+            reg.mocks.contains_key(key) && reg.cjs_exports.contains_key(key)
+        })
 }
 
 /// `native_require` of a `jest.mock(spec, factory, { virtual: true })` mock: served keyed by the
@@ -7355,12 +7478,15 @@ fn require_virtual(
 }
 
 /// `native_require` of a node builtin, the test API or a lazy-stubbed barrel (true if served).
-fn require_builtin(scope: &mut v8::PinScope, rv: &mut v8::ReturnValue, spec: &str) -> bool {
-    // node builtins (fs/path/module/...) -> shimmed module objects
+fn require_builtin(
+    scope: &mut v8::PinScope,
+    rv: &mut v8::ReturnValue,
+    dir: &str,
+    spec: &str,
+) -> bool {
+    // node builtins (fs/path/module/...) -> shimmed module objects (or their mock)
     if is_node_builtin(spec) {
-        ensure_node_builtin(scope, spec);
-        let key = PathBuf::from(format!("<node:{spec}>"));
-        set_cjs_exports(scope, rv, &key);
+        require_node_builtin(scope, rv, dir, spec);
         return true;
     }
     // vitest / @jest/globals builtin (describe/it/expect/vi/jest from globals) — never load the
@@ -7618,6 +7744,25 @@ fn mock_key(spec: &str, dir: &Path) -> Option<PathBuf> {
     })
 }
 
+/// The mock-registry key of a node builtin: one for both spellings (`fs` / `node:fs`), so a mock
+/// of either serves both, as jest's and vitest's do (turbo-test#405). It is not the builtin's own
+/// `<node:..>` key, which keeps the real module for requireActual / importActual.
+fn builtin_mock_key(spec: &str) -> PathBuf {
+    PathBuf::from(format!(
+        "<mock:node:{}>",
+        spec.strip_prefix("node:").unwrap_or(spec)
+    ))
+}
+
+/// The mock-registry key the runtime's mock calls (register, resolve, unmock, the async drain
+/// and the entry prepass) use: a builtin's `builtin_mock_key`, else `mock_key`.
+fn runtime_mock_key(spec: &str, dir: &Path) -> Option<PathBuf> {
+    if is_node_builtin(spec) {
+        return Some(builtin_mock_key(spec));
+    }
+    mock_key(spec, dir)
+}
+
 /// The registry key an import of `spec` (resolved to `abs`) uses: the query-suffixed key when a
 /// mock is registered under it (see mock_key), else the module's own path.
 fn query_mock_variant(spec: &str, abs: PathBuf) -> PathBuf {
@@ -7657,16 +7802,25 @@ fn native_register_mock_scoped(
     if exports.is_undefined() {
         return;
     }
-    if let Some(key) = mock_key(&spec, Path::new(&dir)) {
+    if let Some(key) = runtime_mock_key(&spec, Path::new(&dir)) {
         register_mock_value(scope, &key, exports);
     }
 }
 
-/// `jest.mock(spec, factory, { virtual: true })`: register the factory's exports keyed by the
-/// raw spec (plus the caller's dir), skipping module resolution. `require(spec)` in the test
-/// looks the mock up here before resolving, so the spec never needs to point at a real file.
+/// `jest.mock(spec, factory, { virtual: true })`: register the factory's exports without
+/// resolving the spec. `require(spec)` looks the mock up here before resolving, so the spec never
+/// needs to point at a real file. The key is jest-resolve's `getModulePath`: a spec starting with
+/// `.` is the path it names from `dir` (lexically, extension as written), any other (absolute or
+/// bare) is itself, so every module reaching that path gets the mock (turbo-test#405).
 fn virtual_mock_key(dir: &str, spec: &str) -> PathBuf {
-    PathBuf::from(format!("<virtual:{dir}\0{spec}>"))
+    let path = if spec.starts_with('.') {
+        normalize_path(&Path::new(dir).join(spec))
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        spec.to_string()
+    };
+    PathBuf::from(format!("<virtual:{path}>"))
 }
 
 fn native_register_virtual_mock(
@@ -7815,7 +7969,7 @@ fn native_resolve_spec_scoped(
 ) {
     let dir = args.get(0).to_rust_string_lossy(scope);
     let spec = args.get(1).to_rust_string_lossy(scope);
-    if let Some(abs) = mock_key(&spec, Path::new(&dir)) {
+    if let Some(abs) = runtime_mock_key(&spec, Path::new(&dir)) {
         if let Some(v) = v8::String::new(scope, &abs.to_string_lossy()) {
             rv.set(v.into());
         }
@@ -7842,7 +7996,7 @@ fn native_unmock_scoped(
 ) {
     let dir = args.get(0).to_rust_string_lossy(scope);
     let spec = args.get(1).to_rust_string_lossy(scope);
-    if let Some(abs) = mock_key(&spec, Path::new(&dir)) {
+    if let Some(abs) = runtime_mock_key(&spec, Path::new(&dir)) {
         REGISTRY.with(|r| {
             let mut reg = r.borrow_mut();
             reg.mocks.remove(&abs);
@@ -9633,6 +9787,10 @@ impl FrameworkSnapshot {
         scope: &mut v8::PinScope<'s, '_, ()>,
         dom: bool,
     ) -> v8::Local<'s, v8::Context> {
+        // Microtasks run only where the host drains them, as Node's do: after each callback the
+        // host makes into JS, its nextTicks first, then its promise jobs (drain_microtasks).
+        // V8's automatic checkpoint ran the promise jobs first, as the call returned.
+        scope.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
         if dom && self.references.is_some() {
             let index = turbo_dom_browser_env::browser_env::SNAPSHOT_WINDOW_CONTEXT;
             // invariant: a blob with references is a snapshot_blob_with one, which holds it
@@ -10003,6 +10161,7 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__ttRequireResolve", native_require_resolve);
     bind_fn(scope, global, "__ttRequireStack", native_require_stack);
     bind_fn(scope, global, "__ttCache", native_require_cache);
+    bind_fn(scope, global, "__ttRunMicrotasks", run_microtasks);
     bind_fn(scope, global, "__fs_existsSync", fs_exists_sync);
     bind_fn(scope, global, "__fs_readdir", fs_readdir);
     bind_fn(scope, global, "__fs_stat", fs_stat);
@@ -10014,6 +10173,74 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__fs_copyFile", fs_copy_file);
     bind_fn(scope, global, "__fs_remove", fs_remove);
     bind_fn(scope, global, "__fs_symlinkSync", fs_symlink_sync);
+    // fs access / chmod / rename / open and FileHandle descriptors (turbo-test#420)
+    #[cfg(unix)]
+    {
+        bind_fn(
+            scope,
+            global,
+            "__fs_access",
+            crate::fs_handles::native_access,
+        );
+        bind_fn(scope, global, "__fs_chmod", crate::fs_handles::native_chmod);
+        bind_fn(
+            scope,
+            global,
+            "__fs_rename",
+            crate::fs_handles::native_rename,
+        );
+        bind_fn(
+            scope,
+            global,
+            "__fs_openFlags",
+            crate::fs_handles::native_open_flags,
+        );
+        bind_fn(scope, global, "__fs_open", crate::fs_handles::native_open);
+        bind_fn(scope, global, "__fs_read", crate::fs_handles::native_read);
+        bind_fn(scope, global, "__fs_write", crate::fs_handles::native_write);
+        bind_fn(scope, global, "__fs_fdOp", crate::fs_handles::native_fd_op);
+    }
+    // process.uptime / memoryUsage / cpuUsage / resourceUsage / umask (turbo-test#419)
+    crate::process_usage::mark_start();
+    bind_fn(
+        scope,
+        global,
+        "__ttUptime",
+        crate::process_usage::native_uptime,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttHeapUsage",
+        crate::process_usage::native_heap_usage,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttResidentSetSize",
+        crate::process_usage::native_resident_set_size,
+    );
+    #[cfg(unix)]
+    {
+        bind_fn(
+            scope,
+            global,
+            "__ttCpuUsage",
+            crate::process_usage::native_cpu_usage,
+        );
+        bind_fn(
+            scope,
+            global,
+            "__ttResourceUsage",
+            crate::process_usage::native_resource_usage,
+        );
+        bind_fn(
+            scope,
+            global,
+            "__ttUmask",
+            crate::process_usage::native_umask,
+        );
+    }
     // process.cwd(): the process's working directory, as vitest's workers report it; os.tmpdir()
     // and os.homedir() as Node computes them
     let cwd = std::env::current_dir().map(|d| d.to_string_lossy().into_owned());
@@ -10053,6 +10280,24 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     );
     bind_fn(scope, global, "__ttIsIP", crate::node_compat::native_is_ip);
     bind_fn(scope, global, "__ttGzip", crate::node_compat::native_gzip);
+    bind_fn(
+        scope,
+        global,
+        "__ttZlibOpen",
+        crate::zlib_stream::native_zlib_open,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttZlibWrite",
+        crate::zlib_stream::native_zlib_write,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttZlibClose",
+        crate::zlib_stream::native_zlib_close,
+    );
     bind_fn(
         scope,
         global,
@@ -10105,10 +10350,33 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         }
     }
     install_host_env(scope, global);
+    run_js(scope, &process_ids_js(std::process::id(), host_parent_id()));
+    // the clock origins are per run, not the cached snapshot's creation time (#447, #448)
+    run_js(scope, "globalThis.__ttRunStart();");
     if crate::runtime_profile::is_node() {
         install_backend_natives(scope, global);
         crate::runtime_profile::install_backend(scope);
+    } else {
+        bind_fn(scope, global, "__ttActivateBackend", activate_backend);
     }
+}
+
+// A DOM context's first use of a backend capability (tty, zlib, child_process, crypto
+// ciphers, ...) installs the backend natives and payload into it, as vitest's jsdom has all of
+// Node. A reused context then counts as Node, so the next DOM file gets a fresh isolate.
+fn activate_backend(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    if crate::runtime_profile::is_node() {
+        return;
+    }
+    crate::runtime_profile::activate_node();
+    mark_reuse_backend();
+    let global = scope.get_current_context().global(scope);
+    install_backend_natives(scope, global);
+    crate::runtime_profile::install_backend(scope);
 }
 
 fn reset_backend_transports() {
@@ -10152,6 +10420,12 @@ fn install_backend_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Objec
         global,
         "__ttDecryptPkcs8",
         crate::encrypted_pkcs8::native_decrypt_pkcs8,
+    );
+    bind_fn(
+        scope,
+        global,
+        "__ttEncryptPkcs8",
+        crate::encrypted_pkcs8::native_encrypt_pkcs8,
     );
     bind_fn(
         scope,
@@ -10320,6 +10594,29 @@ fn install_host_env(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     );
 }
 
+/// process.pid / process.ppid as Node defines them: this host process's ids (per run, so not in
+/// the snapshot), pid an own read-only data property and ppid an own writable one. Without a
+/// parent id (non-unix hosts) ppid stays undefined rather than a made-up value.
+fn process_ids_js(pid: u32, ppid: Option<u32>) -> String {
+    let ppid = ppid.map_or(String::new(), |ppid| {
+        format!(", ppid: {{ value: {ppid}, writable: true, enumerable: true, configurable: true }}")
+    });
+    format!(
+        "Object.defineProperties(globalThis.process, {{ \
+         pid: {{ value: {pid}, writable: false, enumerable: true, configurable: true }}{ppid} }});"
+    )
+}
+
+#[cfg(unix)]
+fn host_parent_id() -> Option<u32> {
+    Some(std::os::unix::process::parent_id())
+}
+
+#[cfg(not(unix))]
+fn host_parent_id() -> Option<u32> {
+    None
+}
+
 /// Minimal JSON string encoder for embedding a Rust string as a JS string literal.
 fn json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -10340,6 +10637,16 @@ fn json_string(s: &str) -> String {
 }
 
 /// native fs.existsSync(path) -> bool
+/// Node's `runMicrotasks` binding: a host pump's callback scope runs one event's promise jobs
+/// before the next event (`__hostCallback` in runtime.js). A no-op inside a running checkpoint.
+fn run_microtasks(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    scope.perform_microtask_checkpoint();
+}
+
 fn fs_exists_sync(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -10351,8 +10658,8 @@ fn fs_exists_sync(
 
 /// The Node error code and description of an OS error (`EEXIST`, "file already exists"), as
 /// libuv names them; None for an error that is not one of these.
-fn errno_name(e: &std::io::Error) -> Option<(&'static str, &'static str)> {
-    const NAMES: [(i32, &str, &str); 9] = [
+pub(crate) fn errno_name(e: &std::io::Error) -> Option<(&'static str, &'static str)> {
+    const NAMES: [(i32, &str, &str); 10] = [
         (2, "ENOENT", "no such file or directory"),
         (13, "EACCES", "permission denied"),
         (17, "EEXIST", "file already exists"),
@@ -10362,6 +10669,7 @@ fn errno_name(e: &std::io::Error) -> Option<(&'static str, &'static str)> {
         (libc::ENOSYS, "ENOSYS", "function not implemented"),
         (libc::ENOTSUP, "ENOTSUP", "operation not supported"),
         (libc::ENAMETOOLONG, "ENAMETOOLONG", "name too long"),
+        (libc::EBADF, "EBADF", "bad file descriptor"),
     ];
     // ENOTEMPTY's number differs by OS (66 on macOS, 39 on Linux)
     if e.kind() == std::io::ErrorKind::DirectoryNotEmpty {
@@ -10509,20 +10817,23 @@ fn fs_copy_bytes(source: &str, destination: &str, flags: i32) -> std::io::Result
     fs_copy_stream(input, output)
 }
 
-fn throw_fs_copy_error(
+/// Node's error for a two-path call (`copyfile`, `rename`): `CODE: description, syscall 'src' ->
+/// 'dest'` with `path` and `dest`.
+pub(crate) fn throw_fs_dest_error(
     scope: &mut v8::PinScope,
     error: &std::io::Error,
+    syscall: &str,
     source: &str,
     destination: &str,
 ) {
     let (code, description) = errno_name(error).unwrap_or(("EIO", "i/o error"));
-    let message = format!("{code}: {description}, copyfile '{source}' -> '{destination}'");
+    let message = format!("{code}: {description}, {syscall} '{source}' -> '{destination}'");
     let message = v8::String::new(scope, &message).unwrap();
     let exception = v8::Exception::error(scope, message);
     let object = exception.cast::<v8::Object>();
     for (key, value) in [
         ("code", code),
-        ("syscall", "copyfile"),
+        ("syscall", syscall),
         ("path", source),
         ("dest", destination),
     ] {
@@ -10545,7 +10856,7 @@ fn fs_copy_file(
     let destination = args.get(1).to_rust_string_lossy(scope);
     let flags = args.get(2).int32_value(scope).unwrap_or(0);
     if let Err(error) = fs_copy_bytes(&source, &destination, flags) {
-        throw_fs_copy_error(scope, &error, &source, &destination);
+        throw_fs_dest_error(scope, &error, "copyfile", &source, &destination);
     }
 }
 
@@ -10585,12 +10896,17 @@ fn fs_symlink_sync(
 
 /// Throw Node's error for a failed fs call: `ENOENT: no such file or directory, scandir '<path>'`
 /// with its `errno` (negative), `code`, `syscall` and `path`.
-fn throw_fs_error(scope: &mut v8::PinScope, e: &std::io::Error, syscall: &str, path: &str) {
+pub(crate) fn throw_fs_error(
+    scope: &mut v8::PinScope,
+    e: &std::io::Error,
+    syscall: &str,
+    path: &str,
+) {
     throw_fs_error_at(scope, e, syscall, Some(path));
 }
 
 /// throw_fs_error for a call Node reports without a path (`EISDIR: …, read`).
-fn throw_fs_error_at(
+pub(crate) fn throw_fs_error_at(
     scope: &mut v8::PinScope,
     e: &std::io::Error,
     syscall: &str,
@@ -10806,13 +11122,23 @@ fn fs_stat(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv
         Ok(m) => m,
         Err(e) => return throw_fs_error(scope, &e, if lstat { "lstat" } else { "stat" }, &p),
     };
+    let fields = stat_fields(&m);
+    let items: Vec<v8::Local<v8::Value>> = fields
+        .iter()
+        .map(|v| v8::Number::new(scope, *v).into())
+        .collect();
+    rv.set(v8::Array::new_with_elements(scope, &items).into());
+}
+
+/// Node's Stats fields of `m`, in fs_stat's order (also fstat's, turbo-test#420).
+pub(crate) fn stat_fields(m: &std::fs::Metadata) -> [f64; 14] {
     let ms = |t: std::io::Result<std::time::SystemTime>| {
         t.ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0.0, |d| d.as_secs_f64() * 1000.0)
     };
     #[cfg(unix)]
-    let fields = {
+    let fields: [f64; 14] = {
         use std::os::unix::fs::MetadataExt;
         let ctime = m.ctime() as f64 * 1000.0 + m.ctime_nsec() as f64 / 1e6;
         [
@@ -10833,7 +11159,7 @@ fn fs_stat(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv
         ]
     };
     #[cfg(not(unix))]
-    let fields = {
+    let fields: [f64; 14] = {
         let mode = if m.is_dir() { 0o040755 } else { 0o100644 };
         let modified = ms(m.modified());
         [
@@ -10853,11 +11179,7 @@ fn fs_stat(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv
             ms(m.created()),
         ]
     };
-    let items: Vec<v8::Local<v8::Value>> = fields
-        .iter()
-        .map(|v| v8::Number::new(scope, *v).into())
-        .collect();
-    rv.set(v8::Array::new_with_elements(scope, &items).into());
+    fields
 }
 
 /// Node builtin module names we shim; each has an entry in runtime.js `__nodeBuiltins` (a unit
@@ -10935,6 +11257,9 @@ pub struct TestReport {
     pub logs: Vec<(String, String, String)>,
     /// ms the drive loop's clock jumped while the tests ran (turbo-test#95).
     pub waited_ms: f64,
+    /// The messages of the file task's own errors (its top-level hooks'), in order: vitest's JSON
+    /// `message` is the first (turbo-test#426).
+    pub file_errors: Vec<String>,
 }
 
 /// A test file's snapshot outcome, as @vitest/snapshot's `SnapshotResult` (turbo-test#73).
@@ -11601,10 +11926,11 @@ fn persist_entry_dir(scope: &mut v8::PinScope, entry_abs: &Path) {
     }
 }
 
-struct FreshBackendCleanup(bool);
+// Read when the file ends: a DOM file may have activated the backend on first use.
+struct FreshBackendCleanup;
 impl Drop for FreshBackendCleanup {
     fn drop(&mut self) {
-        if self.0 {
+        if crate::runtime_profile::is_node() {
             reset_backend_transports();
         }
     }
@@ -11621,10 +11947,11 @@ fn run_test_file_isolated(entry_abs: &Path, plan: &EntryPlan) -> Result<TestRepo
     // present). We time setup (isolate+context+natives) — the M3/M0 guardrail.
     let setup_start = std::time::Instant::now();
     let isolate = &mut v8::Isolate::new(isolate_params());
-    let _backend_cleanup = FreshBackendCleanup(crate::runtime_profile::is_node());
+    let _backend_cleanup = FreshBackendCleanup;
     isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
     isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
     crate::heap_guard::install(isolate);
+    crate::error_stack::install(isolate);
     crate::heap_guard::arm();
     // Coverage: attach an inspector to this isolate BEFORE entering scopes (needs &mut isolate).
     let mut collector =
@@ -11893,9 +12220,18 @@ fn log_heap(scope: &mut v8::PinScope, entry: &Path, recycled: bool) {
 thread_local! {
     static REUSE_PROFILE: std::cell::Cell<Option<crate::runtime_profile::RuntimeProfile>> = const { std::cell::Cell::new(None) };
 }
+thread_local! {
+    // a reused DOM context activated the backend: neither profile may reuse it
+    static REUSE_MIXED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn mark_reuse_backend() {
+    REUSE_MIXED.with(|mixed| mixed.set(true));
+}
 fn select_reuse_profile(profile: crate::runtime_profile::RuntimeProfile) {
     let previous = REUSE_PROFILE.with(|previous| previous.get());
-    if previous.is_some_and(|previous| previous != profile) {
+    if REUSE_MIXED.with(|mixed| mixed.replace(false))
+        || previous.is_some_and(|previous| previous != profile)
+    {
         end_worker_reuse();
     }
     REUSE_PROFILE.with(|previous| previous.set(Some(profile)));
@@ -11915,6 +12251,7 @@ fn run_test_file_reused(entry_abs: &Path, plan: &EntryPlan) -> Result<TestReport
             isolate.set_host_initialize_import_meta_object_callback(import_meta_callback);
             isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
             crate::heap_guard::install(&mut isolate);
+            crate::error_stack::install(&mut isolate);
             *iso_cell.borrow_mut() = Some(isolate);
         }
     });
@@ -11989,7 +12326,8 @@ fn run_test_file_reused(entry_abs: &Path, plan: &EntryPlan) -> Result<TestReport
 /// outliving the isolate. No-op when reuse was never used.
 pub fn end_worker_reuse() {
     let previous = REUSE_PROFILE.with(|previous| previous.take());
-    if previous == Some(crate::runtime_profile::RuntimeProfile::Node) {
+    let mixed = REUSE_MIXED.with(|mixed| mixed.replace(false));
+    if mixed || previous == Some(crate::runtime_profile::RuntimeProfile::Node) {
         reset_backend_transports();
     }
     if REUSE_ISO.with(|i| i.borrow().is_none()) {
@@ -12069,6 +12407,7 @@ impl Default for JestGlobalRealm {
     fn default() -> Self {
         let _profile = crate::runtime_profile::RuntimeProfile::Node.enter();
         let mut isolate = v8::Isolate::new(isolate_params());
+        crate::error_stack::install(&mut isolate);
         let context = {
             let isolate = &mut isolate;
             v8::scope!(let scope, isolate);
@@ -12553,6 +12892,7 @@ fn drive_tests_bounded(
         })
         .collect();
     let waited_ms = f64::from(get_num(scope, "waited_ms"));
+    let file_errors = string_array(scope, summary, "file_errors");
     Ok(TestReport {
         passed,
         failed,
@@ -12565,6 +12905,7 @@ fn drive_tests_bounded(
         empty_suites,
         logs,
         waited_ms,
+        file_errors,
     })
 }
 

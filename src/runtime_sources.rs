@@ -36,6 +36,10 @@ pub(crate) fn shared_runtime_source() -> String {
                 include_str!("node_buffer_byte_length.js"),
             ),
             (
+                "/* __TT_NODE_BUFFER_OPS__ */",
+                include_str!("node_buffer_ops.js"),
+            ),
+            (
                 "/* __TT_NODE_PORTS__ */",
                 include_str!("node_message_ports.js"),
             ),
@@ -48,7 +52,23 @@ pub(crate) fn shared_runtime_source() -> String {
                 "/* __TT_NODE_WARNINGS__ */",
                 include_str!("node_warnings.js"),
             ),
+            (
+                "/* __TT_NODE_PROCESS_USAGE__ */",
+                include_str!("node_process_usage.js"),
+            ),
+            (
+                "/* __TT_NODE_FS_HANDLES__ */",
+                include_str!("node_fs_handles.js"),
+            ),
+            (
+                "/* __TT_NODE_FS_CALLBACKS__ */",
+                include_str!("node_fs_callbacks.js"),
+            ),
             ("/* __TT_NODE_STREAMS__ */", include_str!("node_streams.js")),
+            (
+                "/* __TT_NODE_DIAGNOSTICS_CHANNEL__ */",
+                include_str!("node_diagnostics_channel.js"),
+            ),
         ],
     )
 }
@@ -70,6 +90,7 @@ pub(crate) fn backend_runtime_source() -> String {
                 include_str!("node_blocklist.js"),
             ),
             ("/* __TT_NODE_TCP__ */", include_str!("node_tcp.js")),
+            ("/* __TT_NODE_ZLIB__ */", include_str!("node_zlib.js")),
             (
                 "/* __TT_NODE_ZLIB_CONSTANTS__ */",
                 include_str!("node_zlib_constants.js"),

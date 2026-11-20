@@ -40,7 +40,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # Node 26: the oracle tests run fixtures under `node --test` and assert the Node 26
+          # behaviour turbo-test implements (Buffer internals etc. differ in Node 22).
+          node-version: 26
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -160,10 +162,21 @@ jobs:
     name: coverage (tarpaulin, fail-under)
     runs-on: ubuntu-latest
     steps:
+      # The instrumented build of every test binary outgrew the hosted runner's free disk
+      # ("No space left on device" in 0.8.5). Drop preinstalled SDKs this job never uses.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # Node 26: the oracle tests run fixtures under `node --test` and assert the Node 26
+          # behaviour turbo-test implements (Buffer internals etc. differ in Node 22).
+          node-version: 26
       # Pinned: each rustc release maps LLVM coverage regions to source lines differently, so
       # `stable` moving (1.99.1 -> 1.100.0 on 2026-11-09) shifted every file's line totals and
       # the gate's percentage with no code change (99.92% -> 99.54%). Bump deliberately, and

@@ -8,21 +8,37 @@ function __aesBytes(value, encoding, strings = true) {
   if (typeof value === 'string' && !strings) throw new TypeError('Expected a byte view');
   return __hashBytes(value, encoding);
 }
+// Node 26's argument checks, in its order (#450): the cipher, key and iv types, then the cipher
+// name, key length, iv and auth tag. GCM tags of 4 / 8 bytes and IVs other than 12 bytes are
+// valid in Node but beyond this AES-256-GCM implementation, which reports them explicitly.
+const __aesKeyTypes = 'string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey';
+const __aesIvTypes = 'string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView';
+const __aesIsBytes = (value) => typeof value === 'string' || value instanceof ArrayBuffer || ArrayBuffer.isView(value);
+function __aesArgType(name, types, value) {
+  return __aesError(`The "${name}" argument must be of type ${types}. Received ${__bufferReceived(value)}`, 'ERR_INVALID_ARG_TYPE', TypeError);
+}
+function __aesCheckArgs(algorithm, key, iv) {
+  if (typeof algorithm !== 'string') throw __aesArgType('cipher', 'string', algorithm);
+  if (!__aesIsBytes(key)) throw __aesArgType('key', __aesKeyTypes, key);
+  if (iv !== null && !__aesIsBytes(iv)) throw __aesArgType('iv', __aesIvTypes, iv);
+}
 function __aesTagLength(value) {
   if (value === undefined) return undefined;
-  if (!Number.isInteger(value)) throw __aesError('Invalid authentication tag length', 'ERR_CRYPTO_INVALID_AUTH_TAG', RangeError);
-  if (value < 12 || value > 16) throw __aesError('Supported AES-GCM authentication tag lengths are 12 through 16 bytes', 'ERR_CRYPTO_INVALID_AUTH_TAG', RangeError);
+  if (!Number.isInteger(value)) throw __aesError(`The property 'options.authTagLength' is invalid. Received ${__util.inspect(value)}`, 'ERR_INVALID_ARG_VALUE', TypeError);
+  if (value === 4 || value === 8) throw __aesError('AES-GCM authentication tags of 4 or 8 bytes are not supported by turbo-test', 'ERR_CRYPTO_INVALID_AUTH_TAG', RangeError);
+  if (value < 12 || value > 16) throw __aesError(`Invalid authentication tag length: ${value}`, 'ERR_CRYPTO_INVALID_AUTH_TAG', TypeError);
   return value;
 }
 function __aesMaterial(key, iv) {
   const material = __aesBytes(key);
-  const nonce = __aesBytes(iv);
   if (material.length !== 32) throw __aesError('Invalid key length', 'ERR_CRYPTO_INVALID_KEYLEN', RangeError);
+  const nonce = iv === null ? new Uint8Array(0) : __aesBytes(iv);
+  if (nonce.length === 0) throw __aesError('Invalid initialization vector', 'ERR_CRYPTO_INVALID_IV', TypeError);
   if (nonce.length !== 12) throw __aesError('AES-256-GCM currently requires a 12-byte IV', 'ERR_CRYPTO_INVALID_IV', TypeError);
   return { material, nonce };
 }
 function __aesCreateState(algorithm, key, iv, options, decrypt) {
-  if (typeof algorithm !== 'string') throw new TypeError('algorithm must be a string');
+  __aesCheckArgs(algorithm, key, iv);
   if (algorithm.toLowerCase() !== 'aes-256-gcm') throw __aesError('Unsupported cipher: ' + algorithm, 'ERR_CRYPTO_UNKNOWN_CIPHER');
   options = options || {};
   const { material, nonce } = __aesMaterial(key, iv);

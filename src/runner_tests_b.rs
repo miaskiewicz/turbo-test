@@ -256,6 +256,25 @@ fn json_string_escapes_for_a_js_literal() {
 }
 
 #[test]
+fn process_ids_define_pid_and_only_a_known_ppid() {
+    let both = process_ids_js(7, Some(3));
+    assert!(
+        both.contains("pid: { value: 7, writable: false, enumerable: true"),
+        "{both}"
+    );
+    assert!(
+        both.contains("ppid: { value: 3, writable: true, enumerable: true"),
+        "{both}"
+    );
+    let pid_only = process_ids_js(7, None);
+    assert!(
+        pid_only.contains("pid: { value: 7, writable: false"),
+        "{pid_only}"
+    );
+    assert!(!pid_only.contains("ppid"), "{pid_only}");
+}
+
+#[test]
 fn builtin_and_test_api_module_names() {
     for s in [
         "fs",
@@ -784,6 +803,32 @@ fn the_default_cache_dir_is_per_build() {
     assert_eq!(env!("TT_BUILD_ID").len(), 16);
 }
 
+/// A TURBO_CACHE_DIR is a root shared across builds (a persisted CI cache, an upgrade): this
+/// build's artifacts, startup snapshots included, live in its own `<version>-<build id>` folder.
+#[test]
+fn a_custom_cache_root_is_per_build_too() {
+    let d = build_cache_dir(Path::new("/ci/cache"));
+    assert_eq!(d, Path::new("/ci/cache").join(BUILD_TAG));
+    assert_eq!(
+        BUILD_TAG,
+        format!("{}-{}", env!("CARGO_PKG_VERSION"), env!("TT_BUILD_ID"))
+    );
+    assert_eq!(
+        default_cache_dir(Path::new("/t")),
+        build_cache_dir(Path::new("/t/turbo-test-cache"))
+    );
+    // every artifact path (here a startup snapshot's) is under the build's folder
+    let blob = saved_blob_path("framework", 1);
+    assert_eq!(
+        blob.parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy(),
+        BUILD_TAG
+    );
+}
+
 /// turbo-test#209: a quote or backtick inside a comment does not open a string for the
 /// shared-let rewrite. payroll-app's RegistrationFields.test.tsx has a JSX comment with
 /// `undefined` in backticks above its `useCurrentEntity: () => currentEntity` factory; the
@@ -964,6 +1009,38 @@ fn native_binary_boundaries_reject_non_views_and_malformed_clone_frames() {
                 r#"JSON.stringify([[],[255],[255,15],[255,15,255],[0,0]].map(bytes=>{try{__ttV8Deserialize(new Uint8Array(bytes));return false;}catch(e){return e instanceof Error;}}))"#
             ),
             "[true,true,true,true,true]"
+        );
+    });
+}
+
+#[test]
+fn native_zlib_handles_return_bytes_and_throw_node_errors() {
+    with_context(|scope, _| {
+        assert_eq!(
+            eval(
+                scope,
+                r#"(() => {
+                  const fail = (fn) => { try { fn(); return 'none'; } catch (e) { return [e.constructor.name, e.message, e.code, e.errno].join('|'); } };
+                  const enc = __ttZlibOpen(5, 9), dec = __ttZlibOpen(6, 6);
+                  const packed = __ttZlibWrite(enc, new TextEncoder().encode('native zlib'), 4);
+                  const text = new TextDecoder().decode(__ttZlibWrite(dec, packed, 4));
+                  const bad = __ttZlibOpen(2, 6), one = __ttZlibOpen(1, 6), all = __ttZlibOpen(3, 6);
+                  const seen = [packed instanceof Uint8Array, text,
+                    fail(() => __ttZlibOpen(42, 6)),
+                    fail(() => __ttZlibOpen(9, 6, new Uint32Array([7, 0]))),
+                    new TextDecoder().decode(__ttZlibWrite(__ttZlibOpen(8, 6), __ttZlibWrite(__ttZlibOpen(9, 6, new Uint32Array([1, 5, 2, 18])), new TextEncoder().encode('brotli'), 4), 4)),
+                    fail(() => __ttZlibWrite(__ttZlibOpen(8, 6), new TextEncoder().encode('nope nope nope'), 0)),
+                    fail(() => __ttZlibWrite(enc, {}, 0)),
+                    fail(() => __ttZlibWrite(enc, new Uint8Array(1), 0)),
+                    fail(() => __ttZlibWrite(bad, new Uint8Array([255, 255, 255, 255]), 0)),
+                    fail(() => __ttZlibWrite(__ttZlibOpen(4, 6), new Uint8Array(0), 4))];
+                  __ttZlibClose(one);
+                  __ttZlibClose();
+                  seen.push(fail(() => __ttZlibWrite(all, new Uint8Array(0), 0)));
+                  return JSON.stringify(seen);
+                })()"#
+            ),
+            r#"[true,"native zlib","Error|invalid zlib mode|ERR_INVALID_ARG_VALUE|","Error|Initialization failed|ERR_ZLIB_INITIALIZATION_FAILED|","brotli","Error|Decompression failed|ERR__ERROR_FORMAT_PADDING_2|-15","Error|Expected a byte view||","Error|zlib binding closed|ERR_ZLIB_BINDING_CLOSED|","Error|invalid compressed data|Z_DATA_ERROR|-3","Error|unexpected end of file|Z_BUF_ERROR|-5","Error|zlib binding closed|ERR_ZLIB_BINDING_CLOSED|"]"#
         );
     });
 }

@@ -15,6 +15,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Where this build keeps its cache entries under a TURBO_CACHE_DIR `root`: its own
+/// `<version>-<build id>` folder, so a root shared across builds never mixes them.
+pub fn build_cache_dir(root: &Path) -> PathBuf {
+    root.join(format!(
+        "{}-{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("TT_BUILD_ID")
+    ))
+}
+
 /// The repository root (where `fixtures/`, `node_modules/` and `cli.js` live).
 pub fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -28,6 +38,11 @@ pub struct Project {
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
 impl Project {
+    /// This build's cache folder under the TURBO_CACHE_DIR the harness gives each run.
+    pub fn build_cache(&self) -> PathBuf {
+        build_cache_dir(&self.dir.join(".tt-cache"))
+    }
+
     /// Create `<tmp>/turbo-test-it/<name>-<pid>-<n>`. `name` should identify the test.
     pub fn new(name: &str) -> Self {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);

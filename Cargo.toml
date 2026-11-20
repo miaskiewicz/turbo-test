@@ -1,6 +1,6 @@
 [package]
 name = "turbo-test"
-version = "0.8.4"
+version = "0.8.5"
 edition = "2021"
 license = "MIT"
 description = "A blazing-fast native test runner — drop-in replacement for Vitest"
@@ -37,7 +37,7 @@ path = "src/bin/m5_affected.rs"
 v8 = { package = "turbo-dom-v8", version = "~150.4.2" }
 # The browser environment (window, document, CSSOM, forms, events) the runner
 # installs into each test context.
-turbo-dom-browser-env = "=0.8.4"
+turbo-dom-browser-env = "=0.8.5"
 oxc_allocator = "0.134"
 oxc_parser = "0.134"
 oxc_span = "0.134"
@@ -70,6 +70,10 @@ rand_chacha = "0.3.1"
 aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc", "zeroize"] }
 zeroize = { version = "1", features = ["alloc"] }
 flate2 = "1"
+# zlib's Brotli streams: Dropbox's pure-Rust port of Google's brotli (BSD-3-Clause AND MIT)
+brotli = "9"
+# its decoder (named for the decoder parameter type)
+brotli-decompressor = "6.3"
 # TextDecoder's legacy encodings (Shift_JIS, UTF-16, windows-125x, ...): the WHATWG Encoding
 # Standard implementation (turbo-test#119)
 encoding_rs = "0.8"

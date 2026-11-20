@@ -47,9 +47,23 @@ function __httpEnsurePoll() {
 function __httpPoll() {
   __httpPollTimer = null;
   const events = __httpNative('poll');
-  for (const event of events) __httpEvent(event);
+  for (const group of __httpEventGroups(events)) __hostCallback(__httpDispatchGroup, group);
   if (__httpConnections.size || __httpServers.size) __httpEnsurePoll();
 }
+// One socket read is one Node callback: its parser emits a message's headers, body and end
+// before the read's nextTicks and promise jobs run. Consecutive parsed events of a connection
+// in a poll come from one read, so they share a host callback scope.
+const __httpParsed = (event) => event.kind === 'headers' || event.kind === 'data' || event.kind === 'end';
+function __httpEventGroups(events) {
+  const groups = [];
+  for (const event of events) {
+    const last = groups[groups.length - 1];
+    if (last && __httpParsed(event) && __httpParsed(last[0]) && last[0].id === event.id) last.push(event);
+    else groups.push([event]);
+  }
+  return groups;
+}
+function __httpDispatchGroup(group) { for (const event of group) __httpEvent(event); }
 function __httpReset() {
   if (__httpPollTimer !== null) __realTimers.clearTimeout(__httpPollTimer);
   __httpPollTimer = null;
@@ -201,6 +215,11 @@ class __HttpOutgoing extends __Writable {
   constructor(connection) {
     super({ autoDestroy: false }); this._connection = connection;
     this._headers = new Map(); this.headersSent = false; this._chunked = false; this._bodySize = 0;
+    this.useChunkedEncodingByDefault = true; this._contentLength = undefined;
+  }
+  end(chunk, encoding, callback) {
+    if (!this.headersSent) this._contentLength = __httpBodyLength(typeof chunk === 'function' ? null : chunk, encoding);
+    return super.end(chunk, encoding, callback);
   }
   setHeader(name, value) {
     if (this.headersSent) throw __streamError('ERR_HTTP_HEADERS_SENT', 'Headers already sent');
@@ -239,11 +258,24 @@ class __HttpOutgoing extends __Writable {
   setFraming() {
     __httpConnectionFraming(this);
     if (this._noBody()) return;
-    if (!this._headers.has('content-length') && !this._headers.has('transfer-encoding')) this._headers.set('transfer-encoding', { name: 'Transfer-Encoding', value: 'chunked' });
+    if (!this._headers.has('content-length') && !this._headers.has('transfer-encoding')) __httpDefaultFraming(this);
     this._chunked = __httpTransferFraming(this);
   }
   _destroy(error, callback) { __httpClose(this._connection, error, this); callback(error); }
 }
+// Node's _storeHeader without explicit framing headers: GET/HEAD/DELETE/OPTIONS/TRACE/CONNECT
+// requests (useChunkedEncodingByDefault false) send their body bare; other messages use
+// Content-Length for a body handed whole to end() before the headers went out, else chunked.
+function __httpDefaultFraming(message) {
+  if (!message.useChunkedEncodingByDefault) return;
+  if (typeof message._contentLength === 'number') message._headers.set('content-length', { name: 'Content-Length', value: String(message._contentLength) });
+  else message._headers.set('transfer-encoding', { name: 'Transfer-Encoding', value: 'chunked' });
+}
+function __httpBodyLength(chunk, encoding) {
+  if (chunk == null) return 0;
+  return Buffer.byteLength(chunk, typeof encoding === 'string' ? encoding : undefined);
+}
+const __httpBodilessMethods = new Set(['GET', 'HEAD', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT']);
 function __httpConnectionFraming(message) {
   const connection = String(message.getHeader('connection') || 'close').toLowerCase();
   if (connection !== 'close') throw __streamError('ERR_HTTP_UNSUPPORTED_KEEP_ALIVE', 'Persistent HTTP connections are not supported');
@@ -306,6 +338,7 @@ class __HttpRequest extends __HttpOutgoing {
     const connection = { id: 0, callbacks: [], incoming: null, outgoing: null };
     super(connection); this._timeoutDelay = 0; this._timeoutId = null;
     connection.outgoing = this; this.method = options.method; this.path = options.path;
+    this.useChunkedEncodingByDefault = !__httpBodilessMethods.has(options.method);
     if (callback) this.once('response', callback);
     this.setHeader('Host', options.hostname + ':' + options.port);
     for (const [name, value] of Object.entries(options.headers || {})) this.setHeader(name, value);

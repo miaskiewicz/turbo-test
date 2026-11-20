@@ -5,6 +5,92 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.8.5] — 2026-11-19 — turbo-dom 0.8.5, Jest/Node parity from the full Flux backend suite
+
+Validated against the full flux-apis backend unit suite (1,582 files, 36,552 tests, real Jest 30
+as the oracle) and the v0.8.5 milestone issues; every behaviour below was checked against real
+Node 26.11, Jest 30 or vitest 5.1 first.
+
+### Added
+- `--compat jest|vitest|auto` / `TURBO_TEST_COMPAT` force Jest or vitest behaviour for the whole
+  run instead of detecting it per file from the nearest config (the flag wins). It drives every
+  Jest/vitest split: `.each`, `toThrow`, hook return values, `toEqual` on arrays, automock `new`.
+- Jest `test.failing` / `it.failing` with `.only`, `.skip`, `.concurrent` and `.each` (#402). Only
+  the body is inverted, as in jest-circus, so hook and `expect.assertions` failures still fail;
+  vitest's `it.fails` is unchanged. `it.only.each`, `it.skip.each`, `describe.only.each` and
+  `describe.skip.each` are new in both modes.
+- `node:diagnostics_channel` `tracingChannel` (traceSync / tracePromise / traceCallback) and
+  bound stores (`bindStore` / `runStores`) (#407). Real Pino calls `tracingChannel` at load, so
+  every spec importing it failed to load (49 Flux files).
+- Streaming zlib — `Deflate`/`Inflate`/`DeflateRaw`/`InflateRaw`/`Gzip`/`Gunzip`/`Unzip`, the
+  `create*` factories, `flush`, the callback/promisified/Sync helpers — on stateful native
+  handles, and real Brotli streams and helpers with Node's params, errors and `BROTLI_*`
+  constants (pure-Rust `brotli` crate). archiver / zip-stream subclass `zlib.DeflateRaw`;
+  `zlib.gzip` used to hand back its input unchanged (#404).
+- Buffer: instance `compare` (#408), `write` (#409), internal `latin1Slice`/…`*Write` methods
+  busboy calls (#418), `isEncoding` (#434), float/double, BigInt64 and 1–6-byte integer
+  reads/writes, `indexOf`/`lastIndexOf`/`includes`, all with Node's validation and messages.
+- `process.uptime`, `memoryUsage`, `cpuUsage`, `resourceUsage`, `umask` with real host figures
+  (#419); `process.pid` / `ppid` are the host's ids (they were undefined).
+- `fs.promises.access`/`chmod`/`rename`/`realpath`/`open` (FileHandle), their `*Sync` forms
+  (#420) and the callback-style fs API (#433), as real syscalls with Node's errors and timing.
+- `KeyObject.export` / `generateKeyPairSync` encrypted PKCS#8 (PBES2, PBKDF2-HMAC-SHA256,
+  AES-CBC / DES-EDE3-CBC), as Node / OpenSSL 3 (#403).
+- `node:stream` Writable `cork`/`uncork`/`_writev`, `decodeStrings: false`, `defaultEncoding` /
+  `setDefaultEncoding`, `_construct`; Readable `unpipe`.
+
+### Fixed
+- A DOM-environment file can use Node's backend built-ins (tty, zlib, child_process, http, net,
+  vm, async_hooks, crypto ciphers) again, as under vitest's jsdom: the backend is activated on
+  their first use. Since 0.8.4's payload split (#390) they threw "requires the Node backend
+  runtime", so suites importing @playwright/test (which requires tty) failed to load. DOM files
+  that never touch them keep the lighter startup.
+- In Jest projects: `test.each`/`describe.each` titles and arguments follow jest-each 30 (#432;
+  199 Flux suites had different test names); `toThrow(errorInstance)` follows Jest's message
+  rule (#403); a hook's non-promise return value is not run as a vitest teardown (#417); an
+  automocked class honours `mockImplementation(() => obj)` under `new` (#421); `toEqual` ignores
+  undefined array items (#423). vitest projects keep vitest's behaviour.
+- Mocks: retained `jest.mock` factories read the test file's `mock`-prefixed consts while its
+  imports load (#401, #429); every hoisted mock is registered before a factory calls
+  `requireActual`/`importOriginal`, whatever the call order (#430); `jest.mock('fs')` replaces the
+  builtin for the test file and the app modules it loads (#405); virtual mocks are keyed by the
+  path Jest resolves (#405); automocked classes mock inherited statics (#406).
+- A failed assertion's diff could loop until the heap limit and abort the file ("JavaScript heap
+  out of memory"): the diff-sequences port read the middle snake after recursion overwrote it.
+  It now matches `@jest/diff-sequences` on 270k random inputs (#403).
+- Date: `class X extends Date` keeps X's prototype, so @date-fns/tz `TZDate` works (#416); the
+  default `Date`, `new Date()` and `performance.timeOrigin` read the host clock at each run —
+  they were frozen at the cached framework snapshot's creation (seconds to days stale) — and
+  `Date.now()` advances in synchronous code (#447, #448).
+- `error.stack`'s header is built on first read, as Node's PrepareStackTraceCallback does, so a
+  message or name set after `super()` (Nest's HttpException) appears (#424); `util.inspect` /
+  `%s` of renamed and stack-less errors follow Node's formatError (#437).
+- `new URL` serializes IPv6 hosts in compressed WHATWG form (#425); `util.isDeepStrictEqual` is
+  strict and key-order independent (#422); `Buffer.from` honours ArrayBuffer offsets/lengths as
+  shared views and throws `ERR_INVALID_ARG_TYPE` for unsupported input.
+- Node event-loop ordering: after every host callback (timer, immediate, socket, child pipe,
+  HTTP, MessagePort) its nextTicks run before its promise jobs (explicit microtask policy).
+  Writable calls `_write` synchronously like Node, written Buffers keep their identity, and a
+  TCP write a retired handle never sent completes as libuv does instead of hanging.
+- HTTP: client requests frame bodies like Node — no framing header on bodiless GET/HEAD/DELETE/
+  OPTIONS/TRACE/CONNECT (#435); `res.end(data)` before headers uses `Content-Length`.
+- A NAN / node-gyp addon (e.g. libxmljs2) that imports V8's or Node's C++ API now fails `require()`
+  saying turbo-test loads only Node-API addons, instead of naming a mangled symbol (#391).
+- A `TURBO_CACHE_DIR` cache is per build, like the default cache: a cache kept across upgrades
+  (e.g. a CI cache) served the previous build's transforms and startup snapshot.
+- `--help` / `--version` print usage / the version instead of running the suite (which could
+  rewrite snapshots); unimplemented vitest commands exit 1 (#427). The JSON reporter keeps a
+  top-level hook failure's message and, in jest projects, a timeout's message (#426); vitest
+  projects keep vitest 4.1.12's timeout output.
+- `crypto.createCipheriv` / `createDecipheriv` validate their arguments with Node's error codes,
+  messages and order (#450).
+
+### Release preparation
+- Consume turbo-dom / turbo-dom-layout / turbo-dom-browser-env 0.8.5 from crates.io (only
+  additions to the public API; runtime/layout changes) with the single turbo-dom-v8 150.4.2.
+  Align the Rust and npm packages at 0.8.5.
+- Deferred to 0.8.6 (#428, #431, #436, #438–#446) and 0.9.0 (#391 NAN addon support).
+
 ## [0.8.4] — 2026-11-18 — Node compatibility and shared DOM performance
 
 ### Added

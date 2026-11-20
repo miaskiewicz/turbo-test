@@ -65,10 +65,10 @@ function __deflateSync(input, options, decompress = false) {
   const level = __gzipLevel(__deflateOptions(options));
   return Buffer.from(globalThis.__ttGzip(__gzipBytes(input), decompress, level, true));
 }
-function __unsupportedDeflateStream() {
-  throw Object.assign(new Error('turbo-test: asynchronous and streaming deflate/inflate are unsupported; use the synchronous APIs'), {code: 'ERR_TURBO_UNSUPPORTED_ZLIB_STREAM'});
-}
-const __zlib = { createGzip: () => new __Duplex(), createGunzip: () => new __Duplex(), createDeflate: __unsupportedDeflateStream, createInflate: __unsupportedDeflateStream, createBrotliCompress: () => new __Duplex(), createBrotliDecompress: () => new __Duplex(), gzip: (_b, cb) => cb && cb(null, _b), gunzip: (_b, cb) => cb && cb(null, _b), gzipSync: (b, opts) => __gzipSync(b, opts), gunzipSync: (b, opts) => __gzipSync(b, opts, true), deflateSync: (b, opts) => __deflateSync(b, opts), inflateSync: (b, opts) => __deflateSync(b, opts, true), deflate: __unsupportedDeflateStream, inflate: __unsupportedDeflateStream }; __zlib.default = __zlib;
+/* __TT_NODE_ZLIB__ */
+// The streaming classes and one-shot helpers come from node_zlib.js; the established sync
+// gzip / deflate helpers keep their own path.
+const __zlib = Object.assign({}, __nodeZlib, { gzipSync: (b, opts) => __gzipSync(b, opts), gunzipSync: (b, opts) => __gzipSync(b, opts, true), deflateSync: (b, opts) => __deflateSync(b, opts), inflateSync: (b, opts) => __deflateSync(b, opts, true) }); __zlib.default = __zlib;
 /* __TT_NODE_ZLIB_CONSTANTS__ */
 const __tty = { isatty: () => false, ReadStream: __EventEmitter, WriteStream: __EventEmitter }; __tty.default = __tty;
 const __dns = { lookup: (_h, _o, cb) => { const c = typeof _o === 'function' ? _o : cb; if (c) c(null, '127.0.0.1', 4); }, resolve: (_h, cb) => cb && cb(null, []), promises: { lookup: () => Promise.resolve({ address: '127.0.0.1', family: 4 }), resolve: () => Promise.resolve([]) } }; __dns.default = __dns;
@@ -150,5 +150,5 @@ for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors
 __runtimeTaskCapture = __captureBackendAsyncContext;
 const __runtimePortResourceClass = __AsyncResource;
 __runtimeTaskResource = () => new __runtimePortResourceClass('MESSAGEPORT');
-__runtimeBackendResets.push(__resetAsyncHooks, __resetAsyncContext, __httpReset, __asyncProcessReset, __tcpReset);
+__runtimeBackendResets.push(__resetAsyncHooks, __resetAsyncContext, __httpReset, __asyncProcessReset, __tcpReset, () => globalThis.__ttZlibClose());
 __runtimeBackendInstalled = true;

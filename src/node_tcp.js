@@ -41,7 +41,7 @@ function __tcpPoll() {
   const events = __tcpNative('poll');
   const previous = __tcpTerminalBatch;
   __tcpTerminalBatch = __tcpTerminalIds(events);
-  try { for (const event of events) __tcpEvent(event); }
+  try { for (const event of events) __hostCallback(__tcpEvent, event); }
   finally { __tcpTerminalBatch = previous; }
   let progressed = events.length > 0;
   for (const socket of __tcpSockets.values()) if (socket._tcpCheckTimeout()) progressed = true;
@@ -242,8 +242,25 @@ function __tcpFinished(socket) {
   const callback = socket._tcpFinal; socket._tcpFinal = null;
   if (callback) callback();
 }
-function __tcpClosed(socket) { socket._tcpNativeClosed = true; __tcpSockets.delete(socket._tcpId); socket._tcpId = null; }
-function __tcpErrored(socket, event) { socket._tcpNativeClosed = true; socket.destroy(__tcpFailure(event.error)); }
+function __tcpClosed(socket) {
+  socket._tcpNativeClosed = true; __tcpSockets.delete(socket._tcpId); socket._tcpId = null;
+  __tcpRetirePendingWrite(socket, Object.assign(__tcpFailure({ code: 'EPIPE', message: 'write EPIPE' }), { syscall: 'write' }), false);
+}
+function __tcpErrored(socket, event) {
+  socket._tcpNativeClosed = true;
+  __tcpRetirePendingWrite(socket, __tcpFailure(event.error), true);
+}
+// As libuv completes a dying handle's write requests (Node calls every write callback once): a
+// write the retired handle never sent fails with `error` (the connection's error, or EPIPE
+// after a clean close), which destroys the socket; one it sent completes with null, after the
+// destroy a fatal error causes (Node's onWriteComplete on a destroyed stream).
+function __tcpRetirePendingWrite(socket, error, fatal) {
+  const pending = socket._tcpWrite;
+  socket._tcpWrite = null;
+  if (pending && !pending.sent) pending.callback(error);
+  if (fatal) socket.destroy(error);
+  if (pending && pending.sent) pending.callback(null);
+}
 class __TcpServer extends __EventEmitter {
   constructor(options = {}, listener) {
     super();

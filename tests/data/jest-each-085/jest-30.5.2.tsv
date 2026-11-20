@@ -1,0 +1,62 @@
+each.test.js	failed	s a d 1	Error: ARGS 2:"a"|1
+each.test.js	failed	s b d 2.5	Error: ARGS 2:"b"|2.5
+each.test.js	failed	i 7 f 3.7 d NaN	Error: ARGS 3:"7.9x"|"3.7"|"1.5y"
+each.test.js	failed	p "str"	Error: ARGS 1:"str"
+each.test.js	failed	p 42	Error: ARGS 1:42
+each.test.js	failed	p null	Error: ARGS 1:null
+each.test.js	failed	p undefined	Error: ARGS 1:u
+each.test.js	failed	p true	Error: ARGS 1:true
+each.test.js	failed	p {"a": 1, "b": [Object]}	Error: ARGS 1:{"a":1,"b":{"c":[1,2]}}
+each.test.js	failed	p [1, [Array]]	Error: ARGS 1:[1,[2,[3]]]
+each.test.js	failed	p 2024-01-02T03:04:05.000Z	Error: ARGS 1:date:2024-01-02T03:04:05.000Z
+each.test.js	failed	p [Function namedFn]	Error: ARGS 1:fn:namedFn
+each.test.js	failed	p [Function Thing]	Error: ARGS 1:fn:Thing
+each.test.js	failed	p "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL"	Error: ARGS 1:"LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL"
+each.test.js	failed	p -0	Error: ARGS 1:0
+each.test.js	failed	p NaN	Error: ARGS 1:null
+each.test.js	failed	j {"a":1}	Error: ARGS 1:{"a":1}
+each.test.js	failed	j [1,"x"]	Error: ARGS 1:[1,"x"]
+each.test.js	failed	j "s"	Error: ARGS 1:"s"
+each.test.js	failed	j [Circular]	Error: ARGS 1:cyclic
+each.test.js	failed	s { a: 1, b: [Object] } o %o O %O	Error: ARGS 1:{"a":1,"b":{"c":{"d":1}}}
+each.test.js	failed	s str o %o O %O	Error: ARGS 1:"str"
+each.test.js	failed	s [ 1, 2 ] o %o O %O	Error: ARGS 1:[1,2]
+each.test.js	failed	idx 0 num 1 pct % s x	Error: ARGS 2:"x"|"y"
+each.test.js	failed	pct value 100%s then %s	Error: ARGS 1:"100%s"
+each.test.js	failed	pct value 50%p then %s	Error: ARGS 1:"50%p"
+each.test.js	failed	flat 1	Error: ARGS 1:1
+each.test.js	failed	flat 2	Error: ARGS 1:2
+each.test.js	failed	flat 3	Error: ARGS 1:3
+each.test.js	failed	mixed null	Error: ARGS 1:null
+each.test.js	failed	mixed [1]	Error: ARGS 1:[1]
+each.test.js	failed	mixed [1,2]	Error: ARGS 1:[1,2]
+each.test.js	failed	more values 1	Error: ARGS 3:1|2|3
+each.test.js	failed	more placeholders 1 %s %p	Error: ARGS 1:1
+each.test.js	failed	long LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL	Error: ARGS 1:"LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL"
+each.test.js	failed	object s { a: 1 } and b	Error: ARGS 2:{"a":1}|"b"
+each.test.js	failed	object 1 deep {"c": "deep"} 0 $missing	Error: ARGS 1:{"a":1,"b":{"c":"deep"}}
+each.test.js	failed	object two [1] {"c": [Array]} 1 $missing	Error: ARGS 1:{"a":"two","b":{"c":[1]}}
+each.test.js	failed	object row p {"a": 1}	Error: ARGS 1:{"a":1}
+each.test.js	failed	object row p {"a": 2}	Error: ARGS 1:{"a":2}
+each.test.js	failed	object mixed $a { a: 1 }	Error: ARGS 1:{"a":1}
+each.test.js	failed	object mixed $a plain	Error: ARGS 1:"plain"
+each.test.js	failed	tagged 1 x {"k": [Object]} {"z": 1} 1 0 %s	Error: ARGS 1:{"a":1,"b":"x","obj":{"k":{"z":1}}}
+each.test.js	failed	tagged null [1, 2] undefined undefined undefined 1 %s	Error: ARGS 1:{"a":null,"b":[1,2]}
+each.test.js	failed	suite d1 1 > inner	Error: ARGS 2:"d1"|1
+each.test.js	failed	suite d2 2 > inner	Error: ARGS 2:"d2"|2
+each.test.js	failed	tsuite tx > inner	Error: ARGS 1:"tx"
+each.test.js	skipped	skipped 1	
+each.test.js	failed	concurrent c	Error: ARGS 1:"c"
+jest-only.test.js	passed	failing 1	
+jest-only.test.js	passed	failing 2	
+jest-only.test.js	failed	failing tagged t	Error: Failing test passed even though it was supposed to fail. Remove `.failing` to remove error.
+jest-only.test.js	failed	empty table %s	Error: Error: `.each` called with an empty Array of table data.
+jest-only.test.js	failed	tagged no data	Error: Error: `.each` called with a Tagged Template Literal with no data, remember to interpolate with ${expression} syntax.
+jest-only.test.js	failed	tagged missing $a	Error: Not enough arguments supplied for given headings:
+jest-only.test.js	failed	not an array %s	Error: `.each` must be called with an Array or Tagged Template Literal.
+jest-only.test.js	skipped	skipped suite 1 > inner	
+jest-only.test.js	failed	bigint j "10n" p %p	TypeError: Do not know how to serialize a BigInt
+jest-only.test.js	failed	bigint j {"n":"10n"} p %p	TypeError: Do not know how to serialize a BigInt
+only.test.js	passed	only o	
+only.test.js	passed	only suite ds > inner	
+only.test.js	skipped	not run	

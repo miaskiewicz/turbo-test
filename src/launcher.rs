@@ -48,8 +48,9 @@ pub const VITEST_CONFIG_FILES: [&str; 12] = [
 /// Runner flags that take a following value (so a file arg isn't mistaken for the value, and the
 /// value isn't mistaken for a file). Mirrors the value-flag set cli.js forwarded with their arg.
 /// `cli::parse_args` also accepts each `--` one in its inline `--flag=value` form.
-pub(crate) const VALUE_FLAGS: [&str; 23] = [
+pub(crate) const VALUE_FLAGS: [&str; 24] = [
     "-j",
+    "--compat",
     "--jobs",
     "--shard",
     "--reporter",
@@ -1549,6 +1550,77 @@ fn absolute_in(cwd: &Path, p: &Path) -> PathBuf {
         cwd.join(p)
     };
     std::path::absolute(&joined).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// vitest commands turbo-test does not implement: running the suite for them would do something
+/// the user did not ask for (turbo-test#427).
+const UNSUPPORTED_COMMANDS: [&str; 6] = ["related", "bench", "init", "doctor", "list", "complete"];
+
+/// The `--help` text, shaped like vitest's (`vitest/<version>`, `Usage:`, `Commands:`,
+/// `Options:`), listing the flags turbo-test acts on.
+const HELP: &str = "
+Usage:
+  $ turbo-test [...filters]
+
+Commands:
+  run [...filters]      Run the test files once (turbo-test always runs once)
+  watch [...filters]    Same as run: turbo-test has no watch mode
+  dev [...filters]      Same as run
+  [...filters]          Run the test files whose path contains a filter
+
+Options:
+  -v, --version                       Display version number
+  -h, --help                          Display this message
+  -c, --config <path>                 Path to the vitest config file
+  -r, --root <path>                   Root path (test files are named relative to it)
+  --dir <path>                        Base directory to scan for the test files
+  -t, --testNamePattern <pattern>     Run tests with full names matching the specified regexp pattern
+  -u, --update                        Update snapshots
+  --reporter <name>                   Reporter: default, verbose, dot, json, junit, tap, tap-flat
+  --outputFile <path>                 Write the reporter's output to a file
+  --environment <name>                Test environment (node, jsdom, happy-dom)
+  --coverage                          Enable coverage (also --coverage-dir, --coverage-reporter,
+                                      --coverage-thresholds, --coverage-include, --coverage-exclude,
+                                      --coverage-per-file, --coverage-all)
+  --changed [since]                   Run the test files changed since a git ref
+  --passWithNoTests                   Pass when no tests are found
+  --isolate / --no-isolate            Run every file on a fresh isolate (default) or reuse isolates
+  --allowOnly / --no-allowOnly        Allow tests and suites marked as only (default: !CI)
+  --testTimeout <ms>                  Default timeout of a test in milliseconds (default: 5000)
+  --hookTimeout <ms>                  Default timeout of a hook in milliseconds (default: 10000)
+  --retry <times>                     Retry a failed test this many times
+  --bail <number>                     Stop after this many failed tests
+  --maxConcurrency <number>           Maximum number of concurrent tests in a file
+  --sequence.concurrent               Run every test concurrently
+  -j, --jobs, --maxWorkers <n>        Number of worker threads
+  --no-file-parallelism               Run test files one at a time
+  --shard <index>/<count>             Run one shard of the test files
+  --silent                            Silence the tests' console output
+  --includeTaskLocation               Record each test's location in the JSON report
+";
+
+/// What the CLI does instead of a run, as (text, exit code): `--help` / `-h` print the usage and
+/// `--version` / `-v` the version (stdout, 0), like vitest's; a vitest command turbo-test does not
+/// implement is an error (stderr, 1) instead of a run (turbo-test#427). Tokens after `--` are
+/// arguments, not options.
+pub fn meta_command(raw: &[String]) -> Option<(String, i32)> {
+    let args: Vec<&str> = raw
+        .iter()
+        .map(String::as_str)
+        .take_while(|a| *a != "--")
+        .collect();
+    let version = format!("turbo-test/{}\n", env!("CARGO_PKG_VERSION"));
+    if args.iter().any(|a| matches!(*a, "-h" | "--help")) {
+        return Some((format!("{version}{HELP}"), 0));
+    }
+    if args.iter().any(|a| matches!(*a, "-v" | "--version")) {
+        return Some((version, 0));
+    }
+    let cmd = args.first().filter(|c| UNSUPPORTED_COMMANDS.contains(c))?;
+    Some((
+        format!("turbo-test: `{cmd}` is not supported (turbo-test runs the test files once: `turbo-test run [...filters]`)\n"),
+        1,
+    ))
 }
 
 /// What `prepare` does, computed by `plan` without side effects.

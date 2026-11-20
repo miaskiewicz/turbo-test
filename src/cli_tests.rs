@@ -611,6 +611,7 @@ fn clone_outcome(r: &FileOutcome) -> FileOutcome {
             empty_suites: rep.empty_suites.clone(),
             logs: rep.logs.clone(),
             waited_ms: rep.waited_ms,
+            file_errors: rep.file_errors.clone(),
         }),
         Err(e) => Err(e.clone()),
     }
@@ -1819,5 +1820,34 @@ fn flattened_tap_tasks_keep_empty_suites_but_not_file_load_failures() {
     assert_eq!(tasks.len(), 1);
     assert!(
         matches!(&tasks[0], TapNode::Empty(name, mode, _) if name == "project > pending suite" && mode == "todo")
+    );
+}
+
+#[test]
+fn compat_flag_sets_the_jest_vitest_switch() {
+    for (args, v) in [
+        (&["--compat", "jest"][..], "jest"),
+        (&["--compat=vitest"][..], "vitest"),
+        (&["--compat", "AUTO"][..], "auto"),
+    ] {
+        let o = parse(args);
+        assert_eq!(
+            o.env,
+            vec![("TURBO_TEST_COMPAT", v.to_string())],
+            "{args:?}"
+        );
+        assert!(o.warnings.is_empty(), "{args:?}");
+    }
+    // an unknown value (or none) is warned about and changes nothing
+    let o = parse(&["--compat", "mocha", "a.test.ts"]);
+    assert!(o.env.is_empty());
+    assert_eq!(
+        o.warnings,
+        vec!["turbo-test: ignoring --compat 'mocha' (expected jest, vitest or auto)".to_string()]
+    );
+    assert_eq!(o.files, vec![PathBuf::from("a.test.ts")]);
+    assert_eq!(
+        parse(&["--compat"]).warnings,
+        vec!["turbo-test: ignoring --compat '' (expected jest, vitest or auto)".to_string()]
     );
 }

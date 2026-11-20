@@ -150,8 +150,14 @@ const __loop = {
   waited: 0,
   elapsed() { return __loop.realNow() + __loop.waited; },
 };
-// the real clock's origin (performance.timeOrigin): when the runtime started
-const __perfOrigin = __loop.realNow();
+// the real clock's origin (performance.timeOrigin): when the run started. The runtime is
+// evaluated into the cached framework snapshot, so the runner resets it at each run through
+// __ttRunStart (#448); a value captured here alone would be the snapshot's creation time.
+let __perfOrigin = __loop.realNow();
+globalThis.__ttRunStart = () => {
+  __perfOrigin = __loop.realNow();
+  if (globalThis.performance && !__loop.fake) globalThis.performance.timeOrigin = __perfOrigin;
+};
 // process.hrtime on the real clock (Node's [seconds, nanoseconds]; `prev` gives the difference)
 function __hrtimeOf(ms, prev) {
   const secs = Math.floor(ms / 1000);
@@ -231,6 +237,19 @@ __loop.drainNextTicks = function () {
   }
   return ran;
 };
+// A host pump delivers each native event (socket, child pipe, HTTP) in a callback scope: as
+// Node's InternalCallbackScope closes, the outermost one runs the event's nextTicks, then its
+// promise jobs, until both are empty, before the next event (processTicksAndRejections).
+__loop.callbackDepth = 0;
+function __processTicksAndRejections() {
+  do { __loop.drainNextTicks(); globalThis.__ttRunMicrotasks(); } while (__loop.nextTicks.length);
+}
+function __hostCallback(fn, ...args) {
+  __loop.callbackDepth++;
+  try { return fn(...args); } finally {
+    if (--__loop.callbackDepth === 0) __processTicksAndRejections();
+  }
+}
 // Real mode: run the single earliest-due macrotask (Rust drains micro/nextTick around it).
 // Considers BOTH the user macro queue and the internal test-timeout queue, firing whichever is
 // due first — so a hung test (no user timers) still advances to its timeout and rejects.
@@ -572,12 +591,18 @@ if (typeof globalThis.queueMicrotask !== 'function') {
 }
 
 // Date faking
+// The body of the runner's Date constructors (the virtual and the fake one): called, the clock's
+// time as a string; under `new`, a real Date built for new.target (Reflect.construct), so a
+// `class X extends Date` instance keeps X's prototype and methods (@date-fns/tz's TZDate:
+// turbo-test#416); without arguments it holds the clock's time.
+function __dateConstruct(Real, target, args, now) {
+  if (!target) return new Real(now()).toString();
+  return Reflect.construct(Real, args.length ? args : [now()], target);
+}
 function __installFakeDate() {
   const Real = __loop.RealDate;
   function FakeDate(...args) {
-    if (!(this instanceof FakeDate)) return new Real(__loop.systemTime + __loop.fnow).toString();
-    if (args.length === 0) return new Real(__loop.systemTime + __loop.fnow);
-    return new Real(...args);
+    return __dateConstruct(Real, new.target, args, () => __loop.systemTime + __loop.fnow);
   }
   Object.defineProperty(FakeDate, 'name', { value: 'Date', configurable: true });
   FakeDate.prototype = Real.prototype;
@@ -586,26 +611,22 @@ function __installFakeDate() {
   FakeDate.parse = Real.parse;
   globalThis.Date = FakeDate;
 }
-// Default clock: a Date whose now() is a REAL wall-clock base + the VIRTUAL elapsed (__loop.now,
-// which advances as the loop fires timers). So `const t=Date.now(); await sleep(100); Date.now()-t`
-// reports ~100 even though no real time passed — elapsed-across-setTimeout assertions work, while
-// timestamps stay ~real (base captured at install). Only `now()` and arg-less `new Date()` are
-// virtualized; `new Date(args)` and the prototype stay real (instanceof works).
-let __virtualBase = 0;
+// Default clock: a Date whose now() is the real wall clock plus the waits the drive loop jumped
+// instead of sleeping (__loop.elapsed(), as performance.now / hrtime). So `const t=Date.now();
+// await sleep(100); Date.now()-t` reports ~100 even though the sleep was skipped, time moves in
+// synchronous code, and the clock is read live rather than from the cached snapshot (#447).
+// Only `now()` and arg-less `new Date()` read it; `new Date(args)` and the prototype stay real.
 // one VDate for the run: restoring the real Date gives back the same function, as Node's
 let __vdate = null;
 function __installVirtualDate() {
   if (__vdate) { globalThis.Date = __vdate; return; }
   const Real = __loop.RealDate;
-  if (!__virtualBase) __virtualBase = __loop.realNow();
   function VDate(...args) {
-    if (!(this instanceof VDate)) return new Real(__virtualBase + __loop.now).toString();
-    if (args.length === 0) return new Real(__virtualBase + __loop.now);
-    return new Real(...args);
+    return __dateConstruct(Real, new.target, args, () => __loop.elapsed());
   }
   Object.defineProperty(VDate, 'name', { value: 'Date', configurable: true });
   VDate.prototype = Real.prototype;
-  VDate.now = () => __virtualBase + __loop.now;
+  VDate.now = () => __loop.elapsed();
   VDate.UTC = Real.UTC;
   VDate.parse = Real.parse;
   __vdate = VDate;
@@ -1051,6 +1072,12 @@ if (typeof globalThis.URL === 'undefined') {
       if (this._special && !this._isFile && URL._badHostPort(hp)) {
         throw new TypeError('Invalid URL: ' + url);
       }
+      if (URL._badIpv6(hp)) throw new TypeError('Invalid URL: ' + url);
+    }
+    // any scheme: a host opening with `[` must be a whole valid IPv6 address (WHATWG host parser)
+    static _badIpv6(hp) {
+      const name = hp ? hp[1] : '';
+      return name.startsWith('[') && URL._ipv6(name) === null;
     }
     _parseAuthority(url, m) {
       this._hierarchical = true;
@@ -1156,14 +1183,15 @@ if (typeof globalThis.URL === 'undefined') {
     }
     _setHostName(name, port, withPort) {
       if (this._rejectHostName(name, port, withPort)) return null;
+      if (name.startsWith('[')) return URL._ipv6(name);
       if (this._special) name = URL._idnAscii(name);
       if (this._isFile && name === 'localhost') return '';
       return name;
     }
     // WHATWG `domain to ASCII` for a special URL's host (turbo-test#259): Node runs an IDN
     // hostname through UTS#46 ToASCII (`new URL('http://ü.com').host === 'xn--tda.com'`); the
-    // lowercase that was here before did the ASCII half of that. IPv6 brackets skip the IDN
-    // pass (the brackets' contents are not a domain); a pure-printable-ASCII name without an
+    // lowercase that was here before did the ASCII half of that. IPv6 brackets never reach the
+    // IDN pass (_setHostName parses them with _ipv6); a pure-printable-ASCII name without an
     // `xn--`-anchored label is lower-cased directly (ToASCII is a no-op on it, and the native
     // call isn't free); otherwise ToASCII runs through `__ttIdnaToAscii`, with a fallback to
     // the lower-cased name if the native is missing or rejects the input — the upstream
@@ -1173,10 +1201,50 @@ if (typeof globalThis.URL === 'undefined') {
     // UTS#46 boundary.
     static _idnAscii(name) {
       const lower = name.toLowerCase();
-      if (lower.startsWith('[')) return lower;
       if (/^[\x21-\x7e]*$/.test(lower) && !/(^|\.)xn--/.test(lower)) return lower;
       const ascii = globalThis.__ttIdnaToAscii ? globalThis.__ttIdnaToAscii(lower) : undefined;
       return ascii === undefined ? lower : ascii;
+    }
+    // WHATWG IPv6 host (turbo-test#425): `[...]` parsed into eight 16-bit pieces (one `::` run of
+    // zeros, an optional dotted IPv4 tail without leading zeros) and serialized as Node does:
+    // lower-case hex without leading zeros, the first longest run of two or more zero pieces as
+    // `::`. Null for an invalid address (the constructor throws, a setter leaves the URL alone).
+    static _ipv6(name) {
+      const pieces = URL._ipv6Pieces(name.slice(1, -1));
+      return name.endsWith(']') && pieces ? '[' + URL._ipv6Text(pieces) + ']' : null;
+    }
+    static _ipv6Pieces(text) {
+      const halves = URL._ipv4Tail(text).split('::');
+      if (halves.length > 2) return null;
+      const part = (s) => (s === '' ? [] : s.split(':'));
+      const head = part(halves[0]), tail = halves.length === 2 ? part(halves[1]) : [];
+      const all = head.concat(tail);
+      if (!URL._ipv6Fits(all, halves.length === 2)) return null;
+      const zeros = new Array(8 - all.length).fill('0');
+      return head.concat(zeros, tail).map((p) => parseInt(p, 16));
+    }
+    // every piece 1-4 hex digits; eight of them, or at most seven around a `::`
+    static _ipv6Fits(all, compressed) {
+      if (!all.every((p) => /^[0-9a-f]{1,4}$/i.test(p))) return false;
+      return compressed ? all.length <= 7 : all.length === 8;
+    }
+    // `a.b.c.d` ending the address becomes two hex pieces; a malformed one leaves a `.` behind,
+    // which then fails the hex-piece check
+    static _ipv4Tail(text) {
+      const m = /^(.*:)((?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3})$/.exec(text);
+      const bytes = m ? m[2].split('.').map(Number) : [];
+      if (!m || bytes.some((b) => b > 255)) return text;
+      return m[1] + ((bytes[0] << 8) | bytes[1]).toString(16) + ':' + ((bytes[2] << 8) | bytes[3]).toString(16);
+    }
+    static _ipv6Text(pieces) {
+      let start = -1, len = 1;
+      for (let i = 0; i < 8; i++) {
+        let n = 0;
+        while (pieces[i + n] === 0) n++;
+        if (n > len) { start = i; len = n; }
+      }
+      const hex = (list) => list.map((p) => p.toString(16)).join(':');
+      return start < 0 ? hex(pieces) : hex(pieces.slice(0, start)) + '::' + hex(pieces.slice(start + len));
     }
     // the leading digits of `v`; a scheme's default port serializes as no port
     _setPort(v) {
@@ -2028,28 +2096,12 @@ if (typeof globalThis.TransformStream === 'undefined') {
   globalThis.TransformStreamDefaultController = TransformStreamDefaultController;
 }
 /* __TT_NODE_BUFFER_BYTE_LENGTH__ */
+/* __TT_NODE_BUFFER_OPS__ */
 if (typeof globalThis.Buffer === 'undefined') {
   const byteArrayTag = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get;
   class Buffer extends Uint8Array {
-    static #fromHex(d) {
-      const b = new Buffer(d.length / 2);
-      for (let i = 0; i < b.length; i++) b[i] = parseInt(d.substr(i * 2, 2), 16);
-      return b;
-    }
-    static #fromString(d, enc) {
-      if (enc === 'base64') return new Buffer(globalThis.__b64decodeToBytes(d));
-      // base64url: RFC 4648 §5 — `-`/`_` instead of `+`/`/`, optional padding. Node's base64
-      // decoder tolerates either, so normalise to standard base64 and reuse the same path.
-      if (enc === 'base64url') return new Buffer(globalThis.__b64decodeToBytes(d.replace(/-/g, '+').replace(/_/g, '/')));
-      if (enc === 'hex') return Buffer.#fromHex(d);
-      return new Buffer(new globalThis.TextEncoder().encode(d));
-    }
-    static from(d, enc) {
-      if (typeof d === 'string') return Buffer.#fromString(d, enc);
-      if (Array.isArray(d) || d instanceof Uint8Array) return new Buffer(d);
-      if (d instanceof ArrayBuffer) return new Buffer(new Uint8Array(d));
-      return new Buffer(0);
-    }
+    // Node's Buffer.from (node_buffer_ops.js), sharing the string encoders with Buffer#write.
+    static from(value, encodingOrOffset, length) { return __bufferFrom(Buffer, value, encodingOrOffset, length); }
     static alloc(n, fill) { const b = new Buffer(n); if (fill != null) b.fill(typeof fill === 'string' ? fill.charCodeAt(0) : fill); return b; }
     static allocUnsafe(n) { return new Buffer(n); }
     static #validateByteArray(value) {
@@ -2064,38 +2116,24 @@ if (typeof globalThis.Buffer === 'undefined') {
       return Math.sign(a.length - b.length);
     }
     static byteLength(value, encoding) { return __bufferByteLength(value, encoding); }
+    static isEncoding(encoding) { return __bufferIsEncoding(encoding); }
     static isBuffer(x) { return x instanceof Buffer; }
     static concat(list) { const len = list.reduce((n, b) => n + b.length, 0); const out = new Buffer(len); let o = 0; for (const b of list) { out.set(b, o); o += b.length; } return out; }
-    static #readUInt32Offset(bytes, offset) {
-      if (typeof offset !== 'number') throw Object.assign(new TypeError('The offset argument must be a number'), { code: 'ERR_INVALID_ARG_TYPE' });
-      if (Math.floor(offset) !== offset) throw Object.assign(new RangeError('The offset must be an integer'), { code: 'ERR_OUT_OF_RANGE' });
-      if (bytes.length < 4) throw Object.assign(new RangeError('Attempt to access memory outside buffer bounds'), { code: 'ERR_BUFFER_OUT_OF_BOUNDS' });
-      if (offset < 0 || offset > bytes.length - 4) throw Object.assign(new RangeError('The offset is outside the buffer bounds'), { code: 'ERR_OUT_OF_RANGE' });
-    }
+    // Instance byte operations live in node_buffer_ops.js (turbo-test#408, #409).
     equals(other) { return Buffer.compare(this, other) === 0; }
-    writeUInt32LE(value, offset = 0) {
-      const number = +value;
-      if (number < 0 || number > 0xffffffff) throw Object.assign(new RangeError('The value is outside the unsigned 32-bit range'), { code: 'ERR_OUT_OF_RANGE' });
-      Buffer.#readUInt32Offset(this, offset);
-      const bits = number >>> 0;
-      for (let i = 0; i < 4; i++) this[offset + i] = bits >>> (8 * i);
-      return offset + 4;
-    }
-    readUInt32BE(offset = 0) {
-      Buffer.#readUInt32Offset(this, offset);
-      return this[offset] * 16777216 + this[offset + 1] * 65536 + this[offset + 2] * 256 + this[offset + 3];
-    }
-    toString(enc) {
-      if (enc === 'hex') return Array.from(this).map((b) => b.toString(16).padStart(2, '0')).join('');
-      if (enc === 'base64') return globalThis.__b64encodeBytes(Array.from(this));
-      // base64url: RFC 4648 §5 — `+` → `-`, `/` → `_`, no `=` padding (Node WHATWG, turbo-test#260).
-      if (enc === 'base64url') return globalThis.__b64encodeBytes(Array.from(this)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-      return new globalThis.TextDecoder('utf-8', { ignoreBOM: true }).decode(this); // Node keeps a BOM
-    }
+    compare(target, targetStart, targetEnd, sourceStart, sourceEnd) { return __bufferCompare(this, target, targetStart, targetEnd, sourceStart, sourceEnd); }
+    copy(target, targetStart, sourceStart, sourceEnd) { return __bufferCopy(this, target, targetStart, sourceStart, sourceEnd); }
+    write(string, offset, length, encoding) { return __bufferWrite(this, string, offset, length, encoding); }
+    indexOf(value, byteOffset, encoding) { return __bufferIndexOf(this, value, byteOffset, encoding, true); }
+    lastIndexOf(value, byteOffset, encoding) { return __bufferIndexOf(this, value, byteOffset, encoding, false); }
+    includes(value, byteOffset, encoding) { return this.indexOf(value, byteOffset, encoding) !== -1; }
+    toString(encoding, start, end) { return __bufferToString(this, encoding, start, end); }
     toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
   }
+  __bufferInstallIntOps(Buffer.prototype);
+  __bufferInstallInternalOps(Buffer.prototype);
   // Node's public static methods are enumerable; safer-buffer copies them with for-in.
-  for (const name of ['from', 'alloc', 'allocUnsafe', 'byteLength', 'isBuffer', 'concat', 'compare']) {
+  for (const name of ['from', 'alloc', 'allocUnsafe', 'byteLength', 'isBuffer', 'isEncoding', 'concat', 'compare']) {
     Object.defineProperty(Buffer, name, { enumerable: true });
   }
   globalThis.Buffer = Buffer;
@@ -2567,6 +2605,8 @@ const __fs = {
     lstat: __promised((p, options) => __stat(p, options, true)),
   },
 };
+/* __TT_NODE_FS_HANDLES__ */
+/* __TT_NODE_FS_CALLBACKS__ */
 const __module = {
   // a require(): the `require` export condition (turbo-test#134)
   createRequire: (url) => globalThis.__mkRequire(globalThis.__dirnameOf(String(url).startsWith('file:') ? globalThis.__fileURLToPath(url) : String(url)), false),
@@ -2717,13 +2757,17 @@ function __unhandledEventError(value) {
 }
 const __eventState = (emitter) => emitter._ev || (emitter._ev = Object.create(null));
 const __eventListeners = (emitter, event) => (emitter._ev && emitter._ev[event]) || [];
-class __EventEmitter {
-  constructor() { this._ev = Object.create(null); }
+// A function constructor, as Node's: legacy subclasses (readable-stream's Stream, turbo-test#404)
+// initialise through EventEmitter.call(this). Like Node's init, a receiver whose listener state
+// is missing or only inherited gets its own.
+function __EventEmitter() {
+  'use strict'; // a call without a receiver throws, as Node's
+  if (this._ev === undefined || this._ev === Object.getPrototypeOf(this)._ev) this._ev = Object.create(null);
+}
+class __EventEmitterMethods {
   on(e, f) { const state = __eventState(this); (state[e] || (state[e] = [])).push(f); return this; }
-  addListener(e, f) { return this.on(e, f); }
-  once(e, f) { const self = this; function g(...a) { self.off(e, g); return f.apply(this, a); } g.listener = f; return this.on(e, g); }
-  off(e, f) { if (this._ev && this._ev[e]) this._ev[e] = this._ev[e].filter((x) => x !== f && x.listener !== f); return this; }
-  removeListener(e, f) { return this.off(e, f); }
+  once(e, f) { const self = this; function g(...a) { self.removeListener(e, g); return f.apply(this, a); } g.listener = f; return this.on(e, g); }
+  removeListener(e, f) { if (this._ev && this._ev[e]) this._ev[e] = this._ev[e].filter((x) => x !== f && x.listener !== f); return this; }
   removeAllListeners(e) { if (!this._ev) return this; if (e !== undefined) delete this._ev[e]; else this._ev = Object.create(null); return this; }
   emit(e, ...a) {
     const listeners = __eventListeners(this, e).slice();
@@ -2737,41 +2781,20 @@ class __EventEmitter {
   prependListener(e, f) { const state = __eventState(this); (state[e] || (state[e] = [])).unshift(f); return this; }
 }
 // Node exposes enumerable prototype methods; libraries such as Mongoose copy them with for-in.
-for (const name of Object.getOwnPropertyNames(__EventEmitter.prototype).filter((name) => name !== 'constructor')) {
-  Object.defineProperty(__EventEmitter.prototype, name, { enumerable: true });
+for (const name of Object.getOwnPropertyNames(__EventEmitterMethods.prototype).filter((name) => name !== 'constructor')) {
+  const method = Object.getOwnPropertyDescriptor(__EventEmitterMethods.prototype, name);
+  Object.defineProperty(__EventEmitter.prototype, name, { ...method, enumerable: true });
 }
+// As in Node, the aliases are the same functions: an alias that dispatched through `this` would
+// recurse when a subclass aliases its override and calls the original from it (readable-stream
+// v4's removeListener / off, turbo-test#404).
+__EventEmitter.prototype.addListener = __EventEmitter.prototype.on;
+__EventEmitter.prototype.off = __EventEmitter.prototype.removeListener;
 /* __TT_NODE_WARNINGS__ */
+/* __TT_NODE_PROCESS_USAGE__ */
 const __events = Object.assign(__EventEmitter, { EventEmitter: __EventEmitter, default: __EventEmitter, once: (em, e) => new Promise((res) => em.once(e, (...a) => res(a))) });
 /* __TT_NODE_STREAMS__ */
-const __dcChannels = new Map();
-class __DiagnosticChannel {
-  constructor(name) { this.name = name; this._subscribers = []; }
-  get hasSubscribers() { return this._subscribers.length > 0; }
-  subscribe(fn) {
-    if (typeof fn !== 'function') throw new TypeError('subscriber must be a function');
-    this._subscribers.push(fn);
-  }
-  unsubscribe(fn) {
-    const index = this._subscribers.indexOf(fn);
-    if (index < 0) return false;
-    this._subscribers.splice(index, 1);
-    return true;
-  }
-  publish(message) { this._subscribers.slice().forEach((fn) => fn(message, this.name)); }
-}
-function __diagnosticChannel(name) {
-  if (typeof name !== 'string' && typeof name !== 'symbol') throw new TypeError('channel name must be a string or symbol');
-  if (!__dcChannels.has(name)) __dcChannels.set(name, new __DiagnosticChannel(name));
-  return __dcChannels.get(name);
-}
-const __dc = {
-  Channel: __DiagnosticChannel,
-  channel: __diagnosticChannel,
-  hasSubscribers: (name) => __diagnosticChannel(name).hasSubscribers,
-  subscribe: (name, fn) => __diagnosticChannel(name).subscribe(fn),
-  unsubscribe: (name, fn) => __diagnosticChannel(name).unsubscribe(fn),
-};
-__dc.default = __dc;
+/* __TT_NODE_DIAGNOSTICS_CHANNEL__ */
 // ---- Node's util.inspect / util.format (Node 26; turbo-test#93) ----
 // The shape of Node's formatValue / formatRaw / reduceToSingleString / groupArrayElements:
 // depth 2, breakLength 80, compact 3, maxArrayLength 100; console.log formats through it.
@@ -3271,9 +3294,39 @@ function __rawDate(ctx, value, keys) {
   const base = Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
   return keys.length === 0 ? __sty(ctx, base, 'date') : __rawSpec(keys, ['{', '}'], undefined, base);
 }
-function __rawErr(value, keys) {
-  const base = value.stack ? String(value.stack) : `[${Error.prototype.toString.call(value)}]`;
-  keys = keys.filter((k) => k !== 'stack' && k !== 'message');
+// Node's formatError (#437): the stack (read lazily, so a later name shows in its header),
+// improveStack's `Ctor [name]` for a stack-header name ending in "Error" that differs from the
+// constructor, brackets for an error without frames, and name / message keys hidden only when
+// the stack already shows them.
+function __errStack(value) {
+  let stack;
+  try { stack = value.stack; } catch { stack = undefined; }
+  return stack ? String(stack) : Error.prototype.toString.call(value);
+}
+function __errKeyShown(stack, value, key) {
+  let v;
+  try { v = value[key]; } catch { return true; }
+  return typeof v === 'string' && !stack.includes(v);
+}
+function __errHeaderName(stack, name) {
+  const len = name.length;
+  return name.endsWith('Error') && stack.startsWith(name) && (stack.length === len || stack[len] === ':' || stack[len] === '\n');
+}
+function __improveStack(stack, ctor, name) {
+  if (ctor === null || name === ctor || !__errHeaderName(stack, name)) return stack;
+  if (!ctor.includes(name)) return `${ctor} [${name}]${stack.slice(name.length)}`;
+  return name.length === 0 ? `${ctor}: ${stack}` : ctor + stack.slice(name.length);
+}
+function __bracketStack(stack, message) {
+  let pos = (message && stack.indexOf(message)) || -1;
+  if (pos !== -1) pos += message.length;
+  return stack.indexOf('\n    at', pos) === -1 ? `[${stack}]` : stack;
+}
+function __rawErr(value, keys, ctor) {
+  const stack = __errStack(value);
+  const name = value.name == null ? 'Error' : String(value.name);
+  keys = keys.filter((k) => k !== 'stack' && (k !== 'message' && k !== 'name' || __errKeyShown(stack, value, k)));
+  const base = __bracketStack(__improveStack(stack, ctor, name), value.message);
   return keys.length === 0 ? base : __rawSpec(keys, ['{', '}'], undefined, base);
 }
 // a function, regexp, date or error: its base text, alone when it has no keys to print
@@ -3281,7 +3334,7 @@ function __rawBased(ctx, value, recurseTimes, keys, ctor) {
   if (typeof value === 'function') return __rawFn(ctx, value, keys, ctor);
   if (value instanceof RegExp) return __rawRegExp(ctx, value, keys, recurseTimes);
   if (value instanceof Date) return __rawDate(ctx, value, keys);
-  return __rawErr(value, keys);
+  return __rawErr(value, keys, ctor);
 }
 function __rawIsBased(value) {
   return typeof value === 'function' || value instanceof RegExp || value instanceof Date || value instanceof Error;
@@ -3450,7 +3503,8 @@ const __util = {
   formatWithOptions: (o, ...a) => __nodeFormatWith(o, ...a),
   deprecate: (fn, _msg) => fn,
   debuglog: () => (() => {}),
-  isDeepStrictEqual: (a, b) => { try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return a === b; } },
+  // assert.deepStrictEqual's comparison (turbo-test#422): key order never matters
+  isDeepStrictEqual: (a, b) => __deepEq(a, b, true),
   types: { isPromise: (x) => x && typeof x.then === 'function', isDate: __utilIsDate, isRegExp: (x) => x instanceof RegExp, isNativeError: (x) => x instanceof Error, isArrayBuffer: (x) => x instanceof ArrayBuffer, isTypedArray: (x) => ArrayBuffer.isView(x) },
   TextEncoder: globalThis.TextEncoder,
   TextDecoder: globalThis.TextDecoder,
@@ -4556,10 +4610,14 @@ function __eqFast(a, b, aStack, bStack, cls) {
   if (typeof a !== 'object' || typeof b !== 'object') return false;
   return __eqFastObject(a, b, aStack, bStack);
 }
+// Whether two arrays of different lengths are unequal: always in vitest's `equals`; in Jest's only
+// under strictCheck (toStrictEqual), otherwise the extra items are compared as keys, so an
+// undefined one is ignored like an undefined property (turbo-test#423).
+const __arrayLengthChecked = (hasKey) => hasKey === __hasKey || !globalThis.__ttJestProject;
 function __eqWalk(a, b, aStack, bStack, testers, hasKey, cls) {
   aStack.push(a);
   bStack.push(b);
-  if (cls === '[object Array]' && a.length !== b.length) return false;
+  if (cls === '[object Array]' && a.length !== b.length && __arrayLengthChecked(hasKey)) return false;
   if (__isError(a) && __isError(b)) return __eqError(a, b, aStack, bStack, testers, hasKey);
   if (!__eqOwnKeys(a, b, aStack, bStack, testers, hasKey)) return false;
   aStack.pop();
@@ -5067,8 +5125,65 @@ function __toThrowFn(c, expected, threw, err) {
   const name = expected.name || expected.prototype.constructor.name;
   return c(threw && err instanceof expected, `expected error to be instance of ${name}`, `expected error not to be instance of ${name}`, expected, err);
 }
+// Jest 30's createMessageAndCause: the message, or with a truthy cause the JSON of the error's
+// own props but stack / fileName / lineNumber (sorted, causes nested, cycles cut, bigint and
+// undefined as strings)
+const __JEST_UNSERIALIZED = new Set(['stack', 'fileName', 'lineNumber']);
+function __jestSerializeError(e) {
+  if (e === null || typeof e !== 'object') return e;
+  const out = {};
+  for (const name of Object.getOwnPropertyNames(e).sort()) {
+    if (!__JEST_UNSERIALIZED.has(name)) out[name] = name === 'cause' ? __jestSerializeError(e.cause) : e[name];
+  }
+  return out;
+}
+function __jestMessageAndCause(e) {
+  if (!e.cause) return e.message;
+  const seen = new WeakSet();
+  return JSON.stringify(__jestSerializeError(e), (_, v) => {
+    if (v !== null && typeof v === 'object') {
+      if (seen.has(v)) return undefined;
+      seen.add(v);
+    }
+    return typeof v === 'bigint' || v === undefined ? String(v) : v;
+  });
+}
+// Jest's getThrown: the thrown value's message (a string `message`, else String(value)) and
+// whether it is an Error by shape (string message, name and stack)
+function __jestThrown(err) {
+  const hasMessage = err !== null && err !== undefined && typeof err.message === 'string';
+  const isError = hasMessage && typeof err.name === 'string' && typeof err.stack === 'string';
+  return { isError, message: hasMessage ? err.message : String(err) };
+}
+// toThrow(object) in a jest project (turbo-test#403): Jest 30's toThrowExpectedObject — the same
+// message, the same message-and-cause, and for an expected custom error class an instance of it.
+// Own props beyond those (a Nest exception's response body) are not compared, unlike vitest.
+// whether a thrown error must be an instance of the expected one's class: an Error compared with
+// an expected Error of a custom class
+function __jestClassMatters(thrown, expected) {
+  return thrown.isError && expected instanceof Error && expected.constructor.name !== 'Error';
+}
+function __jestObjectPass(expected, err, want) {
+  const thrown = __jestThrown(err);
+  if (thrown.message !== expected.message || __jestMessageAndCause(err) !== want) return false;
+  return !__jestClassMatters(thrown, expected) || err instanceof expected.constructor;
+}
+function __toThrowJestObject(c, expected, threw, err) {
+  const want = __jestMessageAndCause(expected);
+  const pass = threw && __jestObjectPass(expected, err, want);
+  const got = threw ? __jestMessageAndCause(err) : undefined;
+  return c(pass, 'expected a thrown error to have message #{exp}', 'expected a thrown error not to have message #{exp}', want, got);
+}
+// toThrow(value) compared the Jest way: any object but an asymmetric matcher, in a jest project
+function __jestObjectExpected(expected) {
+  return !!globalThis.__ttJestProject && expected !== null && typeof expected === 'object' && !__isAsym(expected);
+}
 function __toThrowValue(c, testers, expected, threw, err) {
   if (typeof expected === 'function') return __toThrowFn(c, expected, threw, err);
+  if (__jestObjectExpected(expected)) return __toThrowJestObject(c, expected, threw, err);
+  return __toThrowVitestValue(c, testers, expected, threw, err);
+}
+function __toThrowVitestValue(c, testers, expected, threw, err) {
   // an Error or any other value: vitest's `equals(thrown, expected, [iterableEquality])`
   // (Errors by name / message / cause / own props; a plain object never equals an Error)
   if (__isError(expected)) {
@@ -5942,17 +6057,31 @@ globalThis.__ttMockNames = (m) => (m && (typeof m === 'object' || typeof m === '
 // arrays are kept.
 // Own static keys that an automocked function must not copy (function built-ins and shape).
 const __AUTOMOCK_FN_SKIP = new Set(['length', 'name', 'prototype', 'caller', 'arguments']);
-// __automockFn's own-static pass: copy each non-skipped key through the recursive automocker.
+// __automockFn's static pass: copy each non-skipped key through the recursive automocker. A
+// class's inherited statics count too (`static async create` on a base class; turbo-test#406):
+// jest's moduleMocker and vitest's automocker both walk the constructor chain up to
+// Function.prototype, the nearest definition winning.
+function __automockFnStatic(m, mod, k, seen, depth, spy) {
+  if (__AUTOMOCK_FN_SKIP.has(k) || seen.has(k)) return;
+  seen.add(k);
+  try { m[k] = __automock(mod[k], depth + 1, spy); } catch (e) {}
+}
 function __automockFnStatics(m, mod, depth, spy) {
-  for (const k of Object.getOwnPropertyNames(mod)) {
-    if (__AUTOMOCK_FN_SKIP.has(k)) continue;
-    try { m[k] = __automock(mod[k], depth + 1, spy); } catch (e) {}
+  const seen = new Set();
+  // (an async / generator function's prototype is an object, not a constructor: not walked)
+  for (let c = mod; typeof c === 'function' && c !== Function.prototype; c = Object.getPrototypeOf(c)) {
+    for (const k of Object.getOwnPropertyNames(c)) __automockFnStatic(m, mod, k, seen, depth, spy);
   }
 }
+// a jest project's automock is a jest-mock constructor: under `new` its implementation (an arrow
+// included) is applied to the allocated receiver, as jest.fn()'s (turbo-test#421). A spy keeps
+// its original (a class can't be applied), as vitest's.
+const __automockJestConstructor = (spy) => !!globalThis.__ttJestProject && !spy;
 function __automockFn(mod, depth, spy) {
   const m = __trackSpy(makeSpy(undefined, { original: spy ? mod : undefined }));
   // vitest's automocker keeps the function's own name (`Comp.name`, not the spy's) (turbo-test#136)
   try { Object.defineProperty(m, 'name', { value: mod.name, configurable: true }); } catch (e) {}
+  m[__mockConfigKey].jestConstructor = __automockJestConstructor(spy);
   if (depth < 3) {
     __automockFnStatics(m, mod, depth, spy);
     // class / constructor function: `new m()` returns an instance of m.prototype, whose
@@ -6380,6 +6509,36 @@ function __ttMock(spec, factory, vitest, isDoMock, options) {
   // (turbo-test#308). Jest-only; vi.mock has no such option. Virtual registrations take their
   // own path and don't need the automock mark below.
   if (__ttIsVirtualMock(vitest, options)) return __ttVirtualMockEntry(spec, factory, isDoMock, dir);
+  if (__ttPrepassDefer(spec, factory, vitest, isDoMock, key, dir)) return;
+  __ttMockApply(spec, factory, vitest, isDoMock, key, dir);
+}
+// The entry's mock prepass registers every hoisted mock before any factory runs, as jest and
+// vitest do (turbo-test#430): a factory's requireActual / importActual / importOriginal then
+// loads the real module with the file's other mocks in place, whichever order the calls are
+// in. Each call is queued and listed in the lazy map (so a require of its module runs it
+// first, from __mkRequire); __ttPrepassFlush runs the rest in order once all are queued.
+const __ttPrepassQueue = [];
+function __ttInPrepass() { return !!(globalThis.__ttMockPrepass || globalThis.__ttNoLazyJestMock); }
+function __ttPrepassDefer(spec, factory, vitest, isDoMock, key, dir) {
+  if (isDoMock || !__ttInPrepass()) return false;
+  const lazyKey = __ttJestLazyKey(dir, spec);
+  const entry = { lazyKey, done: false, run: () => __ttMockApply(spec, factory, vitest, false, key, dir) };
+  // a later mock of the same module replaces an earlier one
+  const prev = __ttJestLazy.get(lazyKey);
+  if (prev && prev.run) prev.done = true;
+  __ttJestLazy.set(lazyKey, entry);
+  __ttPrepassQueue.push(entry);
+  return true;
+}
+function __ttPrepassRun(entry) {
+  if (entry.done) return;
+  entry.done = true;
+  if (__ttJestLazy.get(entry.lazyKey) === entry) __ttJestLazy.delete(entry.lazyKey);
+  // (a call that throws leaves its module to the file's own call, as before)
+  try { entry.run(); } catch (e) {}
+}
+globalThis.__ttPrepassFlush = () => { for (const e of __ttPrepassQueue.splice(0)) __ttPrepassRun(e); };
+function __ttMockApply(spec, factory, vitest, isDoMock, key, dir) {
   // jest automock (turbo-test#184): record this spec as explicitly handled so the automock
   // bypass does NOT re-mock it on require. Resolution may fail (non-existent spec from a
   // prepass): we still fall through to normal mock logic.
@@ -6404,8 +6563,20 @@ function __ttVirtualLazyEligible(factory, isDoMock) {
   if (isDoMock || typeof factory !== 'function') return false;
   return !(globalThis.__ttMockPrepass || globalThis.__ttNoLazyJestMock);
 }
+// A virtual mock's key, as jest-resolve's getModulePath makes it (turbo-test#405): a spec starting
+// with `.` is the path it names from `dir` (lexically, extension as written), any other (absolute
+// or bare) is itself. runner.rs's virtual_mock_key is the same.
+function __ttVirtualPath(dir, spec) {
+  if (spec[0] !== '.') return spec;
+  const out = [];
+  for (const seg of ((dir || '') + '/' + spec).split('/')) {
+    if (seg === '..') out.pop();
+    else if (seg && seg !== '.') out.push(seg);
+  }
+  return '/' + out.join('/');
+}
 function __ttVirtualKey(dir, spec) {
-  return (dir || '') + '\0virtual:' + String(spec);
+  return '\0virtual:' + __ttVirtualPath(dir, String(spec));
 }
 function __ttIsVirtualMock(vitest, options) {
   return !vitest && !!options && options.virtual === true;
@@ -6475,6 +6646,8 @@ function __ttJestLazyRun(dir, spec) {
   if (!__ttJestLazy.size) return;
   const [k, entry] = __ttJestLazyFind(dir, spec);
   if (!entry) return;
+  // a prepass mock still queued (turbo-test#430)
+  if (entry.run) return __ttPrepassRun(entry);
   __ttJestLazy.delete(k);
   __ttJestLazyFinalize(entry);
 }
@@ -7892,9 +8065,13 @@ function __diffSequences(aLength, bLength, isCommon, foundSubsequence) {
     }
     const { found, common } = callbacks[transposed ? 1 : 0];
     divide(nChange, aStart, aEnd, bStart, bEnd, common, aIndexesF, aIndexesR, division);
-    const { nChangePreceding, aEndPreceding, bEndPreceding, nChangeFollowing, aStartFollowing, bStartFollowing } = division;
+    // `division` is shared scratch that the recursion below overwrites: read this level's
+    // middle snake before it (as jest's findSubsequences destructures it), or the common runs
+    // emitted after it are the preceding half's, repeated or out of order (turbo-test#403)
+    const own = { ...division };
+    const { nChangePreceding, aEndPreceding, bEndPreceding, nChangeFollowing, aStartFollowing, bStartFollowing } = own;
     if (aStart < aEndPreceding && bStart < bEndPreceding) find(nChangePreceding, aStart, aEndPreceding, bStart, bEndPreceding, transposed, callbacks, aIndexesF, aIndexesR, division);
-    findEmit(division, found);
+    findEmit(own, found);
     if (aStartFollowing < aEnd && bStartFollowing < bEnd) find(nChangeFollowing, aStartFollowing, aEnd, bStartFollowing, bEnd, transposed, callbacks, aIndexesF, aIndexesR, division);
   };
   const nCommonF = countF(0, aLength, 0, bLength, isCommon);
@@ -8623,8 +8800,10 @@ function __eachCases(cases, targs) {
   }
   return rows;
 }
-// `.each`: one task per row, the row spread into the handler when every row is an array.
+// `.each`: one task per row, the row spread into the handler when every row is an array. A file
+// with Jest's behaviour (a Jest project, or `--compat jest`) gets jest-each's instead.
 function __each(register, cases, targs) {
+  if (globalThis.__ttJestProject) return __jestEach(register, cases, targs);
   cases = __eachCases(cases, targs);
   return (name, a, b) => {
     const title = __formatName(name);
@@ -8660,6 +8839,122 @@ function __for(register, cases, targs, isSuite) {
       const fn = (ctx) => (typeof handler !== 'function' ? undefined : isSuite ? handler(item) : handler(item, ctx));
       register(__formatTitle(title, item == null ? [] : Array.isArray(item) ? item : [item], idx), fn, opts);
     });
+  };
+}
+
+// ---- jest-each (Jest 30's `.each`, for files with Jest's behaviour) ----
+// An array table: a title with no placeholder over object rows interpolates `$key.path` (each
+// row one argument); otherwise every row is spread when all are arrays, else passed as ONE
+// argument, and the placeholders take the row's values in turn (%p pretty-format, %j JSON, the
+// rest node's util.format; %# / %$ the index / 1-based index, %% a literal %). A tagged template
+// is one object per line, interpolated as `$key.path`. A malformed table registers one test
+// under the bare title that throws jest-each's error.
+const __JE_ESC = '@@__JEST_EACH_PLACEHOLDER_ESCAPE__@@';
+const __JE_PLACEHOLDER = /%[#Odfijops]/;
+const __JE_HEADINGS = /^\n\s*[^\s]+\s*(\|\s*[^\s]+\s*)*\n/g;
+const __jePretty = (v) => __pf(v, { maxDepth: 1, min: true });
+const __jeEscape = (title) => title.replaceAll('%%', __JE_ESC);
+// jest-util convertDescriptorToString
+function __jeDescriptor(d) {
+  if (typeof d === 'string') return d;
+  if (typeof d === 'number' || d === undefined) return `${d}`;
+  if (typeof d === 'function' && d.name) return d.name;
+  throw new Error(`Invalid first argument, ${d}. It must be a named class, named function, number, or string.`);
+}
+// %j: `[Circular]` for a cyclic value, a bigint as its literal
+function __jeIsCyclic(v, ancestors) {
+  if (v === null || typeof v !== 'object') return false;
+  if (ancestors.includes(v)) return true;
+  const nested = [...ancestors, v];
+  return Object.values(v).some((e) => __jeIsCyclic(e, nested));
+}
+const __jeJson = (v) => (__jeIsCyclic(v, []) ? '[Circular]' : `${JSON.stringify(v, (_, e) => (typeof e === 'bigint' ? `${e}n` : e))}`);
+// one row value into the title's first placeholder (a `%` in a string value is kept literal)
+function __jeFormatOne(title, value) {
+  const m = title.match(__JE_PLACEHOLDER);
+  if (!m) return title;
+  const v = typeof value === 'string' ? value.replaceAll('%', __JE_ESC) : value;
+  if (m[0] === '%p') return title.replace('%p', () => __jePretty(v));
+  if (m[0] === '%j') return title.replace('%j', () => __jeJson(v));
+  return __nodeFormat(title, v);
+}
+function __jeFormatTitle(title, row, idx) {
+  const start = __jeEscape(title).replace('%#', String(idx)).replace('%$', String(idx + 1));
+  return row.reduce((t, v) => __jeFormatOne(t, v), start).replaceAll(__JE_ESC, '%');
+}
+// `$key.path`: the value at the path (stopping where it ends), a primitive as a string, else
+// pretty-formatted; `$#` the row index
+function __jeGetPath(t, [head, ...tail]) {
+  if (t === null) return 'null';
+  if (t === undefined) return 'undefined';
+  if (!head || !Object.prototype.hasOwnProperty.call(t, head)) return t;
+  return __jeGetPath(t[head], tail);
+}
+const __jeVarValue = (v) => (Object(v) !== v ? String(v) : __jePretty(v));
+const __jeRegexEscape = (s) => s.replaceAll(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+function __jeInterpolate(title, template, idx) {
+  const keys = Object.keys(template).filter((k) => k.length > 0).sort((a, b) => b.length - a.length);
+  if (keys.length === 0) return title.replace('$#', `${idx}`);
+  const re = new RegExp(`\\$(${keys.map(__jeRegexEscape).join('|')})[.\\w]*`, 'g');
+  return title.replaceAll(re, (m) => __jeVarValue(__jeGetPath(template, m.slice(1).split('.')))).replace('$#', `${idx}`);
+}
+const __jeTaggedNoData = (t) => (typeof t[0] === 'string' && t[0].trim() === ''
+  ? 'Error: `.each` called with an empty Tagged Template Literal of table data.\n'
+  : 'Error: `.each` called with a Tagged Template Literal with no data, remember to interpolate with ${expression} syntax.\n');
+function __jeValidateArray(table) {
+  if (!Array.isArray(table)) throw new TypeError(`\`.each\` must be called with an Array or Tagged Template Literal.\n\nInstead was called with: ${__jePretty(table)}\n`);
+  if (table.raw !== undefined) throw new Error(__jeTaggedNoData(table));
+  if (table.length === 0) throw new Error('Error: `.each` called with an empty Array of table data.\n');
+}
+const __jeIsTemplates = (title, table) => !__JE_PLACEHOLDER.test(__jeEscape(title))
+  && !table.every(Array.isArray) && table.every((c) => c != null && typeof c === 'object');
+function __jeArrayRows(title, table) {
+  __jeValidateArray(table);
+  if (__jeIsTemplates(title, table)) {
+    return table.map((t, i) => ({ args: [t], title: __jeInterpolate(title, t, i).replaceAll('%%', '%') }));
+  }
+  const rows = table.every(Array.isArray) ? table : table.map((c) => [c]);
+  return rows.map((row, i) => ({ args: row, title: __jeFormatTitle(title, row, i) }));
+}
+function __jeHeadings(first) {
+  const m = String(first).match(__JE_HEADINGS);
+  if (m === null) throw new Error(`Table headings do not conform to expected format:\n\nheading1 | headingN\n\nReceived:\n\n${__pf(first, {})}`);
+  return m[0].replaceAll(/\s/g, '').split('|');
+}
+function __jeMissing(headings, data) {
+  const n = headings.length - (data.length % headings.length);
+  return `Not enough arguments supplied for given headings:\n${headings.join(' | ')}\n\nReceived:\n${__pf(data, {})}\n\nMissing ${n} argument${n === 1 ? '' : 's'}`;
+}
+function __jeTemplateRows(title, strings, data) {
+  const headings = __jeHeadings(strings[0]);
+  if (data.length % headings.length > 0) throw new Error(__jeMissing(headings, data));
+  const rows = [];
+  for (let i = 0; i < data.length / headings.length; i++) {
+    const t = Object.fromEntries(headings.map((h, c) => [h, data[i * headings.length + c]]));
+    rows.push({ args: [t], title: __jeInterpolate(title, t, i) });
+  }
+  return rows;
+}
+// its tests are `each` tasks (vitest's `task.each`); the body gets the row's arguments only
+function __jeRegister(register, rows, test, timeout) {
+  const outer = __inEach;
+  __inEach = true;
+  try {
+    for (const r of rows) register(r.title, () => test(...r.args), timeout);
+  } finally { __inEach = outer; }
+}
+// jest-each `bind`: `.each(table)(title, fn, timeout)` / `.each\`…\`(title, fn, timeout)`
+function __jestEach(register, table, data) {
+  return (name, test, timeout) => {
+    const title = __jeDescriptor(name);
+    let rows;
+    try {
+      rows = data.length === 0 ? __jeArrayRows(title, table) : __jeTemplateRows(title, table, data);
+    } catch (e) {
+      const err = new Error(e.message);
+      return register(title, () => { throw err; });
+    }
+    __jeRegister(register, rows, test, timeout);
   };
 }
 
@@ -8770,6 +9065,8 @@ describe.todo = (name, a, b) => { describe(name, a, b).mode = 'todo'; };
 describe.skipIf = (cond) => (cond ? describe.skip : describe);
 describe.runIf = (cond) => (cond ? describe : describe.skip);
 describe.each = (cases, ...targs) => __each(describe, cases, targs);
+describe.only.each = (cases, ...targs) => __each(describe.only, cases, targs);
+describe.skip.each = (cases, ...targs) => __each(describe.skip, cases, targs);
 describe.for = (cases, ...targs) => __for(describe, cases, targs, true);
 // Supports both vitest signatures: it(name, fn, opts) and it(name, opts, fn).
 function __normTestOptsForFn(b) {
@@ -8826,11 +9123,28 @@ it.skip = (name, a, b) => __addTest({ name, fn: __normTest(a, b).fn, skip: true 
 it.todo = (name) => __addTest({ name, fn: () => {}, skip: true, todo: true });
 it.only = (name, a, b) => { __tt.hasOnly = true; const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: true, retry: o.retry || 0, repeats: o.repeats, own: o, timeout: o.timeout }); };
 it.each = (cases, ...targs) => __each(it, cases, targs);
+it.only.each = (cases, ...targs) => __each(it.only, cases, targs);
+it.skip.each = (cases, ...targs) => __each(it.skip, cases, targs);
 it.for = (cases, ...targs) => __for(it, cases, targs);
 it.skipIf = (cond) => (name, fn) => __addTest({ name, fn, skip: !!cond, only: false, retry: 0 });
 it.runIf = (cond) => (name, fn) => __addTest({ name, fn, skip: !cond, only: false, retry: 0 });
 // it.fails: the test PASSES iff its body throws (runSuite inverts the outcome via `fails`).
 it.fails = (name, a, b) => { const { fn, o } = __normTest(a, b); __addTest({ name, fn, skip: false, only: false, retry: o.retry || 0, repeats: o.repeats, own: o, fails: true }); };
+// Jest's test.failing / test.only.failing / test.skip.failing and their `.each` (jest-circus
+// bindFailing, turbo-test#402): unlike it.fails, only the BODY is inverted (`failing`, see
+// __runFailingBody) — a throwing beforeEach / afterEach still fails the test, as in Jest.
+function __failing(mode) {
+  const failing = (name, a, b) => {
+    const { fn, o } = __normTest(a, b);
+    if (mode === 'only') __tt.hasOnly = true;
+    __addTest({ name, fn, skip: mode === 'skip', only: mode === 'only', retry: o.retry || 0, repeats: o.repeats, own: o, timeout: o.timeout, failing: true });
+  };
+  failing.each = (cases, ...targs) => __each(failing, cases, targs);
+  return failing;
+}
+it.failing = __failing('');
+it.only.failing = __failing('only');
+it.skip.failing = __failing('skip');
 // it.extend({...}) — test-context fixtures (best-effort). vitest passes a merged context object as
 // the test fn's first arg; fixtures defined as plain values or `async ({}, use) => use(value)`
 // functions are resolved here and provided. Returns a new test fn with these fixtures baked in.
@@ -9413,9 +9727,16 @@ async function __vtRunHook(h, args, name) {
     // called as a plain function, as vitest calls it (its frame has no method name)
     const fn = h.fn;
     const r = await __vtSettle(async () => fn(...args), __hookArm(h, args[0]));
-    // a cleanup runs under its hook's timeout (vitest's getBeforeHookCleanupCallback)
-    return typeof r === 'function' ? { fn: r, hook: h, ctx: args[0] } : undefined;
+    return __hookCleanup(r, h, args[0]);
   });
+}
+// A function a beforeEach / beforeAll hook returned is its cleanup (vitest's
+// getBeforeHookCleanupCallback), run under the hook's timeout. Jest ignores a hook's return value
+// (it only awaits a promise): in a jest project `beforeEach(() => mock.mockClear())` returns the
+// mock, which must not be called afterwards (turbo-test#417).
+function __hookCleanup(r, h, ctx) {
+  if (typeof r !== 'function' || globalThis.__ttJestProject) return undefined;
+  return { fn: r, hook: h, ctx };
 }
 // callSuiteHook: a suite's hooks (afterEach / afterAll last registered first); beforeEach runs
 // the enclosing suites' first, afterEach after. `chain[i]` is the suite. A throw stops them.
@@ -9524,7 +9845,10 @@ function __runTestBody(t, ctx, timeoutMs) {
       // describe( call returned: no enclosing describe( frames)
       const frames = String(t.stackTrace.stack).split('\n');
       const own = frames.findIndex((l, i) => i > 0 && !!globalThis.__ttFile && l.includes(globalThis.__ttFile));
-      err.stack = (own < 0 ? frames : frames.slice(0, own + 1)).join('\n');
+      // vitest 4.1.12 keeps the registration stack's STACK_TRACE_ERROR header; a jest project
+      // heads it with the timeout's message (turbo-test#426)
+      const stack = (own < 0 ? frames : frames.slice(0, own + 1)).join('\n');
+      err.stack = globalThis.__ttJestProject ? stack.replace('STACK_TRACE_ERROR', err.message) : stack;
       // the context's signal aborts with the timeout error (vitest's `withTimeout`)
       t.abort.abort(err);
       reject(err);
@@ -9571,6 +9895,19 @@ function __attemptState(task, run) {
     task.result.errors = run.attemptErrors;
   }
 }
+// Jest's test.failing body (jest-circus _callCircusTest, turbo-test#402): a body that throws,
+// rejects or times out is the success; one that completes fails with Jest's message. Its hooks
+// and the expect.assertions check after it are not inverted (Jest checks those apart too).
+async function __runFailingBody(t, ctx, timeoutMs) {
+  try {
+    await __runTestBody(t, ctx, timeoutMs);
+  } catch (e) {
+    if (e instanceof __PendingError) throw e;
+    return;
+  }
+  throw new Error('Failing test passed even though it was supposed to fail. Remove `.failing` to remove error.');
+}
+const __runBody = (t, ctx, timeoutMs) => (t.failing ? __runFailingBody(t, ctx, timeoutMs) : __runTestBody(t, ctx, timeoutMs));
 // One attempt of a test: its beforeEach hooks (the enclosing suites' first) and body, then its
 // afterEach hooks (even when it failed, so a failed test's mounted DOM does not leak into the
 // next one: innermost suite first, each suite's last registered first), the functions its
@@ -9584,7 +9921,7 @@ async function __runAttemptInner(t, chain, ctx, timeoutMs, run) {
     __clearModuleMocks();
     await null;
     beCleanups = await __vtSuiteHook(chain, chain.length - 1, 'be', [ctx]);
-    await __runTestBody(t, ctx, timeoutMs);
+    await __runBody(t, ctx, timeoutMs);
     __checkAssertions();
     await null;
     run.ok = true;
@@ -9847,7 +10184,7 @@ function __suiteOpen(suite, ancestors, summary, mode) {
   return st;
 }
 function __suiteClose(st) {
-  if (st.suiteErrors.length && st.ancestors.length) __recordSuiteErrors(st.suite, st.summary, st.suiteSlot, st.suiteStart, st.suiteErrors);
+  __recordHookErrors(st);
   __ttLogTask = st.outerTask;
   st.record(__suiteState(st.failed, st.skipAll, st.idle));
   return st.failed;
@@ -9934,6 +10271,13 @@ function __suitePlan(suite, ancestors, summary, skipAll) {
   return { idle, forbidden, hooks: !skipAll && !idle && !forbidden };
 }
 const __suiteTaskName = (suite, ancestors) => (ancestors.length ? [...ancestors.slice(1), suite].map((x) => x.name).join(' > ') : '');
+// A suite's hook errors: a describe's are its suite's (turbo-test#81); the root suite's are the
+// file task's errors, whose first message is vitest's JSON `message` for the file (turbo-test#426).
+function __recordHookErrors(st) {
+  if (!st.suiteErrors.length) return;
+  if (st.ancestors.length) __recordSuiteErrors(st.suite, st.summary, st.suiteSlot, st.suiteStart, st.suiteErrors);
+  else st.summary.file_errors = st.suiteErrors.map((e) => e.message);
+}
 function __recordSuiteErrors(suite, summary, suiteSlot, suiteStart, suiteErrors) {
   summary.suite_errors[suiteSlot] = { name: suite.name, duration_ms: __loop.elapsed() - suiteStart, errors: suiteErrors };
 }
@@ -9985,7 +10329,7 @@ globalThis.__tt = {
     if (globalThis.__ttInstallJsdomComputedStyle) globalThis.__ttInstallJsdomComputedStyle();
     // `suites`: one state per describe block ('pass' / 'fail' / 'skip' / 'todo'), for the JSON
     // reporter's suite counts.
-    const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [], suites: [], skippedNames: [], suite_errors: [], empty_suites: [] };
+    const summary = { passed: 0, failed: 0, skipped: 0, failures: [], tests: [], suites: [], skippedNames: [], suite_errors: [], empty_suites: [], file_errors: [] };
     // vitest (runner `runFiles`): a file that collected NO task at all — no test or suite, skipped
     // and todo ones included — fails with "No test suite found in file <path>" unless
     // passWithNoTests. Reported as the file's only failure entry with no failed test; the CLI
