@@ -4304,6 +4304,12 @@ class __Anything extends Asymmetric {
   toString() { return 'Anything'; }
   toAsymmetricMatcher() { return 'Anything'; }
 }
+// Equality testers __ObjectContaining.asymmetricMatch runs per key (turbo-test#442):
+// in a jest project it drops iterableEquality / subsetEquality so Jest 30 semantics apply.
+function __objectContainingTesters(customTesters) {
+  if (!globalThis.__ttJestProject) return customTesters;
+  return (customTesters || []).filter((t) => t !== __iterableEquality && t !== __subsetEquality);
+}
 class __ObjectContaining extends Asymmetric {
   constructor(sample, inverse = false) { super(sample, inverse); }
   getPrototype(obj) {
@@ -4321,9 +4327,13 @@ class __ObjectContaining extends Asymmetric {
   }
   asymmetricMatch(other, customTesters) {
     if (typeof this.sample !== 'object') throw new TypeError(`You must provide an object to ${this.toString()}, not '${typeof this.sample}'.`);
+    // Jest 30 (turbo-test#442): ObjectContaining's per-key equality uses only user-added
+    // custom testers (getCustomEqualityTesters), so iterableEquality is NOT in play — two
+    // Sets, with no own enumerable keys, always compare equal.
+    const testers = __objectContainingTesters(customTesters);
     let result = true;
     for (const property of this.getProperties(this.sample)) {
-      if (!this.hasProperty(other, property) || !__equals(this.sample[property], other[property], customTesters)) { result = false; break; }
+      if (!this.hasProperty(other, property) || !__equals(this.sample[property], other[property], testers)) { result = false; break; }
     }
     return this.inverse ? !result : result;
   }
