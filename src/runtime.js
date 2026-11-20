@@ -4304,6 +4304,12 @@ class __Anything extends Asymmetric {
   toString() { return 'Anything'; }
   toAsymmetricMatcher() { return 'Anything'; }
 }
+// Equality testers __ObjectContaining.asymmetricMatch runs per key (turbo-test#442):
+// in a jest project it drops iterableEquality / subsetEquality so Jest 30 semantics apply.
+function __objectContainingTesters(customTesters) {
+  if (!globalThis.__ttJestProject) return customTesters;
+  return (customTesters || []).filter((t) => t !== __iterableEquality && t !== __subsetEquality);
+}
 class __ObjectContaining extends Asymmetric {
   constructor(sample, inverse = false) { super(sample, inverse); }
   getPrototype(obj) {
@@ -4321,9 +4327,13 @@ class __ObjectContaining extends Asymmetric {
   }
   asymmetricMatch(other, customTesters) {
     if (typeof this.sample !== 'object') throw new TypeError(`You must provide an object to ${this.toString()}, not '${typeof this.sample}'.`);
+    // Jest 30 (turbo-test#442): ObjectContaining's per-key equality uses only user-added
+    // custom testers (getCustomEqualityTesters), so iterableEquality is NOT in play — two
+    // Sets, with no own enumerable keys, always compare equal.
+    const testers = __objectContainingTesters(customTesters);
     let result = true;
     for (const property of this.getProperties(this.sample)) {
-      if (!this.hasProperty(other, property) || !__equals(this.sample[property], other[property], customTesters)) { result = false; break; }
+      if (!this.hasProperty(other, property) || !__equals(this.sample[property], other[property], testers)) { result = false; break; }
     }
     return this.inverse ? !result : result;
   }
@@ -4581,6 +4591,9 @@ function __eqErrorExtras(a, b, aStack, bStack, testers, hasKey) {
 }
 function __eqError(a, b, aStack, bStack, testers, hasKey) {
   try {
+    // Jest 30 (@jest/expect-utils equals, turbo-test#443): two Error instances compare equal
+    // when their messages do; name, cause, own enumerable props and subclass do not matter.
+    if (globalThis.__ttJestProject) return a.message === b.message;
     return __eqErrorShape(a, b) && __eqErrorExtras(a, b, aStack, bStack, testers, hasKey);
   } finally {
     aStack.pop();
@@ -9808,6 +9821,46 @@ function __skipTest(t, chain, summary, label, skipAll, hookFailed, filtered) {
   if (!todo) summary.skippedNames.push(label);
   return true;
 }
+// In a jest project a failing beforeAll fails every test under it (jest-circus), where vitest
+// skips them. __ttActiveHookError is the error of the nearest enclosing failed beforeAll
+// (turbo-test#440); __runSuiteBody sets it around that suite's idle walk.
+let __ttActiveHookError = null;
+// Jest's jest-message-util format (TITLE_INDENT=2 spaces, TITLE_BULLET='● ',
+// ANCESTRY_SEPARATOR=' › ', MESSAGE_INDENT=4 spaces): `  ● <path>\n\n<indented content>`
+// per failed test, joined by \n. No ANSI colours — the JSON reporter is plain text.
+const __JEST_MESSAGE_INDENT = '    ';
+function __jestTitleLine(t) {
+  const sep = ' › ';
+  const path = (t.ancestors || []).concat(t.title).filter(Boolean).join(sep);
+  return `  ● ${path}`;
+}
+function __jestIndentMessage(s) {
+  return String(s == null ? '' : s)
+    .split('\n')
+    .map((l) => (l.length ? __JEST_MESSAGE_INDENT + l : l))
+    .join('\n');
+}
+function __jestFailureBlocks(t) {
+  const fms = t.failure_messages || [];
+  if (!fms.length) return [`${__jestTitleLine(t)}\n\n${__JEST_MESSAGE_INDENT}${t.message || ''}`];
+  return fms.map((fm) => `${__jestTitleLine(t)}\n\n${__jestIndentMessage(fm)}`);
+}
+function __jestFileMessage(summary) {
+  const parts = [];
+  for (const t of summary.tests) {
+    if (t.status === 'failed') parts.push(...__jestFailureBlocks(t));
+  }
+  if (parts.length) summary.file_errors = [parts.join('\n')];
+}
+function __failAsJestHook(t, chain, summary, label, hookFailed) {
+  if (!hookFailed || !globalThis.__ttJestProject || __ttActiveHookError == null) return false;
+  const e = __ttActiveHookError;
+  const msg = __failMessage(e);
+  summary.failed++;
+  summary.failures.push(`${label}: ${msg}`);
+  summary.tests.push(__testRecord(t, chain, 'failed', { message: msg, failure_messages: [__failureMessage(e)], errors: [__errorInfo(e)] }));
+  return true;
+}
 // retry: per-test `{ retry }` wins; else the global default (--retry → __TT_DEFAULT_RETRY).
 function __testRetry(t) {
   if (t.retry != null && t.retry > 0) return t.retry;
@@ -10118,6 +10171,8 @@ function __runSuiteTest(t, chain, summary, skipAll, hookFailed, suiteTask) {
   const fullName = chain.slice(1).map((s) => s.name).concat(t.name).join(' ');
   const filtered = !skipAll && __tt.namePattern && !__tt.namePattern.test(fullName);
   if (__runSuiteOnlyUnderSkip(t, chain, summary, skipAll, label)) return false;
+  // jest project (turbo-test#440): a beforeAll failure in an enclosing describe fails this test
+  if (__failAsJestHook(t, chain, summary, label, hookFailed)) return true;
   if (__skipTest(t, chain, summary, label, skipAll, hookFailed, filtered)) return false;
   if (__runSuiteForbiddenOnly(t, chain, summary, label)) return true;
   return __runTest(t, chain, summary, label, suiteTask);
@@ -10213,10 +10268,18 @@ function __mark(st, failed) { if (failed) st.failed = true; }
 function __baError(st, suite, summary, suiteErrors, e) {
   __suiteHookError(suite, summary, suiteErrors, 'beforeAll', e);
   st.hookFailed = st.failed = true;
+  st.hookError = e;
 }
 function __aaError(st, suite, summary, suiteErrors, e) {
   __suiteHookError(suite, summary, suiteErrors, 'afterAll', e);
   st.failed = true;
+}
+// __runSuiteBody's idle walk after a failed beforeAll: in a jest project, descendants read
+// __ttActiveHookError to fail their tests with that error (turbo-test#440).
+function __idleTasksUnderHook(st) {
+  const prev = __ttActiveHookError;
+  if (st.hookError) __ttActiveHookError = st.hookError;
+  try { __idleTasks(st); } finally { __ttActiveHookError = prev; }
 }
 // afterAll hooks, then the functions its beforeAll hooks returned (last first: vitest's
 // `sequence.hooks: 'stack'`; a throwing beforeAll drops them all, turbo-test#101). A throwing
@@ -10230,7 +10293,7 @@ async function __runSuiteBody(st) {
   } catch (e) {
     __baError(st, suite, summary, suiteErrors, e);
   }
-  if (st.hookFailed) __idleTasks(st);
+  if (st.hookFailed) __idleTasksUnderHook(st);
   else for (const run of __suiteItems(suite.tasks, st)) __mark(st, await run());
   const afterSteps = __suiteAfterAllSteps(baCleanups, st);
   try {
@@ -10349,6 +10412,9 @@ globalThis.__tt = {
     summary.waited_ms = __loop.waited - waited;
     summary.snapshot = __snapFinish(summary.skippedNames);
     summary.logs = __ttFileLogs.map((l) => [l[0], l[3], l[1]]);
+    // jest project (turbo-test#441): the JSON reporter's file-level `message` carries every
+    // failure in Jest's "  ● <ancestors › title>\n\n<content>" shape.
+    if (globalThis.__ttJestProject) __jestFileMessage(summary);
     return summary;
   },
 };
