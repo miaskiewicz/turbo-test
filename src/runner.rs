@@ -3675,16 +3675,49 @@ fn esbuild_transform_cjs(file: &Path, prefer_metadata: bool) -> Option<String> {
     let use_meta = wants_decorator_metadata(file, prefer_metadata, &raw);
     let cov = crate::coverage::enabled();
     let cache = mr_cjs_cache_path(file, &root, &raw, use_meta, cov);
-    if let Some(c) = read_cached_cjs(&cache) {
+    let code = esbuild_transform_cjs_body(file, &root, &raw, use_meta, cov, &cache)?;
+    // Under --coverage the entry test file takes the esbuild path (native is skipped) — its
+    // transform's inline source map must still reach location.rs so failure frames in it map
+    // back to the authored line:col, as the native-transform path does without --coverage
+    // (turbo-test#444).
+    maybe_register_entry_map(file, &raw, &code);
+    Some(code)
+}
+
+/// Dispatch the three transform routes `esbuild_transform_cjs` holds (cache hit, decorator-
+/// metadata path, plain esbuild).
+fn esbuild_transform_cjs_body(
+    file: &Path,
+    root: &Path,
+    raw: &str,
+    use_meta: bool,
+    cov: bool,
+    cache: &Path,
+) -> Option<String> {
+    if let Some(c) = read_cached_cjs(cache) {
         return Some(c);
     }
     if use_meta {
-        if let Some(code) = esbuild_transform_cjs_meta(file, &root, &raw, &cache) {
+        if let Some(code) = esbuild_transform_cjs_meta(file, root, raw, cache) {
             return Some(code);
         }
         // fall through to the plain esbuild transform below (metadata-less, but loads)
     }
-    esbuild_transform_cjs_plain(file, &root, &raw, &cache, cov)
+    esbuild_transform_cjs_plain(file, root, raw, cache, cov)
+}
+
+/// Under --coverage, register the entry test file's esbuild inline source map with location.rs
+/// so failure frames in that file resolve back to the authored source, matching the native path's
+/// behaviour without coverage (turbo-test#444). esbuild emits `//# sourceMappingURL=data:...` at
+/// the end; the finalize passes preserve it, and `cjs_script_origin` already sets the 1-line
+/// wrapper offset for the entry, so a plain `set_map` here lines up with V8's reported line:col.
+fn maybe_register_entry_map(file: &Path, raw: &str, code: &str) {
+    if !crate::coverage::enabled() || !crate::location::is_entry(file) {
+        return;
+    }
+    if let Some(segs) = crate::coverage::inline_segments(code) {
+        crate::location::set_map(file, segs, raw);
+    }
 }
 
 fn wants_decorator_metadata(file: &Path, prefer_metadata: bool, raw: &str) -> bool {
