@@ -3215,6 +3215,14 @@ fn tsc_transform_source_with_kind(
     if !ts_dir.join("package.json").is_file() {
         return None;
     }
+    // Fast path: a persistent `node` worker that keeps `require("typescript")` loaded
+    // across files. On any worker / protocol failure the caller falls through to the
+    // one-shot `node -e <inline>` spawn below, so correctness never depends on it.
+    if let Some(code) = crate::tsc_worker::transform(root, &ts_dir, file, module_kind, src) {
+        if !code.trim().is_empty() {
+            return Some(code);
+        }
+    }
     // Small node program: transpile with the project's TS (no checker — same isolatedModules
     // semantics ts-jest uses), with the requested module kind + inlined helpers + decorator metadata.
     const SCRIPT: &str = r#"
