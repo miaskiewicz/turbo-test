@@ -9920,6 +9920,10 @@ function __jestFileMessage(summary) {
 }
 function __failAsJestHook(t, chain, summary, label, hookFailed) {
   if (!hookFailed || !globalThis.__ttJestProject || __ttActiveHookError == null) return false;
+  // Jest respects .skip and .todo even when an enclosing beforeAll failed — jest-circus
+  // reports them as pending, not failed. Leave them to __skipTest so the test is recorded
+  // as skipped/todo instead of being counted as a hook-failure casualty (turbo-test#440).
+  if (t.skip || t.todo) return false;
   const e = __ttActiveHookError;
   const msg = __failMessage(e);
   summary.failed++;

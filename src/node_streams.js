@@ -254,8 +254,11 @@ function __readablePushEof(stream) {
   if (state.ended) return false;
   __readableDecoderTail(state);
   state.ended = true;
+  // Async EOF skips the next-tick delay of __readableEmitReadable so 'end' fires on the
+  // current tick; __readableEmitReadableNow still runs __readableEmitReadableDeliver which
+  // resets emittedReadable, so no pre-set is needed (the earlier assignment was dead).
   if (state.sync) __readableEmitReadable(stream);
-  else { state.emittedReadable = true; __readableEmitReadableNow(stream); }
+  else __readableEmitReadableNow(stream);
   return false;
 }
 function __readablePushSkipEmpty(stream, state) {
@@ -493,7 +496,10 @@ function __readableUpdateListening(stream) {
 }
 function __readableOnData(stream) {
   __readableUpdateListening(stream);
-  __readableResume(stream);
+  // Node only resumes when flowing is not explicitly paused: `stream.pause()` sets flowing to
+  // false, and a later `.on('data', …)` must not re-wake the stream (Node's readable.js
+  // `on('data')` handler: `if (state.flowing !== false) resume(…)`).
+  if (stream._rs.flowing !== false) __readableResume(stream);
 }
 function __readableOnReadable(stream) {
   const state = stream._rs;
@@ -606,7 +612,10 @@ class __Readable extends __Stream {
 function __readableUnshiftStore(stream, state, value) {
   const chunk = state.decoder && Buffer.isBuffer(value) ? state.decoder.decode(value, { stream: true }) : value;
   state.buffer.unshift(chunk);
-  state.length += state.objectMode ? 1 : value.length;
+  // Count the length of what's actually buffered (the decoded string under a decoder), so
+  // state.length matches __readableBufferChunk / __readableSetEncoding and later read(n)
+  // accounting is consistent whether a chunk entered via push or unshift.
+  state.length += state.objectMode ? 1 : chunk.length;
   if (state.needReadable) __readableEmitReadable(stream);
 }
 function __readableUnshift(stream, chunk, encoding) {

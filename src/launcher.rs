@@ -2022,8 +2022,10 @@ fn forward_config_numbers(cwd: &Path, forced: Option<&Path>, forward: &mut Vec<S
 
 /// `test.nodeFeatures: 22|24|26` in vitest config → `--node-features N` (turbo-test#453). CLI
 /// (`--node-features`) and env (`TURBO_NODE_FEATURES`) both outrank the config: CLI wins because
-/// `has_flag` short-circuits; env wins because the CLI then sees the env value and forwards
-/// `--node-features` into the child, which the runner's env read picks up.
+/// `has_flag` short-circuits; env wins because `install_runtime_flags` reads
+/// `TURBO_NODE_FEATURES` directly, and a child process inherits it either from the ambient
+/// environment or from `std::env::set_var` that `cli::parse_args` performs when `--node-features`
+/// is on the command line.
 fn forward_node_features(cwd: &Path, forced: Option<&Path>, forward: &mut Vec<String>) {
     if has_flag(forward, "--node-features") {
         return;
