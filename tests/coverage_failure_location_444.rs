@@ -47,12 +47,14 @@ fn coverage_reports_same_failure_position_as_without_coverage() {
     let plain_at = frame_line(&plain);
     let covered_at = frame_line(&covered);
     assert_eq!(
-        plain_at, "pkg.test.ts:4:17",
+        plain_at,
+        "pkg.test.ts:4:17",
         "no-coverage oracle: {}",
         plain.all()
     );
     assert_eq!(
-        covered_at, plain_at,
+        covered_at,
+        plain_at,
         "coverage frame drifted from the no-coverage source position:\n{}",
         covered.all()
     );
