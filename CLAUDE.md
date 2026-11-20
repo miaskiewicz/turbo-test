@@ -72,7 +72,9 @@ A release where these disagree is a bug. Bump both in the same commit.
   `turbo_dom_browser_env::browser_env::{install, enabled, reset, flush_ownership}`. Fix DOM behaviour there.
 - V8 is turbo-dom's rusty_v8 fork `turbo-dom-v8` (aliased `v8`). No V8 source is vendored
   here. `bash scripts/check-single-v8.sh` must pass (one turbo-dom-v8, no v8/v8x/turbo-surf-v8).
-- The release consumes published turbo-dom / -layout / -browser-env 0.8.5 and
+- This unreleased 0.8.6 branch pins turbo-dom / -layout / -browser-env 0.8.6 to turbo-dom
+  `release/0.8.6` @ 2561ff20 via `[patch.crates-io]` (scripts/agent/pin-turbo-dom.sh); drop it
+  (drop-turbo-dom-pin.sh) once they are published. Releases consume published turbo-dom crates and
   turbo-dom-v8 150.4.2 through the registry lockfile. `release-guard` requires no
   temporary `[patch]` sections or Git sources before tagging. Future development
   pins must be removed and the registry graph validated before publication.

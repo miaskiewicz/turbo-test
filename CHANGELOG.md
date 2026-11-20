@@ -5,6 +5,25 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.8.6] — unreleased local candidate — turbo-dom 0.8.6
+
+Not tagged or published: turbo-dom 0.8.6 is not on crates.io yet, so this branch pins
+turbo-dom / turbo-dom-layout / turbo-dom-browser-env 0.8.6 to turbo-dom `release/0.8.6` @ 2561ff20
+through `[patch.crates-io]`. The pin must be dropped and the registry graph re-validated before
+tagging (release-guard rejects it).
+
+### Fixed
+- Consume turbo-dom 0.8.6's fix for the 0.8.5 grid baseline regression (turbo-dom#537): a
+  baseline-aligned grid item was laid out at its min-content width; baseline offsets now match
+  Chromium.
+
+### Performance
+- Consume turbo-dom 0.8.6's faster HTML parser (index-arena html5ever tree sink, SIMD
+  `<selectedcontent>` scan) for DOM-environment documents.
+
+### Release preparation
+- Align the Rust and npm packages at 0.8.6; turbo-dom-v8 stays 150.4.2 (single V8 in the graph).
+
 ## [0.8.5] — 2026-11-19 — turbo-dom 0.8.5, Jest/Node parity from the full Flux backend suite
 
 Validated against the full flux-apis backend unit suite (1,582 files, 36,552 tests, real Jest 30
