@@ -4,8 +4,11 @@
 
 #![cfg(unix)]
 
-use super::{spawn_count, transform};
-use std::path::PathBuf;
+use super::{
+    decode_escape, decode_response, decode_unicode_escape, encode_request, json_quote,
+    spawn_count, transform,
+};
+use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -48,6 +51,57 @@ fn transform_lowers_legacy_decorators_through_the_persistent_worker() {
         out.contains("exports.Service"),
         "commonjs export missing: {out}"
     );
+}
+
+#[test]
+fn json_quote_escapes_every_json_control_sequence() {
+    // Every JSON escape branch the worker emits: covers json_quote arms individually.
+    let mut out = String::new();
+    json_quote(&mut out, "a \"q\" b");
+    assert_eq!(out, r#""a \"q\" b""#);
+    out.clear();
+    json_quote(&mut out, r"back\slash");
+    assert_eq!(out, r#""back\\slash""#);
+    out.clear();
+    json_quote(&mut out, "line\n\r\tnext");
+    assert_eq!(out, r#""line\n\r\tnext""#);
+    out.clear();
+    // U+0001 is below 0x20 and has no dedicated escape → \u0001
+    json_quote(&mut out, "ctrl\u{0001}end");
+    assert_eq!(out, "\"ctrl\\u0001end\"");
+    // Non-ASCII above 0x7F is emitted verbatim (JSON allows raw UTF-8)
+    out.clear();
+    json_quote(&mut out, "☃");
+    assert_eq!(out, "\"☃\"");
+}
+
+#[test]
+fn decode_response_parses_each_json_string_escape() {
+    // Every decode_escape branch, including \u for a code unit.
+    let body = r#"{"code":"q\"\\/n\n\r\t\b\fA"}"#.as_bytes();
+    assert_eq!(decode_response(body).as_deref(), Some("q\"\\/n\n\r\t\u{08}\u{0c}A"));
+    // An unknown escape letter → decode_escape returns None, decode_response bails.
+    let bad = r#"{"code":"x\z"}"#.as_bytes();
+    assert_eq!(decode_response(bad), None);
+    // The response's shape must carry the "code":"..." marker; other shapes → None.
+    assert_eq!(decode_response(r#"{"error":"nope"}"#.as_bytes()), None);
+    // Non-UTF-8 → None.
+    assert_eq!(decode_response(&[0xffu8, 0xfeu8]), None);
+    // decode_unicode_escape's short-sequence guard: fewer than 4 hex digits → None.
+    let mut short = "12".chars();
+    assert_eq!(decode_unicode_escape(&mut short), None);
+    // Bare decode_escape: `None` on empty iterator.
+    let mut empty = "".chars();
+    assert_eq!(decode_escape(&mut empty), None);
+}
+
+#[test]
+fn encode_request_builds_json_frame_shape_the_worker_decodes() {
+    let body = encode_request(Path::new("/tmp/x.ts"), "commonjs", "const a = 1;\n");
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(text.starts_with(r#"{"file":"/tmp/x.ts","moduleKind":"commonjs","src":"#));
+    assert!(text.ends_with(r#""}"#));
+    assert!(text.contains(r#""src":"const a = 1;\n""#));
 }
 
 #[test]

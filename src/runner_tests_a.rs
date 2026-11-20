@@ -1216,6 +1216,33 @@ fn hoist_mock_setup_no_op_cases() {
 }
 
 #[test]
+fn jest_imports_before_const_captures_multiline_imports_up_to_the_first_decl() {
+    // single-line imports before a const: both specs captured, decl stops the walk
+    let single = "import a from './a';\nimport { b } from './b';\nconst x = 1;\nimport c from './c';\n";
+    assert_eq!(
+        jest_imports_before_const(single),
+        vec!["./a".to_string(), "./b".to_string()]
+    );
+    // multi-line import — continuation scans forward for the first string literal
+    let multi = "import {\n  a,\n  b,\n} from './ab';\nconst x = 1;\n";
+    assert_eq!(jest_imports_before_const(multi), vec!["./ab".to_string()]);
+    // multi-line import whose first line already carries `;` without a string → skipped (an
+    // `import` declaration cannot end on the opening line without one, so this is a syntax
+    // the extractor leaves to v8; we just don't record a spec for it)
+    let ragged = "import ;\nconst x = 1;\n";
+    assert_eq!(jest_imports_before_const(ragged), Vec::<String>::new());
+    // a continuation line reaches `;` before any string: no spec for that import
+    let truncated = "import { a }\n  from\n  ; broken\nconst x = 1;\n";
+    assert_eq!(jest_imports_before_const(truncated), Vec::<String>::new());
+    // declaration first → nothing collected (opens_import never fires for the const line)
+    let decl_first = "const x = 1;\nimport a from './a';\n";
+    assert_eq!(jest_imports_before_const(decl_first), Vec::<String>::new());
+    // bare side-effect import (`import './side';`) is captured too — opens_import matches
+    let side_effect = "import './side';\nconst x = 1;\n";
+    assert_eq!(jest_imports_before_const(side_effect), vec!["./side".to_string()]);
+}
+
+#[test]
 fn extract_string_literal_and_require_spec() {
     assert_eq!(
         extract_first_string_literal("(x, \"a b\", 'c')").as_deref(),
