@@ -90,34 +90,12 @@ fn expected(oracle: &str, files: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// Where turbo-test's vitest `.each` titles still read as vitest 4 (unchanged by the jest-each
-/// work): vitest 5 prints a `$key` string value unquoted and an object `%s` / `$key` value
-/// through its pretty-format based `inspect`. (vitest 5.1.0 line, turbo-test line.)
-const VITEST5_TITLE_GAPS: [(&str, &str); 5] = [
-    (
-        "object 1 deep { c: 'deep' } $# undefined",
-        "object 1 'deep' { c: 'deep' } $# undefined",
-    ),
-    (
-        "object two [ 1 ] { c: [ 1 ] } $# undefined",
-        "object 'two' [ 1 ] { c: [ 1 ] } $# undefined",
-    ),
-    ("tagged 1 x { k: { z: 1 } }", "tagged 1 'x' { k: { z: 1 } }"),
-    (
-        "{ a: null, b: [Array], obj: undefined }",
-        "{ a: null, b: [ 1, 2 ], obj: undefined }",
-    ),
-    ("tsuite tx > inner", "tsuite 'tx' > inner"),
-];
-
-/// The vitest 5.1.0 oracle's lines for `files`, with VITEST5_TITLE_GAPS applied.
+/// Vitest 5's `.each` title formatter (ported in turbo-test#439): `$key` string values are
+/// printed unquoted (truncated to taskTitleValueFormatTruncate = 40), and object / array
+/// values in `$key` and `%s` go through vitest 5's pretty-format based `inspect`, so a nested
+/// value past the adaptive maxDepth collapses to `[Array]` / `[Object]`.
 fn vitest_expected(files: &[&str]) -> Vec<String> {
-    let gap = |l: String| {
-        VITEST5_TITLE_GAPS
-            .iter()
-            .fold(l, |l, (vitest, tt)| l.replace(vitest, tt))
-    };
-    expected(VITEST, files).into_iter().map(gap).collect()
+    expected(VITEST, files)
 }
 
 fn assert_lines(got: Vec<String>, want: Vec<String>) {
