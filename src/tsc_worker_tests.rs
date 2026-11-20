@@ -5,8 +5,8 @@
 #![cfg(unix)]
 
 use super::{
-    decode_escape, decode_response, decode_unicode_escape, encode_request, json_quote,
-    spawn_count, transform,
+    decode_escape, decode_response, decode_unicode_escape, encode_request, json_quote, spawn_count,
+    transform,
 };
 use std::path::{Path, PathBuf};
 
@@ -79,7 +79,10 @@ fn json_quote_escapes_every_json_control_sequence() {
 fn decode_response_parses_each_json_string_escape() {
     // Every decode_escape branch, including \u for a code unit.
     let body = r#"{"code":"q\"\\/n\n\r\t\b\fA"}"#.as_bytes();
-    assert_eq!(decode_response(body).as_deref(), Some("q\"\\/n\n\r\t\u{08}\u{0c}A"));
+    assert_eq!(
+        decode_response(body).as_deref(),
+        Some("q\"\\/n\n\r\t\u{08}\u{0c}A")
+    );
     // An unknown escape letter → decode_escape returns None, decode_response bails.
     let bad = r#"{"code":"x\z"}"#.as_bytes();
     assert_eq!(decode_response(bad), None);

@@ -1218,7 +1218,8 @@ fn hoist_mock_setup_no_op_cases() {
 #[test]
 fn jest_imports_before_const_captures_multiline_imports_up_to_the_first_decl() {
     // single-line imports before a const: both specs captured, decl stops the walk
-    let single = "import a from './a';\nimport { b } from './b';\nconst x = 1;\nimport c from './c';\n";
+    let single =
+        "import a from './a';\nimport { b } from './b';\nconst x = 1;\nimport c from './c';\n";
     assert_eq!(
         jest_imports_before_const(single),
         vec!["./a".to_string(), "./b".to_string()]
@@ -1239,7 +1240,10 @@ fn jest_imports_before_const_captures_multiline_imports_up_to_the_first_decl() {
     assert_eq!(jest_imports_before_const(decl_first), Vec::<String>::new());
     // bare side-effect import (`import './side';`) is captured too — opens_import matches
     let side_effect = "import './side';\nconst x = 1;\n";
-    assert_eq!(jest_imports_before_const(side_effect), vec!["./side".to_string()]);
+    assert_eq!(
+        jest_imports_before_const(side_effect),
+        vec!["./side".to_string()]
+    );
 }
 
 #[test]
