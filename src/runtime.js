@@ -3437,12 +3437,19 @@ function __nodeFormat(...args) {
   return __nodeFormatWith({}, ...args);
 }
 // util.formatWithOptions: `o.colors` colours %o / %O and the inspected rest (not %s / %d / …)
-// util.format's %s: strings as they are, objects inspected one level deep
+// util.format's %s: strings as they are, objects inspected one level deep; a plain-tag object
+// with its own (non-Object.prototype) toString is rendered via String(value) as Node does
+// (jest-each #449; preserves Node behaviour for Error / Date / RegExp, which keep inspect).
+function __formatSpecSObject(a) {
+  const tag = Object.prototype.toString.call(a);
+  if (tag === '[object Object]' && typeof a.toString === 'function' && a.toString !== Object.prototype.toString) return String(a);
+  return __nodeInspect(a, { depth: 0 });
+}
 function __formatSpecS(a) {
   if (typeof a === 'string') return a;
   if (typeof a === 'bigint') return `${a}n`;
   if (typeof a === 'symbol') return String(a);
-  if (typeof a === 'object' && a !== null) return __nodeInspect(a, { depth: 0 });
+  if (typeof a === 'object' && a !== null) return __formatSpecSObject(a);
   return Object.is(a, -0) ? '-0' : String(a);
 }
 // util.format's numeric specifiers %d, %i, %f
@@ -7550,11 +7557,16 @@ function __chaiAssert(negated, pass, msg, notMsg, obj, exp, act, showDiff = true
 }
 // @vitest/pretty-format: `o` = { indent, min, basic (printBasicPrototype), maxDepth, escape
 // (escapeString), toJSON (callToJSON), errors (the Error plugin) }.
-function __pf(val, o) {
-  const cfg = {
-    indent: o.min ? '' : ' '.repeat(o.indent == null ? 2 : o.indent),
-    outer: o.min ? '' : '\n',
-    inner: o.min ? ' ' : '\n',
+function __pfSpacing(o) {
+  const indent = o.min ? '' : ' '.repeat(o.indent == null ? 2 : o.indent);
+  const outer = o.spacingOuter != null ? o.spacingOuter : (o.min ? '' : '\n');
+  const inner = o.spacingInner != null ? o.spacingInner : (o.min ? ' ' : '\n');
+  return { indent, outer, inner };
+}
+function __pfCfg(o) {
+  const { indent, outer, inner } = __pfSpacing(o);
+  return {
+    indent, outer, inner,
     min: !!o.min,
     basic: o.basic !== false,
     maxDepth: o.maxDepth == null ? Infinity : o.maxDepth,
@@ -7565,8 +7577,13 @@ function __pf(val, o) {
     escapeRegex: !!o.escapeRegex,
     mocks: !!o.mocks,
     plugins: o.plugins || [],
+    singleQuote: !!o.singleQuote,
+    quoteKeys: o.quoteKeys !== false,
+    sortKeys: o.sortKeys !== false,
   };
-  return __pfPrint(val, cfg, '', 0, [], false);
+}
+function __pf(val, o) {
+  return __pfPrint(val, __pfCfg(o), '', 0, [], false);
 }
 // pretty-format plugins (expect.addSnapshotSerializer, turbo-test#162): a plugin is
 // `{ test, serialize }` or the older `{ test, print }`, tried before any built-in printing.
@@ -7713,10 +7730,16 @@ function __pfHooks(v, cfg, ind, depth, refs) {
   return __PF_NONE;
 }
 // __pfPrimitive's typeof-dispatch over number/bigint/string/function/symbol.
+function __pfStr(v, cfg) {
+  const quote = cfg.singleQuote ? "'" : '"';
+  if (!cfg.escape) return `${quote}${v}${quote}`;
+  const esc = cfg.singleQuote ? v.replace(/\\/g, '\\\\').replace(/'/g, "\\'") : v.replace(/"|\\/g, '\\$&');
+  return `${quote}${esc}${quote}`;
+}
 const __PF_TYPEOF = {
   number: (v) => Object.is(v, -0) ? '-0' : String(v),
   bigint: (v) => `${v}n`,
-  string: (v, cfg) => cfg.escape ? `"${v.replace(/"|\\/g, '\\$&')}"` : `"${v}"`,
+  string: __pfStr,
   function: (v, cfg) => cfg.fnName ? `[Function ${v.name || 'anonymous'}]` : '[Function]',
   symbol: (v) => String(v).replace(/^Symbol\((.*)\)(.*)$/, 'Symbol($1)'),
 };
@@ -7795,21 +7818,24 @@ function __pfPrint(v, cfg, ind, depth, refs, calledToJSON) {
   if (__pfShouldJSON(cfg, v, hit, calledToJSON)) return __pfPrint(v.toJSON(), cfg, ind, d, nextRefs, true);
   return __pfComposite(v, cfg, ind, d, nextRefs, hit, tag);
 }
-function __pfEntries(entries, cfg, ind, depth, refs, sep) {
+function __pfEntries(entries, cfg, ind, depth, refs, sep, printKey) {
   if (!entries.length) return '';
   const next = ind + cfg.indent;
+  const kp = printKey || ((k) => __pfPrint(k, cfg, next, depth, refs, false));
   let out = cfg.outer;
   entries.forEach(([k, x], i) => {
-    out += next + __pfPrint(k, cfg, next, depth, refs, false) + sep + __pfPrint(x, cfg, next, depth, refs, false);
+    out += next + kp(k) + sep + __pfPrint(x, cfg, next, depth, refs, false);
     if (i < entries.length - 1) out += `,${cfg.inner}`;
     else if (!cfg.min) out += ',';
   });
   return out + cfg.outer + ind;
 }
 function __pfProps(v, cfg, ind, depth, refs) {
-  const keys = Object.keys(v).sort();
+  const next = ind + cfg.indent;
+  const keys = cfg.sortKeys ? Object.keys(v).sort() : Object.keys(v);
   for (const s of Object.getOwnPropertySymbols(v)) if (Object.getOwnPropertyDescriptor(v, s).enumerable) keys.push(s);
-  return __pfEntries(keys.map((k) => [k, v[k]]), cfg, ind, depth, refs, ': ');
+  const kp = (k) => (typeof k === 'string' && !cfg.quoteKeys) ? k : __pfPrint(k, cfg, next, depth, refs, false);
+  return __pfEntries(keys.map((k) => [k, v[k]]), cfg, ind, depth, refs, ': ', kp);
 }
 // @vitest/utils `stringify` (the call listings without a diff).
 function __stringify(v) {
@@ -8687,9 +8713,29 @@ function __subsetMatches(a, e) {
 
 // @vitest/utils format's extra argument
 const __formatExtra = (v) => (v === null || typeof v !== 'object' ? (typeof v === 'symbol' ? v.toString() : v) : __inspect(v));
-// @vitest/utils format's %s
+// vitest 5's title inspect: pretty-format with singleQuote/unquoted keys, insertion-order,
+// min layout with ' ' spacing, basic prototypes hidden, and adaptive maxDepth so a rendering
+// of `truncate` characters or more re-runs at half the depth (collapsing nested values to
+// `[Array]` / `[Object]`). taskTitleValueFormatTruncate defaults to 40 (turbo-test#439).
+const __V_TITLE_OPTS = { singleQuote: true, quoteKeys: false, sortKeys: false, min: true, spacingInner: ' ', spacingOuter: ' ', basic: false, escape: false };
+function __vTitlePF(v, maxDepth) {
+  try { return __pf(v, { ...__V_TITLE_OPTS, maxDepth, toJSON: true }); }
+  catch { return __pf(v, { ...__V_TITLE_OPTS, maxDepth, toJSON: false }); }
+}
+function __vTitleStringify(v, maxDepth, maxLength) {
+  const out = __vTitlePF(v, maxDepth);
+  return out.length >= maxLength && maxDepth > 1 ? __vTitleStringify(v, Math.floor(maxDepth / 2), maxLength) : out;
+}
+function __vTitleInspect(v, truncate) {
+  const maxLen = truncate || 1e4;
+  const out = __vTitleStringify(v, 10, maxLen);
+  if (!truncate || out.length <= truncate) return out;
+  return __vTitlePF(v, 0);
+}
+// @vitest/utils format's %s object branch: a custom toString wins, else vitest's pretty-format
+// title inspect (truncated to taskTitleValueFormatTruncate).
 function __formatOneSObject(v) {
-  return (typeof v.toString === 'function' && v.toString !== Object.prototype.toString) ? v.toString() : __inspect(v);
+  return (typeof v.toString === 'function' && v.toString !== Object.prototype.toString) ? v.toString() : __vTitleInspect(v, 40);
 }
 function __formatOneS(v) {
   if (typeof v === 'bigint') return `${v}n`;
@@ -8770,12 +8816,24 @@ function __formatTitleJoin(template, items, attrs, count) {
   if (last < template.length) out += attrs(template.slice(last));
   return out;
 }
+// Vitest 5 `$key.path`: a string value prints unquoted (truncated to 40), other values go
+// through vitest's title inspect (turbo-test#439).
+function __vTitleTruncStr(s, max) {
+  if (s.length <= max) return s;
+  let end = max - 1;
+  if (end > 0 && s[end - 1] >= '\ud800' && s[end - 1] <= '\udbff') end--;
+  return `${s.slice(0, end)}…`;
+}
+function __vTitleAttrValue(v) {
+  if (typeof v === 'string') return __vTitleTruncStr(v, 40);
+  return __vTitleInspect(v, 40);
+}
 function __formatTitleAttrs(items, isObjectItem) {
   return (str) => str.replace(/\$([$\w.]+)/g, (_, key) => {
     const isArrayKey = /^\d+$/.test(key);
     if (!isObjectItem && !isArrayKey) return `$${key}`;
     const el = isArrayKey ? __objectAttr(items, key) : undefined;
-    return __objDisplay(isObjectItem ? __objectAttr(items[0], key, el) : el);
+    return __vTitleAttrValue(isObjectItem ? __objectAttr(items[0], key, el) : el);
   });
 }
 function __formatTitle(template, items, idx) {
