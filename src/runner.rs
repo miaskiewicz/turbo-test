@@ -110,6 +110,14 @@ thread_local! {
     /// mock-prefixed const runs — a TDZ real Jest 30 reports. Guards the jest branch of
     /// `hoist_mock_lines` (turbo-test#445). Set per-file by `finish_mr_cjs` / `native_transform_cjs`.
     static JEST_IMPORT_BEFORE_MOCK_CONST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Module specs of the file's top-level `import` statements that appear BEFORE the first
+    /// top-level `const/let/var` in authored source. Esbuild hoists every ES import to the top
+    /// of the CJS output, erasing that source order; the jest-flavored hoist uses this set to
+    /// restore it — a require whose spec is here stays BEFORE the mock-prefixed const, while an
+    /// import that was authored AFTER the const (turbo-test#429's `./service`) moves after it,
+    /// matching ts-jest's source-order emission. Set per-file by `finish_mr_cjs` /
+    /// `native_transform_cjs`.
+    static JEST_IMPORTS_BEFORE_MOCK_CONST: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Jest `moduleDirectories`: additional directories to search for bare modules besides
     /// `node_modules` (turbo-test#345). Empty when unconfigured (only `node_modules`).
     static CUSTOM_MODULE_DIRS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -3525,8 +3533,10 @@ fn native_transform_cjs(file: &Path) -> Option<String> {
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     let emitted = crate::esm_cjs::emit_with(file, &raw, legacy_decorators)?;
     JEST_IMPORT_BEFORE_MOCK_CONST.with(|c| c.set(jest_import_before_const(&raw)));
+    JEST_IMPORTS_BEFORE_MOCK_CONST.with(|c| *c.borrow_mut() = jest_imports_before_const(&raw));
     let mut code = hoist_mock_setup(&await_do_mocks_on_import(emitted));
     JEST_IMPORT_BEFORE_MOCK_CONST.with(|c| c.set(false));
+    JEST_IMPORTS_BEFORE_MOCK_CONST.with(|c| c.borrow_mut().clear());
     let shared = shared_mock_lets(&raw);
     if !shared.is_empty() {
         code = rewrite_shared_lets(&code, &shared);
@@ -3565,8 +3575,10 @@ fn native_transform_cjs_mapped(file: &Path) -> Option<(String, crate::location::
     let emitted = crate::esm_cjs::emit_mapped(file, &raw, legacy_decorators)?;
     let map = crate::coverage::inline_segments(&emitted)?;
     JEST_IMPORT_BEFORE_MOCK_CONST.with(|c| c.set(jest_import_before_const(&raw)));
+    JEST_IMPORTS_BEFORE_MOCK_CONST.with(|c| *c.borrow_mut() = jest_imports_before_const(&raw));
     let (mut code, mut origins) = hoist_mock_setup_tracked(&await_do_mocks_on_import(emitted));
     JEST_IMPORT_BEFORE_MOCK_CONST.with(|c| c.set(false));
+    JEST_IMPORTS_BEFORE_MOCK_CONST.with(|c| c.borrow_mut().clear());
     let shared = shared_mock_lets(&raw);
     if !shared.is_empty() {
         code = rewrite_shared_lets(&code, &shared);
@@ -3793,8 +3805,10 @@ fn finish_mr_cjs(code: String, raw: &str) -> String {
     // vitest-style vi.mock hoisting: move consumer requires below the vi.mock setup so the mock
     // is registered (immediately, in this module's scope) before the mocked module loads.
     JEST_IMPORT_BEFORE_MOCK_CONST.with(|c| c.set(jest_import_before_const(raw)));
+    JEST_IMPORTS_BEFORE_MOCK_CONST.with(|c| *c.borrow_mut() = jest_imports_before_const(raw));
     code = hoist_mock_setup(&code);
     JEST_IMPORT_BEFORE_MOCK_CONST.with(|c| c.set(false));
+    JEST_IMPORTS_BEFORE_MOCK_CONST.with(|c| c.borrow_mut().clear());
     // Module-`let`s that this file's vi.mock() factory closes over (writes from inside the mock,
     // read by the test) must be SHARED between the mock-prepass scope and this module's scope.
     // vitest shares them via one module scope; we can't (the factory runs in the prepass), so
@@ -4323,19 +4337,75 @@ fn opens_declaration(t: &str) -> bool {
 /// over trimmed lines — comments and blank lines are skipped, string literals that happen to
 /// start with `import ` are not top-level statements.
 pub(crate) fn jest_import_before_const(raw: &str) -> bool {
-    raw.lines()
+    // The Jest TDZ shape requires BOTH a top-level `import` AND a later top-level
+    // `const/let/var` that a `jest.mock(...)` factory closes over. A file whose top-level
+    // declarations are only `import`s (the auto-generated mock prepass under
+    // node_modules/.turbo-test-prepass is exactly that shape: imports + a vi.mock call,
+    // no mock-prefixed const) carries no TDZ risk and must stay on the vitest-style hoist
+    // or its own `var import_vitest = require(...)` would be moved below the vi.mock call.
+    let mut seen_import = false;
+    for line in raw
+        .lines()
         .map(|l| l.trim_start())
         .filter(|t| is_meaningful_src_line(t))
-        .find_map(|t| {
-            if opens_import(t) {
-                Some(true)
-            } else if opens_declaration(t) {
-                Some(false)
-            } else {
-                None
+    {
+        if opens_import(line) {
+            seen_import = true;
+        } else if opens_declaration(line) {
+            return seen_import;
+        }
+    }
+    false
+}
+
+/// Module specs of top-level `import` statements that appear BEFORE the first top-level
+/// `const/let/var` in the raw source. The jest-flavored hoist uses these to restore ts-jest's
+/// source order: esbuild moves every ES import to the top of the CJS output, but ts-jest keeps
+/// imports in their authored position, so a `jest.mock(...)` whose factory closes over a
+/// mock-prefixed const TDZs on an import authored BEFORE the const (turbo-test#445) and runs
+/// fine for one authored AFTER (turbo-test#429, flux-apis's partner-legal-policy.service.spec).
+/// A textual walk over trimmed lines — a line that opens an import carries its first string
+/// literal as the module spec; a multi-line `import { a, b } from '…';` is covered by scanning
+/// forward until the terminating `;` for the first string literal that follows.
+pub(crate) fn jest_imports_before_const(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut lines = raw
+        .lines()
+        .map(|l| l.trim_start())
+        .filter(|t| is_meaningful_src_line(t));
+    while let Some(line) = lines.next() {
+        if opens_import(line) {
+            if let Some(spec) = extract_import_spec(line, &mut lines) {
+                out.push(spec);
             }
-        })
-        .unwrap_or(false)
+        } else if opens_declaration(line) {
+            break;
+        }
+    }
+    out
+}
+
+/// The module spec of an `import` statement opened by `first` — its first string literal, or
+/// the first string literal of a continuation line until `;` closes the statement.
+fn extract_import_spec<'a>(
+    first: &'a str,
+    rest: &mut impl Iterator<Item = &'a str>,
+) -> Option<String> {
+    if let Some(spec) = extract_first_string_literal(first) {
+        return Some(spec);
+    }
+    if first.contains(';') {
+        return None;
+    }
+    for line in rest {
+        if let Some(spec) = extract_first_string_literal(line) {
+            return Some(spec);
+        }
+        if line.contains(';') {
+            return None;
+        }
+    }
+    None
 }
 
 /// Whether to switch `hoist_mock_lines` to its jest branch: a jest-governed file whose raw
@@ -4358,11 +4428,25 @@ fn hoist_mock_lines_jest(region: &HoistRegion<'_, '_>) -> (String, Vec<Option<us
         region_end,
         ..
     } = *region;
+    // Esbuild hoists every ES import to the top of the CJS output; ts-jest keeps imports in
+    // their authored position. To match ts-jest's source order (so #429's `./service` import —
+    // authored AFTER the mock-prefixed const — runs after the const initialises, while #445's
+    // `./decorating` import — authored BEFORE the const — still TDZs), split the require block
+    // by spec: a require whose module was imported BEFORE the first top-level declaration in
+    // the raw source goes above the pre-mock decls; one that was imported after goes below.
+    // Non-hoistable requires (user-written `const x = require('…')` lines esbuild left in
+    // place, including ones whose specs are not ES imports) default to BEFORE, matching the
+    // esbuild-emitted order.
+    let before_specs = JEST_IMPORTS_BEFORE_MOCK_CONST.with(|c| c.borrow().clone());
+    let (reqs_before, reqs_after): (Vec<&str>, Vec<&str>) = reqs.iter().copied().partition(|l| {
+        extract_require_spec(l).is_none_or(|spec| before_specs.iter().any(|s| s == &spec))
+    });
     let mut out: Vec<&str> = Vec::with_capacity(lines.len());
     out.extend_from_slice(&lines[..req_start]);
     out.extend_from_slice(mock_stmts);
-    out.extend_from_slice(reqs);
+    out.extend_from_slice(&reqs_before);
     out.extend_from_slice(pre_setup);
+    out.extend_from_slice(&reqs_after);
     out.extend_from_slice(post_decls);
     if region_end + 1 < lines.len() {
         out.extend_from_slice(&lines[region_end + 1..]);
