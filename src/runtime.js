@@ -9812,6 +9812,33 @@ function __skipTest(t, chain, summary, label, skipAll, hookFailed, filtered) {
 // skips them. __ttActiveHookError is the error of the nearest enclosing failed beforeAll
 // (turbo-test#440); __runSuiteBody sets it around that suite's idle walk.
 let __ttActiveHookError = null;
+// Jest's jest-message-util format (TITLE_INDENT=2 spaces, TITLE_BULLET='● ',
+// ANCESTRY_SEPARATOR=' › ', MESSAGE_INDENT=4 spaces): `  ● <path>\n\n<indented content>`
+// per failed test, joined by \n. No ANSI colours — the JSON reporter is plain text.
+const __JEST_MESSAGE_INDENT = '    ';
+function __jestTitleLine(t) {
+  const sep = ' › ';
+  const path = (t.ancestors || []).concat(t.title).filter(Boolean).join(sep);
+  return `  ● ${path}`;
+}
+function __jestIndentMessage(s) {
+  return String(s == null ? '' : s)
+    .split('\n')
+    .map((l) => (l.length ? __JEST_MESSAGE_INDENT + l : l))
+    .join('\n');
+}
+function __jestFailureBlocks(t) {
+  const fms = t.failure_messages || [];
+  if (!fms.length) return [`${__jestTitleLine(t)}\n\n${__JEST_MESSAGE_INDENT}${t.message || ''}`];
+  return fms.map((fm) => `${__jestTitleLine(t)}\n\n${__jestIndentMessage(fm)}`);
+}
+function __jestFileMessage(summary) {
+  const parts = [];
+  for (const t of summary.tests) {
+    if (t.status === 'failed') parts.push(...__jestFailureBlocks(t));
+  }
+  if (parts.length) summary.file_errors = [parts.join('\n')];
+}
 function __failAsJestHook(t, chain, summary, label, hookFailed) {
   if (!hookFailed || !globalThis.__ttJestProject || __ttActiveHookError == null) return false;
   const e = __ttActiveHookError;
@@ -10372,6 +10399,9 @@ globalThis.__tt = {
     summary.waited_ms = __loop.waited - waited;
     summary.snapshot = __snapFinish(summary.skippedNames);
     summary.logs = __ttFileLogs.map((l) => [l[0], l[3], l[1]]);
+    // jest project (turbo-test#441): the JSON reporter's file-level `message` carries every
+    // failure in Jest's "  ● <ancestors › title>\n\n<content>" shape.
+    if (globalThis.__ttJestProject) __jestFileMessage(summary);
     return summary;
   },
 };
