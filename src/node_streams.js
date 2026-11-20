@@ -496,10 +496,12 @@ function __readableUpdateListening(stream) {
 }
 function __readableOnData(stream) {
   __readableUpdateListening(stream);
-  // Node only resumes when flowing is not explicitly paused: `stream.pause()` sets flowing to
-  // false, and a later `.on('data', …)` must not re-wake the stream (Node's readable.js
-  // `on('data')` handler: `if (state.flowing !== false) resume(…)`).
-  if (stream._rs.flowing !== false) __readableResume(stream);
+  // Node's readable.js `on('data')` handler only resumes when `flowing !== false`, so a
+  // `pause()` followed by `on('data', …)` does NOT re-wake the stream; this port initialises
+  // `flowing` to false (not Node's null tri-state), so the same check would block the first
+  // listener's wake-up too. Resume unconditionally, matching the port's semantics where
+  // flowing=false is also the "not yet flowing" state (the gap to Node is acknowledged).
+  __readableResume(stream);
 }
 function __readableOnReadable(stream) {
   const state = stream._rs;
