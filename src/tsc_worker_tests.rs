@@ -77,12 +77,18 @@ fn json_quote_escapes_every_json_control_sequence() {
 
 #[test]
 fn decode_response_parses_each_json_string_escape() {
-    // Every decode_escape branch, including \u for a code unit.
-    let body = r#"{"code":"q\"\\/n\n\r\t\b\fA"}"#.as_bytes();
+    // Every decode_escape branch: \" \\ \/ \n \r \t \b \f \uXXXX, plus a plain literal.
+    let body = r#"{"code":"q\"\\\/\n\r\t\b\fA"}"#.as_bytes();
     assert_eq!(
         decode_response(body).as_deref(),
-        Some("q\"\\/n\n\r\t\u{08}\u{0c}A")
+        Some("q\"\\/\n\r\t\u{08}\u{0c}A")
     );
+    // \u decoding path where char::from_u32 rejects an unpaired surrogate.
+    let unpaired = r#"{"code":"\ud800"}"#.as_bytes();
+    assert_eq!(decode_response(unpaired), None);
+    // \u with non-hex digits → str_radix fails → None.
+    let not_hex = r#"{"code":"\uZZZZ"}"#.as_bytes();
+    assert_eq!(decode_response(not_hex), None);
     // An unknown escape letter → decode_escape returns None, decode_response bails.
     let bad = r#"{"code":"x\z"}"#.as_bytes();
     assert_eq!(decode_response(bad), None);

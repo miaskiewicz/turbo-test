@@ -1235,6 +1235,14 @@ fn jest_imports_before_const_captures_multiline_imports_up_to_the_first_decl() {
     // a continuation line reaches `;` before any string: no spec for that import
     let truncated = "import { a }\n  from\n  ; broken\nconst x = 1;\n";
     assert_eq!(jest_imports_before_const(truncated), Vec::<String>::new());
+    // extract_import_spec's iterator exhausts without a string or a `;` (the last line
+    // leaves the import unterminated, no decl follows): the `for` loop falls through to
+    // the bottom `None` return.
+    let unterminated = "import {\n  a,\n  b\n";
+    assert_eq!(
+        jest_imports_before_const(unterminated),
+        Vec::<String>::new()
+    );
     // declaration first → nothing collected (opens_import never fires for the const line)
     let decl_first = "const x = 1;\nimport a from './a';\n";
     assert_eq!(jest_imports_before_const(decl_first), Vec::<String>::new());
