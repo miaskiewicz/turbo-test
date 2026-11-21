@@ -2489,16 +2489,54 @@ const __writeFile = (p, data, append) => globalThis.__fs_writeFile(__fsPath(p), 
 const __mkdir = (p, options) => globalThis.__fs_mkdir(__fsPath(p), !!(options && typeof options === 'object' && options.recursive));
 const __rm = (p, options) => {
   const path = __fsPath(p), o = options || {};
-  let st;
-  try { st = globalThis.__fs_stat(path, true); } catch (e) { if (o.force && e.code === 'ENOENT') return; throw e; }
+  const st = __rmStatOrNull(path, o);
+  if (st === null) return;
   if ((st[1] & __S_IFMT) !== 0o040000) return globalThis.__fs_remove(path, 'unlink');
-  if (!o.recursive) {
-    const e = new Error(`Path is a directory: rm returned EISDIR (is a directory) ${path}`);
-    Object.defineProperty(e, 'name', { value: 'SystemError', configurable: true, writable: true });
-    Object.assign(e, { code: 'ERR_FS_EISDIR', errno: 21, syscall: 'rm', path });
-    throw e;
+  if (!o.recursive) throw __rmEisDir(path);
+  __rmWithRetry(path, o);
+};
+// Resolve the target's stat for __rm. Returns null when force+ENOENT (skip), rethrows
+// otherwise.
+const __rmStatOrNull = (path, o) => {
+  try { return globalThis.__fs_stat(path, true); }
+  catch (e) { if (o.force && e.code === 'ENOENT') return null; throw e; }
+};
+// Build Node's `rm` EISDIR SystemError for a directory passed without recursive.
+const __rmEisDir = (path) => {
+  const e = new Error(`Path is a directory: rm returned EISDIR (is a directory) ${path}`);
+  Object.defineProperty(e, 'name', { value: 'SystemError', configurable: true, writable: true });
+  Object.assign(e, { code: 'ERR_FS_EISDIR', errno: 21, syscall: 'rm', path });
+  return e;
+};
+// Retry transient OS races (mongodb-memory-server#455: mongod's shutdown flushes data
+// files between its 'exit' event and the kernel releasing its file locks on macOS).
+// Node's own fs.rm exposes maxRetries/retryDelay; apply a small default for
+// recursive+force so library code that didn't set options still succeeds the way it
+// does under Jest's isolate teardown.
+const __rmWithRetry = (path, o) => {
+  const maxRetries = typeof o.maxRetries === 'number' ? o.maxRetries : (o.force ? 5 : 0);
+  const retryDelay = typeof o.retryDelay === 'number' ? o.retryDelay : 100;
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const error = __rmOnce(path);
+    if (!error) return;
+    if (!__rmShouldRetry(error, attempt, maxRetries)) throw error;
+    __busySleepMs(retryDelay * (attempt + 1));
   }
-  globalThis.__fs_remove(path, 'rm');
+};
+// One rm attempt; returns the caught error or null on success.
+const __rmOnce = (path) => {
+  try { globalThis.__fs_remove(path, 'rm'); return null; }
+  catch (e) { return e; }
+};
+// Whether `error` is one of Node's retryable rm codes AND more attempts remain.
+const __rmShouldRetry = (error, attempt, maxRetries) => attempt < maxRetries
+  && __rmRetryableCodes.has(error.code);
+const __rmRetryableCodes = new Set(['EBUSY', 'EMFILE', 'ENFILE', 'ENOTEMPTY', 'EPERM']);
+// Synchronous sleep for rm-retry inter-attempt wait. Node's fs.rmSync spin-waits the
+// same way; the backoff cap in __rm keeps total wait bounded (sum of 1..N * delay).
+const __busySleepMs = (ms) => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { /* spin */ }
 };
 const __promised = (f) => (...a) => { try { return Promise.resolve(f(...a)); } catch (e) { return Promise.reject(e); } };
 const __fsArgumentError = (code, message, Type = TypeError) => Object.assign(new Type(message), { code });
