@@ -4335,7 +4335,9 @@ fn opens_declaration(t: &str) -> bool {
 /// above the import, so a factory that closes over a mock-prefixed const reads it in its
 /// temporal dead zone when the hoisted require loads (turbo-test#445). A cheap textual check
 /// over trimmed lines — comments and blank lines are skipped, string literals that happen to
-/// start with `import ` are not top-level statements.
+/// start with `import ` are not top-level statements, AND a `const` inside a block scope (an
+/// arrow callback, a class body, a function body) is skipped by tracking balanced brace /
+/// paren / bracket depth across lines (turbo-test#454).
 pub(crate) fn jest_import_before_const(raw: &str) -> bool {
     // The Jest TDZ shape requires BOTH a top-level `import` AND a later top-level
     // `const/let/var` that a `jest.mock(...)` factory closes over. A file whose top-level
@@ -4344,16 +4346,20 @@ pub(crate) fn jest_import_before_const(raw: &str) -> bool {
     // no mock-prefixed const) carries no TDZ risk and must stay on the vitest-style hoist
     // or its own `var import_vitest = require(...)` would be moved below the vi.mock call.
     let mut seen_import = false;
+    let mut depth = 0i32;
     for line in raw
         .lines()
         .map(|l| l.trim_start())
         .filter(|t| is_meaningful_src_line(t))
     {
-        if opens_import(line) {
-            seen_import = true;
-        } else if opens_declaration(line) {
-            return seen_import;
+        if depth == 0 {
+            if opens_import(line) {
+                seen_import = true;
+            } else if opens_declaration(line) {
+                return seen_import;
+            }
         }
+        update_source_depth(line, &mut depth);
     }
     false
 }
@@ -4369,20 +4375,71 @@ pub(crate) fn jest_import_before_const(raw: &str) -> bool {
 /// forward until the terminating `;` for the first string literal that follows.
 pub(crate) fn jest_imports_before_const(raw: &str) -> Vec<String> {
     let mut out = Vec::new();
+    let mut depth = 0i32;
     let mut lines = raw
         .lines()
         .map(|l| l.trim_start())
         .filter(|t| is_meaningful_src_line(t));
     while let Some(line) = lines.next() {
-        if opens_import(line) {
-            if let Some(spec) = extract_import_spec(line, &mut lines) {
-                out.push(spec);
+        if depth == 0 {
+            if opens_import(line) {
+                if let Some(spec) = extract_import_spec(line, &mut lines) {
+                    out.push(spec);
+                }
+                update_source_depth(line, &mut depth);
+                continue;
+            } else if opens_declaration(line) {
+                break;
             }
-        } else if opens_declaration(line) {
-            break;
         }
+        update_source_depth(line, &mut depth);
     }
     out
+}
+
+/// Adjust `depth` by the balanced brackets `(`, `[`, `{` on this line, with a lightweight
+/// string / comment lexer that ignores brackets inside `"…"`, `'…'`, `` `…` ``, line comments
+/// and block comments that both open and close on the same line. Multiline template literals
+/// and multiline block comments that cross lines may mis-count — the top-level hoist detector
+/// uses this to tell a file-scope `const` from one buried inside a callback or class body
+/// (turbo-test#454); occasional misclassification is better than the old naive scan.
+fn update_source_depth(line: &str, depth: &mut i32) {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'"' | b'\'' | b'`' => {
+                let quote = b;
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => return,
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                // Skip until the block-comment close on the same line; if it crosses the
+                // line, give up and leave the depth as-is for the rest of the line.
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                if i + 1 < bytes.len() {
+                    i += 2;
+                } else {
+                    return;
+                }
+            }
+            b'{' | b'(' | b'[' => *depth += 1,
+            b'}' | b')' | b']' => *depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
 }
 
 /// The module spec of an `import` statement opened by `first` — its first string literal, or

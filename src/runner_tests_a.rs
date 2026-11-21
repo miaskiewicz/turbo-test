@@ -1252,6 +1252,27 @@ fn jest_imports_before_const_captures_multiline_imports_up_to_the_first_decl() {
         jest_imports_before_const(side_effect),
         vec!["./side".to_string()]
     );
+    // #454: a `const` buried in a block scope (test callback, class field, arrow body)
+    // must NOT trigger the top-level-const break — turbo-test#454 was the flux-apis
+    // schema.spec.ts shape (class, then import, then a test(() => { const b = ... })).
+    let buried =
+        "class FakeDocument {}\nimport { X } from './x';\ntest('t', () => {\n  const b = 1;\n});\n";
+    assert_eq!(jest_imports_before_const(buried), vec!["./x".to_string()]);
+    assert!(!jest_import_before_const(buried));
+}
+
+#[test]
+fn jest_import_before_const_ignores_block_scoped_declarations() {
+    // factory body with `const` → no top-level const, no jest-hoist
+    let factory =
+        "import a from './a';\njest.mock('./m', () => {\n  const x = 1;\n  return { x };\n});\n";
+    assert!(!jest_import_before_const(factory));
+    // real top-level const after an import → still fires
+    let real = "import a from './a';\nconst b = 1;\n";
+    assert!(jest_import_before_const(real));
+    // template literal containing a `{` must not disturb depth tracking
+    let template = "import a from './a';\nconst b = `hi ${x}`;\nconst c = 2;\n";
+    assert!(jest_import_before_const(template));
 }
 
 #[test]
