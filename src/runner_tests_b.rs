@@ -988,7 +988,10 @@ fn saved_blob_keys_follow_their_inputs() {
 /// defaults; set empty, it runs none. The startup blob is keyed on the effective flags.
 #[test]
 fn v8_runs_single_threaded_unless_turbo_v8_flags_says_otherwise() {
-    assert_eq!(v8_flags(None), "--single-threaded --min-semi-space-size=32");
+    assert_eq!(
+        v8_flags(None),
+        "--single-threaded --min-semi-space-size=32 --max-semi-space-size=128"
+    );
     assert_eq!(v8_flags(Some("")), "");
     assert_eq!(v8_flags(Some("--max-lazy")), "--max-lazy");
 }

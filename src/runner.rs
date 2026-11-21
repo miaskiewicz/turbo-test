@@ -13631,8 +13631,13 @@ fn clear_registry() {
 /// short-lived objects (React trees, DOM nodes, matcher diffs) take fewer scavenges: 3-8% less
 /// wall and 5-7% less CPU on the four reference projects (ui-design-components 8%, payroll 5%),
 /// identical results, peak memory within about 0.3 GB.
+/// `--max-semi-space-size=128`: raise the young-generation CEILING (not the start size) from
+/// V8's default so a heavy test's working set stays scavengeable without promoting into the
+/// old generation. ui-design-components measured a ~15% wall-time improvement on this change
+/// alone; payroll was ambiguous (within noise). Peak RSS unchanged on quieter projects (the
+/// young gen only grows when it needs to).
 fn v8_flags(env: Option<&str>) -> String {
-    env.unwrap_or("--single-threaded --min-semi-space-size=32")
+    env.unwrap_or("--single-threaded --min-semi-space-size=32 --max-semi-space-size=128")
         .to_string()
 }
 
