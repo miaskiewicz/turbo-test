@@ -37,7 +37,7 @@ path = "src/bin/m5_affected.rs"
 v8 = { package = "turbo-dom-v8", version = "~150.4.2" }
 # The browser environment (window, document, CSSOM, forms, events) the runner
 # installs into each test context.
-turbo-dom-browser-env = "=0.8.6"
+turbo-dom-browser-env = "=0.8.7"
 oxc_allocator = "0.134"
 oxc_parser = "0.134"
 oxc_span = "0.134"
@@ -98,3 +98,8 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
+
+[patch.crates-io]
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "d00712fc" }
+turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "d00712fc" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "d00712fc" }
