@@ -4407,33 +4407,11 @@ fn update_source_depth(line: &str, depth: &mut i32) {
     let bytes = line.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        let b = bytes[i];
-        match b {
-            b'"' | b'\'' | b'`' => {
-                let quote = b;
-                i += 1;
-                while i < bytes.len() && bytes[i] != quote {
-                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-            }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => return,
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
-                // Skip until the block-comment close on the same line; if it crosses the
-                // line, give up and leave the depth as-is for the rest of the line.
-                i += 2;
-                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    i += 1;
-                }
-                if i + 1 < bytes.len() {
-                    i += 2;
-                } else {
-                    return;
-                }
-            }
+        if let Some(end) = comment_or_string_end(bytes, i) {
+            i = end;
+            continue;
+        }
+        match bytes[i] {
             b'{' | b'(' | b'[' => *depth += 1,
             b'}' | b')' | b']' => *depth -= 1,
             _ => {}
