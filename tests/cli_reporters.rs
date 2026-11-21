@@ -364,6 +364,32 @@ fn output_file_failures_and_missing_dirs() {
 }
 
 #[test]
+fn output_file_placeholder_signals_incomplete_runs_and_is_overwritten_on_success() {
+    // turbo-test#457: CI pipelines can't distinguish "process crashed before writing" from
+    // "no file was produced" when --outputFile is set. Write a placeholder at the START of
+    // every run so the file always exists; the final successful write overwrites it.
+    let p = Project::new("rep-outfile-placeholder");
+    p.file("a.test.js", "test('a', () => {})\n");
+    let target = path(&p, "out.json");
+    let r = turbo_test(
+        &p.dir,
+        &["--reporter", "json", "--outputFile", &target, "a.test.js"],
+        &[],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    // Successful run: the placeholder is overwritten with the real artifact.
+    let body = std::fs::read_to_string(&target).unwrap();
+    assert!(
+        body.contains("\"success\":true") && body.contains("\"numPassedTests\":1"),
+        "final JSON should overwrite the placeholder: {body}"
+    );
+    assert!(
+        !body.contains("placeholder — the process crashed"),
+        "the placeholder marker must not leak into the final artifact: {body}"
+    );
+}
+
+#[test]
 fn output_file_artifacts() {
     let p = fixture("rep-outfile");
     // artifact → file (parent dirs created); stdout says where it went, as vitest's

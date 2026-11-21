@@ -1688,6 +1688,23 @@ fn junit_root() -> PathBuf {
     crate::canon::canonicalize(&root).unwrap_or(root)
 }
 
+/// Drop a minimal "run did not complete" placeholder at the `--outputFile` path before
+/// discovery so a crash before the final write leaves CI with a parseable file that signals
+/// failure rather than a missing file that looks identical to "the job never started"
+/// (turbo-test#457). A clean run overwrites this with the real artifact.
+fn write_incomplete_run_placeholder(opts: &Options) {
+    let Some(path) = opts.output_file.as_deref() else {
+        return;
+    };
+    let text = match opts.reporter {
+        Reporter::Json => "{\"numTotalTestSuites\":0,\"numPassedTestSuites\":0,\"numFailedTestSuites\":0,\"numPendingTestSuites\":0,\"numTotalTests\":0,\"numPassedTests\":0,\"numFailedTests\":0,\"numPendingTests\":0,\"numTodoTests\":0,\"testResults\":[],\"success\":false,\"message\":\"turbo-test run did not complete (placeholder — the process crashed or was killed before writing the final report)\"}".to_string(),
+        Reporter::Junit => "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuites name=\"turbo-test\" tests=\"0\" failures=\"0\" errors=\"1\" time=\"0\">\n  <testsuite name=\"turbo-test\" tests=\"0\" failures=\"0\" errors=\"1\" time=\"0\">\n    <testcase name=\"turbo-test run did not complete\" classname=\"turbo-test\"><error message=\"placeholder\">the process crashed or was killed before writing the final report</error></testcase>\n  </testsuite>\n</testsuites>\n".to_string(),
+        Reporter::Tap | Reporter::TapFlat => "TAP version 13\n1..0 # turbo-test run did not complete (placeholder)\n".to_string(),
+        _ => return,
+    };
+    let _ = write_output_file(path, &text);
+}
+
 /// Write `text` to the `--outputFile` `path`, creating missing parent dirs. Returns the stderr
 /// message for a failed write (empty on success).
 fn write_output_file(path: &str, text: &str) -> String {
@@ -1918,6 +1935,13 @@ pub fn run(opts: Options) -> i32 {
     if let Some(code) = apply_cli_prelude(&opts) {
         return code;
     }
+    // Write a crash-placeholder artifact at the outputFile path BEFORE discovery / V8 init:
+    // a CI pipeline that `--reporter json --outputFile report.json` then parses report.json
+    // can tell "process crashed before finishing" (placeholder with `success:false`) from
+    // "no test files were discovered" (regular empty-ok report) from "run finished". The
+    // final write at the end of `run` overwrites this placeholder with the real artifact
+    // (turbo-test#457).
+    write_incomplete_run_placeholder(&opts);
     let files = apply_shard(opts.files.clone(), opts.shard);
     // An artifact printed to stdout must be the ONLY thing there: test console output goes to
     // stderr then (like the summary line below).
