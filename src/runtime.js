@@ -1628,6 +1628,31 @@ if (typeof globalThis.fetch === 'undefined') {
     if (h) for (const k of Object.keys(h)) out.set(k, h[k]);
     return out;
   };
+  // Decode one chunk yielded by a ReadableStream reader. Strings pass through; ArrayBuffers and
+  // ArrayBufferViews are UTF-8-decoded through the shared streaming decoder.
+  function __decodeStreamChunk(value, decoder) {
+    if (value == null) return '';
+    if (typeof value === 'string') return value;
+    if (value instanceof ArrayBuffer) return decoder.decode(new Uint8Array(value), { stream: true });
+    return decoder.decode(value, { stream: true });
+  }
+  // Consume a Fetch body into text. Fast paths: null → '', string → identity. ReadableStream
+  // bodies (duck-typed with `getReader` for realm-safety, turbo-test#463) are drained chunk by
+  // chunk; chunks may be Uint8Array / ArrayBuffer / string and are decoded as UTF-8.
+  async function __consumeBodyText(body) {
+    if (body == null) return '';
+    if (typeof body === 'string') return body;
+    if (typeof body !== 'object' || typeof body.getReader !== 'function') return String(body);
+    const reader = body.getReader();
+    const decoder = new TextDecoder('utf-8', { fatal: false });
+    let out = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      out += __decodeStreamChunk(value, decoder);
+    }
+    return out + decoder.decode();
+  }
   globalThis.Request = class Request {
     constructor(url, init) {
       init = init || {};
@@ -1640,8 +1665,12 @@ if (typeof globalThis.fetch === 'undefined') {
       this.headers = __requestHeaders(init.headers);
       this._body = init.body;
     }
-    json() { return Promise.resolve(typeof this._body === 'string' ? JSON.parse(this._body) : this._body); }
-    text() { return Promise.resolve(this._body == null ? '' : String(this._body)); }
+    async json() {
+      const b = this._body;
+      if (b != null && typeof b === 'object' && typeof b.getReader !== 'function') return b;
+      return JSON.parse(await __consumeBodyText(b));
+    }
+    text() { return __consumeBodyText(this._body); }
     clone() { return new globalThis.Request(this.url, { method: this.method, headers: this.headers, body: this._body }); }
   };
   const __responseStatus = (init) => (init && init.status) || 200;
@@ -1659,8 +1688,12 @@ if (typeof globalThis.fetch === 'undefined') {
       this.ok = this.status >= 200 && this.status < 300;
       this.headers = __responseHeaders(init);
     }
-    json() { return Promise.resolve(typeof this._body === 'string' ? JSON.parse(this._body) : this._body); }
-    text() { return Promise.resolve(this._body == null ? '' : String(this._body)); }
+    async json() {
+      const b = this._body;
+      if (b != null && typeof b === 'object' && typeof b.getReader !== 'function') return b;
+      return JSON.parse(await __consumeBodyText(b));
+    }
+    text() { return __consumeBodyText(this._body); }
     clone() { return new globalThis.Response(this._body, { status: this.status }); }
     static json(data, init) { const r = new globalThis.Response(JSON.stringify(data), init); r._body = data; r.headers.set('content-type', 'application/json'); return r; }
     static error() { return new globalThis.Response(null, { status: 500 }); }
