@@ -10,7 +10,10 @@ use common::{json_report, turbo_test, Project};
 fn hoisted_runs_before_static_import_evaluates() {
     let p = Project::new("vi-hoisted-env-464");
     p.with_esbuild();
-    p.file("package.json", r#"{"name":"r","version":"0.0.0","type":"module"}"#);
+    p.file(
+        "package.json",
+        r#"{"name":"r","version":"0.0.0","type":"module"}"#,
+    );
     p.file(
         "vitest.config.ts",
         "import { defineConfig } from 'vitest/config';\n\

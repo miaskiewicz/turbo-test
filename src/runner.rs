@@ -2818,8 +2818,16 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String>
     let entry_dir = js_string_literal(&dir.to_string_lossy());
     run_js(scope, &format!("globalThis.__ttEntryDir = {entry_dir};"));
     let mocks = extract_mocks(&src);
+    // A file with no vi.mock but with vi.hoisted(...) still needs the prepass: vitest runs
+    // every hoisted body BEFORE the file's static-import graph is evaluated, so the body can
+    // seed process.env (or any other global) a statically-imported module reads at load time
+    // (turbo-test#464). The untransformed path handles the mock-less case without building a
+    // bundled prepass.
     if mocks.is_empty() {
-        return Ok(());
+        if extract_hoisted(&src).is_empty() {
+            return Ok(());
+        }
+        return run_entry_mocks_untransformed(scope, entry, &src, &entry_dir, &mocks);
     }
     let Some(root) = project_root(entry) else {
         return run_entry_mocks_untransformed(scope, entry, &src, &entry_dir, &mocks);
