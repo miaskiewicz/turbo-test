@@ -100,6 +100,6 @@ codegen-units = 1
 
 
 [patch.crates-io]
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "6f24c148" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "6f24c148" }
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "6f24c148" }
+turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "448d05e8" }
+turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "448d05e8" }
+turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "448d05e8" }
