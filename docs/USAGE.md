@@ -6,14 +6,15 @@ prints vitest-shaped output. You don't rewrite tests; you swap the runner.
 
 ## Install & run
 
+```sh
+npm install --save-dev @miaskiewicz/turbo-test
+```
+
 ```jsonc
 // package.json
 {
   "scripts": {
     "test": "turbo-test"          // was: "vitest run"
-  },
-  "devDependencies": {
-    "@miaskiewicz/turbo-test": "^0.2.x"
   }
 }
 ```
@@ -35,7 +36,8 @@ importing vitest:
 1. **Config** — walks up for the nearest `vitest.config.*` / `vite.config.*` and **string-scans**
    (no TS eval) `test.include`/`exclude` (discovery), `test.environment` (node/jsdom/happy-dom),
    and the `coverage.*` block (include/exclude/thresholds). `-c/--config <path>` forces an exact
-   file. Dynamic config (functions, plugins, `defineConfig` logic, aliases) is invisible — see gaps.
+   file. Literal `resolve.alias` and `test.alias` entries are also supported. Dynamic config
+   expressions and plugins have limited support. See the [README](../README.md) for details.
 2. **Globals are always on** — `describe`/`it`/`expect`/`vi` are injected; you don't import them
    (importing from `'vitest'` also works as a no-op shim). `--globals`/`--no-globals` are accepted
    no-ops.
@@ -43,7 +45,8 @@ importing vitest:
    DOM. A per-file `// @vitest-environment <env>` docblock overrides it.
 4. **Output** — `--reporter json` emits vitest's JSON report (suite / test counts, per-file
    `testResults` with per-test `assertionResults`); `junit`/`tap`/`verbose`/`dot`/`default` also
-   supported.
+   supported. With `--outputFile`, JSON, JUnit and TAP reports start with an
+   incomplete-run placeholder that a completed run replaces.
 
 ## What's compatible (vitest surface)
 
@@ -53,7 +56,9 @@ Full matrix + quirks: `vitest.compat.md`. Summary:
 (json/junit/tap/verbose/dot/default) + `--outputFile`, `-t/--testNamePattern`, `--testTimeout`,
 `--retry`, `--hookTimeout`, `--bail`, `-c/--config`, `--root`/`--dir`, `--environment`, `--isolate`/`--no-isolate`,
 `--changed [since]`, `--passWithNoTests`, `-u/--update`, the `--coverage*` family.
-turbo-test's own: `--zero-delay-timers` / `--no-zero-delay-timers` (`setTimeout(fn, 0)` takes 0 ms
+turbo-test's own: `--node-features 22|24|26` selects the Node feature baseline
+(default 22). The flag takes precedence over `TURBO_NODE_FEATURES`, which takes
+precedence over `test.nodeFeatures`. Other switches include `--zero-delay-timers` / `--no-zero-delay-timers` (`setTimeout(fn, 0)` takes 0 ms
 of the clock in Node's order (default) or Node's 1 ms; also `TURBO_ZERO_DELAY_TIMERS=0|1`, preferred over
 `test.zeroDelayTimers`, which vitest's config type lacks; README "Switches"); `--chrome-media` /
 `--no-chrome-media` (`matchMedia` and `@media` evaluated against the 1024x768 viewport as in Chrome,
@@ -93,8 +98,7 @@ text / html reporters; thresholds gate; include/exclude globs (auto-read from co
   pass the expected string explicitly.
 - `it.extend` fixtures: best-effort (no per-fixture teardown / `{ auto }`).
 - `bench()`: not implemented.
-- Config read is a regex scan: dynamic/`defineConfig`-computed config, plugins, aliases beyond
-  tsconfig `paths`, and most `test.*` non-discovery options are not read from config.
+- Config read is a regex scan: dynamic/`defineConfig`-computed config, plugins, computed aliases beyond the supported literal forms, and most `test.*` non-discovery options are not read from config.
 
 ## How it works (one paragraph)
 

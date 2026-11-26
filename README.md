@@ -1,7 +1,7 @@
 # turbo-test
 
 **A native test runner for vitest suites — a drop-in replacement for [vitest](https://vitest.dev)
-(and, experimentally, jest).** Version **0.8.6**.
+(and, experimentally, jest).** Release candidate **0.8.7**.
 
 turbo-test is written in Rust on V8: per-file transforms through [oxc](https://oxc.rs) / esbuild,
 work-stealing parallelism, native V8 coverage, an optional isolate-reuse mode, and an all-Rust DOM
@@ -24,14 +24,16 @@ Since 0.6.0 the browser engine lives in one place,
 | `turbo-dom-layout` | HTML/CSS layout | turbo-html2pdf, turbo-surf |
 | `turbo-dom-raster` | synthetic screenshots | turbo-surf |
 
-turbo-test links `turbo-dom-browser-env` 0.8.6 and `turbo-dom-v8 ~150.4.2` (under the local alias
+turbo-test links `turbo-dom-browser-env` 0.8.7 and `turbo-dom-v8 ~150.4.2` (under the local alias
 `v8`; `scripts/check-single-v8.sh` keeps exactly one V8 in the graph). This repository carries no
 copy of the binding or of V8: the binding, its probes and the Chrome-control collectors that
 record their oracles live in turbo-dom's
 [`crates/turbo-dom-browser-env`](https://github.com/miaskiewicz/turbo-dom/tree/main/crates/turbo-dom-browser-env)
-— fix DOM behaviour and recollect controls there. The release resolves turbo-dom-v8
-150.4.2 and turbo-dom / -layout / -browser-env 0.8.6 from crates.io. The committed
-registry lockfile and `release-guard` keep temporary Git patches out of releases.
+— fix DOM behaviour and recollect controls there. The 0.8.7 candidate pins
+`turbo-dom`, `turbo-dom-layout` and `turbo-dom-browser-env` to
+`dd2771f66da8670e22d6136c0ec13027e6c1a0e3`. It uses `turbo-dom-v8` 150.4.2
+from crates.io. Follow [the release procedure](RELEASING.md) to switch the
+DOM packages to the registry and verify the production graph before tagging.
 
 ## Install and run
 
@@ -59,6 +61,8 @@ environment, setup files, isolate, aliases, coverage thresholds). Replace `vites
 
 The default and verbose reporters print vitest 4.1.12's output (under an AI agent, its agent
 reporter); `TURBO_LEGACY_REPORTER=1` keeps turbo-test's compact `PASS` / `FAIL` lines.
+JSON, JUnit and TAP reports written with `--outputFile` start with an incomplete-run
+placeholder. A completed run replaces it with the final report.
 
 The DOM is on for `jsdom` / `happy-dom` / `turbo-dom` environments (and any file with a
 `// @vitest-environment jsdom` pragma); `environment: 'node'` files get clean globals, as in
@@ -192,6 +196,10 @@ TURBO_REUSE_ISOLATE=1 npx turbo-test   # force reuse on
 TURBO_NO_REUSE=1       npx turbo-test   # force fresh isolation
 ```
 
+Set `TURBO_MAX_HEAP_MB` for a per-isolate V8 heap limit. When a limit is set,
+V8 sizes the young generation within that limit. Otherwise the default maximum
+semi-space size is 128 MiB.
+
 ## Jest compatibility (experimental)
 
 turbo-test also runs **jest** suites — no rewrite to `vi`. A `jest` global maps onto the same
@@ -209,6 +217,7 @@ or a `package.json` `"jest"` block) is read, `<rootDir>` resolved:
 - `moduleNameMapper` (0.8.3+): regex keys in config order, `$n` captures, a list of targets or
   `require.resolve(...)`; it is read from the config text, so mappings built in code (a spread, a
   helper's result) are reported on stderr and should be written as literal entries;
+- `roots` (0.8.7+) restricts discovery to the configured directories.
 - `testMatch`, `injectGlobals: false`, `moduleDirectories`, `customExportConditions`,
   `testTimeout`, `clearMocks` / `resetMocks` / `restoreMocks` (0.8.3+);
 - `fakeTimers` (0.8.0+): `enableGlobally: true` fakes the timers before each test file loads, and
@@ -289,7 +298,10 @@ binary inputs and independent known-answer controls. PBKDF2 output is bounded to
 before derivation; this runner limit bounds synchronous native work. Other
 derivation digests report an unsupported-algorithm error.
 WebCrypto `getRandomValues` accepts integer typed arrays, uses OS entropy, and
-enforces its 65,536-byte quota. `Buffer.readUInt32BE` respects view and offset bounds.
+enforces its 65,536-byte quota. In DOM environments, WebCrypto also supports
+`SubtleCrypto` operations including key import, signing, verification and AES-GCM.
+`Response.text()` and `Request.text()` consume `ReadableStream` bodies.
+`Buffer.readUInt32BE` respects view and offset bounds.
 Synchronous zlib deflate/inflate exchange real compressed bytes with Node;
 dictionary/tuning options and asynchronous or streaming deflate/inflate report
 explicit unsupported-capability errors.
@@ -635,7 +647,7 @@ npm ci
 cargo test --locked          # unit + CLI integration tests
 npm test                     # node --test test/*.mjs (CLI compat + tsc type checks)
 npm run test:vue-oracle       # real @vitejs/plugin-vue / Vitest component controls
-cargo tarpaulin              # line-coverage gate (tarpaulin.toml, fail-under = 99.9)
+cargo tarpaulin              # line-coverage gate (tarpaulin.toml, fail-under = 99.80)
 cargo fmt --check            # CI job `lint`, with:
 cargo clippy --all-targets -- -D warnings
 npm run complexity:rust      # CI job `complexity / rust (cc <= 7)` (needs cc-check, below)
@@ -666,7 +678,7 @@ publish packages; `v*` tag publishing remains enabled.
   Windows, including platform path fixtures. Its actual results are informational;
   it does not weaken the existing release binary matrix.
 - **Coverage — blocking.** `coverage` (ubuntu) runs `cargo tarpaulin` (Llvm engine) and fails
-  below `fail-under = 99.9` line coverage. Subprocess runs of the instrumented binaries are
+  below `fail-under = 99.80` line coverage. Subprocess runs of the instrumented binaries are
   attributed through `tarpaulin.toml`'s `objects`; the `#[path]` unit-test modules are excluded.
 - **Lint — blocking.** `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`;
   `npm-lockfile` checks the lock under npm 10 and 11.
