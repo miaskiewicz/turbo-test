@@ -5,6 +5,38 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+## [0.8.7] — Unreleased
+
+The release branch pins turbo-dom, turbo-dom-layout and turbo-dom-browser-env
+to `dd2771f66da8670e22d6136c0ec13027e6c1a0e3`. The
+[upstream 0.8.7 notes](https://github.com/miaskiewicz/turbo-dom/blob/dd2771f66da8670e22d6136c0ec13027e6c1a0e3/CHANGELOG.md)
+cover native DOM and layout changes, including focus, selection, navigation and
+DOMRect compatibility. Publication requires the corresponding registry crates.
+
+### Added
+
+- Honor Jest's `roots` setting when discovering tests (#456).
+- Write an initial report at `--outputFile` so an interrupted run leaves a
+  crash placeholder (#457).
+
+### Fixed
+
+- Ignore block-scoped declarations when detecting variables that affect Jest
+  mock hoisting (#454).
+- Run `vi.hoisted` callbacks before static imports in test files (#464).
+- Retry transient failures during recursive removal, following Node's
+  `fs.rm` behavior (#455).
+- Implement WebCrypto `SubtleCrypto` in the DOM environment, including key
+  import, signing, verification and AES-GCM (#462).
+- Consume `ReadableStream` bodies in `Response.text()` and `Request.text()` (#463).
+- Honor explicit `TURBO_MAX_HEAP_MB` limits by letting V8 size the young
+  generation within the configured heap.
+
+### Performance
+
+- Set V8's default maximum semi-space size to 128 MiB for runs without an
+  explicit heap limit.
+
 ## [0.8.6] — 2026-11-20 — turbo-dom 0.8.6, Node feature flags + Jest/CJS fixes from the full Flux suite
 
 Consumes the published turbo-dom / turbo-dom-layout / turbo-dom-browser-env 0.8.6 crates and

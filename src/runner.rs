@@ -13644,14 +13644,22 @@ fn clear_registry() {
 /// old generation. ui-design-components measured a ~15% wall-time improvement on this change
 /// alone; payroll was ambiguous (within noise). Peak RSS unchanged on quieter projects (the
 /// young gen only grows when it needs to).
-fn v8_flags(env: Option<&str>) -> String {
-    env.unwrap_or("--single-threaded --min-semi-space-size=32 --max-semi-space-size=128")
-        .to_string()
+/// Explicit heap limits let V8 size the young generation within the requested heap.
+fn v8_flags(env: Option<&str>, heap_limited: bool) -> String {
+    match (env, heap_limited) {
+        (Some(flags), _) => flags,
+        (None, true) => "--single-threaded",
+        (None, false) => "--single-threaded --min-semi-space-size=32 --max-semi-space-size=128",
+    }
+    .to_string()
 }
 
 /// This run's V8 flags ([`v8_flags`] of `TURBO_V8_FLAGS`).
 fn run_v8_flags() -> String {
-    v8_flags(std::env::var("TURBO_V8_FLAGS").ok().as_deref())
+    v8_flags(
+        std::env::var("TURBO_V8_FLAGS").ok().as_deref(),
+        crate::heap_guard::max_heap_bytes().is_some(),
+    )
 }
 
 /// Initialize V8 once for the process.
