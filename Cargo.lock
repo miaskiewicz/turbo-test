@@ -3233,7 +3233,7 @@ dependencies = [
 
 [[package]]
 name = "turbo-test"
-version = "0.8.6"
+version = "0.8.7"
 dependencies = [
  "aes-gcm",
  "base64",
