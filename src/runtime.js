@@ -1628,6 +1628,31 @@ if (typeof globalThis.fetch === 'undefined') {
     if (h) for (const k of Object.keys(h)) out.set(k, h[k]);
     return out;
   };
+  // Decode one chunk yielded by a ReadableStream reader. Strings pass through; ArrayBuffers and
+  // ArrayBufferViews are UTF-8-decoded through the shared streaming decoder.
+  function __decodeStreamChunk(value, decoder) {
+    if (value == null) return '';
+    if (typeof value === 'string') return value;
+    if (value instanceof ArrayBuffer) return decoder.decode(new Uint8Array(value), { stream: true });
+    return decoder.decode(value, { stream: true });
+  }
+  // Consume a Fetch body into text. Fast paths: null → '', string → identity. ReadableStream
+  // bodies (duck-typed with `getReader` for realm-safety, turbo-test#463) are drained chunk by
+  // chunk; chunks may be Uint8Array / ArrayBuffer / string and are decoded as UTF-8.
+  async function __consumeBodyText(body) {
+    if (body == null) return '';
+    if (typeof body === 'string') return body;
+    if (typeof body !== 'object' || typeof body.getReader !== 'function') return String(body);
+    const reader = body.getReader();
+    const decoder = new TextDecoder('utf-8', { fatal: false });
+    let out = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      out += __decodeStreamChunk(value, decoder);
+    }
+    return out + decoder.decode();
+  }
   globalThis.Request = class Request {
     constructor(url, init) {
       init = init || {};
@@ -1640,8 +1665,12 @@ if (typeof globalThis.fetch === 'undefined') {
       this.headers = __requestHeaders(init.headers);
       this._body = init.body;
     }
-    json() { return Promise.resolve(typeof this._body === 'string' ? JSON.parse(this._body) : this._body); }
-    text() { return Promise.resolve(this._body == null ? '' : String(this._body)); }
+    async json() {
+      const b = this._body;
+      if (b != null && typeof b === 'object' && typeof b.getReader !== 'function') return b;
+      return JSON.parse(await __consumeBodyText(b));
+    }
+    text() { return __consumeBodyText(this._body); }
     clone() { return new globalThis.Request(this.url, { method: this.method, headers: this.headers, body: this._body }); }
   };
   const __responseStatus = (init) => (init && init.status) || 200;
@@ -1659,8 +1688,12 @@ if (typeof globalThis.fetch === 'undefined') {
       this.ok = this.status >= 200 && this.status < 300;
       this.headers = __responseHeaders(init);
     }
-    json() { return Promise.resolve(typeof this._body === 'string' ? JSON.parse(this._body) : this._body); }
-    text() { return Promise.resolve(this._body == null ? '' : String(this._body)); }
+    async json() {
+      const b = this._body;
+      if (b != null && typeof b === 'object' && typeof b.getReader !== 'function') return b;
+      return JSON.parse(await __consumeBodyText(b));
+    }
+    text() { return __consumeBodyText(this._body); }
     clone() { return new globalThis.Response(this._body, { status: this.status }); }
     static json(data, init) { const r = new globalThis.Response(JSON.stringify(data), init); r._body = data; r.headers.set('content-type', 'application/json'); return r; }
     static error() { return new globalThis.Response(null, { status: 500 }); }
@@ -2489,16 +2522,54 @@ const __writeFile = (p, data, append) => globalThis.__fs_writeFile(__fsPath(p), 
 const __mkdir = (p, options) => globalThis.__fs_mkdir(__fsPath(p), !!(options && typeof options === 'object' && options.recursive));
 const __rm = (p, options) => {
   const path = __fsPath(p), o = options || {};
-  let st;
-  try { st = globalThis.__fs_stat(path, true); } catch (e) { if (o.force && e.code === 'ENOENT') return; throw e; }
+  const st = __rmStatOrNull(path, o);
+  if (st === null) return;
   if ((st[1] & __S_IFMT) !== 0o040000) return globalThis.__fs_remove(path, 'unlink');
-  if (!o.recursive) {
-    const e = new Error(`Path is a directory: rm returned EISDIR (is a directory) ${path}`);
-    Object.defineProperty(e, 'name', { value: 'SystemError', configurable: true, writable: true });
-    Object.assign(e, { code: 'ERR_FS_EISDIR', errno: 21, syscall: 'rm', path });
-    throw e;
+  if (!o.recursive) throw __rmEisDir(path);
+  __rmWithRetry(path, o);
+};
+// Resolve the target's stat for __rm. Returns null when force+ENOENT (skip), rethrows
+// otherwise.
+const __rmStatOrNull = (path, o) => {
+  try { return globalThis.__fs_stat(path, true); }
+  catch (e) { if (o.force && e.code === 'ENOENT') return null; throw e; }
+};
+// Build Node's `rm` EISDIR SystemError for a directory passed without recursive.
+const __rmEisDir = (path) => {
+  const e = new Error(`Path is a directory: rm returned EISDIR (is a directory) ${path}`);
+  Object.defineProperty(e, 'name', { value: 'SystemError', configurable: true, writable: true });
+  Object.assign(e, { code: 'ERR_FS_EISDIR', errno: 21, syscall: 'rm', path });
+  return e;
+};
+// Retry transient OS races (mongodb-memory-server#455: mongod's shutdown flushes data
+// files between its 'exit' event and the kernel releasing its file locks on macOS).
+// Node's own fs.rm exposes maxRetries/retryDelay; apply a small default for
+// recursive+force so library code that didn't set options still succeeds the way it
+// does under Jest's isolate teardown.
+const __rmWithRetry = (path, o) => {
+  const maxRetries = typeof o.maxRetries === 'number' ? o.maxRetries : (o.force ? 5 : 0);
+  const retryDelay = typeof o.retryDelay === 'number' ? o.retryDelay : 100;
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const error = __rmOnce(path);
+    if (!error) return;
+    if (!__rmShouldRetry(error, attempt, maxRetries)) throw error;
+    __busySleepMs(retryDelay * (attempt + 1));
   }
-  globalThis.__fs_remove(path, 'rm');
+};
+// One rm attempt; returns the caught error or null on success.
+const __rmOnce = (path) => {
+  try { globalThis.__fs_remove(path, 'rm'); return null; }
+  catch (e) { return e; }
+};
+// Whether `error` is one of Node's retryable rm codes AND more attempts remain.
+const __rmShouldRetry = (error, attempt, maxRetries) => attempt < maxRetries
+  && __rmRetryableCodes.has(error.code);
+const __rmRetryableCodes = new Set(['EBUSY', 'EMFILE', 'ENFILE', 'ENOTEMPTY', 'EPERM']);
+// Synchronous sleep for rm-retry inter-attempt wait. Node's fs.rmSync spin-waits the
+// same way; the backoff cap in __rm keeps total wait bounded (sum of 1..N * delay).
+const __busySleepMs = (ms) => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { /* spin */ }
 };
 const __promised = (f) => (...a) => { try { return Promise.resolve(f(...a)); } catch (e) { return Promise.reject(e); } };
 const __fsArgumentError = (code, message, Type = TypeError) => Object.assign(new Type(message), { code });
@@ -2688,18 +2759,145 @@ function __createHash(algorithm) {
     },
   };
 }
+// WebCrypto SubtleCrypto uses the native keyed-hash, AES-GCM and entropy backends.
+const __subtleKeyMaterial = new WeakMap();
+function __subtleAlgoName(algorithm) {
+  const name = typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name;
+  if (typeof name !== 'string') throw new TypeError('Algorithm name must be a string');
+  return name.toUpperCase();
+}
+function __subtleBytes(data) {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data.slice(0));
+  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+  throw new TypeError('The data argument must be an ArrayBuffer or ArrayBufferView');
+}
+// WebCrypto's HMAC permits SHA-1/256/384/512; the embedded backend only exposes SHA-1 and
+// SHA-256 digests, so the remaining two surface as NotSupportedError per WebCrypto.
+const __subtleHmacHashes = { 'SHA-1': 'sha1', 'SHA-256': 'sha256' };
+function __subtleHmacHash(algorithm) {
+  const hash = algorithm && algorithm.hash;
+  const name = (typeof hash === 'string' ? hash : hash && hash.name || '').toUpperCase();
+  const mapped = __subtleHmacHashes[name];
+  if (mapped) return mapped;
+  throw new DOMException(`Unsupported HMAC hash: ${name || hash}`, 'NotSupportedError');
+}
+function __subtleSecret(algorithm, extractable, usages, material) {
+  const key = { type: 'secret', extractable: !!extractable, algorithm, usages: Array.from(usages || []) };
+  __subtleKeyMaterial.set(key, { ...material, usages: new Set(key.usages) });
+  return key;
+}
+function __subtleHmacKey(bytes, hash, extractable, usages, length = bytes.length * 8) {
+  const algorithm = { name: 'HMAC', hash: { name: hash === 'sha1' ? 'SHA-1' : 'SHA-256' }, length };
+  return __subtleSecret(algorithm, extractable, usages, { bytes, hash });
+}
+function __subtleAesKey(bytes, extractable, usages) {
+  if (![16, 24, 32].includes(bytes.length)) throw new DOMException('Invalid AES-GCM key length', 'DataError');
+  return __subtleSecret({ name: 'AES-GCM', length: bytes.length * 8 }, extractable, usages, { bytes, aes: true });
+}
+function __subtleGenerationUsages(usages, supported) {
+  const keys = Array.from(new Set(usages));
+  if (keys.length === 0 || keys.some(usage => !supported.includes(usage))) {
+    throw new DOMException('Invalid key usages', 'SyntaxError');
+  }
+  return keys;
+}
+function __subtleGenerateHmac(algorithm, extractable, usages) {
+  const hash = __subtleHmacHash(algorithm);
+  const length = algorithm.length === undefined ? 512 : Number(algorithm.length);
+  if (!Number.isInteger(length) || length < 0 || length > 0xffffffff) throw new TypeError('Invalid HMAC key length');
+  if (length === 0) throw new DOMException('HMAC key length cannot be zero', 'OperationError');
+  const keys = __subtleGenerationUsages(usages, ['sign', 'verify']);
+  const bytes = globalThis.__ttRandomBytes(Math.ceil(length / 8));
+  if (length % 8) bytes[bytes.length - 1] &= 0xff << (8 - length % 8);
+  return __subtleHmacKey(bytes, hash, extractable, keys, length);
+}
+function __subtleGenerateAes(algorithm, extractable, usages) {
+  if (algorithm.length === undefined) throw new TypeError('AES-GCM requires a key length');
+  const length = Number(algorithm.length);
+  if (![128, 192, 256].includes(length)) throw new DOMException('Invalid AES-GCM key length', 'OperationError');
+  const keys = __subtleGenerationUsages(usages, ['encrypt', 'decrypt', 'wrapKey', 'unwrapKey']);
+  return __subtleAesKey(globalThis.__ttRandomBytes(length / 8), extractable, keys);
+}
+function __subtleCryptoBufferOf(bytes) {
+  const copy = new Uint8Array(bytes);
+  return copy.buffer;
+}
+function __subtleUsage(material, usage) {
+  if (!material?.usages.has(usage)) throw new DOMException(`Key cannot be used for ${usage}`, 'InvalidAccessError');
+}
+function __subtleHmacDigest(material, data) {
+  return new Uint8Array(globalThis.__ttCryptoHashes('hmac-' + material.hash, material.bytes, __subtleBytes(data), 0, 0));
+}
+function __subtleAesParams(params) {
+  if (!params?.iv) throw new TypeError('AES-GCM requires an iv');
+  const iv = __subtleBytes(params.iv);
+  if (iv.length !== 12) throw new DOMException('AES-GCM currently requires a 12-byte IV', 'OperationError');
+  const aad = params.additionalData ? __subtleBytes(params.additionalData) : new Uint8Array(0);
+  const tagLength = params.tagLength == null ? 16 : (params.tagLength / 8) | 0;
+  return { iv, aad, tagLength };
+}
+function __subtleEnsureAesBackend() {
+  if (typeof globalThis.__ttAesGcm !== 'function') __runtimeEnsureBackend();
+  if (typeof globalThis.__ttAesGcm !== 'function') throw new DOMException('AES-GCM backend unavailable', 'NotSupportedError');
+}
+function __subtleAesCrypt(decrypt, key, params, data) {
+  __subtleUsage(key?.aes ? key : undefined, decrypt ? 'decrypt' : 'encrypt');
+  const { iv, aad, tagLength } = __subtleAesParams(params);
+  __subtleEnsureAesBackend();
+  try { return globalThis.__ttAesGcm(decrypt, key.bytes, iv, __subtleBytes(data), aad, tagLength); }
+  catch (e) { throw new DOMException(e && e.message || String(e), 'OperationError'); }
+}
 const __subtleCrypto = {
   async digest(algorithm, data) {
-    const name = typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name;
-    if (typeof name !== 'string') throw new TypeError('Algorithm name must be a string');
-    if (name.toUpperCase() !== 'SHA-256') throw new DOMException(`Unrecognized algorithm name: ${name}`, 'NotSupportedError');
-    let bytes;
-    if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
-    else if (ArrayBuffer.isView(data)) bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-    else throw new TypeError('The data argument must be an ArrayBuffer or ArrayBufferView');
-    return globalThis.__ttSha256(bytes);
+    const name = __subtleAlgoName(algorithm);
+    const bytes = __subtleBytes(data);
+    if (name === 'SHA-256') return __subtleCryptoBufferOf(globalThis.__ttSha256(bytes));
+    if (name === 'SHA-1') return __subtleCryptoBufferOf(globalThis.__ttSha1(bytes));
+    throw new DOMException(`Unrecognized algorithm name: ${name}`, 'NotSupportedError');
+  },
+  async importKey(format, keyData, algorithm, extractable, usages) {
+    if (format !== 'raw') throw new DOMException(`Unsupported key format: ${format}`, 'NotSupportedError');
+    const bytes = __subtleBytes(keyData);
+    const name = __subtleAlgoName(algorithm);
+    if (name === 'HMAC') return __subtleHmacKey(bytes, __subtleHmacHash(algorithm), extractable, usages);
+    if (name === 'AES-GCM') return __subtleAesKey(bytes, extractable, usages);
+    throw new DOMException(`Unsupported import algorithm: ${name}`, 'NotSupportedError');
+  },
+  async generateKey(algorithm, extractable, usages) {
+    const name = __subtleAlgoName(algorithm);
+    if (name === 'HMAC') return __subtleGenerateHmac(algorithm, extractable, usages);
+    if (name === 'AES-GCM') return __subtleGenerateAes(algorithm, extractable, usages);
+    throw new DOMException(`Unsupported key generation algorithm: ${name}`, 'NotSupportedError');
+  },
+  async sign(algorithm, key, data) {
+    const material = __subtleKeyMaterial.get(key);
+    if (__subtleAlgoName(algorithm) !== 'HMAC' || !material?.hash) throw new DOMException('Unsupported sign algorithm', 'NotSupportedError');
+    __subtleUsage(material, 'sign');
+    return __subtleCryptoBufferOf(__subtleHmacDigest(material, data));
+  },
+  async verify(algorithm, key, signature, data) {
+    const material = __subtleKeyMaterial.get(key);
+    if (__subtleAlgoName(algorithm) !== 'HMAC' || !material?.hash) throw new DOMException('Unsupported verify algorithm', 'NotSupportedError');
+    __subtleUsage(material, 'verify');
+    const expected = __subtleHmacDigest(material, data);
+    const got = __subtleBytes(signature);
+    if (got.length !== expected.length) return false;
+    let r = 0;
+    for (let i = 0; i < expected.length; i++) r |= expected[i] ^ got[i];
+    return r === 0;
+  },
+  async encrypt(algorithm, key, data) {
+    if (__subtleAlgoName(algorithm) !== 'AES-GCM') throw new DOMException('Unsupported encrypt algorithm', 'NotSupportedError');
+    return __subtleCryptoBufferOf(__subtleAesCrypt(false, __subtleKeyMaterial.get(key), algorithm, data));
+  },
+  async decrypt(algorithm, key, data) {
+    if (__subtleAlgoName(algorithm) !== 'AES-GCM') throw new DOMException('Unsupported decrypt algorithm', 'NotSupportedError');
+    return __subtleCryptoBufferOf(__subtleAesCrypt(true, __subtleKeyMaterial.get(key), algorithm, data));
   },
 };
+for (const name of ['exportKey', 'deriveKey', 'deriveBits', 'wrapKey', 'unwrapKey']) {
+  __subtleCrypto[name] = async () => { throw new DOMException(`${name} is not supported`, 'NotSupportedError'); };
+}
 
 /* __TT_NODE_CRYPTO_HASHES__ */
 /* __TT_NODE_RANDOM__ */
@@ -2745,7 +2943,9 @@ __crypto.constants = Object.freeze(Object.create(null));
 if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.randomUUID) {
   globalThis.crypto = Object.assign(globalThis.crypto || {}, { randomUUID: __crypto.randomUUID, getRandomValues: __crypto.getRandomValues });
 }
-if (!globalThis.crypto.subtle) globalThis.crypto.subtle = __subtleCrypto;
+// WebCrypto subtle covers DOM and node envs identically (turbo-test#462). The DOM env sets
+// globalThis.crypto first; replace any partial subtle from it with the full implementation.
+globalThis.crypto.subtle = __subtleCrypto;
 __crypto.webcrypto = globalThis.crypto;
 __crypto.subtle = globalThis.crypto.subtle;
 function __unhandledEventError(value) {

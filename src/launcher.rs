@@ -1379,20 +1379,13 @@ fn excludes_dir(exclude: &[String], rel: &str) -> bool {
 fn discover(cwd: &Path, forced_config: Option<&Path>) -> Vec<PathBuf> {
     let mut all = Vec::new();
     let pats = vitest_patterns(cwd, forced_config);
-    let jest_match = if pats.is_none() {
-        jest_test_match(cwd)
-    } else {
-        None
-    };
+    let (jest_match, jest_root_dirs) = jest_discovery(cwd, pats.is_some());
     let base = pats.as_ref().map_or(cwd, |p| p.root.as_path());
     let include = pats.as_ref().and_then(|p| p.include.as_deref());
-    let exclude: Vec<String> = match pats.as_ref().and_then(|p| p.exclude.clone()) {
-        Some(e) => e,
-        None => DEFAULT_EXCLUDE_GLOBS
-            .iter()
-            .map(|g| g.to_string())
-            .collect(),
-    };
+    let exclude: Vec<String> = pats
+        .as_ref()
+        .and_then(|p| p.exclude.clone())
+        .unwrap_or_else(default_exclude_globs);
     let rel = |f: &Path| -> String {
         // base-relative POSIX path (vitest matches globs against this).
         let r = f.strip_prefix(base).unwrap_or(f);
@@ -1403,10 +1396,12 @@ fn discover(cwd: &Path, forced_config: Option<&Path>) -> Vec<PathBuf> {
     };
     let prune = |d: &Path| excludes_dir(&exclude, &rel(d));
     let has_include = include.is_some() || jest_match.is_some();
-    if has_include {
-        walk(cwd, &mut all, &|_| true, &prune);
-    } else {
-        walk(cwd, &mut all, &is_test_file, &prune);
+    for root in walk_roots(cwd, jest_root_dirs.as_deref()) {
+        if has_include {
+            walk(root, &mut all, &|_| true, &prune);
+        } else {
+            walk(root, &mut all, &is_test_file, &prune);
+        }
     }
     all.retain(|f| {
         let r = rel(f);
@@ -1434,6 +1429,84 @@ const JEST_CONFIG_NAMES: [&str; 5] = [
 fn jest_test_match(cwd: &Path) -> Option<Vec<String>> {
     let text = jest_config_text_in(cwd)?;
     scan_string_array(&text, "testMatch")
+}
+
+/// jest-side discovery inputs for `discover`: `(testMatch globs, roots paths)`. When vitest
+/// patterns already drive discovery (`vitest_patterns` is Some), both return None — the vitest
+/// config takes precedence.
+fn jest_discovery(cwd: &Path, has_vitest: bool) -> (Option<Vec<String>>, Option<Vec<PathBuf>>) {
+    if has_vitest {
+        (None, None)
+    } else {
+        (jest_test_match(cwd), jest_roots(cwd))
+    }
+}
+
+/// `exclude` globs when no vitest config exclude applies — vitest's own default-exclude set.
+fn default_exclude_globs() -> Vec<String> {
+    DEFAULT_EXCLUDE_GLOBS
+        .iter()
+        .map(|g| g.to_string())
+        .collect()
+}
+
+/// Roots `discover` walks: jest's `roots` when set, else `cwd`.
+fn walk_roots<'a>(cwd: &'a Path, jest_root_dirs: Option<&'a [PathBuf]>) -> Vec<&'a Path> {
+    match jest_root_dirs {
+        Some(roots) if !roots.is_empty() => roots.iter().map(|r| r.as_path()).collect(),
+        _ => vec![cwd],
+    }
+}
+
+/// jest config's `roots`, resolved against the config's `rootDir` (or the config dir when
+/// `rootDir` is not set): `<rootDir>` substitutions are expanded, each entry becomes an
+/// absolute path. `None` means the config has no `roots` key, or there is no jest config —
+/// callers fall back to walking `cwd` wholesale. (turbo-test#456 — flux-apis's jest config
+/// sets `roots: ['<rootDir>/src', '<rootDir>/packages']`; without this the walker scans the
+/// whole repo, including `.claude/worktrees/*`, and OOMs.)
+fn jest_roots(cwd: &Path) -> Option<Vec<PathBuf>> {
+    let text = jest_config_text_in(cwd)?;
+    let roots = scan_string_array(&text, "roots")?;
+    let root_dir_abs = resolve_jest_root_dir(cwd, &text);
+    Some(
+        roots
+            .into_iter()
+            .map(|r| expand_jest_root_dir(&r, &root_dir_abs))
+            .collect(),
+    )
+}
+
+/// `<rootDir>` resolved to an absolute path: the jest config's `rootDir` if set (relative to
+/// the config's dir), else the config's dir itself. Jest's own default behavior.
+fn resolve_jest_root_dir(cwd: &Path, text: &str) -> PathBuf {
+    match crate::runner::config_string_value(text, "rootDir") {
+        Some(r) => {
+            let r = expand_jest_root_dir(&r, cwd);
+            if r.is_absolute() {
+                r
+            } else {
+                cwd.join(r)
+            }
+        }
+        None => cwd.to_path_buf(),
+    }
+}
+
+/// Replace `<rootDir>` in a jest path value with `root_dir`. Everything after the marker is
+/// joined as a child path — jest's own `<rootDir>/subdir` substitution.
+fn expand_jest_root_dir(value: &str, root_dir: &Path) -> PathBuf {
+    let marker = "<rootDir>";
+    match value.find(marker) {
+        Some(0) => {
+            let rest = value[marker.len()..].trim_start_matches('/');
+            if rest.is_empty() {
+                root_dir.to_path_buf()
+            } else {
+                root_dir.join(rest)
+            }
+        }
+        _ => PathBuf::from(value),
+    }
 }
 
 fn jest_config_text_in(dir: &Path) -> Option<String> {

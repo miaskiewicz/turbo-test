@@ -243,6 +243,40 @@ fn discover_applies_a_config_exclude_without_include() {
 }
 
 #[test]
+fn discover_honours_jest_roots_so_the_walker_skips_siblings_outside_them() {
+    // turbo-test#456: flux-apis's jest config sets `roots: ['<rootDir>/src',
+    // '<rootDir>/packages']`; without this the walker scans the whole repo, including
+    // `.claude/worktrees/*`, and OOMs. The walker should scope to roots.
+    let t = Tmp::new("disc-jest-roots");
+    t.file(
+        "jest.config.js",
+        "module.exports = { testEnvironment: 'node', rootDir: '.', roots: ['<rootDir>/src', '<rootDir>/packages'] };",
+    );
+    t.file("src/a.test.ts", T);
+    t.file("packages/p/b.test.ts", T);
+    t.file(".claude/worktrees/wt/src/c.test.ts", T);
+    t.file("other/d.test.ts", T);
+    let found = discover(&t.0, None);
+    assert_eq!(
+        found,
+        vec![t.0.join("packages/p/b.test.ts"), t.0.join("src/a.test.ts"),]
+    );
+    // No `roots` set → walk the whole tree (old behavior preserved).
+    let t2 = Tmp::new("disc-jest-no-roots");
+    t2.file(
+        "jest.config.js",
+        "module.exports = { testEnvironment: 'node' };",
+    );
+    t2.file("src/x.test.ts", T);
+    t2.file(".claude/worktrees/wt/src/y.test.ts", T);
+    let all = discover(&t2.0, None);
+    assert!(all.iter().any(|p| p.ends_with("src/x.test.ts")));
+    assert!(all
+        .iter()
+        .any(|p| p.ends_with("worktrees/wt/src/y.test.ts")));
+}
+
+#[test]
 fn discover_ignores_coverage_block_patterns() {
     // no test.include → default discovery; coverage.exclude's test glob must not exclude tests
     let t = Tmp::new("disc-cov");

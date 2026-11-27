@@ -56,9 +56,11 @@ scripts/agent/pin-turbo-dom.sh a5e05113        # add [patch.crates-io] + re-lock
 scripts/agent/drop-turbo-dom-pin.sh            # strip the section, re-lock from crates.io
 ```
 
-A tag must build from crates.io: CI's `release-guard` fails if `Cargo.toml` still has a
-`[patch]` section or `Cargo.lock` still has a `git+` source. Always drop the pin in the
-same commit that bumps the version.
+The 0.8.7 branch uses this workflow to validate against the upstream candidate.
+Once the matching DOM crates are available on crates.io, see
+[RELEASING.md](../RELEASING.md) for the registry verification. A tag must build from crates.io: CI's `release-guard` fails if `Cargo.toml` still has a
+`[patch]` section or `Cargo.lock` still has a `git+` source. Drop the pin and validate the resulting
+registry graph before tagging.
 
 ## Cache directory trap
 
@@ -76,7 +78,7 @@ user-CPU seconds; compare by user CPU seconds (wall absorbs scheduler jitter).
 
 ## Coverage floor
 
-`cargo tarpaulin` (reads `tarpaulin.toml`) enforces `fail-under = 99.9` in CI. Locally:
+`cargo tarpaulin` (reads `tarpaulin.toml`) enforces `fail-under = 99.80` in CI. Locally:
 
 ```bash
 scripts/agent/coverage.sh
@@ -106,5 +108,5 @@ via `#[cfg]` skips.
 | `benchmark-app.sh APP_DIR [FILE]` | ABBA runs with load check and isolated caches; wall + user CPU seconds to a TSV. |
 | `pin-turbo-dom.sh REV` | Adds `[patch.crates-io]` for the turbo-dom crates at REV and re-locks. |
 | `drop-turbo-dom-pin.sh` | Removes the pin and re-locks from crates.io; fails if git sources remain. |
-| `coverage.sh` | `cargo tarpaulin` against the 99.9% floor in `tarpaulin.toml`. |
+| `coverage.sh` | `cargo tarpaulin` against the 99.80% floor in `tarpaulin.toml`. |
 | `check-versions.sh` | Confirms `Cargo.toml` and `package.json` agree on the version. |

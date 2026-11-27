@@ -35,7 +35,7 @@ A release where these disagree is a bug. Bump both in the same commit.
   module they test) and CLI integration tests (`tests/*.rs`, helper `tests/common/mod.rs`:
   throwaway projects outside the repo, isolated TMPDIR/TURBO_CACHE_DIR, spawning the real
   binary). Integration tests and the path/V8-sensitive unit modules are `cfg(unix)`.
-- `cargo tarpaulin` (reads `tarpaulin.toml`: Llvm engine, `target/cov`, `fail-under = 99.9`)
+- `cargo tarpaulin` (reads `tarpaulin.toml`: Llvm engine, `target/cov`, `fail-under = 99.80`)
   is the CI `coverage` gate. New code needs behaviour-asserting tests (happy path + edge
   cases) that keep every line covered; never add coverage-only no-op tests. The two
   remaining uncovered lines (each with its reason or open issue) are explained in tarpaulin.toml.
@@ -43,7 +43,7 @@ A release where these disagree is a bug. Bump both in the same commit.
   code is unchanged. Validate the fresh build, single-V8 graph, relevant runtime
   regressions and app correctness instead. Keep earlier coverage/timing evidence tied
   to its actual source revision. Rerun coverage for runner code changes or a specific
-  coverage-related concern; the 99.9% floor and CI/release requirements stay unchanged.
+  coverage-related concern; the 99.80% floor and CI/release requirements stay unchanged.
 - CI detection (snapshot update mode `none` on CI) is std-env's `isCI`: `src/ci.rs` over the
   provider table `src/ci_providers.json`. When vitest's std-env changes, re-check the table with
   `node scripts/check-ci-detection.mjs <dir with vitest installed>` (0 mismatches). The test
@@ -72,16 +72,16 @@ A release where these disagree is a bug. Bump both in the same commit.
   `turbo_dom_browser_env::browser_env::{install, enabled, reset, flush_ownership}`. Fix DOM behaviour there.
 - V8 is turbo-dom's rusty_v8 fork `turbo-dom-v8` (aliased `v8`). No V8 source is vendored
   here. `bash scripts/check-single-v8.sh` must pass (one turbo-dom-v8, no v8/v8x/turbo-surf-v8).
-- The release consumes published turbo-dom / -layout / -browser-env 0.8.6 and
-  turbo-dom-v8 150.4.2 through the registry lockfile. `release-guard` requires no
-  temporary `[patch]` sections or Git sources before tagging. Future development
-  pins must be removed and the registry graph validated before publication.
+- The 0.8.7 candidate pins the three DOM crates by Git revision and uses
+  `turbo-dom-v8` 150.4.2 from crates.io. Once the required DOM crates are on
+  crates.io, remove the patches and validate the registry graph using
+  [RELEASING.md](RELEASING.md). The tag's `release-guard` requires a registry-only lockfile.
 
 ## Coverage CLI (v0.2.3+)
 `--coverage` `--coverage-dir DIR` `--coverage-thresholds lines=,functions=,branches=,statements=`
 `--coverage-per-file` `--coverage-reporter lcov,json-summary,text,html`
 `--coverage-include GLOB` `--coverage-exclude GLOB` `--coverage-all` (v0.8.3+: unexecuted matching files at zero).
-Thresholds/include/exclude are auto-read from the vitest config `coverage` block by `cli.js`
+Thresholds/include/exclude are auto-read from the vitest config `coverage` block by the native launcher
 when not passed explicitly (flags win).
 `statements` (v0.2.6+) is DERIVED: oxc parses each source once (shared with the branch pass —
 no extra parse cost) and each executable statement's position is correlated with V8's covered

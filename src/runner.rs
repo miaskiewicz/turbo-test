@@ -2594,8 +2594,15 @@ fn run_setup_file(
 ) -> Result<(), String> {
     // A setup file that throws fails every test file that uses it, with its error (vitest).
     let failed = |e: String| Err(format!("setup file {}: {e}", file.display()));
-    if mr_enabled() && esbuild_transform_cjs(file, false).is_some() {
-        return run_setup_file_mr(scope, file, &failed);
+    if mr_enabled() && project_root(file).is_some() {
+        if esbuild_transform_cjs(file, false).is_some() {
+            return run_setup_file_mr(scope, file, &failed);
+        }
+        // esbuild's CJS transform rejects top-level await. Keep setup and the test on
+        // the same module registry by running the native transform in an async wrapper.
+        if let Some(code) = async_setup_code(file) {
+            return run_async_setup(scope, file, &code).or_else(failed);
+        }
     }
     // vitest hoists the setup's vi.mock calls above its imports here too (turbo-test#194): the
     // mock prepass registers them before the bundle's externalized imports load (every loader
@@ -2639,6 +2646,95 @@ fn run_setup_file_mr(
         "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;",
     );
     err.map_or(Ok(()), failed)
+}
+
+// Preserve ESM link errors when the synchronous transform is unavailable for another
+// reason. Only an actual module-level await requires the async CommonJS wrapper.
+fn async_setup_code(file: &Path) -> Option<String> {
+    let source = std::fs::read_to_string(file).ok()?;
+    let ty = oxc_span::SourceType::from_path(file)
+        .ok()?
+        .with_module(true);
+    let alloc = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&alloc, &source, ty).parse();
+    let mut found = TopLevelAwait(false);
+    oxc_ast_visit::Visit::visit_program(&mut found, &parsed.program);
+    found.0.then(|| native_transform_cjs(file)).flatten()
+}
+
+struct TopLevelAwait(bool);
+
+impl<'a> oxc_ast_visit::Visit<'a> for TopLevelAwait {
+    fn visit_await_expression(&mut self, _: &oxc_ast::ast::AwaitExpression<'a>) {
+        self.0 = true;
+    }
+
+    fn visit_for_of_statement(&mut self, statement: &oxc_ast::ast::ForOfStatement<'a>) {
+        self.0 |= statement.r#await;
+        oxc_ast_visit::walk::walk_for_of_statement(self, statement);
+    }
+
+    fn visit_function(&mut self, _: &oxc_ast::ast::Function<'a>, _: oxc_semantic::ScopeFlags) {}
+
+    fn visit_arrow_function_expression(&mut self, _: &oxc_ast::ast::ArrowFunctionExpression<'a>) {}
+}
+
+fn run_async_setup(scope: &mut v8::PinScope, file: &Path, code: &str) -> Result<(), String> {
+    run_entry_mocks(scope, file)?;
+    run_js(scope, "globalThis.__hoistedIdx = 0;");
+    let result = evaluate_async_setup(scope, file, code);
+    settle_module_mocks(scope, file, false);
+    run_js(
+        scope,
+        "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;",
+    );
+    result
+}
+
+fn evaluate_async_setup(scope: &mut v8::PinScope, file: &Path, code: &str) -> Result<(), String> {
+    let tc = std::pin::pin!(v8::TryCatch::new(scope));
+    let tc = &mut tc.init();
+    let wrapped = wrap_cjs_source(file, code).replacen("(function", "(async function", 1);
+    let source = v8_str!(tc, &wrapped);
+    let origin = cjs_script_origin(tc, file);
+    let wrapper = v8::Script::compile(tc, source, origin.as_ref())
+        .and_then(|script| script.run(tc))
+        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+        .ok_or_else(|| {
+            caught_message(tc, "setup compile failed")
+                .unwrap_or_else(|| "setup compile failed".into())
+        })?;
+    let (exports, module, _) = build_cjs_module_object(tc).ok_or("cannot create setup module")?;
+    let ctx = build_cjs_call_ctx(tc, file).ok_or("cannot create setup require")?;
+    let prev_dir = swap_in_tt_dir(tc, ctx.global, ctx.dir_str);
+    let result = await_setup_wrapper(
+        tc,
+        wrapper,
+        [
+            exports.into(),
+            module.into(),
+            ctx.require,
+            ctx.filename.into(),
+            ctx.dir_str.into(),
+        ],
+        ctx.global,
+    );
+    restore_tt_dir(tc, ctx.global, prev_dir);
+    result
+}
+
+fn await_setup_wrapper<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    wrapper: v8::Local<'s, v8::Function>,
+    args: [v8::Local<'s, v8::Value>; 5],
+    global: v8::Local<'s, v8::Object>,
+) -> Result<(), String> {
+    let receiver = v8::undefined(scope).into();
+    let promise = wrapper
+        .call(scope, receiver, &args)
+        .and_then(|value| v8::Local::<v8::Promise>::try_from(value).ok())
+        .ok_or("setup wrapper did not return a promise")?;
+    run_event_loop(scope, global, promise, 100_000)
 }
 
 fn reset_pending_mocks(scope: &mut v8::PinScope) {
@@ -2818,13 +2914,34 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String>
     let entry_dir = js_string_literal(&dir.to_string_lossy());
     run_js(scope, &format!("globalThis.__ttEntryDir = {entry_dir};"));
     let mocks = extract_mocks(&src);
+    // A file with no vi.mock but with vi.hoisted(...) still needs the prepass: vitest runs
+    // every hoisted body BEFORE the file's static-import graph is evaluated, so the body can
+    // seed process.env (or any other global) a statically-imported module reads at load time
+    // (turbo-test#464). The untransformed path handles the mock-less case without building a
+    // bundled prepass.
     if mocks.is_empty() {
-        return Ok(());
+        if extract_hoisted(&src).is_empty() {
+            return Ok(());
+        }
+        return run_entry_mocks_untransformed(scope, entry, &src, &entry_dir, &mocks);
     }
     let Some(root) = project_root(entry) else {
         return run_entry_mocks_untransformed(scope, entry, &src, &entry_dir, &mocks);
     };
-    let p = write_entry_prepass(&root, &src, &mocks);
+    run_project_mock_prepass(scope, entry, &src, &root, &mocks)
+}
+
+fn run_project_mock_prepass(
+    scope: &mut v8::PinScope,
+    entry: &Path,
+    src: &str,
+    root: &Path,
+    mocks: &[(String, String)],
+) -> Result<(), String> {
+    let shared = shared_mock_lets(src);
+    let bind_esm_locals = needs_esm_mock_bindings(entry, &shared);
+    let rewritten = if bind_esm_locals { &[][..] } else { &shared };
+    let p = write_entry_prepass(root, src, mocks, rewritten);
     {
         let global = scope.get_current_context().global(scope);
         if let Some(key) = v8::String::new(scope, "__pendingMocks") {
@@ -2833,11 +2950,20 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String>
         }
     }
     if mr_enabled() {
-        run_entry_mocks_mr(scope, entry, &src, &p);
+        run_entry_mocks_mr(scope, entry, src, &p, !bind_esm_locals);
         return Ok(());
     }
     run_entry_mocks_bundled(scope, entry, &p);
     Ok(())
+}
+
+// The entry's ESM fallback registers accessors for its real binding. A prepass
+// rewritten to read __ms would bypass those accessors and see an uninitialized slot.
+fn needs_esm_mock_bindings(entry: &Path, shared: &[String]) -> bool {
+    !shared.is_empty()
+        && mr_enabled()
+        && TEST_FILE.with(|file| *file.borrow() == entry)
+        && !mr_entry_transformable(entry)
 }
 
 /// The `vi.mock(...)` / `jest.mock(...)` replay calls of the entry's prepass (one per mock).
@@ -2952,7 +3078,12 @@ fn scope_prepass_code(
 }
 
 /// Write the entry's esbuild mock prepass module (hashed, inside node_modules) and return it.
-fn write_entry_prepass(root: &Path, src: &str, mocks: &[(String, String)]) -> PathBuf {
+fn write_entry_prepass(
+    root: &Path,
+    src: &str,
+    mocks: &[(String, String)],
+    shared: &[String],
+) -> PathBuf {
     // React is imported here too: mock factories commonly reference the test's module-scope
     // `React` (e.g. `React.useEffect` inside a returned component) which isn't in this prepass.
     let mut content = String::from("import { vi } from 'vitest';\nimport React from 'react';\n");
@@ -2966,9 +3097,8 @@ fn write_entry_prepass(root: &Path, src: &str, mocks: &[(String, String)]) -> Pa
     }
     // Route module-`let`s the factories close over through globalThis.__ms so they share the
     // SAME binding as the entry module (which esbuild_transform_cjs rewrites identically).
-    let shared = shared_mock_lets(src);
     if !shared.is_empty() {
-        content = rewrite_shared_lets(&content, &shared);
+        content = rewrite_shared_lets(&content, shared);
     }
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -2987,7 +3117,13 @@ fn write_entry_prepass(root: &Path, src: &str, mocks: &[(String, String)]) -> Pa
 }
 
 /// Module-runner entry prepass: the factories run IN THE CURRENT realm.
-fn run_entry_mocks_mr(scope: &mut v8::PinScope, entry: &Path, src: &str, p: &Path) {
+fn run_entry_mocks_mr(
+    scope: &mut v8::PinScope,
+    entry: &Path,
+    src: &str,
+    p: &Path,
+    rewritten_shared_lets: bool,
+) {
     let dir = entry.parent().unwrap_or(Path::new("."));
     // Module-runner: run the mock factories IN THE CURRENT realm (CJS transform + wrapper)
     // so their require('react')/jsx-runtime resolve to the SAME shared react the test uses
@@ -3001,7 +3137,7 @@ fn run_entry_mocks_mr(scope: &mut v8::PinScope, entry: &Path, src: &str, p: &Pat
     set_mock_prepass(scope, true);
     if let Some(raw) = esbuild_transform_cjs(p, false) {
         // the factories see the file's top-level bindings through its scope (mock_scope.rs)
-        let bindings = factory_bindings(entry, src, true);
+        let bindings = factory_bindings(entry, src, rewritten_shared_lets);
         let raw = if bindings.is_empty() {
             raw
         } else {
@@ -4335,7 +4471,9 @@ fn opens_declaration(t: &str) -> bool {
 /// above the import, so a factory that closes over a mock-prefixed const reads it in its
 /// temporal dead zone when the hoisted require loads (turbo-test#445). A cheap textual check
 /// over trimmed lines — comments and blank lines are skipped, string literals that happen to
-/// start with `import ` are not top-level statements.
+/// start with `import ` are not top-level statements, AND a `const` inside a block scope (an
+/// arrow callback, a class body, a function body) is skipped by tracking balanced brace /
+/// paren / bracket depth across lines (turbo-test#454).
 pub(crate) fn jest_import_before_const(raw: &str) -> bool {
     // The Jest TDZ shape requires BOTH a top-level `import` AND a later top-level
     // `const/let/var` that a `jest.mock(...)` factory closes over. A file whose top-level
@@ -4344,16 +4482,20 @@ pub(crate) fn jest_import_before_const(raw: &str) -> bool {
     // no mock-prefixed const) carries no TDZ risk and must stay on the vitest-style hoist
     // or its own `var import_vitest = require(...)` would be moved below the vi.mock call.
     let mut seen_import = false;
+    let mut depth = 0i32;
     for line in raw
         .lines()
         .map(|l| l.trim_start())
         .filter(|t| is_meaningful_src_line(t))
     {
-        if opens_import(line) {
-            seen_import = true;
-        } else if opens_declaration(line) {
-            return seen_import;
+        if depth == 0 {
+            if opens_import(line) {
+                seen_import = true;
+            } else if opens_declaration(line) {
+                return seen_import;
+            }
         }
+        update_source_depth(line, &mut depth);
     }
     false
 }
@@ -4369,20 +4511,49 @@ pub(crate) fn jest_import_before_const(raw: &str) -> bool {
 /// forward until the terminating `;` for the first string literal that follows.
 pub(crate) fn jest_imports_before_const(raw: &str) -> Vec<String> {
     let mut out = Vec::new();
+    let mut depth = 0i32;
     let mut lines = raw
         .lines()
         .map(|l| l.trim_start())
         .filter(|t| is_meaningful_src_line(t));
     while let Some(line) = lines.next() {
-        if opens_import(line) {
-            if let Some(spec) = extract_import_spec(line, &mut lines) {
-                out.push(spec);
+        if depth == 0 {
+            if opens_import(line) {
+                if let Some(spec) = extract_import_spec(line, &mut lines) {
+                    out.push(spec);
+                }
+                update_source_depth(line, &mut depth);
+                continue;
+            } else if opens_declaration(line) {
+                break;
             }
-        } else if opens_declaration(line) {
-            break;
         }
+        update_source_depth(line, &mut depth);
     }
     out
+}
+
+/// Adjust `depth` by the balanced brackets `(`, `[`, `{` on this line, with a lightweight
+/// string / comment lexer that ignores brackets inside `"…"`, `'…'`, `` `…` ``, line comments
+/// and block comments that both open and close on the same line. Multiline template literals
+/// and multiline block comments that cross lines may mis-count — the top-level hoist detector
+/// uses this to tell a file-scope `const` from one buried inside a callback or class body
+/// (turbo-test#454); occasional misclassification is better than the old naive scan.
+fn update_source_depth(line: &str, depth: &mut i32) {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(end) = comment_or_string_end(bytes, i) {
+            i = end;
+            continue;
+        }
+        match bytes[i] {
+            b'{' | b'(' | b'[' => *depth += 1,
+            b'}' | b')' | b']' => *depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
 }
 
 /// The module spec of an `import` statement opened by `first` — its first string literal, or
@@ -13596,14 +13767,27 @@ fn clear_registry() {
 /// short-lived objects (React trees, DOM nodes, matcher diffs) take fewer scavenges: 3-8% less
 /// wall and 5-7% less CPU on the four reference projects (ui-design-components 8%, payroll 5%),
 /// identical results, peak memory within about 0.3 GB.
-fn v8_flags(env: Option<&str>) -> String {
-    env.unwrap_or("--single-threaded --min-semi-space-size=32")
-        .to_string()
+/// `--max-semi-space-size=128`: raise the young-generation CEILING (not the start size) from
+/// V8's default so a heavy test's working set stays scavengeable without promoting into the
+/// old generation. ui-design-components measured a ~15% wall-time improvement on this change
+/// alone; payroll was ambiguous (within noise). Peak RSS unchanged on quieter projects (the
+/// young gen only grows when it needs to).
+/// Explicit heap limits let V8 size the young generation within the requested heap.
+fn v8_flags(env: Option<&str>, heap_limited: bool) -> String {
+    match (env, heap_limited) {
+        (Some(flags), _) => flags,
+        (None, true) => "--single-threaded",
+        (None, false) => "--single-threaded --min-semi-space-size=32 --max-semi-space-size=128",
+    }
+    .to_string()
 }
 
 /// This run's V8 flags ([`v8_flags`] of `TURBO_V8_FLAGS`).
 fn run_v8_flags() -> String {
-    v8_flags(std::env::var("TURBO_V8_FLAGS").ok().as_deref())
+    v8_flags(
+        std::env::var("TURBO_V8_FLAGS").ok().as_deref(),
+        crate::heap_guard::max_heap_bytes().is_some(),
+    )
 }
 
 /// Initialize V8 once for the process.
