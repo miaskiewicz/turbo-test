@@ -14,6 +14,7 @@ test('native byte view contracts fail before cryptographic work',()=>{
  assert.throws(()=>globalThis.__ttSha256('bad'),/ArrayBufferView/);
  assert.throws(()=>globalThis.__ttX509('bad'),/byte view/);
  assert.throws(()=>globalThis.__ttAesGcm(false,new Uint8Array(31),new Uint8Array(12),new Uint8Array(),new Uint8Array(),16),/32-byte key/);
+ assert.throws(()=>globalThis.__ttAesGcm(false,new Uint8Array(32),new Uint8Array(11),new Uint8Array(),new Uint8Array(),16),/12-byte IV/);
  assert.throws(()=>globalThis.__ttRandomBytes(-1),/Invalid random byte size/);
  assert.throws(()=>globalThis.__ttCryptoHashes('unknown',new Uint8Array(),new Uint8Array(),0,0),/Unsupported keyed hash/);
 });

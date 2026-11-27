@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
 use crate::coverage;
@@ -702,14 +702,32 @@ pub fn run_files(
     jobs: usize,
     bail: usize,
 ) -> Vec<FileResult> {
+    run_files_reporting(engine, files, names, order, jobs, bail, None)
+}
+
+fn run_files_reporting(
+    engine: &Engine,
+    files: &[PathBuf],
+    names: &[PathBuf],
+    order: &[usize],
+    jobs: usize,
+    bail: usize,
+    checkpoint: Option<JsonCheckpoint<'_>>,
+) -> Vec<FileResult> {
     let cursor = AtomicUsize::new(0);
-    let results = Mutex::new(Vec::<FileResult>::new());
+    let results = Mutex::new((Vec::<FileResult>::new(), false));
+    let ready = Condvar::new();
+    let checkpointing = checkpoint.is_some();
     let failed_total = AtomicUsize::new(0);
     std::thread::scope(|s| {
+        let reporter = checkpoint.map(|checkpoint| {
+            let (results, ready) = (&results, &ready);
+            s.spawn(move || checkpoint_results(checkpoint, results, ready))
+        });
         let handles: Vec<_> = (0..jobs)
             .map(|pool| {
-                let (cursor, order, files, names, results, failed_total) =
-                    (&cursor, order, files, names, &results, &failed_total);
+                let (cursor, results, failed_total, ready) =
+                    (&cursor, &results, &failed_total, &ready);
                 s.spawn(move || {
                     loop {
                         if bail > 0 && failed_total.load(Ordering::Relaxed) >= bail {
@@ -729,20 +747,39 @@ pub fn run_files(
                         if bail > 0 {
                             failed_total.fetch_add(fr.failed as usize, Ordering::Relaxed);
                         }
-                        results.lock().unwrap().push(fr);
+                        record_file_result(results, ready, checkpointing, fr);
                     }
                     // reuse path: tear down this worker's persistent isolate cleanly (no-op otherwise)
                     (engine.end_worker)();
                 })
             })
             .collect();
-        for h in handles {
-            h.join().unwrap();
+        let outcomes: Vec<_> = handles.into_iter().map(|handle| handle.join()).collect();
+        if let Some(reporter) = reporter {
+            results.lock().unwrap().1 = true;
+            ready.notify_one();
+            reporter.join().unwrap();
+        }
+        for outcome in outcomes {
+            outcome.unwrap();
         }
     });
-    let mut res = results.into_inner().unwrap();
+    let (mut res, _) = results.into_inner().unwrap();
     res.sort_by_key(|r| r.idx);
     res
+}
+
+fn record_file_result(
+    results: &Mutex<(Vec<FileResult>, bool)>,
+    ready: &Condvar,
+    checkpointing: bool,
+    result: FileResult,
+) {
+    let mut state = results.lock().unwrap();
+    state.0.push(result);
+    if checkpointing && state.0.len() == 1 {
+        ready.notify_one();
+    }
 }
 
 /// Run-wide counts.
@@ -967,6 +1004,16 @@ pub fn render_json(
     start_ms: f64,
     did_update: bool,
 ) -> String {
+    render_json_state(files, res, start_ms, did_update, true)
+}
+
+fn render_json_state(
+    files: &[PathBuf],
+    res: &[FileResult],
+    start_ms: f64,
+    did_update: bool,
+    complete: bool,
+) -> String {
     let count = |st: &str| -> usize {
         res.iter()
             .map(|r| r.tests.iter().filter(|t| t.status == st).count())
@@ -1002,8 +1049,11 @@ pub fn render_json(
     out.push_str(&format!("\"startTime\":{},", js_num(start_ms)));
     out.push_str(&format!(
         "\"success\":{},",
-        !files.is_empty() && failed_suites == 0 && failed_tests == 0
+        complete && !files.is_empty() && failed_suites == 0 && failed_tests == 0
     ));
+    if !complete {
+        out.push_str("\"message\":\"turbo-test run did not complete (partial results)\",");
+    }
     out.push_str("\"testResults\":[");
     let items: Vec<String> = res
         .iter()
@@ -1688,6 +1738,102 @@ fn junit_root() -> PathBuf {
     crate::canon::canonicalize(&root).unwrap_or(root)
 }
 
+/// Keep a usable JSON report if the process dies before the final report. Checkpoint the
+/// first completed file immediately, then batch writes so large suites don't rewrite the
+/// whole report on every completion.
+struct JsonCheckpoint<'a> {
+    path: &'a str,
+    files: &'a [PathBuf],
+    start_ms: f64,
+    did_update: bool,
+    written: usize,
+}
+
+impl<'a> JsonCheckpoint<'a> {
+    fn new(opts: &'a Options, files: &'a [PathBuf], start_ms: f64) -> Option<Self> {
+        opts.output_file
+            .as_deref()
+            .filter(|_| opts.reporter == Reporter::Json)
+            .map(|path| Self {
+                path,
+                files,
+                start_ms,
+                did_update: opts.env.iter().any(|(k, _)| *k == "TURBO_UPDATE_SNAPSHOTS"),
+                written: 0,
+            })
+    }
+
+    fn record(&mut self, results: &[FileResult]) {
+        if results.len() == self.written {
+            return;
+        }
+        let report = render_json_state(self.files, results, self.start_ms, self.did_update, false);
+        if write_json_report(self.path, &report).is_empty() {
+            self.written = results.len();
+        }
+    }
+}
+
+// Wake immediately for the first result and on completion. A timer flushes results that
+// arrive in the meantime even if the remaining workers never finish their next file.
+fn checkpoint_results(
+    mut checkpoint: JsonCheckpoint<'_>,
+    results: &Mutex<(Vec<FileResult>, bool)>,
+    ready: &Condvar,
+) {
+    let mut state = results.lock().unwrap();
+    loop {
+        checkpoint.record(&state.0);
+        if state.1 {
+            break;
+        }
+        state = if state.0.is_empty() {
+            ready.wait(state).unwrap()
+        } else {
+            ready
+                .wait_timeout(state, std::time::Duration::from_millis(250))
+                .unwrap()
+                .0
+        };
+    }
+}
+
+// Replace the report only after the complete JSON is written, so termination during
+// a checkpoint or the final write leaves the previous readable report in place.
+fn write_json_report(path: &str, text: &str) -> String {
+    use std::io::Write;
+    static OUTPUT_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    let write = || -> std::io::Result<()> {
+        let path = Path::new(path);
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let seq = OUTPUT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let temporary = parent.join(format!(
+            ".turbo-test-report-{}-{seq}.tmp",
+            std::process::id()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        let result = file.write_all(text.as_bytes());
+        drop(file);
+        let result = result.and_then(|_| std::fs::rename(&temporary, path));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
+    };
+    match write() {
+        Ok(()) => String::new(),
+        Err(e) => format!("turbo-test: failed to write --outputFile '{path}': {e}\n"),
+    }
+}
+
 /// Drop a minimal "run did not complete" placeholder at the `--outputFile` path before
 /// discovery so a crash before the final write leaves CI with a parseable file that signals
 /// failure rather than a missing file that looks identical to "the job never started"
@@ -1702,7 +1848,7 @@ fn write_incomplete_run_placeholder(opts: &Options) {
         Reporter::Tap | Reporter::TapFlat => "TAP version 13\n1..0 # turbo-test run did not complete (placeholder)\n".to_string(),
         _ => return,
     };
-    let _ = write_output_file(path, &text);
+    let _ = write_reporter_output(opts.reporter, path, &text);
 }
 
 /// Write `text` to the `--outputFile` `path`, creating missing parent dirs. Returns the stderr
@@ -1714,6 +1860,14 @@ fn write_output_file(path: &str, text: &str) -> String {
     match std::fs::write(path, text) {
         Ok(()) => String::new(),
         Err(e) => format!("turbo-test: failed to write --outputFile '{path}': {e}\n"),
+    }
+}
+
+fn write_reporter_output(reporter: Reporter, path: &str, text: &str) -> String {
+    if reporter == Reporter::Json {
+        write_json_report(path, text)
+    } else {
+        write_output_file(path, text)
     }
 }
 
@@ -1738,7 +1892,7 @@ pub fn emit_output(
                     Reporter::Json => ("JSON", text.to_string()),
                     _ => ("", text.to_string()),
                 };
-                stderr = write_output_file(path, &text);
+                stderr = write_reporter_output(reporter, path, &text);
                 if stderr.is_empty() && !kind.is_empty() {
                     let abs = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
                     stdout = format!("{kind} report written to {}\n", abs.display());
@@ -1975,7 +2129,16 @@ pub fn run(opts: Options) -> i32 {
     if let Some(code) = run_jest_global_script(&mut globals, "globalSetup") {
         return code;
     }
-    let res = run_files(&Engine::v8(), &files, &names, &order, jobs, opts.bail);
+    let checkpoint = JsonCheckpoint::new(&opts, &files, start_ms);
+    let res = run_files_reporting(
+        &Engine::v8(),
+        &files,
+        &names,
+        &order,
+        jobs,
+        opts.bail,
+        checkpoint,
+    );
     let teardown_failed = run_jest_global_script(&mut globals, "globalTeardown").is_some();
     drop(globals);
     let wall_ms = wall.elapsed().as_secs_f64() * 1000.0;

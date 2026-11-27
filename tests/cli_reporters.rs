@@ -390,6 +390,62 @@ fn output_file_placeholder_signals_incomplete_runs_and_is_overwritten_on_success
 }
 
 #[test]
+fn json_output_preserves_completed_results_after_kill() {
+    let p = Project::new("rep-outfile-killed");
+    p.file("a.test.js", "test('first finished', () => {});\n");
+    p.file("b.test.js", "test('second finished', () => {});\n");
+    p.file(
+        "z.test.js",
+        "test('unfinished', () => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30_000); }, 40_000);\n",
+    );
+    let target = p.path("out.json");
+    let mut child = common::command(
+        env!("CARGO_BIN_EXE_turbo-test"),
+        &p.dir,
+        &[
+            "--jobs",
+            "1",
+            "--reporter",
+            "json",
+            "--outputFile",
+            "out.json",
+            "a.test.js",
+            "b.test.js",
+            "z.test.js",
+        ],
+        &[],
+        &[],
+    )
+    .spawn()
+    .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let partial = loop {
+        let report = std::fs::read_to_string(&target).ok();
+        if report
+            .as_ref()
+            .is_some_and(|r| r.contains("second finished") && r.contains("partial results"))
+            || std::time::Instant::now() >= deadline
+            || child.try_wait().unwrap().is_some()
+        {
+            break report;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    child.kill().expect("the run should still be active");
+    assert!(!child.wait().unwrap().success());
+    let saved = std::fs::read_to_string(target).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(Some(saved.as_str()), partial.as_deref());
+    assert_eq!(parsed["success"], false);
+    assert_eq!(parsed["numPassedTests"], 2);
+    assert_eq!(parsed["testResults"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        parsed["testResults"][0]["assertionResults"][0]["title"],
+        "first finished"
+    );
+}
+
+#[test]
 fn output_file_artifacts() {
     let p = fixture("rep-outfile");
     // artifact → file (parent dirs created); stdout says where it went, as vitest's

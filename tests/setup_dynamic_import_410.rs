@@ -97,3 +97,63 @@ fn setup_absolute_hoisted_package_import_stays_external_with_local_esbuild() {
     child.file("test/a.test.ts", "import { expect, it } from 'vitest';\nit('hoisted package shares runtime expect', () => expect(globalThis.SETUP_VALUE).toBeHoisted());\n");
     passes(&child);
 }
+
+#[test]
+fn setup_with_top_level_await_shares_module_state_and_factory_imports() {
+    let p = project(
+        "setup-await-mock-459",
+        r#"
+import { basename } from 'node:path';
+import { vi } from 'vitest';
+import { register } from './registry';
+vi.mock('./dep', () => ({ value: () => basename('/setup/ready') }));
+async function catalog() {
+    await new Promise(resolve => setTimeout(resolve, 1));
+    return [(await import('./value')).value];
+}
+for await (const value of await catalog()) {
+    register(value);
+}
+"#,
+    );
+    p.file(
+        "test/registry.ts",
+        "export let state = ''; export function register(value: string) { state = value; }",
+    );
+    p.file("test/dep.ts", "export const value = () => 'original';");
+    p.file(
+        "test/a.test.ts",
+        r#"
+import { expect, it } from 'vitest';
+import { state } from './registry';
+import { value } from './dep';
+it('shares state registered after await and resolves the mock factory import', () => {
+    expect([state, value()]).toEqual(['relative', 'ready']);
+});
+"#,
+    );
+    passes(&p);
+}
+
+#[test]
+fn entry_with_top_level_await_keeps_mock_factory_let_bindings() {
+    let p = project("entry-await-mock-459", "await import('./value');\n");
+    p.file("test/dep.ts", "export const read = () => 'original';");
+    p.file("test/api.ts", "export { read } from './dep';");
+    p.file(
+        "test/a.test.ts",
+        r#"
+import { beforeEach, expect, it, vi } from 'vitest';
+let values: string[] = [];
+vi.mock('./dep', () => ({ read: () => values.join(',') }));
+vi.stubGlobal('setupMarker', true);
+const { read } = await import('./api');
+beforeEach(() => { values = []; });
+it('reads the test module let through a hoisted factory', () => {
+    values = ['current'];
+    expect(read()).toBe('current');
+});
+"#,
+    );
+    passes(&p);
+}

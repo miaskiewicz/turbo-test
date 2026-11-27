@@ -1,6 +1,6 @@
-//! Authenticated AES-256-GCM for the owned Node cipher API and OS-backed entropy.
+//! Authenticated AES-GCM for the owned Node cipher API and OS-backed entropy.
 use aes_gcm::aead::{consts, Aead, KeyInit, Payload};
-use aes_gcm::aes::Aes256;
+use aes_gcm::aes::{Aes128, Aes192, Aes256};
 use aes_gcm::{AesGcm, Nonce, TagSize};
 use zeroize::Zeroizing;
 
@@ -28,15 +28,26 @@ fn request(args: &v8::FunctionCallbackArguments) -> Result<Request, String> {
         data: bytes(args.get(3))?,
         aad: bytes(args.get(4))?,
     };
-    if request.key.len() != 32 || request.iv.len() != 12 {
-        return Err("AES-256-GCM requires a 32-byte key and a 12-byte IV".into());
+    if request.iv.len() != 12 {
+        return Err("AES-GCM requires a 12-byte IV".into());
     }
     Ok(request)
 }
 
 fn crypt<Tag: TagSize>(request: &Request) -> Result<Vec<u8>, String> {
-    let cipher = AesGcm::<Aes256, consts::U12, Tag>::new_from_slice(&request.key)
-        .map_err(|_| "Invalid AES key length".to_owned())?;
+    match request.key.len() {
+        16 => crypt_with::<AesGcm<Aes128, consts::U12, Tag>>(request),
+        24 => crypt_with::<AesGcm<Aes192, consts::U12, Tag>>(request),
+        32 => crypt_with::<AesGcm<Aes256, consts::U12, Tag>>(request),
+        _ => Err("AES-GCM requires a 16-, 24-, or 32-byte key".into()),
+    }
+}
+
+fn crypt_with<C: Aead<NonceSize = consts::U12> + KeyInit>(
+    request: &Request,
+) -> Result<Vec<u8>, String> {
+    let cipher =
+        C::new_from_slice(&request.key).map_err(|_| "Invalid AES key length".to_owned())?;
     let nonce = Nonce::from_slice(&request.iv);
     let payload = Payload {
         msg: &request.data,

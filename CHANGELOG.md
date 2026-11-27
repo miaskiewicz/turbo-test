@@ -5,29 +5,33 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
-## [0.8.7] — Unreleased
+## [0.8.7] — 2026-11-27
 
-The release branch pins turbo-dom, turbo-dom-layout and turbo-dom-browser-env
-to `dd2771f66da8670e22d6136c0ec13027e6c1a0e3`. The
-[upstream 0.8.7 notes](https://github.com/miaskiewicz/turbo-dom/blob/dd2771f66da8670e22d6136c0ec13027e6c1a0e3/CHANGELOG.md)
+This release uses the published `turbo-dom`, `turbo-dom-layout` and
+`turbo-dom-browser-env` 0.8.7 crates. The
+[upstream 0.8.7 notes](https://github.com/miaskiewicz/turbo-dom/releases/tag/v0.8.7)
 cover native DOM and layout changes, including focus, selection, navigation and
-DOMRect compatibility. Publication requires the corresponding registry crates.
+DOMRect compatibility.
 
 ### Added
 
 - Honor Jest's `roots` setting when discovering tests (#456).
 - Write an initial report at `--outputFile` so an interrupted run leaves a
-  crash placeholder (#457).
+  crash placeholder. JSON output preserves completed test files in a partial
+  report if the runner is interrupted (#457).
 
 ### Fixed
 
 - Ignore block-scoped declarations when detecting variables that affect Jest
   mock hoisting (#454).
 - Run `vi.hoisted` callbacks before static imports in test files (#464).
+- Preserve mock factory bindings and shared module state when setup and test
+  files use top-level `await` (#459).
 - Retry transient failures during recursive removal, following Node's
   `fs.rm` behavior (#455).
 - Implement WebCrypto `SubtleCrypto` in the DOM environment, including key
-  import, signing, verification and AES-GCM (#462).
+  import, signing, verification and AES-GCM. Generate HMAC SHA-1/SHA-256 keys
+  and 128-, 192- and 256-bit AES-GCM keys (#462).
 - Consume `ReadableStream` bodies in `Response.text()` and `Request.text()` (#463).
 - Honor explicit `TURBO_MAX_HEAP_MB` limits by letting V8 size the young
   generation within the configured heap.

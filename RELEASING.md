@@ -27,11 +27,10 @@ The fork carries the interceptor `ShouldThrowOnError` fix;
 against the resolved fork. `scripts/check-single-v8.sh` (CI build job) requires
 exactly one `turbo-dom-v8` in the graph and no `v8`, `v8x` or `turbo-surf-v8`.
 
-The v0.8.7 candidate pins `turbo-dom`, `turbo-dom-layout` and
-`turbo-dom-browser-env` to `dd2771f66da8670e22d6136c0ec13027e6c1a0e3` for prerelease
-validation. `turbo-dom-v8` 150.4.2 resolves from crates.io. Once the required
-DOM crate versions are available from crates.io, remove the temporary patches
-and validate the actual registry graph:
+The v0.8.7 release uses the published `turbo-dom`, `turbo-dom-layout` and
+`turbo-dom-browser-env` 0.8.7 crates and `turbo-dom-v8` 150.4.2. For future
+prerelease pins, remove the temporary patches when the required DOM crates
+are available and validate the actual registry graph:
 
 ```sh
 scripts/agent/drop-turbo-dom-pin.sh

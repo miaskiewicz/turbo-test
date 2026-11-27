@@ -97,9 +97,3 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tarpaulin)"] }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-
-
-[patch.crates-io]
-turbo-dom = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "dd2771f66da8670e22d6136c0ec13027e6c1a0e3" }
-turbo-dom-layout = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "dd2771f66da8670e22d6136c0ec13027e6c1a0e3" }
-turbo-dom-browser-env = { git = "https://github.com/miaskiewicz/turbo-dom", rev = "dd2771f66da8670e22d6136c0ec13027e6c1a0e3" }

@@ -2594,8 +2594,15 @@ fn run_setup_file(
 ) -> Result<(), String> {
     // A setup file that throws fails every test file that uses it, with its error (vitest).
     let failed = |e: String| Err(format!("setup file {}: {e}", file.display()));
-    if mr_enabled() && esbuild_transform_cjs(file, false).is_some() {
-        return run_setup_file_mr(scope, file, &failed);
+    if mr_enabled() && project_root(file).is_some() {
+        if esbuild_transform_cjs(file, false).is_some() {
+            return run_setup_file_mr(scope, file, &failed);
+        }
+        // esbuild's CJS transform rejects top-level await. Keep setup and the test on
+        // the same module registry by running the native transform in an async wrapper.
+        if let Some(code) = async_setup_code(file) {
+            return run_async_setup(scope, file, &code).or_else(failed);
+        }
     }
     // vitest hoists the setup's vi.mock calls above its imports here too (turbo-test#194): the
     // mock prepass registers them before the bundle's externalized imports load (every loader
@@ -2639,6 +2646,95 @@ fn run_setup_file_mr(
         "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;",
     );
     err.map_or(Ok(()), failed)
+}
+
+// Preserve ESM link errors when the synchronous transform is unavailable for another
+// reason. Only an actual module-level await requires the async CommonJS wrapper.
+fn async_setup_code(file: &Path) -> Option<String> {
+    let source = std::fs::read_to_string(file).ok()?;
+    let ty = oxc_span::SourceType::from_path(file)
+        .ok()?
+        .with_module(true);
+    let alloc = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&alloc, &source, ty).parse();
+    let mut found = TopLevelAwait(false);
+    oxc_ast_visit::Visit::visit_program(&mut found, &parsed.program);
+    found.0.then(|| native_transform_cjs(file)).flatten()
+}
+
+struct TopLevelAwait(bool);
+
+impl<'a> oxc_ast_visit::Visit<'a> for TopLevelAwait {
+    fn visit_await_expression(&mut self, _: &oxc_ast::ast::AwaitExpression<'a>) {
+        self.0 = true;
+    }
+
+    fn visit_for_of_statement(&mut self, statement: &oxc_ast::ast::ForOfStatement<'a>) {
+        self.0 |= statement.r#await;
+        oxc_ast_visit::walk::walk_for_of_statement(self, statement);
+    }
+
+    fn visit_function(&mut self, _: &oxc_ast::ast::Function<'a>, _: oxc_semantic::ScopeFlags) {}
+
+    fn visit_arrow_function_expression(&mut self, _: &oxc_ast::ast::ArrowFunctionExpression<'a>) {}
+}
+
+fn run_async_setup(scope: &mut v8::PinScope, file: &Path, code: &str) -> Result<(), String> {
+    run_entry_mocks(scope, file)?;
+    run_js(scope, "globalThis.__hoistedIdx = 0;");
+    let result = evaluate_async_setup(scope, file, code);
+    settle_module_mocks(scope, file, false);
+    run_js(
+        scope,
+        "globalThis.__hoistedCache = []; globalThis.__hoistedIdx = 0;",
+    );
+    result
+}
+
+fn evaluate_async_setup(scope: &mut v8::PinScope, file: &Path, code: &str) -> Result<(), String> {
+    let tc = std::pin::pin!(v8::TryCatch::new(scope));
+    let tc = &mut tc.init();
+    let wrapped = wrap_cjs_source(file, code).replacen("(function", "(async function", 1);
+    let source = v8_str!(tc, &wrapped);
+    let origin = cjs_script_origin(tc, file);
+    let wrapper = v8::Script::compile(tc, source, origin.as_ref())
+        .and_then(|script| script.run(tc))
+        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+        .ok_or_else(|| {
+            caught_message(tc, "setup compile failed")
+                .unwrap_or_else(|| "setup compile failed".into())
+        })?;
+    let (exports, module, _) = build_cjs_module_object(tc).ok_or("cannot create setup module")?;
+    let ctx = build_cjs_call_ctx(tc, file).ok_or("cannot create setup require")?;
+    let prev_dir = swap_in_tt_dir(tc, ctx.global, ctx.dir_str);
+    let result = await_setup_wrapper(
+        tc,
+        wrapper,
+        [
+            exports.into(),
+            module.into(),
+            ctx.require,
+            ctx.filename.into(),
+            ctx.dir_str.into(),
+        ],
+        ctx.global,
+    );
+    restore_tt_dir(tc, ctx.global, prev_dir);
+    result
+}
+
+fn await_setup_wrapper<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    wrapper: v8::Local<'s, v8::Function>,
+    args: [v8::Local<'s, v8::Value>; 5],
+    global: v8::Local<'s, v8::Object>,
+) -> Result<(), String> {
+    let receiver = v8::undefined(scope).into();
+    let promise = wrapper
+        .call(scope, receiver, &args)
+        .and_then(|value| v8::Local::<v8::Promise>::try_from(value).ok())
+        .ok_or("setup wrapper did not return a promise")?;
+    run_event_loop(scope, global, promise, 100_000)
 }
 
 fn reset_pending_mocks(scope: &mut v8::PinScope) {
@@ -2832,7 +2928,20 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String>
     let Some(root) = project_root(entry) else {
         return run_entry_mocks_untransformed(scope, entry, &src, &entry_dir, &mocks);
     };
-    let p = write_entry_prepass(&root, &src, &mocks);
+    run_project_mock_prepass(scope, entry, &src, &root, &mocks)
+}
+
+fn run_project_mock_prepass(
+    scope: &mut v8::PinScope,
+    entry: &Path,
+    src: &str,
+    root: &Path,
+    mocks: &[(String, String)],
+) -> Result<(), String> {
+    let shared = shared_mock_lets(src);
+    let bind_esm_locals = needs_esm_mock_bindings(entry, &shared);
+    let rewritten = if bind_esm_locals { &[][..] } else { &shared };
+    let p = write_entry_prepass(root, src, mocks, rewritten);
     {
         let global = scope.get_current_context().global(scope);
         if let Some(key) = v8::String::new(scope, "__pendingMocks") {
@@ -2841,11 +2950,20 @@ fn run_entry_mocks(scope: &mut v8::PinScope, entry: &Path) -> Result<(), String>
         }
     }
     if mr_enabled() {
-        run_entry_mocks_mr(scope, entry, &src, &p);
+        run_entry_mocks_mr(scope, entry, src, &p, !bind_esm_locals);
         return Ok(());
     }
     run_entry_mocks_bundled(scope, entry, &p);
     Ok(())
+}
+
+// The entry's ESM fallback registers accessors for its real binding. A prepass
+// rewritten to read __ms would bypass those accessors and see an uninitialized slot.
+fn needs_esm_mock_bindings(entry: &Path, shared: &[String]) -> bool {
+    !shared.is_empty()
+        && mr_enabled()
+        && TEST_FILE.with(|file| *file.borrow() == entry)
+        && !mr_entry_transformable(entry)
 }
 
 /// The `vi.mock(...)` / `jest.mock(...)` replay calls of the entry's prepass (one per mock).
@@ -2960,7 +3078,12 @@ fn scope_prepass_code(
 }
 
 /// Write the entry's esbuild mock prepass module (hashed, inside node_modules) and return it.
-fn write_entry_prepass(root: &Path, src: &str, mocks: &[(String, String)]) -> PathBuf {
+fn write_entry_prepass(
+    root: &Path,
+    src: &str,
+    mocks: &[(String, String)],
+    shared: &[String],
+) -> PathBuf {
     // React is imported here too: mock factories commonly reference the test's module-scope
     // `React` (e.g. `React.useEffect` inside a returned component) which isn't in this prepass.
     let mut content = String::from("import { vi } from 'vitest';\nimport React from 'react';\n");
@@ -2974,9 +3097,8 @@ fn write_entry_prepass(root: &Path, src: &str, mocks: &[(String, String)]) -> Pa
     }
     // Route module-`let`s the factories close over through globalThis.__ms so they share the
     // SAME binding as the entry module (which esbuild_transform_cjs rewrites identically).
-    let shared = shared_mock_lets(src);
     if !shared.is_empty() {
-        content = rewrite_shared_lets(&content, &shared);
+        content = rewrite_shared_lets(&content, shared);
     }
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -2995,7 +3117,13 @@ fn write_entry_prepass(root: &Path, src: &str, mocks: &[(String, String)]) -> Pa
 }
 
 /// Module-runner entry prepass: the factories run IN THE CURRENT realm.
-fn run_entry_mocks_mr(scope: &mut v8::PinScope, entry: &Path, src: &str, p: &Path) {
+fn run_entry_mocks_mr(
+    scope: &mut v8::PinScope,
+    entry: &Path,
+    src: &str,
+    p: &Path,
+    rewritten_shared_lets: bool,
+) {
     let dir = entry.parent().unwrap_or(Path::new("."));
     // Module-runner: run the mock factories IN THE CURRENT realm (CJS transform + wrapper)
     // so their require('react')/jsx-runtime resolve to the SAME shared react the test uses
@@ -3009,7 +3137,7 @@ fn run_entry_mocks_mr(scope: &mut v8::PinScope, entry: &Path, src: &str, p: &Pat
     set_mock_prepass(scope, true);
     if let Some(raw) = esbuild_transform_cjs(p, false) {
         // the factories see the file's top-level bindings through its scope (mock_scope.rs)
-        let bindings = factory_bindings(entry, src, true);
+        let bindings = factory_bindings(entry, src, rewritten_shared_lets);
         let raw = if bindings.is_empty() {
             raw
         } else {

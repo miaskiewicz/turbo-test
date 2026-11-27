@@ -2759,10 +2759,8 @@ function __createHash(algorithm) {
     },
   };
 }
-// WebCrypto SubtleCrypto (turbo-test#462). Covers digest(SHA-256), HMAC importKey/sign/verify
-// against the backend's keyed hashes, and AES-GCM (256-bit, 12-byte IV) through __ttAesGcm.
-// Algorithms the backend does not expose (RSA, ECDSA, exportKey, generateKey, deriveBits, …)
-// throw NotSupportedError.
+// WebCrypto SubtleCrypto uses the native keyed-hash, AES-GCM and entropy backends.
+const __subtleKeyMaterial = new WeakMap();
 function __subtleAlgoName(algorithm) {
   const name = typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name;
   if (typeof name !== 'string') throw new TypeError('Algorithm name must be a string');
@@ -2783,37 +2781,70 @@ function __subtleHmacHash(algorithm) {
   if (mapped) return mapped;
   throw new DOMException(`Unsupported HMAC hash: ${name || hash}`, 'NotSupportedError');
 }
-function __subtleImportHmac(bytes, algorithm, extractable, usages) {
-  const hash = __subtleHmacHash(algorithm);
-  return { type: 'secret', extractable: !!extractable, algorithm: { name: 'HMAC', hash: hash === 'sha1' ? 'SHA-1' : 'SHA-256' },
-    usages: Array.from(usages || []), _raw: bytes, _hmac: hash };
+function __subtleSecret(algorithm, extractable, usages, material) {
+  const key = { type: 'secret', extractable: !!extractable, algorithm, usages: Array.from(usages || []) };
+  __subtleKeyMaterial.set(key, { ...material, usages: new Set(key.usages) });
+  return key;
 }
-function __subtleImportAes(bytes, extractable, usages) {
-  if (bytes.length !== 32) throw new DOMException('AES-GCM key must be 256 bits', 'DataError');
-  return { type: 'secret', extractable: !!extractable, algorithm: { name: 'AES-GCM', length: 256 },
-    usages: Array.from(usages || []), _raw: bytes, _aes: true };
+function __subtleHmacKey(bytes, hash, extractable, usages, length = bytes.length * 8) {
+  const algorithm = { name: 'HMAC', hash: { name: hash === 'sha1' ? 'SHA-1' : 'SHA-256' }, length };
+  return __subtleSecret(algorithm, extractable, usages, { bytes, hash });
+}
+function __subtleAesKey(bytes, extractable, usages) {
+  if (![16, 24, 32].includes(bytes.length)) throw new DOMException('Invalid AES-GCM key length', 'DataError');
+  return __subtleSecret({ name: 'AES-GCM', length: bytes.length * 8 }, extractable, usages, { bytes, aes: true });
+}
+function __subtleGenerationUsages(usages, supported) {
+  const keys = Array.from(new Set(usages));
+  if (keys.length === 0 || keys.some(usage => !supported.includes(usage))) {
+    throw new DOMException('Invalid key usages', 'SyntaxError');
+  }
+  return keys;
+}
+function __subtleGenerateHmac(algorithm, extractable, usages) {
+  const hash = __subtleHmacHash(algorithm);
+  const length = algorithm.length === undefined ? 512 : Number(algorithm.length);
+  if (!Number.isInteger(length) || length < 0 || length > 0xffffffff) throw new TypeError('Invalid HMAC key length');
+  if (length === 0) throw new DOMException('HMAC key length cannot be zero', 'OperationError');
+  const keys = __subtleGenerationUsages(usages, ['sign', 'verify']);
+  const bytes = globalThis.__ttRandomBytes(Math.ceil(length / 8));
+  if (length % 8) bytes[bytes.length - 1] &= 0xff << (8 - length % 8);
+  return __subtleHmacKey(bytes, hash, extractable, keys, length);
+}
+function __subtleGenerateAes(algorithm, extractable, usages) {
+  if (algorithm.length === undefined) throw new TypeError('AES-GCM requires a key length');
+  const length = Number(algorithm.length);
+  if (![128, 192, 256].includes(length)) throw new DOMException('Invalid AES-GCM key length', 'OperationError');
+  const keys = __subtleGenerationUsages(usages, ['encrypt', 'decrypt', 'wrapKey', 'unwrapKey']);
+  return __subtleAesKey(globalThis.__ttRandomBytes(length / 8), extractable, keys);
 }
 function __subtleCryptoBufferOf(bytes) {
   const copy = new Uint8Array(bytes);
   return copy.buffer;
 }
-function __subtleHmacDigest(key, data) {
-  return new Uint8Array(globalThis.__ttCryptoHashes('hmac-' + key._hmac, key._raw, __subtleBytes(data), 0, 0));
+function __subtleUsage(material, usage) {
+  if (!material?.usages.has(usage)) throw new DOMException(`Key cannot be used for ${usage}`, 'InvalidAccessError');
 }
-function __subtleAesParams(key, params) {
-  if (!key._aes) throw new DOMException('Key algorithm mismatch', 'InvalidAccessError');
-  if (!params || !params.iv) throw new TypeError('AES-GCM requires an iv');
+function __subtleHmacDigest(material, data) {
+  return new Uint8Array(globalThis.__ttCryptoHashes('hmac-' + material.hash, material.bytes, __subtleBytes(data), 0, 0));
+}
+function __subtleAesParams(params) {
+  if (!params?.iv) throw new TypeError('AES-GCM requires an iv');
   const iv = __subtleBytes(params.iv);
   if (iv.length !== 12) throw new DOMException('AES-GCM currently requires a 12-byte IV', 'OperationError');
   const aad = params.additionalData ? __subtleBytes(params.additionalData) : new Uint8Array(0);
   const tagLength = params.tagLength == null ? 16 : (params.tagLength / 8) | 0;
   return { iv, aad, tagLength };
 }
-function __subtleAesCrypt(decrypt, key, params, data) {
-  const { iv, aad, tagLength } = __subtleAesParams(key, params);
+function __subtleEnsureAesBackend() {
   if (typeof globalThis.__ttAesGcm !== 'function') __runtimeEnsureBackend();
   if (typeof globalThis.__ttAesGcm !== 'function') throw new DOMException('AES-GCM backend unavailable', 'NotSupportedError');
-  try { return globalThis.__ttAesGcm(decrypt, key._raw, iv, __subtleBytes(data), aad, tagLength); }
+}
+function __subtleAesCrypt(decrypt, key, params, data) {
+  __subtleUsage(key?.aes ? key : undefined, decrypt ? 'decrypt' : 'encrypt');
+  const { iv, aad, tagLength } = __subtleAesParams(params);
+  __subtleEnsureAesBackend();
+  try { return globalThis.__ttAesGcm(decrypt, key.bytes, iv, __subtleBytes(data), aad, tagLength); }
   catch (e) { throw new DOMException(e && e.message || String(e), 'OperationError'); }
 }
 const __subtleCrypto = {
@@ -2828,17 +2859,27 @@ const __subtleCrypto = {
     if (format !== 'raw') throw new DOMException(`Unsupported key format: ${format}`, 'NotSupportedError');
     const bytes = __subtleBytes(keyData);
     const name = __subtleAlgoName(algorithm);
-    if (name === 'HMAC') return __subtleImportHmac(bytes, algorithm, extractable, usages);
-    if (name === 'AES-GCM') return __subtleImportAes(bytes, extractable, usages);
+    if (name === 'HMAC') return __subtleHmacKey(bytes, __subtleHmacHash(algorithm), extractable, usages);
+    if (name === 'AES-GCM') return __subtleAesKey(bytes, extractable, usages);
     throw new DOMException(`Unsupported import algorithm: ${name}`, 'NotSupportedError');
   },
+  async generateKey(algorithm, extractable, usages) {
+    const name = __subtleAlgoName(algorithm);
+    if (name === 'HMAC') return __subtleGenerateHmac(algorithm, extractable, usages);
+    if (name === 'AES-GCM') return __subtleGenerateAes(algorithm, extractable, usages);
+    throw new DOMException(`Unsupported key generation algorithm: ${name}`, 'NotSupportedError');
+  },
   async sign(algorithm, key, data) {
-    if (__subtleAlgoName(algorithm) !== 'HMAC' || !key._hmac) throw new DOMException('Unsupported sign algorithm', 'NotSupportedError');
-    return __subtleCryptoBufferOf(__subtleHmacDigest(key, data));
+    const material = __subtleKeyMaterial.get(key);
+    if (__subtleAlgoName(algorithm) !== 'HMAC' || !material?.hash) throw new DOMException('Unsupported sign algorithm', 'NotSupportedError');
+    __subtleUsage(material, 'sign');
+    return __subtleCryptoBufferOf(__subtleHmacDigest(material, data));
   },
   async verify(algorithm, key, signature, data) {
-    if (__subtleAlgoName(algorithm) !== 'HMAC' || !key._hmac) throw new DOMException('Unsupported verify algorithm', 'NotSupportedError');
-    const expected = __subtleHmacDigest(key, data);
+    const material = __subtleKeyMaterial.get(key);
+    if (__subtleAlgoName(algorithm) !== 'HMAC' || !material?.hash) throw new DOMException('Unsupported verify algorithm', 'NotSupportedError');
+    __subtleUsage(material, 'verify');
+    const expected = __subtleHmacDigest(material, data);
     const got = __subtleBytes(signature);
     if (got.length !== expected.length) return false;
     let r = 0;
@@ -2847,14 +2888,14 @@ const __subtleCrypto = {
   },
   async encrypt(algorithm, key, data) {
     if (__subtleAlgoName(algorithm) !== 'AES-GCM') throw new DOMException('Unsupported encrypt algorithm', 'NotSupportedError');
-    return __subtleCryptoBufferOf(__subtleAesCrypt(false, key, algorithm, data));
+    return __subtleCryptoBufferOf(__subtleAesCrypt(false, __subtleKeyMaterial.get(key), algorithm, data));
   },
   async decrypt(algorithm, key, data) {
     if (__subtleAlgoName(algorithm) !== 'AES-GCM') throw new DOMException('Unsupported decrypt algorithm', 'NotSupportedError');
-    return __subtleCryptoBufferOf(__subtleAesCrypt(true, key, algorithm, data));
+    return __subtleCryptoBufferOf(__subtleAesCrypt(true, __subtleKeyMaterial.get(key), algorithm, data));
   },
 };
-for (const name of ['generateKey', 'exportKey', 'deriveKey', 'deriveBits', 'wrapKey', 'unwrapKey']) {
+for (const name of ['exportKey', 'deriveKey', 'deriveBits', 'wrapKey', 'unwrapKey']) {
   __subtleCrypto[name] = async () => { throw new DOMException(`${name} is not supported`, 'NotSupportedError'); };
 }
 
