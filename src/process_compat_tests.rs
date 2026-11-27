@@ -20,7 +20,9 @@ fn timeout_kills_child_group_and_closes_inherited_pipes() {
 
 #[test]
 fn cancellation_reaps_children_without_a_javascript_result() {
-    let request = shell("sleep 60 & wait");
+    // Keep the process-group leader alive independently of the background child.
+    // A shell running wait can exit normally with the child's status during group kill.
+    let request = shell("sleep 60 & exec sleep 60");
     let start = Instant::now();
     let result = spawn_with_cancel(&request, Vec::new(), || {
         start.elapsed() >= Duration::from_millis(20)
