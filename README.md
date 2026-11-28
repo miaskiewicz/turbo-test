@@ -489,9 +489,15 @@ setup files and existing snapshots, without Git. It reruns files with changed or
 files that failed, and files with no recorded run. Only runs with this flag update the records;
 filters, shards and bail update only files that actually ran. History lives in
 `node_modules/.cache/turbo-test` under the project root (`--root`, or the current directory).
-When both flags are supplied, the last-run provider is used, as in Vitest. Unlike Vitest's Vite module graph,
-turbo-test cannot observe files registered only through arbitrary Vite plugin watch hooks;
-run the full suite when such plugin inputs change.
+When both flags are supplied, the last-run provider is used, as in Vitest.
+
+For Vite configurations that can contain plugins, affected-test selection also invokes the
+project's installed Vite in a short-lived Node process to collect files registered through
+`this.addWatchFile()`. Test execution remains native. If Node or Vite is unavailable, a plugin
+fails, or the graph is incomplete, `--changed` runs all candidates and `--since-last-run`
+keeps them eligible for the next run; the CLI prints a warning. This helper loads the Vite
+configuration and runs its plugin hooks, so those hooks have the same side effects they have
+when Vite transforms modules.
 
 ## Programmatic
 

@@ -320,21 +320,14 @@ fn changed_runs_only_changed_test_files() {
     );
     assert_eq!(json_report(&r)["numTotalTestSuites"], 1, "{}", r.all());
 
-    // git missing from PATH → warn and run everything
+    // Git is required by the changed provider; report the failure instead of guessing.
     let r = turbo_test(
         &p.dir,
         &["--changed", "--reporter", "json"],
         &[("PATH", "/nonexistent")],
     );
-    assert_eq!(r.code, Some(0), "{}", r.all());
-    assert!(
-        r.stderr.starts_with(
-            "turbo-test: --changed: git unavailable / not a repo — running all discovered tests.\n"
-        ),
-        "{}",
-        r.all()
-    );
-    assert_eq!(json_report(&r)["numTotalTestSuites"], 3);
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    assert!(r.stderr.contains("Git unavailable"), "{}", r.all());
 }
 
 #[test]

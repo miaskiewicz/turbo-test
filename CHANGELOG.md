@@ -9,6 +9,8 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 - Add `--since-last-run` to rerun tests with changed recorded dependencies, failed tests,
   and tests without a previous record, without requiring Git.
+- Collect Vite plugin watch-file dependencies for affected-test selection, with a conservative
+  fallback if the project’s Vite graph cannot be collected.
 
 ### Changed
 

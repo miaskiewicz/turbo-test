@@ -2138,10 +2138,14 @@ pub fn run(opts: Options) -> i32 {
     let mut globals = None;
     crate::run_history::begin(Path::new(""));
     crate::run_history::capture_project_inputs(&history_root);
+    if let Some(path) = std::env::var_os("TURBO_TRACK_FORCED_CONFIG") {
+        crate::run_history::capture_with_imports(Path::new(&path));
+    }
     if let Some(code) = run_jest_global_script(&mut globals, "globalSetup") {
         return code;
     }
     let global_dependencies = crate::run_history::finish();
+    let vite_start = std::time::SystemTime::now();
     let checkpoint = JsonCheckpoint::new(&opts, &files, start_ms);
     let mut res = run_files_reporting(
         &Engine::v8(),
@@ -2152,7 +2156,17 @@ pub fn run(opts: Options) -> i32 {
         opts.bail,
         checkpoint,
     );
-    record_run_dependencies(&history_root, &files, &mut res, global_dependencies, &opts);
+    let (vite_dependencies, vite_failed) =
+        collect_vite_inputs(&history_root, &files, &res, vite_start);
+    merge_vite_inputs(&files, &mut res, &vite_dependencies);
+    record_run_dependencies(
+        &history_root,
+        &files,
+        &mut res,
+        global_dependencies,
+        &opts,
+        vite_failed,
+    );
     let teardown_failed = run_jest_global_script(&mut globals, "globalTeardown").is_some();
     drop(globals);
     let wall_ms = wall.elapsed().as_secs_f64() * 1000.0;
@@ -2170,12 +2184,102 @@ pub fn run(opts: Options) -> i32 {
     code.max(i32::from(teardown_failed))
 }
 
+fn collect_vite_inputs(
+    root: &Path,
+    files: &[PathBuf],
+    results: &[FileResult],
+    started: std::time::SystemTime,
+) -> (HashMap<String, crate::run_history::Fingerprints>, bool) {
+    let Some(config) = std::env::var_os("TURBO_VITE_WATCH_CONFIG") else {
+        return (HashMap::new(), false);
+    };
+    let (tests, loaded) = loaded_vite_entries(files, results);
+    match crate::vite_watch::collect_with_loaded(root, Path::new(&config), &tests, &loaded) {
+        Ok(graph) => {
+            let changed_during_run = graph.values().flatten().any(|path| {
+                std::fs::metadata(path)
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|time| time > started)
+            });
+            (
+                graph
+                    .into_iter()
+                    .map(|(test, paths)| {
+                        let deps = paths
+                            .into_iter()
+                            .map(|path| {
+                                let hash =
+                                    crate::run_history::fingerprint(&path).unwrap_or_default();
+                                (path.to_string_lossy().into_owned(), hash)
+                            })
+                            .collect();
+                        (test, deps)
+                    })
+                    .collect(),
+                changed_during_run,
+            )
+        }
+        Err(error) => {
+            eprintln!("turbo-test: --since-last-run: {error}; affected tests will rerun until the graph is available.");
+            (HashMap::new(), true)
+        }
+    }
+}
+
+fn loaded_vite_entries(
+    files: &[PathBuf],
+    results: &[FileResult],
+) -> (Vec<PathBuf>, HashMap<String, Vec<PathBuf>>) {
+    let mut tests = Vec::new();
+    let mut loaded = HashMap::new();
+    for result in results {
+        let (Some(file), Some(deps)) = (files.get(result.idx), &result.dependencies) else {
+            continue;
+        };
+        let file = crate::vite_watch::absolute(file);
+        let entries = deps
+            .keys()
+            .map(PathBuf::from)
+            .filter(|path| is_vite_source(path))
+            .collect();
+        loaded.insert(file.to_string_lossy().into_owned(), entries);
+        tests.push(file);
+    }
+    (tests, loaded)
+}
+
+fn is_vite_source(path: &Path) -> bool {
+    path.extension().is_none_or(|ext| ext != "snap") && path.is_file()
+}
+
+fn merge_vite_inputs(
+    files: &[PathBuf],
+    results: &mut [FileResult],
+    graph: &HashMap<String, crate::run_history::Fingerprints>,
+) {
+    for result in results {
+        let Some(deps) = result.dependencies.as_mut() else {
+            continue;
+        };
+        let Some(file) = files.get(result.idx) else {
+            continue;
+        };
+        let key = crate::vite_watch::absolute(file)
+            .to_string_lossy()
+            .into_owned();
+        if let Some(vite) = graph.get(&key) {
+            deps.extend(vite.clone());
+        }
+    }
+}
+
 fn record_run_dependencies(
     root: &Path,
     files: &[PathBuf],
     results: &mut [FileResult],
     global: Option<crate::run_history::Fingerprints>,
     opts: &Options,
+    graph_failed: bool,
 ) {
     if let Some(global) = global {
         for result in results.iter_mut() {
@@ -2190,7 +2294,7 @@ fn record_run_dependencies(
         .env
         .iter()
         .any(|(key, _)| *key == "TURBO_TEST_NAME_PATTERN");
-    crate::run_history::record(root, files, results, partial);
+    crate::run_history::record(root, files, results, partial, graph_failed);
 }
 
 /// Run a jest `globalSetup` or `globalTeardown` script if configured.

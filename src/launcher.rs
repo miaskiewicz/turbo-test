@@ -1890,6 +1890,18 @@ fn keep_since_last_run(
         messages.push("turbo-test: --since-last-run requires the test cache to be enabled.".into());
         return Some(1);
     }
+    if let Some(path) = forced {
+        env.push((
+            "TURBO_TRACK_FORCED_CONFIG",
+            path.to_string_lossy().into_owned(),
+        ));
+    }
+    if let Some(config) = crate::vite_watch::config(cwd, forced) {
+        env.push((
+            "TURBO_VITE_WATCH_CONFIG",
+            config.to_string_lossy().into_owned(),
+        ));
+    }
     env.push(("TURBO_RECORD_DEPENDENCIES", "1".into()));
     let history_root = opts
         .name_root
@@ -2319,11 +2331,16 @@ fn keep_changed(
     if changed.iter().any(|p| !p.exists() || is_global_change(p)) {
         return None;
     }
+    let plugin_affected = match plugin_affected_tests(cwd, forced, &absolute, &changed, messages) {
+        Ok(files) => files,
+        Err(()) => return None,
+    };
     let aliases = config_aliases(cwd, forced);
-    let affected: HashSet<_> =
+    let mut affected: HashSet<_> =
         crate::graph::affected_tests_with_aliases(&changed, &absolute, &aliases)
             .into_iter()
             .collect();
+    affected.extend(plugin_affected);
     test_files.retain(|f| affected.contains(&absolute_in(proc_cwd, f)));
     if test_files.is_empty() {
         messages.push(format!(
@@ -2332,6 +2349,47 @@ fn keep_changed(
         return Some(0);
     }
     None
+}
+
+fn plugin_affected_tests(
+    cwd: &Path,
+    forced: Option<&Path>,
+    tests: &[PathBuf],
+    changed: &[PathBuf],
+    messages: &mut Vec<String>,
+) -> Result<HashSet<PathBuf>, ()> {
+    if changed.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let Some(config) = crate::vite_watch::config(cwd, forced) else {
+        return Ok(HashSet::new());
+    };
+    let graph = match crate::vite_watch::collect(cwd, &config, tests) {
+        Ok(graph) => graph,
+        Err(error) => {
+            messages.push(format!(
+                "turbo-test: --changed: {error}; running all candidate tests."
+            ));
+            return Err(());
+        }
+    };
+    let changed: HashSet<_> = changed
+        .iter()
+        .map(|path| crate::vite_watch::absolute(path))
+        .collect();
+    Ok(tests
+        .iter()
+        .filter(|file| {
+            let key = crate::vite_watch::absolute(file)
+                .to_string_lossy()
+                .into_owned();
+            graph.get(&key).is_none_or(|deps| {
+                deps.iter()
+                    .any(|dep| changed.contains(&crate::vite_watch::absolute(dep)))
+            })
+        })
+        .cloned()
+        .collect())
 }
 
 fn is_global_change(path: &Path) -> bool {

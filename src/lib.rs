@@ -50,6 +50,7 @@ pub mod structured_clone;
 pub mod text_decoder;
 pub mod transform;
 pub mod vite_asset;
+mod vite_watch;
 pub mod vm_compat;
 pub mod zlib_stream;
 

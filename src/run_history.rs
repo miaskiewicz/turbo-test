@@ -25,7 +25,7 @@ fn key(path: &Path) -> String {
         .into_owned()
 }
 
-fn fingerprint(path: &Path) -> Option<String> {
+pub fn fingerprint(path: &Path) -> Option<String> {
     let contents = std::fs::read(path).ok()?;
     let modified = std::fs::metadata(path)
         .ok()?
@@ -125,7 +125,10 @@ fn capture_config(path: &Path, name: &str) {
     }
 }
 
-fn capture_with_imports(path: &Path) {
+pub fn capture_with_imports(path: &Path) {
+    if !enabled() {
+        return;
+    }
     capture(path);
     for dep in crate::graph::transitive_imports(path, &mut HashMap::new()) {
         capture(&dep);
@@ -136,22 +139,38 @@ pub fn finish() -> Option<Fingerprints> {
     ACTIVE.with(|active| active.borrow_mut().take())
 }
 
-pub fn record(root: &Path, files: &[PathBuf], results: &[FileResult], partial: bool) {
+pub fn record(
+    root: &Path,
+    files: &[PathBuf],
+    results: &[FileResult],
+    partial: bool,
+    graph_failed: bool,
+) {
     if !results.iter().any(|result| result.dependencies.is_some()) {
         return;
     }
     let mut history = load(root);
     for result in results {
-        update_record(&mut history, files, result, partial);
+        update_record(&mut history, files, result, partial, graph_failed);
     }
     write_history(root, &history);
 }
 
-fn update_record(history: &mut History, files: &[PathBuf], result: &FileResult, partial: bool) {
+fn update_record(
+    history: &mut History,
+    files: &[PathBuf],
+    result: &FileResult,
+    partial: bool,
+    graph_failed: bool,
+) {
     let (Some(file), Some(deps)) = (files.get(result.idx), &result.dependencies) else {
         return;
     };
     let key = key(file);
+    if graph_failed {
+        history.insert(key, json!({"failed": true, "dependencies": deps}));
+        return;
+    }
     let only = std::fs::read_to_string(file)
         .ok()
         .is_some_and(|source| source.contains(".only(") || source.contains(".only."));
