@@ -799,6 +799,14 @@ fn explicitly_mapped(spec: &str) -> bool {
 
 /// Resolve with the importer's module kind (`esm`) selecting ESM vs CJS export conditions.
 pub fn resolve_spec_as(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
+    let result = resolve_spec_recorded(spec, from_dir, esm);
+    if let Some(path) = &result {
+        crate::run_history::capture(path);
+    }
+    result
+}
+
+fn resolve_spec_recorded(spec: &str, from_dir: &Path, esm: bool) -> Option<PathBuf> {
     // E12: memoize per (spec, from_dir, esm, cjs-first). native_require repeats the same
     // specifier from the same importer dir across every module/file that imports it; the oxc
     // resolve + canonicalize is deterministic for a run. cjs-first is in the key because it
@@ -1863,6 +1871,23 @@ fn vitest_setup_files(entry: &Path) -> Vec<PathBuf> {
         }
     }
     vitest_setup_files_uncached(entry)
+}
+
+pub(crate) fn dependency_setup_files(entry: &Path) -> Vec<PathBuf> {
+    let mut files = vitest_setup_files(entry);
+    let mut dir = entry.parent();
+    while let Some(current) = dir {
+        if vitest_setup_files_in_dir(current).is_some() {
+            break;
+        }
+        if let Some(text) = jest_config_text(current) {
+            let _ = jest_setup_files_from(current, &text);
+            files.extend(JEST_EARLY_SETUP.with(|early| early.borrow().clone()));
+            break;
+        }
+        dir = current.parent();
+    }
+    files
 }
 
 use crate::launcher::VITEST_CONFIG_FILES;
@@ -12017,6 +12042,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     // NOT externalized: their factories can fail to register (JSX/importOriginal), and a
     // dangling external would fail the whole file — safer to leave them bundled.
     let (setup_files, externals, mock_targets, load_target) = build_entry_plan_pieces(&entry_abs);
+    capture_test_inputs(&entry_abs, &setup_files);
     let plan = EntryPlan {
         setup_files: &setup_files,
         externals: &externals,
@@ -12034,6 +12060,27 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     }
 
     run_test_file_isolated(&entry_abs, &plan)
+}
+
+fn capture_test_inputs(entry: &Path, setup_files: &[PathBuf]) {
+    if !crate::run_history::enabled() {
+        return;
+    }
+    let mut inputs = setup_files.to_vec();
+    inputs.extend(dependency_setup_files(entry));
+    inputs.push(entry.to_path_buf());
+    let mut memo = std::collections::HashMap::new();
+    for file in inputs {
+        crate::run_history::capture(&file);
+        for dep in crate::graph::transitive_imports(&file, &mut memo) {
+            crate::run_history::capture(&dep);
+        }
+    }
+    if let (Some(dir), Some(name)) = (entry.parent(), entry.file_name()) {
+        let mut snapshot = name.to_os_string();
+        snapshot.push(".snap");
+        crate::run_history::capture(&dir.join("__snapshots__").join(snapshot));
+    }
 }
 
 /// Collect the inputs `run_test_file` hands to `EntryPlan`: setup files, externals, mock targets,
@@ -12106,7 +12153,7 @@ fn prepare_entry_thread_locals(entry_abs: &Path) {
 
 /// Read jest `moduleDirectories` and `customExportConditions` from the nearest jest config and
 /// store them in thread-locals so `base_resolve_options()` picks them up (turbo-test#345).
-fn set_custom_resolve_options(entry: &Path) {
+pub(crate) fn set_custom_resolve_options(entry: &Path) {
     let mut dir = entry.parent();
     while let Some(d) = dir {
         if let Some(text) = jest_config_text(d) {

@@ -96,22 +96,123 @@ fn collect_deps_into(
 /// Given changed files, return the subset of `tests` transitively affected.
 /// Guaranteed superset of the truly-affected set.
 pub fn affected_tests(changed: &[PathBuf], tests: &[PathBuf]) -> Vec<PathBuf> {
+    affected_tests_with_aliases(changed, tests, &[])
+}
+
+/// Resolve each test independently: sharing a partial closure across a cycle can miss edges.
+pub fn affected_tests_with_aliases(
+    changed: &[PathBuf],
+    tests: &[PathBuf],
+    aliases: &[(String, String)],
+) -> Vec<PathBuf> {
     let canon = |p: &Path| crate::canon::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let changed: HashSet<PathBuf> = changed.iter().map(|p| canon(p)).collect();
-    let mut memo = HashMap::new();
-    let mut out = Vec::new();
-    for t in tests {
-        let tc = canon(t);
-        if changed.contains(&tc) {
-            out.push(t.clone());
-            continue;
-        }
-        let deps = transitive_imports(&tc, &mut memo);
-        if deps.iter().any(|d| changed.contains(d)) {
-            out.push(t.clone());
+    tests
+        .iter()
+        .filter(|test| test_is_affected(test, &changed, aliases))
+        .cloned()
+        .collect()
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    crate::canon::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn test_is_affected(test: &Path, changed: &HashSet<PathBuf>, aliases: &[(String, String)]) -> bool {
+    crate::runner::set_custom_resolve_options(test);
+    let mut pending = crate::runner::dependency_setup_files(test);
+    pending.push(canonical(test));
+    let mut seen = HashSet::new();
+    while let Some(file) = pending.pop() {
+        if visit_test_file(&canonical(&file), changed, aliases, &mut pending, &mut seen) {
+            return true;
         }
     }
-    out
+    false
+}
+
+fn visit_test_file(
+    file: &Path,
+    changed: &HashSet<PathBuf>,
+    aliases: &[(String, String)],
+    pending: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+) -> bool {
+    if !seen.insert(file.to_path_buf()) {
+        return false;
+    }
+    if changed.contains(file) || snapshot_changed(file, changed) {
+        return true;
+    }
+    if is_node_modules(file) {
+        return false;
+    }
+    let Ok(src) = std::fs::read_to_string(file) else {
+        return false;
+    };
+    if !changed.is_empty() && has_computed_import(&src) {
+        return true;
+    }
+    append_resolved_imports(file, &src, aliases, pending);
+    false
+}
+
+fn append_resolved_imports(
+    file: &Path,
+    src: &str,
+    aliases: &[(String, String)],
+    pending: &mut Vec<PathBuf>,
+) {
+    let dir = file.parent().unwrap_or(Path::new("."));
+    for spec in extract_specifiers(src) {
+        let mapped = aliases
+            .iter()
+            .find_map(|(from, to)| map_alias(&spec, from, to));
+        if let Some(dep) = resolve_spec(mapped.as_deref().unwrap_or(&spec), dir) {
+            pending.push(dep);
+        }
+    }
+}
+
+fn map_alias(spec: &str, from: &str, to: &str) -> Option<String> {
+    if spec == from {
+        return Some(to.to_string());
+    }
+    spec.strip_prefix(from)
+        .filter(|rest| rest.starts_with('/'))
+        .map(|rest| format!("{to}{rest}"))
+}
+
+fn snapshot_changed(file: &Path, changed: &HashSet<PathBuf>) -> bool {
+    let (Some(parent), Some(name)) = (file.parent(), file.file_name()) else {
+        return false;
+    };
+    let mut snapshot = name.to_os_string();
+    snapshot.push(".snap");
+    changed.contains(&parent.join("__snapshots__").join(snapshot))
+}
+
+fn has_computed_import(source: &str) -> bool {
+    if source.contains("import.meta.glob") {
+        return true;
+    }
+    ["import", "require"].iter().any(|keyword| {
+        source.match_indices(keyword).any(|(index, _)| {
+            let tail = source[index + keyword.len()..].trim_start();
+            let Some(argument) = tail.strip_prefix('(') else {
+                return false;
+            };
+            let argument = argument.trim_start();
+            match argument.chars().next() {
+                Some('\'' | '"') => false,
+                Some('`') => argument[1..]
+                    .split('`')
+                    .next()
+                    .is_some_and(|s| s.contains("${")),
+                _ => true,
+            }
+        })
+    })
 }
 
 #[cfg(all(test, unix))]

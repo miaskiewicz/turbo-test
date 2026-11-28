@@ -43,6 +43,7 @@ pub mod node_compat;
 pub mod parse_error;
 pub mod pnpm_ancestor;
 pub mod rsa_compat;
+mod run_history;
 pub mod runner;
 pub(crate) mod runtime_sources;
 pub mod structured_clone;

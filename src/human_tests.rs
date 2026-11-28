@@ -25,6 +25,7 @@ fn file(idx: usize, tests: Vec<TestCase>) -> FileResult {
         load_error_info: None,
         logs: Vec::new(),
         waited_ms: 0.0,
+        dependencies: None,
     }
 }
 

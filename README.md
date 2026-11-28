@@ -41,7 +41,8 @@ DOM packages to the registry and verify the production graph before tagging.
 npm i -D @miaskiewicz/turbo-test
 npx turbo-test                       # discover + run every *.test.* / *.spec.* under cwd
 npx turbo-test src/foo.test.ts       # run specific files
-npx turbo-test --changed             # only files affected by your git diff
+npx turbo-test --changed             # tests affected by your git diff
+npx turbo-test --since-last-run      # test files changed since they last ran
 npx turbo-test --jobs 8              # parallelism (default = cores)
 npx turbo-test --coverage            # native V8 coverage (honors the config's thresholds)
 npx turbo-test --reporter json       # default | verbose | json | junit | tap | dot
@@ -463,6 +464,7 @@ Istanbul/vitest job alongside.
 
 ```
 turbo-test [files...] [--jobs N] [--shard i/n] [--reporter json]
+           [--changed [ref]] [--since-last-run]
            [--coverage] [--coverage-dir DIR]
            [--coverage-thresholds lines=,functions=,branches=] [--coverage-per-file]
            [--coverage-reporter lcov,json-summary,text,html]
@@ -475,6 +477,21 @@ exactly like vitest); otherwise it uses vitest's defaults, include `**/*.{test,s
 and exclude `**/node_modules/**, **/.git/**` (a config `exclude` replaces that default, as in
 vitest). With `--root`, files are named relative to the root. Flags pass through to the native binary. Every
 value flag takes either form, `--reporter json` or `--reporter=json`.
+
+`--changed [ref]` uses Git changes and the static import graph to select affected tests;
+without a ref it includes staged, unstaged, and untracked files. A ref compares from its merge
+base with HEAD. It follows literal imports,
+requires, configured aliases, and setup files. Deleted files and project configuration changes
+conservatively select all tests. Computed imports cannot always be resolved statically.
+
+`--since-last-run` records each executed test file's dependencies, including dynamic imports,
+setup files and existing snapshots, without Git. It reruns files with changed or deleted inputs,
+files that failed, and files with no recorded run. Only runs with this flag update the records;
+filters, shards and bail update only files that actually ran. History lives in
+`node_modules/.cache/turbo-test` under the project root (`--root`, or the current directory).
+When both flags are supplied, the last-run provider is used, as in Vitest. Unlike Vitest's Vite module graph,
+turbo-test cannot observe files registered only through arbitrary Vite plugin watch hooks;
+run the full suite when such plugin inputs change.
 
 ## Programmatic
 

@@ -933,8 +933,7 @@ fn git_changed_sets() {
     assert_eq!(set("true"), ["a.test.ts", "c.test.ts", "d.test.ts"]);
     assert_eq!(set(""), ["a.test.ts", "c.test.ts", "d.test.ts"]);
     assert_eq!(set("HEAD"), ["a.test.ts", "c.test.ts", "d.test.ts"]);
-    // an unknown ref fails both diffs; untracked files are still reported
-    assert_eq!(set("no-such-ref"), ["c.test.ts"]);
+    assert!(git_changed("no-such-ref", &t.0).is_none());
     let not_repo = Tmp::new("git-none");
     assert!(git_changed("true", &not_repo.0).is_none());
 }
@@ -947,7 +946,8 @@ fn plan_changed_filters_discovered_files() {
     assert!(p.messages.is_empty());
     // since-ref forms (space + inline)
     let p = run_plan(&t, &["--changed", "no-such-ref"]);
-    assert_eq!(argv(&p), vec!["c.test.ts"]);
+    assert_eq!(p.outcome, Err(1));
+    assert!(p.messages[0].contains("invalid Git ref"));
     let p = run_plan(&t, &["--changed=HEAD", "b.test.ts", "a.test.ts"]);
     assert_eq!(argv(&p), args(&["a.test.ts"]));
     // nothing changed among the candidates → exit 0
@@ -960,15 +960,12 @@ fn plan_changed_filters_discovered_files() {
 }
 
 #[test]
-fn plan_changed_outside_a_repo_runs_everything() {
+fn plan_changed_outside_a_repo_reports_error() {
     let t = Tmp::new("plan-nogit");
     t.file("a.test.ts", T);
     let p = run_plan(&t, &["--changed"]);
-    assert_eq!(argv(&p), vec!["a.test.ts"]);
-    assert_eq!(
-        p.messages,
-        vec!["turbo-test: --changed: git unavailable / not a repo — running all discovered tests."]
-    );
+    assert_eq!(p.outcome, Err(1));
+    assert!(p.messages[0].contains("not a repository"));
 }
 
 // ---- plan() -------------------------------------------------------------------------------
@@ -1637,4 +1634,103 @@ fn meta_command_help_version_and_unsupported_commands() {
     ] {
         assert_eq!(meta_command(&args(a)), None, "{a:?}");
     }
+}
+
+#[test]
+fn changed_selects_transitive_importers() {
+    let t = Tmp::new("changed-dependencies");
+    git(&t.0, &["init", "-q"]);
+    t.file("a.test.js", "import './middle.js'; test('a', () => {});");
+    t.file("b.test.js", "test('b', () => {});");
+    t.file("middle.js", "import './source.js';");
+    t.file("source.js", "export const a = 1;");
+    git(&t.0, &["add", "."]);
+    git(&t.0, &["commit", "-q", "-m", "init"]);
+    t.file("source.js", "export const a = 2;");
+    assert_eq!(argv(&run_plan(&t, &["--changed"])), vec!["a.test.js"]);
+}
+
+#[test]
+fn since_last_run_initially_selects_all_without_git() {
+    let t = Tmp::new("since-last-run");
+    t.file("a.test.js", T);
+    t.file("b.test.js", T);
+    assert_eq!(
+        argv(&run_plan(&t, &["--since-last-run"])),
+        vec!["a.test.js", "b.test.js"]
+    );
+}
+
+#[test]
+fn changed_tracks_aliases_and_setup_files_and_is_conservative_for_deletions() {
+    let t = Tmp::new("changed-alias-setup");
+    git(&t.0, &["init", "-q"]);
+    t.file("vitest.config.js", "export default { resolve: { alias: { '@': './src' } }, test: { setupFiles: ['./setup.js'] } }");
+    t.file("a.test.js", "import '@/dep.js'; test('a', () => {});");
+    t.file("b.test.js", T);
+    t.file("src/dep.js", "export const value = 1;");
+    t.file("setup.js", "globalThis.x = 1;");
+    git(&t.0, &["add", "."]);
+    git(&t.0, &["commit", "-q", "-m", "init"]);
+    t.file("src/dep.js", "export const value = 2;");
+    assert_eq!(argv(&run_plan(&t, &["--changed"])), vec!["a.test.js"]);
+    t.file("setup.js", "globalThis.x = 2;");
+    assert_eq!(
+        argv(&run_plan(&t, &["--changed"])),
+        vec!["a.test.js", "b.test.js"]
+    );
+    std::fs::remove_file(t.0.join("src/dep.js")).unwrap();
+    assert_eq!(
+        argv(&run_plan(&t, &["--changed"])),
+        vec!["a.test.js", "b.test.js"]
+    );
+}
+
+#[test]
+fn changed_accepts_git_filenames_with_newlines() {
+    let t = git_fixture("git-newline");
+    t.file("new\nfile.test.js", T);
+    assert!(git_changed("true", &t.0)
+        .unwrap()
+        .contains(&t.0.join("new\nfile.test.js")));
+}
+
+#[test]
+fn since_last_run_requires_enabled_cache() {
+    let t = Tmp::new("disabled-dependency-cache");
+    t.file(
+        "vitest.config.js",
+        "export default { test: { cache: false } }",
+    );
+    t.file("a.test.js", T);
+    let p = run_plan(&t, &["--since-last-run"]);
+    assert_eq!(p.outcome, Err(1));
+    assert!(p.messages[0].contains("cache"));
+}
+
+#[test]
+fn changed_ref_uses_merge_base_instead_of_other_branch_tip() {
+    let t = Tmp::new("git-merge-base");
+    git(&t.0, &["init", "-q"]);
+    t.file("a.test.js", T);
+    t.file("b.test.js", T);
+    git(&t.0, &["add", "."]);
+    git(&t.0, &["commit", "-q", "-m", "base"]);
+    git(&t.0, &["checkout", "-q", "-b", "other"]);
+    t.file("b.test.js", "// changed on other branch\n");
+    git(&t.0, &["commit", "-qam", "other"]);
+    git(&t.0, &["checkout", "-q", "-b", "current", "HEAD~1"]);
+    t.file("a.test.js", "// changed on current branch\n");
+    git(&t.0, &["commit", "-qam", "current"]);
+    assert_eq!(argv(&run_plan(&t, &["--changed=other"])), vec!["a.test.js"]);
+}
+
+#[test]
+fn since_last_run_uses_its_non_git_provider_when_combined_with_changed() {
+    let t = Tmp::new("since-and-changed");
+    t.file("a.test.js", T);
+    assert_eq!(
+        argv(&run_plan(&t, &["--changed=missing", "--since-last-run"])),
+        vec!["a.test.js"]
+    );
 }

@@ -5,6 +5,16 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 
 ## [Unreleased]
 
+### Added
+
+- Add `--since-last-run` to rerun tests with changed recorded dependencies, failed tests,
+  and tests without a previous record, without requiring Git.
+
+### Changed
+
+- Extend `--changed` to select tests affected by transitive imports, aliases and setup files;
+  conservatively run all candidates for deleted files and configuration changes.
+
 ## [0.8.7] — 2026-11-27
 
 This release uses the published `turbo-dom`, `turbo-dom-layout` and

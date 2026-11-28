@@ -1527,46 +1527,70 @@ fn package_json_jest_block(pkg: &str) -> Option<String> {
 }
 
 /// `--changed [since]`: absolute paths git reports changed vs `since` (default working-tree vs
-/// HEAD/index) — staged + unstaged + untracked. `None` when git is unavailable / not a repo
-/// (caller then runs everything). Mirrors cli.js `gitChanged`.
+/// HEAD/index) — staged + unstaged + untracked. A ref uses its merge base with HEAD.
+/// `None` indicates an unavailable repository or a failed Git command.
 fn git_changed(since: &str, cwd: &Path) -> Option<HashSet<PathBuf>> {
-    let run = |args: &[&str]| -> Option<Vec<String>> { run_git_lines(args, cwd) };
-    let root_lines = run(&["rev-parse", "--show-toplevel"])?;
-    let repo_root = PathBuf::from(root_lines.first()?);
-    let diff_ref: Vec<&str> = git_diff_ref_args(since);
-    let mut cmds: Vec<Vec<&str>> = vec![
-        {
-            let mut v = vec!["diff", "--name-only"];
-            v.extend(&diff_ref);
-            v
-        },
-        {
-            let mut v = vec!["diff", "--name-only", "--cached"];
-            v.extend(&diff_ref);
-            v
-        },
-        vec!["ls-files", "--others", "--exclude-standard"],
+    let root = run_git_lines(&["rev-parse", "--show-toplevel"], cwd)?;
+    let repo_root = PathBuf::from(root.first()?);
+    let range = format!("{since}...HEAD");
+    let mut commands = vec![
+        vec!["diff", "--name-only", "--no-renames", "-z", "--"],
+        vec![
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            "--cached",
+            "--",
+        ],
+        vec!["ls-files", "--others", "--exclude-standard", "-z"],
     ];
+    if !since.is_empty() && since != "true" {
+        commands.push(vec![
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            &range,
+            "--",
+        ]);
+    }
     let mut set = HashSet::new();
-    for args in cmds.drain(..) {
-        collect_git_lines(run(&args), &repo_root, &mut set);
+    for args in commands {
+        collect_git_paths(&args, cwd, &repo_root, &mut set)?;
     }
     Some(set)
 }
 
-fn git_diff_ref_args(since: &str) -> Vec<&str> {
-    if !since.is_empty() && since != "true" {
-        vec![since]
-    } else {
-        vec![]
+fn collect_git_paths(
+    args: &[&str],
+    cwd: &Path,
+    root: &Path,
+    set: &mut HashSet<PathBuf>,
+) -> Option<()> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
     }
-}
-
-fn collect_git_lines(lines: Option<Vec<String>>, repo_root: &Path, set: &mut HashSet<PathBuf>) {
-    let Some(lines) = lines else { return };
-    for f in lines {
-        set.insert(repo_root.join(f));
+    for name in output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|name| !name.is_empty())
+    {
+        #[cfg(unix)]
+        let name = {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::OsStr::from_bytes(name).to_os_string()
+        };
+        #[cfg(not(unix))]
+        let name = std::ffi::OsString::from(String::from_utf8_lossy(name).as_ref());
+        set.insert(root.join(name));
     }
+    Some(())
 }
 
 /// `git <args>` in `cwd`: each stdout line (dropping blanks). `None` on non-zero exit or spawn error.
@@ -1597,6 +1621,7 @@ struct Opts {
     environment: Option<String>,
     /// `Some("true")` for bare `--changed`, `Some(<ref>)` for `--changed <ref>`, `None` if absent.
     changed: Option<String>,
+    since_last_run: bool,
     isolate: Option<bool>,
     pass_with_no_tests: bool,
 }
@@ -1656,7 +1681,8 @@ Options:
   --coverage                          Enable coverage (also --coverage-dir, --coverage-reporter,
                                       --coverage-thresholds, --coverage-include, --coverage-exclude,
                                       --coverage-per-file, --coverage-all)
-  --changed [since]                   Run the test files changed since a git ref
+  --changed [since]                   Run tests affected by changes since a git ref
+  --since-last-run                    Run test files changed since their last run
   --passWithNoTests                   Pass when no tests are found
   --isolate / --no-isolate            Run every file on a fresh isolate (default) or reuse isolates
   --allowOnly / --no-allowOnly        Allow tests and suites marked as only (default: !CI)
@@ -1747,6 +1773,7 @@ pub fn plan(mut raw: Vec<String>, proc_cwd: &Path) -> Plan {
         name_root: None,
         environment: None,
         changed: None,
+        since_last_run: false,
         isolate: None,
         pass_with_no_tests: false,
     };
@@ -1790,16 +1817,36 @@ pub fn plan(mut raw: Vec<String>, proc_cwd: &Path) -> Plan {
         };
     }
 
-    // `--changed [since]`: keep only discovered test files git reports changed. Direct changed-file
-    // filter (no import graph). Nothing changed → running zero tests is expected → exit 0.
-    if let Some(since) = &opts.changed {
-        if let Some(code) = keep_changed(since, &cwd, proc_cwd, &mut test_files, &mut messages) {
-            return Plan {
-                env,
-                messages,
-                outcome: Err(code),
-            };
-        }
+    // Select changed tests and transitive importers before applying the last-run filter.
+    if let Some(code) = filter_git_changes(
+        &opts,
+        &cwd,
+        proc_cwd,
+        forced.as_deref(),
+        &mut test_files,
+        &mut messages,
+    ) {
+        return Plan {
+            env,
+            messages,
+            outcome: Err(code),
+        };
+    }
+
+    if let Some(code) = keep_since_last_run(
+        &opts,
+        &cwd,
+        proc_cwd,
+        forced.as_deref(),
+        &mut test_files,
+        &mut env,
+        &mut messages,
+    ) {
+        return Plan {
+            env,
+            messages,
+            outcome: Err(code),
+        };
     }
 
     // Effective argv for the runner loop: forwarded flags, then resolved files.
@@ -1810,6 +1857,56 @@ pub fn plan(mut raw: Vec<String>, proc_cwd: &Path) -> Plan {
         messages,
         outcome: Ok(out),
     }
+}
+
+fn filter_git_changes(
+    opts: &Opts,
+    cwd: &Path,
+    proc_cwd: &Path,
+    forced: Option<&Path>,
+    files: &mut Vec<PathBuf>,
+    messages: &mut Vec<String>,
+) -> Option<i32> {
+    let since = opts.changed.as_ref().filter(|_| !opts.since_last_run)?;
+    keep_changed(since, cwd, proc_cwd, forced, files, messages)
+}
+
+fn keep_since_last_run(
+    opts: &Opts,
+    cwd: &Path,
+    proc_cwd: &Path,
+    forced: Option<&Path>,
+    files: &mut Vec<PathBuf>,
+    env: &mut Vec<(&'static str, String)>,
+    messages: &mut Vec<String>,
+) -> Option<i32> {
+    if !opts.since_last_run {
+        return None;
+    }
+    if find_config(cwd, forced)
+        .and_then(|config| value_after_key(&strip_comments(&config.text), "cache"))
+        .is_some_and(|value| value.trim().starts_with("false"))
+    {
+        messages.push("turbo-test: --since-last-run requires the test cache to be enabled.".into());
+        return Some(1);
+    }
+    env.push(("TURBO_RECORD_DEPENDENCIES", "1".into()));
+    let history_root = opts
+        .name_root
+        .as_ref()
+        .map(|root| absolute_in(proc_cwd, Path::new(root)))
+        .unwrap_or_else(|| proc_cwd.to_path_buf());
+    env.push((
+        "TURBO_RUN_HISTORY_ROOT",
+        history_root.to_string_lossy().into_owned(),
+    ));
+    let cache = crate::run_history::load(&history_root);
+    files.retain(|file| crate::run_history::changed(&cache, &absolute_in(proc_cwd, file)));
+    if files.is_empty() {
+        messages.push("turbo-test: --since-last-run: no changed test files — exiting 0.".into());
+        return Some(0);
+    }
+    None
 }
 
 /// `plan`'s handling of the argument at `i` (into `opts`, `forward`, `files`, `messages`); the
@@ -1828,6 +1925,12 @@ fn plan_arg(
         Some(eq) if a.starts_with("--") => (&a[..eq], Some(a[eq + 1..].to_string())),
         _ => (a.as_str(), None),
     };
+    if matches!(key, "--since-last-run" | "--sinceLastRun")
+        && inline_val.as_deref() == Some("false")
+    {
+        opts.since_last_run = false;
+        return i;
+    }
     if launcher_flag(key, opts, &mut || take_val(raw, &mut i, &inline_val)) {
         return i;
     }
@@ -1928,7 +2031,13 @@ fn launcher_flag(key: &str, opts: &mut Opts, take_val: &mut dyn FnMut() -> Optio
         }
         "--environment" => opts.environment = take_val(),
         // `--changed`'s arg is OPTIONAL: a following non-flag token is the `since` ref.
-        "--changed" => opts.changed = Some(take_val().unwrap_or_else(|| "true".to_string())),
+        "--changed" => {
+            let value = take_val().unwrap_or_else(|| "true".to_string());
+            opts.changed = (value != "false").then_some(value);
+        }
+        "--no-changed" => opts.changed = None,
+        "--since-last-run" | "--sinceLastRun" => opts.since_last_run = true,
+        "--no-since-last-run" | "--no-sinceLastRun" => opts.since_last_run = false,
         "--isolate" => opts.isolate = Some(true),
         "--no-isolate" => opts.isolate = Some(false),
         // Globals are ALWAYS on in turbo-test; accept both spellings as no-ops.
@@ -2167,27 +2276,55 @@ fn no_files_message(code: i32, files: &[String], cwd: &Path, forced: Option<&Pat
     msg
 }
 
-/// `--changed [since]`: keep only discovered test files git reports changed. Direct changed-file
-/// filter (no import graph). Nothing changed → running zero tests is expected → `Some(0)`.
+/// Select changed tests and their transitive importers; no matches is a successful empty run.
 fn keep_changed(
     since: &str,
     cwd: &Path,
     proc_cwd: &Path,
+    forced: Option<&Path>,
     test_files: &mut Vec<PathBuf>,
     messages: &mut Vec<String>,
 ) -> Option<i32> {
+    if since != "true"
+        && !since.is_empty()
+        && run_git_lines(
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{since}^{{commit}}"),
+            ],
+            cwd,
+        )
+        .is_none()
+    {
+        messages.push(format!("turbo-test: --changed: invalid Git ref: {since}"));
+        return Some(1);
+    }
     let Some(changed) = git_changed(since, cwd) else {
         messages.push(
-            "turbo-test: --changed: git unavailable / not a repo — running all discovered tests."
+            "turbo-test: --changed: Git unavailable, not a repository, or Git diff failed."
                 .to_string(),
         );
-        return None;
+        return Some(1);
     };
     let before = test_files.len();
-    test_files.retain(|f| {
-        let abs = absolute_in(proc_cwd, f);
-        changed.contains(&abs)
-    });
+    let absolute: Vec<_> = test_files
+        .iter()
+        .map(|f| absolute_in(proc_cwd, f))
+        .collect();
+    let changed: Vec<_> = changed.into_iter().collect();
+    // Deleted files cannot be resolved from the current tree, and configuration changes can
+    // affect every test. Conservatively keep all candidates in those cases.
+    if changed.iter().any(|p| !p.exists() || is_global_change(p)) {
+        return None;
+    }
+    let aliases = config_aliases(cwd, forced);
+    let affected: HashSet<_> =
+        crate::graph::affected_tests_with_aliases(&changed, &absolute, &aliases)
+            .into_iter()
+            .collect();
+    test_files.retain(|f| affected.contains(&absolute_in(proc_cwd, f)));
     if test_files.is_empty() {
         messages.push(format!(
             "turbo-test: --changed: no changed test files (of {before}) — exiting 0."
@@ -2195,6 +2332,19 @@ fn keep_changed(
         return Some(0);
     }
     None
+}
+
+fn is_global_change(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return true;
+    };
+    name == "package.json"
+        || name == ".env"
+        || name.starts_with(".env.")
+        || name.starts_with("tsconfig")
+        || name.starts_with("vitest.config.")
+        || name.starts_with("vite.config.")
+        || name.starts_with("jest.config.")
 }
 
 #[cfg(all(test, unix))]

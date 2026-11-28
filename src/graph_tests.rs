@@ -142,3 +142,14 @@ fn affected_tests_selects_importers_and_changed_tests() {
 
     assert!(affected_tests(&[], &tests).is_empty());
 }
+
+#[test]
+fn computed_imports_are_conservative() {
+    assert!(has_computed_import("import (name)"));
+    assert!(has_computed_import("require( prefix + name )"));
+    assert!(has_computed_import("import(`./${name}.js`)"));
+    assert!(has_computed_import("import.meta.glob('./*.js')"));
+    assert!(!has_computed_import(
+        "import('./known.js'); require (\"./known.js\")"
+    ));
+}

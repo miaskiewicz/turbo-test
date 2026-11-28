@@ -66,6 +66,7 @@ pub struct FileResult {
     /// ms its tests waited on timers (the drive loop's clock jumps, turbo-test#95): vitest's
     /// file duration counts them.
     pub waited_ms: f64,
+    pub(crate) dependencies: Option<crate::run_history::Fingerprints>,
 }
 
 /// Which reporter to emit. Anything turbo-test does not implement is accepted-and-ignored and
@@ -665,6 +666,7 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
                 load_error_info: None,
                 logs: rep.logs,
                 waited_ms: rep.waited_ms,
+                dependencies: None,
             }
         }
         Err(e) => FileResult {
@@ -686,6 +688,7 @@ pub fn file_result(idx: usize, file: &Path, r: FileOutcome, dur_ms: f64) -> File
             load_error_info: runner::take_load_error(),
             logs: Vec::new(),
             waited_ms: 0.0,
+            dependencies: None,
         },
     }
 }
@@ -741,9 +744,12 @@ fn run_files_reporting(
                         let file = &files[idx];
                         runner::set_worker_slot(pool, i);
                         let t = Instant::now();
+                        crate::run_history::begin(file);
                         let r = execute_file(engine, file);
-                        let fr =
+                        let dependencies = crate::run_history::finish();
+                        let mut fr =
                             file_result(idx, &names[idx], r, t.elapsed().as_secs_f64() * 1000.0);
+                        fr.dependencies = dependencies;
                         if bail > 0 {
                             failed_total.fetch_add(fr.failed as usize, Ordering::Relaxed);
                         }
@@ -2111,6 +2117,10 @@ pub fn run(opts: Options) -> i32 {
     runner::plan_window_snapshot(&files);
     runner::init_v8(); // builds the framework snapshot once, before workers spawn
 
+    let history_root = std::env::var_os("TURBO_RUN_HISTORY_ROOT")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
     let hist_path = durations_path();
     let hist = load_durations(&hist_path);
     let order = schedule_order(&files, &hist);
@@ -2126,11 +2136,14 @@ pub fn run(opts: Options) -> i32 {
     );
     // one context for globalSetup and globalTeardown, made only when the project has either
     let mut globals = None;
+    crate::run_history::begin(Path::new(""));
+    crate::run_history::capture_project_inputs(&history_root);
     if let Some(code) = run_jest_global_script(&mut globals, "globalSetup") {
         return code;
     }
+    let global_dependencies = crate::run_history::finish();
     let checkpoint = JsonCheckpoint::new(&opts, &files, start_ms);
-    let res = run_files_reporting(
+    let mut res = run_files_reporting(
         &Engine::v8(),
         &files,
         &names,
@@ -2139,6 +2152,7 @@ pub fn run(opts: Options) -> i32 {
         opts.bail,
         checkpoint,
     );
+    record_run_dependencies(&history_root, &files, &mut res, global_dependencies, &opts);
     let teardown_failed = run_jest_global_script(&mut globals, "globalTeardown").is_some();
     drop(globals);
     let wall_ms = wall.elapsed().as_secs_f64() * 1000.0;
@@ -2154,6 +2168,29 @@ pub fn run(opts: Options) -> i32 {
     };
     // a failing globalTeardown fails the run, as with jest
     code.max(i32::from(teardown_failed))
+}
+
+fn record_run_dependencies(
+    root: &Path,
+    files: &[PathBuf],
+    results: &mut [FileResult],
+    global: Option<crate::run_history::Fingerprints>,
+    opts: &Options,
+) {
+    if let Some(global) = global {
+        for result in results.iter_mut() {
+            if let Some(deps) = &mut result.dependencies {
+                for (path, hash) in &global {
+                    deps.entry(path.clone()).or_insert_with(|| hash.clone());
+                }
+            }
+        }
+    }
+    let partial = opts
+        .env
+        .iter()
+        .any(|(key, _)| *key == "TURBO_TEST_NAME_PATTERN");
+    crate::run_history::record(root, files, results, partial);
 }
 
 /// Run a jest `globalSetup` or `globalTeardown` script if configured.
