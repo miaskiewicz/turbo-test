@@ -155,7 +155,7 @@ function __generateKeyPairSync(type, options) {
   if (type === 'rsa') return __generateRsaKeyPair(options);
   if (type !== 'ec') __keyUnsupported('Key generation algorithm ' + type);
   __keyOptions(options);
-  if (options.namedCurve !== 'prime256v1') __keyUnsupported('EC curve ' + options.namedCurve);
+  if (options.namedCurve !== 'prime256v1' && options.namedCurve !== 'P-256') __keyUnsupported('EC curve ' + options.namedCurve);
   if (options.paramEncoding !== undefined && options.paramEncoding !== 'named') __keyUnsupported('Explicit EC parameters');
   __keyGenerationEncodings(options);
   return __keyGenerated(globalThis.__ttEc('generate'), 'ec', options);

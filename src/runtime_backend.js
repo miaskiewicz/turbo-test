@@ -27,6 +27,23 @@ __http.default = __http;
 const __https = Object.assign({}, __http, { Agent: __Agent, globalAgent: new __Agent() }); __https.default = __https;
 /* __TT_NODE_HTTP__ */
 Object.assign(__http, __nodeHttp);
+// The HTTP transport is asynchronous so a server in the same isolate can make progress.
+globalThis.__ttFetchHttp = (url, init) => new Promise((resolve, reject) => {
+  const headers = Object.fromEntries(new Headers(init.headers));
+  const request = __http.request(url, { method: init.method || 'GET', headers }, incoming => {
+    const chunks = [];
+    incoming.on('data', chunk => chunks.push(Buffer.from(chunk)));
+    incoming.on('error', reject);
+    incoming.on('end', () => {
+      const response = new Response(Buffer.concat(chunks), { status: incoming.statusCode, statusText: incoming.statusMessage, headers: incoming.headers });
+      response.url = url;
+      resolve(response);
+    });
+  });
+  request.on('error', reject);
+  if (init.signal) init.signal.addEventListener('abort', () => request.destroy(init.signal.reason), { once: true });
+  request.end(init.body);
+});
 function __httpUnsupportedTls() { throw Object.assign(new Error('HTTPS is not supported by the loopback HTTP transport'), { code: 'ERR_HTTP_UNSUPPORTED_TLS' }); }
 Object.assign(__https, { request: __httpUnsupportedTls, get: __httpUnsupportedTls, createServer: __httpUnsupportedTls });
 /* __TT_NODE_BLOCKLIST__ */

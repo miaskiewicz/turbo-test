@@ -56,6 +56,11 @@ pub(crate) fn shared_runtime_source() -> String {
                 "/* __TT_NODE_PROCESS_USAGE__ */",
                 include_str!("node_process_usage.js"),
             ),
+            ("/* __TT_NODE_FS_WALK__ */", include_str!("node_fs_walk.js")),
+            (
+                "/* __TT_NODE_FS_WATCH__ */",
+                include_str!("node_fs_watch.js"),
+            ),
             (
                 "/* __TT_NODE_FS_HANDLES__ */",
                 include_str!("node_fs_handles.js"),

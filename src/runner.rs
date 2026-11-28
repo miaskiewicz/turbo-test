@@ -10309,8 +10309,12 @@ pub fn plan_window_snapshot(files: &[PathBuf]) {
         .filter(|f| needs_dom(f))
         .take(WINDOW_SNAPSHOT_MIN_DOM_FILES)
         .count();
+    // A window snapshot reserves context zero, which the Node vm shim needs as a pristine realm.
+    // Mixed suites therefore use the framework snapshot for all workers; DOM-only suites retain
+    // the faster window snapshot.
+    let mixed = window_snapshot_wanted(dom_files) && files.iter().any(|file| !needs_dom(file));
     WINDOW_SNAPSHOT_WANTED.store(
-        window_snapshot_wanted(dom_files),
+        window_snapshot_wanted(dom_files) && !mixed,
         std::sync::atomic::Ordering::Relaxed,
     );
 }
@@ -10633,9 +10637,12 @@ fn install_natives(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     bind_fn(scope, global, "__ttCache", native_require_cache);
     bind_fn(scope, global, "__ttRunMicrotasks", run_microtasks);
     bind_fn(scope, global, "__fs_existsSync", fs_exists_sync);
+    bind_fn(scope, global, "__ttFsWatch", crate::fs_watch::native_watch);
+    bind_fn(scope, global, "__ttFsGlobMatch", fs_glob_match);
     bind_fn(scope, global, "__fs_readdir", fs_readdir);
     bind_fn(scope, global, "__fs_stat", fs_stat);
     bind_fn(scope, global, "__fs_realpath", fs_realpath);
+    bind_fn(scope, global, "__fs_readlink", fs_readlink);
     bind_fn(scope, global, "__fs_readFile", fs_read_file);
     bind_fn(scope, global, "__fs_writeFile", fs_write_file);
     bind_fn(scope, global, "__fs_mkdir", fs_mkdir);
@@ -11131,6 +11138,26 @@ fn run_microtasks(
     scope.perform_microtask_checkpoint();
 }
 
+fn fs_glob_match(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let pattern = args.get(0).to_rust_string_lossy(scope);
+    let path = args.get(1).to_rust_string_lossy(scope);
+    let options = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: true,
+    };
+    let matches = crate::coverage::expand_braces(&pattern)
+        .iter()
+        .any(|pattern| {
+            glob::Pattern::new(pattern).is_ok_and(|pattern| pattern.matches_with(&path, options))
+        });
+    rv.set(v8::Boolean::new(scope, matches).into());
+}
+
 fn fs_exists_sync(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -11418,6 +11445,21 @@ pub(crate) fn throw_fs_error_at(
         obj.set(scope, k.into(), v.into());
     }
     scope.throw_exception(err);
+}
+
+fn fs_readlink(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let path = args.get(0).to_rust_string_lossy(scope);
+    match std::fs::read_link(&path) {
+        Ok(target) => {
+            let value = v8_str!(scope, &target.to_string_lossy());
+            rv.set(value.into());
+        }
+        Err(error) => throw_fs_error(scope, &error, "readlink", &path),
+    }
 }
 
 fn fs_realpath(
@@ -12015,6 +12057,7 @@ fn mock_externalizable(factory: &str) -> bool {
 }
 
 pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
+    crate::fs_watch::reset();
     LOAD_ERROR.with(|e| e.borrow_mut().take());
     // Per-file native-DOM lifecycle: reset the thread-local DOM (fresh document per file) and, when
     // debugging (TURBO_RUST_DOM_LOG), dump the missing-member access log — on ANY exit incl. a load
@@ -12024,6 +12067,7 @@ pub fn run_test_file(entry: &Path) -> Result<TestReport, String> {
     struct DomGuard;
     impl Drop for DomGuard {
         fn drop(&mut self) {
+            crate::fs_watch::reset();
             if on_reuse_path() && DOM_INSTALLED.with(|d| d.get()) {
                 return;
             }

@@ -26,6 +26,7 @@ pub mod esm_spy;
 pub mod failure;
 #[cfg(unix)]
 pub mod fs_handles;
+mod fs_watch;
 pub mod graph;
 pub mod heap_guard;
 pub mod highlight;

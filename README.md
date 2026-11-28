@@ -600,6 +600,12 @@ import.meta.url))`, string concatenation (`__dirname + '/z'`, `path.resolve(__di
 
 ## Compatibility notes
 
+- `fetch` supports `data:` URLs and the native loopback HTTP transport; HTTPS and non-loopback
+  network requests remain unsupported. `fs.watch` uses OS notifications; `persistent: false`
+  and `unref()` currently report an unsupported-capability error. `fs.cpSync` supports recursive
+  copies and symlinks but does not yet support `preserveTimestamps`. `fs.globSync` supports
+  common glob patterns and character classes but reports extglobs as unsupported.
+
 - A handful of vitest features that depend on a full Node runtime are stubbed/approximated; e2e
   helper files that import heavy Node-only packages (e.g. `@playwright/test`) get those deps
   stubbed so the file still runs.

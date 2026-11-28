@@ -217,7 +217,7 @@ pub fn glob_matches(pat: &str, path: &str) -> bool {
     glob_match(pat, path)
 }
 
-fn expand_braces(pat: &str) -> Vec<String> {
+pub(crate) fn expand_braces(pat: &str) -> Vec<String> {
     let Some(open) = pat.find('{') else {
         return vec![pat.to_string()];
     };

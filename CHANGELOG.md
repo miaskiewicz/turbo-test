@@ -17,6 +17,14 @@ All notable changes to `@miaskiewicz/turbo-test`. Format based on
 - Extend `--changed` to select tests affected by transitive imports, aliases and setup files;
   conservatively run all candidates for deleted files and configuration changes.
 
+### Fixed
+
+- Support loopback HTTP `fetch`, binary response bodies, synchronous child processes with
+  ignored stdio, the `P-256` EC curve alias, rejection of special URLs with empty hosts, and
+  Node VM contexts in mixed Node/DOM projects.
+- Add per-worker `process.chdir`, recursive `fs.cpSync`, `fs.globSync`, and OS-backed `fs.watch`
+  for common Node test workloads. Some advanced options remain explicitly unsupported; see README.
+
 ## [0.8.7] — 2026-11-27
 
 This release uses the published `turbo-dom`, `turbo-dom-layout` and

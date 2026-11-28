@@ -77,6 +77,7 @@ globalThis.process = {
   argv: ['node', 'turbo-test'],
   get execPath() { return globalThis.__ttNodeExecutable; },
   cwd: () => globalThis.__ttProcessCwd || globalThis.__cwd || '/',
+  chdir: (directory) => __processChdir(directory),
   nextTick: (fn, ...a) => __loop.nextTicks.push(__captureAsyncContext(() => fn(...a))),
   // the real clock (real time plus the drive loop's jumps) since the runtime started
   // (turbo-test#178; it was a constant [0, 0])
@@ -1044,7 +1045,7 @@ if (typeof globalThis.URL === 'undefined') {
     if (base !== undefined && !/^[a-z][a-z0-9+.-]*:/i.test(url)) {
       url = globalThis.URL._resolve(url, new globalThis.URL(String(base)));
     }
-    if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) throw new TypeError('Invalid URL: ' + url);
+    if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) throw Object.assign(new TypeError('Invalid URL: ' + url), { code: 'ERR_INVALID_URL', input: url });
     return url;
   };
   globalThis.URL = class URL {
@@ -1070,9 +1071,9 @@ if (typeof globalThis.URL === 'undefined') {
     // the search string
     _rejectBadAuthority(url, hp) {
       if (this._special && !this._isFile && URL._badHostPort(hp)) {
-        throw new TypeError('Invalid URL: ' + url);
+        throw Object.assign(new TypeError('Invalid URL: ' + url), { code: 'ERR_INVALID_URL', input: url });
       }
-      if (URL._badIpv6(hp)) throw new TypeError('Invalid URL: ' + url);
+      if (URL._badIpv6(hp)) throw Object.assign(new TypeError('Invalid URL: ' + url), { code: 'ERR_INVALID_URL', input: url });
     }
     // any scheme: a host opening with `[` must be a whole valid IPv6 address (WHATWG host parser)
     static _badIpv6(hp) {
@@ -1120,7 +1121,7 @@ if (typeof globalThis.URL === 'undefined') {
     }
     // a special URL's host has no forbidden code point, and its port is digits up to 65535
     static _badHostPort(hp) {
-      if (!hp || /[\x00-\x20#/:<>?@[\\\]^|]/.test(hp[1].replace(/^\[.*\]$/, ''))) return true;
+      if (!hp || !hp[1] || /[\x00-\x20#/:<>?@[\\\]^|]/.test(hp[1].replace(/^\[.*\]$/, ''))) return true;
       return !!hp[2] && (!/^\d+$/.test(hp[2]) || Number(hp[2]) > 65535);
     }
     // host, hostname and port are views of _hostname/_port, so a set reaches href and origin
@@ -1653,6 +1654,21 @@ if (typeof globalThis.fetch === 'undefined') {
     }
     return out + decoder.decode();
   }
+  async function __streamBodyBytes(body) {
+    const reader = body.getReader(), chunks = [];
+    for (;;) { const { value, done } = await reader.read(); if (done) break; chunks.push(await __consumeBodyBytes(value)); }
+    const size = chunks.reduce((n, chunk) => n + chunk.length, 0), out = new Uint8Array(size);
+    let offset = 0; for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.length; }
+    return out;
+  }
+  async function __consumeBodyBytes(body) {
+    if (body == null) return new Uint8Array();
+    if (typeof body === 'string') return new TextEncoder().encode(body);
+    if (body instanceof ArrayBuffer) return new Uint8Array(body.slice(0));
+    if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength));
+    if (body instanceof Blob) return new Uint8Array(await body.arrayBuffer());
+    return typeof body.getReader === 'function' ? __streamBodyBytes(body) : new TextEncoder().encode(String(body));
+  }
   globalThis.Request = class Request {
     constructor(url, init) {
       init = init || {};
@@ -1664,6 +1680,7 @@ if (typeof globalThis.fetch === 'undefined') {
       this.method = init.method || 'GET';
       this.headers = __requestHeaders(init.headers);
       this._body = init.body;
+      this.signal = init.signal;
     }
     async json() {
       const b = this._body;
@@ -1683,6 +1700,7 @@ if (typeof globalThis.fetch === 'undefined') {
     constructor(body, init) {
       this.body = body;
       this._body = body;
+      this.bodyUsed = false;
       this.status = __responseStatus(init);
       this.statusText = __responseStatusText(init, this.status);
       this.ok = this.status >= 200 && this.status < 300;
@@ -1690,11 +1708,18 @@ if (typeof globalThis.fetch === 'undefined') {
     }
     async json() {
       const b = this._body;
-      if (b != null && typeof b === 'object' && typeof b.getReader !== 'function') return b;
-      return JSON.parse(await __consumeBodyText(b));
+      if (b != null && typeof b === 'object' && typeof b.getReader !== 'function' && !ArrayBuffer.isView(b) && !(b instanceof ArrayBuffer) && !(b instanceof Blob)) {
+        this._markBody(); return b;
+      }
+      return JSON.parse(await this.text());
     }
-    text() { return __consumeBodyText(this._body); }
-    clone() { return new globalThis.Response(this._body, { status: this.status }); }
+    _markBody() {
+      if (this.bodyUsed || (this.body && this.body.locked)) throw new TypeError('Body is unusable');
+      if (this._body != null) this.bodyUsed = true;
+    }
+    async text() { this._markBody(); return new TextDecoder().decode(await __consumeBodyBytes(this._body)); }
+    async arrayBuffer() { this._markBody(); return (await __consumeBodyBytes(this._body)).buffer; }
+    clone() { if (this.bodyUsed) throw new TypeError('Body is unusable'); return new globalThis.Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers }); }
     static json(data, init) { const r = new globalThis.Response(JSON.stringify(data), init); r._body = data; r.headers.set('content-type', 'application/json'); return r; }
     static error() { return new globalThis.Response(null, { status: 500 }); }
     static redirect(url, status) { const r = new globalThis.Response(null, { status: status || 302 }); r.headers.set('location', String(url)); return r; }
@@ -1765,11 +1790,20 @@ if (typeof globalThis.fetch === 'undefined') {
       return new __DataResponse(this._bytes.slice(), this.headers.get('content-type'), this.url);
     }
   }
+  function __fetchNonData(url, init) {
+    if (url.startsWith('http:') && typeof globalThis.__ttFetchHttp !== 'function' && typeof globalThis.__ttActivateBackend === 'function') globalThis.__ttActivateBackend();
+    if (url.startsWith('http:') && typeof globalThis.__ttFetchHttp === 'function') return globalThis.__ttFetchHttp(url, init);
+    throw new TypeError('fetch is not supported for this URL in turbo-test env');
+  }
+  function __fetchOptions(input, init) {
+    const inherited = input instanceof globalThis.Request ? { method: input.method, headers: input.headers, body: input._body, signal: input.signal } : {};
+    return { ...inherited, ...init };
+  }
   globalThis.fetch = async (input, init = {}) => {
     const signal = init.signal || (input && input.signal);
     if (signal && signal.aborted) throw signal.reason;
     const url = new URL(__requestUrl(input)).href;
-    if (!url.startsWith('data:')) throw new TypeError('fetch is not supported for this URL in turbo-test env');
+    if (!url.startsWith('data:')) return __fetchNonData(url, __fetchOptions(input, init));
     const [type, bytes] = __dataUrlDecode(url);
     return new __DataResponse(bytes, type, url);
   };
@@ -2446,10 +2480,22 @@ const __path = {
 __path.posix = __path;
 __path.win32 = Object.assign({}, __path, { sep: '\\', delimiter: ';' });
 // A path argument as Node takes it: a `file:` URL (fileURLToPath), a Buffer, or a string.
-const __fsPath = (p) => {
+const __fsPathValue = (p) => {
   if (p !== null && typeof p === 'object' && typeof p.href === 'string' && typeof p.protocol === 'string') return globalThis.__fileURLToPath(p);
   return String(p);
 };
+const __fsPath = (p) => {
+  const path = __fsPathValue(p);
+  return globalThis.__ttChdirActive && !__path.isAbsolute(path) ? __path.resolve(path) : path;
+};
+function __processChdir(directory) {
+  if (typeof directory !== 'string') throw Object.assign(new TypeError('The directory argument must be a string'), { code: 'ERR_INVALID_ARG_TYPE' });
+  const path = __path.resolve(directory);
+  const stat = __stat(path, undefined, false);
+  if (!stat.isDirectory()) throw Object.assign(new Error('ENOTDIR: not a directory, chdir ' + path), { code: 'ENOTDIR', syscall: 'chdir', path });
+  globalThis.__ttProcessCwd = globalThis.__fs_realpath(path);
+  globalThis.__ttChdirActive = true;
+}
 // Node's Dirent / Stats: the kind is the S_IFMT bits (a Dirent keeps them under a symbol, so
 // its own keys are `name` and `parentPath`; Stats reads them from `mode`).
 const __S_IFMT = 0o170000;
@@ -2659,7 +2705,7 @@ const __fs = {
   statSync: (p, options) => __stat(p, options, false),
   lstatSync: (p, options) => __stat(p, options, true),
   readdirSync: __readdir,
-  symlinkSync: (target, p) => globalThis.__fs_symlinkSync(__fsPath(target), __fsPath(p)),
+  symlinkSync: (target, p) => globalThis.__fs_symlinkSync(__fsPathValue(target), __fsPath(p)),
   promises: {
     symlink: (target, p) => { try { __fs.symlinkSync(target, p); return Promise.resolve(); } catch (e) { return Promise.reject(e); } },
     readFile: __promised(__readFile),
@@ -2676,6 +2722,7 @@ const __fs = {
     lstat: __promised((p, options) => __stat(p, options, true)),
   },
 };
+/* __TT_NODE_FS_WALK__ */
 /* __TT_NODE_FS_HANDLES__ */
 /* __TT_NODE_FS_CALLBACKS__ */
 const __module = {
@@ -2990,6 +3037,7 @@ for (const name of Object.getOwnPropertyNames(__EventEmitterMethods.prototype).f
 // v4's removeListener / off, turbo-test#404).
 __EventEmitter.prototype.addListener = __EventEmitter.prototype.on;
 __EventEmitter.prototype.off = __EventEmitter.prototype.removeListener;
+/* __TT_NODE_FS_WATCH__ */
 /* __TT_NODE_WARNINGS__ */
 /* __TT_NODE_PROCESS_USAGE__ */
 const __events = Object.assign(__EventEmitter, { EventEmitter: __EventEmitter, default: __EventEmitter, once: (em, e) => new Promise((res) => em.once(e, (...a) => res(a))) });

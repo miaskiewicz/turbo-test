@@ -38,10 +38,17 @@ pub(crate) fn command(request: &Value) -> Command {
         command.current_dir(cwd);
     }
     configure_environment(&mut command, &request["env"]);
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    if request["stdio"].as_str() == Some("ignore") {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+    } else {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+    }
     configure_process_group(&mut command, request["detached"].as_bool().unwrap_or(false));
     command
 }
@@ -111,6 +118,29 @@ fn read_pipe(
         finished.fetch_add(1, Ordering::Release);
         result
     })
+}
+
+fn read_optional_pipe<T: Read + Send + 'static>(
+    pipe: Option<T>,
+    maximum: usize,
+    overflow: Arc<AtomicBool>,
+    finished: Arc<AtomicUsize>,
+) -> Reader {
+    match pipe {
+        Some(pipe) => read_pipe(pipe, maximum, overflow, finished),
+        None => read_pipe(std::io::empty(), maximum, overflow, finished),
+    }
+}
+
+fn write_optional_input<T: Write + Send + 'static>(
+    pipe: Option<T>,
+    input: Vec<u8>,
+    finished: Arc<AtomicUsize>,
+) -> JoinHandle<std::io::Result<()>> {
+    match pipe {
+        Some(pipe) => write_input(pipe, input, finished),
+        None => write_input(std::io::sink(), Vec::new(), finished),
+    }
 }
 
 fn drain_pipe(
@@ -249,19 +279,19 @@ fn spawn_with_cancel(
     let maximum = request["maxBuffer"].as_u64().unwrap_or(1_048_576) as usize;
     let overflow = Arc::new(AtomicBool::new(false));
     let finished = Arc::new(AtomicUsize::new(0));
-    let stdout = read_pipe(
-        child.0.stdout.take().unwrap(),
+    let stdout = read_optional_pipe(
+        child.0.stdout.take(),
         maximum,
         overflow.clone(),
         finished.clone(),
     );
-    let stderr = read_pipe(
-        child.0.stderr.take().unwrap(),
+    let stderr = read_optional_pipe(
+        child.0.stderr.take(),
         maximum,
         overflow.clone(),
         finished.clone(),
     );
-    let writer = write_input(child.0.stdin.take().unwrap(), input, finished.clone());
+    let writer = write_optional_input(child.0.stdin.take(), input, finished.clone());
     let pid = child.0.id();
     let result = wait_child(
         &mut child.0,
@@ -271,7 +301,12 @@ fn spawn_with_cancel(
         &finished,
         &cancelled,
     );
-    finish_child(child, pid, result, stdout, stderr, writer, overflow)
+    let mut output = finish_child(child, pid, result, stdout, stderr, writer, overflow)?;
+    if request["stdio"].as_str() == Some("ignore") {
+        output["stdout"] = Value::Null;
+        output["stderr"] = Value::Null;
+    }
+    Ok(output)
 }
 
 fn finish_child(

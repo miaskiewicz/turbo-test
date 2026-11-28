@@ -61,7 +61,7 @@ function __processShellOption(shell) {
   if (shell !== undefined && typeof shell !== 'boolean' && typeof shell !== 'string') throw __processType('shell must be a boolean or string');
 }
 function __processExecOptions(options) {
-  if (options.stdio !== undefined && options.stdio !== 'pipe') __processUnsupported('stdio ' + options.stdio);
+  if (options.stdio !== undefined && options.stdio !== 'pipe' && options.stdio !== 'ignore') __processUnsupported('stdio ' + options.stdio);
   if (options.uid !== undefined || options.gid !== undefined) __processUnsupported('uid/gid');
   __processShellOption(options.shell);
 }
@@ -89,7 +89,7 @@ function __processRequest(file, args, options) {
   const maximum = options.maxBuffer === Infinity ? Number.MAX_SAFE_INTEGER : options.maxBuffer;
   return { ...command, cwd: options.cwd === undefined ? process.cwd() : __processString(options.cwd, 'cwd'),
     env: __processEnvironment(options.env === undefined ? process.env : options.env), timeout: __processLimit(options.timeout, 0, 'timeout'),
-    maxBuffer: __processLimit(maximum, 1048576, 'maxBuffer'), killSignal: __processSignal(options.killSignal) };
+    maxBuffer: __processLimit(maximum, 1048576, 'maxBuffer'), killSignal: __processSignal(options.killSignal), stdio: options.stdio };
 }
 function __processDecode(bytes, encoding) {
   if (bytes === null) return null;
@@ -99,7 +99,7 @@ function __processDecode(bytes, encoding) {
 function __processResult(result, file, args, encoding) {
   result.stdout = __processDecode(result.stdout, encoding);
   result.stderr = __processDecode(result.stderr, encoding);
-  result.output = result.stdout === null ? null : [null, result.stdout, result.stderr];
+  result.output = result.pid === 0 ? null : [null, result.stdout, result.stderr];
   if (result.error) {
     const details = result.error;
     result.error = Object.assign(new Error('spawnSync ' + file + ' ' + details.code), details, { syscall: 'spawnSync ' + file, path: file, spawnargs: args });
